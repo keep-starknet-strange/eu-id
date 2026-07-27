@@ -5,8 +5,10 @@ use crate::age::strategy::range_check::witness::{
 };
 use crate::age::types::PublicInput;
 use crate::utils::field_const;
+use air_core::claim_mask::add_claim_mask_fraction;
 use air_core::relations::{field_id, FieldBytesRelation};
 use stwo::core::fields::m31::BaseField;
+use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
 #[derive(Clone)]
@@ -20,6 +22,7 @@ pub struct AgeRangeCheckEval {
     /// and the DOB-byte *require* terms.
     pub(super) dob_binding: Option<FieldBytesRelation>,
     pub(super) dob_binding_mode: Option<DobBindingMode>,
+    pub(super) claim_mask_beta: Option<QM31>,
 }
 
 impl FrameworkEval for AgeRangeCheckEval {
@@ -162,6 +165,9 @@ impl FrameworkEval for AgeRangeCheckEval {
             emit_dob_binding(&mut eval, active.clone(), binding);
         }
 
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup_in_pairs();
         eval
     }

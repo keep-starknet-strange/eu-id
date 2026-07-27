@@ -10,7 +10,10 @@ pub mod types;
 pub mod witness;
 
 use air::{NatProver, NatVerifier};
-use types::{Error, InputError, PrivateInput, Proof, PublicInput, PublicInputKind, Witness};
+use types::{
+    Error, InputError, PrivateInput, Proof, PublicInput, PublicInputKind, Witness,
+    MAX_PRESENTED_NATIONALITIES,
+};
 
 use crate::nat::nationalities::Nationality;
 use crate::predicate::{PredicateProver, PredicateVerifier};
@@ -60,18 +63,32 @@ impl NationalityPredicate {
         Ok(())
     }
 
-    /// Find the first private nationality that is in the acceptable set.
+    /// Build the complete signed-array witness and mark every accepted entry.
     fn witness(&self, public: &PublicInput, private: &PrivateInput) -> Result<Witness, Error> {
-        for &nat in &private.nationalities {
-            if let Ok(row_index) = public.acceptable.binary_search(&nat) {
-                return Ok(Witness {
-                    public: public.clone(),
-                    nationality: nat,
-                    nat_index: row_index,
-                });
-            }
+        if private.nationalities.is_empty() {
+            return Err(InputError::NoMatch.into());
         }
-        Err(InputError::NoMatch.into())
+        if private.nationalities.len() > MAX_PRESENTED_NATIONALITIES {
+            return Err(InputError::TooManyNationalities {
+                count: private.nationalities.len(),
+                max: MAX_PRESENTED_NATIONALITIES,
+            }
+            .into());
+        }
+        let accepted_rows: Vec<_> = private
+            .nationalities
+            .iter()
+            .map(|nationality| public.acceptable.binary_search(nationality).ok())
+            .collect();
+        if accepted_rows.iter().all(Option::is_none) {
+            return Err(InputError::NoMatch.into());
+        }
+        Ok(Witness {
+            public: public.clone(),
+            nationalities: private.nationalities.clone(),
+            accepted: accepted_rows.iter().map(Option::is_some).collect(),
+            accepted_rows,
+        })
     }
 
     /// Prove this predicate on its own and pack the result into a [`Proof`].
@@ -82,6 +99,8 @@ impl NationalityPredicate {
         let claimed_sums = prover.claimed_sums();
         Ok(Proof {
             public: public.clone(),
+            nationality_count: u16::try_from(private.nationalities.len())
+                .expect("validated nationality count fits u16"),
             nat_claimed_sum: claimed_sums[0],
             table_claimed_sum: claimed_sums[1],
             stark_proof,
@@ -90,13 +109,47 @@ impl NationalityPredicate {
 
     /// Verify a standalone [`Proof`] of this predicate.
     pub fn verify(&self, proof: &Proof) -> Result<(), Error> {
-        let mut verifier = self.verifier(
+        let mut verifier = self.verifier_with_count(
             &proof.public,
+            usize::from(proof.nationality_count),
             &[proof.nat_claimed_sum, proof.table_claimed_sum],
         )?;
         verify(&mut [&mut verifier], &proof.stark_proof)?;
 
         Ok(())
+    }
+
+    /// Construct a verifier for a complete signed nationality array.
+    ///
+    /// The count is proof metadata, mixed into the transcript and capped here;
+    /// when credential binding is enabled, relation balance forces it to equal
+    /// the number of entries emitted by the semantic mdoc scope.
+    pub fn verifier_with_count(
+        &self,
+        public: &PublicInput,
+        nationality_count: usize,
+        claimed_sums: &[QM31],
+    ) -> Result<NatVerifier, Error> {
+        self.validate(public)?;
+        if nationality_count == 0 {
+            return Err(InputError::NoMatch.into());
+        }
+        if nationality_count > MAX_PRESENTED_NATIONALITIES {
+            return Err(InputError::TooManyNationalities {
+                count: nationality_count,
+                max: MAX_PRESENTED_NATIONALITIES,
+            }
+            .into());
+        }
+        if claimed_sums.len() != 2 {
+            return Err(InputError::InvalidProof.into());
+        }
+        Ok(NatVerifier::new(
+            public,
+            nationality_count,
+            claimed_sums[0],
+            claimed_sums[1],
+        ))
     }
 }
 
@@ -119,8 +172,9 @@ impl PredicateVerifier for NationalityPredicate {
     type Verifier = NatVerifier;
 
     fn verifier(&self, public: &PublicInput, claimed_sums: &[QM31]) -> Result<NatVerifier, Error> {
-        self.validate(public)?;
-        Ok(NatVerifier::new(public, claimed_sums[0], claimed_sums[1]))
+        // The generic trait predates multi-entry presentations. Standalone and
+        // mdoc callers that carry a count use `verifier_with_count`.
+        self.verifier_with_count(public, 1, claimed_sums)
     }
 }
 
@@ -306,6 +360,17 @@ mod tests {
         let mut proof = p.prove(&eu_set(), &private(&[276])).unwrap();
         proof.table_claimed_sum = -proof.table_claimed_sum;
         assert!(p.verify(&proof).is_err());
+    }
+
+    #[test]
+    fn verification_fails_on_mutated_nationality_count() {
+        let p = predicate();
+        let mut proof = p.prove(&eu_set(), &private(&[840, 276])).unwrap();
+        proof.nationality_count = 1;
+        assert!(
+            p.verify(&proof).is_err(),
+            "the complete signed-array length is transcript-bound"
+        );
     }
 
     /// Class-D balance-tamper (Q-015 §4b): the blinded accepted-set table's

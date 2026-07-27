@@ -125,6 +125,9 @@ fn result_json(result: IdentityBenchResult) -> String {
 fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
     let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
     let issuer_key = fixture.statement.issuer_input.public_key.clone();
+    let mut accepted_numeric_countries = fixture.statement.policy.accepted_nationalities.clone();
+    accepted_numeric_countries.sort_unstable();
+    accepted_numeric_countries.dedup();
     (
         ZkPublicStatement {
             spec_id: "stwo-euid-pid-v1".to_string(),
@@ -139,9 +142,7 @@ fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
             nonce: fixture.request.session_transcript,
             predicate_mode: PredicateMode::And,
             age_threshold_years: Some(fixture.statement.policy.min_age_years),
-            accepted_numeric_countries: Some(
-                fixture.statement.policy.accepted_nationalities.clone(),
-            ),
+            accepted_numeric_countries: Some(accepted_numeric_countries),
             nat_mode: NatMode::Any,
         },
         ZkMdocWitness {

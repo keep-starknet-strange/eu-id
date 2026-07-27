@@ -1,11 +1,11 @@
 use eu_id_ec_coprocessor::ligero::{
     commit_witness, v1_ligero_params, v2_ligero_params, v2_ligero_params_b,
     verify_input_claims_from_systematic_openings_with_len, verify_openings, LigeroCode,
-    LigeroParams,
+    LigeroParams, LIGERO_AUXILIARY_ROW_COUNT,
 };
 use eu_id_ec_coprocessor::merkle::{commit_columns, verify_column, ColumnOpening};
 use eu_id_ec_coprocessor::rs::{is_codeword, rs_encode};
-use eu_id_ec_coprocessor::sumcheck::InputClaims;
+use eu_id_ec_coprocessor::sumcheck::{CircuitPads, InputClaims};
 use eu_id_ec_coprocessor::{Circuit, CoprocessorChannel, Fp, Layer, Mle, QuadTerm};
 
 fn term(out: u32, l: u32, r: u32, coeff: u64) -> QuadTerm {
@@ -91,7 +91,7 @@ fn ligero_commit_open_verify_accepts_known_columns() {
     let commitment = commit_witness(&values, params).unwrap();
     let indices = [0usize, 3, 7];
     let openings = commitment.open_columns(&indices).unwrap();
-    assert_eq!(openings[0].column.len(), 5);
+    assert_eq!(openings[0].column.len(), 3 + LIGERO_AUXILIARY_ROW_COUNT);
     let gamma = [Fp::from_u64(2), Fp::from_u64(3), Fp::from_u64(5)];
     let claim = commitment.proximity_claim(&gamma).unwrap();
 
@@ -212,7 +212,7 @@ fn systematic_openings_verify_bl2_input_claims_against_committed_witness() {
 }
 
 #[test]
-fn systematic_openings_accept_bl2_sumcheck_input_claims() {
+fn systematic_openings_do_not_expose_masked_sumcheck_input_claims() {
     let circuit = Circuit::new(vec![Layer::new(
         1,
         2,
@@ -231,10 +231,12 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
         code: LigeroCode::Rs,
     };
     let commitment = commit_witness(&input_layer, params).unwrap();
+    let pads = CircuitPads::fresh(&circuit);
     let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let proof = eu_id_ec_coprocessor::sumcheck::prove_circuit(
         &circuit,
         &witness,
+        &pads,
         commitment.root(),
         &mut prover_channel,
     )
@@ -248,11 +250,11 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
     )
     .unwrap();
 
-    assert!(verify_input_claims_from_systematic_openings_with_len(
+    assert!(!verify_input_claims_from_systematic_openings_with_len(
         commitment.root(),
         params,
         &commitment.open_systematic_columns().unwrap(),
-        &claims,
+        &claims.input_claims,
         input_layer.len(),
     )
     .unwrap());

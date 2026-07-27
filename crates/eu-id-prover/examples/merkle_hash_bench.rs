@@ -251,7 +251,9 @@ fn main() {
         }
         black_box(acc);
     });
-    println!("sha2_crate_1stream  : {sha2c_ns:7.2} ns/node   {sha2c_mn:8.2} Mnodes/s  (>1GB/s => HW)");
+    println!(
+        "sha2_crate_1stream  : {sha2c_ns:7.2} ns/node   {sha2c_mn:8.2} Mnodes/s  (>1GB/s => HW)"
+    );
     // sha2 crate throughput sanity: 64 B/node.
     let sha2c_gbs = sha2c_mn * 1e6 * 64.0 / 1e9;
     let sha2c_hw = sha2c_gbs > 1.0;
@@ -321,7 +323,11 @@ fn main() {
     let ratio = blake_ns / best_sha;
     println!(
         "\nblake2s / best_sha = {ratio:.3}  ({} on this workload)",
-        if ratio > 1.0 { "SHA wins" } else { "Blake2s wins" }
+        if ratio > 1.0 {
+            "SHA wins"
+        } else {
+            "Blake2s wins"
+        }
     );
 
     // --- Machine-readable summary ---------------------------------------------

@@ -1,7 +1,10 @@
 use crate::types::Trace;
 use crate::utils::bits_needed;
 use crate::AgeBounds;
+use air_core::claim_mask::{add_claim_mask_fraction, CLAIM_MASK_MIN_LOG_SIZE};
+use num_traits::One;
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::Column;
@@ -14,6 +17,10 @@ use stwo_constraint_framework::{
 fn month_index(month: u32, year: u32, min_year: u32) -> usize {
     ((year - min_year) * 12 + month - 1) as usize
 }
+
+pub(crate) const VALID_DAY_REAL_ROWS: usize = 28 + 29 + 30 + 31;
+const VALID_DAY_LOG_SIZE: u32 = CLAIM_MASK_MIN_LOG_SIZE;
+const VALID_DAY_DUMMY_MAX_DAYS_BASE: u32 = 1 << 20;
 
 pub(crate) fn max_days_at(month: u32, year: u32) -> u32 {
     match month {
@@ -76,13 +83,12 @@ pub fn generate_max_days_per_month(age_bounds: &AgeBounds) -> Trace {
 
 pub fn valid_date_ranges() -> Trace {
     let max_days_values: [u32; 4] = [28, 29, 30, 31];
-    let total_rows: u32 = max_days_values.iter().sum();
-    let log_size = bits_needed(total_rows) as u32;
-    let total_size = 1 << log_size;
+    let total_size = 1 << VALID_DAY_LOG_SIZE;
 
-    let domain = CanonicCoset::new(log_size).circle_domain();
+    let domain = CanonicCoset::new(VALID_DAY_LOG_SIZE).circle_domain();
     let mut max_days_col = BaseColumn::zeros(total_size);
     let mut day_col = BaseColumn::zeros(total_size);
+    let mut is_dummy_col = BaseColumn::zeros(total_size);
 
     let mut index = 0;
     for &max_day in &max_days_values {
@@ -92,10 +98,19 @@ pub fn valid_date_ranges() -> Trace {
             index += 1;
         }
     }
+    debug_assert_eq!(index, VALID_DAY_REAL_ROWS);
+    for dummy_index in index..total_size {
+        max_days_col.set(
+            dummy_index,
+            M31::from_u32_unchecked(VALID_DAY_DUMMY_MAX_DAYS_BASE + (dummy_index - index) as u32),
+        );
+        is_dummy_col.set(dummy_index, M31::one());
+    }
 
     vec![
         CircleEvaluation::new(domain, max_days_col),
         CircleEvaluation::new(domain, day_col),
+        CircleEvaluation::new(domain, is_dummy_col),
     ]
 }
 
@@ -132,10 +147,17 @@ pub fn valid_day_day_col_id() -> PreProcessedColumnId {
     }
 }
 
+pub fn valid_day_dummy_col_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "age/valid_day/is_dummy/log9".to_string(),
+    }
+}
+
 #[derive(Clone)]
 pub struct CalendarTableEval {
     pub bounds: AgeBounds,
     pub lookup_elements: CalendarElements,
+    pub claim_mask_beta: Option<QM31>,
 }
 
 pub type CalendarTableComponent = FrameworkComponent<CalendarTableEval>;
@@ -158,6 +180,9 @@ impl FrameworkEval for CalendarTableEval {
             -E::EF::from(mult),
             &[table_index, max_days],
         ));
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup();
         eval
     }
@@ -166,6 +191,7 @@ impl FrameworkEval for CalendarTableEval {
 #[derive(Clone)]
 pub struct ValidDayTableEval {
     pub lookup_elements: ValidDayElements,
+    pub claim_mask_beta: Option<QM31>,
 }
 
 pub type ValidDayTableComponent = FrameworkComponent<ValidDayTableEval>;
@@ -182,12 +208,17 @@ impl FrameworkEval for ValidDayTableEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let max_days = eval.get_preprocessed_column(valid_day_max_days_col_id());
         let day = eval.get_preprocessed_column(valid_day_day_col_id());
+        let is_dummy = eval.get_preprocessed_column(valid_day_dummy_col_id());
         let mult = eval.next_trace_mask();
+        let one = E::F::from(M31::one());
         eval.add_to_relation(RelationEntry::new(
             &self.lookup_elements,
-            -E::EF::from(mult),
+            -E::EF::from((one - is_dummy) * mult),
             &[max_days, day],
         ));
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup();
         eval
     }
@@ -259,16 +290,17 @@ mod tests {
     }
 
     #[test]
-    fn valid_date_ranges_log_size_is_7() {
+    fn valid_date_ranges_log_size_is_9() {
         let trace = valid_date_ranges();
-        assert_eq!(trace[0].domain.log_size(), 7);
-        assert_eq!(trace[1].domain.log_size(), 7);
+        assert_eq!(trace[0].domain.log_size(), CLAIM_MASK_MIN_LOG_SIZE);
+        assert_eq!(trace[1].domain.log_size(), CLAIM_MASK_MIN_LOG_SIZE);
+        assert_eq!(trace[2].domain.log_size(), CLAIM_MASK_MIN_LOG_SIZE);
     }
 
     #[test]
-    fn valid_date_ranges_has_two_columns() {
+    fn valid_date_ranges_has_value_pair_and_dummy_selector() {
         let trace = valid_date_ranges();
-        assert_eq!(trace.len(), 2);
+        assert_eq!(trace.len(), 3);
     }
 
     #[test]
@@ -290,15 +322,15 @@ mod tests {
     }
 
     #[test]
-    fn valid_date_ranges_padding_rows_are_zero() {
+    fn valid_date_ranges_dummy_rows_are_unreachable_and_selected() {
         let trace = valid_date_ranges();
-        for index in 118..128 {
-            assert_eq!(
-                trace[0].values.at(index).0,
-                0,
-                "max_days padding at {index}"
+        for index in VALID_DAY_REAL_ROWS..1 << VALID_DAY_LOG_SIZE {
+            assert!(
+                trace[0].values.at(index).0 >= VALID_DAY_DUMMY_MAX_DAYS_BASE,
+                "dummy max_days at {index}"
             );
             assert_eq!(trace[1].values.at(index).0, 0, "day padding at {index}");
+            assert_eq!(trace[2].values.at(index).0, 1, "dummy selector at {index}");
         }
     }
 

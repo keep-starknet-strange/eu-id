@@ -1,4 +1,5 @@
 use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, Mle};
+use p256::elliptic_curve::rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -16,7 +17,6 @@ pub struct InputClaims {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CircuitSumcheckProof {
     pub layers: Vec<CircuitLayerProof>,
-    pub input_claims: InputClaims,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -40,9 +40,71 @@ pub(crate) struct SparseCircuitLayerProfile {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CircuitLayerProof {
     pub rounds: Vec<[Fp; 2]>,
-    pub round_pads: Vec<[Fp; 2]>,
-    pub claim_pads: [Fp; 3],
     pub next_claims: [Fp; 2],
+}
+
+/// Secret one-time pads committed alongside a circuit's input witness.
+///
+/// Per layer the layout is `[dP_0(0), dP_0(2), ..., dP_r(0), dP_r(2),
+/// dW_L, dW_R, dW_L*dW_R]`. Pads are never serialized in the sumcheck proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitPads {
+    values: Vec<Fp>,
+}
+
+impl CircuitPads {
+    pub fn fresh(circuit: &Circuit) -> Self {
+        let mut rng = OsRng;
+        let mut values = Vec::with_capacity(circuit_pad_len(circuit));
+        for layer in circuit.layers() {
+            for _ in 0..2 * layer.next_log_size() {
+                values.push(Fp::random_uniform(&mut rng));
+                values.push(Fp::random_uniform(&mut rng));
+            }
+            let left = Fp::random_uniform(&mut rng);
+            let right = Fp::random_uniform(&mut rng);
+            values.extend_from_slice(&[left, right, left * right]);
+        }
+        Self { values }
+    }
+
+    pub fn values(&self) -> &[Fp] {
+        &self.values
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CircuitLinearTerm {
+    /// Offset relative to the beginning of this circuit's committed pad.
+    pub pad_offset: usize,
+    pub coefficient: Fp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitLinearConstraint {
+    pub terms: Vec<CircuitLinearTerm>,
+    pub value: Fp,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CircuitQuadraticConstraint {
+    pub x: usize,
+    pub y: usize,
+    pub z: usize,
+}
+
+/// Public state reconstructed from a masked sumcheck transcript.
+///
+/// `input_claims.values` are the masked final claims, not witness
+/// evaluations. The Ligero layer binds them to the committed input through
+/// one global affine constraint and binds every layer through
+/// `layer_constraints`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CircuitVerification {
+    pub input_claims: InputClaims,
+    pub input_challenge: Fp,
+    pub input_pad_offsets: [usize; 2],
+    pub layer_constraints: Vec<CircuitLinearConstraint>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -58,6 +120,7 @@ pub enum SumcheckError {
     RoundCountMismatch { expected: usize, actual: usize },
     Circuit(CircuitError),
     UnsatisfiedCircuit,
+    InvalidPads,
     LayerCountMismatch { expected: usize, actual: usize },
     Rejected,
 }
@@ -131,6 +194,7 @@ pub fn verify_sum(
 pub fn prove_circuit(
     circuit: &Circuit,
     witness: &[Vec<Fp>],
+    pads: &CircuitPads,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
 ) -> Result<CircuitSumcheckProof, SumcheckError> {
@@ -141,69 +205,76 @@ pub fn prove_circuit(
         return Err(SumcheckError::UnsatisfiedCircuit);
     }
 
-    prove_circuit_inner(circuit, witness, commitment_root, channel)
+    prove_circuit_inner(circuit, witness, pads, commitment_root, channel)
 }
 
 pub(crate) fn prove_evaluated_circuit(
     circuit: &Circuit,
     witness: &[Vec<Fp>],
+    pads: &CircuitPads,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
 ) -> Result<CircuitSumcheckProof, SumcheckError> {
     validate_evaluated_witness(circuit, witness)?;
-    prove_circuit_inner(circuit, witness, commitment_root, channel)
+    prove_circuit_inner(circuit, witness, pads, commitment_root, channel)
 }
 
 pub(crate) fn prove_evaluated_circuit_sorted_sparse(
     circuit: &Circuit,
     witness: &[Vec<Fp>],
+    pads: &CircuitPads,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
 ) -> Result<CircuitSumcheckProof, SumcheckError> {
-    prove_evaluated_circuit_sorted_sparse_profiled(circuit, witness, commitment_root, channel)
+    prove_evaluated_circuit_sorted_sparse_profiled(circuit, witness, pads, commitment_root, channel)
         .map(|(proof, _)| proof)
 }
 
 pub(crate) fn prove_evaluated_circuit_sorted_sparse_profiled(
     circuit: &Circuit,
     witness: &[Vec<Fp>],
+    pads: &CircuitPads,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
 ) -> Result<(CircuitSumcheckProof, SparseCircuitSumcheckProfile), SumcheckError> {
     validate_evaluated_witness(circuit, witness)?;
-    prove_circuit_inner_sorted_sparse(circuit, witness, commitment_root, channel)
+    prove_circuit_inner_sorted_sparse(circuit, witness, pads, commitment_root, channel)
 }
 
 fn prove_circuit_inner(
     circuit: &Circuit,
     witness: &[Vec<Fp>],
+    pads: &CircuitPads,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
 ) -> Result<CircuitSumcheckProof, SumcheckError> {
+    validate_circuit_pads(circuit, pads)?;
     mix_circuit_domain(circuit, commitment_root, channel);
     let output_log_size = circuit.layers()[0].out_log_size();
     let initial_point = draw_point(channel, output_log_size);
     let mut points = [initial_point.clone(), initial_point];
     let mut claims = [Fp::ZERO, Fp::ZERO];
     let mut layer_proofs = Vec::with_capacity(circuit.layers().len());
+    let mut pad_offset = 0usize;
 
-    for (layer_index, (layer, next_values)) in
-        circuit.layers().iter().zip(&witness[1..]).enumerate()
-    {
+    for (layer, next_values) in circuit.layers().iter().zip(&witness[1..]) {
         let alpha = channel.draw_fp();
         let next_mle = Mle::new(next_values.clone());
         let mut round_state = LayerRoundState::new(layer, &next_mle, &points, alpha);
         let mut claim = alpha * claims[0] + (Fp::ONE - alpha) * claims[1];
         let mut sumcheck_point = Vec::with_capacity(2 * layer.next_log_size());
         let mut rounds = Vec::with_capacity(2 * layer.next_log_size());
-        let mut round_pads = Vec::with_capacity(2 * layer.next_log_size());
         let two_inverse = fp_two_inverse();
 
         for round_index in 0..2 * layer.next_log_size() {
             let [p0, p2] = round_state.round_evals_0_2(round_index);
             let evals = [p0, claim - p0, p2];
             debug_assert_eq!(evals[0] + evals[1], claim);
-            let pad_pair = otp_pad_pair(layer_index, b"P", round_index);
+            let round_pad_offset = pad_offset + 2 * round_index;
+            let pad_pair = [
+                pads.values[round_pad_offset],
+                pads.values[round_pad_offset + 1],
+            ];
             let transmitted = [evals[0] - pad_pair[0], evals[2] - pad_pair[1]];
             for eval in transmitted {
                 channel.mix_fp(eval);
@@ -213,7 +284,6 @@ fn prove_circuit_inner(
             round_state.absorb_challenge(round_index, challenge);
             sumcheck_point.push(challenge);
             rounds.push(transmitted);
-            round_pads.push(pad_pair);
         }
 
         let (left, right) = split_sumcheck_point(&sumcheck_point, layer.next_log_size());
@@ -230,9 +300,11 @@ fn prove_circuit_inner(
                 .eval_at(right)
                 .expect("right point matches next layer")
         );
-        let claim_pair = otp_pad_pair(layer_index, b"W", 0);
-        let claim_pads = [claim_pair[0], claim_pair[1], Fp::ZERO];
-        let claim_pads = [claim_pads[0], claim_pads[1], claim_pads[0] * claim_pads[1]];
+        let claim_pad_offset = pad_offset + 4 * layer.next_log_size();
+        let claim_pads = [
+            pads.values[claim_pad_offset],
+            pads.values[claim_pad_offset + 1],
+        ];
         let masked_next_claims = [
             next_claims[0] - claim_pads[0],
             next_claims[1] - claim_pads[1],
@@ -241,29 +313,26 @@ fn prove_circuit_inner(
         channel.mix_fp(masked_next_claims[1]);
         layer_proofs.push(CircuitLayerProof {
             rounds,
-            round_pads,
-            claim_pads,
             next_claims: masked_next_claims,
         });
         points = [left.to_vec(), right.to_vec()];
         claims = next_claims;
+        pad_offset += circuit_layer_pad_len(layer);
     }
 
     Ok(CircuitSumcheckProof {
         layers: layer_proofs,
-        input_claims: InputClaims {
-            points,
-            values: claims,
-        },
     })
 }
 
 fn prove_circuit_inner_sorted_sparse(
     circuit: &Circuit,
     witness: &[Vec<Fp>],
+    pads: &CircuitPads,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
 ) -> Result<(CircuitSumcheckProof, SparseCircuitSumcheckProfile), SumcheckError> {
+    validate_circuit_pads(circuit, pads)?;
     mix_circuit_domain(circuit, commitment_root, channel);
     let output_log_size = circuit.layers()[0].out_log_size();
     let initial_point = draw_point(channel, output_log_size);
@@ -271,6 +340,7 @@ fn prove_circuit_inner_sorted_sparse(
     let mut claims = [Fp::ZERO, Fp::ZERO];
     let mut layer_proofs = Vec::with_capacity(circuit.layers().len());
     let mut profile = SparseCircuitSumcheckProfile::default();
+    let mut pad_offset = 0usize;
 
     for (layer_index, (layer, next_values)) in
         circuit.layers().iter().zip(&witness[1..]).enumerate()
@@ -289,7 +359,6 @@ fn prove_circuit_inner_sorted_sparse(
         let mut claim = alpha * claims[0] + (Fp::ONE - alpha) * claims[1];
         let mut sumcheck_point = Vec::with_capacity(2 * layer.next_log_size());
         let mut rounds = Vec::with_capacity(2 * layer.next_log_size());
-        let mut round_pads = Vec::with_capacity(2 * layer.next_log_size());
         let two_inverse = fp_two_inverse();
 
         for round_index in 0..2 * layer.next_log_size() {
@@ -297,7 +366,11 @@ fn prove_circuit_inner_sorted_sparse(
             let [p0, p2] = round_state.round_evals_0_2(round_index);
             let evals = [p0, claim - p0, p2];
             debug_assert_eq!(evals[0] + evals[1], claim);
-            let pad_pair = otp_pad_pair(layer_index, b"P", round_index);
+            let round_pad_offset = pad_offset + 2 * round_index;
+            let pad_pair = [
+                pads.values[round_pad_offset],
+                pads.values[round_pad_offset + 1],
+            ];
             let transmitted = [evals[0] - pad_pair[0], evals[2] - pad_pair[1]];
             for eval in transmitted {
                 channel.mix_fp(eval);
@@ -314,7 +387,6 @@ fn prove_circuit_inner_sorted_sparse(
             layer_profile.build_right += build_right;
             sumcheck_point.push(challenge);
             rounds.push(transmitted);
-            round_pads.push(pad_pair);
         }
 
         #[cfg(debug_assertions)]
@@ -338,9 +410,11 @@ fn prove_circuit_inner_sorted_sparse(
 
         let (left, right) = split_sumcheck_point(&sumcheck_point, layer.next_log_size());
         let next_claims = round_state.final_claims();
-        let claim_pair = otp_pad_pair(layer_index, b"W", 0);
-        let claim_pads = [claim_pair[0], claim_pair[1], Fp::ZERO];
-        let claim_pads = [claim_pads[0], claim_pads[1], claim_pads[0] * claim_pads[1]];
+        let claim_pad_offset = pad_offset + 4 * layer.next_log_size();
+        let claim_pads = [
+            pads.values[claim_pad_offset],
+            pads.values[claim_pad_offset + 1],
+        ];
         let masked_next_claims = [
             next_claims[0] - claim_pads[0],
             next_claims[1] - claim_pads[1],
@@ -349,22 +423,17 @@ fn prove_circuit_inner_sorted_sparse(
         channel.mix_fp(masked_next_claims[1]);
         layer_proofs.push(CircuitLayerProof {
             rounds,
-            round_pads,
-            claim_pads,
             next_claims: masked_next_claims,
         });
         points = [left.to_vec(), right.to_vec()];
         claims = next_claims;
         profile.layers.push(layer_profile);
+        pad_offset += circuit_layer_pad_len(layer);
     }
 
     Ok((
         CircuitSumcheckProof {
             layers: layer_proofs,
-            input_claims: InputClaims {
-                points,
-                values: claims,
-            },
         },
         profile,
     ))
@@ -408,92 +477,9 @@ pub fn verify_circuit(
     proof: &CircuitSumcheckProof,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
-) -> Result<InputClaims, SumcheckError> {
-    if proof.layers.len() != circuit.layers().len() {
-        return Err(SumcheckError::LayerCountMismatch {
-            expected: circuit.layers().len(),
-            actual: proof.layers.len(),
-        });
-    }
-    if proof_otp_pad_values(proof) != circuit_otp_pad_values(circuit) {
-        return Err(SumcheckError::Rejected);
-    }
-
-    mix_circuit_domain(circuit, commitment_root, channel);
-    let output_log_size = circuit.layers()[0].out_log_size();
-    let initial_point = draw_point(channel, output_log_size);
-    let mut points = [initial_point.clone(), initial_point];
-    let mut claims = [Fp::ZERO, Fp::ZERO];
-
-    for (layer, layer_proof) in circuit.layers().iter().zip(&proof.layers) {
-        let expected_rounds = 2 * layer.next_log_size();
-        if layer_proof.rounds.len() != expected_rounds {
-            return Err(SumcheckError::RoundCountMismatch {
-                expected: expected_rounds,
-                actual: layer_proof.rounds.len(),
-            });
-        }
-        if layer_proof.round_pads.len() != expected_rounds {
-            return Err(SumcheckError::RoundCountMismatch {
-                expected: expected_rounds,
-                actual: layer_proof.round_pads.len(),
-            });
-        }
-        if layer_proof.claim_pads[0] * layer_proof.claim_pads[1] != layer_proof.claim_pads[2] {
-            return Err(SumcheckError::Rejected);
-        }
-
-        let alpha = channel.draw_fp();
-        let mut claim = alpha * claims[0] + (Fp::ONE - alpha) * claims[1];
-        let mut sumcheck_point = Vec::with_capacity(expected_rounds);
-        let two_inverse = fp_two_inverse();
-        for ([p0_hat, p2_hat], [d_p0, d_p2]) in layer_proof
-            .rounds
-            .iter()
-            .copied()
-            .zip(layer_proof.round_pads.iter().copied())
-        {
-            let p0 = p0_hat + d_p0;
-            let p2 = p2_hat + d_p2;
-            let p1 = claim - p0;
-            let evals = [p0, p1, p2];
-            if evals[0] + evals[1] != claim {
-                return Err(SumcheckError::Rejected);
-            }
-            for eval in [p0_hat, p2_hat] {
-                channel.mix_fp(eval);
-            }
-            let challenge = channel.draw_fp();
-            claim = lagrange_eval_0_1_2(evals, challenge, two_inverse);
-            sumcheck_point.push(challenge);
-        }
-
-        let (left, right) = split_sumcheck_point(&sumcheck_point, layer.next_log_size());
-        let [q0, q1] =
-            q_tilde_eval_pair(layer, &points, left, right).map_err(SumcheckError::Circuit)?;
-        let next_claims = [
-            layer_proof.next_claims[0] + layer_proof.claim_pads[0],
-            layer_proof.next_claims[1] + layer_proof.claim_pads[1],
-        ];
-        let expected = (alpha * q0 + (Fp::ONE - alpha) * q1) * next_claims[0] * next_claims[1];
-        if claim != expected {
-            return Err(SumcheckError::Rejected);
-        }
-
-        channel.mix_fp(layer_proof.next_claims[0]);
-        channel.mix_fp(layer_proof.next_claims[1]);
-        points = [left.to_vec(), right.to_vec()];
-        claims = next_claims;
-    }
-
-    let input_claims = InputClaims {
-        points,
-        values: claims,
-    };
-    if proof.input_claims != input_claims {
-        return Err(SumcheckError::Rejected);
-    }
-    Ok(input_claims)
+) -> Result<CircuitVerification, SumcheckError> {
+    verify_circuit_inner(circuit, proof, commitment_root, channel, false)
+        .map(|(verification, _)| verification)
 }
 
 pub(crate) fn verify_circuit_sorted_sparse(
@@ -501,9 +487,9 @@ pub(crate) fn verify_circuit_sorted_sparse(
     proof: &CircuitSumcheckProof,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
-) -> Result<InputClaims, SumcheckError> {
+) -> Result<CircuitVerification, SumcheckError> {
     verify_circuit_sorted_sparse_profiled(circuit, proof, commitment_root, channel)
-        .map(|(claims, _)| claims)
+        .map(|(verification, _)| verification)
 }
 
 pub(crate) fn verify_circuit_sorted_sparse_profiled(
@@ -511,22 +497,31 @@ pub(crate) fn verify_circuit_sorted_sparse_profiled(
     proof: &CircuitSumcheckProof,
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
-) -> Result<(InputClaims, SparseCircuitSumcheckProfile), SumcheckError> {
+) -> Result<(CircuitVerification, SparseCircuitSumcheckProfile), SumcheckError> {
+    verify_circuit_inner(circuit, proof, commitment_root, channel, true)
+}
+
+fn verify_circuit_inner(
+    circuit: &Circuit,
+    proof: &CircuitSumcheckProof,
+    commitment_root: [u8; 32],
+    channel: &mut CoprocessorChannel,
+    profile_sparse: bool,
+) -> Result<(CircuitVerification, SparseCircuitSumcheckProfile), SumcheckError> {
     if proof.layers.len() != circuit.layers().len() {
         return Err(SumcheckError::LayerCountMismatch {
             expected: circuit.layers().len(),
             actual: proof.layers.len(),
         });
     }
-    if proof_otp_pad_values(proof) != circuit_otp_pad_values(circuit) {
-        return Err(SumcheckError::Rejected);
-    }
 
     mix_circuit_domain(circuit, commitment_root, channel);
     let output_log_size = circuit.layers()[0].out_log_size();
     let initial_point = draw_point(channel, output_log_size);
     let mut points = [initial_point.clone(), initial_point];
-    let mut claims = [Fp::ZERO, Fp::ZERO];
+    let mut masked_claims = [Fp::ZERO, Fp::ZERO];
+    let mut pad_offset = 0usize;
+    let mut layer_constraints = Vec::with_capacity(circuit.layers().len());
     let mut profile = SparseCircuitSumcheckProfile::default();
 
     for (layer_index, (layer, layer_proof)) in
@@ -539,18 +534,16 @@ pub(crate) fn verify_circuit_sorted_sparse_profiled(
                 actual: layer_proof.rounds.len(),
             });
         }
-        if layer_proof.round_pads.len() != expected_rounds {
-            return Err(SumcheckError::RoundCountMismatch {
-                expected: expected_rounds,
-                actual: layer_proof.round_pads.len(),
-            });
-        }
-        if layer_proof.claim_pads[0] * layer_proof.claim_pads[1] != layer_proof.claim_pads[2] {
-            return Err(SumcheckError::Rejected);
-        }
 
         let alpha = channel.draw_fp();
-        let mut claim = alpha * claims[0] + (Fp::ONE - alpha) * claims[1];
+        let one_minus_alpha = Fp::ONE - alpha;
+        let mut claim = CircuitLinearExpression::constant(
+            alpha * masked_claims[0] + one_minus_alpha * masked_claims[1],
+        );
+        if layer_index > 0 {
+            claim.add_term(pad_offset - 3, alpha);
+            claim.add_term(pad_offset - 2, one_minus_alpha);
+        }
         let mut sumcheck_point = Vec::with_capacity(expected_rounds);
         let two_inverse = fp_two_inverse();
         let mut layer_profile = SparseCircuitLayerProfile {
@@ -558,88 +551,153 @@ pub(crate) fn verify_circuit_sorted_sparse_profiled(
             terms: layer.terms().len(),
             ..SparseCircuitLayerProfile::default()
         };
-        for (round_index, ([p0_hat, p2_hat], [d_p0, d_p2])) in layer_proof
-            .rounds
-            .iter()
-            .copied()
-            .zip(layer_proof.round_pads.iter().copied())
-            .enumerate()
-        {
+        for (round_index, [p0_hat, p2_hat]) in layer_proof.rounds.iter().copied().enumerate() {
             let phase_start = Instant::now();
-            let p0 = p0_hat + d_p0;
-            let p2 = p2_hat + d_p2;
-            let p1 = claim - p0;
-            let evals = [p0, p1, p2];
-            if evals[0] + evals[1] != claim {
-                return Err(SumcheckError::Rejected);
-            }
             for eval in [p0_hat, p2_hat] {
                 channel.mix_fp(eval);
             }
             let challenge = channel.draw_fp();
-            claim = lagrange_eval_0_1_2(evals, challenge, two_inverse);
+            let [lag0, lag1, lag2] = lagrange_coefficients_0_1_2(challenge, two_inverse);
+            claim.scale(lag1);
+            claim.known = claim.known + (lag0 - lag1) * p0_hat + lag2 * p2_hat;
+            claim.add_term(pad_offset + 2 * round_index, lag0 - lag1);
+            claim.add_term(pad_offset + 2 * round_index + 1, lag2);
             sumcheck_point.push(challenge);
-            if round_index < layer.next_log_size() {
-                layer_profile.left_rounds += phase_start.elapsed();
-            } else {
-                layer_profile.right_rounds += phase_start.elapsed();
+            if profile_sparse {
+                if round_index < layer.next_log_size() {
+                    layer_profile.left_rounds += phase_start.elapsed();
+                } else {
+                    layer_profile.right_rounds += phase_start.elapsed();
+                }
             }
         }
 
         let (left, right) = split_sumcheck_point(&sumcheck_point, layer.next_log_size());
         let final_start = Instant::now();
-        let [q0, q1] = q_tilde_eval_pair_by_terms(layer, &points, left, right)
-            .map_err(SumcheckError::Circuit)?;
-        layer_profile.final_eval = final_start.elapsed();
-        let next_claims = [
-            layer_proof.next_claims[0] + layer_proof.claim_pads[0],
-            layer_proof.next_claims[1] + layer_proof.claim_pads[1],
-        ];
-        let expected = (alpha * q0 + (Fp::ONE - alpha) * q1) * next_claims[0] * next_claims[1];
-        if claim != expected {
-            return Err(SumcheckError::Rejected);
+        let [q0, q1] = if profile_sparse {
+            q_tilde_eval_pair_by_terms(layer, &points, left, right)
+        } else {
+            q_tilde_eval_pair(layer, &points, left, right)
+        }
+        .map_err(SumcheckError::Circuit)?;
+        let eqq = alpha * q0 + one_minus_alpha * q1;
+        let claim_pad_offset = pad_offset + 4 * layer.next_log_size();
+        claim.add_term(claim_pad_offset, -(eqq * layer_proof.next_claims[1]));
+        claim.add_term(claim_pad_offset + 1, -(eqq * layer_proof.next_claims[0]));
+        claim.add_term(claim_pad_offset + 2, -eqq);
+        let rhs = eqq * layer_proof.next_claims[0] * layer_proof.next_claims[1] - claim.known;
+        layer_constraints.push(claim.into_constraint(rhs));
+        if profile_sparse {
+            layer_profile.final_eval = final_start.elapsed();
         }
 
         channel.mix_fp(layer_proof.next_claims[0]);
         channel.mix_fp(layer_proof.next_claims[1]);
         points = [left.to_vec(), right.to_vec()];
-        claims = next_claims;
-        profile.layers.push(layer_profile);
+        masked_claims = layer_proof.next_claims;
+        pad_offset += circuit_layer_pad_len(layer);
+        if profile_sparse {
+            profile.layers.push(layer_profile);
+        }
     }
 
-    let input_claims = InputClaims {
-        points,
-        values: claims,
-    };
-    if proof.input_claims != input_claims {
-        return Err(SumcheckError::Rejected);
-    }
-    Ok((input_claims, profile))
+    let input_challenge = channel.draw_fp();
+    Ok((
+        CircuitVerification {
+            input_claims: InputClaims {
+                points,
+                values: masked_claims,
+            },
+            input_challenge,
+            input_pad_offsets: [pad_offset - 3, pad_offset - 2],
+            layer_constraints,
+        },
+        profile,
+    ))
 }
 
-pub fn circuit_otp_pad_values(circuit: &Circuit) -> Vec<Fp> {
-    let mut values = Vec::new();
-    for (layer_index, layer) in circuit.layers().iter().enumerate() {
-        for round_index in 0..2 * layer.next_log_size() {
-            values.extend_from_slice(&otp_pad_pair(layer_index, b"P", round_index));
-        }
-        let [d_w_l, d_w_r] = otp_pad_pair(layer_index, b"W", 0);
-        values.push(d_w_l);
-        values.push(d_w_r);
-        values.push(d_w_l * d_w_r);
-    }
-    values
+pub fn circuit_pad_len(circuit: &Circuit) -> usize {
+    circuit.layers().iter().map(circuit_layer_pad_len).sum()
 }
 
-pub fn proof_otp_pad_values(proof: &CircuitSumcheckProof) -> Vec<Fp> {
-    let mut values = Vec::new();
-    for layer in &proof.layers {
-        for pad_pair in &layer.round_pads {
-            values.extend_from_slice(pad_pair);
-        }
-        values.extend_from_slice(&layer.claim_pads);
+pub fn circuit_quadratic_constraints(circuit: &Circuit) -> Vec<CircuitQuadraticConstraint> {
+    let mut pad_offset = 0usize;
+    let mut constraints = Vec::with_capacity(circuit.layers().len());
+    for layer in circuit.layers() {
+        let claim_pad_offset = pad_offset + 4 * layer.next_log_size();
+        constraints.push(CircuitQuadraticConstraint {
+            x: claim_pad_offset,
+            y: claim_pad_offset + 1,
+            z: claim_pad_offset + 2,
+        });
+        pad_offset += circuit_layer_pad_len(layer);
     }
-    values
+    constraints
+}
+
+fn circuit_layer_pad_len(layer: &Layer) -> usize {
+    4 * layer.next_log_size() + 3
+}
+
+fn validate_circuit_pads(circuit: &Circuit, pads: &CircuitPads) -> Result<(), SumcheckError> {
+    if pads.values.len() != circuit_pad_len(circuit) {
+        return Err(SumcheckError::InvalidPads);
+    }
+    for constraint in circuit_quadratic_constraints(circuit) {
+        if pads.values[constraint.x] * pads.values[constraint.y] != pads.values[constraint.z] {
+            return Err(SumcheckError::InvalidPads);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CircuitLinearExpression {
+    known: Fp,
+    terms: Vec<CircuitLinearTerm>,
+}
+
+impl CircuitLinearExpression {
+    fn constant(known: Fp) -> Self {
+        Self {
+            known,
+            terms: Vec::new(),
+        }
+    }
+
+    fn scale(&mut self, coefficient: Fp) {
+        self.known = self.known * coefficient;
+        for term in &mut self.terms {
+            term.coefficient = term.coefficient * coefficient;
+        }
+    }
+
+    fn add_term(&mut self, pad_offset: usize, coefficient: Fp) {
+        if coefficient == Fp::ZERO {
+            return;
+        }
+        if let Some(term) = self
+            .terms
+            .iter_mut()
+            .find(|term| term.pad_offset == pad_offset)
+        {
+            term.coefficient = term.coefficient + coefficient;
+        } else {
+            self.terms.push(CircuitLinearTerm {
+                pad_offset,
+                coefficient,
+            });
+        }
+    }
+
+    fn into_constraint(mut self, value: Fp) -> CircuitLinearConstraint {
+        self.terms.retain(|term| term.coefficient != Fp::ZERO);
+        self.terms.sort_unstable_by_key(|term| term.pad_offset);
+        CircuitLinearConstraint {
+            terms: self.terms,
+            value,
+        }
+    }
 }
 
 fn validate_table(values: &[Fp]) -> Result<(), SumcheckError> {
@@ -657,26 +715,24 @@ fn mix_circuit_domain(
     commitment_root: [u8; 32],
     channel: &mut CoprocessorChannel,
 ) {
-    channel.mix_bytes(b"eu-id-ec-coproc-sumcheck-v1");
+    channel.mix_bytes(b"eu-id-ec-coproc-zk-sumcheck-v2");
     channel.mix_bytes(&commitment_root);
     channel.mix_bytes(&(circuit.layers().len() as u64).to_be_bytes());
     for layer in circuit.layers() {
         channel.mix_bytes(&(layer.out_log_size() as u64).to_be_bytes());
         channel.mix_bytes(&(layer.next_log_size() as u64).to_be_bytes());
+        channel.mix_bytes(&(layer.terms().len() as u64).to_be_bytes());
+        for term in layer.terms() {
+            channel.mix_bytes(&term.out.to_be_bytes());
+            channel.mix_bytes(&term.l.to_be_bytes());
+            channel.mix_bytes(&term.r.to_be_bytes());
+            channel.mix_fp(term.coeff);
+        }
     }
 }
 
 fn draw_point(channel: &mut CoprocessorChannel, len: usize) -> Vec<Fp> {
     (0..len).map(|_| channel.draw_fp()).collect()
-}
-
-fn otp_pad_pair(layer_index: usize, kind: &[u8], item_index: usize) -> [Fp; 2] {
-    let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"eu-id-ec-coproc-otp-pad-pair-v1");
-    channel.mix_bytes(b"eu-id-ec-coproc-otp-pad-pair-v1");
-    channel.mix_bytes(&(layer_index as u64).to_be_bytes());
-    channel.mix_bytes(kind);
-    channel.mix_bytes(&(item_index as u64).to_be_bytes());
-    [channel.draw_fp(), channel.draw_fp()]
 }
 
 fn split_sumcheck_point(point: &[Fp], next_log_size: usize) -> (&[Fp], &[Fp]) {
@@ -1262,6 +1318,12 @@ fn lagrange_eval_0_1_2(values: [Fp; 3], point: Fp, half: Fp) -> Fp {
     values[0] + point * first_delta + quadratic * second_delta
 }
 
+fn lagrange_coefficients_0_1_2(point: Fp, half: Fp) -> [Fp; 3] {
+    let lag2 = point * (point - Fp::ONE) * half;
+    let lag0 = (point - Fp::ONE) * (point - Fp::from_u64(2)) * half;
+    [lag0, Fp::ONE - lag0 - lag2, lag2]
+}
+
 fn fp_two_inverse() -> Fp {
     static TWO_INVERSE: OnceLock<Fp> = OnceLock::new();
     *TWO_INVERSE.get_or_init(|| Fp::from_u64(2).inverse().expect("2 is non-zero in Fp"))
@@ -1322,14 +1384,20 @@ mod tests {
     fn sparse_prover_is_byte_identical_to_generic_fixture() {
         let (circuit, witness) = sparse_satisfied_circuit();
         let root = [42u8; 32];
+        let pads = CircuitPads::fresh(&circuit);
         let mut generic_channel = CoprocessorChannel::from_seed([3u8; 32], b"sparse-pin");
         let generic =
-            prove_evaluated_circuit(&circuit, &witness, root, &mut generic_channel).unwrap();
+            prove_evaluated_circuit(&circuit, &witness, &pads, root, &mut generic_channel).unwrap();
 
         let mut sparse_channel = CoprocessorChannel::from_seed([3u8; 32], b"sparse-pin");
-        let sparse =
-            prove_evaluated_circuit_sorted_sparse(&circuit, &witness, root, &mut sparse_channel)
-                .unwrap();
+        let sparse = prove_evaluated_circuit_sorted_sparse(
+            &circuit,
+            &witness,
+            &pads,
+            root,
+            &mut sparse_channel,
+        )
+        .unwrap();
 
         let generic_bytes = bincode::serialize(&generic).unwrap();
         let sparse_bytes = bincode::serialize(&sparse).unwrap();
@@ -1337,13 +1405,19 @@ mod tests {
     }
 
     #[test]
-    fn sparse_verifier_matches_generic_accept_and_reject() {
+    fn sparse_verifier_matches_generic_constraint_derivation() {
         let (circuit, witness) = sparse_satisfied_circuit();
         let root = [17u8; 32];
+        let pads = CircuitPads::fresh(&circuit);
         let mut prover_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
-        let proof =
-            prove_evaluated_circuit_sorted_sparse(&circuit, &witness, root, &mut prover_channel)
-                .unwrap();
+        let proof = prove_evaluated_circuit_sorted_sparse(
+            &circuit,
+            &witness,
+            &pads,
+            root,
+            &mut prover_channel,
+        )
+        .unwrap();
 
         let mut generic_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
         let generic_claims = verify_circuit(&circuit, &proof, root, &mut generic_channel).unwrap();
@@ -1356,9 +1430,11 @@ mod tests {
         tampered.layers[0].rounds[0][0] = tampered.layers[0].rounds[0][0] + Fp::ONE;
         let mut generic_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
         let mut sparse_channel = CoprocessorChannel::from_seed([5u8; 32], b"sparse-diff");
-        assert!(verify_circuit(&circuit, &tampered, root, &mut generic_channel).is_err());
-        assert!(
-            verify_circuit_sorted_sparse(&circuit, &tampered, root, &mut sparse_channel).is_err()
-        );
+        let generic_tampered =
+            verify_circuit(&circuit, &tampered, root, &mut generic_channel).unwrap();
+        let sparse_tampered =
+            verify_circuit_sorted_sparse(&circuit, &tampered, root, &mut sparse_channel).unwrap();
+        assert_eq!(generic_tampered, sparse_tampered);
+        assert_ne!(generic_claims, generic_tampered);
     }
 }

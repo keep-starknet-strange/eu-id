@@ -1,5 +1,5 @@
 use crate::age::calendar::{
-    calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id,
+    calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id, valid_day_dummy_col_id,
     valid_day_max_days_col_id, CalendarTableComponent, CalendarTableEval, ValidDayTableComponent,
     ValidDayTableEval,
 };
@@ -20,6 +20,7 @@ pub fn preprocessed_column_ids(bounds: &AgeBounds) -> Vec<PreProcessedColumnId> 
         calendar_index_col_id(bounds),
         valid_day_max_days_col_id(),
         valid_day_day_col_id(),
+        valid_day_dummy_col_id(),
     ]
 }
 
@@ -48,6 +49,7 @@ pub fn components(
         CalendarTableEval {
             bounds: public.bounds,
             lookup_elements: lookup_elements.calendar,
+            claim_mask_beta: None,
         },
         cal_claimed_sum,
     );
@@ -55,6 +57,7 @@ pub fn components(
         allocator,
         ValidDayTableEval {
             lookup_elements: lookup_elements.valid_day,
+            claim_mask_beta: None,
         },
         valid_day_claimed_sum,
     );

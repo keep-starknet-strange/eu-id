@@ -43,6 +43,7 @@
 
 use num_traits::One;
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX};
 
 use crate::components::{is_first_row_column_id, round_cyclic_column_ids};
@@ -86,6 +87,9 @@ pub struct Sha256Eval {
     /// consumers are wired (yields with no consumer would leave the module's
     /// claimed sum non-zero). The cross-module yield is what binds.
     pub field_exposure: FieldExposure,
+    /// Post-tree-1 claimed-sum mask challenge. When present, the final logical
+    /// LogUp site is `beta * mask / 1`, read from four committed trace columns.
+    pub claim_mask_beta: Option<QM31>,
 }
 
 impl FrameworkEval for Sha256Eval {
@@ -806,8 +810,40 @@ impl FrameworkEval for Sha256Eval {
                     &tuple,
                 ));
             }
+
+            // Full padded-message stream. One fixed lookup site per byte
+            // position emits on every real block's t=15 row, so the width is
+            // independent of the number of blocks. A consumer that walks
+            // byte_index 0..N therefore sees the exact compression input,
+            // including the SHA marker, zero padding, and length word.
+            if let Some(field_id) = self.field_exposure.padded_stream_field_id() {
+                let b = block_counter
+                    .as_ref()
+                    .expect("padded stream exposure has a block counter");
+                for byte_in_block in 0..crate::constants::BLOCK_BYTES {
+                    let word_idx = byte_in_block / BYTES_PER_WORD;
+                    let byte_in_word = byte_in_block % BYTES_PER_WORD;
+                    let first_bit = (BYTES_PER_WORD - 1 - byte_in_word) * 8;
+                    let word_offset = 15 - word_idx;
+                    let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
+                        acc + w_bit_at(first_bit + bit, word_offset)
+                            * E::F::from(M31::from(1u32 << bit))
+                    });
+                    let byte_index = b.clone()
+                        * E::F::from(M31::from(crate::constants::BLOCK_BYTES as u32))
+                        + E::F::from(M31::from(byte_in_block as u32));
+                    eval.add_to_relation(RelationEntry::base(
+                        &self.relations.field.field,
+                        -gate_r15.clone(),
+                        &[E::F::from(M31::from(field_id)), byte_index, value],
+                    ));
+                }
+            }
         }
 
+        if let Some(beta) = self.claim_mask_beta {
+            air_core::claim_mask::add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup_batched(crate::interaction::SHA_CONSUMER_LOGUP_BATCH);
 
         eval

@@ -1,8 +1,10 @@
 use crate::nat::types::{PublicInput, PublicInputKind};
 use crate::types::Column;
 use crate::utils::random_m31_cell;
+use air_core::claim_mask::{add_claim_mask_fraction, CLAIM_MASK_MIN_LOG_SIZE};
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::Column as _;
@@ -25,8 +27,8 @@ const NAT_DUMMY_KEY_BASE: u32 = 1 << 24;
 /// same fixed table for every module that shares it — the dedup/fingerprint
 /// guard rejects any two modules that reuse the id with different content.
 ///
-/// This is the Class-D **blinded** value column id (real codes on the lower
-/// half, reserved dummy keys on the upper half); namespaced with `blind/` so it
+/// This is the Class-D **blinded** value column id (real codes in the reachable
+/// prefix, reserved dummy keys in the suffix); namespaced with `blind/` so it
 /// never aliases a non-blinded table of the same accepted set.
 pub fn acceptable_col_id(public: &PublicInput) -> PreProcessedColumnId {
     let kind = match public.kind {
@@ -40,7 +42,7 @@ pub fn acceptable_col_id(public: &PublicInput) -> PreProcessedColumnId {
 }
 
 /// Preprocessed `is_dummy` selector id for the blinded accepted-set table: `1`
-/// over the reserved dummy upper half, `0` over the real lower half.
+/// over the reserved dummy suffix, `0` over the reachable prefix.
 pub fn acceptable_dummy_col_id(public: &PublicInput) -> PreProcessedColumnId {
     let kind = match public.kind {
         PublicInputKind::IsoNumeric => "iso",
@@ -52,25 +54,27 @@ pub fn acceptable_dummy_col_id(public: &PublicInput) -> PreProcessedColumnId {
     }
 }
 
-/// `log_size + 1`: the committed row count of the Class-D blinded table.
+/// Committed row count of the Class-D blinded table, extended to the minimum
+/// claim-mask domain when the accepted set is small.
 pub fn blind_log_size(public: &PublicInput) -> u32 {
-    public.log_size() + 1
+    (public.log_size() + 1).max(CLAIM_MASK_MIN_LOG_SIZE)
 }
 
-/// Class-D blinded value column: the accepted codes (then zero padding) over the
-/// real lower half `[0, 2^log_size)`, and the reserved dummy keys
-/// `[NAT_DUMMY_KEY_BASE, NAT_DUMMY_KEY_BASE + 2^log_size)` over the upper half.
+/// Class-D blinded value column: accepted codes (then zero padding) occupy the
+/// reachable prefix `[0, 2^log_size)`; every remaining row carries a reserved
+/// dummy key starting at `NAT_DUMMY_KEY_BASE`.
 pub fn acceptable_value_column(public: &PublicInput) -> Column {
     let log_size = public.log_size();
     let real = 1usize << log_size;
+    let total = 1usize << blind_log_size(public);
     let domain = CanonicCoset::new(blind_log_size(public)).circle_domain();
-    let mut col = BaseColumn::zeros(1 << blind_log_size(public));
+    let mut col = BaseColumn::zeros(total);
     for (i, &code) in public.acceptable.iter().enumerate() {
         col.set(i, M31::from_u32_unchecked(code));
     }
-    // Lower-half padding rows stay 0 (no valid code is 0). Upper half: reserved,
-    // unreachable dummy keys.
-    for i in 0..real {
+    // Reachable padding rows stay 0 (no valid code is 0). The suffix contains
+    // reserved, unreachable dummy keys.
+    for i in 0..total - real {
         col.set(
             real + i,
             M31::from_u32_unchecked(NAT_DUMMY_KEY_BASE + i as u32),
@@ -79,29 +83,31 @@ pub fn acceptable_value_column(public: &PublicInput) -> Column {
     CircleEvaluation::new(domain, col)
 }
 
-/// Class-D `is_dummy` selector: `0` over the real lower half, `1` over the dummy
-/// upper half.
+/// Class-D `is_dummy` selector: `0` over the reachable prefix and `1` over the
+/// dummy suffix.
 pub fn acceptable_dummy_column(public: &PublicInput) -> Column {
     let log_size = public.log_size();
     let real = 1usize << log_size;
+    let total = 1usize << blind_log_size(public);
     let domain = CanonicCoset::new(blind_log_size(public)).circle_domain();
-    let mut col = BaseColumn::zeros(1 << blind_log_size(public));
-    for i in 0..real {
-        col.set(real + i, M31::one());
+    let mut col = BaseColumn::zeros(total);
+    for i in real..total {
+        col.set(i, M31::one());
     }
     CircleEvaluation::new(domain, col)
 }
 
-/// Class-D blinded multiplicity column: `1` on the used code's row, `0` on the
-/// rest of the real lower half, fresh random blind cells on the dummy upper
-/// half. The random cells are the mask; the eval's `+is_dummy·mult` twin makes
-/// any value there balance to zero.
-pub fn gen_blind_multiplicity_column(public: &PublicInput, used_row: usize) -> Column {
+/// Class-D blinded multiplicity column: the number of marked signed entries on
+/// each accepted-code row, zero on unused real rows, and fresh random cells on
+/// the dummy suffix.
+pub fn gen_blind_multiplicity_column(public: &PublicInput, used_rows: &[usize]) -> Column {
     let log_size = public.log_size();
     let real = 1usize << log_size;
     let size = 1usize << blind_log_size(public);
     let mut data = vec![M31::zero(); size];
-    data[used_row] += M31::one();
+    for &used_row in used_rows {
+        data[used_row] += M31::one();
+    }
     for slot in data.iter_mut().take(size).skip(real) {
         *slot = random_m31_cell();
     }
@@ -113,8 +119,8 @@ pub fn gen_blind_multiplicity_column(public: &PublicInput, used_row: usize) -> C
 
 /// Class-D multiplicity-blinded accepted-set table provider (Q-015 §4b).
 ///
-/// Reads the blinded value column (accepted codes on the lower half, reserved
-/// dummy keys on the upper half) and the `is_dummy` selector, then emits ONE
+/// Reads the blinded value column (accepted codes in the reachable prefix,
+/// reserved dummy keys in the suffix) and the `is_dummy` selector, then emits ONE
 /// gated entry per row against the shared relation and the same value: numerator
 /// `-(1 − is_dummy) · multiplicity`.
 ///
@@ -131,6 +137,7 @@ pub fn gen_blind_multiplicity_column(public: &PublicInput, used_row: usize) -> C
 pub struct NatTableEval {
     pub public: PublicInput,
     pub lookup_elements: NatTableElements,
+    pub claim_mask_beta: Option<QM31>,
 }
 
 pub type NatTableComponent = FrameworkComponent<NatTableEval>;
@@ -156,6 +163,9 @@ impl FrameworkEval for NatTableEval {
             -E::EF::from((one - is_dummy) * mult),
             std::slice::from_ref(&acc_nat_code),
         ));
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup();
         eval
     }
@@ -184,12 +194,15 @@ mod class_d_tests {
         // honest membership use can ever land on a dummy key.
         for i in 0..real {
             assert_eq!(dummy.values.at(i).0, 0, "real row {i} must not be a dummy");
-            assert_eq!(dummy.values.at(real + i).0, 1, "upper row must be a dummy");
+        }
+        for i in real..1 << blind_log_size(&public) {
+            assert_eq!(dummy.values.at(i).0, 1, "dummy row must be selected");
             assert!(
-                value.values.at(real + i).0 >= NAT_DUMMY_KEY_BASE,
+                value.values.at(i).0 >= NAT_DUMMY_KEY_BASE,
                 "dummy key must be unreachable (>= NAT_DUMMY_KEY_BASE)"
             );
         }
+        assert!(blind_log_size(&public) >= CLAIM_MASK_MIN_LOG_SIZE);
     }
 
     /// Class-D: the random dummy multiplicities live only in the upper half; the
@@ -201,8 +214,8 @@ mod class_d_tests {
         let real = 1usize << public.log_size();
         let used_row = 1usize; // 276 sits at sorted index 1
 
-        let first = gen_blind_multiplicity_column(&public, used_row);
-        let second = gen_blind_multiplicity_column(&public, used_row);
+        let first = gen_blind_multiplicity_column(&public, &[used_row]);
+        let second = gen_blind_multiplicity_column(&public, &[used_row]);
         assert_eq!(
             first.values.at(used_row).0,
             1,

@@ -14,16 +14,18 @@
 //!
 //! ## What the proof binds (§9.2)
 //! `prove_identity` runs the product mdoc prover and returns an
-//! [`MdocProofEnvelope`]: the zstd-compressed, bincode-serialized mdoc proof,
-//! the verifier-facing mdoc statement, and the canonical-CBOR bytes of the full
-//! [`ZkPublicStatement`]. The two layers bind complementary things:
+//! [`MdocProofEnvelopeV6`]: the zstd-compressed, bincode-serialized mdoc proof,
+//! the verifier-facing mdoc statement, and a domain-separated binding to the
+//! canonical-CBOR bytes of the full [`ZkPublicStatement`]. The two layers bind
+//! complementary things:
 //!
 //! - **The mdoc proof** binds the issuer key, policy, session transcript, issuer
-//!   and device `(r, s)` signatures, and statement offsets. Attribute digests
-//!   and the device key are private witness values bound in-circuit.
-//! - **The envelope** binds the SDK contract fields (`nonce` /
-//!   `SessionTranscript`, `doctype`, `namespace`, `spec_id`, and `version`) so
-//!   verifier-side request drift is rejected before the inner proof is trusted.
+//!   and device `(r, s)` signatures, statement offsets, and the domain-separated
+//!   request digest. Attribute digests and the device key are private witness
+//!   values bound in-circuit.
+//! - **The envelope** repeats the request digest so request drift is rejected
+//!   before decompressing the inner proof; the inner transcript is the
+//!   cryptographic binding for `doctype`, `namespace`, `spec_id`, and version.
 //!
 //! The combined prover overflows a small default thread stack (`EXC_BAD_ACCESS`
 //! on device — see ROADMAP_E2E §7.2), so both entry points run the heavy work on
@@ -34,6 +36,9 @@
 // eu-id-ffi — same rationale, this crate is its own cdylib link unit.
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+use std::io::Read;
+
+use bincode::Options;
 use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -393,9 +398,10 @@ pub fn ts13_validate_presentation_request(
             request.circuit_hash
         )));
     }
-    if request.preprocessed_root.len() != 32 {
+    let expected_root = ts13_default_preprocessed_root();
+    if request.preprocessed_root != expected_root {
         return Err(ZkError::InvalidInput(
-            "preprocessed_root must be 32 bytes".to_string(),
+            "unknown preprocessed_root for the requested circuit_hash".to_string(),
         ));
     }
     if request.trusted_issuer_hashes.len() != request.potential_issuers as usize {
@@ -443,14 +449,20 @@ pub fn ts13_verify_zk_document(
     request: &Ts13PresentationRequest,
     document: &Ts13ZkDocument,
 ) -> Result<bool, ZkError> {
-    if ts13_validate_presentation_request(request).is_err() {
+    if ts13_validate_presentation_request(request).is_err()
+        || document.doc_type != request.doctype
+        || document.zk_system_id != request.zk_system_id
+        || document.circuit_hash != request.circuit_hash
+        || document.preprocessed_root != request.preprocessed_root
+        || document.request_binding_hash != ts13_request_binding_hash(request)
+    {
         return Ok(false);
     }
-    Ok(document.doc_type == request.doctype
-        && document.zk_system_id == request.zk_system_id
-        && document.circuit_hash == request.circuit_hash
-        && document.preprocessed_root == request.preprocessed_root
-        && document.request_binding_hash == ts13_request_binding_hash(request))
+    Err(ZkError::Verify(
+        "TS13 document verification is not implemented; verify the versioned proof with \
+         verifyIdentity"
+            .to_string(),
+    ))
 }
 
 pub fn ts13_disclosure_kind(
@@ -604,13 +616,28 @@ pub enum ZkError {
     Verify(String),
 }
 
-/// Deterministic-CBOR encoding of the public statement `I` — the SINGLE source
-/// of truth, used by both prove and verify (and by both apps).
+/// Build an RFC 8949 deterministic map whose keys are CBOR text strings.
 ///
-/// Determinism comes from building an explicitly-ordered `Value::Map`: ciborium
-/// preserves the insertion order of map entries, and we fix that order here. The
-/// optional `age` / `nat` sub-maps appear only when their predicate is active,
-/// matching the canonical shape in the plan §2.3.
+/// Deterministic CBOR orders map keys first by the length of their encoded form
+/// and then lexicographically by those encoded bytes. For text-only keys this is
+/// exactly UTF-8 byte length followed by UTF-8 byte order.
+fn canonical_text_map(mut entries: Vec<(Value, Value)>) -> Value {
+    entries.sort_by(|(left, _), (right, _)| {
+        let (Value::Text(left), Value::Text(right)) = (left, right) else {
+            unreachable!("canonical_text_map accepts only text keys");
+        };
+        left.len()
+            .cmp(&right.len())
+            .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+    });
+    Value::Map(entries)
+}
+
+/// RFC 8949 deterministic-CBOR encoding of the public statement `I` — the
+/// SINGLE source of truth, used by both prove and verify (and by both apps).
+///
+/// The optional `age` / `nat` sub-maps appear only when their predicate is
+/// active, matching the canonical shape in the plan §2.3.
 ///
 /// This is a free function (not `#[uniffi::export]`ed) because callers only ever
 /// need it transitively through prove/verify; exposing it would invite a second
@@ -624,13 +651,12 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
         (
             "issuer_key".into(),
             match &s.issuer_key {
-                // Byte-identical to the pre-unification encoding — existing proofs still verify.
-                IssuerKey::P256 { x, y } => Value::Map(vec![
+                IssuerKey::P256 { x, y } => canonical_text_map(vec![
                     ("crv".into(), "P-256".into()),
                     ("x".into(), Value::Bytes(x.clone())),
                     ("y".into(), Value::Bytes(y.clone())),
                 ]),
-                IssuerKey::MlDsa { pk_hash } => Value::Map(vec![
+                IssuerKey::MlDsa { pk_hash } => canonical_text_map(vec![
                     ("alg".into(), "ML-DSA-65".into()),
                     ("pk_hash".into(), Value::Bytes(pk_hash.clone())),
                 ]),
@@ -644,7 +670,7 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
     if let Some(threshold) = s.age_threshold_years {
         entries.push((
             "age".into(),
-            Value::Map(vec![("threshold_years".into(), Value::from(threshold))]),
+            canonical_text_map(vec![("threshold_years".into(), Value::from(threshold))]),
         ));
     }
 
@@ -652,7 +678,7 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
         let accepted_arr = accepted.iter().map(|&c| Value::from(c)).collect();
         entries.push((
             "nat".into(),
-            Value::Map(vec![
+            canonical_text_map(vec![
                 ("mode".into(), s.nat_mode.as_token().into()),
                 ("accepted".into(), Value::Array(accepted_arr)),
             ]),
@@ -663,16 +689,180 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
     // Writing into a Vec is infallible; a CBOR serialization error here would be
     // a library bug, not bad input, so we surface it as a panic rather than
     // widening every caller's signature.
-    ciborium::ser::into_writer(&Value::Map(entries), &mut out)
+    ciborium::ser::into_writer(&canonical_text_map(entries), &mut out)
         .expect("CBOR serialization of ZkPublicStatement is infallible");
     out
 }
 
 #[derive(Serialize, Deserialize)]
-struct MdocProofEnvelope {
-    statement_bytes: Vec<u8>,
+struct MdocProofEnvelopeV6 {
+    version: u16,
+    request_binding: [u8; 32],
     mdoc_statement: eu_id_prover::MdocStatement,
-    stark_proof: Vec<u8>,
+    compressed_proof: Vec<u8>,
+}
+
+const MDOC_PROOF_ENVELOPE_VERSION_V6: u16 = 6;
+const PRODUCT_STATEMENT_VERSION: u32 = 1;
+const REQUEST_BINDING_DOMAIN_V2: &[u8] = b"eudi-mdoc-proof-request-v2\0";
+const P256_COORDINATE_BYTES: usize = 32;
+const MAX_PRESENTATION_NONCE_BYTES: usize = 16 * 1024;
+const MAX_ACCEPTED_NUMERIC_COUNTRIES: usize = 249;
+
+/// The measured P-256 proof is about 4 MiB compressed. These caps preserve
+/// headroom while bounding proof parsing and decompression.
+const MAX_MDOC_PROOF_ENVELOPE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_COMPRESSED_STARK_PROOF_BYTES: usize = 6 * 1024 * 1024;
+const MAX_DECOMPRESSED_STARK_PROOF_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ZSTD_WINDOW_LOG: u32 = 24;
+
+fn bounded_bincode_options(limit: usize) -> impl Options {
+    // Match the fixed-width encoding used by bincode's v1 convenience
+    // functions, but add an explicit aggregate allocation/read bound.
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(limit as u64)
+}
+
+fn request_binding(statement: &ZkPublicStatement) -> [u8; 32] {
+    let statement_bytes = encode_statement(statement);
+    let mut digest = Sha256::new();
+    digest.update(REQUEST_BINDING_DOMAIN_V2);
+    digest.update((statement_bytes.len() as u64).to_be_bytes());
+    digest.update(&statement_bytes);
+    digest.finalize().into()
+}
+
+fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<(), ZkError> {
+    let contract = zk_contract_v1();
+    if statement.spec_id != contract.spec_id_pid {
+        return Err(ZkError::InvalidInput(format!(
+            "unsupported spec_id `{}`; expected `{}`",
+            statement.spec_id, contract.spec_id_pid
+        )));
+    }
+    if statement.version != PRODUCT_STATEMENT_VERSION {
+        return Err(ZkError::InvalidInput(format!(
+            "unsupported statement version {}; expected {}",
+            statement.version, PRODUCT_STATEMENT_VERSION
+        )));
+    }
+    if statement.doctype != contract.doctype_pid {
+        return Err(ZkError::InvalidInput(format!(
+            "unsupported doctype `{}`; expected `{}`",
+            statement.doctype, contract.doctype_pid
+        )));
+    }
+    if statement.namespace != contract.pid_namespace {
+        return Err(ZkError::InvalidInput(format!(
+            "unsupported namespace `{}`; expected `{}`",
+            statement.namespace, contract.pid_namespace
+        )));
+    }
+
+    let (issuer_key_x, issuer_key_y) = match &statement.issuer_key {
+        IssuerKey::P256 { x, y } => (x, y),
+        IssuerKey::MlDsa { .. } => {
+            return Err(ZkError::InvalidInput(
+                "this build requires IssuerKey::P256".to_string(),
+            ));
+        }
+    };
+    if issuer_key_x.len() != P256_COORDINATE_BYTES {
+        return Err(ZkError::InvalidInput(format!(
+            "issuer_key P-256 x must be {P256_COORDINATE_BYTES} bytes"
+        )));
+    }
+    if issuer_key_y.len() != P256_COORDINATE_BYTES {
+        return Err(ZkError::InvalidInput(format!(
+            "issuer_key P-256 y must be {P256_COORDINATE_BYTES} bytes"
+        )));
+    }
+
+    if statement.nonce.is_empty() {
+        return Err(ZkError::InvalidInput(
+            "presentation nonce must not be empty".to_string(),
+        ));
+    }
+    if statement.nonce.len() > MAX_PRESENTATION_NONCE_BYTES {
+        return Err(ZkError::InvalidInput(format!(
+            "presentation nonce exceeds {MAX_PRESENTATION_NONCE_BYTES} bytes"
+        )));
+    }
+
+    let (requires_age, requires_nat) = match statement.predicate_mode {
+        PredicateMode::Age => (true, false),
+        PredicateMode::Nat => (false, true),
+        PredicateMode::And => (true, true),
+        PredicateMode::Or => {
+            return Err(ZkError::InvalidInput(
+                "predicate mode `or` is not supported (only `age`, `nat`, `and`)".to_string(),
+            ));
+        }
+    };
+    if statement.age_threshold_years.is_some() != requires_age {
+        return Err(ZkError::InvalidInput(if requires_age {
+            "age predicate active but `age_threshold_years` is absent".to_string()
+        } else {
+            "`age_threshold_years` must be absent when the age predicate is inactive".to_string()
+        }));
+    }
+    if statement.accepted_numeric_countries.is_some() != requires_nat {
+        return Err(ZkError::InvalidInput(if requires_nat {
+            "nationality predicate active but `accepted_numeric_countries` is absent".to_string()
+        } else {
+            "`accepted_numeric_countries` must be absent when the nationality predicate is inactive"
+                .to_string()
+        }));
+    }
+    if let Some(accepted) = &statement.accepted_numeric_countries {
+        if accepted.len() > MAX_ACCEPTED_NUMERIC_COUNTRIES {
+            return Err(ZkError::InvalidInput(format!(
+                "accepted nationality set exceeds {MAX_ACCEPTED_NUMERIC_COUNTRIES} entries"
+            )));
+        }
+        if accepted.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(ZkError::InvalidInput(
+                "accepted nationality set must be sorted and unique".to_string(),
+            ));
+        }
+    }
+    mapping::to_policy(statement)?;
+    Ok(())
+}
+
+fn encode_mdoc_proof_envelope(envelope: &MdocProofEnvelopeV6) -> Result<Vec<u8>, bincode::Error> {
+    bounded_bincode_options(MAX_MDOC_PROOF_ENVELOPE_BYTES)
+        .reject_trailing_bytes()
+        .serialize(envelope)
+}
+
+fn decode_mdoc_proof_envelope(proof: &[u8]) -> Result<MdocProofEnvelopeV6, ZkError> {
+    if proof.len() > MAX_MDOC_PROOF_ENVELOPE_BYTES {
+        return Err(ZkError::Verify(
+            "proof envelope exceeds size limit".to_string(),
+        ));
+    }
+
+    let unsupported = || ZkError::Verify("unsupported proof envelope version".to_string());
+    let version: u16 = bounded_bincode_options(MAX_MDOC_PROOF_ENVELOPE_BYTES)
+        .allow_trailing_bytes()
+        .deserialize(proof)
+        .map_err(|_| unsupported())?;
+    if version != MDOC_PROOF_ENVELOPE_VERSION_V6 {
+        return Err(unsupported());
+    }
+
+    let envelope: MdocProofEnvelopeV6 = bounded_bincode_options(MAX_MDOC_PROOF_ENVELOPE_BYTES)
+        .reject_trailing_bytes()
+        .deserialize(proof)
+        .map_err(|error| ZkError::Verify(format!("invalid proof envelope: {error}")))?;
+    if envelope.compressed_proof.len() > MAX_COMPRESSED_STARK_PROOF_BYTES {
+        return Err(ZkError::Verify(
+            "compressed STARK proof exceeds size limit".to_string(),
+        ));
+    }
+    Ok(envelope)
 }
 
 /// Stack size for the dedicated prover/verifier thread. The combined prover
@@ -683,23 +873,26 @@ const PROVER_STACK_SIZE: usize = 32 * 1024 * 1024;
 /// Run `work` on a dedicated large-stack thread and join it, returning its
 /// result.
 ///
-/// The closure owns everything it touches (the statement / witness are moved
-/// in), so the thread is `'static`. A panic inside `work` is caught by `join`
-/// and surfaced as [`ZkError::Prove`] — it never unwinds across the UniFFI
-/// boundary (requirement: the spawned thread must not unwind across FFI).
-fn on_large_stack<T, F>(work: F) -> Result<T, ZkError>
+/// The closure owns everything it touches, so the thread is `'static`. A panic
+/// inside `work` is caught by `join` and mapped to the caller-selected FFI
+/// error variant — it never unwinds across the UniFFI boundary.
+fn on_large_stack<T, F>(
+    role: &'static str,
+    thread_error: fn(String) -> ZkError,
+    work: F,
+) -> Result<T, ZkError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, ZkError> + Send + 'static,
 {
     let handle = std::thread::Builder::new()
-        .name("euid-prover".to_string())
+        .name(format!("euid-{role}"))
         .stack_size(PROVER_STACK_SIZE)
         .spawn(work)
-        .map_err(|e| ZkError::Prove(format!("failed to spawn prover thread: {e}")))?;
+        .map_err(|e| thread_error(format!("failed to spawn {role} thread: {e}")))?;
     match handle.join() {
         Ok(result) => result,
-        Err(_) => Err(ZkError::Prove("prover thread panicked".to_string())),
+        Err(_) => Err(thread_error(format!("{role} thread panicked"))),
     }
 }
 
@@ -742,14 +935,51 @@ const PROOF_ZSTD_LEVEL: i32 = 12;
 
 /// Compress the raw bincode STARK proof for the FFI transport envelope.
 fn compress_stark_proof_for_ffi(raw_bincode: &[u8]) -> Result<Vec<u8>, ZkError> {
-    zstd::bulk::compress(raw_bincode, PROOF_ZSTD_LEVEL)
-        .map_err(|e| ZkError::Prove(format!("failed to compress proof: {e}")))
+    if raw_bincode.len() > MAX_DECOMPRESSED_STARK_PROOF_BYTES {
+        return Err(ZkError::Prove(
+            "serialized STARK proof exceeds size limit".to_string(),
+        ));
+    }
+    let compressed = zstd::bulk::compress(raw_bincode, PROOF_ZSTD_LEVEL)
+        .map_err(|e| ZkError::Prove(format!("failed to compress proof: {e}")))?;
+    if compressed.len() > MAX_COMPRESSED_STARK_PROOF_BYTES {
+        return Err(ZkError::Prove(
+            "compressed STARK proof exceeds size limit".to_string(),
+        ));
+    }
+    Ok(compressed)
 }
 
 /// Decompress the FFI transport proof payload back to raw bincode bytes.
 fn decompress_stark_proof_from_ffi(compressed: &[u8]) -> Result<Vec<u8>, ZkError> {
-    zstd::stream::decode_all(compressed)
-        .map_err(|e| ZkError::Verify(format!("failed to decompress proof: {e}")))
+    if compressed.len() > MAX_COMPRESSED_STARK_PROOF_BYTES {
+        return Err(ZkError::Verify(
+            "compressed STARK proof exceeds size limit".to_string(),
+        ));
+    }
+    let mut decoder = zstd::stream::read::Decoder::new(compressed)
+        .map_err(|e| ZkError::Verify(format!("failed to initialize proof decompression: {e}")))?;
+    decoder
+        .window_log_max(MAX_ZSTD_WINDOW_LOG)
+        .map_err(|e| ZkError::Verify(format!("failed to limit proof decompression window: {e}")))?;
+    let mut raw_bincode = Vec::new();
+    decoder
+        .take((MAX_DECOMPRESSED_STARK_PROOF_BYTES + 1) as u64)
+        .read_to_end(&mut raw_bincode)
+        .map_err(|e| ZkError::Verify(format!("failed to decompress proof: {e}")))?;
+    if raw_bincode.len() > MAX_DECOMPRESSED_STARK_PROOF_BYTES {
+        return Err(ZkError::Verify(
+            "decompressed STARK proof exceeds size limit".to_string(),
+        ));
+    }
+    Ok(raw_bincode)
+}
+
+fn decode_stark_proof(raw_bincode: &[u8]) -> Option<eu_id_prover::MdocProof> {
+    bounded_bincode_options(MAX_DECOMPRESSED_STARK_PROOF_BYTES)
+        .reject_trailing_bytes()
+        .deserialize(raw_bincode)
+        .ok()
 }
 
 /// The disclosed-attribute set the SDK's mdoc PID path requests, in a fixed
@@ -814,6 +1044,7 @@ fn mdoc_request(
     };
     let contract = zk_contract_v1();
     Ok(eu_id_prover::MdocPidRequest {
+        request_binding: request_binding(statement),
         doctype: statement.doctype.clone(),
         namespace: statement.namespace.clone(),
         attributes: expected_mdoc_attributes(statement.predicate_mode),
@@ -831,6 +1062,26 @@ fn mdoc_statement_matches_public_statement(
     mdoc_statement: &eu_id_prover::MdocStatement,
     statement: &ZkPublicStatement,
 ) -> Result<bool, ZkError> {
+    if mdoc_statement.request_binding != request_binding(statement) {
+        return Ok(false);
+    }
+    if mdoc_statement.doctype != statement.doctype
+        || mdoc_statement.namespace != statement.namespace
+        || mdoc_statement.profile != eu_id_prover::mdoc::MdocProfileVersion::V2
+    {
+        return Ok(false);
+    }
+    // The current FFI statement has no fields for the verifier to bind a
+    // revocation authority, epoch, range, or authority signature. Keep this
+    // release boundary explicitly non-revocation until those inputs are part
+    // of `ZkPublicStatement` and `ZkMdocWitness`.
+    if mdoc_statement.ts13_revocation.is_some()
+        || mdoc_statement.ts13_revocation_range_enabled
+        || mdoc_statement.ts13_revocation_signature_enabled
+    {
+        return Ok(false);
+    }
+
     let policy = mapping::to_policy(statement)?;
     if mdoc_statement.policy != policy {
         return Ok(false);
@@ -868,16 +1119,12 @@ fn mdoc_statement_matches_public_statement(
     }
 
     // Caller-arg binding (mirrors the historical P-256 fix): the disclosed
-    // attribute set, predicate-leg activation, element identity, and disclosure
-    // modes are all prover-supplied fields of the envelope statement. The policy
-    // check above binds only the *values* (min_age, accepted set); it does NOT
-    // force the predicate to actually be proven. Pin these fields to the SDK's
-    // OWN request so a prover cannot
-    //   - drop the age (or nationality) leg by leaving its index `None`, which
-    //     makes the circuit gate `proof.age_public == index.map(..)` trivially
-    //     pass without the predicate ever being enforced (C1); or
-    //   - prove a predicate over the wrong signed element, e.g. `issue_date`
-    //     instead of `birth_date` (C2).
+    // attribute set, predicate-leg activation, element identity, disclosure
+    // modes, and value-free encodings are all prover-supplied fields of the
+    // envelope statement. The policy check above binds only the *values*
+    // (min_age, accepted set); it does NOT force the predicate to actually be
+    // proven. Pin these fields to the SDK's OWN request so a prover cannot drop
+    // a predicate leg or prove it over the wrong signed element.
     // Fail-closed on ANY divergence from the expected set.
     let expected = expected_mdoc_attributes(statement.predicate_mode);
     if mdoc_statement.attributes.len() != expected.len() {
@@ -888,18 +1135,16 @@ fn mdoc_statement_matches_public_statement(
             return Ok(false);
         }
     }
-    // Each active leg's index must be `Some` and point at the matching
-    // disclosed attribute; an inactive leg's index must be `None` (the
-    // `position` over the mode-filtered expected set yields exactly that), so
-    // cross-mode confusion stays fail-closed in both directions.
-    let expected_age_index = expected
+    let expected_birth_date_encoding = expected
         .iter()
-        .position(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::AgeOver));
-    let expected_nat_index = expected
+        .any(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::AgeOver))
+        .then_some(eu_id_prover::mdoc::MdocBirthDateEncoding::Text);
+    let expected_nationality_encoding = expected
         .iter()
-        .position(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set));
-    if mdoc_statement.age_attribute_index != expected_age_index
-        || mdoc_statement.nationality_attribute_index != expected_nat_index
+        .any(|a| matches!(a.mode, eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set))
+        .then_some(eu_id_prover::mdoc::MdocNationalityEncoding::Alpha2);
+    if mdoc_statement.birth_date_encoding != expected_birth_date_encoding
+        || mdoc_statement.nationality_encoding != expected_nationality_encoding
     {
         return Ok(false);
     }
@@ -917,21 +1162,35 @@ pub fn prove_identity(
     statement: ZkPublicStatement,
     witness: ZkMdocWitness,
 ) -> Result<Vec<u8>, ZkError> {
-    on_large_stack(move || {
-        let policy = mapping::to_policy(&statement)?;
-        let request = mdoc_request(&statement, &witness)?;
-        let (proof, mdoc_statement) = eu_id_prover::prove_mdoc(&witness.document, &request, policy)
-            .map_err(map_prover_error)?;
+    validate_product_statement_contract(&statement)?;
+    let expected_request_binding = request_binding(&statement);
+    let policy = mapping::to_policy(&statement)?;
+    let request = mdoc_request(&statement, &witness)?;
+    let document = witness.document;
+
+    on_large_stack("prover", ZkError::Prove, move || {
+        let (proof, mdoc_statement) =
+            eu_id_prover::prove_mdoc(&document, &request, policy).map_err(map_prover_error)?;
+        if mdoc_statement.request_binding != expected_request_binding
+            || mdoc_statement.doctype != statement.doctype
+            || mdoc_statement.namespace != statement.namespace
+            || mdoc_statement.profile != eu_id_prover::mdoc::MdocProfileVersion::V2
+        {
+            return Err(ZkError::Prove(
+                "prover returned an mdoc statement with the wrong request scope".to_string(),
+            ));
+        }
         let stark_proof_bincode = bincode::serialize(&proof)
             .map_err(|e| ZkError::Prove(format!("failed to serialize mdoc proof: {e}")))?;
-        let stark_proof = compress_stark_proof_for_ffi(&stark_proof_bincode)?;
+        let compressed_proof = compress_stark_proof_for_ffi(&stark_proof_bincode)?;
 
-        let envelope = MdocProofEnvelope {
-            statement_bytes: encode_statement(&statement),
+        let envelope = MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6,
+            request_binding: expected_request_binding,
             mdoc_statement,
-            stark_proof,
+            compressed_proof,
         };
-        bincode::serialize(&envelope)
+        encode_mdoc_proof_envelope(&envelope)
             .map_err(|e| ZkError::Prove(format!("failed to serialize mdoc proof envelope: {e}")))
     })
 }
@@ -944,30 +1203,34 @@ pub fn verify_identity(
     statement: ZkPublicStatement,
     proof: Vec<u8>,
 ) -> Result<ZkVerifyResult, ZkError> {
-    on_large_stack(move || {
-        let envelope: MdocProofEnvelope = match bincode::deserialize(&proof) {
-            Ok(envelope) => envelope,
-            Err(_) => return Ok(ZkVerifyResult { ok: false }),
-        };
-        if envelope.statement_bytes != encode_statement(&statement) {
-            return Ok(ZkVerifyResult { ok: false });
-        }
-        if !mdoc_statement_matches_public_statement(&envelope.mdoc_statement, &statement)? {
-            return Ok(ZkVerifyResult { ok: false });
-        }
+    validate_product_statement_contract(&statement)?;
+    let expected_request_binding = request_binding(&statement);
+    let envelope = match decode_mdoc_proof_envelope(&proof) {
+        Ok(envelope) => envelope,
+        Err(_) => return Ok(ZkVerifyResult { ok: false }),
+    };
+    if envelope.request_binding != expected_request_binding
+        || envelope.mdoc_statement.request_binding != expected_request_binding
+    {
+        return Ok(ZkVerifyResult { ok: false });
+    }
+    if !mdoc_statement_matches_public_statement(&envelope.mdoc_statement, &statement)? {
+        return Ok(ZkVerifyResult { ok: false });
+    }
 
-        let stark_proof_bincode = match decompress_stark_proof_from_ffi(&envelope.stark_proof) {
-            Ok(bytes) => bytes,
-            Err(_) => return Ok(ZkVerifyResult { ok: false }),
-        };
-        let stark_proof: eu_id_prover::MdocProof = match bincode::deserialize(&stark_proof_bincode)
-        {
-            Ok(stark_proof) => stark_proof,
-            Err(_) => return Ok(ZkVerifyResult { ok: false }),
-        };
+    let stark_proof_bincode = match decompress_stark_proof_from_ffi(&envelope.compressed_proof) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(ZkVerifyResult { ok: false }),
+    };
+    let stark_proof = match decode_stark_proof(&stark_proof_bincode) {
+        Some(stark_proof) => stark_proof,
+        None => return Ok(ZkVerifyResult { ok: false }),
+    };
+    let mdoc_statement = envelope.mdoc_statement;
 
+    on_large_stack("verifier", ZkError::Verify, move || {
         Ok(ZkVerifyResult {
-            ok: eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok(),
+            ok: eu_id_prover::verify_mdoc(&stark_proof, &mdoc_statement).is_ok(),
         })
     })
 }
@@ -986,6 +1249,8 @@ pub fn zk_system() -> ZkSystemKind {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     fn ts13_request() -> Ts13PresentationRequest {
@@ -1029,7 +1294,17 @@ mod tests {
         assert_eq!(document.zk_system_id, "stwo-euid-v1");
         assert_eq!(document.circuit_hash, request.circuit_hash);
         assert_eq!(document.disclosed_attributes, disclosed);
-        assert!(ts13_verify_zk_document(&request, &document).unwrap());
+        assert!(matches!(
+            ts13_verify_zk_document(&request, &document),
+            Err(ZkError::Verify(message)) if message.contains("verifyIdentity")
+        ));
+
+        let mut empty_proof = document;
+        empty_proof.proof.clear();
+        assert!(matches!(
+            ts13_verify_zk_document(&request, &empty_proof),
+            Err(ZkError::Verify(message)) if message.contains("verifyIdentity")
+        ));
     }
 
     #[test]
@@ -1242,30 +1517,35 @@ mod tests {
     fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::MdocStatement) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let issuer_key = fixture.statement.issuer_input.public_key.clone();
-        (
-            ZkPublicStatement {
-                spec_id: "stwo-euid-pid-v1".to_string(),
-                version: 1,
-                doctype: "eu.europa.ec.eudi.pid.1".to_string(),
-                namespace: "eu.europa.ec.eudi.pid.1".to_string(),
-                issuer_key: IssuerKey::P256 {
-                    x: issuer_key.x.0.to_vec(),
-                    y: issuer_key.y.0.to_vec(),
-                },
-                today_epoch_day: 20637, // 2026-07-03
-                nonce: fixture.request.session_transcript,
-                predicate_mode: PredicateMode::And,
-                age_threshold_years: Some(18),
-                accepted_numeric_countries: Some(vec![276, 250]), // DE, FR
-                nat_mode: NatMode::Any,
+        let statement = ZkPublicStatement {
+            spec_id: "stwo-euid-pid-v1".to_string(),
+            version: 1,
+            doctype: "eu.europa.ec.eudi.pid.1".to_string(),
+            namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+            issuer_key: IssuerKey::P256 {
+                x: issuer_key.x.0.to_vec(),
+                y: issuer_key.y.0.to_vec(),
             },
-            eu_id_prover::MdocStatement::from_circuit(&fixture.statement),
-        )
+            today_epoch_day: 20637, // 2026-07-03
+            nonce: fixture.request.session_transcript,
+            predicate_mode: PredicateMode::And,
+            age_threshold_years: Some(18),
+            accepted_numeric_countries: Some(vec![250, 276]), // FR, DE
+            nat_mode: NatMode::Any,
+        };
+        let mut mdoc_statement = eu_id_prover::MdocStatement::from_circuit(&fixture.statement);
+        mdoc_statement.request_binding = request_binding(&statement);
+        mdoc_statement.policy = mapping::to_policy(&statement).unwrap();
+        (statement, mdoc_statement)
     }
 
     fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let issuer_key = fixture.statement.issuer_input.public_key.clone();
+        let mut accepted_numeric_countries =
+            fixture.statement.policy.accepted_nationalities.clone();
+        accepted_numeric_countries.sort_unstable();
+        accepted_numeric_countries.dedup();
         (
             ZkPublicStatement {
                 spec_id: "stwo-euid-pid-v1".to_string(),
@@ -1280,9 +1560,7 @@ mod tests {
                 nonce: fixture.request.session_transcript,
                 predicate_mode: PredicateMode::And,
                 age_threshold_years: Some(fixture.statement.policy.min_age_years),
-                accepted_numeric_countries: Some(
-                    fixture.statement.policy.accepted_nationalities.clone(),
-                ),
+                accepted_numeric_countries: Some(accepted_numeric_countries),
                 nat_mode: NatMode::Any,
             },
             ZkMdocWitness {
@@ -1298,6 +1576,27 @@ mod tests {
     fn mdoc_statement_match_recomputes_phase_e_device_authentication_hash() {
         let (statement, mdoc_statement) = honest_mdoc_statement();
         assert!(mdoc_statement_matches_public_statement(&mdoc_statement, &statement).unwrap());
+
+        let mut changed_binding = mdoc_statement.clone();
+        changed_binding.request_binding[0] ^= 1;
+        assert!(
+            !mdoc_statement_matches_public_statement(&changed_binding, &statement).unwrap(),
+            "the inner public statement must carry the canonical request binding"
+        );
+
+        let mut changed_inner_doctype = mdoc_statement.clone();
+        changed_inner_doctype.doctype = "other.doctype".to_string();
+        assert!(
+            !mdoc_statement_matches_public_statement(&changed_inner_doctype, &statement).unwrap(),
+            "the proof statement's docType must exactly match the verifier request"
+        );
+
+        let mut changed_inner_namespace = mdoc_statement.clone();
+        changed_inner_namespace.namespace = "other.namespace".to_string();
+        assert!(
+            !mdoc_statement_matches_public_statement(&changed_inner_namespace, &statement).unwrap(),
+            "the proof statement's namespace must exactly match the verifier request"
+        );
 
         let mut changed_transcript = statement.clone();
         changed_transcript.nonce = eu_id_prover::mdoc::openid4vp_session_transcript(b"other");
@@ -1319,6 +1618,35 @@ mod tests {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let public = eu_id_prover::MdocStatement::from_circuit(&fixture.statement);
         let encoded = bincode::serialize(&public).expect("public mdoc statement serializes");
+        if let eu_id_prover::mdoc::MdocBirthDateBinding::Text(date) =
+            fixture.statement.birth_date_binding
+        {
+            assert!(
+                !encoded.windows(date.len()).any(|window| window == date),
+                "raw signed birth date must not be serialized in the public mdoc statement"
+            );
+        }
+        for attribute in &fixture.statement.attributes {
+            let digest = &fixture.extracted.issuer_sig_structure
+                [attribute.mso_digest_offset..attribute.mso_digest_offset + 32];
+            assert!(
+                !encoded.windows(digest.len()).any(|window| window == digest),
+                "private MSO digest must not be serialized in the public mdoc statement"
+            );
+            if attribute.value.len() >= 4
+                && !matches!(
+                    attribute.mode,
+                    eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(_)
+                )
+            {
+                assert!(
+                    !encoded
+                        .windows(attribute.value.len())
+                        .any(|window| window == attribute.value),
+                    "private credential value must not be serialized in the public statement"
+                );
+            }
+        }
         assert!(
             !encoded
                 .windows(32)
@@ -1365,9 +1693,9 @@ mod tests {
 
     #[test]
     fn mdoc_verify_rejects_dropped_predicate_leg() {
-        // C1: a proof that never proved the age (or nationality) predicate leaves
-        // its attribute index `None`; the circuit gate then passes trivially. The
-        // SDK guard must reject it even though policy / issuer / device all match.
+        // C1: a proof that never proved the age (or nationality) predicate must
+        // not be able to retain the requested attribute label while disabling
+        // its semantic encoding/binding.
         let (statement, honest) = honest_mdoc_statement();
         assert!(
             mdoc_statement_matches_public_statement(&honest, &statement).unwrap(),
@@ -1375,17 +1703,64 @@ mod tests {
         );
 
         let mut age_dropped = honest.clone();
-        age_dropped.age_attribute_index = None;
+        age_dropped.birth_date_encoding = None;
         assert!(
             !mdoc_statement_matches_public_statement(&age_dropped, &statement).unwrap(),
-            "dropping the age predicate leg (index None) must be rejected"
+            "dropping the age predicate semantic binding must be rejected"
         );
 
         let mut nat_dropped = honest.clone();
-        nat_dropped.nationality_attribute_index = None;
+        nat_dropped.nationality_encoding = None;
         assert!(
             !mdoc_statement_matches_public_statement(&nat_dropped, &statement).unwrap(),
-            "dropping the nationality predicate leg (index None) must be rejected"
+            "dropping the nationality predicate semantic binding must be rejected"
+        );
+    }
+
+    #[test]
+    fn mdoc_verify_rejects_profile_relabelling() {
+        let (statement, mut mdoc_statement) = honest_mdoc_statement();
+        assert_eq!(
+            mdoc_statement.profile,
+            eu_id_prover::mdoc::MdocProfileVersion::V2
+        );
+        mdoc_statement.profile = eu_id_prover::mdoc::MdocProfileVersion::V1;
+        assert!(
+            !mdoc_statement_matches_public_statement(&mdoc_statement, &statement).unwrap(),
+            "the product verifier must pin the signed deterministic-CBOR profile"
+        );
+    }
+
+    #[test]
+    fn mdoc_verify_rejects_unbound_revocation_layout() {
+        let (statement, honest) = honest_mdoc_statement();
+        assert!(honest.ts13_revocation.is_none());
+        assert!(!honest.ts13_revocation_range_enabled);
+        assert!(!honest.ts13_revocation_signature_enabled);
+        assert!(mdoc_statement_matches_public_statement(&honest, &statement).unwrap());
+
+        let mut public_inputs = honest.clone();
+        public_inputs.ts13_revocation = Some(eu_id_prover::mdoc::MdocRevocationPublicInputs {
+            revocation_public_key: honest.issuer_public_key.clone(),
+            epoch: 1,
+        });
+        assert!(
+            !mdoc_statement_matches_public_statement(&public_inputs, &statement).unwrap(),
+            "the FFI verifier must reject a revocation authority and epoch it cannot bind"
+        );
+
+        let mut range = honest.clone();
+        range.ts13_revocation_range_enabled = true;
+        assert!(
+            !mdoc_statement_matches_public_statement(&range, &statement).unwrap(),
+            "the FFI verifier must reject an unbound revocation range"
+        );
+
+        let mut signature = honest;
+        signature.ts13_revocation_signature_enabled = true;
+        assert!(
+            !mdoc_statement_matches_public_statement(&signature, &statement).unwrap(),
+            "the FFI verifier must reject an unbound revocation signature"
         );
     }
 
@@ -1396,7 +1771,14 @@ mod tests {
         // must be pinned to the requested contract element.
         let (statement, honest) = honest_mdoc_statement();
         let age_index = honest
-            .age_attribute_index
+            .attributes
+            .iter()
+            .position(|attribute| {
+                matches!(
+                    attribute.mode,
+                    eu_id_prover::mdoc::MdocDisclosureMode::AgeOver
+                )
+            })
             .expect("honest statement discloses the age attribute");
 
         let mut wrong_element = honest.clone();
@@ -1446,9 +1828,27 @@ mod tests {
         // ok=true (age never proven); post-fix the SDK guard rejects it.
         let demo = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let issuer_key = demo.statement.issuer_input.public_key.clone();
+        let claimed_statement = ZkPublicStatement {
+            spec_id: "stwo-euid-pid-v1".to_string(),
+            version: 1,
+            doctype: demo.request.doctype.clone(),
+            namespace: demo.request.namespace.clone(),
+            issuer_key: IssuerKey::P256 {
+                x: issuer_key.x.0.to_vec(),
+                y: issuer_key.y.0.to_vec(),
+            },
+            today_epoch_day: 20637, // 2026-07-03
+            nonce: demo.request.session_transcript.clone(),
+            predicate_mode: PredicateMode::And,
+            age_threshold_years: Some(18),
+            accepted_numeric_countries: Some(vec![250, 276]),
+            nat_mode: NatMode::Any,
+        };
+        let expected_request_binding = request_binding(&claimed_statement);
 
         // Attacker request: nationality only — no AgeOver leg.
         let nat_only_request = eu_id_prover::MdocPidRequest {
+            request_binding: expected_request_binding,
             doctype: demo.request.doctype.clone(),
             namespace: demo.request.namespace.clone(),
             attributes: vec![eu_id_prover::mdoc::MdocRequestedAttribute {
@@ -1472,42 +1872,29 @@ mod tests {
                 day: 3,
             },
             min_age_years: 18,
-            accepted_nationalities: vec![276, 250],
-            accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
+            accepted_nationalities: vec![250, 276],
+            accepted_nationalities_alpha2: vec![*b"FR", *b"DE"],
         };
         let (proof, mdoc_statement) =
             eu_id_prover::prove_mdoc(&demo.document, &nat_only_request, policy)
                 .expect("nationality-only mdoc proves");
         assert!(
-            mdoc_statement.age_attribute_index.is_none(),
+            !mdoc_statement.attributes.iter().any(|attribute| matches!(
+                attribute.mode,
+                eu_id_prover::mdoc::MdocDisclosureMode::AgeOver
+            )),
             "attack precondition: age predicate leg absent"
         );
 
         let stark_proof_bincode = bincode::serialize(&proof).unwrap();
-        let stark_proof = compress_stark_proof_for_ffi(&stark_proof_bincode).unwrap();
-
-        let claimed_statement = ZkPublicStatement {
-            spec_id: "stwo-euid-pid-v1".to_string(),
-            version: 1,
-            doctype: demo.request.doctype.clone(),
-            namespace: demo.request.namespace.clone(),
-            issuer_key: IssuerKey::P256 {
-                x: issuer_key.x.0.to_vec(),
-                y: issuer_key.y.0.to_vec(),
-            },
-            today_epoch_day: 20637, // 2026-07-03
-            nonce: demo.request.session_transcript.clone(),
-            predicate_mode: PredicateMode::And,
-            age_threshold_years: Some(18),
-            accepted_numeric_countries: Some(vec![276, 250]),
-            nat_mode: NatMode::Any,
-        };
-        let envelope = MdocProofEnvelope {
-            statement_bytes: encode_statement(&claimed_statement),
+        let compressed_proof = compress_stark_proof_for_ffi(&stark_proof_bincode).unwrap();
+        let envelope = MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6,
+            request_binding: expected_request_binding,
             mdoc_statement,
-            stark_proof,
+            compressed_proof,
         };
-        let proof_bytes = bincode::serialize(&envelope).unwrap();
+        let proof_bytes = encode_mdoc_proof_envelope(&envelope).unwrap();
 
         assert!(
             !verify_identity(claimed_statement, proof_bytes)
@@ -1569,6 +1956,220 @@ mod tests {
     }
 
     #[test]
+    fn encode_statement_uses_rfc8949_deterministic_map_order() {
+        let encoded = encode_statement(&sample_statement());
+        let decoded: Value =
+            ciborium::de::from_reader(encoded.as_slice()).expect("statement CBOR decodes");
+        let Value::Map(entries) = decoded else {
+            panic!("statement must encode as a CBOR map");
+        };
+        let keys: Vec<&str> = entries
+            .iter()
+            .map(|(key, _)| {
+                let Value::Text(key) = key else {
+                    panic!("statement map keys must be text");
+                };
+                key.as_str()
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "v",
+                "age",
+                "nat",
+                "nonce",
+                "today",
+                "doctype",
+                "spec_id",
+                "namespace",
+                "issuer_key",
+                "predicate_mode",
+            ]
+        );
+
+        let issuer_key = entries
+            .iter()
+            .find_map(|(key, value)| {
+                (key == &Value::Text("issuer_key".to_string())).then_some(value)
+            })
+            .expect("issuer_key exists");
+        let Value::Map(issuer_entries) = issuer_key else {
+            panic!("issuer_key must encode as a map");
+        };
+        let issuer_keys: Vec<&str> = issuer_entries
+            .iter()
+            .map(|(key, _)| {
+                let Value::Text(key) = key else {
+                    panic!("issuer-key map keys must be text");
+                };
+                key.as_str()
+            })
+            .collect();
+        assert_eq!(issuer_keys, ["x", "y", "crv"]);
+    }
+
+    #[test]
+    fn request_binding_is_deterministic_and_binds_the_complete_contract() {
+        let statement = sample_statement();
+        let expected = request_binding(&statement);
+        assert_eq!(expected, request_binding(&statement));
+
+        let mut variants = Vec::new();
+        let mut changed = statement.clone();
+        changed.spec_id.push_str("-other");
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.version += 1;
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.doctype.push_str(".other");
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.namespace.push_str(".other");
+        variants.push(changed);
+        let mut changed = statement.clone();
+        let IssuerKey::P256 { x, .. } = &mut changed.issuer_key else {
+            unreachable!("P-256 test statement")
+        };
+        x[0] ^= 1;
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.today_epoch_day += 1;
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.nonce.push(0xff);
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.predicate_mode = PredicateMode::Age;
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.age_threshold_years = Some(21);
+        variants.push(changed);
+        let mut changed = statement.clone();
+        changed.accepted_numeric_countries = Some(vec![56, 196]);
+        variants.push(changed);
+
+        for variant in variants {
+            assert_ne!(
+                expected,
+                request_binding(&variant),
+                "every canonical request field must affect the binding"
+            );
+        }
+    }
+
+    #[test]
+    fn product_contract_rejects_every_unsupported_identity_label() {
+        let statement = sample_statement();
+        validate_product_statement_contract(&statement).unwrap();
+
+        let mut invalid = Vec::new();
+        let mut changed = statement.clone();
+        changed.spec_id = "other-spec".to_string();
+        invalid.push(changed);
+        let mut changed = statement.clone();
+        changed.version = PRODUCT_STATEMENT_VERSION + 1;
+        invalid.push(changed);
+        let mut changed = statement.clone();
+        changed.doctype = "other.doctype".to_string();
+        invalid.push(changed);
+        let mut changed = statement;
+        changed.namespace = "other.namespace".to_string();
+        invalid.push(changed);
+
+        for statement in invalid {
+            assert!(matches!(
+                validate_product_statement_contract(&statement),
+                Err(ZkError::InvalidInput(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn product_contract_bounds_and_canonicalizes_public_vectors() {
+        let rejects = |statement: ZkPublicStatement| {
+            assert!(matches!(
+                validate_product_statement_contract(&statement),
+                Err(ZkError::InvalidInput(_))
+            ));
+        };
+
+        let mut changed = sample_statement();
+        let IssuerKey::P256 { x, .. } = &mut changed.issuer_key else {
+            unreachable!("P-256 test statement")
+        };
+        x.truncate(P256_COORDINATE_BYTES - 1);
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.nonce.clear();
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.nonce = vec![0; MAX_PRESENTATION_NONCE_BYTES + 1];
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.predicate_mode = PredicateMode::Age;
+        changed.accepted_numeric_countries = None;
+        validate_product_statement_contract(&changed).unwrap();
+        changed.accepted_numeric_countries = Some(vec![56, 196]);
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.predicate_mode = PredicateMode::Nat;
+        changed.age_threshold_years = None;
+        validate_product_statement_contract(&changed).unwrap();
+        changed.age_threshold_years = Some(18);
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.accepted_numeric_countries = Some(vec![196, 56]);
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.accepted_numeric_countries = Some(vec![56, 56, 196]);
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.accepted_numeric_countries = Some(vec![56]);
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.accepted_numeric_countries = Some(vec![56, 999]);
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.accepted_numeric_countries =
+            Some((0..=MAX_ACCEPTED_NUMERIC_COUNTRIES as u32).collect());
+        rejects(changed);
+
+        let mut changed = sample_statement();
+        changed.predicate_mode = PredicateMode::Or;
+        rejects(changed);
+    }
+
+    #[test]
+    fn public_entry_points_validate_the_product_contract_before_proof_processing() {
+        let mut statement = sample_statement();
+        statement.version = PRODUCT_STATEMENT_VERSION + 1;
+        let witness = ZkMdocWitness {
+            document: Vec::new(),
+            trusted_issuers: TrustedIssuers::Certificates(Vec::new()),
+        };
+
+        assert!(matches!(
+            prove_identity(statement.clone(), witness),
+            Err(ZkError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            verify_identity(statement, Vec::new()),
+            Err(ZkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
     fn verify_rejects_a_malformed_proof() {
         // Garbage bytes don't deserialize to an envelope -> fail-closed, no error.
         let s = sample_statement();
@@ -1599,19 +2200,142 @@ mod tests {
     }
 
     #[test]
+    fn envelope_decoder_rejects_wrong_version_and_trailing_bytes() {
+        let (statement, mdoc_statement) = honest_mdoc_statement();
+        let binding = request_binding(&statement);
+        let mut wrong_version = MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6 - 1,
+            request_binding: binding,
+            mdoc_statement: mdoc_statement.clone(),
+            compressed_proof: Vec::new(),
+        };
+        let encoded = encode_mdoc_proof_envelope(&wrong_version).unwrap();
+        assert_eq!(
+            encoded,
+            bincode::serialize(&wrong_version).unwrap(),
+            "bounded envelope options must remain byte-compatible with bincode v1 fixed-int encoding"
+        );
+        assert!(decode_mdoc_proof_envelope(&encoded).is_err());
+
+        wrong_version.version = MDOC_PROOF_ENVELOPE_VERSION_V6;
+        let mut encoded = encode_mdoc_proof_envelope(&wrong_version).unwrap();
+        encoded.push(0xff);
+        assert!(decode_mdoc_proof_envelope(&encoded).is_err());
+    }
+
+    #[test]
+    fn envelope_decoder_rejects_legacy_unversioned_envelope() {
+        #[derive(Serialize)]
+        struct LegacyMdocProofEnvelope {
+            statement_bytes: Vec<u8>,
+            mdoc_statement: eu_id_prover::MdocStatement,
+            stark_proof: Vec<u8>,
+        }
+
+        let (statement, mdoc_statement) = honest_mdoc_statement();
+        let encoded = bincode::serialize(&LegacyMdocProofEnvelope {
+            statement_bytes: encode_statement(&statement),
+            mdoc_statement,
+            stark_proof: Vec::new(),
+        })
+        .unwrap();
+
+        assert!(matches!(
+            decode_mdoc_proof_envelope(&encoded),
+            Err(ZkError::Verify(message)) if message == "unsupported proof envelope version"
+        ));
+    }
+
+    #[test]
+    fn envelope_decoder_rejects_oversized_inputs_before_nested_decode() {
+        let oversized = vec![0u8; MAX_MDOC_PROOF_ENVELOPE_BYTES + 1];
+        assert!(matches!(
+            decode_mdoc_proof_envelope(&oversized),
+            Err(ZkError::Verify(message)) if message.contains("envelope exceeds")
+        ));
+
+        let (statement, mdoc_statement) = honest_mdoc_statement();
+        let envelope = MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6,
+            request_binding: request_binding(&statement),
+            mdoc_statement,
+            compressed_proof: vec![0u8; MAX_COMPRESSED_STARK_PROOF_BYTES + 1],
+        };
+        let encoded = encode_mdoc_proof_envelope(&envelope).unwrap();
+        assert!(matches!(
+            decode_mdoc_proof_envelope(&encoded),
+            Err(ZkError::Verify(message)) if message.contains("compressed STARK proof")
+        ));
+    }
+
+    #[test]
+    fn streaming_decompression_rejects_output_past_the_limit() {
+        let oversized_raw = vec![0x5a; MAX_DECOMPRESSED_STARK_PROOF_BYTES + 1];
+        let compressed = zstd::bulk::compress(&oversized_raw, 1).unwrap();
+        assert!(compressed.len() < MAX_COMPRESSED_STARK_PROOF_BYTES);
+        assert!(matches!(
+            decompress_stark_proof_from_ffi(&compressed),
+            Err(ZkError::Verify(message)) if message.contains("decompressed STARK proof")
+        ));
+    }
+
+    #[test]
+    fn streaming_decompression_rejects_frames_with_oversized_windows() {
+        let mut encoder =
+            zstd::stream::write::Encoder::new(Vec::new(), 1).expect("zstd encoder initializes");
+        encoder
+            .window_log(MAX_ZSTD_WINDOW_LOG + 1)
+            .expect("test encoder accepts a larger window");
+        encoder
+            .write_all(b"small payload")
+            .expect("test payload compresses");
+        let compressed = encoder.finish().expect("test frame finishes");
+
+        assert!(matches!(
+            decompress_stark_proof_from_ffi(&compressed),
+            Err(ZkError::Verify(message)) if message.contains("decompress")
+        ));
+    }
+
+    #[test]
+    fn large_stack_verifier_panics_map_to_verify_errors() {
+        let error = on_large_stack::<(), _>("verifier", ZkError::Verify, || {
+            panic!("intentional verifier panic")
+        })
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ZkError::Verify(message) if message.contains("verifier thread panicked")
+        ));
+    }
+
+    #[test]
+    fn verify_rejects_envelope_request_binding_mismatch() {
+        let (statement, mdoc_statement) = honest_mdoc_statement();
+        let mut wrong_binding = request_binding(&statement);
+        wrong_binding[0] ^= 1;
+        let envelope = encode_mdoc_proof_envelope(&MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6,
+            request_binding: wrong_binding,
+            mdoc_statement,
+            compressed_proof: Vec::new(),
+        })
+        .unwrap();
+        assert!(!verify_identity(statement, envelope).unwrap().ok);
+    }
+
+    #[test]
     fn verify_rejects_statement_envelope_drift() {
-        // The envelope binds the *full* statement (incl. nonce). An envelope
-        // built for statement A is rejected against statement B before the STARK
-        // is even deserialized — this is the anti-replay / doctype binding, and
-        // it needs no real proof to exercise.
+        // The inner request digest binds the full statement, including nonce.
         let (a, mdoc_statement) = honest_mdoc_statement();
         let mut b = a.clone();
         b.nonce = vec![0xff; 8]; // a fresh session -> different statement bytes
 
-        let envelope = bincode::serialize(&MdocProofEnvelope {
-            statement_bytes: encode_statement(&a),
+        let envelope = encode_mdoc_proof_envelope(&MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6,
+            request_binding: request_binding(&a),
             mdoc_statement,
-            stark_proof: b"opaque".to_vec(),
+            compressed_proof: b"opaque".to_vec(),
         })
         .unwrap();
         assert!(!verify_identity(b, envelope).unwrap().ok);
@@ -1622,10 +2346,11 @@ mod tests {
         // Envelope statement matches, but the inner STARK proof is junk -> the
         // STARK deserialization fails and the result is fail-closed.
         let (s, mdoc_statement) = honest_mdoc_statement();
-        let envelope = bincode::serialize(&MdocProofEnvelope {
-            statement_bytes: encode_statement(&s),
+        let envelope = encode_mdoc_proof_envelope(&MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6,
+            request_binding: request_binding(&s),
             mdoc_statement,
-            stark_proof: b"not a stark proof".to_vec(),
+            compressed_proof: b"not a zstd frame".to_vec(),
         })
         .unwrap();
         assert!(!verify_identity(s, envelope).unwrap().ok);
@@ -1637,10 +2362,11 @@ mod tests {
         // bytes are not a valid STARK proof. That still rejects fail-closed.
         let (s, mdoc_statement) = honest_mdoc_statement();
         let compressed_junk = compress_stark_proof_for_ffi(b"not a stark proof").unwrap();
-        let envelope = bincode::serialize(&MdocProofEnvelope {
-            statement_bytes: encode_statement(&s),
+        let envelope = encode_mdoc_proof_envelope(&MdocProofEnvelopeV6 {
+            version: MDOC_PROOF_ENVELOPE_VERSION_V6,
+            request_binding: request_binding(&s),
             mdoc_statement,
-            stark_proof: compressed_junk,
+            compressed_proof: compressed_junk,
         })
         .unwrap();
         assert!(!verify_identity(s, envelope).unwrap().ok);

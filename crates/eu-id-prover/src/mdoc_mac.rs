@@ -6,6 +6,9 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use air_core::claim_mask::{
+    add_claim_mask_fraction, ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS,
+};
 use air_core::relations::{
     field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
 };
@@ -18,9 +21,6 @@ use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 
-use crate::claimed_sum_blinder::{
-    add_blinder_relation_entry, blinder_denominator, random_qm31, ClaimedSumBlinderRelation,
-};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use stwo::prover::backend::simd::column::BaseColumn;
@@ -36,26 +36,27 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator,
 };
 
-const MACS_PER_PROOF: usize = 6;
+const MACS_PER_PROOF: usize = eu_id_ec_coprocessor::ecdsa::MDOC_P4B_MAC_HALF_COUNT;
 const HALF_BYTES: usize = 16;
 const GF_BITS: usize = 128;
 const ACTIVE_ROWS: usize = MACS_PER_PROOF * GF_BITS;
-const CONSUMER_LOG_SIZE: u32 = 10;
+// Eight bound halves occupy 1,024 active rows. Keep another 1,024 rows for
+// Class-C polynomial masking of every witness column.
+const CONSUMER_LOG_SIZE: u32 = 11;
 const CONSUMER_ROWS: usize = 1 << CONSUMER_LOG_SIZE;
 const INACTIVE_ROWS: usize = CONSUMER_ROWS - ACTIVE_ROWS;
 const BINDING_LOG_SIZE: u32 = 9;
 const CONSUMER_PREPROCESSED_COLS: usize = 3 + MACS_PER_PROOF + GF_BITS;
-const BINDING_PREPROCESSED_COLS: usize = 5;
+const BINDING_PREPROCESSED_COLS: usize = 6;
 const CONSUMER_TRACE_COLS: usize = 1 + GF_BITS;
 const POST_TRACE_COLS: usize = 2 * GF_BITS;
 const BINDING_TRACE_COLS: usize = 32;
 const INTERACTION_COLS_PER_FRACTION: usize = 4;
-// Consumer: mac_half yield + Q-015 blinder (+m) fraction, one column each
-// under `finalize_logup`.
+// Consumer: mac_half yield + optional committed claim-mask fraction.
 const CONSUMER_INTERACTION_COLS: usize = 2 * INTERACTION_COLS_PER_FRACTION;
-// Binding: 35 lookup sites + the Q-015 blinder (−2m) counterpart = 36
-// fractions, paired two-per-column under `finalize_logup_in_pairs`.
-const BINDING_INTERACTION_COLS: usize = 18 * INTERACTION_COLS_PER_FRACTION;
+// Binding: issuer digest + revocation digest + 32 device-key bytes + two
+// half-value sites + optional committed claim mask = 37 fractions.
+const BINDING_INTERACTION_COLS: usize = 19 * INTERACTION_COLS_PER_FRACTION;
 const CHECK_NEW_SELECTOR_BOOLS: bool = false;
 const CHECK_S_CONSTRAINTS: bool = true;
 const CHECK_POST_COLUMN_CONSTRAINTS: bool = true;
@@ -114,11 +115,15 @@ pub(crate) struct MdocMacBind {
     rows: [MacHalfWitness; MACS_PER_PROOF],
     mac_state: Option<MdocP4bMacSharedState>,
     issuer_digest_handle: Option<SharedDigestRelation>,
+    revocation_digest_handle: Option<SharedDigestRelation>,
+    revocation_digest_relation: Option<DigestBytesRelation>,
+    has_revocation: bool,
     issuer_field_handle: Option<SharedFieldRelation>,
     av: Option<[u8; HALF_BYTES]>,
     tags: Option<[[u8; HALF_BYTES]; MACS_PER_PROOF]>,
     mac_half_relation: Option<MacHalfRelation>,
-    blinder_relation: Option<ClaimedSumBlinderRelation>,
+    claim_mask_traces: Option<[ClaimMaskTrace; 2]>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocMacInteractionClaim>,
     consumer_decoys: Option<MacConsumerDecoyRows>,
     consumer_component: Option<ConsumerComponent>,
@@ -131,11 +136,15 @@ impl Clone for MdocMacBind {
             rows: self.rows.clone(),
             mac_state: self.mac_state.clone(),
             issuer_digest_handle: self.issuer_digest_handle.clone(),
+            revocation_digest_handle: self.revocation_digest_handle.clone(),
+            revocation_digest_relation: None,
+            has_revocation: self.has_revocation,
             issuer_field_handle: self.issuer_field_handle.clone(),
             tags: self.tags,
             av: self.av,
             mac_half_relation: None,
-            blinder_relation: None,
+            claim_mask_traces: self.claim_mask_traces.clone(),
+            claim_mask_challenge: self.claim_mask_challenge.clone(),
             interaction_claim: self.interaction_claim.clone(),
             consumer_decoys: self.consumer_decoys.clone(),
             consumer_component: None,
@@ -148,20 +157,12 @@ impl Clone for MdocMacBind {
 pub(crate) struct MdocMacInteractionClaim {
     pub(crate) consumer: QM31,
     pub(crate) binding: QM31,
-    /// Q-015 §4b blinder pair: fresh per-prove `v` (denominator seed) and `m`
-    /// (free numerator). `+m/(z−combine(v))` shifts the consumer sum, `−m/…`
-    /// shifts the binding sum, so each published number is masked by a uniform
-    /// QM31 while the global fold stays zero.
-    pub(crate) blinder_v: QM31,
-    pub(crate) blinder_m: QM31,
 }
 
 #[derive(Clone)]
 struct MacConsumerEval {
     mac_half_relation: MacHalfRelation,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_beta: Option<QM31>,
     av: [u8; HALF_BYTES],
     tags: [[u8; HALF_BYTES]; MACS_PER_PROOF],
 }
@@ -169,10 +170,9 @@ struct MacConsumerEval {
 #[derive(Clone)]
 struct MacBindingEval {
     mac_half_relation: MacHalfRelation,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_beta: Option<QM31>,
     issuer_digest_relation: DigestBytesRelation,
+    revocation_digest_relation: DigestBytesRelation,
     issuer_field_relation: FieldBytesRelation,
 }
 
@@ -182,8 +182,10 @@ impl MdocMacBind {
         mac_values: [Gf128; MACS_PER_PROOF],
         mac_state: MdocP4bMacSharedState,
         issuer_digest_handle: SharedDigestRelation,
+        revocation_digest_handle: Option<SharedDigestRelation>,
         issuer_field_handle: SharedFieldRelation,
     ) -> Self {
+        let has_revocation = revocation_digest_handle.is_some();
         Self {
             rows: std::array::from_fn(|index| MacHalfWitness {
                 ap: mac_key_shares.0[index],
@@ -191,11 +193,15 @@ impl MdocMacBind {
             }),
             mac_state: Some(mac_state),
             issuer_digest_handle: Some(issuer_digest_handle),
+            revocation_digest_handle,
+            revocation_digest_relation: None,
+            has_revocation,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
             mac_half_relation: None,
-            blinder_relation: None,
+            claim_mask_traces: None,
+            claim_mask_challenge: None,
             interaction_claim: None,
             consumer_decoys: None,
             consumer_component: None,
@@ -206,9 +212,11 @@ impl MdocMacBind {
     pub(crate) fn verifier(
         mac_state: MdocP4bMacSharedState,
         issuer_digest_handle: SharedDigestRelation,
+        revocation_digest_handle: Option<SharedDigestRelation>,
         issuer_field_handle: SharedFieldRelation,
         interaction_claim: MdocMacInteractionClaim,
     ) -> Self {
+        let has_revocation = revocation_digest_handle.is_some();
         Self {
             rows: std::array::from_fn(|_| MacHalfWitness {
                 ap: [0; HALF_BYTES],
@@ -216,11 +224,15 @@ impl MdocMacBind {
             }),
             mac_state: Some(mac_state),
             issuer_digest_handle: Some(issuer_digest_handle),
+            revocation_digest_handle,
+            revocation_digest_relation: None,
+            has_revocation,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
             mac_half_relation: None,
-            blinder_relation: None,
+            claim_mask_traces: None,
+            claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             consumer_decoys: None,
             consumer_component: None,
@@ -234,17 +246,18 @@ impl MdocMacBind {
             .expect("MAC half relation drawn before use")
     }
 
-    fn blinder_relation(&self) -> &ClaimedSumBlinderRelation {
-        self.blinder_relation
-            .as_ref()
-            .expect("MAC blinder relation drawn before use")
-    }
-
     fn issuer_digest_relation(&self) -> DigestBytesRelation {
         self.issuer_digest_handle
             .as_ref()
             .expect("issuer digest handle is set")
             .get()
+    }
+
+    fn revocation_digest_relation(&self) -> DigestBytesRelation {
+        self.revocation_digest_relation
+            .as_ref()
+            .expect("revocation digest relation drawn before use")
+            .clone()
     }
 
     fn issuer_field_relation(&self) -> FieldBytesRelation {
@@ -258,6 +271,46 @@ impl MdocMacBind {
         self.interaction_claim
             .as_ref()
             .expect("mdoc MAC interaction claim is set")
+    }
+
+    pub(crate) fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        vec![CONSUMER_LOG_SIZE, BINDING_LOG_SIZE]
+    }
+
+    pub(crate) fn with_claim_masks(
+        mut self,
+        traces: Vec<ClaimMaskTrace>,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Result<Self, String> {
+        let traces: [ClaimMaskTrace; 2] = traces.try_into().map_err(|traces: Vec<_>| {
+            format!("mdoc MAC needs 2 claim masks, got {}", traces.len())
+        })?;
+        for (index, (trace, expected)) in traces
+            .iter()
+            .zip([CONSUMER_LOG_SIZE, BINDING_LOG_SIZE])
+            .enumerate()
+        {
+            if trace.log_size() != expected {
+                return Err(format!(
+                    "mdoc MAC claim mask {index} has log size {}, expected {expected}",
+                    trace.log_size()
+                ));
+            }
+        }
+        self.claim_mask_traces = Some(traces);
+        self.claim_mask_challenge = Some(challenge);
+        Ok(self)
+    }
+
+    pub(crate) fn with_claim_masks_verifier(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge
+            .as_ref()
+            .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
     }
 
     fn public_from_state(
@@ -278,19 +331,41 @@ impl MdocMacBind {
 
 impl Air for MdocMacBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(0x4d44_4f43_4d41_4303);
+        channel.mix_u64(0x4d44_4f43_4d41_4304);
         channel.mix_u64(MACS_PER_PROOF as u64);
         channel.mix_u64(GF_BITS as u64);
         channel.mix_u64(ACTIVE_ROWS as u64);
         channel.mix_u64(POST_TRACE_COLS as u64);
+        channel.mix_u64(u64::from(self.has_revocation));
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.mac_half_relation = Some(MacHalfRelation::draw(channel));
-        self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
+        self.revocation_digest_relation = Some(
+            self.revocation_digest_handle
+                .as_ref()
+                .map(SharedDigestRelation::get)
+                .unwrap_or_else(|| DigestBytesRelation::draw(channel)),
+        );
     }
 
     fn layout(&self) -> air_core::TreeLayout {
+        let mask_enabled = self.claim_mask_challenge.is_some();
+        let mut trace =
+            std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_TRACE_COLS).collect::<Vec<_>>();
+        if mask_enabled {
+            trace.extend(std::iter::repeat_n(
+                CONSUMER_LOG_SIZE,
+                CLAIM_MASK_TRACE_COLUMNS,
+            ));
+        }
+        trace.extend(std::iter::repeat_n(BINDING_LOG_SIZE, BINDING_TRACE_COLS));
+        if mask_enabled {
+            trace.extend(std::iter::repeat_n(
+                BINDING_LOG_SIZE,
+                CLAIM_MASK_TRACE_COLUMNS,
+            ));
+        }
         air_core::TreeLayout {
             preprocessed: std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_PREPROCESSED_COLS)
                 .chain(std::iter::repeat_n(
@@ -298,15 +373,24 @@ impl Air for MdocMacBind {
                     BINDING_PREPROCESSED_COLS,
                 ))
                 .collect(),
-            trace: std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_TRACE_COLS)
-                .chain(std::iter::repeat_n(BINDING_LOG_SIZE, BINDING_TRACE_COLS))
-                .collect(),
-            interaction: std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_INTERACTION_COLS)
-                .chain(std::iter::repeat_n(
-                    BINDING_LOG_SIZE,
-                    BINDING_INTERACTION_COLS,
-                ))
-                .collect(),
+            trace,
+            interaction: std::iter::repeat_n(
+                CONSUMER_LOG_SIZE,
+                if mask_enabled {
+                    CONSUMER_INTERACTION_COLS
+                } else {
+                    INTERACTION_COLS_PER_FRACTION
+                },
+            )
+            .chain(std::iter::repeat_n(
+                BINDING_LOG_SIZE,
+                if mask_enabled {
+                    BINDING_INTERACTION_COLS
+                } else {
+                    18 * INTERACTION_COLS_PER_FRACTION
+                },
+            ))
+            .collect(),
         }
     }
 
@@ -323,7 +407,8 @@ impl Air for MdocMacBind {
         ids.extend((0..MACS_PER_PROOF).map(|i| mac_col_id(&format!("consumer/mac_{i}"))));
         ids.extend((0..GF_BITS).map(|i| mac_col_id(&format!("consumer/step_{i}"))));
         ids.push(mac_col_id("binding/active"));
-        ids.push(mac_col_id("binding/digest_active"));
+        ids.push(mac_col_id("binding/issuer_digest_active"));
+        ids.push(mac_col_id("binding/revocation_digest_active"));
         ids.push(mac_col_id("binding/field_active"));
         ids.push(mac_col_id("binding/field_id"));
         ids.push(mac_col_id("binding/slot"));
@@ -333,7 +418,7 @@ impl Air for MdocMacBind {
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<MacColumnEval>, stwo::core::verifier::VerificationError> {
-        Ok(preprocessed_trace())
+        Ok(preprocessed_trace(self.has_revocation))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -343,9 +428,7 @@ impl Air for MdocMacBind {
             allocator,
             MacConsumerEval {
                 mac_half_relation: self.mac_half_relation().clone(),
-                blinder_relation: self.blinder_relation().clone(),
-                blinder_v: self.interaction_claim().blinder_v,
-                blinder_m: self.interaction_claim().blinder_m,
+                claim_mask_beta: self.claim_mask_beta(),
                 av,
                 tags,
             },
@@ -355,10 +438,9 @@ impl Air for MdocMacBind {
             allocator,
             MacBindingEval {
                 mac_half_relation: self.mac_half_relation().clone(),
-                blinder_relation: self.blinder_relation().clone(),
-                blinder_v: self.interaction_claim().blinder_v,
-                blinder_m: self.interaction_claim().blinder_m,
+                claim_mask_beta: self.claim_mask_beta(),
                 issuer_digest_relation: self.issuer_digest_relation(),
+                revocation_digest_relation: self.revocation_digest_relation(),
                 issuer_field_relation: self.issuer_field_relation(),
             },
             self.interaction_claim().binding,
@@ -408,55 +490,55 @@ impl AirProver for MdocMacBind {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(preprocessed_trace());
+        tb.extend_evals(preprocessed_trace(self.has_revocation));
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         fingerprint_preprocessed_columns(
             "eu_id_prover::mdoc_mac",
             &self.preprocessed_column_ids(),
-            &preprocessed_trace(),
+            &preprocessed_trace(self.has_revocation),
         )
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let decoys = MacConsumerDecoyRows::random();
         tb.extend_evals(consumer_trace(&self.rows, &decoys));
+        if let Some(masks) = &self.claim_mask_traces {
+            tb.extend_evals(masks[0].columns().to_vec());
+        }
         self.consumer_decoys = Some(decoys);
         tb.extend_evals(binding_trace(&self.rows));
+        if let Some(masks) = &self.claim_mask_traces {
+            tb.extend_evals(masks[1].columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        // Q-015 §4b blinder pair: fresh per-prove randomness. `+m/(z−v)` lands
-        // in the consumer claimed sum over 2^CONSUMER_LOG_SIZE rows, the
-        // counterpart `−2m/(z−v)` in the binding sum over 2^BINDING_LOG_SIZE
-        // rows, so the two published sums each shift by a uniform QM31 and the
-        // pair cancels exactly in the global fold.
-        let blinder_v = random_qm31();
-        let blinder_m = random_qm31();
+        let claim_mask_beta = self.claim_mask_beta();
+        let consumer_mask = self.claim_mask_traces.as_ref().map(|masks| &masks[0]);
+        let binding_mask = self.claim_mask_traces.as_ref().map(|masks| &masks[1]);
         let (consumer_trace, consumer_claim) = consumer_interaction_trace(
             &self.rows,
             self.mac_half_relation(),
-            self.blinder_relation(),
-            blinder_v,
-            blinder_m,
+            consumer_mask,
+            claim_mask_beta,
         );
         let (binding_trace, binding_claim) = binding_interaction_trace(
             &self.rows,
             self.mac_half_relation(),
             &self.issuer_digest_relation(),
+            &self.revocation_digest_relation(),
             &self.issuer_field_relation(),
-            self.blinder_relation(),
-            blinder_v,
-            blinder_m,
+            self.has_revocation,
+            binding_mask,
+            claim_mask_beta,
         );
         tb.extend_evals(consumer_trace);
         tb.extend_evals(binding_trace);
         self.interaction_claim = Some(MdocMacInteractionClaim {
             consumer: consumer_claim,
             binding: binding_claim,
-            blinder_v,
-            blinder_m,
         });
     }
 
@@ -641,15 +723,9 @@ impl FrameworkEval for MacConsumerEval {
             }
         }
 
-        // Q-015 blinder `+m/(z−combine(v))`, ungated (every row); pairs with
-        // the `−2m` counterpart in the binding component.
-        add_blinder_relation_entry(
-            &mut eval,
-            &self.blinder_relation,
-            self.blinder_v,
-            self.blinder_m,
-            false,
-        );
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
 
         eval.finalize_logup();
         eval
@@ -667,25 +743,45 @@ impl FrameworkEval for MacBindingEval {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let active = eval.get_preprocessed_column(mac_col_id("binding/active"));
-        let digest_active = eval.get_preprocessed_column(mac_col_id("binding/digest_active"));
+        let issuer_digest_active =
+            eval.get_preprocessed_column(mac_col_id("binding/issuer_digest_active"));
+        let revocation_digest_active =
+            eval.get_preprocessed_column(mac_col_id("binding/revocation_digest_active"));
         let field_active = eval.get_preprocessed_column(mac_col_id("binding/field_active"));
         let field_id_col = eval.get_preprocessed_column(mac_col_id("binding/field_id"));
         let slot = eval.get_preprocessed_column(mac_col_id("binding/slot"));
         let one = m31_const::<E>(1);
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
-        eval.add_constraint(digest_active.clone() * (digest_active.clone() - one.clone()));
+        eval.add_constraint(
+            issuer_digest_active.clone() * (issuer_digest_active.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            revocation_digest_active.clone() * (revocation_digest_active.clone() - one.clone()),
+        );
         eval.add_constraint(field_active.clone() * (field_active.clone() - one.clone()));
-        eval.add_constraint(digest_active.clone() * (one.clone() - active.clone()));
+        eval.add_constraint(issuer_digest_active.clone() * (one.clone() - active.clone()));
+        eval.add_constraint(revocation_digest_active.clone() * (one.clone() - active.clone()));
         eval.add_constraint(field_active.clone() * (one.clone() - active.clone()));
 
         let bytes = (0..32).map(|_| eval.next_trace_mask()).collect::<Vec<_>>();
 
         eval.add_to_relation(RelationEntry::new(
             &self.issuer_digest_relation,
-            E::EF::from(digest_active.clone()),
+            E::EF::from(issuer_digest_active.clone()),
             &bytes,
         ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.revocation_digest_relation,
+            E::EF::from(revocation_digest_active.clone()),
+            &bytes,
+        ));
+
+        let zero_active =
+            active.clone() - issuer_digest_active - revocation_digest_active - field_active.clone();
+        for byte in &bytes {
+            eval.add_constraint(zero_active.clone() * byte.clone());
+        }
 
         for (byte_idx, byte) in bytes.iter().enumerate() {
             eval.add_to_relation(RelationEntry::new(
@@ -718,26 +814,16 @@ impl FrameworkEval for MacBindingEval {
             &hi_values,
         ));
 
-        // Q-015 blinder counterpart `−2m/(z−combine(v))`, ungated, emitted
-        // LAST to match the generator's site order (36th site pairs with the
-        // hi-half site under `finalize_logup_in_pairs`).
-        let blinder_scale = QM31::from(M31::from_u32_unchecked(
-            1 << (CONSUMER_LOG_SIZE - BINDING_LOG_SIZE),
-        ));
-        add_blinder_relation_entry(
-            &mut eval,
-            &self.blinder_relation,
-            self.blinder_v,
-            self.blinder_m * blinder_scale,
-            true,
-        );
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
 
         eval.finalize_logup_in_pairs();
         eval
     }
 }
 
-fn preprocessed_trace() -> Vec<MacColumnEval> {
+fn preprocessed_trace(has_revocation: bool) -> Vec<MacColumnEval> {
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE]; CONSUMER_PREPROCESSED_COLS];
     for mac_index in 0..MACS_PER_PROOF {
@@ -754,23 +840,24 @@ fn preprocessed_trace() -> Vec<MacColumnEval> {
         .into_iter()
         .map(|values| column_eval(CONSUMER_LOG_SIZE, values))
         .collect::<Vec<_>>();
-    out.extend(binding_preprocessed_trace());
+    out.extend(binding_preprocessed_trace(has_revocation));
     out
 }
 
-fn binding_preprocessed_trace() -> Vec<MacColumnEval> {
+fn binding_preprocessed_trace(has_revocation: bool) -> Vec<MacColumnEval> {
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); 1 << BINDING_LOG_SIZE]; BINDING_PREPROCESSED_COLS];
-    for slot in 0..3 {
+    for slot in 0..(MACS_PER_PROOF / 2) {
         columns[0][slot] = M31::from_u32_unchecked(1);
         columns[1][slot] = M31::from_u32_unchecked(u32::from(slot == 0));
-        columns[2][slot] = M31::from_u32_unchecked(u32::from(slot != 0));
-        columns[3][slot] = M31::from_u32_unchecked(match slot {
+        columns[2][slot] = M31::from_u32_unchecked(u32::from(has_revocation && slot == 3));
+        columns[3][slot] = M31::from_u32_unchecked(u32::from(matches!(slot, 1 | 2)));
+        columns[4][slot] = M31::from_u32_unchecked(match slot {
             1 => field_id::MDOC_DEVICE_KEY_X,
             2 => field_id::MDOC_DEVICE_KEY_Y,
             _ => 0,
         });
-        columns[4][slot] = M31::from_u32_unchecked(slot as u32);
+        columns[5][slot] = M31::from_u32_unchecked(slot as u32);
     }
     columns
         .into_iter()
@@ -778,7 +865,7 @@ fn binding_preprocessed_trace() -> Vec<MacColumnEval> {
         .collect()
 }
 
-fn binding_value_rows(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> [[u8; 32]; 3] {
+fn binding_value_rows(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> [[u8; 32]; MACS_PER_PROOF / 2] {
     std::array::from_fn(|slot| {
         let lo = rows[slot * 2].x;
         let hi = rows[slot * 2 + 1].x;
@@ -815,20 +902,23 @@ fn binding_interaction_trace(
     rows: &[MacHalfWitness; MACS_PER_PROOF],
     mac_half_relation: &MacHalfRelation,
     issuer_digest_relation: &DigestBytesRelation,
+    revocation_digest_relation: &DigestBytesRelation,
     issuer_field_relation: &FieldBytesRelation,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    has_revocation: bool,
+    claim_mask_trace: Option<&ClaimMaskTrace>,
+    claim_mask_beta: Option<QM31>,
 ) -> (Vec<MacColumnEval>, QM31) {
-    let preprocessed = binding_preprocessed_trace();
+    let preprocessed = binding_preprocessed_trace(has_revocation);
     let active = &preprocessed[0];
-    let digest_active = &preprocessed[1];
-    let field_active = &preprocessed[2];
-    let field_ids = &preprocessed[3];
-    let slots = &preprocessed[4];
+    let issuer_digest_active = &preprocessed[1];
+    let revocation_digest_active = &preprocessed[2];
+    let field_active = &preprocessed[3];
+    let field_ids = &preprocessed[4];
+    let slots = &preprocessed[5];
     let bytes = binding_trace(rows);
     let n_vec_rows = bytes[0].data.len();
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(35);
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> =
+        Vec::with_capacity(36 + usize::from(claim_mask_trace.is_some()));
     sites.push(
         (0..n_vec_rows)
             .map(|vec_row| {
@@ -836,8 +926,21 @@ fn binding_interaction_trace(
                     .map(|byte_idx| bytes[byte_idx].data[vec_row])
                     .collect::<Vec<_>>();
                 (
-                    PackedQM31::from(digest_active.data[vec_row]),
+                    PackedQM31::from(issuer_digest_active.data[vec_row]),
                     issuer_digest_relation.combine(&values),
+                )
+            })
+            .collect(),
+    );
+    sites.push(
+        (0..n_vec_rows)
+            .map(|vec_row| {
+                let values = (0..32)
+                    .map(|byte_idx| bytes[byte_idx].data[vec_row])
+                    .collect::<Vec<_>>();
+                (
+                    PackedQM31::from(revocation_digest_active.data[vec_row]),
+                    revocation_digest_relation.combine(&values),
                 )
             })
             .collect(),
@@ -881,15 +984,18 @@ fn binding_interaction_trace(
                 .collect(),
         );
     }
-    // Q-015 blinder counterpart `−2m/(z−combine(v))` on every binding row
-    // (2^BINDING_LOG_SIZE rows at 2m cancel 2^CONSUMER_LOG_SIZE rows at m);
-    // matched by the ungated entry in `MacBindingEval::evaluate`.
-    let blinder_scale = QM31::from(M31::from_u32_unchecked(
-        1 << (CONSUMER_LOG_SIZE - BINDING_LOG_SIZE),
-    ));
-    let blinder_numerator = -PackedQM31::broadcast(blinder_m * blinder_scale);
-    let blinder_denom = blinder_denominator(blinder_relation, blinder_v);
-    sites.push(vec![(blinder_numerator, blinder_denom); n_vec_rows]);
+    match (claim_mask_trace, claim_mask_beta) {
+        (Some(mask), Some(beta)) => {
+            assert_eq!(mask.log_size(), BINDING_LOG_SIZE);
+            sites.push(
+                (0..n_vec_rows)
+                    .map(|vec_row| mask.packed_fraction_at(vec_row, beta))
+                    .collect(),
+            );
+        }
+        (None, None) => {}
+        _ => panic!("mdoc MAC binding mask and challenge must be configured together"),
+    }
 
     let mut logup = LogupTraceGenerator::new(BINDING_LOG_SIZE);
     let mut site_idx = 0usize;
@@ -945,9 +1051,8 @@ fn consumer_trace(
 fn consumer_interaction_trace(
     rows: &[MacHalfWitness; MACS_PER_PROOF],
     mac_half_relation: &MacHalfRelation,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_trace: Option<&ClaimMaskTrace>,
+    claim_mask_beta: Option<QM31>,
 ) -> (Vec<MacColumnEval>, QM31) {
     let mut first_values = vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE];
     let mut mac_values = vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE];
@@ -978,11 +1083,16 @@ fn consumer_interaction_trace(
         let numerator = -PackedQM31::from(first_eval.data[vec_row]);
         (numerator, mac_half_relation.combine(&values))
     });
-    // Q-015 blinder `+m/(z−combine(v))` on every consumer row; matched by the
-    // ungated `add_blinder_relation_entry` in `MacConsumerEval::evaluate`.
-    let blinder_numerator = PackedQM31::broadcast(blinder_m);
-    let blinder_denominator = blinder_denominator(blinder_relation, blinder_v);
-    logup.col_from_fn(|_| (blinder_numerator, blinder_denominator));
+    match (claim_mask_trace, claim_mask_beta) {
+        (Some(mask), Some(beta)) => {
+            assert_eq!(mask.log_size(), CONSUMER_LOG_SIZE);
+            logup.col_from_iter(
+                (0..mask.packed_rows()).map(|vec_row| mask.packed_fraction_at(vec_row, beta)),
+            );
+        }
+        (None, None) => {}
+        _ => panic!("mdoc MAC consumer mask and challenge must be configured together"),
+    }
     logup.finalize_last()
 }
 
@@ -1182,6 +1292,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    use air_core::claim_mask::{ClaimMaskChallengeModule, ClaimMaskRing};
     use stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
     use stwo::prover::backend::simd::m31::N_LANES;
     use stwo_constraint_framework::{Multiplicity, PREPROCESSED_TRACE_IDX};
@@ -1230,7 +1341,8 @@ mod tests {
             let mut row = Self::default();
 
             row.preprocessed.push_back(vec![zero]); // active
-            row.preprocessed.push_back(vec![zero]); // digest active
+            row.preprocessed.push_back(vec![zero]); // issuer digest active
+            row.preprocessed.push_back(vec![zero]); // revocation digest active
             row.preprocessed.push_back(vec![zero]); // field active
             row.preprocessed.push_back(vec![zero]); // field id
             row.preprocessed.push_back(vec![zero]); // slot
@@ -1306,9 +1418,7 @@ mod tests {
     fn mdoc_mac_consumer_decoy_slack_rows_are_not_zero_pinned() {
         let eval = MacConsumerEval {
             mac_half_relation: MacHalfRelation::dummy(),
-            blinder_relation: ClaimedSumBlinderRelation::dummy(),
-            blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
-            blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
+            claim_mask_beta: None,
             av: [0; HALF_BYTES],
             tags: [[0; HALF_BYTES]; MACS_PER_PROOF],
         };
@@ -1326,6 +1436,67 @@ mod tests {
             ap: [0; HALF_BYTES],
             x: [0; HALF_BYTES],
         })
+    }
+
+    fn test_claim_masks() -> (ClaimMaskTrace, ClaimMaskTrace, QM31) {
+        let log_sizes = [CONSUMER_LOG_SIZE, BINDING_LOG_SIZE];
+        let mut ring = ClaimMaskRing::new(&log_sizes).unwrap();
+        let consumer = ring.take(CONSUMER_LOG_SIZE).unwrap();
+        let binding = ring.take(BINDING_LOG_SIZE).unwrap();
+        ring.finish().unwrap();
+
+        let shared = SharedClaimMaskChallenge::new();
+        let mut anchor = ClaimMaskChallengeModule::new(shared.clone(), log_sizes).unwrap();
+        anchor.draw_relations(&mut Blake2sChannel::default());
+        let beta = shared.require().unwrap();
+        (consumer, binding, beta)
+    }
+
+    #[test]
+    fn mdoc_mac_consumer_mask_delta_matches_private_target() {
+        let rows = test_rows();
+        let mut channel = Blake2sChannel::default();
+        let relation = MacHalfRelation::draw(&mut channel);
+        let (mask, _, beta) = test_claim_masks();
+
+        let (_, unmasked) = consumer_interaction_trace(&rows, &relation, None, None);
+        let (_, masked) = consumer_interaction_trace(&rows, &relation, Some(&mask), Some(beta));
+
+        assert_eq!(masked - unmasked, beta * mask.target_sum());
+    }
+
+    #[test]
+    fn mdoc_mac_binding_mask_delta_matches_private_target() {
+        let rows = test_rows();
+        let mut channel = Blake2sChannel::default();
+        let mac_half_relation = MacHalfRelation::draw(&mut channel);
+        let issuer_digest_relation = DigestBytesRelation::draw(&mut channel);
+        let revocation_digest_relation = DigestBytesRelation::draw(&mut channel);
+        let issuer_field_relation = FieldBytesRelation::draw(&mut channel);
+        let (_, mask, beta) = test_claim_masks();
+
+        let (_, unmasked) = binding_interaction_trace(
+            &rows,
+            &mac_half_relation,
+            &issuer_digest_relation,
+            &revocation_digest_relation,
+            &issuer_field_relation,
+            true,
+            None,
+            None,
+        );
+        let (_, masked) = binding_interaction_trace(
+            &rows,
+            &mac_half_relation,
+            &issuer_digest_relation,
+            &revocation_digest_relation,
+            &issuer_field_relation,
+            true,
+            Some(&mask),
+            Some(beta),
+        );
+
+        assert_eq!(masked - unmasked, beta * mask.target_sum());
     }
 
     fn trace_fingerprint(trace: &[MacColumnEval]) -> Vec<[M31; N_LANES]> {
@@ -1373,10 +1544,9 @@ mod tests {
     fn mdoc_mac_binding_inactive_rows_are_not_zero_pinned() {
         let eval = MacBindingEval {
             mac_half_relation: MacHalfRelation::dummy(),
-            blinder_relation: ClaimedSumBlinderRelation::dummy(),
-            blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
-            blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
+            claim_mask_beta: None,
             issuer_digest_relation: DigestBytesRelation::dummy(),
+            revocation_digest_relation: DigestBytesRelation::dummy(),
             issuer_field_relation: FieldBytesRelation::dummy(),
         };
         let row = eval.evaluate(RowEval::inactive_binding_row());
@@ -1391,7 +1561,7 @@ mod tests {
     #[test]
     fn mdoc_mac_binding_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
         assert!(
-            (1usize << BINDING_LOG_SIZE) - 3 >= 256,
+            (1usize << BINDING_LOG_SIZE) - (MACS_PER_PROOF / 2) >= 256,
             "MAC binding Class A needs at least 256 blind rows"
         );
 

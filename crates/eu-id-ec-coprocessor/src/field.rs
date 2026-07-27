@@ -3,6 +3,7 @@ use core::ops::{Add, Mul, Neg, Sub};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use p256::elliptic_curve::ff::PrimeField;
+use p256::elliptic_curve::rand_core::RngCore;
 use p256::{FieldBytes, FieldElement};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -50,6 +51,21 @@ impl Fp {
             bytes
         };
         Self::from_bytes_be(reduced).expect("one subtraction maps 256-bit input below p")
+    }
+
+    /// Samples uniformly from F_p by rejecting the tiny `2^256 - p` tail.
+    ///
+    /// Fiat–Shamir challenges deliberately retain the historical reduction in
+    /// [`Self::random`]. Secret masks use this method so their distribution is
+    /// exactly uniform, as required by the committed-mask ZK argument.
+    pub fn random_uniform(rng: &mut impl RngCore) -> Self {
+        loop {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            if let Some(value) = Self::from_bytes_be(bytes) {
+                return value;
+            }
+        }
     }
 
     pub fn square(self) -> Self {

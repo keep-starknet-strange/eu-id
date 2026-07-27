@@ -116,7 +116,10 @@ fn main() {
         proof = Some(next);
     }
     let proof = proof.expect("at least one proof iteration ran");
+    #[cfg(feature = "ec-coprocessor")]
     let p4b_prove_profile = proof.p4b_prove_profile().map(|p| format!("{p:?}"));
+    #[cfg(not(feature = "ec-coprocessor"))]
+    let p4b_prove_profile = None;
     let proof_bincode = bincode::serialize(&proof).expect("TS13 mdoc proof serializes");
     // Optional raw-proof dump for wire-compression experiments.
     if let Ok(path) = std::env::var("BENCH_DUMP_PROOF") {

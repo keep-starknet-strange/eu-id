@@ -60,12 +60,27 @@ pub struct FieldByteYield {
 pub struct FieldExposure {
     yields: Vec<FieldByteYield>,
     target_blocks: Vec<usize>,
+    /// Optional full padded-message byte stream. Unlike `yields`, this adds
+    /// only 64 lookup sites (one per byte position in a SHA block), regardless
+    /// of the message length. Every real block emits
+    /// `(field_id, block_idx * 64 + byte_in_block, byte)`.
+    padded_stream_field_id: Option<u32>,
 }
 
 impl FieldExposure {
     /// The provider-off exposure (no field columns, no yields).
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// Enable a full padded-message stream under `field_id`.
+    ///
+    /// This is the efficient bridge for parsers that must consume the entire
+    /// SHA preimage, including its padding. It composes with ordinary fixed
+    /// windows and keeps the interaction width constant as messages grow.
+    pub fn with_padded_stream(mut self, field_id: u32) -> Self {
+        self.padded_stream_field_id = Some(field_id);
+        self
     }
 
     /// Build an exposure from preimage byte **windows**, each `(field_id,
@@ -131,12 +146,13 @@ impl FieldExposure {
         Self {
             yields,
             target_blocks,
+            padded_stream_field_id: None,
         }
     }
 
     /// Whether the provider is off (no field columns, no yields).
     pub fn is_empty(&self) -> bool {
-        self.yields.is_empty()
+        self.yields.is_empty() && self.padded_stream_field_id.is_none()
     }
 
     /// The yields, in the fixed order the trace, constraints, and interaction
@@ -147,7 +163,12 @@ impl FieldExposure {
 
     /// Number of cross-module yields (one LogUp lookup each when exposed).
     pub fn n_yields(&self) -> usize {
-        self.yields.len()
+        self.yields.len() + usize::from(self.padded_stream_field_id.is_some()) * BLOCK_BYTES
+    }
+
+    /// Field id of the optional full padded-message stream.
+    pub fn padded_stream_field_id(&self) -> Option<u32> {
+        self.padded_stream_field_id
     }
 
     /// The distinct SHA block indices that contain at least one yielded field
@@ -160,7 +181,7 @@ impl FieldExposure {
     /// Whether this exposure needs the multi-block witness tail. The legacy
     /// block-0 path needs neither a block counter nor selectors.
     pub fn needs_block_witness(&self) -> bool {
-        self.yields.iter().any(|y| y.block_idx != 0)
+        self.padded_stream_field_id.is_some() || self.yields.iter().any(|y| y.block_idx != 0)
     }
 
     /// Column slot of the optional block counter within the dynamic field tail.
@@ -344,5 +365,27 @@ mod tests {
             y.iter().map(|b| b.byte_index).collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn padded_stream_has_constant_width_and_block_counter() {
+        let e = FieldExposure::empty().with_padded_stream(99);
+        assert!(!e.is_empty());
+        assert_eq!(e.padded_stream_field_id(), Some(99));
+        assert_eq!(e.n_yields(), BLOCK_BYTES);
+        assert!(e.needs_block_witness());
+        assert_eq!(e.n_columns(), 1);
+        assert_eq!(e.block_counter_column_slot(), Some(0));
+        assert!(e.target_blocks().is_empty());
+    }
+
+    #[test]
+    fn padded_stream_composes_with_fixed_windows() {
+        let e = FieldExposure::from_preimage_windows_multi(&[(field_id::DOB, 5, 4)])
+            .with_padded_stream(99);
+        assert_eq!(e.n_yields(), BLOCK_BYTES + 4);
+        assert_eq!(e.n_columns(), 2);
+        assert_eq!(e.target_blocks(), [0]);
+        assert_eq!(e.selector_column_slot(0), Some(1));
     }
 }

@@ -243,8 +243,8 @@ fn class_d_sha_tables_dummy_region_is_doubled_and_randomised() {
     // Every producer's committed multiplicity column is doubled and split into a
     // deterministic real half + a randomised dummy half.
     let check = |producer: SharedProducer, va: &[u32], vb: &[u32]| {
-        let real = 1usize << producer.log_size();
         let blind = 1usize << producer.blind_log_size();
+        let real = blind / 2;
         assert_eq!(blind, 2 * real, "blind domain is one log larger");
         assert_eq!(
             va.len(),

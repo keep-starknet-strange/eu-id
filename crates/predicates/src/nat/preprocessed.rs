@@ -11,24 +11,49 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
-/// Preprocessed id of the nationality component's `active` single-row selector:
-/// `1` on the single active row, `0` on the Class-C blind rows.
-pub fn active_col_id() -> PreProcessedColumnId {
+fn nat_prefix_col_id(count: usize, name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: "nat/active".to_string(),
+        id: format!("nat/prefix/{count}/{name}"),
     }
 }
 
-/// The `active` selector column for the nationality component: `1` on row 0,
-/// `0` elsewhere, over the component's `LOG_SIZE` domain.
-pub fn active_column() -> Column {
+pub fn active_col_id(count: usize) -> PreProcessedColumnId {
+    nat_prefix_col_id(count, "active")
+}
+
+pub fn row_index_col_id(count: usize) -> PreProcessedColumnId {
+    nat_prefix_col_id(count, "row_index")
+}
+
+pub fn first_col_id(count: usize) -> PreProcessedColumnId {
+    nat_prefix_col_id(count, "first")
+}
+
+pub fn last_col_id(count: usize) -> PreProcessedColumnId {
+    nat_prefix_col_id(count, "last")
+}
+
+/// Active-prefix metadata for the complete signed nationality array.
+fn prefix_columns(count: usize) -> [Column; 4] {
     let log_size = WitnessData::log_size();
-    let mut data = vec![M31::zero(); 1 << log_size];
-    data[0] = M31::one();
-    Column::new(
-        CanonicCoset::new(log_size).circle_domain(),
-        BaseColumn::from_iter(data),
-    )
+    let rows = 1usize << log_size;
+    assert!((1..=rows / 2).contains(&count));
+    let domain = CanonicCoset::new(log_size).circle_domain();
+
+    let mut active = vec![M31::zero(); rows];
+    for value in active.iter_mut().take(count) {
+        *value = M31::one();
+    }
+    let row_index = (0..rows)
+        .map(|row| M31::from_u32_unchecked(row as u32))
+        .collect::<Vec<_>>();
+    let mut first = vec![M31::zero(); rows];
+    first[0] = M31::one();
+    let mut last = vec![M31::zero(); rows];
+    last[count - 1] = M31::one();
+
+    [active, row_index, first, last]
+        .map(|values| Column::new(domain, BaseColumn::from_iter(values)))
 }
 
 pub struct Preprocessed {
@@ -38,9 +63,9 @@ pub struct Preprocessed {
 }
 
 impl Preprocessed {
-    pub fn new(public: &PublicInput) -> Self {
+    pub fn new(public: &PublicInput, nationality_count: usize) -> Self {
         Self {
-            active: vec![active_column()],
+            active: prefix_columns(nationality_count).into(),
             acceptable: vec![
                 acceptable_value_column(public),
                 acceptable_dummy_column(public),

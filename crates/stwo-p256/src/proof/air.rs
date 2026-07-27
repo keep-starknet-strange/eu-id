@@ -34,6 +34,7 @@ use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
+use stwo::core::verifier::VerificationError;
 use stwo::core::ColumnVec;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
@@ -551,6 +552,19 @@ impl P256Verifier {
 }
 
 impl Air for P256Verifier {
+    fn validate_structure(&self) -> Result<(), VerificationError> {
+        if self.proof_claim.hint_points_on_curve.len()
+            != self.interaction_claim.hint_points_on_curve.len()
+        {
+            return Err(VerificationError::InvalidStructure(format!(
+                "P-256 hint-point proof/interaction claim count mismatch: {} != {}",
+                self.proof_claim.hint_points_on_curve.len(),
+                self.interaction_claim.hint_points_on_curve.len(),
+            )));
+        }
+        Ok(())
+    }
+
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         self.proof_claim.mix_into(channel);
     }

@@ -133,8 +133,8 @@ fn mac_half_circuit_accepts_reference_tag_and_recomposition() {
         "each half commits x bits, a_p bits, and post-a_v Q quotient bits"
     );
     assert_eq!(
-        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 9_987,
-        "MAC inputs include exact-byte canonicality witnesses for the three 256-bit values"
+        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 13_316,
+        "the eight MAC halves include four exact-byte canonicality witnesses"
     );
     assert_eq!(
         input.len(),

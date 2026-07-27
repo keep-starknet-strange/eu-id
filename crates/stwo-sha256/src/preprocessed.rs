@@ -48,7 +48,8 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::components::{
-    all_preprocessed_column_ids, range_log_size, shared_table_preprocessed_column_ids, RANGE_TABLES,
+    all_preprocessed_column_ids, range_log_size, shared_table_preprocessed_column_ids,
+    SharedProducer, RANGE_TABLES,
 };
 use crate::tables_local::{range_2, range_4, range_5, range_8};
 use crate::trace::Layout;
@@ -81,7 +82,10 @@ pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
     let mut log_sizes = Vec::new();
     for &kind in RANGE_TABLES {
         // 1 value col + 1 is_dummy.
-        log_sizes.extend(std::iter::repeat_n(range_log_size(kind) + 1, 2));
+        log_sizes.extend(std::iter::repeat_n(
+            SharedProducer::Range(kind).blind_log_size(),
+            2,
+        ));
     }
     log_sizes
 }
@@ -111,8 +115,10 @@ pub fn generate_shared_table_preprocessed_trace() -> PreprocessedTrace {
         .clone()
 }
 
-static PREPROCESSED_TRACE_CACHE: OnceLock<Mutex<HashMap<(u32, u32), PreprocessedTrace>>> =
-    OnceLock::new();
+type PreprocessedTraceCacheKey = (u32, u32, u32);
+static PREPROCESSED_TRACE_CACHE: OnceLock<
+    Mutex<HashMap<PreprocessedTraceCacheKey, PreprocessedTrace>>,
+> = OnceLock::new();
 
 /// Log sizes of every preprocessed column, in canonical order —
 /// **metadata only**, allocating no `BaseColumn`/`CircleEvaluation`.
@@ -129,11 +135,19 @@ static PREPROCESSED_TRACE_CACHE: OnceLock<Mutex<HashMap<(u32, u32), Preprocessed
 /// each emitted column's domain — pinned by
 /// [`tests::metadata_log_sizes_match_built_columns`].
 pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
+    preprocessed_log_sizes_with_range_min(group_width, log_n_rows, 0)
+}
+
+pub(crate) fn preprocessed_log_sizes_with_range_min(
+    group_width: u32,
+    log_n_rows: u32,
+    range_min_log_size: u32,
+) -> Vec<u32> {
     let mut log_sizes = Vec::new();
     let _ = group_width;
     // 4 range tables × 1 column, each at its own range_log_size(kind).
     for &kind in RANGE_TABLES {
-        log_sizes.push(range_log_size(kind));
+        log_sizes.push(range_log_size(kind).max(range_min_log_size));
     }
     // 1 is_first_row selector at the main trace's log_n_rows.
     log_sizes.push(log_n_rows);
@@ -153,8 +167,16 @@ pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
 /// `is_first_row` selector column is sized to it and is `1` at storage
 /// index `Layout::block_slot(0, log_n_rows) = 0`, `0` elsewhere.
 pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> PreprocessedTrace {
+    generate_preprocessed_trace_with_range_min(group_width, log_n_rows, 0)
+}
+
+pub(crate) fn generate_preprocessed_trace_with_range_min(
+    group_width: u32,
+    log_n_rows: u32,
+    range_min_log_size: u32,
+) -> PreprocessedTrace {
     let cache = PREPROCESSED_TRACE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (group_width, log_n_rows);
+    let key = (group_width, log_n_rows, range_min_log_size);
     {
         let cache = cache.lock().expect("SHA preprocessed cache poisoned");
         if let Some(trace) = cache.get(&key) {
@@ -162,12 +184,16 @@ pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> Preproc
         }
     }
 
-    let trace = generate_preprocessed_trace_uncached(group_width, log_n_rows);
+    let trace = generate_preprocessed_trace_uncached(group_width, log_n_rows, range_min_log_size);
     let mut cache = cache.lock().expect("SHA preprocessed cache poisoned");
     cache.entry(key).or_insert_with(|| trace.clone()).clone()
 }
 
-fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> PreprocessedTrace {
+fn generate_preprocessed_trace_uncached(
+    group_width: u32,
+    log_n_rows: u32,
+    range_min_log_size: u32,
+) -> PreprocessedTrace {
     let mut evals = Vec::new();
     let mut log_sizes = Vec::new();
 
@@ -181,7 +207,7 @@ fn generate_preprocessed_trace_uncached(group_width: u32, log_n_rows: u32) -> Pr
     // do not perturb the LogUp balance (the matching multiplicity column
     // holds zeros for the padded suffix — see `range_k_multiplicities`).
     for &kind in RANGE_TABLES {
-        let log_size = range_log_size(kind);
+        let log_size = range_log_size(kind).max(range_min_log_size);
         let domain = CanonicCoset::new(log_size).circle_domain();
         let rows = range_rows(kind);
         let n_rows = 1usize << log_size;
@@ -279,7 +305,7 @@ fn blind_value_col(real: Vec<u32>, dummy: impl Fn(usize) -> u32) -> BaseColumn {
     let real_len = real.len();
     debug_assert!(real_len.is_power_of_two());
     real.into_iter()
-        .chain((0..real_len).map(|j| dummy(j)))
+        .chain((0..real_len).map(dummy))
         .map(BaseField::from)
         .collect()
 }
@@ -297,11 +323,11 @@ fn generate_shared_table_preprocessed_trace_uncached() -> PreprocessedTrace {
     let mut log_sizes = Vec::new();
 
     for &kind in RANGE_TABLES {
-        let log_size = range_log_size(kind);
-        let blind_log = log_size + 1;
+        let producer = SharedProducer::Range(kind);
+        let blind_log = producer.blind_log_size();
         let domain = CanonicCoset::new(blind_log).circle_domain();
         let rows = range_rows(kind);
-        let real_len = 1usize << log_size;
+        let real_len = 1usize << (blind_log - 1);
         // Real lower half: `[0, k)` then zero padding up to `2^L` (matches
         // `shared_tables::range_blind_rows`). Dummy upper half: `2^16 + j`.
         let real: Vec<u32> = (0..real_len)
@@ -478,7 +504,7 @@ mod tests {
     #[test]
     fn shared_table_columns_are_class_d_blinded_with_distinct_ids() {
         use crate::components::{RANGE_TABLES, SHARED_ID_PREFIX};
-        let (regular_evals, _regular_ids, regular_log_sizes) =
+        let (regular_evals, _regular_ids, _regular_log_sizes) =
             generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, LOG_N_LANES);
         let (shared_evals, shared_ids, shared_log_sizes) =
             generate_shared_table_preprocessed_trace();
@@ -500,19 +526,31 @@ mod tests {
         }
 
         // The regular trace leads with the 4 range value columns; the shared
-        // trace pairs each with an `is_dummy` selector at the blinded (L+1)
-        // size, value column being exactly twice the regular height.
+        // trace pairs each with an `is_dummy` selector at a blinded domain of
+        // at least log9. Its equal-size lower/upper halves are respectively
+        // honest-table padding and unreachable dummy rows.
         let mut si = 0; // shared index
-        let mut ri = 0; // regular index
-        for _ in RANGE_TABLES {
-            assert_eq!(shared_log_sizes[si], regular_log_sizes[ri] + 1);
+        for (ri, &kind) in RANGE_TABLES.iter().enumerate() {
+            let producer = SharedProducer::Range(kind);
+            assert_eq!(shared_log_sizes[si], producer.blind_log_size());
+            let real_len = 1usize << (producer.blind_log_size() - 1);
             assert_eq!(
                 shared_evals[si].values.len(),
-                2 * regular_evals[ri].values.len(),
-                "blinded value column doubles the regular domain",
+                2 * real_len,
+                "blinded value column has equal real and dummy halves",
+            );
+            assert_eq!(
+                &shared_evals[si].values.as_slice()[..regular_evals[ri].values.len()],
+                regular_evals[ri].values.as_slice(),
+                "shared real prefix matches the standalone table"
+            );
+            assert!(
+                shared_evals[si].values.as_slice()[regular_evals[ri].values.len()..real_len]
+                    .iter()
+                    .all(|value| *value == BaseField::from(0u32)),
+                "extra real rows are unreachable zero-multiplicity padding"
             );
             si += 1;
-            ri += 1;
             // is_dummy selector.
             assert_eq!(shared_log_sizes[si], shared_log_sizes[si - 1]);
             si += 1;

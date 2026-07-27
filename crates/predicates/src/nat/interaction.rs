@@ -2,6 +2,7 @@ use crate::nat::lookup_elements::LookupElements;
 use crate::nat::preprocessed::Preprocessed;
 use crate::nat::witness::WitnessData;
 use crate::types::Trace;
+use air_core::claim_mask::ClaimMaskTrace;
 use air_core::relations::{field_id, FieldBytesRelation};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::M31;
@@ -59,43 +60,84 @@ impl InteractionTraces {
         preprocessed: &Preprocessed,
         lookup_elements: &LookupElements,
         nat_field: Option<&FieldBytesRelation>,
+        claim_masks: Option<&[ClaimMaskTrace]>,
+        claim_mask_beta: Option<QM31>,
     ) -> Self {
+        assert_eq!(
+            claim_masks.map(|masks| masks.len()),
+            claim_mask_beta.map(|_| 2),
+            "nationality claim masks and challenge must be enabled together"
+        );
         let n_packed = 1 << (WitnessData::log_size() - LOG_N_LANES);
 
-        // Class-C: the membership use fires only on the active row. Its numerator
-        // is the preprocessed `active` selector (1 on row 0, 0 on the blind rows),
-        // matching `E::EF::from(active)` in the eval.
         let active = &preprocessed.active[0];
+        let row_index = &preprocessed.active[1];
+        let first = &preprocessed.active[2];
+        let last = &preprocessed.active[3];
+        let nationality = &witness_data.witness_trace[0];
+        let accepted = &witness_data.witness_trace[1];
+        let seen_before = &witness_data.witness_trace[2];
+        let seen_after = &witness_data.witness_trace[3];
+        let one_m31 = PackedM31::broadcast(M31::from_u32_unchecked(1));
 
         let mut nat_entries = Vec::new();
         append_entry(&mut nat_entries, n_packed, |packed_row| {
             (
-                PackedQM31::from(active.values.data[packed_row]),
-                lookup_elements.nat_table.combine(&[PackedM31::broadcast(
-                    M31::from_u32_unchecked(witness_data.nationality),
-                )]),
+                PackedQM31::from(active.values.data[packed_row] * accepted.values.data[packed_row]),
+                lookup_elements
+                    .nat_table
+                    .combine(&[nationality.values.data[packed_row]]),
             )
         });
 
-        // The credential-field binding: require the two nationality bytes on the
-        // shared `Sha256Field` channel, one solo column per byte. The numerator is
-        // the preprocessed `active` selector (1 on a single row), so each byte is
-        // required exactly once — matching SHA's single `−is_first_block` yield.
-        // Appended after the membership fraction so that column is unchanged; the
-        // eval emits the same order before `finalize_logup_in_pairs`.
-        if let (Some(field), Some(bytes)) = (nat_field, witness_data.nat_bytes) {
-            for (byte_index, &value) in bytes.iter().enumerate() {
+        append_entry(&mut nat_entries, n_packed, |packed_row| {
+            (
+                PackedQM31::from(active.values.data[packed_row] - first.values.data[packed_row]),
+                lookup_elements.prefix_transition.combine(&[
+                    row_index.values.data[packed_row],
+                    seen_before.values.data[packed_row],
+                ]),
+            )
+        });
+        append_entry(&mut nat_entries, n_packed, |packed_row| {
+            (
+                -PackedQM31::from(active.values.data[packed_row] - last.values.data[packed_row]),
+                lookup_elements.prefix_transition.combine(&[
+                    row_index.values.data[packed_row] + one_m31,
+                    seen_after.values.data[packed_row],
+                ]),
+            )
+        });
+
+        if nat_field.is_some() {
+            assert!(
+                witness_data.nat_bytes.is_some(),
+                "bound nationality witness must include byte columns"
+            );
+        }
+        if let Some(field) = nat_field {
+            let code_hi = &witness_data.witness_trace[4];
+            let code_lo = &witness_data.witness_trace[5];
+            let field_id = PackedM31::broadcast(M31::from_u32_unchecked(field_id::NATIONALITY));
+            let two = PackedM31::broadcast(M31::from_u32_unchecked(2));
+            for (byte_offset, value) in [(0u32, code_hi), (1, code_lo)] {
+                let offset = PackedM31::broadcast(M31::from_u32_unchecked(byte_offset));
                 append_entry(&mut nat_entries, n_packed, |packed_row| {
                     (
                         PackedQM31::from(active.values.data[packed_row]),
                         field.combine(&[
-                            PackedM31::broadcast(M31::from_u32_unchecked(field_id::NATIONALITY)),
-                            PackedM31::broadcast(M31::from_u32_unchecked(byte_index as u32)),
-                            PackedM31::broadcast(M31::from_u32_unchecked(value)),
+                            field_id,
+                            row_index.values.data[packed_row] * two + offset,
+                            value.values.data[packed_row],
                         ]),
                     )
                 });
             }
+        }
+        if let (Some(masks), Some(beta)) = (claim_masks, claim_mask_beta) {
+            append_entry(&mut nat_entries, n_packed, |packed_row| {
+                masks[0].packed_fraction_at(packed_row, beta)
+            });
         }
 
         let mut logup_gen = LogupTraceGenerator::new(WitnessData::log_size());
@@ -116,6 +158,9 @@ impl InteractionTraces {
             let numerator = -((one - PackedQM31::from(dummy_val)) * PackedQM31::from(mult_val));
             (numerator, denom)
         });
+        if let (Some(masks), Some(beta)) = (claim_masks, claim_mask_beta) {
+            logup_gen.col_from_fn(|vec_row| masks[1].packed_fraction_at(vec_row, beta));
+        }
         let (table_interaction, table_claimed_sum) = logup_gen.finalize_last();
 
         Self {

@@ -11,6 +11,8 @@ use crate::age::strategy::range_check::lookup_elements::LookupElements;
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
 use crate::age::strategy::range_check::witness::{DobBindingMode, WitnessData};
 use crate::age::types::{PublicInput, Witness};
+use crate::utils::validate_claim_masks;
+use air_core::claim_mask::{ClaimMaskError, ClaimMaskTrace, SharedClaimMaskChallenge};
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
@@ -19,10 +21,13 @@ use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
+
+pub const RANGE_CHECK_CLAIM_COUNT: usize = 6;
 
 /// Column layout shared by both prover and verifier: it depends on the public
 /// input (its bounds) and the DOB binding mode (`dob_binding_mode`), never on
@@ -30,45 +35,68 @@ use stwo_constraint_framework::TraceLocationAllocator;
 /// `bind_active` selector plus the exposed bytes) and one LogUp fraction per
 /// exposed DOB byte to the age component. The age component pairs consecutive
 /// LogUp fractions.
-fn layout(public: &PublicInput, dob_binding_mode: Option<DobBindingMode>) -> TreeLayout {
+fn ordered_claim_mask_log_sizes(public: &PublicInput) -> Vec<u32> {
     let bounds = &public.bounds;
     let cal = calendar_log_size(bounds);
     let valid_day = valid_date_ranges()[0].domain.log_size();
-    // Class-D delta tables commit over the blinded (`log+1`) domain.
     let day = Preprocessed::day_range().blind_log_size();
     let month = Preprocessed::month_range().blind_log_size();
     let year = Preprocessed::year_range(bounds).blind_log_size();
     let witness = WitnessData::log_size();
+    vec![witness, cal, valid_day, day, month, year]
+}
+
+fn layout(
+    public: &PublicInput,
+    dob_binding_mode: Option<DobBindingMode>,
+    claim_masks_enabled: bool,
+) -> TreeLayout {
+    let [witness, cal, valid_day, day, month, year]: [u32; 6] =
+        ordered_claim_mask_log_sizes(public)
+            .try_into()
+            .expect("age has exactly six claim-bearing components");
     // The age component: 9 base trace columns plus mode-specific binding columns
     // and 5 base logical LogUp fractions plus one field require per exposed DOB
     // byte, paired into secure columns, each four M31 (`SECURE_EXTENSION_DEGREE`).
     let age_trace_cols = 9 + dob_binding_mode
         .map(DobBindingMode::trace_columns)
         .unwrap_or(0);
-    let logical_age_lookups = 5 + dob_binding_mode
-        .map(DobBindingMode::field_bytes)
-        .unwrap_or(0);
+    let logical_age_lookups = 5
+        + dob_binding_mode
+            .map(DobBindingMode::field_bytes)
+            .unwrap_or(0)
+        + usize::from(claim_masks_enabled);
     let age_interaction_cols = logical_age_lookups.div_ceil(2) * 4;
+    let mut trace = Vec::new();
+    trace.extend(std::iter::repeat_n(witness, age_trace_cols));
+    if claim_masks_enabled {
+        trace.extend([witness; 4]);
+    }
+    for log_size in [cal, valid_day, day, month, year] {
+        trace.push(log_size);
+        if claim_masks_enabled {
+            trace.extend([log_size; 4]);
+        }
+    }
+    let table_interaction_cols = 4 + usize::from(claim_masks_enabled) * 4;
     TreeLayout {
         // Tree 0: age `active` selector (over `witness` log), calendar (2),
-        // valid-day (2), and each Class-D delta table's [value, is_dummy] pair.
+        // valid-day value pair + dummy selector (3), and each Class-D delta
+        // table's [value, is_dummy] pair.
         preprocessed: vec![
-            witness, cal, cal, valid_day, valid_day, day, day, month, month, year, year,
+            witness, cal, cal, valid_day, valid_day, valid_day, day, day, month, month, year, year,
         ],
-        // Tree 1: age witness columns + 5 multiplicity columns (delta mults over
-        // the blinded delta-table domains).
-        trace: std::iter::repeat_n(witness, age_trace_cols)
-            .chain([cal, valid_day, day, month, year])
-            .collect(),
-        // Tree 2: age LogUp fractions + cal (4) + valid_day (4) + each delta
-        // table (4). The blinded delta tables pair their two fractions into a
-        // single secure column, so their interaction width is unchanged.
+        // Tree 1: each component's ordinary columns followed immediately by
+        // its four claim-mask coordinate columns when masking is enabled.
+        trace,
+        // Tree 2: the age LogUp fractions plus each table's ordinary secure
+        // column; masking adds one unbatched secure column to each table.
         interaction: std::iter::repeat_n(witness, age_interaction_cols)
-            .chain(std::iter::repeat_n(cal, 4))
-            .chain(std::iter::repeat_n(valid_day, 4))
-            .chain(std::iter::repeat_n(day, 4))
-            .chain(std::iter::repeat_n(month, 4))
-            .chain(std::iter::repeat_n(year, 4))
+            .chain(std::iter::repeat_n(cal, table_interaction_cols))
+            .chain(std::iter::repeat_n(valid_day, table_interaction_cols))
+            .chain(std::iter::repeat_n(day, table_interaction_cols))
+            .chain(std::iter::repeat_n(month, table_interaction_cols))
+            .chain(std::iter::repeat_n(year, table_interaction_cols))
             .collect(),
     }
 }
@@ -107,6 +135,8 @@ pub struct RangeCheckProver {
     dob_binding: Option<SharedFieldRelation>,
     dob_binding_mode: Option<DobBindingMode>,
     lookup_elements: Option<LookupElements>,
+    claim_masks: Option<Vec<ClaimMaskTrace>>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     claimed_sums: Vec<QM31>,
     components: Option<RangeCheckComponents>,
 }
@@ -123,6 +153,8 @@ impl RangeCheckProver {
             dob_binding: None,
             dob_binding_mode: None,
             lookup_elements: None,
+            claim_masks: None,
+            claim_mask_challenge: None,
             claimed_sums: Vec::new(),
             components: None,
         }
@@ -158,6 +190,24 @@ impl RangeCheckProver {
         self
     }
 
+    /// Component log sizes in the exact `[age, calendar, valid-day, day,
+    /// month, year]` order used by the global claim-mask ring.
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        ordered_claim_mask_log_sizes(&self.public)
+    }
+
+    /// Attach the six ordered private mask traces allocated by the global ring.
+    pub fn with_claim_masks(
+        mut self,
+        masks: Vec<ClaimMaskTrace>,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Result<Self, ClaimMaskError> {
+        validate_claim_masks(&masks, &self.ordered_claim_mask_log_sizes())?;
+        self.claim_masks = Some(masks);
+        self.claim_mask_challenge = Some(challenge);
+        Ok(self)
+    }
+
     /// The drawn field relation, read from the shared handle once it is
     /// populated (after every module's `draw_relations`).
     fn dob_relation(&self) -> Option<FieldBytesRelation> {
@@ -175,6 +225,14 @@ impl RangeCheckProver {
             .as_ref()
             .expect("components are built before they are borrowed")
     }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge.as_ref().map(|shared| {
+            shared
+                .require()
+                .expect("claim-mask challenge anchor must follow all masked modules")
+        })
+    }
 }
 
 impl Air for RangeCheckProver {
@@ -187,7 +245,11 @@ impl Air for RangeCheckProver {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(&self.public, self.dob_binding_mode)
+        layout(
+            &self.public,
+            self.dob_binding_mode,
+            self.claim_masks.is_some(),
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -213,6 +275,7 @@ impl Air for RangeCheckProver {
             &self.claimed_sums,
             self.dob_relation(),
             self.dob_binding_mode,
+            self.claim_mask_beta(),
         ));
     }
 
@@ -249,7 +312,22 @@ impl AirProver for RangeCheckProver {
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        self.witness_data.extend_evals(tb);
+        let Some(masks) = self.claim_masks.as_ref() else {
+            self.witness_data.extend_evals(tb);
+            return;
+        };
+        tb.extend_evals(self.witness_data.witness_trace.clone());
+        tb.extend_evals(masks[0].columns().to_vec());
+        for (ordinary, mask) in [
+            (&self.witness_data.cal_mult_trace, &masks[1]),
+            (&self.witness_data.valid_day_mult_trace, &masks[2]),
+            (&self.witness_data.day_delta_mult_trace, &masks[3]),
+            (&self.witness_data.month_delta_mult_trace, &masks[4]),
+            (&self.witness_data.year_delta_mult_trace, &masks[5]),
+        ] {
+            tb.extend_evals(ordinary.clone());
+            tb.extend_evals(mask.columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
@@ -259,6 +337,8 @@ impl AirProver for RangeCheckProver {
             &self.preprocessed,
             self.relations(),
             dob.as_ref(),
+            self.claim_masks.as_deref(),
+            self.claim_mask_beta(),
         );
         interaction.extend_evals(tb);
         self.claimed_sums = vec![
@@ -283,6 +363,7 @@ pub struct RangeCheckVerifier {
     dob_binding: Option<SharedFieldRelation>,
     dob_binding_mode: Option<DobBindingMode>,
     lookup_elements: Option<LookupElements>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     claimed_sums: Vec<QM31>,
     components: Option<RangeCheckComponents>,
 }
@@ -294,6 +375,7 @@ impl RangeCheckVerifier {
             dob_binding: None,
             dob_binding_mode: None,
             lookup_elements: None,
+            claim_mask_challenge: None,
             claimed_sums,
             components: None,
         }
@@ -315,6 +397,18 @@ impl RangeCheckVerifier {
         self
     }
 
+    /// Component log sizes in the exact `[age, calendar, valid-day, day,
+    /// month, year]` order expected by masked proofs.
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        ordered_claim_mask_log_sizes(&self.public)
+    }
+
+    /// Enable the fixed six-component masked layout for verification.
+    pub fn with_claim_masks(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
     fn dob_relation(&self) -> Option<FieldBytesRelation> {
         self.dob_binding.as_ref().map(|handle| handle.get())
     }
@@ -330,9 +424,28 @@ impl RangeCheckVerifier {
             .as_ref()
             .expect("components are built before they are borrowed")
     }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge.as_ref().map(|shared| {
+            shared
+                .require()
+                .expect("claim-mask challenge anchor must follow all masked modules")
+        })
+    }
 }
 
 impl Air for RangeCheckVerifier {
+    fn validate_structure(&self) -> Result<(), VerificationError> {
+        if self.claimed_sums.len() != RANGE_CHECK_CLAIM_COUNT {
+            return Err(VerificationError::InvalidStructure(format!(
+                "age range-check claim count is {}, expected {}",
+                self.claimed_sums.len(),
+                RANGE_CHECK_CLAIM_COUNT,
+            )));
+        }
+        Ok(())
+    }
+
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         mix_public(&self.public, channel);
     }
@@ -342,7 +455,11 @@ impl Air for RangeCheckVerifier {
     }
 
     fn layout(&self) -> TreeLayout {
-        layout(&self.public, self.dob_binding_mode)
+        layout(
+            &self.public,
+            self.dob_binding_mode,
+            self.claim_mask_challenge.is_some(),
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -370,6 +487,7 @@ impl Air for RangeCheckVerifier {
             &self.claimed_sums,
             self.dob_relation(),
             self.dob_binding_mode,
+            self.claim_mask_beta(),
         ));
     }
 
@@ -397,6 +515,7 @@ fn build_components(
     claimed_sums: &[QM31],
     dob_binding: Option<FieldBytesRelation>,
     dob_binding_mode: Option<DobBindingMode>,
+    claim_mask_beta: Option<QM31>,
 ) -> RangeCheckComponents {
     components(
         allocator,
@@ -410,6 +529,7 @@ fn build_components(
         claimed_sums[3],
         claimed_sums[4],
         claimed_sums[5],
+        claim_mask_beta,
     )
 }
 
@@ -421,6 +541,134 @@ fn component_refs(c: &RangeCheckComponents) -> Vec<&dyn Component> {
 /// Borrow the six built components as `dyn ComponentProver`, in commit order.
 fn prover_component_refs(c: &RangeCheckComponents) -> Vec<&dyn ComponentProver<SimdBackend>> {
     vec![&c.0, &c.1, &c.2, &c.3, &c.4, &c.5]
+}
+
+#[cfg(test)]
+mod claim_mask_tests {
+    use super::*;
+    use crate::age::types::{Date, DateOfBirth};
+    use crate::predicate::{PredicateProver, PredicateVerifier};
+    use crate::AgeRangeCheck;
+    use air_core::claim_mask::{
+        ClaimMaskChallengeModule, ClaimMaskError, ClaimMaskRing, CLAIM_MASK_MIN_LOG_SIZE,
+    };
+    use air_core::{prove, verify};
+    use num_traits::One;
+    use stwo::core::pcs::PcsConfig;
+
+    fn inputs() -> (AgeRangeCheck, PublicInput, DateOfBirth) {
+        (
+            AgeRangeCheck::new(PcsConfig::default()),
+            PublicInput::new(
+                Date {
+                    year: 2025,
+                    month: 7,
+                    day: 1,
+                },
+                18,
+            ),
+            DateOfBirth(Date {
+                year: 2000,
+                month: 2,
+                day: 29,
+            }),
+        )
+    }
+
+    fn take_masks(log_sizes: &[u32]) -> Vec<ClaimMaskTrace> {
+        let mut ring = ClaimMaskRing::new(log_sizes).unwrap();
+        let masks = log_sizes
+            .iter()
+            .map(|&log_size| ring.take(log_size).unwrap())
+            .collect();
+        ring.finish().unwrap();
+        masks
+    }
+
+    #[test]
+    fn verifier_rejects_a_seventh_claimed_sum() {
+        let (predicate, public, _) = inputs();
+        let extra_claims = vec![QM31::from_u32_unchecked(0, 0, 0, 0); 7];
+        assert!(predicate.verifier(&public, &extra_claims).is_err());
+
+        let verifier = RangeCheckVerifier::new(&public, extra_claims);
+        assert!(verifier.validate_structure().is_err());
+    }
+
+    #[test]
+    fn masked_age_round_trip_rejects_claim_and_layout_tampering() {
+        let (predicate, public, private) = inputs();
+        let base_prover = predicate.prover(&public, &private).unwrap();
+        let log_sizes = base_prover.ordered_claim_mask_log_sizes();
+        assert_eq!(log_sizes.len(), 6);
+        assert!(log_sizes
+            .iter()
+            .all(|&log_size| log_size >= CLAIM_MASK_MIN_LOG_SIZE));
+
+        let prover_shared = SharedClaimMaskChallenge::new();
+        let mut prover = base_prover
+            .with_claim_masks(take_masks(&log_sizes), prover_shared.clone())
+            .unwrap();
+        let mut prover_anchor =
+            ClaimMaskChallengeModule::new(prover_shared, log_sizes.clone()).unwrap();
+        let proof = prove(&mut [&mut prover, &mut prover_anchor], PcsConfig::default()).unwrap();
+        let claimed_sums = prover.claimed_sums();
+
+        let verifier_shared = SharedClaimMaskChallenge::new();
+        let mut verifier = predicate
+            .verifier(&public, &claimed_sums)
+            .unwrap()
+            .with_claim_masks(verifier_shared.clone());
+        let mut verifier_anchor =
+            ClaimMaskChallengeModule::new(verifier_shared, log_sizes.clone()).unwrap();
+        verify(&mut [&mut verifier, &mut verifier_anchor], &proof).unwrap();
+
+        let mut tampered_sums = claimed_sums.clone();
+        tampered_sums[0] += QM31::one();
+        let tampered_shared = SharedClaimMaskChallenge::new();
+        let mut tampered = predicate
+            .verifier(&public, &tampered_sums)
+            .unwrap()
+            .with_claim_masks(tampered_shared.clone());
+        let mut tampered_anchor =
+            ClaimMaskChallengeModule::new(tampered_shared, log_sizes.clone()).unwrap();
+        assert!(verify(&mut [&mut tampered, &mut tampered_anchor], &proof,).is_err());
+
+        let unmasked = predicate.verifier(&public, &claimed_sums).unwrap().layout();
+        let masked = verifier.layout();
+        assert_eq!(masked.trace.len(), unmasked.trace.len() + 6 * 4);
+        assert!(masked.interaction.len() > unmasked.interaction.len());
+    }
+
+    #[test]
+    fn masked_age_rejects_missing_and_out_of_order_traces() {
+        let (predicate, public, private) = inputs();
+        let prover = predicate.prover(&public, &private).unwrap();
+        let log_sizes = prover.ordered_claim_mask_log_sizes();
+
+        let mut missing = take_masks(&log_sizes);
+        missing.pop();
+        let error = predicate
+            .prover(&public, &private)
+            .unwrap()
+            .with_claim_masks(missing, SharedClaimMaskChallenge::new())
+            .err()
+            .unwrap();
+        assert!(matches!(error, ClaimMaskError::Exhausted { .. }));
+
+        let mut out_of_order = take_masks(&log_sizes);
+        out_of_order.swap(0, 1);
+        let error = predicate
+            .prover(&public, &private)
+            .unwrap()
+            .with_claim_masks(out_of_order, SharedClaimMaskChallenge::new())
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ClaimMaskError::LogSizeOutOfOrder { index: 0, .. }
+        ));
+    }
 }
 
 #[cfg(test)]

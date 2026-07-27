@@ -48,14 +48,14 @@ const HASH_BYTES: usize = 32; // Blake2s / SHA-256 / Blake3 all 32-byte digests 
 const CHILD_BYTES: usize = 2 * HASH_BYTES; // 64
 const M31_BYTES: usize = 4;
 
-// Coprocessor Ligero v3 tree (post-P6): commit_columns(encoded_rows) where
+// Coprocessor Ligero v4 tree (including the claim-blind kernel check):
 // encoded_rows = `committed_rows` codeword rows each `codeword_len` long. It
 // transposes to `codeword_len` leaves (one per codeword column), each leaf
 // hashing `committed_rows` field limbs (32 B each) + a 39-byte prefix
 // (domain-sep 23 B + index u64 + len u64). Internal nodes hash a 23-byte
 // domain-sep + 64 B of children.
 const COPROC_CODEWORD_LEN: usize = 4096;
-const COPROC_COMMITTED_ROWS: usize = 219; // encoded_rows_total from the probe
+const COPROC_COMMITTED_ROWS: usize = 220; // prior probe + the kernel-check mask row
 const COPROC_FIELD_BYTES: usize = 32;
 const COPROC_LEAF_PREFIX: usize = 23 + 8 + 8; // "eu-id-s4-ligero-leaf-v1" + index + len
 const COPROC_NODE_PREFIX: usize = 23; // "eu-id-s4-ligero-node-v1"

@@ -7,8 +7,10 @@ pub mod preprocessed;
 pub mod witness;
 
 use crate::age::predicate::AgePredicate;
-use crate::age::strategy::range_check::air::{RangeCheckProver, RangeCheckVerifier};
-use crate::age::types::{AgeRangeCheckProof, DateOfBirth, Error, PublicInput};
+use crate::age::strategy::range_check::air::{
+    RangeCheckProver, RangeCheckVerifier, RANGE_CHECK_CLAIM_COUNT,
+};
+use crate::age::types::{AgeInputError, AgeRangeCheckProof, DateOfBirth, Error, PublicInput};
 use crate::predicate::{PredicateProver, PredicateVerifier};
 use air_core::{prove, verify, Air};
 use stwo::core::fields::qm31::QM31;
@@ -98,6 +100,14 @@ impl PredicateVerifier for AgeRangeCheck {
         claimed_sums: &[QM31],
     ) -> Result<RangeCheckVerifier, Error> {
         self.0.validate(public)?;
+        if claimed_sums.len() != RANGE_CHECK_CLAIM_COUNT {
+            return Err(AgeInputError::Invalid(format!(
+                "age range-check proof carries {} claimed sums; expected {}",
+                claimed_sums.len(),
+                RANGE_CHECK_CLAIM_COUNT,
+            ))
+            .into());
+        }
         Ok(RangeCheckVerifier::new(public, claimed_sums.to_vec()))
     }
 }

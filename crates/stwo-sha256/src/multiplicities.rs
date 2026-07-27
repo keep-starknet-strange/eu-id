@@ -453,7 +453,15 @@ mod tests {
                 .map(|(a, b)| a + b)
                 .collect();
             assert_eq!(&shared.range[i][..expected.len()], &expected[..]);
-            assert_eq!(shared.range[i].len(), 2 * expected.len());
+            let producer = crate::components::SharedProducer::Range(kind);
+            let real_len = 1usize << (producer.blind_log_size() - 1);
+            assert_eq!(shared.range[i].len(), 2 * real_len);
+            assert!(
+                shared.range[i][expected.len()..real_len]
+                    .iter()
+                    .all(|&multiplicity| multiplicity == 0),
+                "extra real rows must have zero multiplicity"
+            );
         }
     }
 }

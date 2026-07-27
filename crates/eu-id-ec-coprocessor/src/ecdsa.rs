@@ -2,19 +2,24 @@ use core::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::ligero::{
-    commit_witness_profiled, v4_circle_params, verify_and_authenticate_split_openings,
-    verify_authenticated_split_claim_batch, verify_claim_batch, verify_openings, LigeroClaimBatch,
-    LigeroCode, LigeroError, LigeroLinearClaim, LigeroLinearTerm, LigeroParams,
-    LigeroProximityClaim,
+    commit_witness_with_quadratics_profiled, quadratic_committed_len, quadratic_route_claims,
+    v4_circle_params, verify_and_authenticate_split_openings,
+    verify_authenticated_split_claim_batch, verify_claim_batch, verify_claim_blind_check,
+    verify_openings, verify_quadratic_batch, verify_split_claim_blind_check, LigeroClaimBatch,
+    LigeroClaimBlindCheck, LigeroCode, LigeroError, LigeroLinearClaim, LigeroLinearTerm,
+    LigeroParams, LigeroProximityClaim, LigeroQuadraticBatch, LigeroQuadraticConstraint,
+    LIGERO_AUXILIARY_ROW_COUNT,
 };
 use crate::mac::{bytes_to_bits, gf128_tag, Gf128, GF128_BITS};
 use crate::merkle::ColumnOpening;
 use crate::sumcheck::{
-    circuit_otp_pad_values, proof_otp_pad_values, prove_circuit, prove_evaluated_circuit,
+    circuit_pad_len, circuit_quadratic_constraints, prove_circuit, prove_evaluated_circuit,
     prove_evaluated_circuit_sorted_sparse, verify_circuit, verify_circuit_sorted_sparse,
-    CircuitSumcheckProof, InputClaims, SumcheckError,
+    CircuitPads, CircuitSumcheckProof, CircuitVerification, InputClaims, SumcheckError,
 };
-use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, Mle, QuadTerm, TranscriptSeed};
+#[cfg(test)]
+use crate::Mle;
+use crate::{Circuit, CircuitError, CoprocessorChannel, Fp, Layer, QuadTerm, TranscriptSeed};
 use blake2::{Blake2s256, Digest};
 use p256::elliptic_curve::ff::PrimeField;
 use p256::elliptic_curve::group::{Curve, Group};
@@ -56,10 +61,10 @@ pub const MAC_HALF_PARITY_MAX_S: usize = 632;
 const MAC_HALF_BOOL_CONSTRAINTS: usize = 2 * GF128_BITS + GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 const MAC_HALF_TAG_CONSTRAINTS: usize = GF128_BITS;
 const MAC_HALF_LOCAL_CONSTRAINTS: usize = MAC_HALF_BOOL_CONSTRAINTS + MAC_HALF_TAG_CONSTRAINTS;
-const MAC_BATCH_GROUP_A_INPUT_LOG_SIZE: usize = 13;
-const MAC_BATCH_GROUP_B_INPUT_LOG_SIZE: usize = 13;
-const MAC_BATCH_INPUT_LOG_SIZE: usize = 14;
-const MAC_BATCH_TREE_LOG_SIZE: usize = 14;
+const MAC_BATCH_GROUP_A_INPUT_LOG_SIZE: usize = 14;
+const MAC_BATCH_GROUP_B_INPUT_LOG_SIZE: usize = 14;
+const MAC_BATCH_INPUT_LOG_SIZE: usize = 15;
+const MAC_BATCH_TREE_LOG_SIZE: usize = 15;
 const MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
 const MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE: usize = GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 const MAC_HALF_GROUP_B_INPUT_START: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
@@ -86,7 +91,7 @@ pub const MAC_HALF_GROUP_A_USED_INPUTS: usize = MAC_HALF_AP_BITS_START + GF128_B
 pub const MAC_HALF_GROUP_B_USED_INPUTS: usize = GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
     (MAC_HALF_GROUP_A_USED_INPUTS - 1) + MAC_HALF_GROUP_B_USED_INPUTS;
-pub const MDOC_P4B_MAC_HALF_COUNT: usize = 6;
+pub const MDOC_P4B_MAC_HALF_COUNT: usize = 8;
 pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize = MDOC_P4B_MAC_HALF_COUNT
     * MAC_HALF_COMMITTED_PRIVATE_INPUTS
     + MAC_BATCH_CANONICAL_VALUE_COUNT * (MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES);
@@ -212,7 +217,7 @@ const C14_RX_SLACK_LIMBS_START: usize = C14_RX_BITS_START + N_LIMBS * LIMB_BITS;
 const C14_RX_SLACK_BITS_START: usize = C14_RX_SLACK_LIMBS_START + N_LIMBS;
 const C14_RX_LT_CARRIES_START: usize = C14_RX_SLACK_BITS_START + N_LIMBS * LIMB_BITS;
 const C14_REDUCTION_BORROWS_START: usize = C14_RX_LT_CARRIES_START + N_LIMBS;
-const IMPLEMENTED_BUNDLE_LIGERO_LABEL: &[u8] = b"s4-ecdsa-implemented-bundle-v2";
+const IMPLEMENTED_BUNDLE_LIGERO_LABEL: &[u8] = b"s4-ecdsa-implemented-bundle-v4";
 const COPROCESSOR_TRANSCRIPT_DOMAIN: &[u8] = b"eu-id-ec-coproc-v2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -282,12 +287,16 @@ impl EcdsaPublicProjection {
         }
     }
 
-    pub fn issuer_key_only(qx: [u8; 32], qy: [u8; 32]) -> Self {
+    pub fn public_key_only(qx: [u8; 32], qy: [u8; 32]) -> Self {
         Self {
             qx: Some(qx),
             qy: Some(qy),
             ..Self::default()
         }
+    }
+
+    pub fn issuer_key_only(qx: [u8; 32], qy: [u8; 32]) -> Self {
+        Self::public_key_only(qx, qy)
     }
 
     pub fn message_hash_only(z: [u8; 32]) -> Self {
@@ -321,6 +330,8 @@ pub struct ImplementedCircuitBundle {
     #[serde(default)]
     pub proximity_claim_b: Option<LigeroProximityClaim>,
     pub claim_batch: LigeroClaimBatch,
+    pub claim_blind_check: LigeroClaimBlindCheck,
+    pub quadratic_batch: LigeroQuadraticBatch,
     #[serde(default)]
     pub claim_batch_b: Option<LigeroClaimBatch>,
     pub consistency_claim_values: Vec<Fp>,
@@ -436,6 +447,7 @@ pub enum ImplementedCircuitProofError {
     ProximityOpeningRejected,
     InputBindingRejected,
     CrossFamilyBindingRejected,
+    NonCanonicalBundle,
 }
 
 pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
@@ -565,18 +577,27 @@ pub fn prove_implemented_circuit_proofs(
         let mut channel =
             CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
         channel.mix_bytes(instance.label);
+        let pads = CircuitPads::fresh(&instance.circuit);
         proofs.push(
-            prove_circuit(&instance.circuit, &layers, commitment_root, &mut channel)
-                .map_err(ImplementedCircuitProofError::Sumcheck)?,
+            prove_circuit(
+                &instance.circuit,
+                &layers,
+                &pads,
+                commitment_root,
+                &mut channel,
+            )
+            .map_err(ImplementedCircuitProofError::Sumcheck)?,
         );
     }
     Ok(ImplementedCircuitProofs { proofs })
 }
 
-/// Verifies only the per-family sumchecks and returns their unbound input claims.
+/// Verifies only the per-family sumcheck transcript shape and returns its
+/// masked, unbound input claims.
 ///
 /// This low-level API does **not** bind a caller statement, projected inputs, or
-/// copies shared between circuit families. Production callers must use
+/// copies shared between circuit families, and cannot validate the committed
+/// pad constraints without the Ligero commitment. Production callers must use
 /// [`verify_implemented_circuit_bundle`] (or its batch/projected variants), which
 /// authenticates these claims against Ligero and adds all fixed and affine bindings.
 pub fn verify_implemented_circuit_proofs(
@@ -601,6 +622,7 @@ pub fn verify_implemented_circuit_proofs(
                 CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
             channel.mix_bytes(instance.label);
             verify_circuit(&instance.circuit, proof, commitment_root, &mut channel)
+                .map(|verification| verification.input_claims)
                 .map_err(ImplementedCircuitProofError::Sumcheck)
         })
         .collect()
@@ -746,7 +768,17 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
         );
     }
 
-    let (committed_values, all_layouts) = prover_committed_values(&all_instances);
+    let (committed_values, all_layouts, all_pads) = prover_committed_values(&all_instances);
+    let mut quadratic_constraints = Vec::new();
+    for (instances, layouts) in all_instances.iter().zip(&all_layouts) {
+        for (instance, layout) in instances.iter().zip(layouts) {
+            append_circuit_quadratic_constraints(
+                &mut quadratic_constraints,
+                &instance.circuit,
+                layout,
+            );
+        }
+    }
     profile.circuit_build = start.elapsed();
     profile.committed_values = committed_values.len();
     profile.committed_nonzero_values = committed_values
@@ -760,8 +792,9 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
         .map(|chunk| chunk.iter().filter(|&&value| value != Fp::ZERO).count())
         .max()
         .unwrap_or(0);
-    let (commitment, commit_profile) = commit_witness_profiled(&committed_values, params)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let (commitment, commit_profile) =
+        commit_witness_with_quadratics_profiled(&committed_values, params, &quadratic_constraints)
+            .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_row_encode = commit_profile.row_encode;
     profile.ligero_merkle_build = commit_profile.merkle_build;
     profile.ligero_rows = commit_profile.rows;
@@ -770,7 +803,7 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
     let gamma = ligero_proximity_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         root,
-        ligero_row_count(committed_values.len(), params.row_len),
+        commitment.committed_rows(),
         transcript_seed,
     );
     let start = Instant::now();
@@ -779,23 +812,13 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
         .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_proximity_claim = start.elapsed();
 
-    let start = Instant::now();
-    let proximity_indices = ligero_proximity_indices(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        root,
-        params,
-        transcript_seed,
-    );
-    let proximity_openings = commitment
-        .open_columns(&proximity_indices)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
-    profile.ligero_openings = start.elapsed();
-
     let mut entries = Vec::new();
+    let mut all_verifications = Vec::with_capacity(all_instances.len());
     let start = Instant::now();
     for (signature_index, (projection, instances)) in
         projections.iter().zip(&all_instances).enumerate()
     {
+        let mut verifications = Vec::with_capacity(instances.len());
         for (family_index, instance) in instances.iter().enumerate() {
             let layers = instance
                 .circuit
@@ -806,12 +829,24 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
             mix_bundle_signature_index(signature_index, &mut channel);
             channel.mix_bytes(instance.label);
             mix_ecdsa_public_projection(projection, &mut channel);
+            let mut verifier_channel = channel.clone();
             let family_start = Instant::now();
-            let proof = prove_evaluated_circuit(&instance.circuit, &layers, root, &mut channel)
-                .map_err(ImplementedCircuitProofError::Sumcheck)?;
+            let proof = prove_evaluated_circuit(
+                &instance.circuit,
+                &layers,
+                &all_pads[signature_index][family_index],
+                root,
+                &mut channel,
+            )
+            .map_err(ImplementedCircuitProofError::Sumcheck)?;
+            let verification =
+                verify_circuit(&instance.circuit, &proof, root, &mut verifier_channel)
+                    .map_err(ImplementedCircuitProofError::Sumcheck)?;
             profile.sumcheck_by_family[family_index] += family_start.elapsed();
             entries.push(ImplementedCircuitBundleEntry { proof });
+            verifications.push(verification);
         }
+        all_verifications.push(verifications);
     }
     profile.sumcheck = start.elapsed();
     let (claim_batch, consistency_claim_values) = prover_claim_batch(
@@ -819,9 +854,45 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
         projections,
         &all_instances,
         &all_layouts,
+        &all_verifications,
         &entries,
+        committed_values.len(),
+        &quadratic_constraints,
         transcript_seed,
     )?;
+    let claim_blind_challenge = ligero_claim_blind_challenge(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        root,
+        params,
+        transcript_seed,
+    );
+    let claim_blind_check = commitment.claim_blind_check(claim_blind_challenge);
+    let quadratic_challenges = ligero_quadratic_challenges(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        root,
+        params,
+        &quadratic_constraints,
+        transcript_seed,
+    );
+    let quadratic_batch = commitment
+        .quadratic_batch(&quadratic_challenges)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let start = Instant::now();
+    let opening_indices = ligero_opening_indices(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        root,
+        params,
+        &proximity_claim,
+        &entries,
+        &claim_batch,
+        &claim_blind_check,
+        &quadratic_batch,
+        transcript_seed,
+    );
+    let proximity_openings = commitment
+        .open_columns(&opening_indices)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    profile.ligero_openings = start.elapsed();
 
     Ok((
         ImplementedCircuitBundle {
@@ -833,6 +904,8 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
             proximity_claim,
             proximity_claim_b: None,
             claim_batch,
+            claim_blind_check,
+            quadratic_batch,
             claim_batch_b: None,
             consistency_claim_values,
             mac_tags: Vec::new(),
@@ -886,7 +959,11 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         .map_err(ImplementedCircuitProofError::Witness)?;
     let all_instances = vec![instances];
 
-    let (committed_values, all_layouts) = prover_committed_values(&all_instances);
+    let (committed_values, all_layouts, all_pads) = prover_committed_values(&all_instances);
+    let mut quadratic_constraints = Vec::new();
+    for (instance, layout) in all_instances[0].iter().zip(&all_layouts[0]) {
+        append_circuit_quadratic_constraints(&mut quadratic_constraints, &instance.circuit, layout);
+    }
     profile.circuit_build = start.elapsed();
     profile.committed_values = committed_values.len();
     profile.committed_nonzero_values = committed_values
@@ -900,8 +977,9 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         .map(|chunk| chunk.iter().filter(|&&value| value != Fp::ZERO).count())
         .max()
         .unwrap_or(0);
-    let (commitment, commit_profile) = commit_witness_profiled(&committed_values, params)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let (commitment, commit_profile) =
+        commit_witness_with_quadratics_profiled(&committed_values, params, &quadratic_constraints)
+            .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_row_encode = commit_profile.row_encode;
     profile.ligero_merkle_build = commit_profile.merkle_build;
     profile.ligero_rows = commit_profile.rows;
@@ -910,7 +988,7 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
     let gamma = ligero_proximity_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         root,
-        ligero_row_count(committed_values.len(), params.row_len),
+        commitment.committed_rows(),
         transcript_seed,
     );
     let start = Instant::now();
@@ -919,19 +997,8 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_proximity_claim = start.elapsed();
 
-    let start = Instant::now();
-    let proximity_indices = ligero_proximity_indices(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        root,
-        params,
-        transcript_seed,
-    );
-    let proximity_openings = commitment
-        .open_columns(&proximity_indices)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
-    profile.ligero_openings = start.elapsed();
-
     let mut entries = Vec::new();
+    let mut verifications = Vec::with_capacity(all_instances[0].len());
     let start = Instant::now();
     for (index, instance) in all_instances[0].iter().enumerate() {
         let layers = instance
@@ -944,11 +1011,21 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         channel.mix_bytes(instance.label);
         let projection = EcdsaPublicProjection::full(input);
         mix_ecdsa_public_projection(&projection, &mut channel);
+        let mut verifier_channel = channel.clone();
         let family_start = Instant::now();
-        let proof = prove_evaluated_circuit(&instance.circuit, &layers, root, &mut channel)
+        let proof = prove_evaluated_circuit(
+            &instance.circuit,
+            &layers,
+            &all_pads[0][index],
+            root,
+            &mut channel,
+        )
+        .map_err(ImplementedCircuitProofError::Sumcheck)?;
+        let verification = verify_circuit(&instance.circuit, &proof, root, &mut verifier_channel)
             .map_err(ImplementedCircuitProofError::Sumcheck)?;
         profile.sumcheck_by_family[index] = family_start.elapsed();
         entries.push(ImplementedCircuitBundleEntry { proof });
+        verifications.push(verification);
     }
     profile.sumcheck = start.elapsed();
     let single_projection = [EcdsaPublicProjection::full(input)];
@@ -957,9 +1034,45 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
         &single_projection,
         &all_instances,
         &all_layouts,
+        &[verifications],
         &entries,
+        committed_values.len(),
+        &quadratic_constraints,
         transcript_seed,
     )?;
+    let claim_blind_challenge = ligero_claim_blind_challenge(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        root,
+        params,
+        transcript_seed,
+    );
+    let claim_blind_check = commitment.claim_blind_check(claim_blind_challenge);
+    let quadratic_challenges = ligero_quadratic_challenges(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        root,
+        params,
+        &quadratic_constraints,
+        transcript_seed,
+    );
+    let quadratic_batch = commitment
+        .quadratic_batch(&quadratic_challenges)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let start = Instant::now();
+    let opening_indices = ligero_opening_indices(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        root,
+        params,
+        &proximity_claim,
+        &entries,
+        &claim_batch,
+        &claim_blind_check,
+        &quadratic_batch,
+        transcript_seed,
+    );
+    let proximity_openings = commitment
+        .open_columns(&opening_indices)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    profile.ligero_openings = start.elapsed();
 
     Ok((
         ImplementedCircuitBundle {
@@ -971,6 +1084,8 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
             proximity_claim,
             proximity_claim_b: None,
             claim_batch,
+            claim_blind_check,
+            quadratic_batch,
             claim_batch_b: None,
             consistency_claim_values,
             mac_tags: Vec::new(),
@@ -1018,6 +1133,11 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
 ) -> Result<(ImplementedCircuitBundle, MdocP4bProveProfile), ImplementedCircuitProofError> {
     let mut profile = MdocP4bProveProfile::default();
     let start = Instant::now();
+    validate_mdoc_p4b_projection_shapes(
+        issuer_projection,
+        device_projection,
+        revocation.map(|(_, projection, _)| projection),
+    )?;
     verify_witness(issuer_input, issuer_witness).map_err(ImplementedCircuitProofError::Witness)?;
     verify_witness(device_input, device_witness).map_err(ImplementedCircuitProofError::Witness)?;
     if let Some((revocation_input, _, revocation_witness)) = revocation {
@@ -1045,7 +1165,11 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
             instances.push(MdocP4bProverInstance::ecdsa(2, instance));
         }
     }
-    let mac_values = mdoc_p4b_mac_values(issuer_input, device_input);
+    let mac_values = mdoc_p4b_mac_values(
+        issuer_input,
+        device_input,
+        revocation.map(|(input, _, _)| input),
+    );
     let mac_tags_placeholder = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
     let circuit = build_mac_batch_circuit(&[0u8; 16], &mac_tags_placeholder)
         .map_err(ImplementedCircuitProofError::Circuit)?;
@@ -1058,11 +1182,16 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         input,
     });
 
-    let (committed_values, layouts) = mdoc_p4b_committed_values(&instances);
+    let (committed_values, layouts, pads) = mdoc_p4b_committed_values(&instances);
+    let mut quadratic_constraints = Vec::new();
+    for (instance, layout) in instances.iter().zip(&layouts) {
+        append_circuit_quadratic_constraints(&mut quadratic_constraints, &instance.circuit, layout);
+    }
     let params = implemented_circuit_ligero_params(committed_values.len());
     profile.circuit_build = start.elapsed();
-    let (commitment, commit_profile) = commit_witness_profiled(&committed_values, params)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let (commitment, commit_profile) =
+        commit_witness_with_quadratics_profiled(&committed_values, params, &quadratic_constraints)
+            .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_row_encode = commit_profile.row_encode;
     profile.ligero_merkle_build = commit_profile.merkle_build;
     profile.row_inventory = mdoc_p4b_row_inventory(
@@ -1085,15 +1214,16 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         .map_err(ImplementedCircuitProofError::Witness)?;
     let params_b = implemented_circuit_ligero_params(committed_values_b.len());
     debug_assert_eq!(params, params_b);
-    let (commitment_b, commit_profile_b) = commit_witness_profiled(&committed_values_b, params_b)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let (commitment_b, commit_profile_b) =
+        commit_witness_with_quadratics_profiled(&committed_values_b, params_b, &[])
+            .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_row_encode += commit_profile_b.row_encode;
     profile.ligero_merkle_build += commit_profile_b.merkle_build;
     let root_b = commitment_b.root();
     let full_root = mdoc_p4b_full_root(root, root_b);
 
-    let group_a_rows = ligero_row_count(committed_values.len(), params.row_len);
-    let group_b_rows = ligero_row_count(committed_values_b.len(), params.row_len);
+    let group_a_rows = commitment.committed_rows();
+    let group_b_rows = commitment_b.committed_rows();
     let gamma = ligero_proximity_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         full_root,
@@ -1105,21 +1235,6 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         .split_proximity_claim(&commitment_b, &gamma)
         .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_proximity_claim = start.elapsed();
-    let start = Instant::now();
-    let proximity_indices = ligero_proximity_indices(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        full_root,
-        params,
-        transcript_seed,
-    );
-    let proximity_openings = commitment
-        .open_columns(&proximity_indices)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
-    let proximity_openings_b = commitment_b
-        .open_columns(&proximity_indices)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
-    profile.ligero_openings = start.elapsed();
-
     let mut projections = vec![*issuer_projection, *device_projection];
     if let Some((_, revocation_projection, _)) = revocation {
         projections.push(*revocation_projection);
@@ -1127,7 +1242,8 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     let sumcheck_start = Instant::now();
     let entry_results = instances
         .par_iter()
-        .map(|instance| {
+        .enumerate()
+        .map(|(instance_index, instance)| {
             let circuit = match instance.role {
                 MdocP4bCircuitRole::MacBatch => build_mac_batch_circuit(&av, &mac_tags)
                     .map_err(ImplementedCircuitProofError::Circuit)?,
@@ -1152,24 +1268,47 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
                 &av,
                 &mac_tags,
             );
+            let mut verifier_channel = channel.clone();
             let instance_start = Instant::now();
             let proof = match instance.role {
                 MdocP4bCircuitRole::MacBatch => prove_evaluated_circuit_sorted_sparse(
                     &circuit,
                     &layers,
+                    &pads[instance_index],
                     full_root,
                     &mut channel,
                 ),
-                _ => prove_evaluated_circuit(&circuit, &layers, full_root, &mut channel),
+                _ => prove_evaluated_circuit(
+                    &circuit,
+                    &layers,
+                    &pads[instance_index],
+                    full_root,
+                    &mut channel,
+                ),
+            }
+            .map_err(ImplementedCircuitProofError::Sumcheck)?;
+            let verification = match instance.role {
+                MdocP4bCircuitRole::MacBatch => {
+                    verify_circuit_sorted_sparse(&circuit, &proof, full_root, &mut verifier_channel)
+                }
+                _ => verify_circuit(&circuit, &proof, full_root, &mut verifier_channel),
             }
             .map_err(ImplementedCircuitProofError::Sumcheck)?;
             Ok((
                 ImplementedCircuitBundleEntry { proof },
+                verification,
                 mdoc_p4b_instance_timing(instance.role, instance.label, instance_start.elapsed()),
             ))
         })
         .collect::<Result<Vec<_>, ImplementedCircuitProofError>>()?;
-    let (entries, sumcheck_by_instance): (Vec<_>, Vec<_>) = entry_results.into_iter().unzip();
+    let mut entries = Vec::with_capacity(entry_results.len());
+    let mut verifications = Vec::with_capacity(entry_results.len());
+    let mut sumcheck_by_instance = Vec::with_capacity(entry_results.len());
+    for (entry, verification, timing) in entry_results {
+        entries.push(entry);
+        verifications.push(verification);
+        sumcheck_by_instance.push(timing);
+    }
     profile.sumcheck_by_instance = sumcheck_by_instance;
     profile.sumcheck = sumcheck_start.elapsed();
 
@@ -1180,12 +1319,52 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         params,
         &instances,
         &layouts,
+        &verifications,
         &entries,
         &projections,
         committed_values.len(),
+        &quadratic_constraints,
         full_root,
         transcript_seed,
     )?;
+    let claim_blind_challenge = ligero_claim_blind_challenge(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        params,
+        transcript_seed,
+    );
+    let claim_blind_check = commitment
+        .split_claim_blind_check(&commitment_b, claim_blind_challenge)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let quadratic_challenges = ligero_quadratic_challenges(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        params,
+        &quadratic_constraints,
+        transcript_seed,
+    );
+    let quadratic_batch = commitment
+        .quadratic_batch(&quadratic_challenges)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let opening_start = Instant::now();
+    let opening_indices = ligero_opening_indices(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        params,
+        &proximity_claim,
+        &entries,
+        &claim_batch,
+        &claim_blind_check,
+        &quadratic_batch,
+        transcript_seed,
+    );
+    let proximity_openings = commitment
+        .open_columns(&opening_indices)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    let proximity_openings_b = commitment_b
+        .open_columns(&opening_indices)
+        .map_err(ImplementedCircuitProofError::Ligero)?;
+    profile.ligero_openings = opening_start.elapsed();
     profile.claim_batch = claim_start.elapsed();
     profile.row_inventory = mdoc_p4b_row_inventory(
         params,
@@ -1206,6 +1385,8 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
             proximity_claim,
             proximity_claim_b: None,
             claim_batch,
+            claim_blind_check,
+            quadratic_batch,
             claim_batch_b: None,
             consistency_claim_values,
             mac_tags,
@@ -1272,6 +1453,14 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
 ) -> Result<MdocP4bVerifyProfile, ImplementedCircuitProofError> {
     let mut profile = MdocP4bVerifyProfile::default();
     let setup_start = Instant::now();
+    validate_mdoc_p4b_projection_shapes(
+        issuer_projection,
+        device_projection,
+        revocation_projection,
+    )?;
+    if bundle.proximity_claim_b.is_some() || bundle.claim_batch_b.is_some() {
+        return Err(ImplementedCircuitProofError::NonCanonicalBundle);
+    }
     if !bundle.consistency_claim_values.is_empty() {
         return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
     }
@@ -1302,9 +1491,17 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         });
     }
     let (layouts, committed_len) = mdoc_p4b_verifier_bundle_pad_layouts(&circuits, 0);
-    if bundle.params != implemented_circuit_ligero_params(committed_len) {
+    let mut quadratic_constraints = Vec::new();
+    for (instance, layout) in circuits.iter().zip(&layouts) {
+        append_circuit_quadratic_constraints(&mut quadratic_constraints, &instance.circuit, layout);
+    }
+    let expected_params = implemented_circuit_ligero_params(committed_len);
+    if bundle.params != expected_params {
         return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
     }
+    let expanded_committed_len =
+        quadratic_committed_len(committed_len, expected_params, quadratic_constraints.len())
+            .map_err(ImplementedCircuitProofError::Ligero)?;
     let committed_len_b = 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE;
     profile.setup = setup_start.elapsed();
 
@@ -1312,29 +1509,39 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     let proximity_gamma = ligero_proximity_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         full_root,
-        ligero_row_count(committed_len, bundle.params.row_len)
+        ligero_row_count(expanded_committed_len, bundle.params.row_len)
             + ligero_row_count(committed_len_b, bundle.params.row_len),
         transcript_seed,
     );
-    verify_ligero_proximity_indices(
+    verify_ligero_opening_indices(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         full_root,
         bundle.params,
         &bundle.proximity_openings,
+        &bundle.proximity_claim,
+        &bundle.entries,
+        &bundle.claim_batch,
+        &bundle.claim_blind_check,
+        &bundle.quadratic_batch,
         transcript_seed,
     )?;
-    verify_ligero_proximity_indices(
+    verify_ligero_opening_indices(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         full_root,
         bundle.params,
         &bundle.proximity_openings_b,
+        &bundle.proximity_claim,
+        &bundle.entries,
+        &bundle.claim_batch,
+        &bundle.claim_blind_check,
+        &bundle.quadratic_batch,
         transcript_seed,
     )?;
     let authenticated_openings = verify_and_authenticate_split_openings(
         bundle.root,
         root_b,
         bundle.params,
-        committed_len,
+        expanded_committed_len,
         committed_len_b,
         &bundle.proximity_openings,
         &bundle.proximity_openings_b,
@@ -1343,6 +1550,27 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     )
     .map_err(ImplementedCircuitProofError::Ligero)?
     .ok_or(ImplementedCircuitProofError::ProximityOpeningRejected)?;
+    let claim_blind_challenge = ligero_claim_blind_challenge(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        bundle.params,
+        transcript_seed,
+    );
+    if !verify_split_claim_blind_check(
+        bundle.root,
+        root_b,
+        bundle.params,
+        expanded_committed_len,
+        committed_len_b,
+        &bundle.proximity_openings,
+        &bundle.proximity_openings_b,
+        &bundle.claim_blind_check,
+        claim_blind_challenge,
+    )
+    .map_err(ImplementedCircuitProofError::Ligero)?
+    {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+    }
     profile.ligero_proximity = start.elapsed();
 
     let mut linear_claims = Vec::new();
@@ -1379,11 +1607,8 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         })
         .collect::<Result<Vec<_>, ImplementedCircuitProofError>>()?;
 
-    for (((instance, layout), entry), (claims, elapsed)) in circuits
-        .iter()
-        .zip(layouts.iter())
-        .zip(bundle.entries.iter())
-        .zip(verified_claims)
+    for ((instance, layout), (verification, elapsed)) in
+        circuits.iter().zip(layouts.iter()).zip(verified_claims)
     {
         profile.sumcheck += elapsed;
         profile.sumcheck_by_instance.push(mdoc_p4b_instance_timing(
@@ -1393,21 +1618,14 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         ));
         let start = Instant::now();
         match instance.role {
-            MdocP4bCircuitRole::MacBatch => add_mac_split_input_claims(
+            MdocP4bCircuitRole::MacBatch => add_mac_split_circuit_verification_claims(
                 &mut linear_claims,
                 layout,
-                ligero_row_count(committed_len, bundle.params.row_len) * bundle.params.row_len,
-                &claims,
+                expanded_committed_len,
+                &verification,
             )?,
-            _ => add_input_claims(&mut linear_claims, layout, &claims),
+            _ => add_circuit_verification_claims(&mut linear_claims, layout, &verification),
         }
-        add_pad_claims(
-            &mut linear_claims,
-            layout,
-            &proof_otp_pad_values(&entry.proof),
-            full_root,
-            transcript_seed,
-        )?;
         profile.input_claims += start.elapsed();
         let start = Instant::now();
         match instance.role {
@@ -1453,12 +1671,38 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         .map(|instance| (instance.role, instance.label))
         .collect::<Vec<_>>();
     add_mdoc_p4b_consistency_claims(&mut linear_claims, &identities, &layouts)?;
+    linear_claims.extend(
+        quadratic_route_claims(committed_len, bundle.params, &quadratic_constraints)
+            .map_err(ImplementedCircuitProofError::Ligero)?,
+    );
     profile.consistency += start.elapsed();
+
+    let quadratic_challenges = ligero_quadratic_challenges(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        full_root,
+        bundle.params,
+        &quadratic_constraints,
+        transcript_seed,
+    );
+    if !verify_quadratic_batch(
+        bundle.root,
+        bundle.params,
+        committed_len,
+        quadratic_constraints.len(),
+        &bundle.proximity_openings,
+        &bundle.quadratic_batch,
+        &quadratic_challenges,
+    )
+    .map_err(ImplementedCircuitProofError::Ligero)?
+    {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+    }
 
     let start = Instant::now();
     let claim_gamma = ligero_claim_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         full_root,
+        &bundle.entries,
         linear_claims.len(),
         transcript_seed,
     );
@@ -1502,6 +1746,14 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
 {
     let mut profile = ImplementedCircuitVerifyProfile::default();
     let setup_start = Instant::now();
+    if bundle.root_b.is_some()
+        || !bundle.proximity_openings_b.is_empty()
+        || bundle.proximity_claim_b.is_some()
+        || bundle.claim_batch_b.is_some()
+        || !bundle.mac_tags.is_empty()
+    {
+        return Err(ImplementedCircuitProofError::NonCanonicalBundle);
+    }
     if !bundle.consistency_claim_values.is_empty() {
         return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
     }
@@ -1523,23 +1775,42 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         offset = next_offset;
     }
     let committed_len = offset;
-    if bundle.params != implemented_circuit_ligero_params(committed_len) {
+    let mut quadratic_constraints = Vec::new();
+    for layouts in &signature_layouts {
+        for (instance, layout) in circuits.iter().zip(layouts) {
+            append_circuit_quadratic_constraints(
+                &mut quadratic_constraints,
+                &instance.circuit,
+                layout,
+            );
+        }
+    }
+    let expected_params = implemented_circuit_ligero_params(committed_len);
+    if bundle.params != expected_params {
         return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
     }
+    let expanded_committed_len =
+        quadratic_committed_len(committed_len, expected_params, quadratic_constraints.len())
+            .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.setup = setup_start.elapsed();
 
     let start = Instant::now();
     let proximity_gamma = ligero_proximity_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         bundle.root,
-        ligero_row_count(committed_len, bundle.params.row_len),
+        ligero_row_count(expanded_committed_len, bundle.params.row_len),
         transcript_seed,
     );
-    verify_ligero_proximity_indices(
+    verify_ligero_opening_indices(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         bundle.root,
         bundle.params,
         &bundle.proximity_openings,
+        &bundle.proximity_claim,
+        &bundle.entries,
+        &bundle.claim_batch,
+        &bundle.claim_blind_check,
+        &bundle.quadratic_batch,
         transcript_seed,
     )?;
     let proximity_match = verify_openings(
@@ -1552,6 +1823,24 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
     .map_err(ImplementedCircuitProofError::Ligero)?;
     if !proximity_match {
         return Err(ImplementedCircuitProofError::ProximityOpeningRejected);
+    }
+    let claim_blind_challenge = ligero_claim_blind_challenge(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        bundle.root,
+        bundle.params,
+        transcript_seed,
+    );
+    if !verify_claim_blind_check(
+        bundle.root,
+        bundle.params,
+        expanded_committed_len,
+        &bundle.proximity_openings,
+        &bundle.claim_blind_check,
+        claim_blind_challenge,
+    )
+    .map_err(ImplementedCircuitProofError::Ligero)?
+    {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
     }
     profile.ligero_proximity = start.elapsed();
 
@@ -1585,52 +1874,63 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
         projections.iter().zip(&signature_layouts).enumerate()
     {
         let mut verified_claims = Vec::with_capacity(circuits.len());
-        for (family_index, ((instance, layout), entry)) in circuits
-            .iter()
-            .zip(layouts)
-            .zip(
-                &bundle.entries
-                    [signature_index * circuits.len()..(signature_index + 1) * circuits.len()],
-            )
-            .enumerate()
-        {
-            let (claims, elapsed) = &verified_flat[signature_index * family_count + family_index];
-            let claims = claims.clone();
+        for (family_index, (instance, layout)) in circuits.iter().zip(layouts).enumerate() {
+            let (verification, elapsed) =
+                &verified_flat[signature_index * family_count + family_index];
+            let verification = verification.clone();
             profile.sumcheck += *elapsed;
             profile.sumcheck_by_family[family_index] += *elapsed;
 
             let start = Instant::now();
-            add_input_claims(&mut linear_claims, layout, &claims);
-            add_pad_claims(
-                &mut linear_claims,
-                layout,
-                &proof_otp_pad_values(&entry.proof),
-                bundle.root,
-                transcript_seed,
-            )?;
+            add_circuit_verification_claims(&mut linear_claims, layout, &verification);
             profile.input_claims += start.elapsed();
 
             let start = Instant::now();
             add_family_fixed_claims(&mut linear_claims, projection, instance.label, layout)?;
             profile.consistency += start.elapsed();
-            verified_claims.push(claims);
+            verified_claims.push(verification.input_claims);
         }
         let start = Instant::now();
         add_ecdsa_consistency_claims(&mut linear_claims, layouts)?;
         profile.consistency += start.elapsed();
         all_claims.push(verified_claims);
     }
+    linear_claims.extend(
+        quadratic_route_claims(committed_len, bundle.params, &quadratic_constraints)
+            .map_err(ImplementedCircuitProofError::Ligero)?,
+    );
+    let quadratic_challenges = ligero_quadratic_challenges(
+        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+        bundle.root,
+        bundle.params,
+        &quadratic_constraints,
+        transcript_seed,
+    );
+    if !verify_quadratic_batch(
+        bundle.root,
+        bundle.params,
+        committed_len,
+        quadratic_constraints.len(),
+        &bundle.proximity_openings,
+        &bundle.quadratic_batch,
+        &quadratic_challenges,
+    )
+    .map_err(ImplementedCircuitProofError::Ligero)?
+    {
+        return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
+    }
     let start = Instant::now();
     let claim_gamma = ligero_claim_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         bundle.root,
+        &bundle.entries,
         linear_claims.len(),
         transcript_seed,
     );
     if !verify_claim_batch(
         bundle.root,
         bundle.params,
-        committed_len,
+        expanded_committed_len,
         &bundle.proximity_openings,
         &bundle.claim_batch,
         &linear_claims,
@@ -1677,6 +1977,7 @@ fn ligero_proximity_gamma(
 fn ligero_claim_gamma(
     label: &[u8],
     root: [u8; 32],
+    entries: &[ImplementedCircuitBundleEntry],
     claims: usize,
     transcript_seed: TranscriptSeed,
 ) -> Vec<Fp> {
@@ -1684,19 +1985,94 @@ fn ligero_claim_gamma(
     channel.mix_bytes(label);
     channel.mix_bytes(&root);
     channel.mix_bytes(b"s4-ligero-claim-gamma");
+    mix_sumcheck_entries(&mut channel, entries);
+    channel.mix_bytes(&(claims as u64).to_be_bytes());
     (0..claims).map(|_| channel.draw_fp()).collect()
 }
 
-fn ligero_proximity_indices(
+fn ligero_claim_blind_challenge(
     label: &[u8],
     root: [u8; 32],
     params: LigeroParams,
+    transcript_seed: TranscriptSeed,
+) -> Fp {
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+    channel.mix_bytes(label);
+    channel.mix_bytes(&root);
+    channel.mix_bytes(b"s4-ligero-claim-blind-kernel-v1");
+    for dimension in [
+        params.row_len,
+        params.degree_bound,
+        params.codeword_len,
+        params.openings,
+        params.proximity_radius,
+    ] {
+        channel.mix_bytes(&(dimension as u64).to_be_bytes());
+    }
+    channel.mix_bytes(&[match params.code {
+        LigeroCode::Rs => 0,
+        LigeroCode::Circle => 1,
+    }]);
+    channel.draw_fp()
+}
+
+fn ligero_quadratic_challenges(
+    label: &[u8],
+    root: [u8; 32],
+    params: LigeroParams,
+    constraints: &[LigeroQuadraticConstraint],
+    transcript_seed: TranscriptSeed,
+) -> Vec<Fp> {
+    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
+    channel.mix_bytes(label);
+    channel.mix_bytes(&root);
+    channel.mix_bytes(b"s4-ligero-quadratic-v1");
+    channel.mix_bytes(&(constraints.len() as u64).to_be_bytes());
+    for constraint in constraints {
+        channel.mix_bytes(&(constraint.x as u64).to_be_bytes());
+        channel.mix_bytes(&(constraint.y as u64).to_be_bytes());
+        channel.mix_bytes(&(constraint.z as u64).to_be_bytes());
+    }
+    (0..constraints.len().div_ceil(params.row_len))
+        .map(|_| channel.draw_fp())
+        .collect()
+}
+
+fn ligero_opening_indices(
+    label: &[u8],
+    root: [u8; 32],
+    params: LigeroParams,
+    proximity_claim: &LigeroProximityClaim,
+    entries: &[ImplementedCircuitBundleEntry],
+    claim_batch: &LigeroClaimBatch,
+    claim_blind_check: &LigeroClaimBlindCheck,
+    quadratic_batch: &LigeroQuadraticBatch,
     transcript_seed: TranscriptSeed,
 ) -> Vec<usize> {
     let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
     channel.mix_bytes(label);
     channel.mix_bytes(&root);
-    channel.mix_bytes(b"s4-ligero-proximity-indices");
+    channel.mix_bytes(b"s4-ligero-opening-transcript-v4");
+    for dimension in [
+        params.row_len,
+        params.degree_bound,
+        params.codeword_len,
+        params.openings,
+        params.proximity_radius,
+    ] {
+        channel.mix_bytes(&(dimension as u64).to_be_bytes());
+    }
+    channel.mix_bytes(&[match params.code {
+        LigeroCode::Rs => 0,
+        LigeroCode::Circle => 1,
+    }]);
+    mix_fp_slice(&mut channel, &proximity_claim.combined_row);
+    mix_sumcheck_entries(&mut channel, entries);
+    mix_fp_slice(&mut channel, &claim_batch.coefficients);
+    channel.mix_fp(claim_batch.blind_claim);
+    mix_fp_slice(&mut channel, &claim_blind_check.combined_row);
+    mix_fp_slice(&mut channel, &quadratic_batch.quotient);
+    channel.mix_bytes(b"s4-ligero-opening-indices");
     let mut indices = Vec::with_capacity(params.openings);
     while indices.len() < params.openings {
         let bytes = channel.draw_fp().to_bytes_be();
@@ -1711,14 +2087,55 @@ fn ligero_proximity_indices(
     indices
 }
 
-fn verify_ligero_proximity_indices(
+fn mix_sumcheck_entries(
+    channel: &mut CoprocessorChannel,
+    entries: &[ImplementedCircuitBundleEntry],
+) {
+    channel.mix_bytes(&(entries.len() as u64).to_be_bytes());
+    for entry in entries {
+        channel.mix_bytes(&(entry.proof.layers.len() as u64).to_be_bytes());
+        for layer in &entry.proof.layers {
+            channel.mix_bytes(&(layer.rounds.len() as u64).to_be_bytes());
+            for round in &layer.rounds {
+                channel.mix_fp(round[0]);
+                channel.mix_fp(round[1]);
+            }
+            channel.mix_fp(layer.next_claims[0]);
+            channel.mix_fp(layer.next_claims[1]);
+        }
+    }
+}
+
+fn mix_fp_slice(channel: &mut CoprocessorChannel, values: &[Fp]) {
+    channel.mix_bytes(&(values.len() as u64).to_be_bytes());
+    for value in values {
+        channel.mix_fp(*value);
+    }
+}
+
+fn verify_ligero_opening_indices(
     label: &[u8],
     root: [u8; 32],
     params: LigeroParams,
     openings: &[ColumnOpening],
+    proximity_claim: &LigeroProximityClaim,
+    entries: &[ImplementedCircuitBundleEntry],
+    claim_batch: &LigeroClaimBatch,
+    claim_blind_check: &LigeroClaimBlindCheck,
+    quadratic_batch: &LigeroQuadraticBatch,
     transcript_seed: TranscriptSeed,
 ) -> Result<(), ImplementedCircuitProofError> {
-    let expected = ligero_proximity_indices(label, root, params, transcript_seed);
+    let expected = ligero_opening_indices(
+        label,
+        root,
+        params,
+        proximity_claim,
+        entries,
+        claim_batch,
+        claim_blind_check,
+        quadratic_batch,
+        transcript_seed,
+    );
     let actual = openings
         .iter()
         .map(|opening| opening.index)
@@ -1731,7 +2148,7 @@ fn verify_ligero_proximity_indices(
 
 fn mdoc_p4b_full_root(root_a: [u8; 32], root_b: [u8; 32]) -> [u8; 32] {
     let mut hasher = Blake2s256::new();
-    hasher.update(b"eu-id-s4-mdoc-p4b-two-root-v1");
+    hasher.update(b"eu-id-s4-mdoc-p4b-two-root-v2");
     hasher.update(root_a);
     hasher.update(root_b);
     let digest = hasher.finalize();
@@ -1747,7 +2164,7 @@ fn mix_bundle_signature_index(signature_index: usize, channel: &mut CoprocessorC
 
 fn draw_mdoc_p4b_av(transcript_seed: TranscriptSeed, root: [u8; 32]) -> Gf128 {
     let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
-    channel.mix_bytes(b"s4-mdoc-p4b-mac-public");
+    channel.mix_bytes(MDOC_P4B_MAC_PUBLIC_LABEL);
     channel.mix_bytes(&root);
     channel.draw_gf128(b"eu-id-p4b-mac-av")
 }
@@ -1779,7 +2196,7 @@ fn mdoc_p4b_instance_channel(
             mix_ecdsa_public_projection(&projections[2], &mut channel);
         }
         MdocP4bCircuitRole::MacBatch => {
-            channel.mix_bytes(b"s4-mdoc-p4b-mac-public");
+            channel.mix_bytes(MDOC_P4B_MAC_PUBLIC_LABEL);
             channel.mix_bytes(&root);
             channel.mix_bytes(av);
             channel.mix_bytes(&(mac_tags.len() as u64).to_be_bytes());
@@ -1792,10 +2209,45 @@ fn mdoc_p4b_instance_channel(
     channel
 }
 
-fn mdoc_p4b_mac_values(issuer_input: &EcdsaInput, device_input: &EcdsaInput) -> [Gf128; 6] {
+fn validate_mdoc_p4b_projection_shapes(
+    issuer: &EcdsaPublicProjection,
+    device: &EcdsaPublicProjection,
+    revocation: Option<&EcdsaPublicProjection>,
+) -> Result<(), ImplementedCircuitProofError> {
+    let key_only = |projection: &EcdsaPublicProjection| {
+        projection.z.is_none()
+            && projection.r.is_none()
+            && projection.s.is_none()
+            && projection.qx.is_some()
+            && projection.qy.is_some()
+    };
+    let message_hash_only = |projection: &EcdsaPublicProjection| {
+        projection.z.is_some()
+            && projection.r.is_none()
+            && projection.s.is_none()
+            && projection.qx.is_none()
+            && projection.qy.is_none()
+    };
+    if !key_only(issuer)
+        || !message_hash_only(device)
+        || revocation.is_some_and(|projection| !key_only(projection))
+    {
+        return Err(ImplementedCircuitProofError::NonCanonicalBundle);
+    }
+    Ok(())
+}
+
+fn mdoc_p4b_mac_values(
+    issuer_input: &EcdsaInput,
+    device_input: &EcdsaInput,
+    revocation_input: Option<&EcdsaInput>,
+) -> [Gf128; MDOC_P4B_MAC_HALF_COUNT] {
     let [issuer_z_lo, issuer_z_hi] = gf128_halves_from_be32(issuer_input.z);
     let [device_qx_lo, device_qx_hi] = gf128_halves_from_be32(device_input.qx);
     let [device_qy_lo, device_qy_hi] = gf128_halves_from_be32(device_input.qy);
+    let [revocation_z_lo, revocation_z_hi] = revocation_input
+        .map(|input| gf128_halves_from_be32(input.z))
+        .unwrap_or_default();
     [
         issuer_z_lo,
         issuer_z_hi,
@@ -1803,6 +2255,8 @@ fn mdoc_p4b_mac_values(issuer_input: &EcdsaInput, device_input: &EcdsaInput) -> 
         device_qx_hi,
         device_qy_lo,
         device_qy_hi,
+        revocation_z_lo,
+        revocation_z_hi,
     ]
 }
 
@@ -1920,7 +2374,8 @@ struct MdocP4bClaimInventory {
     linear_claim_touched_rows: usize,
 }
 
-const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-mac-batch";
+const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-mac-batch-v2";
+const MDOC_P4B_MAC_PUBLIC_LABEL: &[u8] = b"s4-mdoc-p4b-mac-public-v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BundleCircuitLayout {
@@ -1928,6 +2383,22 @@ struct BundleCircuitLayout {
     input_len: usize,
     pad_offset: usize,
     pad_len: usize,
+}
+
+fn append_circuit_quadratic_constraints(
+    out: &mut Vec<LigeroQuadraticConstraint>,
+    circuit: &Circuit,
+    layout: &BundleCircuitLayout,
+) {
+    out.extend(
+        circuit_quadratic_constraints(circuit)
+            .into_iter()
+            .map(|constraint| LigeroQuadraticConstraint {
+                x: layout.pad_offset + constraint.x,
+                y: layout.pad_offset + constraint.y,
+                z: layout.pad_offset + constraint.z,
+            }),
+    );
 }
 
 fn verifier_bundle_pad_layouts(
@@ -1940,7 +2411,7 @@ fn verifier_bundle_pad_layouts(
         let input_len = verifier_circuit_input_len(&instance.circuit);
         let input_offset = offset;
         offset += input_len;
-        let pad_len = circuit_otp_pad_values(&instance.circuit).len();
+        let pad_len = circuit_pad_len(&instance.circuit);
         layouts.push(BundleCircuitLayout {
             input_offset,
             input_len,
@@ -1965,7 +2436,7 @@ fn mdoc_p4b_verifier_bundle_pad_layouts(
         };
         let input_offset = offset;
         offset += input_len;
-        let pad_len = circuit_otp_pad_values(&instance.circuit).len();
+        let pad_len = circuit_pad_len(&instance.circuit);
         layouts.push(BundleCircuitLayout {
             input_offset,
             input_len,
@@ -1979,52 +2450,62 @@ fn mdoc_p4b_verifier_bundle_pad_layouts(
 
 fn prover_committed_values(
     all_instances: &[Vec<ProverCircuitInstance>],
-) -> (Vec<Fp>, Vec<Vec<BundleCircuitLayout>>) {
+) -> (
+    Vec<Fp>,
+    Vec<Vec<BundleCircuitLayout>>,
+    Vec<Vec<CircuitPads>>,
+) {
     let mut committed_values = Vec::new();
     let mut all_layouts = Vec::with_capacity(all_instances.len());
+    let mut all_pads = Vec::with_capacity(all_instances.len());
     for instances in all_instances {
         let mut layouts = Vec::with_capacity(instances.len());
+        let mut instance_pads = Vec::with_capacity(instances.len());
         for instance in instances {
             let input_offset = committed_values.len();
             committed_values.extend_from_slice(&instance.input);
             let input_len = instance.input.len();
-            let pads = circuit_otp_pad_values(&instance.circuit);
+            let pads = CircuitPads::fresh(&instance.circuit);
             let pad_offset = committed_values.len();
-            let pad_len = pads.len();
-            committed_values.extend(pads);
+            let pad_len = pads.values().len();
+            committed_values.extend_from_slice(pads.values());
             layouts.push(BundleCircuitLayout {
                 input_offset,
                 input_len,
                 pad_offset,
                 pad_len,
             });
+            instance_pads.push(pads);
         }
         all_layouts.push(layouts);
+        all_pads.push(instance_pads);
     }
-    (committed_values, all_layouts)
+    (committed_values, all_layouts, all_pads)
 }
 
 fn mdoc_p4b_committed_values(
     instances: &[MdocP4bProverInstance],
-) -> (Vec<Fp>, Vec<BundleCircuitLayout>) {
+) -> (Vec<Fp>, Vec<BundleCircuitLayout>, Vec<CircuitPads>) {
     let mut committed_values = Vec::new();
     let mut layouts = Vec::with_capacity(instances.len());
+    let mut all_pads = Vec::with_capacity(instances.len());
     for instance in instances {
         let input_offset = committed_values.len();
         committed_values.extend_from_slice(&instance.input);
         let input_len = instance.input.len();
-        let pads = circuit_otp_pad_values(&instance.circuit);
+        let pads = CircuitPads::fresh(&instance.circuit);
         let pad_offset = committed_values.len();
-        let pad_len = pads.len();
-        committed_values.extend(pads);
+        let pad_len = pads.values().len();
+        committed_values.extend_from_slice(pads.values());
         layouts.push(BundleCircuitLayout {
             input_offset,
             input_len,
             pad_offset,
             pad_len,
         });
+        all_pads.push(pads);
     }
-    (committed_values, layouts)
+    (committed_values, layouts, all_pads)
 }
 
 fn mdoc_p4b_row_inventory(
@@ -2065,7 +2546,7 @@ fn mdoc_p4b_row_inventory(
     MdocP4bRowInventory {
         row_len: params.row_len,
         committed_values,
-        committed_rows: committed_values.div_ceil(params.row_len),
+        committed_rows: encoded_rows_total.saturating_sub(LIGERO_AUXILIARY_ROW_COUNT),
         encoded_rows_total,
         ecdsa_input_values,
         ecdsa_input_rows,
@@ -2073,7 +2554,7 @@ fn mdoc_p4b_row_inventory(
         mac_input_rows,
         otp_pad_values,
         otp_pad_rows,
-        blind_rows: 2,
+        blind_rows: LIGERO_AUXILIARY_ROW_COUNT,
         linear_claims: claim_inventory.linear_claims,
         linear_claim_touched_rows: claim_inventory.linear_claim_touched_rows,
     }
@@ -2174,34 +2655,33 @@ fn prover_claim_batch(
     projections: &[EcdsaPublicProjection],
     all_instances: &[Vec<ProverCircuitInstance>],
     all_layouts: &[Vec<BundleCircuitLayout>],
+    all_verifications: &[Vec<CircuitVerification>],
     entries: &[ImplementedCircuitBundleEntry],
+    committed_len: usize,
+    quadratic_constraints: &[LigeroQuadraticConstraint],
     transcript_seed: TranscriptSeed,
 ) -> Result<(LigeroClaimBatch, Vec<Fp>), ImplementedCircuitProofError> {
     let mut claims = Vec::new();
-    let circuits_per_signature = all_instances.first().map(|v| v.len()).unwrap_or(0);
-    for (signature_index, ((projection, instances), layouts)) in projections
+    for (((projection, instances), layouts), verifications) in projections
         .iter()
         .zip(all_instances.iter())
         .zip(all_layouts.iter())
-        .enumerate()
+        .zip(all_verifications)
     {
-        for (family_index, (instance, layout)) in instances.iter().zip(layouts).enumerate() {
-            let entry = &entries[signature_index * circuits_per_signature + family_index];
-            add_input_claims(&mut claims, layout, &entry.proof.input_claims);
-            add_pad_claims(
-                &mut claims,
-                layout,
-                &proof_otp_pad_values(&entry.proof),
-                commitment.root(),
-                transcript_seed,
-            )?;
+        for ((instance, layout), verification) in instances.iter().zip(layouts).zip(verifications) {
+            add_circuit_verification_claims(&mut claims, layout, verification);
             add_family_fixed_claims(&mut claims, projection, instance.label, layout)?;
         }
         add_ecdsa_consistency_claims(&mut claims, layouts)?;
     }
+    claims.extend(
+        quadratic_route_claims(committed_len, commitment.params(), quadratic_constraints)
+            .map_err(ImplementedCircuitProofError::Ligero)?,
+    );
     let gamma = ligero_claim_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         commitment.root(),
+        entries,
         claims.len(),
         transcript_seed,
     );
@@ -2217,31 +2697,28 @@ fn mdoc_p4b_prover_claim_batch(
     params: LigeroParams,
     instances: &[MdocP4bProverInstance],
     layouts: &[BundleCircuitLayout],
+    verifications: &[CircuitVerification],
     entries: &[ImplementedCircuitBundleEntry],
     projections: &[EcdsaPublicProjection],
     committed_len_a: usize,
+    quadratic_constraints: &[LigeroQuadraticConstraint],
     transcript_root: [u8; 32],
     transcript_seed: TranscriptSeed,
 ) -> Result<(LigeroClaimBatch, Vec<Fp>, MdocP4bClaimInventory), ImplementedCircuitProofError> {
     let mut claims = Vec::new();
-    let group_b_offset = ligero_row_count(committed_len_a, params.row_len) * params.row_len;
-    for ((instance, layout), entry) in instances.iter().zip(layouts).zip(entries) {
+    let group_b_offset =
+        quadratic_committed_len(committed_len_a, params, quadratic_constraints.len())
+            .map_err(ImplementedCircuitProofError::Ligero)?;
+    for ((instance, layout), verification) in instances.iter().zip(layouts).zip(verifications) {
         match instance.role {
-            MdocP4bCircuitRole::MacBatch => add_mac_split_input_claims(
+            MdocP4bCircuitRole::MacBatch => add_mac_split_circuit_verification_claims(
                 &mut claims,
                 layout,
                 group_b_offset,
-                &entry.proof.input_claims,
+                verification,
             )?,
-            _ => add_input_claims(&mut claims, layout, &entry.proof.input_claims),
+            _ => add_circuit_verification_claims(&mut claims, layout, verification),
         }
-        add_pad_claims(
-            &mut claims,
-            layout,
-            &proof_otp_pad_values(&entry.proof),
-            transcript_root,
-            transcript_seed,
-        )?;
         match instance.role {
             MdocP4bCircuitRole::IssuerEcdsa => {
                 add_family_fixed_claims(&mut claims, &projections[0], instance.label, layout)?;
@@ -2264,9 +2741,14 @@ fn mdoc_p4b_prover_claim_batch(
         .map(|instance| (instance.role, instance.label))
         .collect::<Vec<_>>();
     add_mdoc_p4b_consistency_claims(&mut claims, &identities, layouts)?;
+    claims.extend(
+        quadratic_route_claims(committed_len_a, params, quadratic_constraints)
+            .map_err(ImplementedCircuitProofError::Ligero)?,
+    );
     let gamma = ligero_claim_gamma(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         transcript_root,
+        entries,
         claims.len(),
         transcript_seed,
     );
@@ -2280,74 +2762,116 @@ fn mdoc_p4b_prover_claim_batch(
     Ok((batch, Vec::new(), inventory))
 }
 
-fn add_input_claims(
+fn add_circuit_verification_claims(
     claims: &mut Vec<LigeroLinearClaim>,
     layout: &BundleCircuitLayout,
-    input_claims: &InputClaims,
+    verification: &CircuitVerification,
 ) {
-    for (point, value) in input_claims.points.iter().cloned().zip(input_claims.values) {
-        claims.push(LigeroLinearClaim::mle(
-            layout.input_offset,
-            layout.input_len,
-            point,
-            value,
+    for constraint in &verification.layer_constraints {
+        claims.push(LigeroLinearClaim::affine(
+            constraint
+                .terms
+                .iter()
+                .map(|term| LigeroLinearTerm {
+                    offset: layout.pad_offset + term.pad_offset,
+                    len: 1,
+                    point: Vec::new(),
+                    coefficient: term.coefficient,
+                })
+                .collect(),
+            constraint.value,
         ));
     }
+    let beta = verification.input_challenge;
+    claims.push(LigeroLinearClaim::affine(
+        vec![
+            LigeroLinearTerm {
+                offset: layout.input_offset,
+                len: layout.input_len,
+                point: verification.input_claims.points[0].clone(),
+                coefficient: Fp::ONE,
+            },
+            LigeroLinearTerm {
+                offset: layout.input_offset,
+                len: layout.input_len,
+                point: verification.input_claims.points[1].clone(),
+                coefficient: beta,
+            },
+            LigeroLinearTerm {
+                offset: layout.pad_offset + verification.input_pad_offsets[0],
+                len: 1,
+                point: Vec::new(),
+                coefficient: -Fp::ONE,
+            },
+            LigeroLinearTerm {
+                offset: layout.pad_offset + verification.input_pad_offsets[1],
+                len: 1,
+                point: Vec::new(),
+                coefficient: -beta,
+            },
+        ],
+        verification.input_claims.values[0] + beta * verification.input_claims.values[1],
+    ));
 }
 
-fn add_mac_split_input_claims(
+fn add_mac_split_circuit_verification_claims(
     claims: &mut Vec<LigeroLinearClaim>,
     layout_a: &BundleCircuitLayout,
     group_b_offset: usize,
-    input_claims: &InputClaims,
+    verification: &CircuitVerification,
 ) -> Result<(), ImplementedCircuitProofError> {
-    for (point, value) in input_claims.points.iter().zip(input_claims.values) {
+    for constraint in &verification.layer_constraints {
+        claims.push(LigeroLinearClaim::affine(
+            constraint
+                .terms
+                .iter()
+                .map(|term| LigeroLinearTerm {
+                    offset: layout_a.pad_offset + term.pad_offset,
+                    len: 1,
+                    point: Vec::new(),
+                    coefficient: term.coefficient,
+                })
+                .collect(),
+            constraint.value,
+        ));
+    }
+
+    let beta = verification.input_challenge;
+    let mut terms = Vec::with_capacity(6);
+    for (point, coefficient) in verification.input_claims.points.iter().zip([Fp::ONE, beta]) {
         if point.len() != MAC_BATCH_INPUT_LOG_SIZE {
             return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
         }
         let split = point[MAC_BATCH_GROUP_A_INPUT_LOG_SIZE];
         let subpoint = point[..MAC_BATCH_GROUP_A_INPUT_LOG_SIZE].to_vec();
-        claims.push(LigeroLinearClaim::affine(
-            vec![
-                LigeroLinearTerm {
-                    offset: layout_a.input_offset,
-                    len: layout_a.input_len,
-                    point: subpoint.clone(),
-                    coefficient: Fp::ONE - split,
-                },
-                LigeroLinearTerm {
-                    offset: group_b_offset,
-                    len: 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE,
-                    point: subpoint,
-                    coefficient: split,
-                },
-            ],
-            value,
-        ));
+        terms.push(LigeroLinearTerm {
+            offset: layout_a.input_offset,
+            len: layout_a.input_len,
+            point: subpoint.clone(),
+            coefficient: coefficient * (Fp::ONE - split),
+        });
+        terms.push(LigeroLinearTerm {
+            offset: group_b_offset,
+            len: 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE,
+            point: subpoint,
+            coefficient: coefficient * split,
+        });
     }
-    Ok(())
-}
-
-fn add_pad_claims(
-    claims: &mut Vec<LigeroLinearClaim>,
-    layout: &BundleCircuitLayout,
-    pads: &[Fp],
-    root: [u8; 32],
-    transcript_seed: TranscriptSeed,
-) -> Result<(), ImplementedCircuitProofError> {
-    debug_assert_eq!(layout.pad_len, pads.len());
-    if pads.is_empty() {
-        return Ok(());
-    }
-    let point = pad_claim_point(layout.pad_offset, layout.pad_len, root, transcript_seed);
-    let value = Mle::new(pads.to_vec())
-        .eval_at(&point)
-        .map_err(|err| ImplementedCircuitProofError::Ligero(LigeroError::Mle(err)))?;
-    claims.push(LigeroLinearClaim::mle(
-        layout.pad_offset,
-        layout.pad_len,
-        point,
-        value,
+    terms.push(LigeroLinearTerm {
+        offset: layout_a.pad_offset + verification.input_pad_offsets[0],
+        len: 1,
+        point: Vec::new(),
+        coefficient: -Fp::ONE,
+    });
+    terms.push(LigeroLinearTerm {
+        offset: layout_a.pad_offset + verification.input_pad_offsets[1],
+        len: 1,
+        point: Vec::new(),
+        coefficient: -beta,
+    });
+    claims.push(LigeroLinearClaim::affine(
+        terms,
+        verification.input_claims.values[0] + beta * verification.input_claims.values[1],
     ));
     Ok(())
 }
@@ -2612,6 +3136,18 @@ fn add_mdoc_p4b_consistency_claims(
     add_mac_field_binding(claims, issuer_c3, C3_Z_INDEX, mac, 0, 1);
     add_mac_field_binding(claims, device_c2, C2_QX_INDEX as usize, mac, 2, 3);
     add_mac_field_binding(claims, device_c2, C2_QY_INDEX as usize, mac, 4, 5);
+    if identities
+        .iter()
+        .any(|(role, _)| *role == MdocP4bCircuitRole::RevocationEcdsa)
+    {
+        let revocation_c3 = find(
+            MdocP4bCircuitRole::RevocationEcdsa,
+            b"s4-ecdsa-c3-c5-scalar-setup",
+        )?;
+        add_mac_field_binding(claims, revocation_c3, C3_Z_INDEX, mac, 6, 7);
+    } else {
+        add_mac_zero_field_binding(claims, mac, 6, 7);
+    }
     Ok(())
 }
 
@@ -2638,6 +3174,30 @@ fn add_mac_field_binding(
             fixed_term(field_layout, field_index, scale),
             half_term(low_half, -Fp::ONE),
             half_term(high_half, -two_pow_128()),
+        ],
+        Fp::ZERO,
+    ));
+}
+
+fn add_mac_zero_field_binding(
+    claims: &mut Vec<LigeroLinearClaim>,
+    mac_layout: &BundleCircuitLayout,
+    low_half: usize,
+    high_half: usize,
+) {
+    let (point, _) = mac_half_x_recompose_claim_point();
+    let half_term = |half, coefficient| LigeroLinearTerm {
+        offset: mac_layout.input_offset
+            + mac_batch_half_group_a_input_offset(half)
+            + MAC_HALF_X_BITS_START,
+        len: GF128_BITS,
+        point: point.clone(),
+        coefficient,
+    };
+    claims.push(LigeroLinearClaim::affine(
+        vec![
+            half_term(low_half, Fp::ONE),
+            half_term(high_half, two_pow_128()),
         ],
         Fp::ZERO,
     ));
@@ -2695,22 +3255,6 @@ fn fixed_point(len: usize, index: usize) -> Vec<Fp> {
             }
         })
         .collect()
-}
-
-fn pad_claim_point(
-    pad_offset: usize,
-    pad_len: usize,
-    root: [u8; 32],
-    transcript_seed: TranscriptSeed,
-) -> Vec<Fp> {
-    let vars = pad_len.next_power_of_two().ilog2() as usize;
-    let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
-    channel.mix_bytes(IMPLEMENTED_BUNDLE_LIGERO_LABEL);
-    channel.mix_bytes(&root);
-    channel.mix_bytes(b"s4-ligero-pad-claim-point");
-    channel.mix_bytes(&(pad_offset as u64).to_be_bytes());
-    channel.mix_bytes(&(pad_len as u64).to_be_bytes());
-    (0..vars).map(|_| channel.draw_fp()).collect()
 }
 
 fn implemented_circuit_instances(
@@ -5543,6 +6087,103 @@ mod tests {
     }
 
     #[test]
+    fn p4b_public_key_projection_hides_digest_and_signature() {
+        let issuer = p4b_microbench_input(17);
+        let device = p4b_microbench_input(19);
+        let revocation = p4b_microbench_input(23);
+        let issuer_projection = EcdsaPublicProjection::public_key_only(issuer.qx, issuer.qy);
+        let device_projection = EcdsaPublicProjection::message_hash_only(device.z);
+        let revocation_projection =
+            EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
+        assert_eq!(revocation_projection.qx, Some(revocation.qx));
+        assert_eq!(revocation_projection.qy, Some(revocation.qy));
+        assert_eq!(revocation_projection.z, None);
+        assert_eq!(revocation_projection.r, None);
+        assert_eq!(revocation_projection.s, None);
+        validate_mdoc_p4b_projection_shapes(
+            &issuer_projection,
+            &device_projection,
+            Some(&revocation_projection),
+        )
+        .unwrap();
+        assert!(validate_mdoc_p4b_projection_shapes(
+            &issuer_projection,
+            &device_projection,
+            Some(&EcdsaPublicProjection::message_hash_only(revocation.z)),
+        )
+        .is_err());
+        assert!(validate_mdoc_p4b_projection_shapes(
+            &issuer_projection,
+            &device_projection,
+            Some(&EcdsaPublicProjection::full(&revocation)),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn p4b_mac_layout_covers_fixed_revocation_halves() {
+        let issuer = p4b_microbench_input(19);
+        let device = p4b_microbench_input(23);
+        let revocation = p4b_microbench_input(29);
+        let key_shares = p4b_microbench_key_shares();
+        let av = [0x5au8; 16];
+        let absent = mdoc_p4b_mac_values(&issuer, &device, None);
+        assert_eq!(absent[6], [0u8; 16]);
+        assert_eq!(absent[7], [0u8; 16]);
+        assert_eq!(
+            mac_batch_group_a_input(&key_shares, &absent).unwrap().len(),
+            1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE
+        );
+        let tags: [Gf128; MDOC_P4B_MAC_HALF_COUNT] =
+            std::array::from_fn(|half| gf128_tag(&key_shares.0[half], &av, &absent[half]));
+        assert_eq!(
+            mac_batch_group_b_input(&key_shares, &av, &absent, &tags)
+                .unwrap()
+                .len(),
+            1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE
+        );
+        let circuit = build_mac_batch_circuit(&av, &tags).unwrap();
+        assert_eq!(
+            circuit.layers().first().unwrap().out_log_size(),
+            MAC_BATCH_INPUT_LOG_SIZE
+        );
+        assert_eq!(
+            circuit.layers().last().unwrap().next_log_size(),
+            MAC_BATCH_INPUT_LOG_SIZE
+        );
+        let present = mdoc_p4b_mac_values(&issuer, &device, Some(&revocation));
+        assert_eq!(
+            [present[6], present[7]],
+            gf128_halves_from_be32(revocation.z)
+        );
+    }
+
+    #[test]
+    fn p4b_absent_revocation_halves_are_bound_to_zero() {
+        let key_shares = p4b_microbench_key_shares();
+        let values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
+        let mut committed = mac_batch_group_a_input(&key_shares, &values).unwrap();
+        let layout = BundleCircuitLayout {
+            input_offset: 0,
+            input_len: committed.len(),
+            pad_offset: committed.len(),
+            pad_len: 0,
+        };
+        let mut claims = Vec::new();
+        add_mac_zero_field_binding(&mut claims, &layout, 6, 7);
+        let claim = &claims[0];
+        let evaluate = |values: &[Fp]| {
+            claim.terms.iter().fold(Fp::ZERO, |sum, term| {
+                let mle = Mle::new(values[term.offset..term.offset + term.len].to_vec());
+                sum + term.coefficient * mle.eval_at(&term.point).unwrap()
+            })
+        };
+        assert_eq!(evaluate(&committed), claim.value);
+        committed[mac_batch_half_group_a_input_offset(6) + MAC_HALF_X_BITS_START] = Fp::ONE;
+        assert_ne!(evaluate(&committed), claim.value);
+    }
+
+    #[test]
     fn mac_batch_rejects_base_field_alias_bits() {
         let key_shares = p4b_microbench_key_shares();
         let av = [0x5au8; 16];
@@ -5969,10 +6610,31 @@ mod tests {
     fn proximity_sampler_uses_full_circle_domain_but_excludes_rs_message_prefix() {
         let root = [0x51; 32];
         let seed = [0xA7; 32];
+        let proximity_claim = LigeroProximityClaim {
+            combined_row: vec![Fp::ZERO],
+        };
+        let entries = Vec::new();
+        let claim_batch = LigeroClaimBatch {
+            coefficients: Vec::new(),
+            blind_claim: Fp::ZERO,
+        };
+        let claim_blind_check = LigeroClaimBlindCheck {
+            combined_row: Vec::new(),
+        };
+        let quadratic_batch = LigeroQuadraticBatch::default();
 
         let circle = v4_circle_params();
-        let circle_indices =
-            ligero_proximity_indices(IMPLEMENTED_BUNDLE_LIGERO_LABEL, root, circle, seed);
+        let circle_indices = ligero_opening_indices(
+            IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+            root,
+            circle,
+            &proximity_claim,
+            &entries,
+            &claim_batch,
+            &claim_blind_check,
+            &quadratic_batch,
+            seed,
+        );
         assert_eq!(circle_indices.len(), circle.openings);
         assert!(circle_indices
             .iter()
@@ -5992,10 +6654,146 @@ mod tests {
         );
 
         let rs = crate::ligero::v2_ligero_params();
-        let rs_indices = ligero_proximity_indices(IMPLEMENTED_BUNDLE_LIGERO_LABEL, root, rs, seed);
+        let rs_indices = ligero_opening_indices(
+            IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+            root,
+            rs,
+            &proximity_claim,
+            &entries,
+            &claim_batch,
+            &claim_blind_check,
+            &quadratic_batch,
+            seed,
+        );
         assert!(
             rs_indices.iter().all(|&index| index >= rs.row_len),
             "RS proximity queries must remain disjoint from systematic openings"
+        );
+    }
+
+    #[test]
+    fn opening_indices_bind_every_prover_response() {
+        let params = v4_circle_params();
+        let root = [0x31; 32];
+        let seed = [0x79; 32];
+        let proximity_claim = LigeroProximityClaim {
+            combined_row: vec![Fp::from_u64(2), Fp::from_u64(3)],
+        };
+        let entries = vec![ImplementedCircuitBundleEntry {
+            proof: CircuitSumcheckProof {
+                layers: vec![crate::sumcheck::CircuitLayerProof {
+                    rounds: vec![[Fp::from_u64(5), Fp::from_u64(7)]],
+                    next_claims: [Fp::from_u64(11), Fp::from_u64(13)],
+                }],
+            },
+        }];
+        let claim_batch = LigeroClaimBatch {
+            coefficients: vec![Fp::from_u64(17), Fp::from_u64(19)],
+            blind_claim: Fp::from_u64(23),
+        };
+        let claim_blind_check = LigeroClaimBlindCheck {
+            combined_row: vec![Fp::from_u64(29), Fp::from_u64(31)],
+        };
+        let quadratic_batch = LigeroQuadraticBatch {
+            quotient: vec![Fp::from_u64(37), Fp::from_u64(41)],
+        };
+        let baseline = ligero_opening_indices(
+            IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+            root,
+            params,
+            &proximity_claim,
+            &entries,
+            &claim_batch,
+            &claim_blind_check,
+            &quadratic_batch,
+            seed,
+        );
+
+        let mut changed_proximity = proximity_claim.clone();
+        changed_proximity.combined_row[0] = changed_proximity.combined_row[0] + Fp::ONE;
+        assert_ne!(
+            baseline,
+            ligero_opening_indices(
+                IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+                root,
+                params,
+                &changed_proximity,
+                &entries,
+                &claim_batch,
+                &claim_blind_check,
+                &quadratic_batch,
+                seed,
+            )
+        );
+
+        let mut changed_entries = entries.clone();
+        changed_entries[0].proof.layers[0].rounds[0][0] =
+            changed_entries[0].proof.layers[0].rounds[0][0] + Fp::ONE;
+        assert_ne!(
+            baseline,
+            ligero_opening_indices(
+                IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+                root,
+                params,
+                &proximity_claim,
+                &changed_entries,
+                &claim_batch,
+                &claim_blind_check,
+                &quadratic_batch,
+                seed,
+            )
+        );
+
+        let mut changed_claim_batch = claim_batch.clone();
+        changed_claim_batch.blind_claim = changed_claim_batch.blind_claim + Fp::ONE;
+        assert_ne!(
+            baseline,
+            ligero_opening_indices(
+                IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+                root,
+                params,
+                &proximity_claim,
+                &entries,
+                &changed_claim_batch,
+                &claim_blind_check,
+                &quadratic_batch,
+                seed,
+            )
+        );
+
+        let mut changed_claim_blind_check = claim_blind_check.clone();
+        changed_claim_blind_check.combined_row[0] =
+            changed_claim_blind_check.combined_row[0] + Fp::ONE;
+        assert_ne!(
+            baseline,
+            ligero_opening_indices(
+                IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+                root,
+                params,
+                &proximity_claim,
+                &entries,
+                &claim_batch,
+                &changed_claim_blind_check,
+                &quadratic_batch,
+                seed,
+            )
+        );
+
+        let mut changed_quadratic = quadratic_batch.clone();
+        changed_quadratic.quotient[0] = changed_quadratic.quotient[0] + Fp::ONE;
+        assert_ne!(
+            baseline,
+            ligero_opening_indices(
+                IMPLEMENTED_BUNDLE_LIGERO_LABEL,
+                root,
+                params,
+                &proximity_claim,
+                &entries,
+                &claim_batch,
+                &claim_blind_check,
+                &changed_quadratic,
+                seed,
+            )
         );
     }
 
@@ -6007,7 +6805,8 @@ mod tests {
         let revocation = signed_p4b_input(11, b"structured claim revocation");
         let issuer_projection = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
         let device_projection = EcdsaPublicProjection::message_hash_only(device.z);
-        let revocation_projection = EcdsaPublicProjection::full(&revocation);
+        let revocation_projection =
+            EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
         let issuer_witness = generate_witness(&issuer).unwrap();
         let device_witness = generate_witness(&device).unwrap();
         let revocation_witness = generate_witness(&revocation).unwrap();
@@ -6102,7 +6901,7 @@ mod tests {
         let transcript_seed = [7u8; 32];
         let root = [31u8; 32];
         let av = draw_mdoc_p4b_av(transcript_seed, root);
-        let mac_values = mdoc_p4b_mac_values(&issuer, &device);
+        let mac_values = mdoc_p4b_mac_values(&issuer, &device, None);
         let key_shares = p4b_microbench_key_shares();
         let mac_tags = key_shares
             .0
@@ -6113,6 +6912,7 @@ mod tests {
         let circuit = build_mac_batch_circuit(&av, &mac_tags).unwrap();
         let input = mac_batch_input_with_av(&key_shares, &av, &mac_values, &mac_tags).unwrap();
         let layers = circuit.evaluate_input(input).unwrap();
+        let pads = CircuitPads::fresh(&circuit);
         assert!(circuit.is_satisfied(&layers).unwrap());
 
         let mut generic_channel = mdoc_p4b_instance_channel(
@@ -6126,7 +6926,7 @@ mod tests {
         );
         let generic_start = Instant::now();
         let generic =
-            prove_evaluated_circuit(&circuit, &layers, root, &mut generic_channel).unwrap();
+            prove_evaluated_circuit(&circuit, &layers, &pads, root, &mut generic_channel).unwrap();
         let generic_prove = generic_start.elapsed();
 
         let mut sparse_channel = mdoc_p4b_instance_channel(
@@ -6142,6 +6942,7 @@ mod tests {
         let (sparse, prove_profile) = prove_evaluated_circuit_sorted_sparse_profiled(
             &circuit,
             &layers,
+            &pads,
             root,
             &mut sparse_channel,
         )
@@ -6167,7 +6968,18 @@ mod tests {
             verify_circuit_sorted_sparse_profiled(&circuit, &sparse, root, &mut verify_channel)
                 .unwrap();
         let sparse_verify = verify_start.elapsed();
-        assert_eq!(claims, sparse.input_claims);
+        let mut generic_verify_channel = mdoc_p4b_instance_channel(
+            transcript_seed,
+            root,
+            MDOC_P4B_MAC_BATCH_LABEL,
+            MdocP4bCircuitRole::MacBatch,
+            &projections,
+            &av,
+            &mac_tags,
+        );
+        let generic_claims =
+            verify_circuit(&circuit, &sparse, root, &mut generic_verify_channel).unwrap();
+        assert_eq!(claims, generic_claims);
 
         let prove_terms = prove_profile
             .layers

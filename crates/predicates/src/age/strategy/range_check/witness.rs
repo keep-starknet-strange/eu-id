@@ -1,4 +1,4 @@
-use crate::age::calendar::{max_days_at, valid_day_row_index};
+use crate::age::calendar::{max_days_at, valid_day_row_index, VALID_DAY_REAL_ROWS};
 use crate::age::strategy::range_check::preprocessed::Preprocessed;
 use crate::types::Trace;
 use crate::utils::random_m31_cell;
@@ -110,6 +110,9 @@ impl WitnessData {
 
         let mut valid_day_mult_data = vec![M31::zero(); 1 << valid_day_log_size];
         valid_day_mult_data[valid_day_row] = M31::from_u32_unchecked(1);
+        for value in valid_day_mult_data.iter_mut().skip(VALID_DAY_REAL_ROWS) {
+            *value = random_m31_cell();
+        }
         let valid_day_mult_trace = vec![CircleEvaluation::new(
             CanonicCoset::new(valid_day_log_size).circle_domain(),
             BaseColumn::from_iter(valid_day_mult_data),
@@ -117,7 +120,7 @@ impl WitnessData {
 
         // Class-D blinded multiplicity columns for the three delta range tables:
         // real count (1) on the value row, fresh random on the reserved dummy
-        // upper half.
+        // reserved dummy suffix.
         let single = |val: u32| vec![M31::from_u32_unchecked(val)];
         let day_delta_mult_trace = vec![Preprocessed::day_range()
             .claim()
@@ -280,7 +283,9 @@ fn text_digit_bytes(text: &[u8; DOB_TEXT_LEN]) -> [u8; DOB_TEXT_DIGITS] {
 mod class_c_tests {
     use super::*;
     use crate::age::types::{Date, PublicInput};
+    use air_core::claim_mask::CLAIM_MASK_MIN_LOG_SIZE;
     use stwo::prover::backend::simd::m31::N_LANES;
+    use stwo::prover::backend::Column as _;
 
     fn test_witness() -> Witness {
         let public = PublicInput::new(
@@ -342,5 +347,22 @@ mod class_c_tests {
             first, second,
             "age inactive cells must be fresh per trace (differ across two generations)"
         );
+    }
+
+    #[test]
+    fn valid_day_dummy_multiplicities_are_fresh() {
+        let witness = test_witness();
+        let preprocessed = Preprocessed::new(&witness.public.bounds);
+        let first = WitnessData::new(&witness, &preprocessed, None);
+        let second = WitnessData::new(&witness, &preprocessed, None);
+        let dummy_range = VALID_DAY_REAL_ROWS..1 << CLAIM_MASK_MIN_LOG_SIZE;
+        let first_dummy: Vec<u32> = dummy_range
+            .clone()
+            .map(|row| first.valid_day_mult_trace[0].values.at(row).0)
+            .collect();
+        let second_dummy: Vec<u32> = dummy_range
+            .map(|row| second.valid_day_mult_trace[0].values.at(row).0)
+            .collect();
+        assert_ne!(first_dummy, second_dummy);
     }
 }

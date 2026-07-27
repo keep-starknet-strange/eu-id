@@ -18,10 +18,13 @@ use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
+
+pub const BIT_DECOMPOSITION_CLAIM_COUNT: usize = 3;
 
 /// Column layout shared by both prover and verifier: it depends only on the
 /// public input (its bounds), never on the witness.
@@ -31,8 +34,8 @@ fn layout(public: &PublicInput) -> TreeLayout {
     let valid_day = valid_date_ranges()[0].domain.log_size();
     let witness = WitnessData::log_size();
     TreeLayout {
-        // Tree 0: calendar (2) + valid-day (2).
-        preprocessed: vec![cal, cal, valid_day, valid_day],
+        // Tree 0: calendar (2) + valid-day value pair and dummy selector (3).
+        preprocessed: vec![cal, cal, valid_day, valid_day, valid_day],
         // Tree 1: bit-decomposed witness columns + calendar/valid-day multiplicities.
         trace: std::iter::repeat_n(witness, WitnessData::trace_columns(bounds))
             .chain([cal, valid_day])
@@ -191,6 +194,17 @@ impl BitDecompositionVerifier {
 }
 
 impl Air for BitDecompositionVerifier {
+    fn validate_structure(&self) -> Result<(), VerificationError> {
+        if self.claimed_sums.len() != BIT_DECOMPOSITION_CLAIM_COUNT {
+            return Err(VerificationError::InvalidStructure(format!(
+                "age bit-decomposition claim count is {}, expected {}",
+                self.claimed_sums.len(),
+                BIT_DECOMPOSITION_CLAIM_COUNT,
+            )));
+        }
+        Ok(())
+    }
+
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         self.public.mix_into(channel);
     }
@@ -258,4 +272,25 @@ fn component_refs(c: &BitDecompositionComponents) -> Vec<&dyn Component> {
 /// Borrow the three built components as `dyn ComponentProver`, in commit order.
 fn prover_component_refs(c: &BitDecompositionComponents) -> Vec<&dyn ComponentProver<SimdBackend>> {
     vec![&c.0, &c.1, &c.2]
+}
+
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+    use crate::age::types::Date;
+
+    #[test]
+    fn verifier_rejects_a_fourth_claimed_sum() {
+        let public = PublicInput::new(
+            Date {
+                year: 2025,
+                month: 7,
+                day: 1,
+            },
+            18,
+        );
+        let verifier =
+            BitDecompositionVerifier::new(&public, vec![QM31::from_u32_unchecked(0, 0, 0, 0); 4]);
+        assert!(verifier.validate_structure().is_err());
+    }
 }

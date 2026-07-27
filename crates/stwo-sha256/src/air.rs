@@ -14,6 +14,9 @@
 //! component's sum individually. Both `air_core::prove` and `air_core::verify`
 //! mix identically, so the round trip is self-consistent.
 
+use air_core::claim_mask::{
+    ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_MIN_LOG_SIZE, CLAIM_MASK_TRACE_COLUMNS,
+};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
@@ -31,7 +34,6 @@ use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
-#[cfg(feature = "gkr-spike")]
 use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
@@ -45,6 +47,7 @@ use stwo_constraint_framework::EvalAtRow;
 use stwo_constraint_framework::PointEvaluator;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
+use crate::claim_mask::{validate_claim_masks, ShaClaimMaskConfigError};
 use crate::components::{
     all_preprocessed_column_ids, consumer_preprocessed_column_ids, range_log_size, RangeKEval,
     Sha256Relations, RANGE_TABLES,
@@ -62,14 +65,19 @@ use crate::gkr_spike::{
     xor_8_table_denominator_mle_eval, Xor8GkrProofWire,
 };
 use crate::interaction::{
-    generate_consumer_interaction_trace, generate_interaction_trace, sha_lookups_per_row,
-    InteractionClaim,
+    generate_consumer_interaction_trace, generate_interaction_trace,
+    generate_interaction_trace_with_claim_masks, sha_lookups_per_row, InteractionClaim,
 };
 use crate::multiplicities::range_k_multiplicities;
-use crate::preprocessed::{generate_preprocessed_trace, preprocessed_log_sizes, LOG_SIZE_16};
+use crate::preprocessed::{
+    generate_preprocessed_trace, generate_preprocessed_trace_with_range_min,
+    preprocessed_log_sizes, preprocessed_log_sizes_with_range_min, LOG_SIZE_16,
+};
 use crate::relations::SharedShaTableRelations;
 use crate::trace::Layout;
 use crate::types::Sha256Witness;
+
+pub const SHA_LOCAL_RANGE_CLAIM_COUNT: usize = RANGE_TABLES.len();
 
 /// Column log-sizes per tree, shared by prover and verifier — they depend
 /// only on the public size surface (`log_n_rows`, `group_width`), never on the
@@ -80,10 +88,13 @@ fn layout(
     expose_digest: bool,
     field_exposure: &FieldExposure,
     shared_tables: bool,
+    claim_masked: bool,
 ) -> TreeLayout {
     TreeLayout {
         preprocessed: if shared_tables {
             consumer_preprocessed_log_sizes(log_n_rows)
+        } else if claim_masked {
+            preprocessed_log_sizes_with_range_min(group_width, log_n_rows, CLAIM_MASK_MIN_LOG_SIZE)
         } else {
             preprocessed_log_sizes(group_width, log_n_rows)
         },
@@ -92,6 +103,7 @@ fn layout(
             group_width,
             field_exposure.n_columns(),
             !shared_tables,
+            claim_masked,
         ),
         interaction: interaction_trace_log_sizes(
             log_n_rows,
@@ -99,6 +111,7 @@ fn layout(
             expose_digest,
             field_exposure,
             !shared_tables,
+            claim_masked,
         ),
     }
 }
@@ -173,6 +186,8 @@ pub struct Sha256Prover<'a> {
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
+    claim_masks: Option<Vec<ClaimMaskTrace>>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     #[cfg(feature = "gkr-spike")]
     xor_8_gkr_proof: Option<Xor8GkrProofWire>,
     #[cfg(feature = "gkr-spike")]
@@ -219,6 +234,7 @@ impl<'a> Sha256ColumnTask<'a> {
             self.group_width,
             &self.field_exposure,
             true,
+            0,
         );
         Sha256PreparedColumns { preprocessed, base }
     }
@@ -240,6 +256,8 @@ impl<'a> Sha256Prover<'a> {
             relations: None,
             interaction_claim: None,
             components: None,
+            claim_masks: None,
+            claim_mask_challenge: None,
             #[cfg(feature = "gkr-spike")]
             xor_8_gkr_proof: None,
             #[cfg(feature = "gkr-spike")]
@@ -314,12 +332,24 @@ impl<'a> Sha256Prover<'a> {
     }
 
     pub fn with_shared_tables(mut self, shared: SharedShaTableRelations) -> Self {
+        assert!(
+            self.claim_masks.is_none(),
+            "configure shared SHA tables before supplying ordered claim masks"
+        );
         self.shared_tables = Some(shared);
         self
     }
 
     fn uses_shared_tables(&self) -> bool {
         self.shared_tables.is_some()
+    }
+
+    fn local_range_min_log_size(&self) -> u32 {
+        if self.claim_masks.is_some() && !self.uses_shared_tables() {
+            CLAIM_MASK_MIN_LOG_SIZE
+        } else {
+            0
+        }
     }
 
     fn built_components(&self) -> &Sha256Components {
@@ -335,6 +365,42 @@ impl<'a> Sha256Prover<'a> {
         self.interaction_claim
             .as_ref()
             .expect("interaction claim is set during the interaction phase")
+    }
+
+    /// Claim-bearing component log sizes in exact component/serialization
+    /// order. This is the order in which the caller must take masks from the
+    /// global zero-sum ring.
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        let mut sizes = vec![self.log_n_rows];
+        if !self.uses_shared_tables() {
+            sizes.extend(
+                RANGE_TABLES
+                    .iter()
+                    .map(|&kind| range_log_size(kind).max(CLAIM_MASK_MIN_LOG_SIZE)),
+            );
+        }
+        sizes
+    }
+
+    /// Enable private claimed sums for the main SHA component and every local
+    /// range provider owned by this module.
+    pub fn with_claim_masks(
+        mut self,
+        traces: Vec<ClaimMaskTrace>,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Result<Self, ShaClaimMaskConfigError> {
+        validate_claim_masks(&self.ordered_claim_mask_log_sizes(), &traces)?;
+        self.claim_masks = Some(traces);
+        self.claim_mask_challenge = Some(challenge);
+        Ok(self)
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge.as_ref().map(|shared| {
+            shared
+                .require()
+                .expect("claim-mask challenge anchor must follow all masked SHA modules")
+        })
     }
 
     #[cfg(feature = "gkr-spike")]
@@ -359,6 +425,7 @@ impl Air for Sha256Prover<'_> {
             self.expose_digest,
             &self.field_exposure,
             self.uses_shared_tables(),
+            self.claim_masks.is_some(),
         )
         .mix_into(channel);
     }
@@ -387,6 +454,7 @@ impl Air for Sha256Prover<'_> {
             self.expose_digest,
             &self.field_exposure,
             self.uses_shared_tables(),
+            self.claim_masks.is_some(),
         )
     }
 
@@ -410,6 +478,7 @@ impl Air for Sha256Prover<'_> {
             self.group_width,
             self.log_n_rows,
             &self.preprocessed_column_ids(),
+            self.local_range_min_log_size(),
         ))
     }
 
@@ -423,6 +492,7 @@ impl Air for Sha256Prover<'_> {
             self.expose_digest,
             &self.field_exposure,
             !self.uses_shared_tables(),
+            self.claim_mask_beta(),
         ));
         #[cfg(feature = "gkr-spike")]
         {
@@ -480,7 +550,14 @@ impl AirProver for Sha256Prover<'_> {
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         let ids = self.preprocessed_column_ids();
+        let range_min_log_size = self.local_range_min_log_size();
         let preprocessed = match self.preprocessed.take() {
+            Some(_) if range_min_log_size != 0 => generated_preprocessed_for_ids(
+                self.group_width,
+                self.log_n_rows,
+                &ids,
+                range_min_log_size,
+            ),
             Some(evals) if !self.uses_shared_tables() => evals,
             Some(evals) => {
                 let full_ids = all_preprocessed_column_ids();
@@ -499,7 +576,12 @@ impl AirProver for Sha256Prover<'_> {
                     })
                     .collect()
             }
-            None => generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids),
+            None => generated_preprocessed_for_ids(
+                self.group_width,
+                self.log_n_rows,
+                &ids,
+                range_min_log_size,
+            ),
         };
         tb.extend_evals(preprocessed);
     }
@@ -509,7 +591,17 @@ impl AirProver for Sha256Prover<'_> {
         // evals when set, otherwise the (cached) generated trace. Do not `take` — the
         // evals must still be available for the later `write_preprocessed` call.
         let ids = self.preprocessed_column_ids();
+        let range_min_log_size = self.local_range_min_log_size();
         match &self.preprocessed {
+            Some(_) if range_min_log_size != 0 => {
+                let evals = generated_preprocessed_for_ids(
+                    self.group_width,
+                    self.log_n_rows,
+                    &ids,
+                    range_min_log_size,
+                );
+                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
+            }
             Some(evals) if !self.uses_shared_tables() => {
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, evals)
             }
@@ -533,7 +625,12 @@ impl AirProver for Sha256Prover<'_> {
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &selected)
             }
             None => {
-                let evals = generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids);
+                let evals = generated_preprocessed_for_ids(
+                    self.group_width,
+                    self.log_n_rows,
+                    &ids,
+                    range_min_log_size,
+                );
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
             }
         }
@@ -549,7 +646,14 @@ impl AirProver for Sha256Prover<'_> {
         // orchestrator commits each preprocessed column once and asks later
         // instances for only their non-duplicate subset — possibly none.
         let ids = self.preprocessed_column_ids();
+        let range_min_log_size = self.local_range_min_log_size();
         let preprocessed = match self.preprocessed.take() {
+            Some(_) if range_min_log_size != 0 => generated_preprocessed_for_ids(
+                self.group_width,
+                self.log_n_rows,
+                &ids,
+                range_min_log_size,
+            ),
             Some(evals) if !self.uses_shared_tables() => evals,
             Some(evals) => {
                 let full_ids = all_preprocessed_column_ids();
@@ -568,7 +672,12 @@ impl AirProver for Sha256Prover<'_> {
                     })
                     .collect()
             }
-            None => generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids),
+            None => generated_preprocessed_for_ids(
+                self.group_width,
+                self.log_n_rows,
+                &ids,
+                range_min_log_size,
+            ),
         };
         if selected_ids == ids.as_slice() {
             tb.extend_evals(preprocessed);
@@ -592,20 +701,75 @@ impl AirProver for Sha256Prover<'_> {
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let base = self.base.take().unwrap_or_else(|| {
-            build_base_trace(
+        let include_table_providers = !self.uses_shared_tables();
+        let range_min_log_size = self.local_range_min_log_size();
+        let main_columns = Layout::total_cols_with_fields(self.field_exposure.n_columns());
+        let mut base = match self.base.take() {
+            Some(prepared)
+                if range_min_log_size == 0
+                    && include_table_providers
+                    && prepared.len() == main_columns + RANGE_TABLES.len() =>
+            {
+                prepared
+            }
+            Some(mut prepared) => {
+                assert!(
+                    prepared.len() >= main_columns,
+                    "prepared SHA trace is missing main component columns"
+                );
+                prepared.truncate(main_columns);
+                if include_table_providers {
+                    for &kind in RANGE_TABLES {
+                        let log_size = range_log_size(kind).max(range_min_log_size);
+                        let mut mults = range_k_multiplicities(self.witness, kind);
+                        mults.resize(1usize << log_size, 0);
+                        prepared.push(mult_col_to_eval(&mults, log_size));
+                    }
+                }
+                prepared
+            }
+            None => build_base_trace(
                 self.witness,
                 self.log_n_rows,
                 self.group_width,
                 &self.field_exposure,
-                !self.uses_shared_tables(),
-            )
-        });
-        tb.extend_evals(base);
+                include_table_providers,
+                range_min_log_size,
+            ),
+        };
+
+        if let Some(masks) = &self.claim_masks {
+            let mut masked =
+                Vec::with_capacity(base.len() + masks.len() * CLAIM_MASK_TRACE_COLUMNS);
+            masked.extend(base.drain(..main_columns));
+            masked.extend(masks[0].columns().iter().cloned());
+            if include_table_providers {
+                for (index, multiplicity) in base.into_iter().enumerate() {
+                    masked.push(multiplicity);
+                    masked.extend(masks[index + 1].columns().iter().cloned());
+                }
+            }
+            tb.extend_evals(masked);
+        } else {
+            tb.extend_evals(base);
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let (interaction_evals, interaction_claim) = if self.uses_shared_tables() {
+        let (interaction_evals, interaction_claim) = if let Some(masks) = &self.claim_masks {
+            generate_interaction_trace_with_claim_masks(
+                self.relations(),
+                self.witness,
+                self.log_n_rows,
+                self.group_width,
+                self.expose_digest,
+                &self.field_exposure,
+                !self.uses_shared_tables(),
+                masks,
+                self.claim_mask_beta()
+                    .expect("enabled SHA claim masks have a shared challenge"),
+            )
+        } else if self.uses_shared_tables() {
             generate_consumer_interaction_trace(
                 self.relations(),
                 self.witness,
@@ -696,6 +860,7 @@ pub struct Sha256Verifier {
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
     components: Option<Sha256Components>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     #[cfg(feature = "gkr-spike")]
     xor_8_gkr_proof: Option<Xor8GkrProofWire>,
     #[cfg(feature = "gkr-spike")]
@@ -717,6 +882,7 @@ impl Sha256Verifier {
             interaction_claim,
             relations: None,
             components: None,
+            claim_mask_challenge: None,
             #[cfg(feature = "gkr-spike")]
             xor_8_gkr_proof: None,
             #[cfg(feature = "gkr-spike")]
@@ -775,8 +941,44 @@ impl Sha256Verifier {
         self
     }
 
+    /// Claim-bearing component log sizes in exact component/serialization
+    /// order.
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        let mut sizes = vec![self.log_n_rows];
+        if !self.uses_shared_tables() {
+            sizes.extend(
+                RANGE_TABLES
+                    .iter()
+                    .map(|&kind| range_log_size(kind).max(CLAIM_MASK_MIN_LOG_SIZE)),
+            );
+        }
+        sizes
+    }
+
+    /// Match a prover whose every SHA-owned interaction claim is masked.
+    pub fn with_claim_masks(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge.as_ref().map(|shared| {
+            shared
+                .require()
+                .expect("claim-mask challenge anchor must follow all masked SHA modules")
+        })
+    }
+
     fn uses_shared_tables(&self) -> bool {
         self.shared_tables.is_some()
+    }
+
+    fn local_range_min_log_size(&self) -> u32 {
+        if self.claim_mask_challenge.is_some() && !self.uses_shared_tables() {
+            CLAIM_MASK_MIN_LOG_SIZE
+        } else {
+            0
+        }
     }
 
     fn relations(&self) -> &Sha256Relations {
@@ -793,6 +995,21 @@ impl Sha256Verifier {
 }
 
 impl Air for Sha256Verifier {
+    fn validate_structure(&self) -> Result<(), VerificationError> {
+        let expected = if self.uses_shared_tables() {
+            0
+        } else {
+            SHA_LOCAL_RANGE_CLAIM_COUNT
+        };
+        if self.interaction_claim.range.len() != expected {
+            return Err(VerificationError::InvalidStructure(format!(
+                "SHA range claim count is {}, expected {expected}",
+                self.interaction_claim.range.len(),
+            )));
+        }
+        Ok(())
+    }
+
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         Stmt0::new(
             self.log_n_rows,
@@ -800,6 +1017,7 @@ impl Air for Sha256Verifier {
             self.expose_digest,
             &self.field_exposure,
             self.uses_shared_tables(),
+            self.claim_mask_challenge.is_some(),
         )
         .mix_into(channel);
     }
@@ -826,6 +1044,7 @@ impl Air for Sha256Verifier {
             self.expose_digest,
             &self.field_exposure,
             self.uses_shared_tables(),
+            self.claim_mask_challenge.is_some(),
         )
     }
 
@@ -849,6 +1068,7 @@ impl Air for Sha256Verifier {
             self.group_width,
             self.log_n_rows,
             &self.preprocessed_column_ids(),
+            self.local_range_min_log_size(),
         ))
     }
 
@@ -862,6 +1082,7 @@ impl Air for Sha256Verifier {
             self.expose_digest,
             &self.field_exposure,
             !self.uses_shared_tables(),
+            self.claim_mask_beta(),
         ));
         #[cfg(feature = "gkr-spike")]
         {
@@ -969,6 +1190,8 @@ struct Stmt0 {
     /// Only the enabled case is mixed so the legacy standalone transcript
     /// remains byte-identical.
     shared_tables: bool,
+    /// Whether every claim-bearing component carries four private mask columns.
+    claim_masked: bool,
 }
 impl Stmt0 {
     fn new(
@@ -977,6 +1200,7 @@ impl Stmt0 {
         expose_digest: bool,
         field_exposure: &FieldExposure,
         shared_tables: bool,
+        claim_masked: bool,
     ) -> Self {
         Self {
             log_n_rows,
@@ -985,6 +1209,7 @@ impl Stmt0 {
             n_field_columns: field_exposure.n_columns() as u32,
             n_field_yields: field_exposure.n_yields() as u32,
             shared_tables,
+            claim_masked,
         }
     }
 
@@ -996,6 +1221,9 @@ impl Stmt0 {
         channel.mix_u64(u64::from(self.n_field_yields));
         if self.shared_tables {
             channel.mix_u64(1);
+        }
+        if self.claim_masked {
+            channel.mix_u64(0x434c_4149_4d4d_4153);
         }
     }
 }
@@ -1029,6 +1257,7 @@ fn build_base_trace(
     group_width: u32,
     field_exposure: &FieldExposure,
     include_table_providers: bool,
+    range_min_log_size: u32,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
     let mut base_trace: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> =
         Vec::new();
@@ -1050,8 +1279,10 @@ fn build_base_trace(
     }
     // Multiplicity columns — same order as `Sha256Components::component_provers`.
     for &kind in RANGE_TABLES {
-        let mults = range_k_multiplicities(witness, kind);
-        base_trace.push(mult_col_to_eval(&mults, range_log_size(kind)));
+        let log_size = range_log_size(kind).max(range_min_log_size);
+        let mut mults = range_k_multiplicities(witness, kind);
+        mults.resize(1usize << log_size, 0);
+        base_trace.push(mult_col_to_eval(&mults, log_size));
     }
 
     base_trace
@@ -1065,18 +1296,30 @@ fn base_trace_log_sizes(
     group_width: u32,
     n_field_cols: usize,
     include_table_providers: bool,
+    claim_masked: bool,
 ) -> Vec<u32> {
     // Base columns + the dynamic multi-block field selector auxiliaries, all
     // at the trace's `log_n_rows`. Empty and single-block exposures leave this
     // at `Layout::TOTAL_COLS`.
     let mut out = vec![log_n_rows; Layout::total_cols_with_fields(n_field_cols)];
+    if claim_masked {
+        out.extend(std::iter::repeat_n(log_n_rows, CLAIM_MASK_TRACE_COLUMNS));
+    }
     let _ = group_width;
     if !include_table_providers {
         return out;
     }
     // 4 range mults, each at its own `range_log_size(kind)`.
     for &kind in RANGE_TABLES {
-        out.push(range_log_size(kind));
+        let log_size = if claim_masked {
+            range_log_size(kind).max(CLAIM_MASK_MIN_LOG_SIZE)
+        } else {
+            range_log_size(kind)
+        };
+        out.push(log_size);
+        if claim_masked {
+            out.extend(std::iter::repeat_n(log_size, CLAIM_MASK_TRACE_COLUMNS));
+        }
     }
     out
 }
@@ -1092,6 +1335,7 @@ fn interaction_trace_log_sizes(
     expose_digest: bool,
     field_exposure: &FieldExposure,
     include_table_providers: bool,
+    claim_masked: bool,
 ) -> Vec<u32> {
     let mut out = Vec::new();
 
@@ -1104,7 +1348,7 @@ fn interaction_trace_log_sizes(
     // that provider is on and one yield per exposed window byte) → batched
     // columns. Field bytes are virtual W-bit expressions and add no range
     // lookups. Sized at log_n_rows. See `interaction::sha256_interaction`.
-    let sha_cols = sha_lookups_per_row(expose_digest, field_exposure)
+    let sha_cols = (sha_lookups_per_row(expose_digest, field_exposure) + usize::from(claim_masked))
         .div_ceil(crate::interaction::SHA_CONSUMER_LOGUP_BATCH);
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
     let _ = group_width;
@@ -1113,9 +1357,14 @@ fn interaction_trace_log_sizes(
     }
     // 4 Range_k producers: 1 lookup each, at the kind's own log_size.
     for &kind in RANGE_TABLES {
+        let log_size = if claim_masked {
+            range_log_size(kind).max(CLAIM_MASK_MIN_LOG_SIZE)
+        } else {
+            range_log_size(kind)
+        };
         out.extend(std::iter::repeat_n(
-            range_log_size(kind),
-            num_paired_cols(1) * EXT,
+            log_size,
+            num_paired_cols(1 + usize::from(claim_masked)) * EXT,
         ));
     }
     out
@@ -1129,8 +1378,13 @@ fn generated_preprocessed_for_ids(
     group_width: u32,
     log_n_rows: u32,
     selected_ids: &[PreProcessedColumnId],
+    range_min_log_size: u32,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-    let (evals, ids, _log_sizes) = generate_preprocessed_trace(group_width, log_n_rows);
+    let (evals, ids, _log_sizes) = if range_min_log_size == 0 {
+        generate_preprocessed_trace(group_width, log_n_rows)
+    } else {
+        generate_preprocessed_trace_with_range_min(group_width, log_n_rows, range_min_log_size)
+    };
     selected_ids
         .iter()
         .map(|selected_id| {
@@ -1161,6 +1415,7 @@ struct Sha256Components {
 }
 
 impl Sha256Components {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         allocator: &mut TraceLocationAllocator,
         claim: &InteractionClaim,
@@ -1170,6 +1425,7 @@ impl Sha256Components {
         expose_digest: bool,
         field_exposure: &FieldExposure,
         include_table_providers: bool,
+        claim_mask_beta: Option<QM31>,
     ) -> Self {
         // The shared TraceLocationAllocator (seeded by the orchestrator with
         // every module's `preprocessed_column_ids` in commit order) runs the
@@ -1182,6 +1438,7 @@ impl Sha256Components {
                 relations: relations.clone(),
                 expose_digest,
                 field_exposure: field_exposure.clone(),
+                claim_mask_beta,
             },
             claim.sha256.claimed_sum,
         );
@@ -1190,13 +1447,19 @@ impl Sha256Components {
         let mut range = Vec::with_capacity(4);
         if include_table_providers {
             for (i, &kind) in RANGE_TABLES.iter().enumerate() {
+                let log_size = if claim_mask_beta.is_some() {
+                    range_log_size(kind).max(CLAIM_MASK_MIN_LOG_SIZE)
+                } else {
+                    range_log_size(kind)
+                };
                 range.push(FrameworkComponent::new(
                     allocator,
                     RangeKEval {
-                        log_size: range_log_size(kind),
+                        log_size,
                         kind,
                         relations: relations.clone(),
                         shared_tables: false,
+                        claim_mask_beta,
                     },
                     claim.range[i].claimed_sum,
                 ));

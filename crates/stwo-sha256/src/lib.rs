@@ -50,6 +50,7 @@
 //! - [`stark`] — prover/verifier entry points for the standalone component.
 
 pub mod air;
+pub mod claim_mask;
 pub mod components;
 pub mod constants;
 pub mod constraints;

@@ -1,5 +1,5 @@
 use crate::age::calendar::{
-    calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id,
+    calendar_index_col_id, calendar_max_days_col_id, valid_day_day_col_id, valid_day_dummy_col_id,
     valid_day_max_days_col_id, CalendarTableComponent, CalendarTableEval, ValidDayTableComponent,
     ValidDayTableEval,
 };
@@ -26,6 +26,7 @@ pub fn preprocessed_column_ids(bounds: &AgeBounds) -> Vec<PreProcessedColumnId> 
         calendar_index_col_id(bounds),
         valid_day_max_days_col_id(),
         valid_day_day_col_id(),
+        valid_day_dummy_col_id(),
         // Class-D blinded delta tables: each contributes a value + is_dummy pair.
         Preprocessed::day_range().blind_value_id(),
         Preprocessed::day_range().blind_dummy_id(),
@@ -49,6 +50,7 @@ pub fn components(
     day_delta_claimed_sum: QM31,
     month_delta_claimed_sum: QM31,
     year_delta_claimed_sum: QM31,
+    claim_mask_beta: Option<QM31>,
 ) -> (
     AgeRangeCheckComponent,
     CalendarTableComponent,
@@ -64,6 +66,7 @@ pub fn components(
             lookup_elements: lookup_elements.clone(),
             dob_binding,
             dob_binding_mode,
+            claim_mask_beta,
         },
         age_claimed_sum,
     );
@@ -72,6 +75,7 @@ pub fn components(
         CalendarTableEval {
             bounds: public.bounds,
             lookup_elements: lookup_elements.calendar,
+            claim_mask_beta,
         },
         cal_claimed_sum,
     );
@@ -79,22 +83,29 @@ pub fn components(
         allocator,
         ValidDayTableEval {
             lookup_elements: lookup_elements.valid_day,
+            claim_mask_beta,
         },
         valid_day_claimed_sum,
     );
     let day_delta_component = DayDeltaTableComponent::new(
         allocator,
-        Preprocessed::day_range().blind_eval(lookup_elements.day_delta),
+        Preprocessed::day_range()
+            .blind_eval(lookup_elements.day_delta)
+            .with_claim_mask(claim_mask_beta),
         day_delta_claimed_sum,
     );
     let month_delta_component = MonthDeltaTableComponent::new(
         allocator,
-        Preprocessed::month_range().blind_eval(lookup_elements.month_delta),
+        Preprocessed::month_range()
+            .blind_eval(lookup_elements.month_delta)
+            .with_claim_mask(claim_mask_beta),
         month_delta_claimed_sum,
     );
     let year_delta_component = YearDeltaTableComponent::new(
         allocator,
-        Preprocessed::year_range(&public.bounds).blind_eval(lookup_elements.year_delta),
+        Preprocessed::year_range(&public.bounds)
+            .blind_eval(lookup_elements.year_delta)
+            .with_claim_mask(claim_mask_beta),
         year_delta_claimed_sum,
     );
     (

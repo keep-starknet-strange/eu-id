@@ -269,6 +269,7 @@ fn collect_constraint_residuals_with_fields(
         // off to mirror the standalone (self-balancing) AIR.
         expose_digest: false,
         field_exposure,
+        claim_mask_beta: None,
     };
     let n_rows = 1usize << log_size;
     let mut all = Vec::new();

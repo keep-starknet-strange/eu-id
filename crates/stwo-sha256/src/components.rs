@@ -34,6 +34,7 @@
 //! so the matching trace generator (`crate::preprocessed`) and the
 //! evaluator stay in lock-step.
 
+use stwo::core::fields::qm31::QM31;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -499,6 +500,9 @@ pub struct RangeKEval {
     pub kind: RangeKind,
     pub relations: Sha256Relations,
     pub shared_tables: bool,
+    /// Post-tree-1 claimed-sum mask challenge. When present, four additional
+    /// trace columns hold one private `QM31` mask per row.
+    pub claim_mask_beta: Option<QM31>,
 }
 
 impl FrameworkEval for RangeKEval {
@@ -534,6 +538,9 @@ impl FrameworkEval for RangeKEval {
             }
         }
 
+        if let Some(beta) = self.claim_mask_beta {
+            air_core::claim_mask::add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -571,7 +578,7 @@ impl SharedProducer {
     /// producer — preprocessed value/group cells, `is_dummy` selector,
     /// multiplicity trace, interaction fraction — lives at this size.
     pub fn blind_log_size(self) -> u32 {
-        self.log_size() + 1
+        (self.log_size() + 1).max(air_core::claim_mask::CLAIM_MASK_MIN_LOG_SIZE)
     }
 
     /// Stable per-producer tag, matching its preprocessed-column family.
@@ -640,6 +647,9 @@ pub struct SharedProducerPairEval {
     /// the same order (see `shared_tables::PRODUCER_PAIRS`).
     pub producers: Vec<SharedProducer>,
     pub relations: Sha256Relations,
+    /// Post-tree-1 claimed-sum mask challenge. When present, four additional
+    /// trace columns hold one private `QM31` mask per row.
+    pub claim_mask_beta: Option<QM31>,
 }
 
 impl FrameworkEval for SharedProducerPairEval {
@@ -652,6 +662,9 @@ impl FrameworkEval for SharedProducerPairEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         for &producer in &self.producers {
             producer.emit_entry(&mut eval, &self.relations);
+        }
+        if let Some(beta) = self.claim_mask_beta {
+            air_core::claim_mask::add_claim_mask_fraction(&mut eval, beta);
         }
         eval.finalize_logup_in_pairs();
         eval

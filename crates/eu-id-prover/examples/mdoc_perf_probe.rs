@@ -11,10 +11,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "ec-coprocessor")]
+use eu_id_prover::mdoc::verify_mdoc_circuit_with_pcs_config_profiled;
 use eu_id_prover::mdoc::{
     demo_mdoc_circuit_fixture, demo_mdoc_module_shapes, mdoc_proof_byte_breakdown,
-    prove_mdoc_circuit, verify_mdoc_circuit, verify_mdoc_circuit_with_pcs_config_profiled,
-    MdocProofByteBreakdown,
+    prove_mdoc_circuit, verify_mdoc_circuit, MdocProofByteBreakdown,
 };
 use serde::Serialize;
 use stwo::core::pcs::PcsConfig;
@@ -190,7 +191,10 @@ fn main() {
         proof = Some(next);
     }
     let proof = proof.expect("at least one proof iteration ran");
-    let prove_ms_last = prove_times.last().expect("at least one iteration").as_millis();
+    let prove_ms_last = prove_times
+        .last()
+        .expect("at least one iteration")
+        .as_millis();
     let stark_prove_profile = proof.stark_prove_profile().clone();
     #[cfg(feature = "ec-coprocessor")]
     let p4b_prove_profile = proof.p4b_prove_profile().map(P4bProveProfileReport::from);

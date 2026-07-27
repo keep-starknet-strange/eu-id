@@ -96,15 +96,15 @@
 //! `sha2` / the `p256` crate, and [`fixtures`] is the deterministic catalogue of
 //! valid and adversarial witnesses the binding tasks diff against.
 
-pub(crate) mod claimed_sum_blinder;
 pub mod credential;
 pub mod fixtures;
 pub mod generator;
 pub mod mdoc;
+pub(crate) mod mdoc_cbor_stream;
 #[cfg(feature = "ec-coprocessor")]
 pub(crate) mod mdoc_mac;
+pub(crate) mod mdoc_scope;
 mod mdoc_validity;
-mod mdoc_window_bind;
 pub mod nonce;
 #[cfg(feature = "ec-coprocessor")]
 mod public_digest_bind;
@@ -158,9 +158,7 @@ pub fn prove_mdoc(
     request: &MdocPidRequest,
     policy: Policy,
 ) -> Result<(MdocProof, MdocStatement), Error> {
-    let mut extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
-    // Multi-nationality holders disclose an array; pick the code satisfying the policy before proving.
-    mdoc::select_accepted_nationality(&mut extracted, &policy);
+    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
     let statement =
         mdoc::MdocCircuitStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
@@ -274,8 +272,12 @@ pub mod ec_coprocessor {
         S4EcdsaPublicProjection::full(&input_from_stwo(input))
     }
 
+    pub fn public_key_projection_from_stwo(input: &EcdsaVerifyInput) -> S4EcdsaPublicProjection {
+        S4EcdsaPublicProjection::public_key_only(input.public_key.x.0, input.public_key.y.0)
+    }
+
     pub fn issuer_key_projection_from_stwo(input: &EcdsaVerifyInput) -> S4EcdsaPublicProjection {
-        S4EcdsaPublicProjection::issuer_key_only(input.public_key.x.0, input.public_key.y.0)
+        public_key_projection_from_stwo(input)
     }
 
     pub fn message_hash_projection_from_stwo(input: &EcdsaVerifyInput) -> S4EcdsaPublicProjection {

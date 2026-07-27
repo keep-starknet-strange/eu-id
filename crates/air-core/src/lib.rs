@@ -23,6 +23,7 @@
 //! Switching the system to a different (e.g. Stwo-friendly) hash is a one-line
 //! change to these aliases.
 
+pub mod claim_mask;
 pub mod relations;
 
 use std::collections::{HashMap, HashSet};
@@ -217,6 +218,14 @@ pub struct TreeLayout {
 /// input, draw the module's lookup relations, declare its column layout, expose
 /// its claimed LogUp sums, and assemble its AIR components.
 pub trait Air {
+    /// Reject malformed proof-carried module metadata before it can influence
+    /// layouts, transcript mixing, or the global LogUp balance. Implementations
+    /// with variable-length serialized claims must enforce their exact
+    /// component cardinality here.
+    fn validate_structure(&self) -> Result<(), VerificationError> {
+        Ok(())
+    }
+
     /// Bind this module's public statement to the shared transcript.
     fn mix_public(&self, channel: &mut Ch);
 
@@ -755,6 +764,9 @@ pub fn compute_canonical_preprocessed_root(
     modules: &mut [&mut dyn Air],
     config: PcsConfig,
 ) -> Result<CommitmentRoot, VerificationError> {
+    for module in modules.iter() {
+        module.validate_structure()?;
+    }
     let max_preprocessed_log_size = modules
         .iter()
         .flat_map(|module| module.layout().preprocessed)
@@ -844,6 +856,9 @@ pub fn verify_with_expected_preprocessed_root(
     proof: &StarkProof<Hasher>,
     expected_preprocessed_root: Option<CommitmentRoot>,
 ) -> Result<(), VerifyError> {
+    for module in modules.iter() {
+        module.validate_structure()?;
+    }
     if let Some(expected) = expected_preprocessed_root {
         let got = proof.commitments[0];
         if got != expected {
@@ -1042,6 +1057,32 @@ mod tests {
         preprocessed_log_size: u32,
     }
 
+    struct InvalidShapeModule;
+
+    impl Air for InvalidShapeModule {
+        fn validate_structure(&self) -> Result<(), VerificationError> {
+            Err(VerificationError::InvalidStructure(
+                "malformed module metadata".to_string(),
+            ))
+        }
+
+        fn mix_public(&self, _channel: &mut Ch) {}
+        fn draw_relations(&mut self, _channel: &mut Ch) {}
+        fn layout(&self) -> TreeLayout {
+            panic!("layout must not be read before structural validation")
+        }
+        fn claimed_sums(&self) -> Vec<QM31> {
+            panic!("claims must not be read before structural validation")
+        }
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            panic!("ids must not be read before structural validation")
+        }
+        fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+        fn components(&self) -> Vec<&dyn Component> {
+            Vec::new()
+        }
+    }
+
     impl Air for ShapeOnlyModule {
         fn mix_public(&self, _channel: &mut Ch) {}
         fn draw_relations(&mut self, _channel: &mut Ch) {}
@@ -1087,6 +1128,18 @@ mod tests {
             }
             other => panic!("expected InvalidStructure, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn canonical_root_rejects_module_structure_before_reading_layout() {
+        let mut module = InvalidShapeModule;
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], PcsConfig::default())
+            .expect_err("malformed module metadata must reject");
+        assert!(matches!(
+            error,
+            VerificationError::InvalidStructure(message)
+                if message == "malformed module metadata"
+        ));
     }
 
     #[test]

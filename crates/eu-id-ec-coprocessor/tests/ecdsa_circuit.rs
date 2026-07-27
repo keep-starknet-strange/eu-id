@@ -12,12 +12,12 @@ use eu_id_ec_coprocessor::ecdsa::{
     verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
     verify_implemented_circuit_proofs, verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle,
     verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot,
-    MdocP4bMacKeyShares, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
+    MdocP4bMacKeyShares, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, MDOC_P4B_MAC_HALF_COUNT,
 };
 use eu_id_ec_coprocessor::ligero::{
     commit_witness, v2_ligero_params, v4_circle_params, LigeroCode, LigeroParams,
 };
-use eu_id_ec_coprocessor::sumcheck::{circuit_otp_pad_values, prove_circuit};
+use eu_id_ec_coprocessor::sumcheck::{prove_circuit, CircuitPads};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;
 use p256::ecdsa::{Signature, SigningKey};
@@ -463,12 +463,19 @@ fn implemented_circuit_proofs_accept_honest_witness() {
 }
 
 #[test]
-fn implemented_circuit_proofs_reject_wrong_commitment_root() {
+fn unbound_circuit_proofs_derive_different_claims_under_wrong_root() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
     let proofs = prove_implemented_circuit_proofs(&input, &witness, [3u8; 32], TEST_SEED).unwrap();
 
-    assert!(verify_implemented_circuit_proofs(&proofs, [4u8; 32], TEST_SEED).is_err());
+    let honest =
+        verify_implemented_circuit_proofs(&proofs, [3u8; 32], TEST_SEED).expect("honest claims");
+    let wrong =
+        verify_implemented_circuit_proofs(&proofs, [4u8; 32], TEST_SEED).expect("derived claims");
+    assert_ne!(
+        honest, wrong,
+        "the low-level API is intentionally unbound, but its derived claims must bind the root; the production bundle rejects the wrong-root constraints through Ligero"
+    );
 }
 
 #[test]
@@ -670,16 +677,15 @@ fn implemented_circuit_bundle_rejects_prover_selected_ligero_params() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
     let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
-    bundle.params = LigeroParams {
-        row_len: 32,
-        degree_bound: 36,
-        codeword_len: 128,
-        openings: 4,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+    bundle.params.row_len = 0;
 
-    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
+    let verdict =
+        std::panic::catch_unwind(|| verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED));
+    assert!(
+        verdict.is_ok(),
+        "malformed proof-carried params must not panic the production verifier"
+    );
+    assert!(verdict.unwrap().is_err());
 }
 
 #[test]
@@ -832,11 +838,51 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
         bundle.claim_batch.coefficients.len(),
         bundle.params.claim_degree_bound()
     );
+    assert_eq!(
+        bundle.claim_blind_check.combined_row.len(),
+        bundle.params.claim_degree_bound()
+    );
     assert!(
         bundle.consistency_claim_values.is_empty(),
         "private consistency values must not be serialized"
     );
+    assert_eq!(
+        bundle.quadratic_batch.quotient.len(),
+        bundle.params.quadratic_degree_bound() - bundle.params.row_len,
+        "the committed claim-pad products require the exact Z_W quotient bound"
+    );
     verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).unwrap();
+
+    let mut corrupt_quadratic = bundle.clone();
+    corrupt_quadratic.quadratic_batch.quotient[0] =
+        corrupt_quadratic.quadratic_batch.quotient[0] + Fp::ONE;
+    assert!(
+        verify_implemented_circuit_bundle(&input, &corrupt_quadratic, TEST_SEED).is_err(),
+        "the production path must reject a forged quadratic response"
+    );
+
+    let mut corrupt_claim_blind_check = bundle.clone();
+    corrupt_claim_blind_check.claim_blind_check.combined_row[0] =
+        corrupt_claim_blind_check.claim_blind_check.combined_row[0] + Fp::ONE;
+    assert!(
+        verify_implemented_circuit_bundle(&input, &corrupt_claim_blind_check, TEST_SEED).is_err(),
+        "the production path must reject a forged claim-blind kernel response"
+    );
+
+    let mut noncanonical = bundle.clone();
+    noncanonical.proximity_claim_b = Some(bundle.proximity_claim.clone());
+    assert!(
+        verify_implemented_circuit_bundle(&input, &noncanonical, TEST_SEED).is_err(),
+        "unused legacy proof responses must be rejected, not ignored"
+    );
+
+    let mut corrupt_masked_sumcheck = bundle.clone();
+    corrupt_masked_sumcheck.entries[0].proof.layers[0].rounds[0][0] =
+        corrupt_masked_sumcheck.entries[0].proof.layers[0].rounds[0][0] + Fp::ONE;
+    assert!(
+        verify_implemented_circuit_bundle(&input, &corrupt_masked_sumcheck, TEST_SEED).is_err(),
+        "the production path must reject a forged masked sumcheck response"
+    );
 
     let mut missing_entry = bundle.clone();
     missing_entry.entries.pop();
@@ -949,10 +995,10 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
     )
     .unwrap();
 
-    assert_eq!(bundle.mac_tags.len(), 6);
+    assert_eq!(bundle.mac_tags.len(), MDOC_P4B_MAC_HALF_COUNT);
     assert_eq!(
-        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 9987,
-        "the six MAC halves include three exact-byte canonicality witnesses"
+        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 13_316,
+        "the eight MAC halves include four exact-byte canonicality witnesses"
     );
     assert!(
         bundle.consistency_claim_values.is_empty(),
@@ -985,6 +1031,52 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
     }
     verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
         .unwrap();
+
+    let mut corrupt_claim_blind_check = bundle.clone();
+    corrupt_claim_blind_check.claim_blind_check.combined_row[0] =
+        corrupt_claim_blind_check.claim_blind_check.combined_row[0] + Fp::ONE;
+    assert!(
+        verify_mdoc_p4b_circuit_bundle(
+            &issuer_public,
+            &device_public,
+            None,
+            &corrupt_claim_blind_check,
+            TEST_SEED
+        )
+        .is_err(),
+        "the split production path must reject a forged kernel response"
+    );
+
+    let mut malformed_params = bundle.clone();
+    malformed_params.params.row_len = 0;
+    let malformed_verdict = std::panic::catch_unwind(|| {
+        verify_mdoc_p4b_circuit_bundle(
+            &issuer_public,
+            &device_public,
+            None,
+            &malformed_params,
+            TEST_SEED,
+        )
+    });
+    assert!(
+        malformed_verdict.is_ok(),
+        "malformed split proof params must not panic the production verifier"
+    );
+    assert!(malformed_verdict.unwrap().is_err());
+
+    let mut noncanonical = bundle.clone();
+    noncanonical.claim_batch_b = Some(bundle.claim_batch.clone());
+    assert!(
+        verify_mdoc_p4b_circuit_bundle(
+            &issuer_public,
+            &device_public,
+            None,
+            &noncanonical,
+            TEST_SEED
+        )
+        .is_err(),
+        "unused legacy split responses must be rejected, not ignored"
+    );
 
     let mut tampered = bundle.clone();
     tampered.mac_tags[0][0] ^= 1;
@@ -1101,7 +1193,10 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
     let revocation_witness = generate_witness(&revocation).unwrap();
     let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
     let device_public = EcdsaPublicProjection::message_hash_only(device.z);
-    let revocation_public = EcdsaPublicProjection::message_hash_only(revocation.z);
+    let revocation_public = EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
+    assert_eq!(revocation_public.z, None);
+    assert_eq!(revocation_public.r, None);
+    assert_eq!(revocation_public.s, None);
     let mac_key_shares = test_mac_key_shares();
 
     let bundle = prove_mdoc_p4b_circuit_bundle(
@@ -1126,6 +1221,15 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
         TEST_SEED,
     )
     .unwrap();
+    let serialized = bincode::serialize(&bundle).unwrap();
+    for private_value in [revocation.z, revocation.r, revocation.s] {
+        assert!(
+            !serialized
+                .windows(private_value.len())
+                .any(|window| window == private_value),
+            "serialized revocation bundle contains a private digest/signature operand"
+        );
+    }
 
     assert!(
         verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
@@ -1133,18 +1237,17 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
         "three-set bundle must not verify against a two-set expectation"
     );
 
-    let mut wrong_revocation_z = revocation_public;
-    wrong_revocation_z.z.as_mut().unwrap()[31] ^= 1;
+    let wrong_revocation_key = EcdsaPublicProjection::public_key_only(issuer.qx, issuer.qy);
     assert!(
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
             &device_public,
-            Some(&wrong_revocation_z),
+            Some(&wrong_revocation_key),
             &bundle,
             TEST_SEED,
         )
         .is_err(),
-        "tampered revocation message-hash projection must be rejected"
+        "a different valid revocation public key must be rejected"
     );
 
     let two_set_bundle = prove_mdoc_p4b_circuit_bundle(
@@ -1271,15 +1374,16 @@ fn c14_legacy_transcript_bundle_entry(
 ) -> ImplementedCircuitBundleEntry {
     let circuit = build_c14_c15_final_check_circuit().unwrap();
     let circuit_input = c14_c15_final_check_input(input, witness).unwrap();
+    let pads = CircuitPads::fresh(&circuit);
     let mut committed_input = circuit_input.clone();
-    committed_input.extend(circuit_otp_pad_values(&circuit));
+    committed_input.extend_from_slice(pads.values());
     let params = v2_ligero_params();
     let commitment = commit_witness(&committed_input, params).unwrap();
     let root = commitment.root();
     let layers = circuit.evaluate_input(circuit_input).unwrap();
     let mut channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     channel.mix_bytes(b"s4-ecdsa-c14-c15-final-check");
-    let proof = prove_circuit(&circuit, &layers, root, &mut channel).unwrap();
+    let proof = prove_circuit(&circuit, &layers, &pads, root, &mut channel).unwrap();
 
     ImplementedCircuitBundleEntry { proof }
 }

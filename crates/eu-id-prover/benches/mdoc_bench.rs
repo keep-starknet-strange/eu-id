@@ -271,6 +271,7 @@ fn longfellow_case(
     config: PcsConfig,
 ) -> MdocBenchCase {
     let request = MdocPidRequest {
+        request_binding: [0; 32],
         doctype: vector.doctype.to_string(),
         namespace: vector.namespace.to_string(),
         attributes,

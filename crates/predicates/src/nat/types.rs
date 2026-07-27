@@ -7,6 +7,10 @@ use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::ProvingError;
 
+/// The fixed log-9 nationality trace reserves at least 256 rows for
+/// polynomial masking, leaving at most 256 active signed array entries.
+pub const MAX_PRESENTED_NATIONALITIES: usize = 256;
+
 /// Code space for the accepted nationality table: ISO 3166-1 numeric codes (the
 /// POC path, mapped host-side) or the 2-byte ASCII alpha-2 codes stored as
 /// `256*b0 + b1` (the mdoc path, bound directly to the exposed window).
@@ -72,15 +76,19 @@ pub struct PrivateInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Witness {
     pub public: PublicInput,
-    /// The single nationality code selected by the prover.
-    pub nationality: u32,
-    /// Row index of `nationality` in the sorted `acceptable` table.
-    pub nat_index: usize,
+    /// Every signed nationality, in credential array order.
+    pub nationalities: Vec<u32>,
+    /// Per-entry membership bits. Honest generation marks every accepted
+    /// entry; the AIR proves that at least one marked entry is accepted.
+    pub accepted: Vec<bool>,
+    /// Row in the sorted accepted table for every marked entry.
+    pub accepted_rows: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proof {
     pub public: PublicInput,
+    pub nationality_count: u16,
     pub nat_claimed_sum: QM31,
     pub table_claimed_sum: QM31,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
@@ -104,6 +112,8 @@ pub enum InputError {
     InvalidNationalityCode(u32),
     #[error("no matching nationality found in acceptable set")]
     NoMatch,
+    #[error("nationality array length {count} exceeds the supported maximum {max}")]
+    TooManyNationalities { count: usize, max: usize },
     #[error("proof is invalid: claimed logup sums do not cancel")]
     InvalidProof,
 }

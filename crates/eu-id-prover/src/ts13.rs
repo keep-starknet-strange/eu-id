@@ -11,30 +11,34 @@ use crate::mdoc::{
     MdocCircuitStatement, MdocRevocationPublicInputs,
 };
 
-// Regenerated 2026-07-24 for circuit revision 4: terminal SHA digest limbs now
-// recompose from Range8-pinned bytes instead of using a 2^16-row Range16
-// table, changing the SHA-256 constraint set and mdoc preprocessed root.
+// Published identifiers pin the default `ec-coprocessor` circuit composition.
+// The no-default backend is not a published TS13 profile and canonical artifact
+// verification there fails closed. Regenerated 2026-07-24 for circuit revision
+// 5: exact CBOR semantic scope, exact MSO/revocation SHA bindings, private
+// revocation coprocessor rejoin, and committed cyclic claimed-sum masks replace
+// the offset-window/public-blinder design.
 // Old hashes:
 // 5445c650a6f57d6b...0d4f21e6 (revision 1); a43f41e4745a053a...a3232591
 // (revision 2, SHA field exposure from constrained W bit planes 2026-07-13);
-// d09852c1343dcf59...2b84fc96 (revision 3, split-pack deletion 2026-07-21).
+// d09852c1343dcf59...2b84fc96 (revision 3, split-pack deletion 2026-07-21);
+// b1f58a97cbcffc1b...04252bf3 (revision 4, terminal Range8 checks 2026-07-24).
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "b1f58a97cbcffc1b4172733c9d89c138b6291bdc59415afe3883307104252bf3";
-// Regenerated 2026-07-24 after replacing terminal Range16 limb checks with
-// Range8 byte checks. Value is the real
+    "8fbe779f3371058468aed76a720730a346ad9628dc7b8920f14b41f4f386886f";
+// Regenerated 2026-07-24 for revision 5. Value is the real
 // `commitments[0]` of the published N=1 revocation-enabled age_over_18 mdoc
 // proof (captured via ts13_evidence_pack_n1_measurements). Old values:
 // 3532fa24129acba9...8583169f (Class-D blinding repin 2026-07-08);
 // ba943f9deed4cf5e...55e8a8b7 (P4b coprocessor revocation reroute 2026-07-08);
-// bc8ad8a2f9440f66...2a9babcf (split-pack deletion 2026-07-21). See
-// tasks/p4c-leakage-table.md.
+// bc8ad8a2f9440f66...2a9babcf (split-pack deletion 2026-07-21);
+// ea5754a08fdd9ca9...6b7d3c7c (revision 4, terminal Range8 checks 2026-07-24).
+// See tasks/p4c-leakage-table.md.
 pub const TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT: &[u8; 32] =
-    b"\xea\x57\x54\xa0\x8f\xdd\x9c\xa9\xfc\x1a\xbb\x41\x4d\x7f\x8f\x3c\xe5\x4c\x5f\xc8\x6f\x10\x29\x77\x5c\xdd\x69\x4b\x6b\x7d\x3c\x7c";
+    b"\xd8\x24\xfc\xe2\x4d\xaa\xe4\xc6\x27\x46\x60\x87\xf9\x1b\xfb\x2e\xa5\x69\x24\xd6\x08\x02\xb6\x13\x44\x58\xa0\x04\x7d\x2e\x7b\xae";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CIRCUIT_REVISION: u32 = 4;
+pub const TS13_CIRCUIT_REVISION: u32 = 5;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
@@ -355,11 +359,11 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
             rationale: "caller-bound revocation statement",
         },
         Ts13ZkExposure {
-            name: "revocation ECDSA instance (pair message hash, signature)",
-            classification: PublicByDesign,
-            rationale: "proof-carried coprocessor instance; identical exposure to the \
-                        prior in-STARK claim's public inputs — the hash is dictionary- \
-                        matchable against a public sorted-pair list by design",
+            name: "revocation ECDSA message hash and signature",
+            classification: PerfectlyMasked,
+            rationale: "private coprocessor witness rejoined to the authenticated revocation \
+                        digest through the fixed-width P4b MAC; only the revocation key and \
+                        epoch remain caller-bound public inputs",
         },
         Ts13ZkExposure {
             name: "longfellow-libzk-v1 proof bytes",
@@ -384,7 +388,9 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
         Ts13ZkExposure {
             name: "LogUp claimed sums",
             classification: PerfectlyMasked,
-            rationale: "Q-015 blinder pairs make each published private-data sum uniform",
+            rationale: "fresh committed per-component masks have private cyclic targets whose \
+                        total is zero; a nonzero post-commitment challenge masks every private \
+                        sum without serializing the masks",
         },
         Ts13ZkExposure {
             name: "SHA w/a/e decoy bit columns",
@@ -481,13 +487,14 @@ impl Ts13MdocProofArtifact {
         statement: &MdocCircuitStatement,
     ) -> Result<(), Ts13MdocProofArtifactError> {
         self.verify_statement_revocation_binding(statement)?;
-        self.verify_revocation_binding(extracted, self.preprocessed_root)?;
+        let expected_preprocessed_root = ts13_default_preprocessed_root();
+        self.verify_revocation_binding(extracted, expected_preprocessed_root)?;
         let proof: MdocCircuitProof = bincode::deserialize(&self.mdoc_proof)
             .map_err(|_| Ts13MdocProofArtifactError::ProofDecode)?;
         verify_mdoc_circuit_with_preprocessed_root(
             &proof,
             statement,
-            Blake2sHash(self.preprocessed_root),
+            Blake2sHash(expected_preprocessed_root),
         )
         .map_err(|_| Ts13MdocProofArtifactError::MdocProof)
     }
@@ -500,6 +507,17 @@ impl Ts13MdocProofArtifact {
             return Err(Ts13MdocProofArtifactError::StatementRevocationMissing);
         };
         if public_inputs != &MdocRevocationPublicInputs::from(&self.revocation_statement) {
+            return Err(Ts13MdocProofArtifactError::StatementRevocationMismatch);
+        }
+        let Some(range) = &statement.ts13_revocation_range else {
+            return Err(Ts13MdocProofArtifactError::StatementRevocationMismatch);
+        };
+        if range.id != self.revocation_witness.id
+            || range.id_lo != self.revocation_witness.id_lo
+            || range.id_hi != self.revocation_witness.id_hi
+            || statement.ts13_revocation_signature.as_ref()
+                != Some(&self.revocation_witness.signature)
+        {
             return Err(Ts13MdocProofArtifactError::StatementRevocationMismatch);
         }
         Ok(())
@@ -697,7 +715,7 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
-        assert_eq!(tuple.circuit_revision, 4);
+        assert_eq!(tuple.circuit_revision, 5);
         assert_eq!(tuple.pcs_log_blowup_factor, 2);
         assert_eq!(tuple.pcs_queries, 54);
         assert_eq!(tuple.pcs_pow_bits, 20);

@@ -248,6 +248,7 @@ fn longfellow_request(
     attributes: Vec<MdocRequestedAttribute>,
 ) -> MdocPidRequest {
     MdocPidRequest {
+        request_binding: [0; 32],
         doctype: vector.doctype.to_string(),
         namespace: vector.namespace.to_string(),
         attributes,
@@ -835,6 +836,13 @@ fn ts13_revocation_artifact_binds_to_mdoc_mso() {
         id + 1,
         revocation_statement.epoch,
     );
+    let mdoc_statement = mdoc_statement
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id: witness.id,
+            id_lo: witness.id_lo,
+            id_hi: witness.id_hi,
+        })
+        .with_ts13_revocation_signature(witness.signature.clone());
     let expected_preprocessed_root = ts13_default_preprocessed_root();
     let artifact = Ts13MdocProofArtifact {
         circuit_hash: ts13_default_circuit_hash(),
@@ -863,6 +871,10 @@ fn ts13_revocation_artifact_binds_to_mdoc_mso() {
     wrong_root.preprocessed_root[0] ^= 1;
     assert!(matches!(
         wrong_root.verify_revocation_binding(&extracted, expected_preprocessed_root),
+        Err(Ts13MdocProofArtifactError::PreprocessedRoot)
+    ));
+    assert!(matches!(
+        wrong_root.verify_mdoc_and_revocation(&extracted, &mdoc_statement),
         Err(Ts13MdocProofArtifactError::PreprocessedRoot)
     ));
 
@@ -2376,6 +2388,11 @@ fn ts13_evidence_pack_n1_measurements() {
     let proof = prove_mdoc_circuit(&extracted, &statement).expect("TS13 N=1 proves");
     let prove_ms = prove_start.elapsed().as_millis();
     let expected_preprocessed_root = proof.stark_proof.commitments[0].0;
+    assert_eq!(
+        expected_preprocessed_root,
+        ts13_default_preprocessed_root(),
+        "generated TS13 tree-0 root must match the published revision pin",
+    );
 
     let verify_start = Instant::now();
     verify_mdoc_circuit_with_preprocessed_root(

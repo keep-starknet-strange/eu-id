@@ -32,7 +32,7 @@
 //! WO-P6: the whole module is parametrized by a [`CircleGeom`] so the aspect
 //! ratios coexist — ℓ=64 (v2: 64 data / 256 message / 2048 codeword / 512
 //! product), ℓ=128 (v3: 128 / 512 / 4096 / 1024), and ℓ=256 (v4: 256 / 512 /
-//! 4096 / 1024). Every `Tables`/
+//! 4096 / 2048). Every `Tables`/
 //! `DataWindow` is cached per geometry; the universal basis is shared.
 
 use std::collections::HashMap;
@@ -94,17 +94,15 @@ pub const CIRCLE_GEOM_L128: CircleGeom = CircleGeom {
     product_domain_len: 1024,
 };
 
-/// ℓ=256 geometry (v4 params): same message/codeword/product domains as
-/// ℓ=128, twice the data slots per row. Rows halve, so the per-column
-/// openings (the dominant proof-size slice) halve; the claim bound moves to
-/// 256 + 512 + 2 = 770, still under the same 1024 product domain, so the
-/// claim-batch FFT sizes are unchanged. The per-row value-pad budget drops to
-/// 512 − 256 = 256, which still covers the opening count (t = 176).
+/// ℓ=256 geometry (v4 params). The committed-mask layer proves products of two
+/// degree-512 rows, whose circle-basis bound is `2*512 + 2 = 1026`; therefore
+/// the product domain is 2048, the smallest power of two strictly above that
+/// bound. The per-row value-pad budget is `512 − 256 = 256`.
 pub const CIRCLE_GEOM_L256: CircleGeom = CircleGeom {
     data_slots: 256,
     row_message_len: 512,
     codeword_len: 4096,
-    product_domain_len: 1024,
+    product_domain_len: 2048,
 };
 
 /// (p + 1) / 2^96 for the P-256 base prime: the odd cofactor of the circle
@@ -437,6 +435,77 @@ pub fn circle_product_ifft(geom: CircleGeom, mut evals: Vec<Fp>) -> Result<Vec<F
     Ok(evals)
 }
 
+/// Multiplies `factor` by the fixed data-window vanishing polynomial
+/// `Z_W = b_data_slots`.
+///
+/// The result is represented in the universal circle basis and truncated to
+/// `degree_bound`. Multiplication is performed on the disjoint product domain,
+/// where `Z_W` is non-zero at every point.
+pub fn circle_multiply_data_vanishing(
+    geom: CircleGeom,
+    factor: &[Fp],
+    degree_bound: usize,
+) -> Result<Vec<Fp>, CircleRsError> {
+    if degree_bound <= geom.data_slots
+        || degree_bound > geom.product_domain_len
+        || factor.len() > degree_bound - geom.data_slots
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    let mut zw = vec![Fp::ZERO; geom.data_slots + 1];
+    zw[geom.data_slots] = Fp::ONE;
+    let mut product = circle_product_fft(geom, factor)?;
+    let zw_values = circle_product_fft(geom, &zw)?;
+    for (value, zw_value) in product.iter_mut().zip(zw_values) {
+        *value = *value * zw_value;
+    }
+    let coefficients = circle_product_ifft(geom, product)?;
+    if coefficients[degree_bound..]
+        .iter()
+        .any(|&coefficient| coefficient != Fp::ZERO)
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    Ok(coefficients[..degree_bound].to_vec())
+}
+
+/// Divides a polynomial that vanishes on the data window by `Z_W`.
+///
+/// This quotient representation proves that the hidden quadratic response
+/// vanishes at every committed data slot without exposing any response value.
+pub fn circle_divide_data_vanishing(
+    geom: CircleGeom,
+    polynomial: &[Fp],
+    degree_bound: usize,
+) -> Result<Vec<Fp>, CircleRsError> {
+    if degree_bound <= geom.data_slots
+        || degree_bound > geom.product_domain_len
+        || polynomial.len() > degree_bound
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    let quotient_bound = degree_bound - geom.data_slots;
+    let mut zw = vec![Fp::ZERO; geom.data_slots + 1];
+    zw[geom.data_slots] = Fp::ONE;
+    let zw_values = circle_product_fft(geom, &zw)?;
+    if zw_values.contains(&Fp::ZERO) {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    let inverse_zw = Fp::batch_inverse(&zw_values);
+    let mut quotient_values = circle_product_fft(geom, polynomial)?;
+    for (value, inverse) in quotient_values.iter_mut().zip(inverse_zw) {
+        *value = *value * inverse;
+    }
+    let coefficients = circle_product_ifft(geom, quotient_values)?;
+    if coefficients[quotient_bound..]
+        .iter()
+        .any(|&coefficient| coefficient != Fp::ZERO)
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    Ok(coefficients[..quotient_bound].to_vec())
+}
+
 fn evaluate_at(message_prefix: &[Fp], point: CirclePoint) -> Fp {
     // pis[k] = pi^{k+1-1}(x) ... pis[0] = x, pis[k] = pi(pis[k-1]); basis for
     // index j uses y^{j_0} and pis[k]^{bit k+1 of j}.
@@ -752,6 +821,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn data_window_vanishing_quotient_roundtrips_at_quadratic_bound() {
+        let geom = CIRCLE_GEOM_L256;
+        let degree_bound = 2 * geom.row_message_len + 2;
+        let quotient_bound = degree_bound - geom.data_slots;
+        let mut state = 0x5155_4F54u64;
+        let factor = rand_row(&mut state, quotient_bound);
+
+        let product =
+            circle_multiply_data_vanishing(geom, &factor, degree_bound).expect("Z_W product");
+        assert_eq!(product.len(), degree_bound);
+        for (index, &point) in data_window(geom).tables.domain.iter().enumerate() {
+            assert_eq!(
+                evaluate_at(&product, point),
+                Fp::ZERO,
+                "Z_W product did not vanish at data slot {index}"
+            );
+        }
+        assert_eq!(
+            circle_divide_data_vanishing(geom, &product, degree_bound).expect("exact Z_W quotient"),
+            factor
+        );
+
+        let mut non_multiple = product;
+        non_multiple[0] = non_multiple[0] + Fp::ONE;
+        assert_eq!(
+            circle_divide_data_vanishing(geom, &non_multiple, degree_bound),
+            Err(CircleRsError::WrongMessageLength)
+        );
     }
 
     #[test]

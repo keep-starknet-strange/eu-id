@@ -1,7 +1,7 @@
-use crate::age::calendar::{max_days_at, valid_day_row_index};
+use crate::age::calendar::{max_days_at, valid_day_row_index, VALID_DAY_REAL_ROWS};
 use crate::age::strategy::bit_decomposition::preprocessed::Preprocessed;
 use crate::types::Trace;
-use crate::utils::{push_repeated_bits, push_repeated_column};
+use crate::utils::{push_repeated_bits, push_repeated_column, random_m31_cell};
 use crate::{AgeBounds, Witness};
 use num_traits::Zero;
 use stwo::core::fields::m31::M31;
@@ -47,6 +47,9 @@ impl WitnessData {
 
         let mut valid_day_mult_data = vec![M31::zero(); 1 << valid_day_log_size];
         valid_day_mult_data[valid_day_row] = M31::from_u32_unchecked(1 << LOG_SIZE);
+        for value in valid_day_mult_data.iter_mut().skip(VALID_DAY_REAL_ROWS) {
+            *value = random_m31_cell();
+        }
         let valid_day_mult_trace = vec![CircleEvaluation::new(
             CanonicCoset::new(valid_day_log_size).circle_domain(),
             BaseColumn::from_iter(valid_day_mult_data),

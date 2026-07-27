@@ -7,6 +7,9 @@
 //! - `validFrom <= policy.current_date`
 //! - `policy.current_date <= validUntil`
 
+use air_core::claim_mask::{
+    add_claim_mask_fraction, ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS,
+};
 use air_core::relations::{field_id, FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
@@ -33,11 +36,6 @@ use stwo_constraint_framework::{
     TraceLocationAllocator,
 };
 
-use crate::claimed_sum_blinder::{
-    add_blinder_relation_entry, blinder_counter_interaction, blinder_denominator, random_qm31,
-    ClaimedSumBlinderEval, ClaimedSumBlinderRelation,
-};
-
 const MDOC_VALIDITY_LOG_SIZE: u32 = 9;
 const DATE_TEXT_LEN: usize = 10;
 const DATE_DIGITS: usize = 8;
@@ -51,12 +49,7 @@ const MDOC_VALIDITY_TRACE_COLS: usize = DATE_TEXT_LEN
     + DATE_SLACK_BITS
     + 2 * MONTH_RANGE_BITS
     + 2 * DAY_RANGE_BITS;
-// DATE_TEXT_LEN issuer-field lookups + the Q-015 blinder `+m` site.
-const MDOC_VALIDITY_LOOKUPS: usize = DATE_TEXT_LEN + 1;
-// Main component columns plus one column for the Q-015 blinder counterpart
-// component (`−m` on every row).
-const MDOC_VALIDITY_INTERACTION_COLS: usize =
-    (MDOC_VALIDITY_LOOKUPS.div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE;
+const MDOC_VALIDITY_LOOKUPS: usize = DATE_TEXT_LEN;
 
 type MdocValidityColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type MdocValidityComponent = FrameworkComponent<MdocValidityEval>;
@@ -91,23 +84,16 @@ pub(crate) fn mdoc_validity_rows(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MdocValidityInteractionClaim {
     pub(crate) claimed_sum: QM31,
-    /// Q-015 §4b blinder pair (see `claimed_sum_blinder`): `+m/(z−combine(v))`
-    /// shifts `claimed_sum`, the counterpart component publishes
-    /// `blinder_claimed_sum = −2^log_size·m/(z−combine(v))`; the pair cancels
-    /// in the global fold while masking the published split.
-    pub(crate) blinder_v: QM31,
-    pub(crate) blinder_m: QM31,
-    pub(crate) blinder_claimed_sum: QM31,
 }
 
 pub(crate) struct MdocValidityBind {
     policy_date: Date,
     rows: Vec<MdocValidityRow>,
     issuer_field_handle: SharedFieldRelation,
-    blinder_relation: Option<ClaimedSumBlinderRelation>,
+    claim_mask_trace: Option<ClaimMaskTrace>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocValidityInteractionClaim>,
     component: Option<MdocValidityComponent>,
-    blinder_component: Option<FrameworkComponent<ClaimedSumBlinderEval>>,
 }
 
 impl MdocValidityBind {
@@ -120,10 +106,10 @@ impl MdocValidityBind {
             policy_date,
             rows,
             issuer_field_handle,
-            blinder_relation: None,
+            claim_mask_trace: None,
+            claim_mask_challenge: None,
             interaction_claim: None,
             component: None,
-            blinder_component: None,
         }
     }
 
@@ -137,10 +123,10 @@ impl MdocValidityBind {
             policy_date,
             rows,
             issuer_field_handle,
-            blinder_relation: None,
+            claim_mask_trace: None,
+            claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             component: None,
-            blinder_component: None,
         }
     }
 
@@ -153,15 +139,39 @@ impl MdocValidityBind {
     fn issuer_field_relation(&self) -> FieldBytesRelation {
         self.issuer_field_handle.get()
     }
+
+    pub(crate) fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        vec![MDOC_VALIDITY_LOG_SIZE]
+    }
+
+    pub(crate) fn with_claim_mask(
+        mut self,
+        trace: ClaimMaskTrace,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Self {
+        assert_eq!(trace.log_size(), MDOC_VALIDITY_LOG_SIZE);
+        self.claim_mask_trace = Some(trace);
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    pub(crate) fn with_claim_mask_verifier(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge
+            .as_ref()
+            .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
+    }
 }
 
 #[derive(Clone)]
 struct MdocValidityEval {
     policy_date: Date,
     issuer_field_relation: FieldBytesRelation,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_beta: Option<QM31>,
 }
 
 fn m31_const<E: EvalAtRow>(value: u32) -> E::F {
@@ -353,14 +363,14 @@ fn mdoc_validity_interaction_trace(
     policy_date: Date,
     rows: &[MdocValidityRow],
     issuer_field_relation: &FieldBytesRelation,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_trace: Option<&ClaimMaskTrace>,
+    claim_mask_beta: Option<QM31>,
 ) -> (Vec<MdocValidityColumnEval>, QM31) {
     let preprocessed = mdoc_validity_preprocessed_columns(rows);
     let trace = mdoc_validity_base_trace(policy_date, rows);
     let n_vec_rows = 1usize << (MDOC_VALIDITY_LOG_SIZE - LOG_N_LANES);
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(MDOC_VALIDITY_LOOKUPS);
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> =
+        Vec::with_capacity(MDOC_VALIDITY_LOOKUPS + usize::from(claim_mask_trace.is_some()));
     for (byte_idx, trace_col) in trace.iter().enumerate().take(DATE_TEXT_LEN) {
         sites.push(
             (0..n_vec_rows)
@@ -376,11 +386,19 @@ fn mdoc_validity_interaction_trace(
                 .collect(),
         );
     }
-    // Q-015 blinder `+m/(z−combine(v))` on every row, emitted LAST to match
-    // `MdocValidityEval::evaluate`.
-    let blinder_num = PackedQM31::broadcast(blinder_m);
-    let blinder_den = blinder_denominator(blinder_relation, blinder_v);
-    sites.push(vec![(blinder_num, blinder_den); n_vec_rows]);
+    // The committed claim mask is emitted last to match the AIR site order.
+    match (claim_mask_trace, claim_mask_beta) {
+        (Some(mask), Some(beta)) => {
+            assert_eq!(mask.log_size(), MDOC_VALIDITY_LOG_SIZE);
+            sites.push(
+                (0..n_vec_rows)
+                    .map(|vec_row| mask.packed_fraction_at(vec_row, beta))
+                    .collect(),
+            );
+        }
+        (None, None) => {}
+        _ => panic!("mdoc validity claim-mask trace and challenge must be configured together"),
+    }
     let mut logup = LogupTraceGenerator::new(MDOC_VALIDITY_LOG_SIZE);
     let mut site_idx = 0usize;
     while site_idx + 1 < sites.len() {
@@ -501,15 +519,10 @@ impl FrameworkEval for MdocValidityEval {
                 &[field_id.clone(), m31_const::<E>(byte_idx as u32), value],
             ));
         }
-        // Q-015 blinder `+m/(z−combine(v))`, ungated, emitted LAST to match
-        // the generator's site order.
-        add_blinder_relation_entry(
-            &mut eval,
-            &self.blinder_relation,
-            self.blinder_v,
-            self.blinder_m,
-            false,
-        );
+        // The committed claim mask is emitted last to match the generator.
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -526,21 +539,27 @@ impl Air for MdocValidityBind {
         }
     }
 
-    fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
-    }
+    fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
 
     fn layout(&self) -> TreeLayout {
+        let mask_enabled = self.claim_mask_challenge.is_some();
         TreeLayout {
             preprocessed: vec![MDOC_VALIDITY_LOG_SIZE; MDOC_VALIDITY_PREPROCESSED_COLS],
-            trace: vec![MDOC_VALIDITY_LOG_SIZE; MDOC_VALIDITY_TRACE_COLS],
-            interaction: vec![MDOC_VALIDITY_LOG_SIZE; MDOC_VALIDITY_INTERACTION_COLS],
+            trace: vec![
+                MDOC_VALIDITY_LOG_SIZE;
+                MDOC_VALIDITY_TRACE_COLS
+                    + usize::from(mask_enabled) * CLAIM_MASK_TRACE_COLUMNS
+            ],
+            interaction: vec![
+                MDOC_VALIDITY_LOG_SIZE;
+                (MDOC_VALIDITY_LOOKUPS + usize::from(mask_enabled)).div_ceil(2)
+                    * SECURE_EXTENSION_DEGREE
+            ],
         }
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
-        let claim = self.interaction_claim();
-        vec![claim.claimed_sum, claim.blinder_claimed_sum]
+        vec![self.interaction_claim().claimed_sum]
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -556,42 +575,22 @@ impl Air for MdocValidityBind {
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let claim = self.interaction_claim().clone();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc validity blinder relation drawn before components");
         self.component = Some(MdocValidityComponent::new(
             allocator,
             MdocValidityEval {
                 policy_date: self.policy_date,
                 issuer_field_relation: self.issuer_field_relation(),
-                blinder_relation: blinder_relation.clone(),
-                blinder_v: claim.blinder_v,
-                blinder_m: claim.blinder_m,
+                claim_mask_beta: self.claim_mask_beta(),
             },
             claim.claimed_sum,
-        ));
-        self.blinder_component = Some(FrameworkComponent::new(
-            allocator,
-            ClaimedSumBlinderEval {
-                log_size: MDOC_VALIDITY_LOG_SIZE,
-                relation: blinder_relation,
-                v: claim.blinder_v,
-                m: claim.blinder_m,
-            },
-            claim.blinder_claimed_sum,
         ));
     }
 
     fn components(&self) -> Vec<&dyn Component> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc validity component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc validity blinder component is built"),
-        ]
+        vec![self
+            .component
+            .as_ref()
+            .expect("mdoc validity component is built")]
     }
 }
 
@@ -638,48 +637,29 @@ impl AirProver for MdocValidityBind {
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         tb.extend_evals(mdoc_validity_base_trace(self.policy_date, &self.rows));
+        if let Some(mask) = &self.claim_mask_trace {
+            tb.extend_evals(mask.columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let blinder_v = random_qm31();
-        let blinder_m = random_qm31();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc validity blinder relation drawn before interaction");
+        let claim_mask_beta = self.claim_mask_beta();
         let (trace, claimed_sum) = mdoc_validity_interaction_trace(
             self.policy_date,
             &self.rows,
             &self.issuer_field_relation(),
-            &blinder_relation,
-            blinder_v,
-            blinder_m,
+            self.claim_mask_trace.as_ref(),
+            claim_mask_beta,
         );
         tb.extend_evals(trace);
-        let (blinder_trace, blinder_claimed_sum) = blinder_counter_interaction(
-            MDOC_VALIDITY_LOG_SIZE,
-            &blinder_relation,
-            blinder_v,
-            blinder_m,
-        );
-        tb.extend_evals(blinder_trace);
-        self.interaction_claim = Some(MdocValidityInteractionClaim {
-            claimed_sum,
-            blinder_v,
-            blinder_m,
-            blinder_claimed_sum,
-        });
+        self.interaction_claim = Some(MdocValidityInteractionClaim { claimed_sum });
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc validity component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc validity blinder component is built"),
-        ]
+        vec![self
+            .component
+            .as_ref()
+            .expect("mdoc validity component is built")]
     }
 }
 
@@ -698,6 +678,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    use air_core::claim_mask::ClaimMaskRing;
     use stwo::prover::backend::simd::m31::N_LANES;
     use stwo_constraint_framework::{Multiplicity, PREPROCESSED_TRACE_IDX};
 
@@ -806,9 +787,7 @@ mod tests {
         let eval = MdocValidityEval {
             policy_date: test_policy_date(),
             issuer_field_relation: FieldBytesRelation::dummy(),
-            blinder_relation: ClaimedSumBlinderRelation::dummy(),
-            blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
-            blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
+            claim_mask_beta: None,
         };
         let row = eval.evaluate(RowEval::inactive_validity_row());
 
@@ -839,5 +818,31 @@ mod tests {
             first, second,
             "mdoc validity inactive cells must be fresh per trace"
         );
+    }
+
+    #[test]
+    fn claim_mask_changes_validity_claim_by_beta_times_target_sum() {
+        let rows = test_rows();
+        let relation = FieldBytesRelation::dummy();
+        let (_, unmasked_claim) =
+            mdoc_validity_interaction_trace(test_policy_date(), &rows, &relation, None, None);
+        let mut ring =
+            ClaimMaskRing::new(&[MDOC_VALIDITY_LOG_SIZE, MDOC_VALIDITY_LOG_SIZE]).unwrap();
+        let mask = ring.take(MDOC_VALIDITY_LOG_SIZE).unwrap();
+        let beta = QM31::from_m31_array([
+            M31::from_u32_unchecked(3),
+            M31::from_u32_unchecked(5),
+            M31::from_u32_unchecked(7),
+            M31::from_u32_unchecked(11),
+        ]);
+        let (_, masked_claim) = mdoc_validity_interaction_trace(
+            test_policy_date(),
+            &rows,
+            &relation,
+            Some(&mask),
+            Some(beta),
+        );
+
+        assert_eq!(masked_claim - unmasked_claim, beta * mask.target_sum());
     }
 }

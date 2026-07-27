@@ -1,4 +1,5 @@
 use crate::age::types::{DATE_MONTH_BASE, DATE_YEAR_BASE};
+use air_core::claim_mask::{ClaimMaskError, ClaimMaskTrace};
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::poly::circle::CanonicCoset;
@@ -74,6 +75,38 @@ pub(crate) fn random_m31_cell() -> M31 {
             return M31::from_u32_unchecked(value);
         }
     }
+}
+
+/// Validate an externally allocated claim-mask slice without consuming it.
+///
+/// The global orchestrator allocates one ring in module/component order. A
+/// predicate must reject a missing, surplus, or out-of-order trace before it
+/// changes its public layout.
+pub(crate) fn validate_claim_masks(
+    masks: &[ClaimMaskTrace],
+    ordered_log_sizes: &[u32],
+) -> Result<(), ClaimMaskError> {
+    if masks.len() < ordered_log_sizes.len() {
+        return Err(ClaimMaskError::Exhausted {
+            requested_log_size: ordered_log_sizes[masks.len()],
+        });
+    }
+    if masks.len() > ordered_log_sizes.len() {
+        return Err(ClaimMaskError::NotExhausted {
+            remaining: masks.len() - ordered_log_sizes.len(),
+        });
+    }
+    for (index, (mask, &expected)) in masks.iter().zip(ordered_log_sizes).enumerate() {
+        let actual = mask.log_size();
+        if actual != expected {
+            return Err(ClaimMaskError::LogSizeOutOfOrder {
+                index,
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn bits_needed(max_value: u32) -> usize {

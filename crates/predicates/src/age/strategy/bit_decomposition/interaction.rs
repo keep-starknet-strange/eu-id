@@ -84,9 +84,10 @@ impl InteractionTraces {
         logup_gen.col_from_fn(|vec_row| {
             let max_days_val: PackedM31 = preprocessed.valid_day_trace[0].values.data[vec_row];
             let day_val: PackedM31 = preprocessed.valid_day_trace[1].values.data[vec_row];
+            let dummy_val: PackedM31 = preprocessed.valid_day_trace[2].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.valid_day_mult_trace[0].values.data[vec_row];
             (
-                PackedQM31::from(-mult_val),
+                -(PackedQM31::one() - PackedQM31::from(dummy_val)) * PackedQM31::from(mult_val),
                 lookup_elements.valid_day.combine(&[max_days_val, day_val]),
             )
         });

@@ -3,7 +3,10 @@
 > **Product mdoc proof contract.** The implementation lives in
 > `crates/eu-id-prover/src/mdoc.rs` and is exported through
 > `eu_id_prover::{prove_mdoc, verify_mdoc}`. The older 11-byte credential proof
-> remains separate as the POC benchmark path.
+> remains separate as the POC benchmark path. The current SDK
+> `proveIdentity`/`verifyIdentity` FFI contract is explicitly non-revocation:
+> it rejects a proof carrying any TS13 revocation inputs because its public
+> statement does not yet expose the authority key and epoch.
 
 ## Purpose & Scope
 
@@ -18,10 +21,11 @@ accepted; v2 is what real wallets emit. It proves:
 - SHA-256 digests for disclosed issuer-signed items,
 - age and nationality predicates bound to disclosed item bytes.
 
-This profile does not add in-circuit CBOR parsing, in-circuit x509 chain
-validation, or SD-JWT / `zk-jwt` support; those requests are rejected
-fail-closed at the TS13 entry point. x5chain validation is host-side against
-verifier-supplied trusted roots.
+The circuit parses the exact profile CBOR streams and proves their semantic
+scope, including the selected item identifiers, digest membership, validity
+fields, and device key. It does not perform x509 chain validation or support
+SD-JWT / `zk-jwt`; those requests are rejected fail-closed at the TS13 entry
+point. x5chain validation is host-side against verifier-supplied trusted roots.
 
 TS13 sorted-pair non-revocation is supported end-to-end for the MSO-derived
 identifier `id = LE64(SHA-256(MSO bytes)[0..8])`: the strict
@@ -30,19 +34,32 @@ MSO-SHA-preimage-to-issuerAuth-payload linkage, and the revocation-authority
 P-256 sorted-pair signature over `SHA-256(LE64(id_lo) || LE64(id_hi) ||
 LE32(epoch))` are all part of the mdoc proof when the TS13 revocation layout is
 enabled. Under the default `ec-coprocessor` feature the signature check rides
-the P4b coprocessor bundle as a third ECDSA instance set — the proof carries
-the instance (message hash, signature, key), the key is checked against the
-public revocation key, and the message hash is pinned to the in-STARK
-revocation-SHA digest via a `PublicDigestBind` module; the non-coprocessor
-build keeps the in-STARK P-256 AIR instance. The public statement carries only
-the revocation public key, epoch, and a range-layout flag; `id`, `id_lo`, and
-`id_hi` stay witness.
+the P4b coprocessor bundle as a third ECDSA instance set. Its message hash and
+signature remain private: fixed MAC relations join the hidden coprocessor
+instance to the in-STARK revocation-SHA digest, while the verifier supplies and
+checks the public revocation key. The non-coprocessor build keeps the
+in-STARK P-256 AIR instance. The public statement carries only the revocation
+public key, epoch, and a range-layout flag; `id`, `id_lo`, `id_hi`, the
+revocation message hash, and the signature stay witness.
+
+This optional relation is currently available through the lower-level
+`mdoc::prove_mdoc_circuit` path after augmenting the circuit statement with
+`with_ts13_revocation*`, plus the corresponding circuit/public verifier. The
+top-level `eu_id_prover::prove_mdoc` and SDK FFI do not yet construct those
+inputs; `verifyIdentity` rejects them fail-closed until `ZkPublicStatement`
+and `ZkMdocWitness` carry the complete verifier and prover revocation inputs.
+The published TS13 circuit hash and preprocessed root pin the default
+`ec-coprocessor` composition only. A no-default build is not a published TS13
+profile and canonical artifact verification there fails closed.
 
 Zero-knowledge privacy masking is implemented in the product mdoc proof path
 (P4c Classes A–E: perfectly masked blind-row cells, MAC/SHA decoys, 1-active-row
-predicate layouts, Class-D reserved-dummy-key range/SHA tables, and per-prove
-claimed-sum blinder pairs on the private-data modules). The classification,
-simulator sketch, and executable guards are in `tasks/p4c-leakage-table.md`.
+predicate layouts, Class-D reserved-dummy-key range/SHA tables, and committed
+per-proof cyclic masks for every private LogUp claimed sum). The mask columns
+are committed before a fresh transcript challenge is drawn; their target sums
+cancel globally and are never serialized as proof metadata. The
+classification, simulator sketch, and executable guards are in
+`tasks/p4c-leakage-table.md`.
 This document states what is implemented; it does not itself assert external
 TS13 compatibility — that claim gates on the release signoff recorded in
 `tasks/audits/2026-07-07-ts13-evidence.md`.
@@ -171,24 +188,27 @@ rejects extracted data unless:
   validity date / device-key coordinate is locatable as a contiguous window in
   the issuer `Sig_structure` preimage.
 
-## In-circuit MSO bindings (Phase D)
+## In-circuit semantic bindings (Phase D)
 
-The item digests and the device key are **not** public inputs. They are bound
-in-circuit by a single `MdocWindowBind` LogUp component over byte windows the
-SHA modules expose from their preimages:
+The item digests and device key are **not** public inputs. `MdocCborStream`
+proves the exact accepted CBOR grammar and `MdocScope` follows the parsed
+structure rather than trusting prover-supplied byte offsets:
 
-- **D1 — element identifier:** the `"birth_date"` / `"nationality"`
-  `elementIdentifier` windows are pinned byte-for-byte to public constants.
-- **D2 — digest membership:** the 32-byte `valueDigests[ns][digestID]` window in
-  the issuer preimage must byte-equal the item SHA module's digest.
-- **D3 — device-key origin:** the two 32-byte `deviceKey` coordinate windows in
-  the issuer preimage must byte-equal the device signature's public key
-  `(qx, qy)` proven by the EC coprocessor.
-- **Validity:** `validFrom` and `validUntil` `YYYY-MM-DD` windows are consumed
-  from the issuer preimage, parsed in-circuit, and compared against the public
-  policy date with non-negative date-key slack.
+- **D1 — element identifier:** the requested `elementIdentifier` is parsed at
+  the correct `IssuerSignedItem` map key and pinned byte-for-byte to the public
+  request.
+- **D2 — digest membership:** the parsed `digestID` selects the matching
+  `valueDigests[namespace][digestID]` entry in the MSO, whose 32 bytes equal the
+  selected item's SHA-256 digest.
+- **D3 — device-key origin:** the parsed MSO `deviceKey` coordinates equal the
+  device signature's public key `(qx, qy)` proven by the EC path.
+- **Validity:** the parsed `validFrom` and `validUntil` dates are consumed by
+  the validity AIR and compared with the public policy date.
+- **Revocation:** when enabled, the normalized MSO payload is bound as the
+  exact SHA-256 preimage used to derive the private revocation identifier.
 
 Consequently the public statement carries the issuer key or trusted-root
-anchored issuer key, policy, session transcript, the two `(r, s)` signatures,
-and the prover-supplied window offsets. Everything else is witness, including
-the item digests, MSO bytes, disclosed item bytes, parsed dates, and device key.
+anchored issuer key, policy, session transcript, requested semantic scope, and
+the two public-path `(r, s)` signatures. Everything else is witness, including
+item digests, MSO bytes, disclosed item bytes, parsed dates, and the device
+key.

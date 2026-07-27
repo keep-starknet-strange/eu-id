@@ -1,13 +1,15 @@
 use crate::circle_fft::{
-    circle_data_sum, circle_encode, circle_encode_row, circle_evaluate, circle_product_fft,
-    circle_product_ifft, circle_weight_coeffs, CircleGeom, CircleRsError, CIRCLE_GEOM_L128,
-    CIRCLE_GEOM_L256, CIRCLE_GEOM_L64,
+    circle_data_sum, circle_divide_data_vanishing, circle_encode, circle_encode_row,
+    circle_evaluate, circle_multiply_data_vanishing, circle_product_fft, circle_product_ifft,
+    circle_weight_coeffs, CircleGeom, CircleRsError, CIRCLE_GEOM_L128, CIRCLE_GEOM_L256,
+    CIRCLE_GEOM_L64,
 };
 use crate::merkle::{commit_columns, verify_column, ColumnOpening, MerkleCommitment, MerkleError};
 use crate::rs::{rs_encode_padded, rs_evaluate, RsError};
 use crate::sumcheck::InputClaims;
-use crate::{CoprocessorChannel, Fp, Mle, MleError};
-use p256::elliptic_curve::rand_core::{OsRng, RngCore};
+use crate::{Fp, Mle, MleError};
+use p256::elliptic_curve::rand_core::{OsRng, RngCore, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -37,13 +39,23 @@ pub struct LigeroParams {
 
 pub const V1_MIN_OPENINGS: usize = 156;
 pub const V2_ZK_OPENINGS: bool = true;
+pub const LIGERO_AUXILIARY_ROW_COUNT: usize = 4;
+
+const PROXIMITY_MASK_ROW_OFFSET: usize = 0;
+const CLAIM_BLIND_ROW_OFFSET: usize = 1;
+const CLAIM_BLIND_MASK_ROW_OFFSET: usize = 2;
+const QUADRATIC_BLIND_ROW_OFFSET: usize = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LigeroCommitment {
     params: LigeroParams,
     witness_rows: usize,
+    quadratic_triples: usize,
+    committed_rows: usize,
     proximity_mask_row: usize,
     claim_blind_row: usize,
+    claim_blind_mask_row: usize,
+    quadratic_blind_row: usize,
     encoded_rows: Vec<Vec<Fp>>,
     /// Circle code only: universal-basis coefficients per row (parallel to
     /// `encoded_rows`; the code is not systematic, so the message is not a
@@ -102,6 +114,31 @@ pub struct LigeroClaimBatch {
     pub blind_claim: Fp,
 }
 
+/// Zero-knowledge proof response that the committed claim-blind row lies in
+/// the kernel of the fixed claim-extraction functional.
+///
+/// If `B` is the claim blind and `M` is an independently committed uniform
+/// kernel mask, this carries the coefficients of `M + rho * B`. The verifier
+/// checks both the opened-column identity and that its extraction is zero.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LigeroClaimBlindCheck {
+    pub combined_row: Vec<Fp>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LigeroQuadraticConstraint {
+    pub x: usize,
+    pub y: usize,
+    pub z: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LigeroQuadraticBatch {
+    /// Coefficients of `Q / Z_W`, where `Q` is the blinded, randomly batched
+    /// quadratic residual and `Z_W` vanishes on every committed data slot.
+    pub quotient: Vec<Fp>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LigeroError {
     EmptyWitness,
@@ -115,6 +152,7 @@ pub enum LigeroError {
     WrongGammaLength,
     WrongClaimLength,
     WrongPointLength,
+    InvalidQuadraticConstraint,
     ColumnOutOfRange,
     UnsupportedCode,
     Merkle(MerkleError),
@@ -149,7 +187,11 @@ impl LigeroParams {
         if self.degree_bound < self.row_len {
             return Err(LigeroError::InvalidDegreeBound);
         }
-        if self.degree_bound < self.row_len + self.openings {
+        if self
+            .row_len
+            .checked_add(self.openings)
+            .is_none_or(|required| self.degree_bound < required)
+        {
             return Err(LigeroError::InvalidDegreeBound);
         }
         if self.codeword_len <= self.degree_bound {
@@ -158,10 +200,19 @@ impl LigeroParams {
         if self.openings > self.codeword_len {
             return Err(LigeroError::TooManyOpenings);
         }
-        if 2 * self.proximity_radius >= self.codeword_len - self.claim_degree_bound() {
+        let claim_bound = self.claim_degree_bound();
+        let Some(claim_distance) = self.codeword_len.checked_sub(claim_bound) else {
+            return Err(LigeroError::CodewordTooShort);
+        };
+        if self.proximity_radius.saturating_mul(2) >= claim_distance {
             return Err(LigeroError::ProximityRadiusTooLarge);
         }
-        if self.codeword_len <= 2 * self.degree_bound + self.proximity_radius {
+        if self.codeword_len
+            <= self
+                .degree_bound
+                .saturating_mul(2)
+                .saturating_add(self.proximity_radius)
+        {
             return Err(LigeroError::CodewordTooShort);
         }
         Ok(())
@@ -169,12 +220,50 @@ impl LigeroParams {
 
     pub fn claim_degree_bound(self) -> usize {
         match self.code {
-            LigeroCode::Rs => self.degree_bound + self.row_len - 1,
+            LigeroCode::Rs => self
+                .degree_bound
+                .saturating_add(self.row_len)
+                .saturating_sub(1),
             // W ∈ F_64 × R ∈ F_256 lands in F_322: the y² = 1 − x² fold adds
             // x-degree 2, so the product bound is a + b + 2, not a + b − 1
             // (Q-025 §params; the F_322 tail-zero test in circle_fft pins it).
-            LigeroCode::Circle => self.degree_bound + self.row_len + 2,
+            LigeroCode::Circle => self
+                .degree_bound
+                .saturating_add(self.row_len)
+                .saturating_add(2),
         }
+    }
+
+    pub fn quadratic_degree_bound(self) -> usize {
+        match self.code {
+            LigeroCode::Rs => self.degree_bound.saturating_mul(2).saturating_sub(1),
+            LigeroCode::Circle => self.degree_bound.saturating_mul(2).saturating_add(2),
+        }
+    }
+
+    pub fn validate_quadratic(self) -> Result<(), LigeroError> {
+        self.validate()?;
+        let bound = self.quadratic_degree_bound();
+        if bound > self.codeword_len {
+            return Err(LigeroError::CodewordTooShort);
+        }
+        if self.code == LigeroCode::Circle
+            && self
+                .circle_geom()
+                .is_none_or(|geom| bound > geom.product_domain_len)
+        {
+            return Err(LigeroError::InvalidDegreeBound);
+        }
+        let Some(distance) = self.codeword_len.checked_sub(bound) else {
+            return Err(LigeroError::CodewordTooShort);
+        };
+        if self.proximity_radius.saturating_mul(2) >= distance {
+            return Err(LigeroError::ProximityRadiusTooLarge);
+        }
+        if self.codeword_len <= bound.saturating_add(self.proximity_radius) {
+            return Err(LigeroError::CodewordTooShort);
+        }
+        Ok(())
     }
 
     pub fn soundness_error(self) -> f64 {
@@ -183,10 +272,13 @@ impl LigeroParams {
         let t = self.openings as f64;
         let e = self.proximity_radius as f64;
         let claim = (self.claim_degree_bound() + 1) as f64;
+        let quadratic = (self.quadratic_degree_bound() + 1) as f64;
         (1.0 - e / n).powf(t)
             + (2.0 * k / n).powf(t)
             + (claim / n).powf(t)
-            + (n + 3.0) / 2f64.powi(256)
+            + (claim / n).powf(t)
+            + (quadratic / n).powf(t)
+            + 2.0 * (n + 4.0) / 2f64.powi(256)
     }
 }
 
@@ -225,7 +317,9 @@ pub fn v2_ligero_params_b() -> LigeroParams {
 
 /// Q-025 circle-FFT params: k = 256 (64 data + 192 value-pads per row),
 /// claim bound 322, e = 862 (2e < 2048 − 322). Soundness ≈ 2^−134:
-/// (1 − 862/2048)^170 + (512/2048)^170 + (323/2048)^170 + (n+3)/2^256.
+/// (1 − 862/2048)^170 + (512/2048)^170 + 2·(323/2048)^170
+/// + 2·(n+4)/2^256. The factor two conservatively accounts for the channel's
+/// one-subtraction reduction from 256-bit strings into the field.
 pub fn v2_circle_params() -> LigeroParams {
     LigeroParams {
         row_len: CIRCLE_GEOM_L64.data_slots,
@@ -241,7 +335,7 @@ pub fn v2_circle_params() -> LigeroParams {
 /// claim bound 128 + 512 + 2 = 642, e = 1726 (2e < 4096 − 642), openings 168.
 /// Soundness ≈ 2^−132.6, dominated by the proximity term:
 /// (1 − 1726/4096)^168 = 2^−132.61; (2·512/4096)^168 = 2^−336;
-/// (643/4096)^168 = 2^−448.78; (4096+3)/2^256 = 2^−244. Pad budget
+/// 2·(643/4096)^168 < 2^−447.78; 2·(4096+4)/2^256 < 2^−242.99. Pad budget
 /// 512 − 128 = 384 ≥ t = 168. (`v3_soundness_error_meets_target` pins it.)
 pub fn v3_circle_params() -> LigeroParams {
     LigeroParams {
@@ -254,22 +348,17 @@ pub fn v3_circle_params() -> LigeroParams {
     }
 }
 
-/// v4 ℓ=256 circle-FFT params: k = 512 (256 data + 256 value-pads per row),
-/// claim bound 256 + 512 + 2 = 770, e = 1662 (2e = 3324 < 4096 − 770 = 3326),
-/// openings 176. Same message/codeword/product domains as v3, so the
-/// claim-batch FFT sizes are unchanged; the row count (and with it the
-/// per-column openings that dominate proof size, plus the row-encode work)
-/// halves. Soundness ≈ 2^−132.9, dominated by the proximity term:
-/// (1 − 1662/4096)^176 = 2^−132.16; (2·512/4096)^176 = 2^−352;
-/// (771/4096)^176 = 2^−424.06; (4096+3)/2^256 = 2^−244. Pad budget
-/// 512 − 256 = 256 ≥ t = 176. (`v4_soundness_error_meets_target` pins it.)
+/// Committed-mask v4 parameters. The largest response is the quadratic check,
+/// with bound `2*512 + 2 = 1026`; `e = 1534` is maximal because
+/// `2e < 4096 - 1026`. With `t = 196`, the proximity term is below 2^-132,
+/// and the 256 row-pad slots still exceed the opening count.
 pub fn v4_circle_params() -> LigeroParams {
     LigeroParams {
         row_len: CIRCLE_GEOM_L256.data_slots,
         degree_bound: CIRCLE_GEOM_L256.row_message_len,
         codeword_len: CIRCLE_GEOM_L256.codeword_len,
-        openings: 176,
-        proximity_radius: 1662,
+        openings: 196,
+        proximity_radius: 1534,
         code: LigeroCode::Circle,
     }
 }
@@ -285,21 +374,36 @@ pub fn commit_witness_profiled(
     witness: &[Fp],
     params: LigeroParams,
 ) -> Result<(LigeroCommitment, LigeroCommitProfile), LigeroError> {
+    commit_witness_with_quadratics_profiled(witness, params, &[])
+}
+
+pub fn commit_witness_with_quadratics_profiled(
+    witness: &[Fp],
+    params: LigeroParams,
+    quadratic_constraints: &[LigeroQuadraticConstraint],
+) -> Result<(LigeroCommitment, LigeroCommitProfile), LigeroError> {
     params.validate()?;
+    if !quadratic_constraints.is_empty() {
+        params.validate_quadratic()?;
+    }
     if witness.is_empty() {
         return Err(LigeroError::EmptyWitness);
     }
+    if !quadratic_constraints.is_empty() && params.code != LigeroCode::Circle {
+        return Err(LigeroError::UnsupportedCode);
+    }
+    validate_quadratic_constraints(witness, quadratic_constraints)?;
 
     let row_encode_start = Instant::now();
     let mut encoded_rows;
     let mut coefficient_rows;
-    let mut pads = fresh_pad_channel();
+    let mut pads = fresh_pad_rng();
     let claim_degree_bound = params.claim_degree_bound();
     match params.code {
         LigeroCode::Rs => {
             let row_pads = witness
                 .chunks(params.row_len)
-                .map(|_| pads.draw_fps(params.degree_bound - params.row_len))
+                .map(|_| draw_uniform_fps(&mut pads, params.degree_bound - params.row_len))
                 .collect::<Vec<_>>();
             encoded_rows = witness
                 .par_chunks(params.row_len)
@@ -321,7 +425,7 @@ pub fn commit_witness_profiled(
             // independent rows in parallel without changing their order.
             let row_pads = witness
                 .chunks(params.row_len)
-                .map(|_| pads.draw_fps(geom.row_message_len - geom.data_slots))
+                .map(|_| draw_uniform_fps(&mut pads, geom.row_message_len - geom.data_slots))
                 .collect::<Vec<_>>();
             let rows = witness
                 .par_chunks(params.row_len)
@@ -338,8 +442,18 @@ pub fn commit_witness_profiled(
         }
     }
     let witness_rows = encoded_rows.len();
+    let quadratic_triples = quadratic_constraints.len().div_ceil(params.row_len);
+    append_quadratic_rows(
+        witness,
+        quadratic_constraints,
+        params,
+        &mut pads,
+        &mut coefficient_rows,
+        &mut encoded_rows,
+    )?;
+    let committed_rows = encoded_rows.len();
     // WO-P2: bulk-draw the proximity-mask row's coefficients.
-    let mask_row = pads.draw_fps(params.degree_bound);
+    let mask_row = draw_uniform_fps(&mut pads, params.degree_bound);
     let proximity_mask_row = encoded_rows.len();
     match params.code {
         LigeroCode::Rs => encoded_rows.push(
@@ -356,33 +470,11 @@ pub fn commit_witness_profiled(
             coefficient_rows.push(mask_row.clone());
         }
     }
-    // WO-P2: bulk-draw the claim-blind row's coefficients.
-    let mut blind_row = pads.draw_fps(claim_degree_bound);
-    // Soundness (C-p4b-blind-claim, Q-025): the verifier's claim-batch check
-    // is `q_sum == blind_claim + Σ γ·value` with a prover-sent blind_claim;
-    // it binds nothing unless the blind row's extraction functional is forced
-    // to a public constant. Zero it here so the verifier can require
-    // blind_claim == 0. Hiding is unaffected: blind stays uniform on the
-    // sum-zero subspace, and the one functional it no longer masks is public.
-    match params.code {
-        LigeroCode::Rs => {
-            let prefix_sum = blind_row[..params.row_len]
-                .iter()
-                .copied()
-                .fold(Fp::ZERO, |acc, value| acc + value);
-            blind_row[0] = blind_row[0] - prefix_sum;
-        }
-        LigeroCode::Circle => {
-            // b_0 ≡ 1 contributes once per data point, so shifting c_0 by
-            // −σ/data_slots zeroes the data-window sum.
-            let geom = params.circle_geom().expect("validated circle params");
-            let sum = circle_data_sum(geom, &blind_row);
-            let slots_inv = Fp::from_u64(geom.data_slots as u64)
-                .inverse()
-                .expect("power of two is invertible mod p");
-            blind_row[0] = blind_row[0] - sum * slots_inv;
-        }
-    }
+    // The claim blind and its independent check mask are both sampled
+    // uniformly from the kernel of the fixed extraction functional. The
+    // verifier proves this committed invariant with a masked random linear
+    // combination, rather than trusting honest-prover construction.
+    let blind_row = claim_blind_row_coefficients(params, &mut pads);
     let claim_blind_row = encoded_rows.len();
     match params.code {
         LigeroCode::Rs => encoded_rows.push(
@@ -397,6 +489,65 @@ pub fn commit_witness_profiled(
             coefficient_rows.push(blind_row);
         }
     }
+    let blind_mask_row = claim_blind_row_coefficients(params, &mut pads);
+    let claim_blind_mask_row = encoded_rows.len();
+    match params.code {
+        LigeroCode::Rs => encoded_rows.push(
+            rs_encode_padded(&blind_mask_row, claim_degree_bound, params.codeword_len)
+                .map_err(LigeroError::Rs)?,
+        ),
+        LigeroCode::Circle => {
+            let geom = params.circle_geom().expect("validated circle params");
+            encoded_rows.push(
+                circle_encode(geom, &blind_mask_row, claim_degree_bound)
+                    .map_err(LigeroError::Circle)?,
+            );
+            coefficient_rows.push(blind_mask_row);
+        }
+    }
+    let quadratic_blind_row = encoded_rows.len();
+    let quadratic_blind_degree = if quadratic_constraints.is_empty() {
+        params.degree_bound
+    } else {
+        params.quadratic_degree_bound()
+    };
+    let quadratic_blind =
+        quadratic_blind_row_coefficients(params, quadratic_blind_degree, &mut pads)?;
+    match params.code {
+        LigeroCode::Rs => encoded_rows.push(
+            rs_encode_padded(
+                &quadratic_blind,
+                quadratic_blind_degree,
+                params.codeword_len,
+            )
+            .map_err(LigeroError::Rs)?,
+        ),
+        LigeroCode::Circle => {
+            let geom = params.circle_geom().expect("validated circle params");
+            encoded_rows.push(
+                circle_encode(geom, &quadratic_blind, quadratic_blind_degree)
+                    .map_err(LigeroError::Circle)?,
+            );
+            coefficient_rows.push(quadratic_blind);
+        }
+    }
+    debug_assert_eq!(
+        proximity_mask_row,
+        committed_rows + PROXIMITY_MASK_ROW_OFFSET
+    );
+    debug_assert_eq!(claim_blind_row, committed_rows + CLAIM_BLIND_ROW_OFFSET);
+    debug_assert_eq!(
+        claim_blind_mask_row,
+        committed_rows + CLAIM_BLIND_MASK_ROW_OFFSET
+    );
+    debug_assert_eq!(
+        quadratic_blind_row,
+        committed_rows + QUADRATIC_BLIND_ROW_OFFSET
+    );
+    debug_assert_eq!(
+        encoded_rows.len(),
+        committed_rows + LIGERO_AUXILIARY_ROW_COUNT
+    );
     let row_encode = row_encode_start.elapsed();
     let merkle_start = Instant::now();
     let merkle = commit_columns(&encoded_rows).map_err(LigeroError::Merkle)?;
@@ -406,8 +557,12 @@ pub fn commit_witness_profiled(
         LigeroCommitment {
             params,
             witness_rows,
+            quadratic_triples,
+            committed_rows,
             proximity_mask_row,
             claim_blind_row,
+            claim_blind_mask_row,
+            quadratic_blind_row,
             encoded_rows,
             coefficient_rows,
             merkle,
@@ -420,9 +575,177 @@ pub fn commit_witness_profiled(
     ))
 }
 
+fn validate_quadratic_constraints(
+    witness: &[Fp],
+    constraints: &[LigeroQuadraticConstraint],
+) -> Result<(), LigeroError> {
+    for constraint in constraints {
+        if [constraint.x, constraint.y, constraint.z]
+            .into_iter()
+            .any(|index| index >= witness.len())
+            || witness[constraint.x] * witness[constraint.y] != witness[constraint.z]
+        {
+            return Err(LigeroError::InvalidQuadraticConstraint);
+        }
+    }
+    Ok(())
+}
+
+fn append_quadratic_rows(
+    witness: &[Fp],
+    constraints: &[LigeroQuadraticConstraint],
+    params: LigeroParams,
+    rng: &mut ChaCha20Rng,
+    coefficient_rows: &mut Vec<Vec<Fp>>,
+    encoded_rows: &mut Vec<Vec<Fp>>,
+) -> Result<(), LigeroError> {
+    if constraints.is_empty() {
+        return Ok(());
+    }
+
+    let triples = constraints.len().div_ceil(params.row_len);
+    let mut x_rows = vec![vec![Fp::ZERO; params.row_len]; triples];
+    let mut y_rows = vec![vec![Fp::ZERO; params.row_len]; triples];
+    let mut z_rows = vec![vec![Fp::ZERO; params.row_len]; triples];
+    for (index, constraint) in constraints.iter().enumerate() {
+        let row = index / params.row_len;
+        let column = index % params.row_len;
+        x_rows[row][column] = witness[constraint.x];
+        y_rows[row][column] = witness[constraint.y];
+        z_rows[row][column] = witness[constraint.z];
+    }
+
+    for rows in [&x_rows, &y_rows, &z_rows] {
+        for data in rows {
+            match params.code {
+                LigeroCode::Rs => {
+                    let mut message = data.clone();
+                    message.extend(draw_uniform_fps(rng, params.degree_bound - params.row_len));
+                    encoded_rows.push(
+                        rs_encode_padded(&message, params.degree_bound, params.codeword_len)
+                            .map_err(LigeroError::Rs)?,
+                    );
+                }
+                LigeroCode::Circle => {
+                    let geom = params.circle_geom().expect("validated circle params");
+                    let mut row_pads =
+                        draw_uniform_fps(rng, geom.row_message_len - geom.data_slots).into_iter();
+                    let (coefficients, codeword) = circle_encode_row(geom, data, || {
+                        row_pads.next().expect("quadratic row pad budget exhausted")
+                    })
+                    .map_err(LigeroError::Circle)?;
+                    coefficient_rows.push(coefficients);
+                    encoded_rows.push(codeword);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn claim_blind_row_coefficients(params: LigeroParams, rng: &mut ChaCha20Rng) -> Vec<Fp> {
+    let mut row = draw_uniform_fps(rng, params.claim_degree_bound());
+    match params.code {
+        LigeroCode::Rs => {
+            let sum = row[..params.row_len]
+                .iter()
+                .copied()
+                .fold(Fp::ZERO, |acc, value| acc + value);
+            row[0] = row[0] - sum;
+        }
+        LigeroCode::Circle => {
+            // b_0 ≡ 1 at every data point. Adjusting c_0 by −L(row)/d
+            // projects a uniform coefficient vector uniformly onto ker L.
+            let geom = params.circle_geom().expect("validated circle params");
+            let sum = circle_data_sum(geom, &row);
+            let slots_inv = Fp::from_u64(geom.data_slots as u64)
+                .inverse()
+                .expect("power of two is invertible mod p");
+            row[0] = row[0] - sum * slots_inv;
+        }
+    }
+    row
+}
+
+fn quadratic_blind_row_coefficients(
+    params: LigeroParams,
+    degree_bound: usize,
+    rng: &mut ChaCha20Rng,
+) -> Result<Vec<Fp>, LigeroError> {
+    match params.code {
+        LigeroCode::Rs => {
+            let mut row = vec![Fp::ZERO; params.row_len];
+            row.extend(draw_uniform_fps(rng, degree_bound - params.row_len));
+            Ok(row)
+        }
+        LigeroCode::Circle => {
+            let geom = params.circle_geom().expect("validated circle params");
+            let quotient = draw_uniform_fps(rng, degree_bound - geom.data_slots);
+            circle_multiply_data_vanishing(geom, &quotient, degree_bound)
+                .map_err(LigeroError::Circle)
+        }
+    }
+}
+
 impl LigeroCommitment {
     pub fn root(&self) -> [u8; 32] {
         self.merkle.root()
+    }
+
+    pub fn committed_rows(&self) -> usize {
+        self.committed_rows
+    }
+
+    pub fn params(&self) -> LigeroParams {
+        self.params
+    }
+
+    pub fn quadratic_batch(&self, challenges: &[Fp]) -> Result<LigeroQuadraticBatch, LigeroError> {
+        if self.quadratic_triples == 0 {
+            if challenges.is_empty() {
+                return Ok(LigeroQuadraticBatch::default());
+            }
+            return Err(LigeroError::WrongGammaLength);
+        }
+        self.params.validate_quadratic()?;
+        if self.params.code != LigeroCode::Circle {
+            return Err(LigeroError::UnsupportedCode);
+        }
+        if challenges.len() != self.quadratic_triples {
+            return Err(LigeroError::WrongGammaLength);
+        }
+
+        let geom = self.params.circle_geom().expect("validated circle params");
+        let degree_bound = self.params.quadratic_degree_bound();
+        let mut response_values =
+            circle_product_fft(geom, &self.coefficient_rows[self.quadratic_blind_row])
+                .map_err(LigeroError::Circle)?;
+        let x_start = self.witness_rows;
+        let y_start = x_start + self.quadratic_triples;
+        let z_start = y_start + self.quadratic_triples;
+        for (index, challenge) in challenges.iter().copied().enumerate() {
+            let x = circle_product_fft(geom, &self.coefficient_rows[x_start + index])
+                .map_err(LigeroError::Circle)?;
+            let y = circle_product_fft(geom, &self.coefficient_rows[y_start + index])
+                .map_err(LigeroError::Circle)?;
+            let z = circle_product_fft(geom, &self.coefficient_rows[z_start + index])
+                .map_err(LigeroError::Circle)?;
+            for (((response, x), y), z) in response_values.iter_mut().zip(x).zip(y).zip(z) {
+                *response = *response + challenge * (z - x * y);
+            }
+        }
+        let coefficients =
+            circle_product_ifft(geom, response_values).map_err(LigeroError::Circle)?;
+        if coefficients[degree_bound..]
+            .iter()
+            .any(|&coefficient| coefficient != Fp::ZERO)
+        {
+            return Err(LigeroError::InvalidQuadraticConstraint);
+        }
+        let quotient =
+            circle_divide_data_vanishing(geom, &coefficients[..degree_bound], degree_bound)
+                .map_err(LigeroError::Circle)?;
+        Ok(LigeroQuadraticBatch { quotient })
     }
 
     /// The message vector of a committed row: the systematic codeword prefix
@@ -430,6 +753,13 @@ impl LigeroCommitment {
     fn row_message(&self, row: usize) -> &[Fp] {
         match self.params.code {
             LigeroCode::Rs => &self.encoded_rows[row][..self.params.degree_bound],
+            LigeroCode::Circle => &self.coefficient_rows[row],
+        }
+    }
+
+    fn claim_row_message(&self, row: usize) -> &[Fp] {
+        match self.params.code {
+            LigeroCode::Rs => &self.encoded_rows[row][..self.params.claim_degree_bound()],
             LigeroCode::Circle => &self.coefficient_rows[row],
         }
     }
@@ -454,7 +784,7 @@ impl LigeroCommitment {
         if gamma.is_empty() {
             return Err(LigeroError::EmptyGamma);
         }
-        if gamma.len() != self.witness_rows {
+        if gamma.len() != self.committed_rows {
             return Err(LigeroError::WrongGammaLength);
         }
 
@@ -478,7 +808,7 @@ impl LigeroCommitment {
         if gamma.is_empty() {
             return Err(LigeroError::EmptyGamma);
         }
-        if gamma.len() != self.witness_rows + other.witness_rows {
+        if gamma.len() != self.committed_rows + other.committed_rows {
             return Err(LigeroError::WrongGammaLength);
         }
 
@@ -489,17 +819,58 @@ impl LigeroCommitment {
         {
             *out = *out + *value;
         }
-        for (index, coeff) in gamma[..self.witness_rows].iter().copied().enumerate() {
+        for (index, coeff) in gamma[..self.committed_rows].iter().copied().enumerate() {
             for (out, value) in combined_row.iter_mut().zip(self.row_message(index)) {
                 *out = *out + coeff * *value;
             }
         }
-        for (index, coeff) in gamma[self.witness_rows..].iter().copied().enumerate() {
+        for (index, coeff) in gamma[self.committed_rows..].iter().copied().enumerate() {
             for (out, value) in combined_row.iter_mut().zip(other.row_message(index)) {
                 *out = *out + coeff * *value;
             }
         }
         Ok(LigeroProximityClaim { combined_row })
+    }
+
+    pub fn claim_blind_check(&self, challenge: Fp) -> LigeroClaimBlindCheck {
+        let mut combined_row = self.claim_row_message(self.claim_blind_mask_row).to_vec();
+        for (out, blind) in combined_row
+            .iter_mut()
+            .zip(self.claim_row_message(self.claim_blind_row))
+        {
+            *out = *out + challenge * *blind;
+        }
+        LigeroClaimBlindCheck { combined_row }
+    }
+
+    pub fn split_claim_blind_check(
+        &self,
+        other: &Self,
+        challenge: Fp,
+    ) -> Result<LigeroClaimBlindCheck, LigeroError> {
+        if self.params != other.params {
+            return Err(LigeroError::InvalidRowLength);
+        }
+        let mut combined_row = self.claim_row_message(self.claim_blind_mask_row).to_vec();
+        for (out, value) in combined_row
+            .iter_mut()
+            .zip(other.claim_row_message(other.claim_blind_mask_row))
+        {
+            *out = *out + *value;
+        }
+        for (out, blind) in combined_row
+            .iter_mut()
+            .zip(self.claim_row_message(self.claim_blind_row))
+        {
+            *out = *out + challenge * *blind;
+        }
+        for (out, blind) in combined_row
+            .iter_mut()
+            .zip(other.claim_row_message(other.claim_blind_row))
+        {
+            *out = *out + challenge * *blind;
+        }
+        Ok(LigeroClaimBlindCheck { combined_row })
     }
 
     pub fn claim_batch(
@@ -520,7 +891,8 @@ impl LigeroCommitment {
         let blind_row = &self.encoded_rows[self.claim_blind_row];
         let mut coefficients = blind_row[..claim_degree_bound].to_vec();
 
-        for (row, weights) in batched_row_weights(self.params, self.witness_rows, claims, gamma)? {
+        for (row, weights) in batched_row_weights(self.params, self.committed_rows, claims, gamma)?
+        {
             let weight_evals = weight_evaluations(self.params, &weights, 0..claim_degree_bound)?;
             for x in 0..claim_degree_bound {
                 let row_value = self.encoded_rows[row][x];
@@ -566,19 +938,19 @@ impl LigeroCommitment {
         }
         let mut q_values = circle_product_fft(geom, &blind_coeffs).map_err(LigeroError::Circle)?;
 
-        let combined_rows = self.witness_rows + other.map_or(0, |o| o.witness_rows);
+        let combined_rows = self.committed_rows + other.map_or(0, |o| o.committed_rows);
         let row_weights = batched_row_weights(self.params, combined_rows, claims, gamma)?;
         let row_products = row_weights
             .par_iter()
             .map(|(row, weights)| {
                 let w_coeffs = circle_weight_coeffs(geom, weights).map_err(LigeroError::Circle)?;
                 let w_values = circle_product_fft(geom, &w_coeffs).map_err(LigeroError::Circle)?;
-                let row_coeffs = if *row < self.witness_rows {
+                let row_coeffs = if *row < self.committed_rows {
                     &self.coefficient_rows[*row]
                 } else {
                     &other
                         .expect("row index beyond first group")
-                        .coefficient_rows[*row - self.witness_rows]
+                        .coefficient_rows[*row - self.committed_rows]
                 };
                 let r_values = circle_product_fft(geom, row_coeffs).map_err(LigeroError::Circle)?;
                 Ok(w_values
@@ -633,13 +1005,13 @@ impl LigeroCommitment {
             *out = *out + *value;
         }
 
-        let combined_rows = self.witness_rows + other.witness_rows;
+        let combined_rows = self.committed_rows + other.committed_rows;
         for (row, weights) in batched_row_weights(self.params, combined_rows, claims, gamma)? {
             let weight_evals = weight_evaluations(self.params, &weights, 0..claim_degree_bound)?;
-            let encoded_row = if row < self.witness_rows {
+            let encoded_row = if row < self.committed_rows {
                 &self.encoded_rows[row]
             } else {
-                &other.encoded_rows[row - self.witness_rows]
+                &other.encoded_rows[row - self.committed_rows]
             };
             for x in 0..claim_degree_bound {
                 coefficients[x] = coefficients[x] + weight_evals[x] * encoded_row[x];
@@ -656,6 +1028,20 @@ impl LigeroCommitment {
             blind_claim,
         })
     }
+}
+
+fn committed_opening_rows(
+    committed_len: usize,
+    row_len: usize,
+) -> Result<(usize, usize), LigeroError> {
+    if row_len == 0 {
+        return Err(LigeroError::InvalidRowLength);
+    }
+    let committed_rows = committed_len.div_ceil(row_len);
+    let opening_rows = committed_rows
+        .checked_add(LIGERO_AUXILIARY_ROW_COUNT)
+        .ok_or(LigeroError::InvalidRowLength)?;
+    Ok((committed_rows, opening_rows))
 }
 
 pub fn verify_split_openings(
@@ -682,9 +1068,12 @@ pub fn verify_split_openings(
     if claim.combined_row.len() != params.degree_bound {
         return Err(LigeroError::WrongClaimLength);
     }
-    let rows_a = committed_len_a.div_ceil(params.row_len);
-    let rows_b = committed_len_b.div_ceil(params.row_len);
-    if gamma.len() != rows_a + rows_b {
+    let (rows_a, opening_rows_a) = committed_opening_rows(committed_len_a, params.row_len)?;
+    let (rows_b, opening_rows_b) = committed_opening_rows(committed_len_b, params.row_len)?;
+    let combined_rows = rows_a
+        .checked_add(rows_b)
+        .ok_or(LigeroError::InvalidRowLength)?;
+    if gamma.len() != combined_rows {
         return Err(LigeroError::WrongGammaLength);
     }
 
@@ -695,7 +1084,7 @@ pub fn verify_split_openings(
         if opening_a.index >= params.codeword_len {
             return Err(LigeroError::ColumnOutOfRange);
         }
-        if opening_a.column.len() != rows_a + 2 || opening_b.column.len() != rows_b + 2 {
+        if opening_a.column.len() != opening_rows_a || opening_b.column.len() != opening_rows_b {
             return Err(LigeroError::WrongGammaLength);
         }
         if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
@@ -761,6 +1150,97 @@ pub(crate) fn verify_and_authenticate_split_openings<'a>(
         openings_a,
         openings_b,
     }))
+}
+
+pub fn verify_claim_blind_check(
+    root: [u8; 32],
+    params: LigeroParams,
+    committed_len: usize,
+    openings: &[ColumnOpening],
+    check: &LigeroClaimBlindCheck,
+    challenge: Fp,
+) -> Result<bool, LigeroError> {
+    params.validate()?;
+    if openings.len() != params.openings {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if check.combined_row.len() != params.claim_degree_bound() {
+        return Err(LigeroError::WrongClaimLength);
+    }
+    if claim_extraction_sum(params, &check.combined_row) != Fp::ZERO {
+        return Ok(false);
+    }
+    let (committed_rows, expected_rows) = committed_opening_rows(committed_len, params.row_len)?;
+    for opening in openings {
+        if opening.index >= params.codeword_len {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening.column.len() != expected_rows {
+            return Err(LigeroError::WrongGammaLength);
+        }
+        if !verify_column(root, opening).map_err(LigeroError::Merkle)? {
+            return Ok(false);
+        }
+        let expected = code_evaluate(params, &check.combined_row, opening.index)?;
+        let actual = opening.column[committed_rows + CLAIM_BLIND_MASK_ROW_OFFSET]
+            + challenge * opening.column[committed_rows + CLAIM_BLIND_ROW_OFFSET];
+        if expected != actual {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn verify_split_claim_blind_check(
+    root_a: [u8; 32],
+    root_b: [u8; 32],
+    params: LigeroParams,
+    committed_len_a: usize,
+    committed_len_b: usize,
+    openings_a: &[ColumnOpening],
+    openings_b: &[ColumnOpening],
+    check: &LigeroClaimBlindCheck,
+    challenge: Fp,
+) -> Result<bool, LigeroError> {
+    params.validate()?;
+    if openings_a.len() != params.openings || openings_b.len() != params.openings {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if openings_a.len() != openings_b.len() {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if check.combined_row.len() != params.claim_degree_bound() {
+        return Err(LigeroError::WrongClaimLength);
+    }
+    if claim_extraction_sum(params, &check.combined_row) != Fp::ZERO {
+        return Ok(false);
+    }
+    let (rows_a, opening_rows_a) = committed_opening_rows(committed_len_a, params.row_len)?;
+    let (rows_b, opening_rows_b) = committed_opening_rows(committed_len_b, params.row_len)?;
+    for (opening_a, opening_b) in openings_a.iter().zip(openings_b) {
+        if opening_a.index != opening_b.index || opening_a.index >= params.codeword_len {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening_a.column.len() != opening_rows_a || opening_b.column.len() != opening_rows_b {
+            return Err(LigeroError::WrongGammaLength);
+        }
+        if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
+            || !verify_column(root_b, opening_b).map_err(LigeroError::Merkle)?
+        {
+            return Ok(false);
+        }
+        let expected = code_evaluate(params, &check.combined_row, opening_a.index)?;
+        let actual = opening_a.column[rows_a + CLAIM_BLIND_MASK_ROW_OFFSET]
+            + opening_b.column[rows_b + CLAIM_BLIND_MASK_ROW_OFFSET]
+            + challenge
+                * (opening_a.column[rows_a + CLAIM_BLIND_ROW_OFFSET]
+                    + opening_b.column[rows_b + CLAIM_BLIND_ROW_OFFSET]);
+        if expected != actual {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 const STRUCTURED_CLAIM_MIN_ROWS: usize = 4;
@@ -1074,9 +1554,21 @@ fn verify_split_claim_batch_inner(
     if batch.blind_claim != Fp::ZERO {
         return Ok(false);
     }
-    let rows_a = committed_len_a.div_ceil(params.row_len);
-    let rows_b = committed_len_b.div_ceil(params.row_len);
-    let combined_rows = rows_a + rows_b;
+    let (rows_a, opening_rows_a) = committed_opening_rows(committed_len_a, params.row_len)?;
+    let (rows_b, opening_rows_b) = committed_opening_rows(committed_len_b, params.row_len)?;
+    let combined_rows = rows_a
+        .checked_add(rows_b)
+        .ok_or(LigeroError::InvalidRowLength)?;
+    // Validate every attacker-carried index and row shape before using an
+    // index to gather an encoded response value.
+    for (opening_a, opening_b) in openings_a.iter().zip(openings_b) {
+        if opening_a.index != opening_b.index || opening_a.index >= params.codeword_len {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening_a.column.len() != opening_rows_a || opening_b.column.len() != opening_rows_b {
+            return Err(LigeroError::WrongGammaLength);
+        }
+    }
     let opening_indices = openings_a
         .iter()
         .map(|opening| opening.index)
@@ -1100,15 +1592,6 @@ fn verify_split_claim_batch_inner(
 
     for (opening_position, (opening_a, opening_b)) in openings_a.iter().zip(openings_b).enumerate()
     {
-        if opening_a.index != opening_b.index {
-            return Err(LigeroError::ColumnOutOfRange);
-        }
-        if opening_a.index >= params.codeword_len {
-            return Err(LigeroError::ColumnOutOfRange);
-        }
-        if opening_a.column.len() != rows_a + 2 || opening_b.column.len() != rows_b + 2 {
-            return Err(LigeroError::WrongGammaLength);
-        }
         if let SplitOpeningAuthentication::Verify { root_a, root_b } = authentication {
             if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
                 || !verify_column(root_b, opening_b).map_err(LigeroError::Merkle)?
@@ -1116,7 +1599,8 @@ fn verify_split_claim_batch_inner(
                 return Ok(false);
             }
         }
-        let blind_value = opening_a.column[rows_a + 1] + opening_b.column[rows_b + 1];
+        let blind_value = opening_a.column[rows_a + CLAIM_BLIND_ROW_OFFSET]
+            + opening_b.column[rows_b + CLAIM_BLIND_ROW_OFFSET];
         let mut combined = blind_value;
         for (row, weights_at_openings) in &weight_evaluations.residual_rows {
             let value = if *row < rows_a {
@@ -1161,17 +1645,15 @@ pub fn verify_input_claims_from_systematic_openings(
     openings: &[ColumnOpening],
     claims: &InputClaims,
 ) -> Result<bool, LigeroError> {
+    params.validate()?;
     let rows = openings
         .first()
         .map(|opening| opening.column.len())
         .ok_or(LigeroError::WrongOpeningCount)?;
-    verify_input_claims_from_systematic_openings_with_len(
-        root,
-        params,
-        openings,
-        claims,
-        rows * params.row_len,
-    )
+    let input_len = rows
+        .checked_mul(params.row_len)
+        .ok_or(LigeroError::WrongPointLength)?;
+    verify_input_claims_from_systematic_openings_with_len(root, params, openings, claims, input_len)
 }
 
 pub fn verify_input_claims_from_systematic_openings_with_len(
@@ -1221,17 +1703,23 @@ pub fn verify_input_claims_from_systematic_openings_with_range(
     if sorted.iter().any(|opening| opening.column.len() != rows) {
         return Err(LigeroError::WrongGammaLength);
     }
-    if input_offset + input_len > rows * params.row_len {
+    let total_values = rows
+        .checked_mul(params.row_len)
+        .ok_or(LigeroError::WrongPointLength)?;
+    let input_end = input_offset
+        .checked_add(input_len)
+        .ok_or(LigeroError::WrongPointLength)?;
+    if input_end > total_values {
         return Err(LigeroError::WrongPointLength);
     }
 
-    let mut values = Vec::with_capacity(rows * params.row_len);
+    let mut values = Vec::with_capacity(total_values);
     for row in 0..rows {
         for opening in &sorted {
             values.push(opening.column[row]);
         }
     }
-    let values = values[input_offset..input_offset + input_len].to_vec();
+    let values = values[input_offset..input_end].to_vec();
     let mle = Mle::new(values);
     for (point, value) in claims.points.iter().zip(claims.values) {
         if point.len() != mle.num_vars() {
@@ -1244,10 +1732,175 @@ pub fn verify_input_claims_from_systematic_openings_with_range(
     Ok(true)
 }
 
-fn fresh_pad_channel() -> CoprocessorChannel {
+fn fresh_pad_rng() -> ChaCha20Rng {
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
-    CoprocessorChannel::from_seed(seed, b"eu-id-s4-ligero-v2-pad")
+    ChaCha20Rng::from_seed(seed)
+}
+
+fn draw_uniform_fps(rng: &mut ChaCha20Rng, count: usize) -> Vec<Fp> {
+    (0..count).map(|_| Fp::random_uniform(rng)).collect()
+}
+
+pub fn quadratic_committed_len(
+    committed_len: usize,
+    params: LigeroParams,
+    quadratic_constraints: usize,
+) -> Result<usize, LigeroError> {
+    params.validate()?;
+    let witness_rows = committed_len.div_ceil(params.row_len);
+    let quadratic_triples = quadratic_constraints.div_ceil(params.row_len);
+    witness_rows
+        .checked_add(
+            quadratic_triples
+                .checked_mul(3)
+                .ok_or(LigeroError::InvalidRowLength)?,
+        )
+        .and_then(|rows| rows.checked_mul(params.row_len))
+        .ok_or(LigeroError::InvalidRowLength)
+}
+
+pub fn quadratic_route_claims(
+    committed_len: usize,
+    params: LigeroParams,
+    constraints: &[LigeroQuadraticConstraint],
+) -> Result<Vec<LigeroLinearClaim>, LigeroError> {
+    params.validate()?;
+    let witness_rows = committed_len.div_ceil(params.row_len);
+    let quadratic_triples = constraints.len().div_ceil(params.row_len);
+    let x_start = witness_rows
+        .checked_mul(params.row_len)
+        .ok_or(LigeroError::InvalidQuadraticConstraint)?;
+    let triple_span = quadratic_triples
+        .checked_mul(params.row_len)
+        .ok_or(LigeroError::InvalidQuadraticConstraint)?;
+    let y_start = x_start
+        .checked_add(triple_span)
+        .ok_or(LigeroError::InvalidQuadraticConstraint)?;
+    let z_start = y_start
+        .checked_add(triple_span)
+        .ok_or(LigeroError::InvalidQuadraticConstraint)?;
+    z_start
+        .checked_add(triple_span)
+        .ok_or(LigeroError::InvalidQuadraticConstraint)?;
+    let capacity = constraints
+        .len()
+        .checked_mul(3)
+        .ok_or(LigeroError::InvalidQuadraticConstraint)?;
+    let mut claims = Vec::with_capacity(capacity);
+    for (index, constraint) in constraints.iter().enumerate() {
+        if [constraint.x, constraint.y, constraint.z]
+            .into_iter()
+            .any(|offset| offset >= committed_len)
+        {
+            return Err(LigeroError::InvalidQuadraticConstraint);
+        }
+        let destinations = [
+            x_start
+                .checked_add(index)
+                .ok_or(LigeroError::InvalidQuadraticConstraint)?,
+            y_start
+                .checked_add(index)
+                .ok_or(LigeroError::InvalidQuadraticConstraint)?,
+            z_start
+                .checked_add(index)
+                .ok_or(LigeroError::InvalidQuadraticConstraint)?,
+        ];
+        for (source, destination) in [constraint.x, constraint.y, constraint.z]
+            .into_iter()
+            .zip(destinations)
+        {
+            claims.push(LigeroLinearClaim::affine(
+                vec![
+                    LigeroLinearTerm {
+                        offset: source,
+                        len: 1,
+                        point: Vec::new(),
+                        coefficient: -Fp::ONE,
+                    },
+                    LigeroLinearTerm {
+                        offset: destination,
+                        len: 1,
+                        point: Vec::new(),
+                        coefficient: Fp::ONE,
+                    },
+                ],
+                Fp::ZERO,
+            ));
+        }
+    }
+    Ok(claims)
+}
+
+pub fn verify_quadratic_batch(
+    root: [u8; 32],
+    params: LigeroParams,
+    committed_len: usize,
+    quadratic_constraints: usize,
+    openings: &[ColumnOpening],
+    batch: &LigeroQuadraticBatch,
+    challenges: &[Fp],
+) -> Result<bool, LigeroError> {
+    params.validate()?;
+    if quadratic_constraints == 0 {
+        return Ok(batch.quotient.is_empty() && challenges.is_empty());
+    }
+    params.validate_quadratic()?;
+    if params.code != LigeroCode::Circle {
+        return Err(LigeroError::UnsupportedCode);
+    }
+    if openings.len() != params.openings {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    let quadratic_triples = quadratic_constraints.div_ceil(params.row_len);
+    if challenges.len() != quadratic_triples {
+        return Err(LigeroError::WrongGammaLength);
+    }
+    let quotient_bound = params.quadratic_degree_bound() - params.row_len;
+    if batch.quotient.len() != quotient_bound {
+        return Err(LigeroError::WrongClaimLength);
+    }
+    let witness_rows = committed_len.div_ceil(params.row_len);
+    let expanded_committed_len =
+        quadratic_committed_len(committed_len, params, quadratic_constraints)?;
+    let (committed_rows, expected_rows) =
+        committed_opening_rows(expanded_committed_len, params.row_len)?;
+    let geom = params.circle_geom().expect("validated circle params");
+    let response_coefficients =
+        circle_multiply_data_vanishing(geom, &batch.quotient, params.quadratic_degree_bound())
+            .map_err(LigeroError::Circle)?;
+    let response_codeword = circle_encode(
+        geom,
+        &response_coefficients,
+        params.quadratic_degree_bound(),
+    )
+    .map_err(LigeroError::Circle)?;
+    let x_start = witness_rows;
+    let y_start = x_start + quadratic_triples;
+    let z_start = y_start + quadratic_triples;
+
+    for opening in openings {
+        if opening.index >= params.codeword_len {
+            return Err(LigeroError::ColumnOutOfRange);
+        }
+        if opening.column.len() != expected_rows {
+            return Err(LigeroError::WrongGammaLength);
+        }
+        if !verify_column(root, opening).map_err(LigeroError::Merkle)? {
+            return Ok(false);
+        }
+        let mut combined = opening.column[committed_rows + QUADRATIC_BLIND_ROW_OFFSET];
+        for (index, challenge) in challenges.iter().copied().enumerate() {
+            let x = opening.column[x_start + index];
+            let y = opening.column[y_start + index];
+            let z = opening.column[z_start + index];
+            combined = combined + challenge * (z - x * y);
+        }
+        if response_codeword[opening.index] != combined {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn verify_openings(
@@ -1267,17 +1920,21 @@ pub fn verify_openings(
     if claim.combined_row.len() != params.degree_bound {
         return Err(LigeroError::WrongClaimLength);
     }
+    let expected_rows = gamma
+        .len()
+        .checked_add(LIGERO_AUXILIARY_ROW_COUNT)
+        .ok_or(LigeroError::WrongGammaLength)?;
     for opening in openings {
         if opening.index >= params.codeword_len {
             return Err(LigeroError::ColumnOutOfRange);
         }
-        if opening.column.len() != gamma.len() + 2 {
+        if opening.column.len() != expected_rows {
             return Err(LigeroError::WrongGammaLength);
         }
         if !verify_column(root, opening).map_err(LigeroError::Merkle)? {
             return Ok(false);
         }
-        let mask_value = opening.column[gamma.len()];
+        let mask_value = opening.column[gamma.len() + PROXIMITY_MASK_ROW_OFFSET];
         let combined = gamma
             .iter()
             .copied()
@@ -1318,9 +1975,7 @@ pub fn verify_claim_batch(
     if batch.blind_claim != Fp::ZERO {
         return Ok(false);
     }
-    let committed_rows = committed_len.div_ceil(params.row_len);
-    let expected_rows = committed_rows + 2;
-    let batched_row_weights = batched_row_weights(params, committed_rows, claims, gamma)?;
+    let (committed_rows, expected_rows) = committed_opening_rows(committed_len, params.row_len)?;
     for opening in openings {
         if opening.index >= params.codeword_len {
             return Err(LigeroError::ColumnOutOfRange);
@@ -1329,6 +1984,7 @@ pub fn verify_claim_batch(
             return Err(LigeroError::WrongGammaLength);
         }
     }
+    let batched_row_weights = batched_row_weights(params, committed_rows, claims, gamma)?;
     let opening_indices = openings
         .iter()
         .map(|opening| opening.index)
@@ -1352,7 +2008,7 @@ pub fn verify_claim_batch(
         if !verify_column(root, opening).map_err(LigeroError::Merkle)? {
             return Ok(false);
         }
-        let blind_value = opening.column[committed_rows + 1];
+        let blind_value = opening.column[committed_rows + CLAIM_BLIND_ROW_OFFSET];
         let mut combined = blind_value;
         for (row, weights_at_openings) in &row_weights_at_openings {
             combined = combined + weights_at_openings[opening_position] * opening.column[*row];
@@ -1380,18 +2036,25 @@ fn validate_linear_claim(
     if claim.terms.is_empty() {
         return Err(LigeroError::WrongPointLength);
     }
+    let committed_cells = committed_rows
+        .checked_mul(params.row_len)
+        .ok_or(LigeroError::WrongPointLength)?;
     for term in &claim.terms {
         if term.len == 0 {
             return Err(LigeroError::WrongPointLength);
         }
-        let expected_point_len = term.len.next_power_of_two().ilog2() as usize;
+        let expected_point_len = term
+            .len
+            .checked_next_power_of_two()
+            .ok_or(LigeroError::WrongPointLength)?
+            .ilog2() as usize;
         if term.point.len() != expected_point_len {
             return Err(LigeroError::WrongPointLength);
         }
         if term
             .offset
             .checked_add(term.len)
-            .is_none_or(|end| end > committed_rows * params.row_len)
+            .is_none_or(|end| end > committed_cells)
         {
             return Err(LigeroError::WrongPointLength);
         }
@@ -1658,6 +2321,31 @@ mod tests {
         }
     }
 
+    fn make_claim_blind_non_kernel(commitment: &mut LigeroCommitment) {
+        let params = commitment.params;
+        let row = commitment.claim_blind_row;
+        match params.code {
+            LigeroCode::Rs => {
+                let mut message =
+                    commitment.encoded_rows[row][..params.claim_degree_bound()].to_vec();
+                message[0] = message[0] + Fp::ONE;
+                commitment.encoded_rows[row] =
+                    rs_encode_padded(&message, params.claim_degree_bound(), params.codeword_len)
+                        .expect("valid adversarial RS row");
+            }
+            LigeroCode::Circle => {
+                let geom = params.circle_geom().expect("validated circle params");
+                let coefficients = &mut commitment.coefficient_rows[row];
+                coefficients[0] = coefficients[0] + Fp::ONE;
+                commitment.encoded_rows[row] =
+                    circle_encode(geom, coefficients, params.claim_degree_bound())
+                        .expect("valid adversarial Circle row");
+            }
+        }
+        commitment.merkle =
+            commit_columns(&commitment.encoded_rows).expect("recommit adversarial row");
+    }
+
     #[test]
     fn batched_row_weights_match_separate_claim_weights() {
         let params = small_params();
@@ -1832,6 +2520,198 @@ mod tests {
         )
         .unwrap());
         assert_eq!(rs_encode_padded_call_count(), 0);
+    }
+
+    #[test]
+    fn claim_blind_kernel_check_accepts_honest_and_rejects_non_kernel_rows() {
+        for params in [small_params(), v4_circle_params()] {
+            let values = (0..params.row_len + 3)
+                .map(|value| Fp::from_u64(value as u64 + 1))
+                .collect::<Vec<_>>();
+            let challenge = Fp::from_u64(17);
+            let indices = (0..params.openings)
+                .map(|index| match params.code {
+                    LigeroCode::Rs => params.row_len + index,
+                    LigeroCode::Circle => index,
+                })
+                .collect::<Vec<_>>();
+
+            let commitment = commit_witness(&values, params).unwrap();
+            let check = commitment.claim_blind_check(challenge);
+            let openings = commitment.open_columns(&indices).unwrap();
+            assert_eq!(claim_extraction_sum(params, &check.combined_row), Fp::ZERO);
+            assert!(verify_claim_blind_check(
+                commitment.root(),
+                params,
+                values.len(),
+                &openings,
+                &check,
+                challenge,
+            )
+            .unwrap());
+
+            let mut adversarial = commitment;
+            make_claim_blind_non_kernel(&mut adversarial);
+            let adversarial_check = adversarial.claim_blind_check(challenge);
+            let adversarial_openings = adversarial.open_columns(&indices).unwrap();
+            assert_ne!(
+                claim_extraction_sum(params, &adversarial_check.combined_row),
+                Fp::ZERO,
+                "nonzero challenge must expose a non-kernel claim blind"
+            );
+            assert!(!verify_claim_blind_check(
+                adversarial.root(),
+                params,
+                values.len(),
+                &adversarial_openings,
+                &adversarial_check,
+                challenge,
+            )
+            .unwrap());
+        }
+    }
+
+    #[test]
+    fn split_claim_blind_kernel_check_binds_both_roots() {
+        let params = small_params();
+        let values_a = (0..12)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        let values_b = (0..9)
+            .map(|value| Fp::from_u64(value + 101))
+            .collect::<Vec<_>>();
+        let commitment_a = commit_witness(&values_a, params).unwrap();
+        let commitment_b = commit_witness(&values_b, params).unwrap();
+        let challenge = Fp::from_u64(19);
+        let indices = [8, 13, 21];
+        let openings_a = commitment_a.open_columns(&indices).unwrap();
+        let openings_b = commitment_b.open_columns(&indices).unwrap();
+        let check = commitment_a
+            .split_claim_blind_check(&commitment_b, challenge)
+            .unwrap();
+        assert!(verify_split_claim_blind_check(
+            commitment_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &openings_a,
+            &openings_b,
+            &check,
+            challenge,
+        )
+        .unwrap());
+
+        let mut adversarial_a = commitment_a;
+        make_claim_blind_non_kernel(&mut adversarial_a);
+        let adversarial_openings_a = adversarial_a.open_columns(&indices).unwrap();
+        let adversarial_check = adversarial_a
+            .split_claim_blind_check(&commitment_b, challenge)
+            .unwrap();
+        assert!(!verify_split_claim_blind_check(
+            adversarial_a.root(),
+            commitment_b.root(),
+            params,
+            values_a.len(),
+            values_b.len(),
+            &adversarial_openings_a,
+            &openings_b,
+            &adversarial_check,
+            challenge,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn claim_blind_kernel_response_is_fresh_for_the_same_witness() {
+        let params = small_params();
+        let values = (0..12)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        let challenge = Fp::from_u64(23);
+        let first = commit_witness(&values, params).unwrap();
+        let second = commit_witness(&values, params).unwrap();
+        let first_check = first.claim_blind_check(challenge);
+        let second_check = second.claim_blind_check(challenge);
+
+        assert_ne!(first.root(), second.root());
+        assert_ne!(
+            first_check, second_check,
+            "the independent kernel mask must hide repeated-witness responses"
+        );
+        assert_eq!(
+            claim_extraction_sum(params, &first_check.combined_row),
+            Fp::ZERO
+        );
+        assert_eq!(
+            claim_extraction_sum(params, &second_check.combined_row),
+            Fp::ZERO
+        );
+    }
+
+    #[test]
+    fn malformed_params_and_claim_lengths_return_errors_without_panicking() {
+        let mut invalid_params = small_params();
+        invalid_params.row_len = 0;
+        let params_verdict = std::panic::catch_unwind(|| {
+            verify_quadratic_batch(
+                [0u8; 32],
+                invalid_params,
+                0,
+                0,
+                &[],
+                &LigeroQuadraticBatch::default(),
+                &[],
+            )
+        });
+        assert!(params_verdict.is_ok(), "invalid params must not panic");
+        assert_eq!(params_verdict.unwrap(), Err(LigeroError::InvalidRowLength));
+
+        let oversized_claim = LigeroLinearClaim::mle(0, usize::MAX, Vec::new(), Fp::ZERO);
+        let claim_verdict =
+            std::panic::catch_unwind(|| validate_linear_claim(small_params(), 1, &oversized_claim));
+        assert!(claim_verdict.is_ok(), "oversized claims must not panic");
+        assert_eq!(claim_verdict.unwrap(), Err(LigeroError::WrongPointLength));
+    }
+
+    #[test]
+    fn split_circle_claim_rejects_out_of_range_index_without_panicking() {
+        let params = v2_circle_params();
+        let values_a = (0..200)
+            .map(|value| Fp::from_u64(value + 1))
+            .collect::<Vec<_>>();
+        let values_b = (0..200)
+            .map(|value| Fp::from_u64(value + 501))
+            .collect::<Vec<_>>();
+        let commitment_a = commit_witness(&values_a, params).unwrap();
+        let commitment_b = commit_witness(&values_b, params).unwrap();
+        let claims = [LigeroLinearClaim::mle(0, 1, Vec::new(), values_a[0])];
+        let gamma = [Fp::from_u64(29)];
+        let batch = commitment_a
+            .split_claim_batch(&commitment_b, &claims, &gamma)
+            .unwrap();
+        let indices = (0..params.openings).collect::<Vec<_>>();
+        let mut openings_a = commitment_a.open_columns(&indices).unwrap();
+        let mut openings_b = commitment_b.open_columns(&indices).unwrap();
+        openings_a[0].index = params.codeword_len;
+        openings_b[0].index = params.codeword_len;
+
+        let verdict = std::panic::catch_unwind(|| {
+            verify_split_claim_batch(
+                commitment_a.root(),
+                commitment_b.root(),
+                params,
+                values_a.len(),
+                values_b.len(),
+                &openings_a,
+                &openings_b,
+                &batch,
+                &claims,
+                &gamma,
+            )
+        });
+        assert!(verdict.is_ok(), "malformed proof input must not panic");
+        assert_eq!(verdict.unwrap(), Err(LigeroError::ColumnOutOfRange));
     }
 
     #[test]
@@ -2354,15 +3234,25 @@ mod tests {
         );
     }
 
-    /// v4 (ℓ=256) soundness pin: same target as v3, half the rows. The
-    /// dominant term is the proximity `(1 − e/n)^t = 2^-132.16`.
+    /// v4 (ℓ=256) committed-mask soundness pin. The quadratic response has
+    /// degree bound 1026, forcing `e = 1534`; `t = 196` leaves a one-opening
+    /// margin over the first count that keeps the total error below 2^-132.
     #[test]
     fn v4_soundness_error_meets_target() {
         let params = v4_circle_params();
         assert!(params.validate().is_ok());
-        assert_eq!(params.openings, 176);
-        assert_eq!(params.proximity_radius, 1662);
+        assert!(params.validate_quadratic().is_ok());
+        assert_eq!(params.openings, 196);
+        assert_eq!(params.proximity_radius, 1534);
         assert_eq!(params.claim_degree_bound(), 770);
+        assert_eq!(params.quadratic_degree_bound(), 1026);
+        assert_eq!(
+            params
+                .circle_geom()
+                .expect("v4 uses a Circle code")
+                .product_domain_len,
+            2048
+        );
         // Value-pad ZK budget: every opening consumes one per-row pad slot.
         assert!(params.degree_bound - params.row_len >= params.openings);
         let se = params.soundness_error();
@@ -2371,12 +3261,94 @@ mod tests {
             "v4 soundness {se:e} (log2 {}) exceeds 2^-132",
             se.log2()
         );
-        // t = 175 misses the target: 176 is the exact minimum.
+        // t = 194 misses the target; production keeps one opening of margin
+        // over the exact minimum of 195.
         let mut weaker = params;
-        weaker.openings = 175;
+        weaker.openings = 194;
         assert!(
             weaker.soundness_error() > 2f64.powi(-132),
-            "t = 175 should NOT reach 2^-132 (t = 176 is the exact minimum)"
+            "t = 194 should NOT reach 2^-132 (production uses t = 196)"
+        );
+    }
+
+    #[test]
+    fn committed_quadratic_batch_accepts_products_and_rejects_tampering() {
+        let params = v4_circle_params();
+        let values = vec![Fp::from_u64(7), Fp::from_u64(9), Fp::from_u64(63)];
+        let constraints = [LigeroQuadraticConstraint { x: 0, y: 1, z: 2 }];
+        let (commitment, _) =
+            commit_witness_with_quadratics_profiled(&values, params, &constraints)
+                .expect("valid product commitment");
+        let challenges = [Fp::from_u64(17)];
+        let batch = commitment
+            .quadratic_batch(&challenges)
+            .expect("quadratic quotient");
+        let indices = (0..params.openings).collect::<Vec<_>>();
+        let openings = commitment
+            .open_columns(&indices)
+            .expect("quadratic openings");
+
+        assert!(verify_quadratic_batch(
+            commitment.root(),
+            params,
+            values.len(),
+            constraints.len(),
+            &openings,
+            &batch,
+            &challenges,
+        )
+        .expect("quadratic verification"));
+
+        let route_claims =
+            quadratic_route_claims(values.len(), params, &constraints).expect("route claims");
+        let route_gamma = [Fp::from_u64(19), Fp::from_u64(23), Fp::from_u64(29)];
+        let route_batch = commitment
+            .claim_batch(&route_claims, &route_gamma)
+            .expect("route batch");
+        assert!(verify_claim_batch(
+            commitment.root(),
+            params,
+            quadratic_committed_len(values.len(), params, constraints.len())
+                .expect("valid quadratic committed length"),
+            &openings,
+            &route_batch,
+            &route_claims,
+            &route_gamma,
+        )
+        .expect("route verification"));
+
+        let mut tampered_quotient = batch.clone();
+        tampered_quotient.quotient[0] = tampered_quotient.quotient[0] + Fp::ONE;
+        assert!(!verify_quadratic_batch(
+            commitment.root(),
+            params,
+            values.len(),
+            constraints.len(),
+            &openings,
+            &tampered_quotient,
+            &challenges,
+        )
+        .expect("tampered quadratic verification"));
+
+        let mut tampered_routes = route_claims;
+        tampered_routes[0].value = Fp::ONE;
+        assert!(!verify_claim_batch(
+            commitment.root(),
+            params,
+            quadratic_committed_len(values.len(), params, constraints.len())
+                .expect("valid quadratic committed length"),
+            &openings,
+            &route_batch,
+            &tampered_routes,
+            &route_gamma,
+        )
+        .expect("tampered route verification"));
+
+        let invalid_values = vec![Fp::from_u64(7), Fp::from_u64(9), Fp::from_u64(62)];
+        assert_eq!(
+            commit_witness_with_quadratics_profiled(&invalid_values, params, &constraints)
+                .map(|_| ()),
+            Err(LigeroError::InvalidQuadraticConstraint)
         );
     }
 
@@ -2435,9 +3407,9 @@ mod tests {
         let (_commitment, profile) = commit_witness_profiled(&values, params).unwrap();
         let (row_cached, claim_cached) = rs_encode_padded_v2a_cached_call_counts();
 
-        assert_eq!(profile.rows, 6);
-        assert_eq!(row_cached, 5);
-        assert_eq!(claim_cached, 1);
+        assert_eq!(profile.rows, 8);
+        assert_eq!(row_cached, 6);
+        assert_eq!(claim_cached, 2);
     }
 
     /// WO-P1 byte-identical gate: the D512 product path must reproduce, coeff

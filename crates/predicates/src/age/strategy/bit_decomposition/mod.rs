@@ -8,9 +8,9 @@ pub mod witness;
 
 use crate::age::predicate::AgePredicate;
 use crate::age::strategy::bit_decomposition::air::{
-    BitDecompositionProver, BitDecompositionVerifier,
+    BitDecompositionProver, BitDecompositionVerifier, BIT_DECOMPOSITION_CLAIM_COUNT,
 };
-use crate::age::types::{AgeBitDecompositionProof, DateOfBirth, Error, PublicInput};
+use crate::age::types::{AgeBitDecompositionProof, AgeInputError, DateOfBirth, Error, PublicInput};
 use crate::predicate::{PredicateProver, PredicateVerifier};
 use air_core::{prove, verify, Air};
 use stwo::core::fields::qm31::QM31;
@@ -94,6 +94,14 @@ impl PredicateVerifier for AgeBitDecomposition {
         claimed_sums: &[QM31],
     ) -> Result<BitDecompositionVerifier, Error> {
         self.0.validate(public)?;
+        if claimed_sums.len() != BIT_DECOMPOSITION_CLAIM_COUNT {
+            return Err(AgeInputError::Invalid(format!(
+                "age bit-decomposition proof carries {} claimed sums; expected {}",
+                claimed_sums.len(),
+                BIT_DECOMPOSITION_CLAIM_COUNT,
+            ))
+            .into());
+        }
         Ok(BitDecompositionVerifier::new(public, claimed_sums.to_vec()))
     }
 }
