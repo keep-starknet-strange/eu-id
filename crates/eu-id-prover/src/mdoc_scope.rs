@@ -2149,7 +2149,6 @@ struct ScopeTraceColumns {
     field_id: usize,
     field_index: usize,
     digest_values: std::ops::Range<usize>,
-    table_multiplicity: usize,
     total: usize,
 }
 
@@ -2209,7 +2208,6 @@ impl ScopeTraceColumns {
         let field_index = take(&mut next);
         let digest_values = next..next + SCOPE_DIGEST_BYTES;
         next += SCOPE_DIGEST_BYTES;
-        let table_multiplicity = take(&mut next);
         Self {
             active,
             first,
@@ -2245,7 +2243,6 @@ impl ScopeTraceColumns {
             field_id,
             field_index,
             digest_values,
-            table_multiplicity,
             total: next,
         }
     }
@@ -2304,8 +2301,8 @@ fn scope_col_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
-fn scope_preprocessed_ids(item_count: usize) -> Vec<PreProcessedColumnId> {
-    let mut ids = vec![
+fn scope_table_preprocessed_ids() -> Vec<PreProcessedColumnId> {
+    vec![
         scope_col_id("dfa_active"),
         scope_col_id("dfa_stream"),
         scope_col_id("dfa_from"),
@@ -2313,18 +2310,23 @@ fn scope_preprocessed_ids(item_count: usize) -> Vec<PreProcessedColumnId> {
         scope_col_id("dfa_action"),
         scope_col_id("dfa_p0"),
         scope_col_id("dfa_p1"),
-    ];
+    ]
+}
+
+fn scope_preprocessed_ids(item_count: usize) -> Vec<PreProcessedColumnId> {
+    let mut ids = scope_table_preprocessed_ids();
     ids.extend((0..item_count).map(|item| scope_col_id(&format!("digest_item_{item}"))));
     ids
 }
 
-fn scope_preprocessed_columns(
-    log_size: u32,
+/// DFA edge-table preprocessed columns, hosted by the table component at its
+/// own (edge-count driven) log size.
+fn scope_table_preprocessed_columns(
+    table_log_size: u32,
     table_edges: &[(usize, DfaEdge)],
-    item_count: usize,
 ) -> Vec<MdocScopeColumnEval> {
-    let domain = 1usize << log_size;
-    let mut columns = vec![vec![m31(0); domain]; SCOPE_PREPROCESSED_FIXED_COLS + item_count];
+    let domain = 1usize << table_log_size;
+    let mut columns = vec![vec![m31(0); domain]; SCOPE_PREPROCESSED_FIXED_COLS];
     for (row, (slot, edge)) in table_edges.iter().copied().enumerate() {
         columns[0][row] = m31(1);
         let tuple = edge.tuple(slot);
@@ -2332,13 +2334,100 @@ fn scope_preprocessed_columns(
             columns[1 + index][row] = m31(value);
         }
     }
-    for item in 0..item_count {
-        columns[SCOPE_PREPROCESSED_FIXED_COLS + item][item] = m31(1);
+    columns
+        .into_iter()
+        .map(|values| scope_column(table_log_size, values))
+        .collect()
+}
+
+/// Walk-side preprocessed columns (per-item digest aggregation flags) at the
+/// walk component's log size.
+fn scope_walk_preprocessed_columns(log_size: u32, item_count: usize) -> Vec<MdocScopeColumnEval> {
+    let domain = 1usize << log_size;
+    let mut columns = vec![vec![m31(0); domain]; item_count];
+    for (item, column) in columns.iter_mut().enumerate() {
+        column[item] = m31(1);
     }
     columns
         .into_iter()
         .map(|values| scope_column(log_size, values))
         .collect()
+}
+
+/// All scope preprocessed columns in [`scope_preprocessed_ids`] order: the DFA
+/// edge table at the table log size, then the walk's digest-item flags.
+fn scope_preprocessed_columns(
+    log_size: u32,
+    table_log_size: u32,
+    table_edges: &[(usize, DfaEdge)],
+    item_count: usize,
+) -> Vec<MdocScopeColumnEval> {
+    let mut columns = scope_table_preprocessed_columns(table_log_size, table_edges);
+    columns.extend(scope_walk_preprocessed_columns(log_size, item_count));
+    columns
+}
+
+/// Committed multiplicity column for the DFA edge table. Rows past the edge
+/// list stay freshly blinded; the preprocessed `dfa_active` flag gates them out
+/// of the LogUp yield.
+fn scope_table_trace(table_log_size: u32, multiplicities: &[u32]) -> MdocScopeColumnEval {
+    let domain = 1usize << table_log_size;
+    let mut values: Vec<M31> = (0..domain).map(|_| random_m31()).collect();
+    for (row, &multiplicity) in multiplicities.iter().enumerate() {
+        values[row] = m31(multiplicity);
+    }
+    scope_column(table_log_size, values)
+}
+
+/// Table-side LogUp: yield `multiplicity` uses of every active edge tuple,
+/// plus the private claimed-sum mask. Pairs into a single secure column.
+fn scope_table_interaction_trace(
+    table_log_size: u32,
+    multiplicity: &MdocScopeColumnEval,
+    table_preprocessed: &[MdocScopeColumnEval],
+    dfa_relation: &MdocScopeDfaRelation,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
+) -> (Vec<MdocScopeColumnEval>, QM31) {
+    let n_vec_rows = 1usize << (table_log_size - LOG_N_LANES);
+    let mut logup = LogupTraceGenerator::new(table_log_size);
+    match claim_mask {
+        Some((mask, beta)) => {
+            assert_eq!(mask.log_size(), table_log_size);
+            logup.col_from_iter((0..n_vec_rows).map(|row| {
+                let denominator: PackedQM31 = dfa_relation.combine(&[
+                    table_preprocessed[1].data[row],
+                    table_preprocessed[2].data[row],
+                    table_preprocessed[3].data[row],
+                    table_preprocessed[4].data[row],
+                    table_preprocessed[5].data[row],
+                    table_preprocessed[6].data[row],
+                ]);
+                let numerator =
+                    -PackedQM31::from(table_preprocessed[0].data[row] * multiplicity.data[row]);
+                let (mask_numerator, mask_denominator) = mask.packed_fraction_at(row, beta);
+                (
+                    numerator * mask_denominator + mask_numerator * denominator,
+                    denominator * mask_denominator,
+                )
+            }));
+        }
+        None => {
+            logup.col_from_iter((0..n_vec_rows).map(|row| {
+                let denominator: PackedQM31 = dfa_relation.combine(&[
+                    table_preprocessed[1].data[row],
+                    table_preprocessed[2].data[row],
+                    table_preprocessed[3].data[row],
+                    table_preprocessed[4].data[row],
+                    table_preprocessed[5].data[row],
+                    table_preprocessed[6].data[row],
+                ]);
+                let numerator =
+                    -PackedQM31::from(table_preprocessed[0].data[row] * multiplicity.data[row]);
+                (numerator, denominator)
+            }));
+        }
+    }
+    logup.finalize_last()
 }
 
 fn set_bits(columns: &mut [Vec<M31>], range: std::ops::Range<usize>, row: usize, value: u16) {
@@ -2445,9 +2534,6 @@ fn scope_base_trace(
         values[columns.field_index][row_index] = m31(index);
     }
 
-    for (row, &multiplicity) in witness.table_multiplicities.iter().enumerate() {
-        values[columns.table_multiplicity][row] = m31(multiplicity);
-    }
     for (item, digest) in witness.item_digest_bytes.iter().enumerate() {
         for (byte, value) in digest.iter().copied().enumerate() {
             values[columns.digest_values.start + byte][item] = m31(u32::from(value));
@@ -2525,15 +2611,6 @@ impl FrameworkEval for MdocScopeEval {
         let raw_count = self.raw_relations.len();
         let columns = ScopeTraceColumns::new(stream_count, raw_count);
 
-        let table_active = eval.get_preprocessed_column(scope_col_id("dfa_active"));
-        let table_tuple = [
-            eval.get_preprocessed_column(scope_col_id("dfa_stream")),
-            eval.get_preprocessed_column(scope_col_id("dfa_from")),
-            eval.get_preprocessed_column(scope_col_id("dfa_to")),
-            eval.get_preprocessed_column(scope_col_id("dfa_action")),
-            eval.get_preprocessed_column(scope_col_id("dfa_p0")),
-            eval.get_preprocessed_column(scope_col_id("dfa_p1")),
-        ];
         let aggregate: Vec<E::F> = (0..item_count)
             .map(|item| eval.get_preprocessed_column(scope_col_id(&format!("digest_item_{item}"))))
             .collect();
@@ -3245,12 +3322,6 @@ impl FrameworkEval for MdocScopeEval {
                 trace[columns.p1].clone(),
             ],
         ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.dfa_relation,
-            -E::EF::from(table_active.clone() * trace[columns.table_multiplicity].clone()),
-            &table_tuple,
-        ));
-
         let mut current_state_tuple = vec![
             stream_slot.clone(),
             trace[columns.byte_index].clone(),
@@ -3302,6 +3373,52 @@ impl FrameworkEval for MdocScopeEval {
     }
 }
 
+/// DFA edge-table component: hosts the preprocessed edge tuples and the
+/// committed per-edge multiplicity at the table's natural height, yielding
+/// `-active * multiplicity` uses of every edge into the shared
+/// [`MdocScopeDfaRelation`]. The walk component consumes from the same
+/// relation instance, so the two cancel in the global LogUp balance.
+struct MdocScopeDfaTableEval {
+    log_size: u32,
+    dfa_relation: MdocScopeDfaRelation,
+    claim_mask_beta: Option<QM31>,
+}
+
+impl FrameworkEval for MdocScopeDfaTableEval {
+    fn log_size(&self) -> u32 {
+        self.log_size
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        // Only the LogUp cumulative-sum constraints, with a degree-2 numerator
+        // (preprocessed `dfa_active` times the committed multiplicity).
+        self.log_size + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let table_active = eval.get_preprocessed_column(scope_col_id("dfa_active"));
+        let table_tuple = [
+            eval.get_preprocessed_column(scope_col_id("dfa_stream")),
+            eval.get_preprocessed_column(scope_col_id("dfa_from")),
+            eval.get_preprocessed_column(scope_col_id("dfa_to")),
+            eval.get_preprocessed_column(scope_col_id("dfa_action")),
+            eval.get_preprocessed_column(scope_col_id("dfa_p0")),
+            eval.get_preprocessed_column(scope_col_id("dfa_p1")),
+        ];
+        let multiplicity = eval.next_trace_mask();
+        eval.add_to_relation(RelationEntry::new(
+            &self.dfa_relation,
+            -E::EF::from(table_active * multiplicity),
+            &table_tuple,
+        ));
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
 fn packed_action_sum(
     base: &[MdocScopeColumnEval],
     columns: &ScopeTraceColumns,
@@ -3320,7 +3437,7 @@ fn scope_interaction_trace(
     log_size: u32,
     columns: &ScopeTraceColumns,
     base: &[MdocScopeColumnEval],
-    preprocessed: &[MdocScopeColumnEval],
+    walk_preprocessed: &[MdocScopeColumnEval],
     stream_ids: &[u32],
     raw_target_stream_ids: &[u32],
     parsed_relations: &[ParsedCborByteRelation],
@@ -3475,7 +3592,7 @@ fn scope_interaction_trace(
     );
 
     for (item, digest_relation) in item_digest_relations.iter().enumerate() {
-        let aggregate = &preprocessed[SCOPE_PREPROCESSED_FIXED_COLS + item];
+        let aggregate = &walk_preprocessed[item];
         for byte in 0..SCOPE_DIGEST_BYTES {
             sites.push(
                 (0..n_vec_rows)
@@ -3533,25 +3650,6 @@ fn scope_interaction_trace(
             })
             .collect(),
     );
-    sites.push(
-        (0..n_vec_rows)
-            .map(|row| {
-                let denominator = dfa_relation.combine(&[
-                    preprocessed[1].data[row],
-                    preprocessed[2].data[row],
-                    preprocessed[3].data[row],
-                    preprocessed[4].data[row],
-                    preprocessed[5].data[row],
-                    preprocessed[6].data[row],
-                ]);
-                let numerator = -PackedQM31::from(
-                    preprocessed[0].data[row] * base[columns.table_multiplicity].data[row],
-                );
-                (numerator, denominator)
-            })
-            .collect(),
-    );
-
     sites.push(
         (0..n_vec_rows)
             .map(|row| {
@@ -3685,25 +3783,32 @@ pub(crate) struct MdocScopeProofMetadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MdocScopeInteractionClaim {
     pub(crate) claimed_sum: QM31,
+    pub(crate) table_claimed_sum: QM31,
 }
 
 pub(crate) struct MdocScope {
     statement: MdocScopeStatement,
     metadata: MdocScopeProofMetadata,
+    /// Derived from the statement's DFA programs on both sides; never
+    /// prover-supplied.
+    table_log_size: u32,
     programs: Vec<DfaProgram>,
     table_edges: Vec<(usize, DfaEdge)>,
     handles: MdocScopeHandles,
     payload_hash_binding: bool,
     witness: Option<MdocScopeWitness>,
     trace_cache: Option<Vec<MdocScopeColumnEval>>,
+    table_trace_cache: Option<MdocScopeColumnEval>,
     dfa_relation: Option<MdocScopeDfaRelation>,
     state_relation: Option<MdocScopeStateRelation>,
     digest_id_relation: Option<MdocScopeDigestIdRelation>,
     digest_byte_relation: Option<MdocScopeDigestByteRelation>,
     claim_mask_trace: Option<ClaimMaskTrace>,
+    table_claim_mask_trace: Option<ClaimMaskTrace>,
     claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocScopeInteractionClaim>,
     component: Option<MdocScopeComponent>,
+    table_component: Option<FrameworkComponent<MdocScopeDfaTableEval>>,
 }
 
 impl MdocScope {
@@ -3735,8 +3840,10 @@ impl MdocScope {
             &programs,
             &table_edges,
         )?;
-        let needed = witness.active_rows.len().max(table_edges.len());
-        let log_size = scope_log_size(needed)?;
+        // The walk runs at its natural (byte-count driven) height; the DFA
+        // edge table lives in its own component at its own height.
+        let log_size = scope_log_size(witness.active_rows.len())?;
+        let table_log_size = scope_log_size(table_edges.len())?;
         let metadata = MdocScopeProofMetadata {
             log_size,
             nationality_count: witness.nationality_count,
@@ -3745,20 +3852,24 @@ impl MdocScope {
         Ok(Self {
             statement,
             metadata,
+            table_log_size,
             programs,
             table_edges,
             handles,
             payload_hash_binding: false,
             witness: Some(witness),
             trace_cache: None,
+            table_trace_cache: None,
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
             digest_byte_relation: None,
             claim_mask_trace: None,
+            table_claim_mask_trace: None,
             claim_mask_challenge: None,
             interaction_claim: None,
             component: None,
+            table_component: None,
         })
     }
 
@@ -3782,31 +3893,29 @@ impl MdocScope {
             .enumerate()
             .flat_map(|(slot, program)| program.edges.iter().copied().map(move |edge| (slot, edge)))
             .collect::<Vec<_>>();
-        let domain = 1usize << metadata.log_size;
-        if table_edges
-            .len()
-            .checked_add(MDOC_SCOPE_BLIND_ROWS)
-            .is_none_or(|needed| needed > domain)
-        {
-            return Err(MdocScopeError::TraceTooLarge(table_edges.len()));
-        }
+        // Verifier-derived: sized from the statement's DFA programs alone.
+        let table_log_size = scope_log_size(table_edges.len())?;
         Ok(Self {
             statement,
             metadata,
+            table_log_size,
             programs,
             table_edges,
             handles,
             payload_hash_binding: false,
             witness: None,
             trace_cache: None,
+            table_trace_cache: None,
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
             digest_byte_relation: None,
             claim_mask_trace: None,
+            table_claim_mask_trace: None,
             claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             component: None,
+            table_component: None,
         })
     }
 
@@ -3875,16 +3984,21 @@ impl MdocScope {
     }
 
     pub(crate) fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
-        vec![self.metadata.log_size]
+        vec![self.metadata.log_size, self.table_log_size]
     }
 
-    pub(crate) fn with_claim_mask(
+    pub(crate) fn with_claim_masks(
         mut self,
-        trace: ClaimMaskTrace,
+        traces: Vec<ClaimMaskTrace>,
         challenge: SharedClaimMaskChallenge,
     ) -> Self {
-        assert_eq!(trace.log_size(), self.metadata.log_size);
-        self.claim_mask_trace = Some(trace);
+        let [walk, table]: [ClaimMaskTrace; 2] = traces
+            .try_into()
+            .unwrap_or_else(|_| panic!("mdoc scope expects exactly two claim masks"));
+        assert_eq!(walk.log_size(), self.metadata.log_size);
+        assert_eq!(table.log_size(), self.table_log_size);
+        self.claim_mask_trace = Some(walk);
+        self.table_claim_mask_trace = Some(table);
         self.claim_mask_challenge = Some(challenge);
         self
     }
@@ -3905,14 +4019,20 @@ impl MdocScope {
             .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
     }
 
+    /// Walk-component LogUp sites; the DFA table's yield lives in its own
+    /// component (see [`Self::n_table_interaction_sites`]).
     fn n_interaction_sites(&self) -> usize {
         self.handles.parsed_streams.len()
             + self.handles.raw_streams.len()
             + 3 // semantic, digest-id, digest-byte
             + usize::from(self.payload_hash_binding)
             + self.statement.items.len() * (SCOPE_DIGEST_BYTES + 1)
-            + 4 // DFA consume/provider and state consume/provider
+            + 3 // DFA consume and state consume/provider
             + usize::from(self.claim_mask_challenge.is_some())
+    }
+
+    fn n_table_interaction_sites(&self) -> usize {
+        1 + usize::from(self.claim_mask_challenge.is_some())
     }
 }
 
@@ -3939,6 +4059,7 @@ impl Air for MdocScope {
         channel.mix_u64(self.statement.profile.transcript_tag());
         channel.mix_u64(u64::from(self.payload_hash_binding));
         channel.mix_u64(u64::from(self.metadata.log_size));
+        channel.mix_u64(u64::from(self.table_log_size));
         channel.mix_u64(self.metadata.nationality_count.map_or(u64::MAX, u64::from));
         for chunk in self.statement.request_binding.chunks_exact(8) {
             channel.mix_u64(u64::from_be_bytes(
@@ -4018,26 +4139,31 @@ impl Air for MdocScope {
 
     fn layout(&self) -> TreeLayout {
         let columns = self.columns();
+        let mask_columns =
+            usize::from(self.claim_mask_challenge.is_some()) * CLAIM_MASK_TRACE_COLUMNS;
+        let mut preprocessed = vec![self.table_log_size; SCOPE_PREPROCESSED_FIXED_COLS];
+        preprocessed.extend(vec![self.metadata.log_size; self.statement.items.len()]);
+        let mut trace = vec![self.metadata.log_size; columns.total + mask_columns];
+        trace.extend(vec![self.table_log_size; 1 + mask_columns]);
+        let mut interaction = vec![
+            self.metadata.log_size;
+            self.n_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
+        ];
+        interaction.extend(vec![
+            self.table_log_size;
+            self.n_table_interaction_sites().div_ceil(2)
+                * SECURE_EXTENSION_DEGREE
+        ]);
         TreeLayout {
-            preprocessed: vec![
-                self.metadata.log_size;
-                SCOPE_PREPROCESSED_FIXED_COLS + self.statement.items.len()
-            ],
-            trace: vec![
-                self.metadata.log_size;
-                columns.total
-                    + usize::from(self.claim_mask_challenge.is_some())
-                        * CLAIM_MASK_TRACE_COLUMNS
-            ],
-            interaction: vec![
-                self.metadata.log_size;
-                self.n_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
-            ],
+            preprocessed,
+            trace,
+            interaction,
         }
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
-        vec![self.interaction_claim().claimed_sum]
+        let claim = self.interaction_claim();
+        vec![claim.claimed_sum, claim.table_claimed_sum]
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -4050,6 +4176,7 @@ impl Air for MdocScope {
     {
         Ok(scope_preprocessed_columns(
             self.metadata.log_size,
+            self.table_log_size,
             &self.table_edges,
             self.statement.items.len(),
         ))
@@ -4095,23 +4222,39 @@ impl Air for MdocScope {
             },
             claim.claimed_sum,
         ));
+        self.table_component = Some(FrameworkComponent::new(
+            allocator,
+            MdocScopeDfaTableEval {
+                log_size: self.table_log_size,
+                dfa_relation: self
+                    .dfa_relation
+                    .clone()
+                    .expect("mdoc scope DFA relation drawn"),
+                claim_mask_beta: self.claim_mask_beta(),
+            },
+            claim.table_claimed_sum,
+        ));
     }
 
     fn components(&self) -> Vec<&dyn Component> {
-        vec![self
-            .component
-            .as_ref()
-            .expect("mdoc scope component is built")]
+        vec![
+            self.component
+                .as_ref()
+                .expect("mdoc scope component is built"),
+            self.table_component
+                .as_ref()
+                .expect("mdoc scope DFA table component is built"),
+        ]
     }
 }
 
 impl AirProver for MdocScope {
     fn max_log_size(&self) -> u32 {
-        self.metadata.log_size
+        self.metadata.log_size.max(self.table_log_size)
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.metadata.log_size + 4
+        (self.metadata.log_size + 4).max(self.table_log_size + 1)
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -4124,6 +4267,7 @@ impl AirProver for MdocScope {
             &scope_preprocessed_ids(self.statement.items.len()),
             &scope_preprocessed_columns(
                 self.metadata.log_size,
+                self.table_log_size,
                 &self.table_edges,
                 self.statement.items.len(),
             ),
@@ -4138,6 +4282,7 @@ impl AirProver for MdocScope {
         let all_ids = scope_preprocessed_ids(self.statement.items.len());
         let all_columns = scope_preprocessed_columns(
             self.metadata.log_size,
+            self.table_log_size,
             &self.table_edges,
             self.statement.items.len(),
         );
@@ -4166,9 +4311,15 @@ impl AirProver for MdocScope {
             self.handles.parsed_streams.len(),
             self.handles.raw_streams.len(),
         );
+        let table_trace = scope_table_trace(self.table_log_size, &witness.table_multiplicities);
         self.trace_cache = Some(trace.clone());
         tb.extend_evals(trace);
         if let Some(mask) = &self.claim_mask_trace {
+            tb.extend_evals(mask.columns().to_vec());
+        }
+        self.table_trace_cache = Some(table_trace.clone());
+        tb.extend_evals(vec![table_trace]);
+        if let Some(mask) = &self.table_claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
     }
@@ -4179,11 +4330,8 @@ impl AirProver for MdocScope {
             .trace_cache
             .as_ref()
             .expect("mdoc scope trace cached before interaction");
-        let preprocessed = scope_preprocessed_columns(
-            self.metadata.log_size,
-            &self.table_edges,
-            self.statement.items.len(),
-        );
+        let walk_preprocessed =
+            scope_walk_preprocessed_columns(self.metadata.log_size, self.statement.items.len());
         let parsed_relations = self.parsed_relations();
         let raw_relations = self.raw_relations();
         let item_digest_relations = self.item_digest_relations();
@@ -4204,7 +4352,7 @@ impl AirProver for MdocScope {
             self.metadata.log_size,
             &columns,
             base,
-            &preprocessed,
+            &walk_preprocessed,
             &stream_specs(self.statement.items.len())
                 .into_iter()
                 .map(|spec| spec.stream_id)
@@ -4223,14 +4371,39 @@ impl AirProver for MdocScope {
             self.claim_mask_beta(),
         );
         tb.extend_evals(interaction);
-        self.interaction_claim = Some(MdocScopeInteractionClaim { claimed_sum });
+        let table_multiplicity = self
+            .table_trace_cache
+            .as_ref()
+            .expect("mdoc scope table trace cached before interaction");
+        let table_preprocessed =
+            scope_table_preprocessed_columns(self.table_log_size, &self.table_edges);
+        let table_claim_mask = self
+            .table_claim_mask_trace
+            .as_ref()
+            .zip(self.claim_mask_beta());
+        let (table_interaction, table_claimed_sum) = scope_table_interaction_trace(
+            self.table_log_size,
+            table_multiplicity,
+            &table_preprocessed,
+            dfa_relation,
+            table_claim_mask,
+        );
+        tb.extend_evals(table_interaction);
+        self.interaction_claim = Some(MdocScopeInteractionClaim {
+            claimed_sum,
+            table_claimed_sum,
+        });
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![self
-            .component
-            .as_ref()
-            .expect("mdoc scope component is built")]
+        vec![
+            self.component
+                .as_ref()
+                .expect("mdoc scope component is built"),
+            self.table_component
+                .as_ref()
+                .expect("mdoc scope DFA table component is built"),
+        ]
     }
 }
 
@@ -4238,6 +4411,7 @@ impl AirProver for MdocScope {
 mod tests {
     use super::*;
     use air_core::claim_mask::ClaimMaskRing;
+    use stwo::core::fields::FieldExpOps;
     use stwo::core::pcs::TreeVec;
     use stwo_constraint_framework::assert_constraints_on_trace;
 
@@ -5050,34 +5224,24 @@ mod tests {
     fn table_multiplicity_padding_is_freshly_blinded() {
         let scope = construct_v2(&[b"FR"], false).unwrap();
         let witness = scope.witness.as_ref().unwrap();
-        let columns = scope.columns();
-        let first = scope_base_trace(
-            scope.metadata.log_size,
-            &columns,
-            witness,
-            scope.handles.parsed_streams.len(),
-            scope.handles.raw_streams.len(),
-        );
-        let second = scope_base_trace(
-            scope.metadata.log_size,
-            &columns,
-            witness,
-            scope.handles.parsed_streams.len(),
-            scope.handles.raw_streams.len(),
-        );
+        let first = scope_table_trace(scope.table_log_size, &witness.table_multiplicities);
+        let second = scope_table_trace(scope.table_log_size, &witness.table_multiplicities);
 
-        let first_values = first[columns.table_multiplicity]
+        let first_values = first
             .data
             .iter()
             .copied()
             .flat_map(PackedM31::to_array)
             .collect::<Vec<_>>();
-        let second_values = second[columns.table_multiplicity]
+        let second_values = second
             .data
             .iter()
             .copied()
             .flat_map(PackedM31::to_array)
             .collect::<Vec<_>>();
+        // Fresh randomness in the padding region regenerates per call. (The
+        // columns are bit-reverse ordered, so compare them wholesale; the
+        // deterministic edge prefix is covered by the honest-table test.)
         assert_ne!(first_values, second_values);
     }
 
@@ -5093,10 +5257,11 @@ mod tests {
             .unwrap()
             .with_payload_hash_binding();
         assert_eq!(bound_scope.n_interaction_sites(), default_sites + 1);
-        assert_eq!(
-            bound_scope.layout().interaction.len(),
-            default_interaction_columns + SECURE_EXTENSION_DEGREE
-        );
+        let expected_columns = (default_sites + 1).div_ceil(2) * SECURE_EXTENSION_DEGREE
+            + bound_scope.n_table_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE;
+        assert_eq!(bound_scope.layout().interaction.len(), expected_columns);
+        // Pairing parity may absorb the extra site into an existing column.
+        assert!(bound_scope.layout().interaction.len() >= default_interaction_columns);
         bound_scope.draw_relations(&mut Blake2sChannel::default());
         assert!(bound_scope.handles.payload_hash_fields.is_set());
     }
@@ -5115,11 +5280,8 @@ mod tests {
             scope.handles.parsed_streams.len(),
             scope.handles.raw_streams.len(),
         );
-        let preprocessed = scope_preprocessed_columns(
-            scope.metadata.log_size,
-            &scope.table_edges,
-            scope.statement.items.len(),
-        );
+        let preprocessed =
+            scope_walk_preprocessed_columns(scope.metadata.log_size, scope.statement.items.len());
         let stream_ids = stream_specs(scope.statement.items.len())
             .into_iter()
             .map(|spec| spec.stream_id)
@@ -5220,6 +5382,150 @@ mod tests {
                 let _ = eval.evaluate(row);
             },
             claimed_sum,
+        );
+    }
+
+    #[test]
+    fn honest_table_trace_satisfies_the_table_component() {
+        let scope = construct_v2(&[b"FR", b"DE"], false).unwrap();
+        let witness = scope.witness.as_ref().unwrap();
+        let dfa_relation = MdocScopeDfaRelation::dummy();
+        let multiplicity = scope_table_trace(scope.table_log_size, &witness.table_multiplicities);
+        let table_preprocessed =
+            scope_table_preprocessed_columns(scope.table_log_size, &scope.table_edges);
+        let (interaction, table_claimed_sum) = scope_table_interaction_trace(
+            scope.table_log_size,
+            &multiplicity,
+            &table_preprocessed,
+            &dfa_relation,
+            None,
+        );
+        let mut ring = ClaimMaskRing::new(&[scope.table_log_size, scope.table_log_size]).unwrap();
+        let mask = ring.take(scope.table_log_size).unwrap();
+        let beta = QM31::from_m31_array([m31(3), m31(5), m31(7), m31(11)]);
+        let (_, masked_sum) = scope_table_interaction_trace(
+            scope.table_log_size,
+            &multiplicity,
+            &table_preprocessed,
+            &dfa_relation,
+            Some((&mask, beta)),
+        );
+        assert_eq!(masked_sum - table_claimed_sum, beta * mask.target_sum());
+        let trees = TreeVec::new(vec![
+            table_preprocessed
+                .into_iter()
+                .map(|column| column.to_cpu().values)
+                .collect(),
+            vec![multiplicity.to_cpu().values],
+            interaction
+                .into_iter()
+                .map(|column| column.to_cpu().values)
+                .collect(),
+        ]);
+        let trace = trees.as_cols_ref();
+        let eval = MdocScopeDfaTableEval {
+            log_size: scope.table_log_size,
+            dfa_relation,
+            claim_mask_beta: None,
+        };
+        assert_constraints_on_trace(
+            &trace,
+            scope.table_log_size,
+            |row| {
+                let _ = eval.evaluate(row);
+            },
+            table_claimed_sum,
+        );
+    }
+
+    /// Cross-component LogUp balance over the shared DFA relation: the walk's
+    /// consume fractions and the table's yield fractions must cancel exactly.
+    /// A tampered multiplicity leaves a nonzero residue, which the verifier
+    /// rejects via the global `sum(claimed_sums) == 0` check in
+    /// `air_core::verify` — the table component's own constraints stay
+    /// satisfied, so this balance is the only thing catching it.
+    #[test]
+    fn tampered_table_multiplicity_breaks_cross_component_dfa_balance() {
+        let scope = construct_v2(&[b"FR", b"DE"], false).unwrap();
+        let witness = scope.witness.as_ref().unwrap();
+        let dfa_relation = MdocScopeDfaRelation::dummy();
+
+        let zero = QM31::from_u32_unchecked(0, 0, 0, 0);
+        let walk_consume_sum = |rows: &[ScopeActiveRow]| {
+            rows.iter().fold(zero, |sum, row| {
+                let applied = row.applied;
+                let tuple = [
+                    m31(row.stream_slot as u32),
+                    m31(applied.edge.from),
+                    m31(applied.edge.to),
+                    m31(applied.edge.action.index() as u32),
+                    m31(applied.edge.p0),
+                    m31(applied.edge.p1),
+                ];
+                let denominator: QM31 = dfa_relation.combine(&tuple);
+                sum + denominator.inverse()
+            })
+        };
+        let table_yield_sum = |multiplicities: &[u32]| {
+            scope
+                .table_edges
+                .iter()
+                .zip(multiplicities)
+                .fold(zero, |sum, (&(slot, edge), &multiplicity)| {
+                    let denominator: QM31 = dfa_relation.combine(&edge.tuple(slot).map(m31));
+                    sum - denominator.inverse() * QM31::from(m31(multiplicity))
+                })
+        };
+
+        let honest = walk_consume_sum(&witness.active_rows)
+            + table_yield_sum(&witness.table_multiplicities);
+        assert_eq!(honest, zero);
+
+        let mut tampered = witness.table_multiplicities.clone();
+        let victim = tampered
+            .iter()
+            .position(|&multiplicity| multiplicity != 0)
+            .expect("some edge is used");
+        tampered[victim] -= 1;
+        let broken = walk_consume_sum(&witness.active_rows) + table_yield_sum(&tampered);
+        assert_ne!(broken, zero);
+
+        // The tampered multiplicity still satisfies the table component's own
+        // constraints: only the cross-component claimed-sum balance breaks.
+        let multiplicity_column = scope_table_trace(scope.table_log_size, &tampered);
+        let table_preprocessed =
+            scope_table_preprocessed_columns(scope.table_log_size, &scope.table_edges);
+        let (interaction, tampered_claimed_sum) = scope_table_interaction_trace(
+            scope.table_log_size,
+            &multiplicity_column,
+            &table_preprocessed,
+            &dfa_relation,
+            None,
+        );
+        let trees = TreeVec::new(vec![
+            table_preprocessed
+                .into_iter()
+                .map(|column| column.to_cpu().values)
+                .collect(),
+            vec![multiplicity_column.to_cpu().values],
+            interaction
+                .into_iter()
+                .map(|column| column.to_cpu().values)
+                .collect(),
+        ]);
+        let trace = trees.as_cols_ref();
+        let eval = MdocScopeDfaTableEval {
+            log_size: scope.table_log_size,
+            dfa_relation,
+            claim_mask_beta: None,
+        };
+        assert_constraints_on_trace(
+            &trace,
+            scope.table_log_size,
+            |row| {
+                let _ = eval.evaluate(row);
+            },
+            tampered_claimed_sum,
         );
     }
 }

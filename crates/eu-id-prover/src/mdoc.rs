@@ -5109,11 +5109,10 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         })
         .collect::<Result<Vec<_>, Error>>()?;
 
-    let log_size = mdoc_scope.ordered_claim_mask_log_sizes()[0];
-    let mask = claim_mask_ring
-        .take(log_size)
-        .map_err(|error| Error::Prove(format!("mdoc scope claim mask: {error}")))?;
-    mdoc_scope = mdoc_scope.with_claim_mask(mask, claim_mask_challenge.clone());
+    let logs = mdoc_scope.ordered_claim_mask_log_sizes();
+    let masks = take_claim_masks(&mut claim_mask_ring, &logs)
+        .map_err(|error| Error::Prove(format!("mdoc scope claim masks: {error}")))?;
+    mdoc_scope = mdoc_scope.with_claim_masks(masks, claim_mask_challenge.clone());
 
     let log_size = mdoc_validity.ordered_claim_mask_log_sizes()[0];
     let mask = claim_mask_ring

@@ -13,32 +13,34 @@ use crate::mdoc::{
 
 // Published identifiers pin the default `ec-coprocessor` circuit composition.
 // The no-default backend is not a published TS13 profile and canonical artifact
-// verification there fails closed. Regenerated 2026-07-24 for circuit revision
-// 5: exact CBOR semantic scope, exact MSO/revocation SHA bindings, private
-// revocation coprocessor rejoin, and committed cyclic claimed-sum masks replace
-// the offset-window/public-blinder design.
+// verification there fails closed. Regenerated 2026-07-27 for circuit revision
+// 6: the mdoc scope's DFA edge table moves to its own narrow component at the
+// edge-count height, letting the semantic walk run at its natural byte-count
+// height (masked table claimed sum joins the cyclic claim-mask ring).
 // Old hashes:
 // 5445c650a6f57d6b...0d4f21e6 (revision 1); a43f41e4745a053a...a3232591
 // (revision 2, SHA field exposure from constrained W bit planes 2026-07-13);
 // d09852c1343dcf59...2b84fc96 (revision 3, split-pack deletion 2026-07-21);
-// b1f58a97cbcffc1b...04252bf3 (revision 4, terminal Range8 checks 2026-07-24).
+// b1f58a97cbcffc1b...04252bf3 (revision 4, terminal Range8 checks 2026-07-24);
+// 8fbe779f33710584...f386886f (revision 5, in-circuit CBOR scope 2026-07-24).
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "8fbe779f3371058468aed76a720730a346ad9628dc7b8920f14b41f4f386886f";
-// Regenerated 2026-07-24 for revision 5. Value is the real
+    "ad2f48128677588d08c67fc742cadeeabaceef1f8d33bb38d33045d47a266557";
+// Regenerated 2026-07-27 for revision 6. Value is the real
 // `commitments[0]` of the published N=1 revocation-enabled age_over_18 mdoc
 // proof (captured via ts13_evidence_pack_n1_measurements). Old values:
 // 3532fa24129acba9...8583169f (Class-D blinding repin 2026-07-08);
 // ba943f9deed4cf5e...55e8a8b7 (P4b coprocessor revocation reroute 2026-07-08);
 // bc8ad8a2f9440f66...2a9babcf (split-pack deletion 2026-07-21);
-// ea5754a08fdd9ca9...6b7d3c7c (revision 4, terminal Range8 checks 2026-07-24).
+// ea5754a08fdd9ca9...6b7d3c7c (revision 4, terminal Range8 checks 2026-07-24);
+// d824fce24daae4c6...7d2e7bae (revision 5, in-circuit CBOR scope 2026-07-24).
 // See tasks/p4c-leakage-table.md.
 pub const TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT: &[u8; 32] =
-    b"\xd8\x24\xfc\xe2\x4d\xaa\xe4\xc6\x27\x46\x60\x87\xf9\x1b\xfb\x2e\xa5\x69\x24\xd6\x08\x02\xb6\x13\x44\x58\xa0\x04\x7d\x2e\x7b\xae";
+    b"\xf0\x7c\xc4\x55\xfa\xda\x60\x38\x21\xf3\x9a\x68\x4c\xaa\xdd\xf2\xc4\x40\xb5\xcc\x64\xc4\x34\x0b\x0a\x2a\xdf\x88\x65\x47\x9a\xb9";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CIRCUIT_REVISION: u32 = 5;
+pub const TS13_CIRCUIT_REVISION: u32 = 6;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
@@ -715,7 +717,7 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
-        assert_eq!(tuple.circuit_revision, 5);
+        assert_eq!(tuple.circuit_revision, 6);
         assert_eq!(tuple.pcs_log_blowup_factor, 2);
         assert_eq!(tuple.pcs_queries, 54);
         assert_eq!(tuple.pcs_pow_bits, 20);
