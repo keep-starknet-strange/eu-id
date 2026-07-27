@@ -10,7 +10,6 @@ std = ["stwo/std", "stwo-constraint-framework/std"]
 # is single-threaded without it). Enables the M4 Max's many cores on the
 # laptop and the phone's performance cores on-device.
 parallel = ["stwo/parallel", "stwo-constraint-framework/parallel"]
-gkr-spike = []
 
 [dependencies]
 air-core = { path = "../air-core" }

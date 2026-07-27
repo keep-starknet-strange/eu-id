@@ -1010,8 +1010,8 @@ mod tests {
         fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
             fingerprint_preprocessed_columns(
                 self.module,
-                &[self.id.clone()],
-                &[self.column.clone()],
+                std::slice::from_ref(&self.id),
+                std::slice::from_ref(&self.column),
             )
         }
 

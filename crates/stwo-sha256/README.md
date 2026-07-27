@@ -32,15 +32,15 @@ cargo run --release --example prove_demo -p stwo-sha256
 cargo run --release --example prove_demo -p stwo-sha256 -- "the quick brown fox"
 ```
 
-The release-mode round-trip is `#[ignore]`d by default because the 2²¹-row
-packed Maj/Ch preprocessed-table generation dominates wall time. Run it
-explicitly with `--ignored` (above) or via `make`.
+The release-mode round-trip is `#[ignore]`d by default because proof generation
+is substantially slower than the unit suite. Run it explicitly with
+`--ignored` (above) or via `make`.
 
 ## What the AIR enforces today
 
 | Soundness obligation             | Status                                                                                                                                                                      |
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Every 16-bit limb in `[0, 2¹⁶)` | Enforced — round-side / σ-side split-and-pack lookups pin most limbs implicitly; each terminal `h_out` limb is recomposed from two explicit `Range_8`-checked bytes.             |
+| Every round word is bit-constrained | Enforced — the bit-plane identities reconstruct round words; each terminal `h_out` limb is recomposed from two explicit `Range_8`-checked bytes.                                              |
 | Every mod-2³² limb-add identity | Enforced — schedule recurrence, `T1`, `T2`/`e_new`/`a_new`, and the 8 finalization adds emit linear constraints **and** range-check their carries against `Range_{2,4,5}`. |
 | IV binding on the first block    | Enforced — `is_first_block · (h_in[j] − IV[j]) = 0`, both limbs, for `j ∈ 0..8`.                                                                                            |
 | Multi-block chain                | Enforced — `(enabler − is_first_block) · (h_in[j] − h_out_prev[j]) = 0` on every continuation row.                                                                          |
@@ -82,14 +82,14 @@ The constraint degree stays at 2 throughout (`max_constraint_log_degree_bound
 | `types`             | Word ↔ M31-limb representation, witness records.                                                                              |
 | `headroom`          | Machine-checked M31 headroom audit for every mod-2³² add family, plus the `Range_2/4/5` carry-range bounds the AIR consumes.  |
 | `native`            | Pure SHA-256 reference (padding, schedule, compression). Tested against the `sha2` crate.                                     |
-| `relations`         | LogUp relation tags: σ/Σ decode (8) + Maj/Ch + `xor_8` + split-and-pack (8) + `Range_k` (4).                                  |
-| `tables`            | Preprocessed lookup-table content (decode, packed Maj/Ch, `xor_8`, split-and-pack).                                           |
+| `relations`         | Active `Range_k` and integration LogUp relation tags; legacy table relation helpers remain for standalone tests.             |
+| `tables`            | Legacy lookup-table constructors retained for standalone table tests.                                                         |
 | `tables_local`      | Local fallback for the shared `Range_k` tables (one-import-swap migration target).                                            |
 | `witness`           | Full witness emitter — every value the trace stores per row.                                                                  |
 | `trace`             | Column layout + materialisation from a witness.                                                                               |
-| `multiplicities`    | Per-row LogUp multiplicity vectors per lookup table.                                                                          |
-| `preprocessed`      | `CircleEvaluation`s for every preprocessed lookup-table column (tree[0]).                                                     |
-| `components`        | `FrameworkEval` producer components for every preprocessed lookup table.                                                      |
+| `multiplicities`    | Per-row multiplicity vectors for the active `Range_k` tables.                                                                  |
+| `preprocessed`      | Active range-table and round-selector preprocessed columns (tree[0]).                                                         |
+| `components`        | Active `Range_k` producers plus legacy standalone table evaluators.                                                           |
 | `constraints`       | The main `Sha256Eval` consumer AIR.                                                                                           |
 | `interaction`       | LogUp interaction-trace generator + `InteractionClaim`.                                                                       |
 | `stark`             | Public `prove_sha256` / `verify_sha256_proof` entry points.                                                                   |

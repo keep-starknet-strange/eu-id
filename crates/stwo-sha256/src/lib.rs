@@ -20,12 +20,9 @@
 //!   migration.
 //! - [`native`] — pure SHA-256 reference (padding, schedule, compression,
 //!   multi-block) tested against the `sha2` crate. The out-of-circuit oracle.
-//! - [`relations`] — LogUp relation tags: `Σ`/`σ` decode (8), packed Maj/Ch
-//!   (2), chunk-wise `xor_8` (1), split-and-pack (8), and `Range_k`
-//!   (`Range_2`/`Range_4`/`Range_5`/`Range_8`, 4) — bundled as
-//!   `Sha256Relations`.
-//! - [`tables`] — preprocessed lookup-table content: `Σ`/`σ` decode tables,
-//!   packed `Maj`/`Ch` table, `xor_8` table, split-and-pack tables.
+//! - [`relations`] — active `Range_k` and integration LogUp channels, plus
+//!   legacy table relation helpers retained for standalone tests.
+//! - [`tables`] — legacy table constructors retained for standalone tests.
 //! - [`tables_local`] — local fallback for the workspace-shared range-check
 //!   tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`). Shipped until the
 //!   ECDSA stream's `stwo-p256-utils` crate is on `main`; mirrors that
@@ -36,15 +33,12 @@
 //!   producer half of the SHA→predicate `CRED_FIELD ↔ PREDICATE_INPUT` binding.
 //! - [`witness`] — full witness emitter — every value the trace stores per row.
 //! - [`trace`] — column layout and materialisation from a witness.
-//! - [`multiplicities`] — per-row LogUp multiplicity vectors keyed against
-//!   every preprocessed lookup table the AIR consumes.
-//! - [`preprocessed`] — `CircleEvaluation`s for every preprocessed lookup
-//!   table column (tree[0] of the proof's commitment scheme).
-//! - [`components`] — producer-side `FrameworkEval` components, one per
-//!   preprocessed lookup table.
+//! - [`multiplicities`] — per-row multiplicity vectors for active range tables.
+//! - [`preprocessed`] — active range-table and round-selector columns.
+//! - [`components`] — active range producers and legacy standalone evaluators.
 //! - [`constraints`] — `FrameworkEval` AIR: linear constraints (IV binding,
 //!   mod-2³² adds, schedule recurrence, multi-block chaining, padding) plus the
-//!   lookup-relation hooks for the `Σ`/`σ`/`Maj`/`Ch`/`xor`/`Range_k` tables.
+//!   bit-plane SHA identities and the active `Range_k` hooks.
 //! - [`interaction`] — LogUp interaction-trace generator + `InteractionClaim`
 //!   aggregator across the consumer and every producer component.
 //! - [`stark`] — prover/verifier entry points for the standalone component.
@@ -55,10 +49,6 @@ pub mod components;
 pub mod constants;
 pub mod constraints;
 pub mod field_exposure;
-#[cfg(feature = "gkr-spike")]
-pub mod gkr_lookups;
-#[cfg(feature = "gkr-spike")]
-pub mod gkr_spike;
 pub mod headroom;
 pub mod interaction;
 pub mod multiplicities;

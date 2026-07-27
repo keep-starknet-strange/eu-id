@@ -892,7 +892,7 @@ mod tests {
         };
 
         let (proof_a, claim_a, dummy_a) = prove_once();
-        let (proof_b, _claim_b, dummy_b) = prove_once();
+        let (proof_b, claim_b, dummy_b) = prove_once();
 
         assert_ne!(
             dummy_a, dummy_b,
@@ -900,7 +900,7 @@ mod tests {
         );
 
         // Both proofs verify.
-        for (proof, claim) in [(&proof_a, &claim_a)] {
+        for (proof, claim) in [(&proof_a, &claim_a), (&proof_b, &claim_b)] {
             let scalar_z_handle_v = SharedScalarZRelation::new();
             let digest_handle_v = SharedRelation::<DigestBytesRelation>::default();
             let mut provider_v = providers(
@@ -919,19 +919,6 @@ mod tests {
             let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut bridge_v];
             air_core::verify(&mut modules, proof).expect("Class-D proof verifies");
         }
-        // proof_b verifies too (guards against a per-proof state leak).
-        let scalar_z_handle_v = SharedScalarZRelation::new();
-        let digest_handle_v = SharedRelation::<DigestBytesRelation>::default();
-        let mut provider_v = providers(
-            &instance,
-            digest_bytes,
-            scalar_z_handle_v.clone(),
-            digest_handle_v.clone(),
-        );
-        let mut bridge_v =
-            DigestBindVerifier::new(log_size, 1, _claim_b, scalar_z_handle_v, digest_handle_v);
-        let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut bridge_v];
-        air_core::verify(&mut modules, &proof_b).expect("second Class-D proof verifies");
     }
 
     /// Tampering a blinded range table's published claimed sum (the

@@ -413,9 +413,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn public_digest_bind_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
         assert!(
-            (1usize << PUBLIC_DIGEST_LOG_SIZE) - 1 >= 256,
+            (1usize << PUBLIC_DIGEST_LOG_SIZE) > 256,
             "public digest Class A needs at least 256 blind rows"
         );
 

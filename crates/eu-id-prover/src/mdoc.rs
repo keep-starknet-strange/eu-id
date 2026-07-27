@@ -2436,12 +2436,14 @@ impl MdocPublicStatement {
         }
     }
 
+    #[cfg(feature = "ec-coprocessor")]
     fn age_attribute_index(&self) -> Option<usize> {
         self.attributes
             .iter()
             .position(|attribute| matches!(attribute.mode, MdocDisclosureMode::AgeOver))
     }
 
+    #[cfg(feature = "ec-coprocessor")]
     fn nationality_attribute_index(&self) -> Option<usize> {
         self.attributes
             .iter()
@@ -5367,29 +5369,6 @@ pub fn verify_mdoc_public_statement(
     {
         return Err(Error::Verify(
             "mdoc predicate mode/encoding layout mismatch".to_string(),
-        ));
-    }
-    let encodings_match_profile = match statement.profile {
-        MdocProfileVersion::V1 => {
-            statement
-                .birth_date_encoding
-                .is_none_or(|encoding| encoding == MdocBirthDateEncoding::Packed)
-                && statement
-                    .nationality_encoding
-                    .is_none_or(|encoding| encoding == MdocNationalityEncoding::Numeric)
-        }
-        MdocProfileVersion::V2 => {
-            statement
-                .birth_date_encoding
-                .is_none_or(|encoding| encoding == MdocBirthDateEncoding::Text)
-                && statement
-                    .nationality_encoding
-                    .is_none_or(|encoding| encoding == MdocNationalityEncoding::Alpha2)
-        }
-    };
-    if !encodings_match_profile {
-        return Err(Error::Verify(
-            "mdoc profile/value encoding mismatch".to_string(),
         ));
     }
     let verifier_statement = statement.verifier_circuit_statement();

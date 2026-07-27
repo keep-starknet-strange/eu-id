@@ -12,7 +12,6 @@ default = ["ec-coprocessor"]
 # path, so enabling this mainly speeds the SHA stage and barely moves the full
 # pipeline — the laptop benchmark quantifies the delta.
 parallel = ["stwo-sha256/parallel"]
-gkr-spike = ["air-core/gkr-spike", "stwo-sha256/gkr-spike"]
 fri-sweep = ["stwo/tracing"]
 ec-coprocessor = ["dep:eu-id-ec-coprocessor"]
 

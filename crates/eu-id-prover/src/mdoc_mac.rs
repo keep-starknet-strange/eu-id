@@ -1559,6 +1559,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn mdoc_mac_binding_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
         assert!(
             (1usize << BINDING_LOG_SIZE) - (MACS_PER_PROOF / 2) >= 256,

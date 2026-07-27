@@ -5,6 +5,8 @@ use sha2::{Digest as _, Sha256};
 use std::time::Instant;
 
 use ciborium::value::Value;
+#[cfg(feature = "ec-coprocessor")]
+use eu_id_prover::mdoc::verify_mdoc_public_statement;
 use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
     extract_pid_mdoc, mdoc_production_pcs_config, mdoc_proof_byte_breakdown,
@@ -2744,6 +2746,9 @@ fn real_vector_pid_pymdoc_end_to_end() {
 
     let verify_start = Instant::now();
     verify_mdoc_circuit(&proof, &statement).expect("real PID mdoc verifies");
+    #[cfg(feature = "ec-coprocessor")]
+    verify_mdoc_public_statement(&proof, &MdocPublicStatement::from_circuit(&statement))
+        .expect("real PID mdoc verifies from its reduced public statement");
     let verify_elapsed = verify_start.elapsed();
 
     let bytes = mdoc_proof_byte_breakdown(&proof).proof_bytes;

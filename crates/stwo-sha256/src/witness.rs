@@ -20,11 +20,9 @@ use crate::constants::{BLOCK_BYTES, IV, K, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORD
 use crate::native::{
     big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj, pad_message, parse_blocks,
 };
-use crate::partitions::{apply, bits_to_mask, SigmaFn};
-use crate::tables::pack_half_key;
 use crate::types::{
-    AddCarries, BlockWitness, Digest, HashState, LimbPairBytes, PaddingWitness, RoundWitness,
-    Schedule, ScheduleEntryWitness, Sha256Witness, SigmaDecodeWitness, WordLimbs, LIMB_BITS,
+    AddCarries, BlockWitness, Digest, HashState, PaddingWitness, RoundWitness, Schedule,
+    ScheduleEntryWitness, Sha256Witness, WordLimbs, LIMB_BITS,
 };
 
 /// Pad the message and assemble the padding witness used by the AIR.
@@ -70,65 +68,6 @@ fn add_words_with_carries(words: &[u32]) -> (u32, AddCarries) {
     )
 }
 
-/// Build the decoded intermediates of one σ-application `y = f(x)` per §9.3:
-/// the two 16-bit half-keys, the spread `O0`/`O1` outputs, the two `O2`
-/// partials, the XOR-combined `O2`, and the byte chunks of all three `O2`
-/// values for the chunk-wise `xor_8` lookup.
-///
-/// `f` is GF(2)-linear, so applying it to the S-only-half and the S′-only-half
-/// of the input separately yields the per-side contributions; the spread `O0`
-/// bits live at natural positions in `f(S-half)`, and the side's `O2` partial
-/// is `f(S-half)` masked to the `O2` bit positions. Same for the S′ side.
-/// Their field sums (disjoint bit sets) plus the chunk-wise XOR of the two
-/// `O2` partials reproduce the full `f(x)` — the reassembly identity the AIR
-/// enforces.
-fn compute_sigma_decode_witness(f: SigmaFn, x: u32) -> SigmaDecodeWitness {
-    let s_mask = f.s_mask();
-    let outputs = f.outputs();
-    let o0_mask = bits_to_mask(outputs.o0);
-    let o1_mask = bits_to_mask(outputs.o1);
-    let o2_mask = bits_to_mask(outputs.o2);
-
-    let key_s = pack_half_key(x, s_mask);
-    let key_s_complement = pack_half_key(x, !s_mask);
-
-    // Per-side spread output: applying f to the half-masked input recovers
-    // O0 (resp. O1) at natural positions and the O2 partial from that side.
-    let x_s_only = x & s_mask;
-    let x_s_complement_only = x & !s_mask;
-    let y_from_s = apply(f, x_s_only);
-    let y_from_s_complement = apply(f, x_s_complement_only);
-
-    let o_main_s = y_from_s & o0_mask;
-    let o_main_s_complement = y_from_s_complement & o1_mask;
-    let o2_partial_s = y_from_s & o2_mask;
-    let o2_partial_s_complement = y_from_s_complement & o2_mask;
-    let o2_combined = o2_partial_s ^ o2_partial_s_complement;
-
-    // Soundness pin (debug-only, since the construction is GF(2)-linear):
-    // the assembled output must equal the full f(x).
-    debug_assert_eq!(
-        o_main_s + o_main_s_complement + o2_combined,
-        apply(f, x),
-        "decoded reassembly disagrees with f({x:#x}) for {f:?}"
-    );
-
-    SigmaDecodeWitness {
-        key_s,
-        key_s_complement,
-        o_main_s: WordLimbs::from_u32(o_main_s),
-        o_main_s_complement: WordLimbs::from_u32(o_main_s_complement),
-        o2_partial_s: WordLimbs::from_u32(o2_partial_s),
-        o2_partial_s_complement: WordLimbs::from_u32(o2_partial_s_complement),
-        o2_combined: WordLimbs::from_u32(o2_combined),
-        o2_chunks_s: LimbPairBytes::from_limbs(WordLimbs::from_u32(o2_partial_s)),
-        o2_chunks_s_complement: LimbPairBytes::from_limbs(WordLimbs::from_u32(
-            o2_partial_s_complement,
-        )),
-        o2_chunks_combined: LimbPairBytes::from_limbs(WordLimbs::from_u32(o2_combined)),
-    }
-}
-
 /// Build the witness for one message-schedule entry `W[t]` (for `t ≥ 16`).
 fn compute_schedule_entry_witness(
     t: u32,
@@ -148,8 +87,6 @@ fn compute_schedule_entry_witness(
         w_t_minus_16: WordLimbs::from_u32(w_t_minus_16),
         lower_sigma0: WordLimbs::from_u32(s0),
         lower_sigma1: WordLimbs::from_u32(s1),
-        lower_sigma0_decode: compute_sigma_decode_witness(SigmaFn::LowerSigma0, w_t_minus_15),
-        lower_sigma1_decode: compute_sigma_decode_witness(SigmaFn::LowerSigma1, w_t_minus_2),
         carries,
         w_t: WordLimbs::from_u32(w_t),
     }
@@ -181,8 +118,6 @@ fn compute_round_witness(
         k_t: WordLimbs::from_u32(k_t),
         sigma0: WordLimbs::from_u32(s0_val),
         sigma1: WordLimbs::from_u32(s1_val),
-        sigma0_decode: compute_sigma_decode_witness(SigmaFn::Sigma0, a),
-        sigma1_decode: compute_sigma_decode_witness(SigmaFn::Sigma1, e),
         ch: WordLimbs::from_u32(ch_val),
         maj: WordLimbs::from_u32(maj_val),
         t1: WordLimbs::from_u32(t1),
@@ -308,147 +243,6 @@ pub fn add_identity_holds(addends: &[u32], result: u32, carries: AddCarries) -> 
     let lhs_hi = hi_sum + carries.lo;
     let rhs_hi = (result >> LIMB_BITS) + (carries.hi << LIMB_BITS);
     lhs_lo == rhs_lo && lhs_hi == rhs_hi
-}
-
-/// Per-block lookup-multiplicity totals for the eight `Σ`/`σ` decode-table
-/// channels. Each field counts how many times the AIR fires a "use" on the
-/// corresponding decode-table row across one block — equivalently, the sum
-/// of the table component's per-row multiplicity column. The sanity test in
-/// [`crate::constraints`] asserts these against the static per-block totals
-/// expected from the trace shape (64 rounds × one σ-application per round
-/// per relation; 48 schedule entries × one σ-application per relation).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct DecodeLookupMultiplicities {
-    pub sigma0_s: u32,
-    pub sigma0_s_complement: u32,
-    pub sigma1_s: u32,
-    pub sigma1_s_complement: u32,
-    pub lower_sigma0_s: u32,
-    pub lower_sigma0_s_complement: u32,
-    pub lower_sigma1_s: u32,
-    pub lower_sigma1_s_complement: u32,
-}
-
-impl DecodeLookupMultiplicities {
-    /// Sum of every decode lookup the block emits — `2 × N_ROUNDS` from
-    /// the rounds (`Σ0` + `Σ1`, each contributing one S + one S′ lookup),
-    /// `2 × N_SCHEDULE_ENTRIES` from the schedule (`σ0` + `σ1`, same shape).
-    pub fn total(&self) -> u32 {
-        self.sigma0_s
-            + self.sigma0_s_complement
-            + self.sigma1_s
-            + self.sigma1_s_complement
-            + self.lower_sigma0_s
-            + self.lower_sigma0_s_complement
-            + self.lower_sigma1_s
-            + self.lower_sigma1_s_complement
-    }
-}
-
-/// Per-block lookup-multiplicity totals for the Maj/Ch packed-group channels
-/// and the chunk-wise `xor_8` channel.
-///
-/// `maj` counts `add_to_relation(MajRelation, +1, …)` firings: one per group
-/// position per round ⇒ `N_ROUNDS · GROUPS_PER_ROUND_PARTITION` per block.
-/// `ch` is symmetric. `xor_8` counts chunk-wise σ-combine lookups: four per
-/// σ-application, with `2 · N_ROUNDS + 2 · N_SCHEDULE_ENTRIES`
-/// σ-applications per block (two per round, two per schedule entry).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct MajChXorMultiplicities {
-    pub maj: u32,
-    pub ch: u32,
-    pub xor_8: u32,
-}
-
-impl MajChXorMultiplicities {
-    pub fn total(&self) -> u32 {
-        self.maj + self.ch + self.xor_8
-    }
-}
-
-/// Count the number of `add_to_relation` "uses" each decode-table channel
-/// would receive from one block. Derived entirely from the witness — does
-/// not depend on the LogUp framework being plumbed end-to-end. Used as a
-/// pre-finalize sanity check that the wiring actually fires the expected
-/// number of times per block.
-pub fn decode_multiplicities_for_block(block: &BlockWitness) -> DecodeLookupMultiplicities {
-    let mut m = DecodeLookupMultiplicities::default();
-    for entry in &block.schedule_entries {
-        // `compute_sigma_decode_witness` always populates a valid pair —
-        // one "use" per relation per σ-application. We don't bucket by key
-        // here because the per-block total is the property the design's
-        // soundness test pins.
-        let _ = entry.lower_sigma0_decode;
-        m.lower_sigma0_s += 1;
-        m.lower_sigma0_s_complement += 1;
-        let _ = entry.lower_sigma1_decode;
-        m.lower_sigma1_s += 1;
-        m.lower_sigma1_s_complement += 1;
-    }
-    for round in &block.rounds {
-        let _ = round.sigma0_decode;
-        m.sigma0_s += 1;
-        m.sigma0_s_complement += 1;
-        let _ = round.sigma1_decode;
-        m.sigma1_s += 1;
-        m.sigma1_s_complement += 1;
-    }
-    m
-}
-
-/// Count the number of Maj / Ch / `xor_8` "uses" each channel would receive
-/// from one block. Derived entirely from the witness; mirrors
-/// [`decode_multiplicities_for_block`] for these channels. The
-/// constraint-side sanity test asserts these against the static per-block
-/// totals expected from the trace shape.
-pub fn maj_ch_xor_multiplicities_for_block(block: &BlockWitness) -> MajChXorMultiplicities {
-    let groups = crate::partitions::GROUPS_PER_ROUND_PARTITION as u32;
-    let rounds = block.rounds.len() as u32;
-    let entries = block.schedule_entries.len() as u32;
-    // One Maj lookup per a-side group per round, one Ch lookup per e-side
-    // group per round. Four chunk-wise `xor_8` lookups per σ-application,
-    // with two σ-applications per round (Σ0, Σ1) and two per schedule
-    // entry (σ0, σ1).
-    MajChXorMultiplicities {
-        maj: rounds * groups,
-        ch: rounds * groups,
-        xor_8: 4 * (2 * rounds + 2 * entries),
-    }
-}
-
-/// Aggregate [`maj_ch_xor_multiplicities_for_block`] across every block.
-pub fn maj_ch_xor_multiplicities_for_witness(witness: &Sha256Witness) -> MajChXorMultiplicities {
-    witness
-        .blocks
-        .iter()
-        .map(maj_ch_xor_multiplicities_for_block)
-        .fold(MajChXorMultiplicities::default(), |mut acc, m| {
-            acc.maj += m.maj;
-            acc.ch += m.ch;
-            acc.xor_8 += m.xor_8;
-            acc
-        })
-}
-
-/// Aggregate [`decode_multiplicities_for_block`] across every block of a
-/// witness. The integration / test sites use the per-block view; this one
-/// helps the top-level test assert the multi-block scaling is linear.
-pub fn decode_multiplicities_for_witness(witness: &Sha256Witness) -> DecodeLookupMultiplicities {
-    witness
-        .blocks
-        .iter()
-        .map(decode_multiplicities_for_block)
-        .fold(DecodeLookupMultiplicities::default(), |mut acc, m| {
-            acc.sigma0_s += m.sigma0_s;
-            acc.sigma0_s_complement += m.sigma0_s_complement;
-            acc.sigma1_s += m.sigma1_s;
-            acc.sigma1_s_complement += m.sigma1_s_complement;
-            acc.lower_sigma0_s += m.lower_sigma0_s;
-            acc.lower_sigma0_s_complement += m.lower_sigma0_s_complement;
-            acc.lower_sigma1_s += m.lower_sigma1_s;
-            acc.lower_sigma1_s_complement += m.lower_sigma1_s_complement;
-            acc
-        })
 }
 
 /// Sanity: rebuild the final schedule from a `BlockWitness` and confirm it

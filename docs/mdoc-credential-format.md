@@ -113,13 +113,14 @@ Both profiles require the exact four-key set; only v2 rejects non-canonical
 ordering.
 `random` is a byte string of at least 16 bytes. `digestID` must fit in `u32`.
 
+The item-map ordering profile and the element-value encoding are independent.
 The circuit-admissible values are:
 
-- `birth_date`: either a `bstr` `[year_hi, year_lo, month, day]` (v1 packed) or a
-  `tstr` `YYYY-MM-DD` (v2 text). The exposed window is 4 or 10 bytes respectively
+- `birth_date`: either a packed `bstr` `[year_hi, year_lo, month, day]` or a
+  `tstr` `YYYY-MM-DD`. The exposed window is 4 or 10 bytes respectively
   and is bound to the age predicate.
-- `nationality`: either a `bstr` of ISO-3166-1 numeric big-endian bytes (v1) or a
-  `tstr` ISO 3166-1 alpha-2 code (v2). The nationality predicate runs in the
+- `nationality`: either a `bstr` of ISO-3166-1 numeric big-endian bytes or a
+  `tstr` ISO 3166-1 alpha-2 code. The nationality predicate runs in the
   matching (numeric or alpha-2) code space.
 
 A window straddling a 64-byte SHA-256 block boundary is admitted (Phase A

@@ -6,18 +6,9 @@
 //! finalization), the within-row state-chain that ties round outputs back
 //! to the next round's inputs, and the §10.3 **cross-row block-chain copy
 //! constraint** that pins block `b+1`'s `h_in` to block `b`'s `h_out` via a
-//! `[0, -1]` interaction mask — are emitted here. The **`Σ`/`σ` decode-table
-//! LogUp lookups** (§9.3 of the validated design), the matching σ-output
-//! reassembly + `O2` chunk-bind constraints, the chunk-wise `xor_8`
-//! lookups that close `o2_combined = o2_partial_s ⊕ o2_partial_s'`, the
-//! **packed `Maj`/`Ch` lookups** keyed on the per-round packed-group
-//! decompositions, and the **split-and-pack lookups** that pin
-//! every packed-group / decode-key column back to a `(lo, hi)` word
-//! limb — all wired below. The §8.1 reuse chain lets `b`/`c`/`f`/`g` of
-//! the Maj/Ch lookups alias prior rounds' `a`/`e` columns (and the
-//! per-block `h_in[1]`/`h_in[2]`/`h_in[5]`/`h_in[6]` aux splits for the
-//! chain's first two rounds), so the trace commits each value's split
-//! once. The mod-2³² limb-add carries are range-checked through
+//! `[0, -1]` interaction mask — are emitted here. The SHA boolean functions
+//! and rotations are constrained directly from committed bit planes. The
+//! mod-2³² limb-add carries are range-checked through
 //! `Range_{2,4,5}` lookups (one family per add per
 //! [`emit_mod_2_32_add_linear`] call) and the final-block `h_out` digest
 //! bytes through `Range_8`; byte recomposition pins the terminal limbs.
@@ -64,9 +55,8 @@ pub struct Sha256Eval {
     /// `log2` of the row count (the smallest power of two **strictly**
     /// greater than `64 · block count`, per [`crate::trace::min_log_size`]).
     pub log_size: u32,
-    /// LogUp channels: `Σ`/`σ` decode tables (8), packed Maj/Ch (2),
-    /// chunk-wise `xor_8` (1), the four `Range_k` channels, and the
-    /// cross-component `Sha256Digest` channel.
+    /// The four active `Range_k` channels plus cross-component digest and
+    /// selected-field channels.
     pub relations: Sha256Relations,
     /// When set, the AIR *yields* the final-block digest bytes on the
     /// `Sha256Digest` channel (the producer half of the `SHA_DIGEST ↔ ECDSA_Z`
@@ -1417,7 +1407,7 @@ mod tests {
         res.push(is_length_only - (1 - is_marker) * is_length);
         res.push(is_marker_only - is_marker * (1 - is_length));
         // cumulative marker-word prefix
-        let mut cum = vec![0i64; WORDS_PER_BLOCK];
+        let mut cum = [0i64; WORDS_PER_BLOCK];
         for j in 1..WORDS_PER_BLOCK {
             cum[j] = cum[j - 1] + mword[j - 1];
         }

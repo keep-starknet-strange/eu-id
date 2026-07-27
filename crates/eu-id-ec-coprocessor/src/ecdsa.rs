@@ -696,12 +696,11 @@ pub fn prove_implemented_circuit_bundle_batch_with_projection_profiled(
         });
     }
 
-    let mut profile = ImplementedCircuitProveProfile::default();
     let start = Instant::now();
     for (input, witness) in inputs.iter().zip(witnesses) {
         verify_witness(input, witness).map_err(ImplementedCircuitProofError::Witness)?;
     }
-    profile.witness_check = start.elapsed();
+    let witness_check = start.elapsed();
     let (bundle, inner_profile) =
         prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled(
             inputs,
@@ -709,17 +708,8 @@ pub fn prove_implemented_circuit_bundle_batch_with_projection_profiled(
             witnesses,
             transcript_seed,
         )?;
-    profile.circuit_build = inner_profile.circuit_build;
-    profile.ligero_row_encode = inner_profile.ligero_row_encode;
-    profile.ligero_merkle_build = inner_profile.ligero_merkle_build;
-    profile.ligero_proximity_claim = inner_profile.ligero_proximity_claim;
-    profile.ligero_openings = inner_profile.ligero_openings;
-    profile.sumcheck = inner_profile.sumcheck;
-    profile.committed_values = inner_profile.committed_values;
-    profile.committed_nonzero_values = inner_profile.committed_nonzero_values;
-    profile.max_row_nonzero_values = inner_profile.max_row_nonzero_values;
-    profile.ligero_rows = inner_profile.ligero_rows;
-    profile.sumcheck_by_family = inner_profile.sumcheck_by_family;
+    let mut profile = inner_profile;
+    profile.witness_check = witness_check;
     Ok((bundle, profile))
 }
 
@@ -921,24 +911,13 @@ pub fn prove_implemented_circuit_bundle_profiled(
     transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
 {
-    let mut profile = ImplementedCircuitProveProfile::default();
-
     let start = Instant::now();
     verify_witness(input, witness).map_err(ImplementedCircuitProofError::Witness)?;
-    profile.witness_check = start.elapsed();
+    let witness_check = start.elapsed();
     let (bundle, inner_profile) =
         prove_implemented_circuit_bundle_unchecked_profiled(input, witness, transcript_seed)?;
-    profile.circuit_build = inner_profile.circuit_build;
-    profile.ligero_row_encode = inner_profile.ligero_row_encode;
-    profile.ligero_merkle_build = inner_profile.ligero_merkle_build;
-    profile.ligero_proximity_claim = inner_profile.ligero_proximity_claim;
-    profile.ligero_openings = inner_profile.ligero_openings;
-    profile.sumcheck = inner_profile.sumcheck;
-    profile.committed_values = inner_profile.committed_values;
-    profile.committed_nonzero_values = inner_profile.committed_nonzero_values;
-    profile.max_row_nonzero_values = inner_profile.max_row_nonzero_values;
-    profile.ligero_rows = inner_profile.ligero_rows;
-    profile.sumcheck_by_family = inner_profile.sumcheck_by_family;
+    let mut profile = inner_profile;
+    profile.witness_check = witness_check;
     Ok((bundle, profile))
 }
 
@@ -953,146 +932,11 @@ pub fn prove_implemented_circuit_bundle_unchecked_profiled(
     transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, ImplementedCircuitProveProfile), ImplementedCircuitProofError>
 {
-    let mut profile = ImplementedCircuitProveProfile::default();
-    let start = Instant::now();
-    let instances = implemented_circuit_instances(input, witness)
-        .map_err(ImplementedCircuitProofError::Witness)?;
-    let all_instances = vec![instances];
-
-    let (committed_values, all_layouts, all_pads) = prover_committed_values(&all_instances);
-    let mut quadratic_constraints = Vec::new();
-    for (instance, layout) in all_instances[0].iter().zip(&all_layouts[0]) {
-        append_circuit_quadratic_constraints(&mut quadratic_constraints, &instance.circuit, layout);
-    }
-    profile.circuit_build = start.elapsed();
-    profile.committed_values = committed_values.len();
-    profile.committed_nonzero_values = committed_values
-        .iter()
-        .filter(|&&value| value != Fp::ZERO)
-        .count();
-
-    let params = implemented_circuit_ligero_params(committed_values.len());
-    profile.max_row_nonzero_values = committed_values
-        .chunks(params.row_len)
-        .map(|chunk| chunk.iter().filter(|&&value| value != Fp::ZERO).count())
-        .max()
-        .unwrap_or(0);
-    let (commitment, commit_profile) =
-        commit_witness_with_quadratics_profiled(&committed_values, params, &quadratic_constraints)
-            .map_err(ImplementedCircuitProofError::Ligero)?;
-    profile.ligero_row_encode = commit_profile.row_encode;
-    profile.ligero_merkle_build = commit_profile.merkle_build;
-    profile.ligero_rows = commit_profile.rows;
-
-    let root = commitment.root();
-    let gamma = ligero_proximity_gamma(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        root,
-        commitment.committed_rows(),
+    prove_implemented_circuit_bundle_batch_unchecked_profiled(
+        std::slice::from_ref(input),
+        std::slice::from_ref(witness),
         transcript_seed,
-    );
-    let start = Instant::now();
-    let proximity_claim = commitment
-        .proximity_claim(&gamma)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
-    profile.ligero_proximity_claim = start.elapsed();
-
-    let mut entries = Vec::new();
-    let mut verifications = Vec::with_capacity(all_instances[0].len());
-    let start = Instant::now();
-    for (index, instance) in all_instances[0].iter().enumerate() {
-        let layers = instance
-            .circuit
-            .evaluate_input(instance.input.clone())
-            .map_err(ImplementedCircuitProofError::Circuit)?;
-        let mut channel =
-            CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
-        mix_bundle_signature_index(0, &mut channel);
-        channel.mix_bytes(instance.label);
-        let projection = EcdsaPublicProjection::full(input);
-        mix_ecdsa_public_projection(&projection, &mut channel);
-        let mut verifier_channel = channel.clone();
-        let family_start = Instant::now();
-        let proof = prove_evaluated_circuit(
-            &instance.circuit,
-            &layers,
-            &all_pads[0][index],
-            root,
-            &mut channel,
-        )
-        .map_err(ImplementedCircuitProofError::Sumcheck)?;
-        let verification = verify_circuit(&instance.circuit, &proof, root, &mut verifier_channel)
-            .map_err(ImplementedCircuitProofError::Sumcheck)?;
-        profile.sumcheck_by_family[index] = family_start.elapsed();
-        entries.push(ImplementedCircuitBundleEntry { proof });
-        verifications.push(verification);
-    }
-    profile.sumcheck = start.elapsed();
-    let single_projection = [EcdsaPublicProjection::full(input)];
-    let (claim_batch, consistency_claim_values) = prover_claim_batch(
-        &commitment,
-        &single_projection,
-        &all_instances,
-        &all_layouts,
-        &[verifications],
-        &entries,
-        committed_values.len(),
-        &quadratic_constraints,
-        transcript_seed,
-    )?;
-    let claim_blind_challenge = ligero_claim_blind_challenge(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        root,
-        params,
-        transcript_seed,
-    );
-    let claim_blind_check = commitment.claim_blind_check(claim_blind_challenge);
-    let quadratic_challenges = ligero_quadratic_challenges(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        root,
-        params,
-        &quadratic_constraints,
-        transcript_seed,
-    );
-    let quadratic_batch = commitment
-        .quadratic_batch(&quadratic_challenges)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
-    let start = Instant::now();
-    let opening_indices = ligero_opening_indices(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        root,
-        params,
-        &proximity_claim,
-        &entries,
-        &claim_batch,
-        &claim_blind_check,
-        &quadratic_batch,
-        transcript_seed,
-    );
-    let proximity_openings = commitment
-        .open_columns(&opening_indices)
-        .map_err(ImplementedCircuitProofError::Ligero)?;
-    profile.ligero_openings = start.elapsed();
-
-    Ok((
-        ImplementedCircuitBundle {
-            params,
-            root,
-            root_b: None,
-            proximity_openings,
-            proximity_openings_b: Vec::new(),
-            proximity_claim,
-            proximity_claim_b: None,
-            claim_batch,
-            claim_blind_check,
-            quadratic_batch,
-            claim_batch_b: None,
-            consistency_claim_values,
-            mac_tags: Vec::new(),
-            entries,
-        },
-        profile,
-    ))
+    )
 }
 
 pub fn prove_mdoc_p4b_circuit_bundle(
@@ -6856,6 +6700,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn q024_mac_reduction_bounds_are_pinned() {
         assert_eq!(
             mac_product_coeff_max_weight(),

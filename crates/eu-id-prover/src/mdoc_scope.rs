@@ -187,36 +187,10 @@ impl MdocScopeStatement {
                     if std::mem::replace(&mut age, true) {
                         return Err(MdocScopeError::DuplicateMode("AgeOver"));
                     }
-                    let coherent = matches!(
-                        (self.profile, &item.mode),
-                        (
-                            MdocScopeProfile::V1,
-                            MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Packed)
-                        ) | (
-                            MdocScopeProfile::V2,
-                            MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Text)
-                        )
-                    );
-                    if !coherent {
-                        return Err(MdocScopeError::WrongShape("profile/birth_date encoding"));
-                    }
                 }
                 MdocScopeMode::Alpha2Set(_) => {
                     if std::mem::replace(&mut nationality, true) {
                         return Err(MdocScopeError::DuplicateMode("Alpha2Set"));
-                    }
-                    let coherent = matches!(
-                        (self.profile, &item.mode),
-                        (
-                            MdocScopeProfile::V1,
-                            MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Numeric)
-                        ) | (
-                            MdocScopeProfile::V2,
-                            MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Alpha2)
-                        )
-                    );
-                    if !coherent {
-                        return Err(MdocScopeError::WrongShape("profile/nationality encoding"));
                     }
                 }
             }
@@ -1745,7 +1719,6 @@ fn apply_edge_native(
             let id = u32::try_from(row.argument).ok()?;
             let selected = action.is_selected_digest_id();
             let item = edge.p0 as usize;
-            let order_ok = !before.have_previous || id > before.previous_id;
             let selected_ok = !selected || (item < item_count && !before.seen[item]);
             let expected_id_ok = expected_item_digest_ids.is_none_or(|expected| {
                 if selected {
@@ -1758,13 +1731,9 @@ fn apply_edge_native(
                 && row.major == 0
                 && id <= MDOC_SCOPE_MAX_DIGEST_ID
                 && width_matches(action, row.byte, 0)
-                && order_ok
                 && selected_ok
                 && expected_id_ok;
             if ok {
-                if before.have_previous {
-                    slack = (id - before.previous_id - 1) as u16;
-                }
                 after.previous_id = id;
                 after.have_previous = true;
                 if selected {
@@ -2847,16 +2816,16 @@ impl FrameworkEval for MdocScopeEval {
                 ScopeAction::UnknownDigestId2,
             ],
         );
-        let ordered_id = selected_id.clone() + unknown_id;
+        let digest_id = selected_id.clone() + unknown_id;
         let previous_before = trace[columns.previous_id_before].clone();
         let expected_previous = previous_before.clone()
             - begin_digest_map.clone() * previous_before.clone()
-            + ordered_id.clone() * (arg_lo.clone() - previous_before.clone());
+            + digest_id.clone() * (arg_lo.clone() - previous_before.clone());
         eval.add_constraint(
             active.clone() * (trace[columns.previous_id_after].clone() - expected_previous),
         );
         let expected_have = have_before.clone() - begin_digest_map.clone() * have_before.clone()
-            + ordered_id.clone() * (one.clone() - have_before.clone());
+            + digest_id.clone() * (one.clone() - have_before.clone());
         eval.add_constraint(
             active.clone() * (trace[columns.have_previous_after].clone() - expected_have),
         );
@@ -2932,7 +2901,7 @@ impl FrameworkEval for MdocScopeEval {
                 sum + value.clone() * f_const::<E>(1u32 << bit)
             });
         let decimal_digit = action(ScopeAction::AsciiDigit) + action(ScopeAction::FieldDigit);
-        let slack_gate = begin_any.clone() + ordered_id.clone() + decimal_digit.clone();
+        let slack_gate = begin_any.clone() + decimal_digit.clone();
         for bit in &trace[columns.slack_bits.clone()] {
             eval.add_constraint(slack_gate.clone() * bit.clone() * (bit.clone() - one.clone()));
         }
@@ -2959,12 +2928,6 @@ impl FrameworkEval for MdocScopeEval {
             (begin_array.clone() + begin_digest_map.clone())
                 * (arg_lo.clone() - trace[columns.p0].clone() - slack.clone()),
         );
-        eval.add_constraint(
-            ordered_id.clone()
-                * have_before.clone()
-                * (arg_lo.clone() - previous_before.clone() - one.clone() - slack.clone()),
-        );
-
         let stay = action_sum::<E>(
             &trace,
             &columns,
@@ -4875,15 +4838,19 @@ mod tests {
     }
 
     #[test]
-    fn rejects_duplicate_unsorted_missing_or_oversized_digest_ids() {
+    fn accepts_unordered_digest_ids_but_rejects_duplicates_missing_and_oversized_ids() {
         let statement = v2_statement(true);
         let inners = v2_item_inners(&[b"FR"]);
-        for ids in [
-            vec![7, 7],
-            vec![9, 7],
-            vec![7],
-            vec![7, u64::from(u16::MAX) + 1],
-        ] {
+        let unordered = encoded_map(&mso_entries(
+            &statement,
+            &[9, 7],
+            VALID_SIGNED,
+            VALID_FROM,
+            VALID_UNTIL,
+        ));
+        construct(statement.clone(), unordered, inners.clone(), false).unwrap();
+
+        for ids in [vec![7, 7], vec![7], vec![7, u64::from(u16::MAX) + 1]] {
             let mso = encoded_map(&mso_entries(
                 &statement,
                 &ids,
@@ -4896,11 +4863,11 @@ mod tests {
     }
 
     #[test]
-    fn permits_sorted_unrequested_digest_entries_but_still_selects_every_item() {
+    fn permits_unordered_unrequested_digest_entries_but_still_selects_every_item() {
         let statement = v2_statement(true);
         let mso = encoded_map(&mso_entries(
             &statement,
-            &[5, 7, 8, 9],
+            &[9, 5, 8, 7],
             VALID_SIGNED,
             VALID_FROM,
             VALID_UNTIL,
@@ -5139,20 +5106,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_profile_encoding_mismatches_before_witness_allocation() {
+    fn accepts_value_encodings_independently_of_map_order_profile() {
         let mut v1 = v1_statement();
         v1.items[0].mode = MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Text);
-        assert!(matches!(
-            v1.validate(),
-            Err(MdocScopeError::WrongShape("profile/birth_date encoding"))
-        ));
+        v1.items[1].mode = MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Alpha2);
+        v1.validate().unwrap();
 
         let mut v2 = v2_statement(true);
+        v2.items[0].mode = MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Packed);
         v2.items[1].mode = MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Numeric);
-        assert!(matches!(
-            v2.validate(),
-            Err(MdocScopeError::WrongShape("profile/nationality encoding"))
-        ));
+        v2.validate().unwrap();
     }
 
     #[test]
@@ -5467,18 +5430,17 @@ mod tests {
             })
         };
         let table_yield_sum = |multiplicities: &[u32]| {
-            scope
-                .table_edges
-                .iter()
-                .zip(multiplicities)
-                .fold(zero, |sum, (&(slot, edge), &multiplicity)| {
+            scope.table_edges.iter().zip(multiplicities).fold(
+                zero,
+                |sum, (&(slot, edge), &multiplicity)| {
                     let denominator: QM31 = dfa_relation.combine(&edge.tuple(slot).map(m31));
                     sum - denominator.inverse() * QM31::from(m31(multiplicity))
-                })
+                },
+            )
         };
 
-        let honest = walk_consume_sum(&witness.active_rows)
-            + table_yield_sum(&witness.table_multiplicities);
+        let honest =
+            walk_consume_sum(&witness.active_rows) + table_yield_sum(&witness.table_multiplicities);
         assert_eq!(honest, zero);
 
         let mut tampered = witness.table_multiplicities.clone();

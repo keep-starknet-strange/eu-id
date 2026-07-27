@@ -1,5 +1,4 @@
-//! Producer-side components for every preprocessed lookup table the
-//! SHA-256 AIR consumes.
+//! Producer-side lookup components.
 //!
 //! The main `crate::constraints::Sha256Eval` is the **consumer**: it fires
 //! `add_to_relation(rel, +1, …)` on each lookup. For the LogUp protocol
@@ -11,22 +10,17 @@
 //! column per relation it serves. It emits `add_to_relation(rel,
 //! −multiplicity_cell, &row_cells)`, then `finalize_logup_in_pairs()`.
 //!
-//! Wired components (standalone path: one `Sha256Eval` consumer + 14
-//! producers):
-//!
-//! - [`SigmaDecodeEval`] × 8 — one per (function, side) of the σ/Σ decode
-//!   tables; each has 2¹⁶ rows × 5 preprocessed columns + 1 multiplicity.
-//! - [`MajChEval`] × 1 — the packed Maj/Ch table; 2^(3·W) rows, 5
-//!   preprocessed columns (`a, b, c, maj, ch`), 2 multiplicities (one
-//!   for Maj, one for Ch).
-//! - [`Xor8Eval`] × 1 — the generic byte XOR table; 2¹⁶ rows × 3
-//!   preprocessed columns + 1 multiplicity.
-//! - [`RangeKEval`] × 4 — one per `RangeKind::{Range2, Range4, Range5,
+//! The active standalone path wires [`RangeKEval`] × 4 — one per
+//! `RangeKind::{Range2, Range4, Range5,
 //!   Range8}` channel. The first three bound carries to 2, 4, or 5 values;
 //!   `Range8` bounds terminal digest bytes to 256 values. Each table has one
 //!   preprocessed value column plus one multiplicity column; small tables are
 //!   padded to the backend's minimum SIMD domain. See [`range_log_size`] and
 //!   [`crate::preprocessed`].
+//!
+//! The decode, Maj/Ch, and Xor evaluator types below are retained only for
+//! standalone table tests and compatibility; the bit-plane SHA AIR does not
+//! instantiate them.
 //!
 //! Every preprocessed-column ID is namespaced under the `"sha256_"` prefix
 //! so it cannot collide with the ECDSA-stream tables in a future combined
@@ -457,16 +451,11 @@ impl FrameworkEval for Xor8Eval {
         let z = eval.get_preprocessed_column(cols[2].clone());
         let mult = eval.next_trace_mask();
 
-        #[cfg(not(feature = "gkr-spike"))]
         eval.add_to_relation(RelationEntry::base(
             &self.relations.xor_8,
             -mult,
             &[x, y, z],
         ));
-        #[cfg(feature = "gkr-spike")]
-        let _ = (x, y, z, mult);
-
-        #[cfg(not(feature = "gkr-spike"))]
         eval.finalize_logup_in_pairs();
         eval
     }

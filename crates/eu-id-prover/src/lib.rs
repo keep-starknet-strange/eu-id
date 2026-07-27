@@ -693,12 +693,6 @@ pub enum Error {
     /// The shared STARK verifier rejected the proof (includes a broken global
     /// LogUp balance — e.g. the signed digest does not equal `SHA-256(C)`).
     Verify(String),
-    /// The feature-gated SHA `xor_8` GKR output claims did not cancel.
-    #[cfg(feature = "gkr-spike")]
-    ShaXor8GkrUnbalanced,
-    /// The feature-gated SHA `xor_8` side GKR proof was malformed or rejected.
-    #[cfg(feature = "gkr-spike")]
-    ShaXor8GkrRejected(String),
     /// The proof was produced under a PCS config that does not match the pinned
     /// security profile (e.g. a prover-weakened FRI/grinding setting). Rejected
     /// before the STARK check, so a low-query proof cannot be inherited.

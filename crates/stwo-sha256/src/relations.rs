@@ -8,23 +8,16 @@
 //! component (committed separately at prover-setup time); the relations
 //! here are the contract between the two.
 //!
-//! Five channel families are wired into the constraint layer:
-//!   - [`SigmaDecodeRelations`] — the eight `Σ`/`σ` decode tables.
-//!   - [`MajRelation`] / [`ChRelation`] — the packed Maj/Ch lookup,
-//!     sharing one underlying table at width `W ≥ MAX_ROUND_GROUP_BITS`.
-//!     Maj keys on `(a, b, c, maj)`; Ch keys on `(e, f, g, ch)` — two
-//!     row-width-4 relations against the same `(a, b, c, maj, ch)` table
-//!     content (each commits its own multiplicity column).
-//!   - [`Xor8Relation`] — the single 2¹⁶-row `(x, y, z = x ⊕ y)` table,
-//!     fired chunk-wise to combine the two `O2` partials of every
-//!     σ-application.
-//!   - [`RangeRelations`] — the four width-1 range-check channels
+//! The active constraint layer wires [`RangeRelations`] — the four width-1
+//! range-check channels
 //!     `Range_2`/`Range_4`/`Range_5`/`Range_8`. The mod-2³² limb-add carries are
 //!     range-checked through `Range_{2,4,5}` per the headroom audit
 //!     (`crate::headroom`); terminal digest bytes are checked through
 //!     `Range_8` and recomposed into the final block's 16-bit `h_out` limbs
 //!     (per design §10.2).
-//!     Row content for each `Range_k` is the table `crate::tables_local::range_k()`.
+//! Row content for each `Range_k` is `crate::tables_local::range_k()`.
+//! Decode, Maj/Ch, and Xor relation types remain for standalone compatibility,
+//! but the bit-plane AIR does not add entries to them.
 //!
 //! Each `relation!(_, N)` declares a struct holding a `LookupElements<N>`
 //! channel — `N` is the row width of the matched table (number of base-field
@@ -38,10 +31,6 @@
 
 use air_core::relations::SharedRelation;
 use stwo::core::channel::Channel;
-#[cfg(feature = "gkr-spike")]
-use stwo::core::fields::m31::BaseField;
-#[cfg(feature = "gkr-spike")]
-use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::relation;
 
 /// Row width of each `Σ`/`σ` decode table: `(key, o_main_lo, o_main_hi,
@@ -132,39 +121,6 @@ relation!(ChRelation, MAJ_CH_REL_SIZE);
 pub const XOR_8_REL_SIZE: usize = 3;
 
 relation!(Xor8Relation, XOR_8_REL_SIZE);
-
-#[cfg(feature = "gkr-spike")]
-impl Xor8Relation {
-    /// Evaluate the fixed `(x, y, x ^ y)` table denominator MLE at `point`.
-    ///
-    /// The table row order is `index = y * 256 + x`; Stwo's MLE recursion
-    /// consumes the most significant index bit first, so point coordinates
-    /// `0..8` are `y[7..0]` and `8..16` are `x[7..0]`.
-    pub fn eval_fixed_table_denominator_mle(&self, point: &[SecureField]) -> SecureField {
-        assert_eq!(point.len(), XOR_8_REL_SIZE + 13);
-
-        let mut y = SecureField::from(BaseField::from(0));
-        for bit in 0..8 {
-            y += SecureField::from(BaseField::from(1u32 << bit)) * point[7 - bit];
-        }
-
-        let mut x = SecureField::from(BaseField::from(0));
-        for bit in 0..8 {
-            x += SecureField::from(BaseField::from(1u32 << bit)) * point[15 - bit];
-        }
-
-        let mut z = SecureField::from(BaseField::from(0));
-        for bit in 0..8 {
-            let xb = point[15 - bit];
-            let yb = point[7 - bit];
-            let xor_bit = xb + yb - SecureField::from(BaseField::from(2)) * xb * yb;
-            z += SecureField::from(BaseField::from(1u32 << bit)) * xor_bit;
-        }
-
-        self.0.alpha_powers[0] * x + self.0.alpha_powers[1] * y + self.0.alpha_powers[2] * z
-            - self.0.z
-    }
-}
 
 /// Row width of every `Range_k` channel: a single base-field value pinned
 /// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
@@ -402,11 +358,10 @@ impl Default for FieldRelation {
     }
 }
 
-/// All LogUp channels the SHA-256 AIR consumes today: the eight `Σ`/`σ`
-/// decode-table channels, the packed Maj/Ch pair, the chunk-wise `xor_8`
-/// channel, the eight split-and-pack channels, and the four range-check
-/// channels. Aggregated so `Sha256Eval` holds a single relations bundle
-/// and the prover-side `draw` walks the transcript once per component.
+/// Transcript-stable relation bundle. The active AIR uses the four range
+/// channels plus optional digest and field providers. Legacy decode, Maj/Ch,
+/// and Xor channels remain drawn for proof-format compatibility but receive no
+/// entries.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sha256Relations {
     pub sigma_decode: SigmaDecodeRelations,

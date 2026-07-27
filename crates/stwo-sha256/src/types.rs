@@ -3,8 +3,8 @@
 //!
 //! Following §3 of `docs/research/sha256-air-design.md`, a SHA-256 word `w` is
 //! stored as **two 16-bit limbs** `(lo, hi)` with `w = lo + 2¹⁶ · hi`. The
-//! 16+16 split is the natural minimum that aligns with the lookup-key width
-//! of the `Σ`/`σ` decode tables (whose keys are 16-bit half-words).
+//! 16+16 split keeps every mod-2³² addition linear over M31 while the trace's
+//! bit planes constrain the SHA boolean functions.
 
 use crate::constants::{
     BLOCK_BYTES, DIGEST_BYTES, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS, WORD_BYTES,
@@ -19,9 +19,8 @@ pub const LIMB_BASE: u32 = 1 << LIMB_BITS;
 /// Maximum legal limb value, `2¹⁶ − 1`.
 pub const LIMB_MAX: u32 = LIMB_BASE - 1;
 
-/// One word as `(lo, hi)` limbs. `lo, hi ∈ [0, 2¹⁶)`. The constraint layer
-/// range-checks these via the lookup-table consumers (every limb is either an
-/// input to or an output of a lookup keyed on `[0, 2¹⁶)`).
+/// One word as `(lo, hi)` limbs. `lo, hi ∈ [0, 2¹⁶)` in every native witness;
+/// the AIR reconstructs the words from their constrained bit planes.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WordLimbs {
     pub lo: u32,
@@ -44,8 +43,7 @@ impl WordLimbs {
         self.lo | (self.hi << LIMB_BITS)
     }
 
-    /// True iff both limbs are in `[0, 2¹⁶)`. The native witness layer
-    /// guarantees this; the AIR enforces it via the lookup tables.
+    /// True iff both limbs are in `[0, 2¹⁶)`.
     #[inline]
     pub const fn is_canonical(self) -> bool {
         self.lo <= LIMB_MAX && self.hi <= LIMB_MAX
@@ -161,11 +159,6 @@ pub struct RoundWitness {
     /// `Σ0(a)` and `Σ1(e)` results as `(lo, hi)` limbs.
     pub sigma0: WordLimbs,
     pub sigma1: WordLimbs,
-    /// Decoded intermediates of `Σ0(a)` — half-keys, spread `O0`/`O1`,
-    /// `O2` partials, combined `O2`, and chunk decomposition for `xor_8`.
-    pub sigma0_decode: SigmaDecodeWitness,
-    /// Decoded intermediates of `Σ1(e)`.
-    pub sigma1_decode: SigmaDecodeWitness,
     /// `Ch(e, f, g)` and `Maj(a, b, c)` results as `(lo, hi)` limbs.
     pub ch: WordLimbs,
     pub maj: WordLimbs,
@@ -198,13 +191,8 @@ pub struct AddCarries {
 
 /// One 16-bit limb split into two 8-bit chunks (`b0 + 256 · b1 == limb`).
 ///
-/// The `Σ`/`σ` output reassembly XORs the two side `O2` partials into the
-/// combined `O2` contribution; the design (§9.3) avoids per-function 2²⁰
-/// XOR-combine tables by chunking each 16-bit limb into bytes and XOR'ing
-/// chunk-wise through the single generic `xor_8` table. This struct holds
-/// the byte chunks of one limb so the witness can carry the values the
-/// chunk-bind constraint (lo + 256·hi == limb) range-checks, and the
-/// `xor_8` lookup can read `(b0_s, b0_s', b0_combined)` directly.
+/// Used by field-exposure and terminal-byte helpers that need an explicit byte
+/// view of a limb.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LimbBytes {
     /// Low byte of the limb (`limb & 0xFF`).
@@ -230,88 +218,6 @@ impl LimbBytes {
     }
 }
 
-/// Byte chunks of one `(lo, hi)` limb pair (`O2` partial or combined output).
-///
-/// `lo` chunks `(lo.b0, lo.b1)` reconstruct the lo-limb; `hi` chunks the
-/// hi-limb. Four bytes per limb pair — chunks for the S-side partial, the
-/// S′-side partial, and their XOR-combined value are all committed (see
-/// [`SigmaDecodeWitness`]) so the `xor_8` chunk-wise lookup can fire on
-/// the three matched byte triples.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct LimbPairBytes {
-    pub lo: LimbBytes,
-    pub hi: LimbBytes,
-}
-
-impl LimbPairBytes {
-    /// Build the chunks of a `WordLimbs` value (each limb split into 2 bytes).
-    #[inline]
-    pub const fn from_limbs(limbs: WordLimbs) -> Self {
-        Self {
-            lo: LimbBytes::from_u16(limbs.lo),
-            hi: LimbBytes::from_u16(limbs.hi),
-        }
-    }
-
-    /// Recompose the four-byte chunks back into a `WordLimbs`.
-    #[inline]
-    pub const fn to_limbs(self) -> WordLimbs {
-        WordLimbs {
-            lo: self.lo.to_u16(),
-            hi: self.hi.to_u16(),
-        }
-    }
-}
-
-/// Per-σ-application decoded intermediates (§9.3 of the validated design).
-///
-/// A `Σ`/`σ` evaluation `y = f(x)` decomposes by GF(2)-linearity into three
-/// disjoint output groups:
-/// - `O0`: output bits whose input-bit dependency lies entirely in the
-///   16-bit `S` half — computable from the S-half alone.
-/// - `O1`: output bits whose dependency lies entirely in the `S′` half.
-/// - `O2`: output bits whose dependency crosses both sides — emitted as
-///   *two* "partials", one from each side, that XOR to the true `O2`
-///   contribution.
-///
-/// Per side, one lookup into the `2¹⁶`-row decode table maps the half-key
-/// to `(o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi)`. The two
-/// `O2` partials XOR — chunk-wise through the generic `xor_8` table
-/// (§9.3) — into `o2_combined`. The final output reassembles by field
-/// addition of disjoint spread parts:
-/// `y.lo = o_main_s.lo + o_main_s_complement.lo + o2_combined.lo`
-/// (analogously for `.hi`).
-///
-/// This struct carries every intermediate the AIR commits per σ-call so the
-/// decode-table `add_to_relation` calls and the `xor_8` chunk-wise lookups
-/// can both be wired without re-deriving values from the input word.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct SigmaDecodeWitness {
-    /// 16-bit packing of the `S`-positions of the input word — the decode
-    /// table is indexed by this.
-    pub key_s: u32,
-    /// 16-bit packing of the `S′`-positions of the input word.
-    pub key_s_complement: u32,
-    /// Spread `O0` output bits (at natural positions, split lo/hi).
-    pub o_main_s: WordLimbs,
-    /// Spread `O1` output bits.
-    pub o_main_s_complement: WordLimbs,
-    /// `O2` partial XOR contribution from the `S` half (natural positions, lo/hi).
-    pub o2_partial_s: WordLimbs,
-    /// `O2` partial XOR contribution from the `S′` half.
-    pub o2_partial_s_complement: WordLimbs,
-    /// `o2_partial_s ⊕ o2_partial_s_complement` — the true `O2` contribution.
-    pub o2_combined: WordLimbs,
-    /// Byte chunks of `o2_partial_s` (`lo + 256·hi == limb` per limb).
-    pub o2_chunks_s: LimbPairBytes,
-    /// Byte chunks of `o2_partial_s_complement`.
-    pub o2_chunks_s_complement: LimbPairBytes,
-    /// Byte chunks of `o2_combined`. The matched triple
-    /// `(o2_chunks_s, o2_chunks_s_complement, o2_chunks_combined)` is what
-    /// the chunk-wise `xor_8` lookup reads.
-    pub o2_chunks_combined: LimbPairBytes,
-}
-
 /// Witness for one message-schedule entry `W[t]`, for `t ∈ [16, 64)`.
 ///
 /// `W[t] = σ1(W[t−2]) + W[t−7] + σ0(W[t−15]) + W[t−16]` (mod 2³²).
@@ -325,11 +231,6 @@ pub struct ScheduleEntryWitness {
     pub w_t_minus_16: WordLimbs,
     pub lower_sigma0: WordLimbs,
     pub lower_sigma1: WordLimbs,
-    /// Decoded intermediates of `σ0(W[t-15])` — half-keys, spread `O0`/`O1`,
-    /// `O2` partials, combined `O2`, and chunk decomposition for `xor_8`.
-    pub lower_sigma0_decode: SigmaDecodeWitness,
-    /// Decoded intermediates of `σ1(W[t-2])`.
-    pub lower_sigma1_decode: SigmaDecodeWitness,
     /// The four-word `+` carries.
     pub carries: AddCarries,
     pub w_t: WordLimbs,

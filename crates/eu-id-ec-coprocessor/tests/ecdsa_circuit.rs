@@ -14,9 +14,7 @@ use eu_id_ec_coprocessor::ecdsa::{
     verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot,
     MdocP4bMacKeyShares, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, MDOC_P4B_MAC_HALF_COUNT,
 };
-use eu_id_ec_coprocessor::ligero::{
-    commit_witness, v2_ligero_params, v4_circle_params, LigeroCode, LigeroParams,
-};
+use eu_id_ec_coprocessor::ligero::{commit_witness, v2_ligero_params, v4_circle_params};
 use eu_id_ec_coprocessor::sumcheck::{prove_circuit, CircuitPads};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;

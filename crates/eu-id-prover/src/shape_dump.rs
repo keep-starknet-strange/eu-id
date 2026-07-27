@@ -50,6 +50,7 @@ fn layout_stats(name: &str, layout: &air_core::TreeLayout) -> (usize, u64) {
 
 #[test]
 #[ignore = "diagnostic dump, run manually with --nocapture"]
+#[allow(clippy::drop_non_drop)]
 fn shape_dump() {
     let pw = fixtures::valid_over_18().pipeline_witness();
     let draft = pw.p256_draft.as_ref().expect("valid fixture has a draft");
@@ -237,7 +238,7 @@ fn shape_dump() {
                 .into_iter()
                 .fold(grand - grand, |a, b| a + b);
             println!("  module {name} claimed-sum total = {s:?}");
-            grand = grand + s;
+            grand += s;
         }
         println!("  GRAND claimed-sum total = {grand:?}");
     }
@@ -270,7 +271,6 @@ fn shape_dump() {
             );
         }
     }
-
     drop(modules);
     let ic = p256.interaction_claim();
     println!(

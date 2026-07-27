@@ -1,17 +1,14 @@
 //! Prover and verifier entry points for the standalone SHA-256 component.
 //!
-//! Full plumbing: preprocessed-trace commitment of every lookup table
-//! (`crate::preprocessed`), base-trace commitment of the Sha256Eval trace
-//! plus the producer-side multiplicity columns, interaction trace per
-//! component (`crate::interaction`), and finally Stwo's `prove<SimdBackend>`
-//! over the 23 components in `crate::components` (1 consumer + 8 σ/Σ
-//! decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4 `Range_k`).
+//! Full plumbing: preprocessed range tables and round selectors, the
+//! `Sha256Eval` base trace plus range multiplicities, interaction traces, and
+//! Stwo proof generation over one SHA consumer and four `Range_k` producers.
 //!
 //! Component composition pattern matches `../sha256-air/src/lib.rs`
 //! (structural reference) and the Blake example in
 //! `stwo/examples/blake/air.rs`. Constraint-layer soundness covers
-//! every lookup the AIR consumes: Σ/σ decode, packed Maj/Ch, `xor_8`,
-//! split-and-pack, and the four `Range_k` carry / terminal-limb channels.
+//! every lookup the AIR consumes: the four `Range_k` carry and terminal-byte
+//! channels. SHA boolean functions are constrained directly from bit planes.
 //!
 //! Order discipline: every `mix_into` on the channel **must** happen in
 //! the same order on the prover and verifier sides — drift silently
@@ -26,8 +23,6 @@ use stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 use crate::air::{Sha256Prover, Sha256Verifier};
 use crate::constants::DIGEST_BYTES;
-#[cfg(feature = "gkr-spike")]
-use crate::gkr_spike::Xor8GkrProofWire;
 use crate::interaction::InteractionClaim;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
@@ -66,12 +61,9 @@ pub struct ProverConfig {
     /// (64 rows) plus padding. Larger messages must override; see the
     /// recipe above.
     pub log_n_rows: u32,
-    /// Group width `W` for the packed `Maj`/`Ch` table. The default is
-    /// `MAX_ROUND_GROUP_BITS = 6`: the round partitions subdivide their two
-    /// 7-bit groups into ≤6-bit sub-groups (design §9.2), so every packed
-    /// group is `≤ 6` bits and the table is `2^(3·6) = 2¹⁸ ≈ 262 k` rows —
-    /// an 8× shrink from the old `W = 7` `2²¹` table that dominated prove
-    /// cost. The packed-table size is `2^(3W)` rows.
+    /// Legacy protocol parameter retained in proof serialization and transcript
+    /// binding. The active bit-plane AIR no longer sizes a packed Maj/Ch table
+    /// from this value.
     pub group_width: u32,
     /// Stwo PCS configuration (FRI + PoW parameters). Use
     /// `PcsConfig::default()` for the smallest sensible test config;
@@ -114,9 +106,8 @@ pub struct Sha256Proof {
     pub n_blocks: usize,
     /// `log2` of the SHA-256 trace's row count.
     pub log_n_rows: u32,
-    /// Group width `W` of the packed Maj/Ch table this proof was generated
-    /// against. The verifier reads it back to reconstruct the matching
-    /// `MajChEval`'s `log_size = 3W`.
+    /// Legacy group-width parameter mixed into the transcript for protocol
+    /// compatibility. It does not size an active table.
     pub group_width: u32,
     /// Per-component LogUp claimed sums. The total **must** be zero for
     /// the verifier to accept — the soundness backbone of the
@@ -128,9 +119,6 @@ pub struct Sha256Proof {
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
-    /// Feature-gated side proof replacing the committed `xor_8` LogUp columns.
-    #[cfg(feature = "gkr-spike")]
-    pub xor_8_gkr_proof: Xor8GkrProofWire,
 }
 
 /// Errors that can be returned by [`prove_sha256`].
@@ -193,10 +181,6 @@ pub enum Sha256VerifyError {
     /// out-of-memory allocation on the verify path (the trace row count is
     /// `2^log_n_rows`).
     UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
-    #[cfg(feature = "gkr-spike")]
-    Xor8GkrUnbalanced,
-    #[cfg(feature = "gkr-spike")]
-    Xor8GkrRejected(String),
 }
 
 impl core::fmt::Display for Sha256VerifyError {
@@ -223,10 +207,6 @@ impl core::fmt::Display for Sha256VerifyError {
                 f,
                 "proof.log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
             ),
-            #[cfg(feature = "gkr-spike")]
-            Self::Xor8GkrUnbalanced => write!(f, "xor_8 GKR output claims do not balance"),
-            #[cfg(feature = "gkr-spike")]
-            Self::Xor8GkrRejected(msg) => write!(f, "xor_8 GKR proof rejected: {msg}"),
         }
     }
 }
@@ -290,9 +270,6 @@ fn prove_sha256_inner(
     let mut prover = Sha256Prover::new(witness, log_n_rows, group_width);
     let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
     let interaction_claim = prover.interaction_claim().clone();
-    #[cfg(feature = "gkr-spike")]
-    let xor_8_gkr_proof = prover.xor_8_gkr_proof().clone();
-
     let digest = witness.digest_from_blocks();
     Ok(Sha256Proof {
         digest: digest.0,
@@ -302,8 +279,6 @@ fn prove_sha256_inner(
         interaction_claim,
         pcs_config,
         stark_proof,
-        #[cfg(feature = "gkr-spike")]
-        xor_8_gkr_proof,
     })
 }
 
@@ -371,10 +346,6 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
         proof.group_width,
         proof.interaction_claim.clone(),
     );
-    #[cfg(feature = "gkr-spike")]
-    {
-        verifier = verifier.with_xor_8_gkr_proof(proof.xor_8_gkr_proof.clone());
-    }
     air_core::verify(&mut [&mut verifier], &proof.stark_proof)
         .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
 }
