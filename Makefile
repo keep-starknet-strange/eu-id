@@ -4,9 +4,9 @@
 # scripts/check.sh — the single definition of the lint gate, also run by the
 # pre-commit hook — so local and CI lint results never diverge.
 #
-# This branch's product path is quantum-only: ML-DSA issuer, device, and
-# revocation authentication. Classical P-256 demo and coprocessor targets live
-# on the classical branches.
+# This branch is quantum-only: the product path uses ML-DSA issuer/device
+# authentication, and revocation lives on the dedicated TS13 path. Classical
+# P-256 demo and coprocessor targets live on the classical branches.
 
 PROOF ?= proof.bin
 
@@ -25,7 +25,6 @@ ACCEPTABLE  ?=
         prove-age verify-age \
         prove-nat verify-nat \
         profile-prove-age-rc profile-verify-age-rc \
-        profile-prove-age-bd profile-verify-age-bd \
         publish-android-local publish-android-symbols publish-jvm-local publish-local \
         clean
 
@@ -45,8 +44,8 @@ help:
 	@echo "  make prove-age     run the age predicate prover  (DOB= required)"
 	@echo "  make verify-age    run the age predicate verifier"
 	@echo ""
-	@echo "  prove-age overrides: DOB= DATE= MIN_AGE= STRATEGY=bd|rc PROOF="
-	@echo "  verify-age overrides: STRATEGY=bd|rc PROOF="
+	@echo "  prove-age overrides: DOB= DATE= MIN_AGE= STRATEGY=rc PROOF="
+	@echo "  verify-age overrides: STRATEGY=rc PROOF="
 	@echo ""
 	@echo "  make prove-nat     run the nationality predicate prover  (NATIONALITY= ACCEPTABLE= required)"
 	@echo "  make verify-nat    run the nationality predicate verifier"
@@ -56,8 +55,6 @@ help:
 	@echo ""
 	@echo "  make profile-prove-age-rc    profile age prove (range check)"
 	@echo "  make profile-verify-age-rc   profile age verify (range check)"
-	@echo "  make profile-prove-age-bd    profile age prove (bit decomposition)"
-	@echo "  make profile-verify-age-bd   profile age verify (bit decomposition)"
 	@echo ""
 	@echo "  make publish-android-local   build + publish the SDK AAR to ~/.m2 (mavenLocal)"
 	@echo "  make publish-android-symbols build + publish the SDK AAR with a GNU build-id (DWARF"
@@ -121,12 +118,6 @@ profile-prove-age-rc:
 
 profile-verify-age-rc:
 	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin verify --release -- age --input target/instruments/age-rc.bin
-
-profile-prove-age-bd:
-	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin prove --release -- age --dob 1990-01-01 --strategy bd --output target/instruments/age-bd.bin
-
-profile-verify-age-bd:
-	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin verify --release -- age --strategy bd --input target/instruments/age-bd.bin
 
 # Cross-compile + package the SDK and install it into the local Maven repo
 # (~/.m2). Each Gradle project owns its native build (cargo-ndk / cargo-zigbuild)

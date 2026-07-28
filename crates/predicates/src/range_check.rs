@@ -25,18 +25,6 @@ impl RangeCheck {
         self.field_size().ilog2()
     }
 
-    pub fn preprocessed_column(&self) -> Column {
-        let field_size = self.field_size();
-        Column::new(
-            CanonicCoset::new(self.log_size()).circle_domain(),
-            BaseColumn::from_iter(
-                (0..=self.0)
-                    .map(M31::from_u32_unchecked)
-                    .chain((self.0 + 1..field_size).map(|_| M31::zero())),
-            ),
-        )
-    }
-
     pub fn id(&self) -> PreProcessedColumnId {
         PreProcessedColumnId {
             id: format!("range_check_[0, {}]", self.0),
@@ -70,7 +58,7 @@ impl RangeCheck {
     // exactly what forces that), so soundness is unaffected. Balance is
     // preserved by the intra-component cancelling `+is_dummy·mult` emit in the
     // eval: on a dummy row the two entries net `(−m + m)/(z − combine) = 0` for
-    // ANY random `m`. The mirror of `stwo-p256`'s `BlindRangeCheckEval`.
+    // ANY random `m`.
 
     /// The blinded (Class-D) preprocessed value column id. Namespaced apart
     /// from [`id`](Self::id) so a blinded and a plain table of the same range
@@ -94,7 +82,7 @@ impl RangeCheck {
     }
 
     /// Class-D preprocessed value column. Lower half is the real range
-    /// `[0, N]` followed by the same zero padding as [`preprocessed_column`];
+    /// `[0, N]` followed by zero padding;
     /// upper half holds the reserved dummy keys `[field_size, 2·field_size)`.
     pub fn blind_preprocessed_column(&self) -> Column {
         let field_size = self.field_size();
@@ -143,21 +131,6 @@ pub struct Claim {
 impl Claim {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.log_size as u64);
-    }
-
-    pub fn gen_multiplicity_col(&self, values: &[Vec<M31>]) -> Column {
-        let mut res = vec![M31::zero(); 1 << self.log_size as usize];
-
-        for col in values {
-            for value in col {
-                res[value.0 as usize] += M31::one();
-            }
-        }
-
-        CircleEvaluation::new(
-            CanonicCoset::new(self.log_size).circle_domain(),
-            BaseColumn::from_iter(res),
-        )
     }
 
     /// Class-D blinded multiplicity column over the `log_size + 1` domain: real

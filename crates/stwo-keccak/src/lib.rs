@@ -20,11 +20,6 @@ pub mod round_gkr;
 pub mod service;
 pub mod sponge;
 pub mod sponge_v;
-pub mod stark;
 pub mod tables;
 pub mod tables_air;
 pub mod utils;
-
-pub use stark::{
-    prove_shake256, shake256_expected_preprocessed_root, verify_shake256, KeccakProof,
-};

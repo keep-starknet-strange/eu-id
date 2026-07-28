@@ -12,17 +12,18 @@ decision for the Digital Identity Wallet.
 **This code is not audited and is not production-ready.** It is a research
 prototype. The first iteration produces **succinct** proofs (small, fast to
 verify) but not yet **zero-knowledge** proofs (witness masking is a deferred
-follow-on). The product path uses ML-DSA-65 for issuer, device, and revocation
-authentication. Classical P-256 implementations and parity benchmarks live on
-their dedicated branches.
+follow-on). The product path uses ML-DSA-65 for issuer and device
+authentication; revocation is TS13-path-only. Classical P-256 implementations
+and parity benchmarks live on their dedicated branches.
 
 The cryptographic components are built and individually sound:
 
-- **ML-DSA-65 verification** — issuer, device, and revocation signatures are
-  verified in-circuit through a shared SHAKE-256 service.
+- **ML-DSA-65 verification** — issuer/device signatures on the product path and
+  TS13 revocation signatures are verified in-circuit through a shared SHAKE-256
+  service.
 - **SHA-256** — multi-block hashing with padding/IV/carry constraints and a
   constraint-level negative-test suite.
-- **Predicates** — age-over-18 (two strategies) and nationality set-membership.
+- **Predicates** — age-over-18 and nationality set-membership.
 
 These compose into one `StarkProof` via the `air-core` orchestration layer,
 **cross-bound** to a *single* mdoc presentation: issuer auth, ISO device auth,

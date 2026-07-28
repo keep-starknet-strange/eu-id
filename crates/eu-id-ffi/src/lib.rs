@@ -620,6 +620,7 @@ fn process_cpu_time() -> Duration {
 }
 
 #[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
 fn process_cpu_time() -> Duration {
     Duration::ZERO
 }

@@ -1,19 +1,15 @@
-pub mod bit_decomposition;
 pub mod range_check;
 
 /// Helper enum for selecting an age-check strategy. Used inside the crate (e.g.
 /// by the demo CLI and benches) to represent a choice; external callers pick a
-/// strategy by calling [`range_check::AgeRangeCheck`] or
-/// [`bit_decomposition::AgeBitDecomposition`] directly.
+/// strategy by calling [`range_check::AgeRangeCheck`] directly.
 #[derive(Clone, Copy)]
 pub enum AgeCheckStrategy {
-    BitDecomposition,
     RangeCheck,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::bit_decomposition::AgeBitDecomposition;
     use super::range_check::AgeRangeCheck;
     use crate::age::types::{AgeBounds, Date, DateOfBirth, Error, PublicInput};
     use crate::AgeInputError;
@@ -229,12 +225,5 @@ mod tests {
         AgeRangeCheck,
         AgeRangeCheck::new(PcsConfig::default()),
         AgeRangeCheck::new_with_input_validation(PcsConfig::default(), false)
-    );
-
-    age_predicate_tests!(
-        bit_decomposition,
-        AgeBitDecomposition,
-        AgeBitDecomposition::new(PcsConfig::default()),
-        AgeBitDecomposition::new_with_input_validation(PcsConfig::default(), false)
     );
 }

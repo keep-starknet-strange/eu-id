@@ -14,7 +14,6 @@
 //! - **Conv** — `2^8`-row `(byte, spread(byte))` byte↔spread table.
 //! - **Split(r)** — `2^8`-row `(spread_byte, spread_hi, spread_lo)` spread split.
 
-use num_traits::Zero;
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{BaseField, M31};
@@ -401,11 +400,3 @@ impl FrameworkEval for Eval {
 }
 
 pub type Component = FrameworkComponent<Eval>;
-
-/// The `claimed_sums` of the tables sum with the consumers to zero.
-pub fn total_claimed_sum(claim: &InteractionClaim) -> SecureField {
-    claim
-        .claimed_sums
-        .iter()
-        .fold(SecureField::zero(), |a, &s| a + s)
-}

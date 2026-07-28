@@ -68,11 +68,10 @@ use stwo::prover::backend::simd::m31::N_LANES;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    INTERACTION_TRACE_IDX,
+    EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry, INTERACTION_TRACE_IDX,
 };
 
-use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
+use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 use crate::constants::{N, TAU};
 use crate::witness::MlDsaWitness;
 use relations::SibRelations;
@@ -845,11 +844,6 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
     cols.into_iter().map(|v| col_eval(log_size, v)).collect()
 }
 
-fn enc_signed(v: i128) -> M31 {
-    const P: i128 = (1 << 31) - 1;
-    m31((((v % P) + P) % P) as u32)
-}
-
 // =============================================================================
 // The AIR.
 // =============================================================================
@@ -1307,8 +1301,6 @@ impl FrameworkEval for SibEval {
         eval
     }
 }
-
-pub type SibComponent = FrameworkComponent<SibEval>;
 
 // =============================================================================
 // Interaction trace.

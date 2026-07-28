@@ -22,8 +22,6 @@ pub struct WitnessData {
     pub witness_trace: Trace,
     pub table_mult_trace: Trace,
     pub nationality: u32,
-    #[allow(dead_code)]
-    pub nat_index: usize,
     /// The two credential nationality byte values `[code_hi, code_lo]`
     /// (big-endian) when the credential binding is wired (`Some`) — the require
     /// tuples the interaction trace emits against the shared `Sha256Field`
@@ -55,7 +53,6 @@ impl WitnessData {
             witness_trace,
             table_mult_trace,
             nationality: witness.nationality,
-            nat_index: witness.nat_index,
             nat_bytes,
         }
     }

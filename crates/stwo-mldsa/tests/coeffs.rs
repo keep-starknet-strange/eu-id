@@ -2,55 +2,20 @@
 //! verifier-native fold against real oracle-generated ML-DSA-65 signatures, plus
 //! the worksheet §5 / S5 §5 negative matrix (each mutation must be rejected).
 
-use ml_dsa::signature::{Keypair, Signer, Verifier};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+mod common;
+
+use common::witness_and_input;
 
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::PcsConfig;
 
 use stwo_mldsa::coeffs::layout::N_GROUPS;
 use stwo_mldsa::proof::{prove_coeffs, verify_coeffs, CoeffsProof};
-use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
-use stwo_mldsa::reference::sponge::shake256;
-use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::MlDsaVerifyInput;
-
-fn oracle_keypair(rng: &mut StdRng) -> SigningKey<MlDsa65> {
-    let mut seed = [0u8; 32];
-    rng.fill(&mut seed);
-    SigningKey::<MlDsa65>::from_seed(&seed.into())
-}
-
-fn oracle_input(sk: &SigningKey<MlDsa65>, msg: &[u8]) -> MlDsaVerifyInput {
-    let vk = sk.verifying_key();
-    let sig = sk.sign(msg);
-    assert!(vk.verify(msg, &sig).is_ok(), "oracle self-check");
-    let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
-    let sig_bytes: EncodedSignature<MlDsa65> = sig.encode();
-    let pk = pk_decode(vk_bytes.as_slice()).expect("pk_decode");
-    let sp = sig_decode(sig_bytes.as_slice()).expect("sig_decode");
-    let (tr_vec, _) = shake256(&[vk_bytes.as_slice()], 64);
-    let mut tr = [0u8; 64];
-    tr.copy_from_slice(&tr_vec);
-    MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec())
-}
 
 fn prove_case(seed: u64, msg: &[u8]) -> CoeffsProof {
     let (witness, input) = witness_and_input(seed, msg);
     prove_coeffs(witness, input, PcsConfig::default()).expect("prove")
-}
-
-fn witness_and_input(
-    seed: u64,
-    msg: &[u8],
-) -> (stwo_mldsa::witness::MlDsaWitness, MlDsaVerifyInput) {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let sk = oracle_keypair(&mut rng);
-    let input = oracle_input(&sk, msg);
-    let witness = generate_witness(&input).expect("witness");
-    (witness, input)
 }
 
 /// A witness mutation is REJECTED if proving fails, panics (e.g. an out-of-range
@@ -335,53 +300,6 @@ fn paired_zw_shape_is_log13_and_batch4_legal() {
         (coeffs_preprocessed_ids().len() + N_BASE_COLS + N_INTERACTION_COLS) * rows,
         483_328
     );
-}
-
-/// Measure committed cells (M31 units) and the native ExpandA+eval microbench.
-#[test]
-fn measure_cells_and_bench() {
-    use stwo_mldsa::coeffs::tables::RcKind;
-    use stwo_mldsa::coeffs::{coeffs_preprocessed_ids, layout, N_BASE_COLS, N_INTERACTION_COLS};
-
-    let log_size = stwo_mldsa::air_util::padded_log_size(layout::active_rows());
-    let rows = 1usize << log_size;
-    let active = layout::active_rows();
-
-    // coeffs component cells (M31 units) = columns × rows.
-    let coeffs_pre = coeffs_preprocessed_ids().len();
-    let coeffs_base = N_BASE_COLS;
-    let coeffs_inter = N_INTERACTION_COLS; // already in M31 (4 per QM31 folded in)
-    let coeffs_cells = (coeffs_pre + coeffs_base + coeffs_inter) * rows;
-
-    // rc table cells (each: 1 preprocessed value + 1 multiplicity + 4 interaction).
-    let mut rc_cells = 0usize;
-    for kind in RcKind::ALL {
-        let tr = 1usize << kind.log_size();
-        rc_cells += (1 /*value*/ + 1 /*mult*/ + 4/*interaction QM31*/) * tr;
-    }
-
-    let total = coeffs_cells + rc_cells;
-    eprintln!("== M4 mldsa_coeffs cell measurement (M31 units) ==");
-    eprintln!(
-        "log_size = {log_size} ({rows} rows, {active} active, {} groups)",
-        layout::N_GROUPS
-    );
-    eprintln!("coeffs: pre={coeffs_pre} base={coeffs_base} inter={coeffs_inter} cols → {coeffs_cells} cells");
-    eprintln!("rc tables (rc9/rc13/rc8/rc7/ternary): {rc_cells} cells");
-    eprintln!("TOTAL committed cells = {total}");
-    eprintln!("counting method: (Σ columns over all trees) × 2^log_size, interaction QM31 counted as 4 M31");
-
-    // Native ExpandA + bivariate-eval microbench.
-    let (_, input) = witness_and_input(9999, b"bench");
-    let r = SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(12345));
-    let s = SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(67890));
-    let iters = 20u32;
-    let t0 = std::time::Instant::now();
-    for _ in 0..iters {
-        let _ = stwo_mldsa::verifier_native::compute_public_evals(&input, r, s);
-    }
-    let ns = t0.elapsed().as_nanos() / iters as u128;
-    eprintln!("native ExpandA(ρ)+INTTs+bivariate-eval: ~{ns} ns/call ({iters} iters)");
 }
 
 /// Control: the exact seeds/messages used by the witness-level negatives prove

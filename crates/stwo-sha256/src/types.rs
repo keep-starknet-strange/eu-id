@@ -152,7 +152,7 @@ pub struct RoundWitness {
     /// Round index `t ∈ [0, 64)`.
     pub t: u32,
     /// Working state at the *start* of the round, as `(lo, hi)` limbs for
-    /// each of `a..h`. Index by `WorkingStateIdx`.
+    /// each of `a..h`.
     pub state_in: [WordLimbs; N_STATE_WORDS],
     /// `W[t]` for this round as `(lo, hi)` limbs.
     pub w_t: WordLimbs,
@@ -553,19 +553,6 @@ impl Sha256Witness {
         }
         Digest::from_state(&state)
     }
-}
-
-/// Working-state index mnemonics — useful for trace column naming.
-#[derive(Copy, Clone, Debug)]
-pub enum WorkingStateIdx {
-    A = 0,
-    B = 1,
-    C = 2,
-    D = 3,
-    E = 4,
-    F = 5,
-    G = 6,
-    H = 7,
 }
 
 #[cfg(test)]

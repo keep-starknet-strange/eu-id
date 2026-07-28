@@ -23,39 +23,23 @@
 
 use stwo::core::fields::qm31::SecureField;
 
+use crate::air_util::enc_signed;
 use crate::coeffs::layout::{
     POLY_ID_C, POLY_ID_CARRY0, POLY_ID_E0, POLY_ID_V0, POLY_ID_W0, POLY_ID_Z0,
 };
-use crate::constants::{D, K, L, N, Q};
+use crate::constants::{D, K, L, N};
 use crate::reference::ntt::ntt_inverse;
 use crate::types::MlDsaVerifyInput;
-use crate::witness::{B, Q_DIGITS, T_A, T_T1};
-
-/// Balanced base-`B` digits of `x` into `T` cells, low-first (mirrors
-/// `witness::balanced_digits`, kept local to avoid exposing that private fn).
-fn balanced_digits(mut x: i128, t: usize) -> Vec<i128> {
-    let half = B / 2;
-    let mut out = vec![0i128; t];
-    for slot in out.iter_mut() {
-        let mut r = x.rem_euclid(B);
-        if r >= half {
-            r -= B;
-        }
-        *slot = r;
-        x = (x - r) / B;
-    }
-    assert_eq!(x, 0, "value overflows {t} base-{B} digits");
-    out
-}
+use crate::witness::{balanced_digits, B, Q_DIGITS, T_A, T_T1};
 
 /// Bivariate eval `P̂(r,s) = Σ_{m} (Σ_t d_{m,t}·s^t)·r^m` of a public integer
 /// poly given as coefficients (index = m), decomposed into `t_digits` balanced
 /// base-B digits. Matches the AIR's high-to-low group Horner: iterate m from the
 /// TOP so the forward Horner `acc·r + digit_row` weights coeff m by exactly r^m.
-fn bivariate_eval(coeffs: &[i128], t_digits: usize, r: SecureField, s: SecureField) -> SecureField {
+fn bivariate_eval<const T: usize>(coeffs: &[i128], r: SecureField, s: SecureField) -> SecureField {
     let mut acc = SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(0));
     for &c in coeffs.iter().rev() {
-        let digits = balanced_digits(c, t_digits);
+        let digits = balanced_digits::<T>(c);
         let mut digit_row = SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(0));
         let mut s_pow = SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(1));
         for &d in &digits {
@@ -69,9 +53,7 @@ fn bivariate_eval(coeffs: &[i128], t_digits: usize, r: SecureField, s: SecureFie
 
 /// QM31 embedding of a signed integer (|x| ≪ p).
 fn signed_qm31(x: i128) -> SecureField {
-    const P: i128 = (1 << 31) - 1;
-    let r = ((x % P) + P) % P;
-    SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(r as u32))
+    SecureField::from(enc_signed(x))
 }
 
 /// Public bivariate evals the verifier computes natively from `(ρ, t1)`.
@@ -105,7 +87,7 @@ fn compute_public_evals_from_a(
     let mut t1_hat = vec![SecureField::default(); K];
     for i in 0..K {
         let coeffs: Vec<i128> = (0..N).map(|m| input.t1[i][m] as i128 * two_d).collect();
-        t1_hat[i] = bivariate_eval(&coeffs, T_T1, r, s);
+        t1_hat[i] = bivariate_eval::<T_T1>(&coeffs, r, s);
     }
 
     // q̂(s) from its exact digits (1, −16, 32).
@@ -115,8 +97,6 @@ fn compute_public_evals_from_a(
         q_hat += s_pow * signed_qm31(qd);
         s_pow *= s;
     }
-    let _ = Q; // Q_DIGITS recompose to Q; asserted in witness tests.
-
     PublicEvals {
         a_hat,
         t1_hat,
@@ -137,7 +117,7 @@ pub fn compute_public_evals(
         for j in 0..L {
             let poly = ntt_inverse(&a_hat_matrix.matrix[i][j]);
             let coeffs: Vec<i128> = poly.iter().map(|&c| c as i128).collect();
-            a_evals.push(bivariate_eval(&coeffs, T_A, r, s));
+            a_evals.push(bivariate_eval::<T_A>(&coeffs, r, s));
         }
     }
     compute_public_evals_from_a(input, &a_evals, r, s)

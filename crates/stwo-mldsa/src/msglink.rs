@@ -8,15 +8,14 @@
 //! tuples are pinned to the real `M` — no committed byte cell to forge and no
 //! range check needed (a constant `u8` is a byte by construction).
 //!
-//! ## M7 swap point (REUSE-FIRST decision)
+//! ## Hosted SHA producer compatibility
 //!
 //! stwo-sha256's `FieldExposure` producer already yields arbitrary multi-block
 //! `(field_id, byte_index, byte)` windows of the SHA-256 preimage, per-byte
 //! range-checked in-AIR (see `crates/stwo-sha256/src/field_exposure.rs`).
-//! [`MsgLinkRelation`] deliberately mirrors that exact tuple shape so M7 can
-//! drop the SHA-side producer in as the yield source with NO relation or
-//! consumer change. THIS component is the M6-standalone placeholder — swap it
-//! out for the SHA producer in M7; the µ-absorb bridge (the consumer) stays.
+//! [`MsgLinkRelation`] deliberately mirrors that exact tuple shape so hosted
+//! proofs can use the SHA-side producer as the yield source with no relation or
+//! consumer change; the µ-absorb bridge (the consumer) stays the same.
 //!
 //! Layout: a single packed row (`LOG_N_LANES`), lane-0 enabler; one relation
 //! entry per message byte. Every constraint degree ≤ 2 (enabler boolean +
@@ -27,14 +26,14 @@ use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
 use crate::air_util::{col_eval, m31, ColEval};
 use crate::binding::MsgLinkRelation;
 
-/// The single `field_id` tag M's bytes are yielded under. (M is one contiguous
-/// window; M7's SHA producer will use its own field ids, mapped by the bridge.)
+/// The single `field_id` tag M's bytes are yielded under. M is one contiguous
+/// window; hosted SHA producers use their own field ids and are mapped by the bridge.
 pub const MSG_FIELD_ID: u32 = 0;
 
 /// The component's fixed log-size: one packed row, lane 0 active.
@@ -99,8 +98,6 @@ impl FrameworkEval for MsgLinkEval {
         eval
     }
 }
-
-pub type MsgLinkComponent = FrameworkComponent<MsgLinkEval>;
 
 /// Interaction trace: one `+enabler / combine(tuple)` fraction per byte, paired
 /// two-per-column (mirrors `io_provider::generate_interaction_trace`).

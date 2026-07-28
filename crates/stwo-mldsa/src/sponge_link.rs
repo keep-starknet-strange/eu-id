@@ -1,4 +1,4 @@
-//! Sponge-chain glue for the composed statement (M6): HashIo *bridges* and a
+//! Sponge-chain glue for the composed statement: HashIo *bridges* and
 //! public-byte links that stitch the SHAKE-256 chains together.
 //!
 //! All four chains and every mldsa component draw the SAME
@@ -28,7 +28,7 @@ use stwo::prover::backend::simd::m31::N_LANES;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
 use air_core::relations::FieldBytesRelation;
@@ -124,8 +124,6 @@ impl FrameworkEval for PublicPrefixEval {
         eval
     }
 }
-
-pub type PublicPrefixComponent = FrameworkComponent<PublicPrefixEval>;
 
 /// All-batched lane-0 fraction column builder (`(is_yield, denom)` per entry):
 /// folds the whole entry list into ONE column, exactly like
@@ -369,13 +367,10 @@ impl FrameworkEval for BridgeEval {
         let dtuple = [E::F::from(m31(self.dst_stream)), dpos, byte];
         eval.add_to_relation(RelationEntry::base(&self.hash_io, active, &dtuple));
 
-        let _ = enabler;
         eval.finalize_logup();
         eval
     }
 }
-
-pub type BridgeComponent = FrameworkComponent<BridgeEval>;
 
 // =============================================================================
 // Squeeze sink: consume (−) the unused tail of a sponge's squeeze stream.
@@ -474,13 +469,10 @@ impl FrameworkEval for SqueezeSinkEval {
         eval.add_constraint(enabler.clone() * (one - enabler.clone()));
         let tuple = [E::F::from(m31(self.stream)), pos, byte];
         eval.add_to_relation(RelationEntry::base(&self.hash_io, -active, &tuple));
-        let _ = enabler;
         eval.finalize_logup();
         eval
     }
 }
-
-pub type SqueezeSinkComponent = FrameworkComponent<SqueezeSinkEval>;
 
 /// Base column count of a squeeze sink (`enabler`, `byte`).
 pub const SINK_BASE_COLS: usize = 2;

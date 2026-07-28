@@ -8,9 +8,6 @@
 
 use stwo_sha256::constants::DIGEST_BYTES;
 use stwo_sha256::trace::{Layout, PADDING_ROW_COLS};
-use stwo_sha256::witness::{
-    compute_sha256_witness, decode_multiplicities_for_block, maj_ch_xor_multiplicities_for_block,
-};
 
 #[test]
 fn sha_air_uses_typed_relation_multiplicities() {
@@ -48,29 +45,4 @@ fn total_cols_equals_437() {
     assert_eq!(Layout::TOTAL_COLS, 437);
     assert_eq!(PADDING_ROW_COLS, 33);
     assert_eq!(DIGEST_BYTES, 32);
-}
-
-/// Print per-block lookup multiplicities for the `b"abc"` single-block
-/// witness and pin them against the design-doc numbers. A drift here
-/// indicates the AIR fires a different number of lookups per block than
-/// the test plan expects.
-#[test]
-fn per_block_multiplicities_for_abc_match_plan() {
-    let w = compute_sha256_witness(b"abc");
-    assert_eq!(w.blocks.len(), 1);
-    let block = &w.blocks[0];
-
-    let decode = decode_multiplicities_for_block(block);
-    let maj_ch_xor = maj_ch_xor_multiplicities_for_block(block);
-    println!("decode = {decode:?}");
-    println!("  total = {}", decode.total());
-    println!("maj_ch_xor = {maj_ch_xor:?}");
-    println!("  total = {}", maj_ch_xor.total());
-    let grand_total = decode.total() + maj_ch_xor.total();
-    println!("grand_total = {grand_total}");
-
-    assert_eq!(decode.total(), 448);
-    // W=6: maj = ch = 64 rounds × 8 groups = 512 each; xor_8 = 896
-    // (unchanged) ⇒ 1920. (Was 1664 at W=7's 6 groups.)
-    assert_eq!(maj_ch_xor.total(), 1920);
 }

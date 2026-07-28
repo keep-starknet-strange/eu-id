@@ -19,27 +19,15 @@
 //! the design doc; that's what this module does, and what the fail-closed
 //! tests at the bottom guard against drift.
 //!
-//! ## Module location
-//!
-//! This audit lives **locally** in `stwo-sha256` for now. It deliberately
-//! mirrors the API of `stwo-p256-utils::headroom` on `origin/lucas/p256`
-//! (the analogous audit for the P-256 stream): same enum
-//! ([`HeadroomStatus`]), same record shape ([`EquationHeadroom`] /
-//! [`LimbHeadroom`]), same audit-helper pattern. Once the cross-stream
-//! interface contract is frozen, the audits migrate into a shared crate
-//! (`stwo-air-utils`, or a generalised `stwo-p256-utils`) and this module
-//! becomes a thin re-export shim.
-//!
 //! ## What's simpler than the P-256 audit
 //!
 //! - **All addend coefficients are `+1`.** SHA-256 only adds; no
 //!   subtraction, no signed coefficient mixing. The bound shape is just
 //!   `Σ addends − result − 2¹⁶ · carry` per limb.
 //! - **Carries are non-negative.** Every carry lives in `[0, k)` for a
-//!   k-addend add; the range-check table is unsigned. The P-256 stream's
-//!   `SignedCarryRange` spec is therefore overkill here — see
-//!   [`EquationHeadroom::signed_carry_bound`] for how we recycle that
-//!   field name without changing its meaning.
+//!   k-addend add; the range-check table is unsigned. The
+//!   [`EquationHeadroom::signed_carry_bound`] field records that exclusive
+//!   upper bound for compatibility with the existing audit helpers.
 //! - **Only 2 limbs.** A SHA-256 word is stored as `(lo, hi)`; the carry
 //!   chain has length 2, not 20+.
 
@@ -81,7 +69,7 @@ pub const RANGE_4: u32 = 4;
 /// (`{0, 1, 2, 3, 4}`).
 pub const RANGE_5: u32 = 5;
 
-// ---- Headroom audit data types (mirroring `stwo-p256-utils::headroom`) ----
+// ---- Headroom audit data types ----
 
 /// Outcome of a single equation-family headroom check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,9 +79,7 @@ pub enum HeadroomStatus {
     Fits,
     /// At least one limb's `|combined_expression|` reaches or exceeds
     /// `M31_CENTER_LIMIT`. The equation must be split before its AIR row
-    /// type is enabled. Not expected for any SHA-256 family — appears in
-    /// P-256 for 256×256 multiplication. Retained here so the API matches
-    /// the P-256 stream's headroom audit verbatim.
+    /// type is enabled. Not expected for any SHA-256 family.
     RequiresSplit,
     /// The audit formula for this equation is not yet derived. The AIR
     /// must refuse to enable a row family in this state; the tests below

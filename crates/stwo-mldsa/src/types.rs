@@ -1,10 +1,9 @@
 //! Serializable public/private inputs to in-circuit ML-DSA-65 verification.
 //!
-//! Mirrors `stwo-p256`'s [`EcdsaVerifyInput`](../../stwo-p256/src/types.rs)
-//! serde conventions: a single `#[derive(Serialize, Deserialize)]` struct whose
-//! fields are the semantically-decoded verification inputs (not raw wire bytes),
-//! so a caller can construct one by name and the witness generator (M2) /
-//! future AIR (M4/M5) consume typed values directly.
+//! A single `#[derive(Serialize, Deserialize)]` struct carries the
+//! semantically-decoded verification inputs (not raw wire bytes), so callers can
+//! construct one by name and both the witness generator and AIR consume typed
+//! values directly.
 //!
 //! ## What is public vs private
 //!

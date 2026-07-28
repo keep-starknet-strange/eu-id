@@ -26,8 +26,6 @@ use stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 use crate::air::{Sha256Prover, Sha256Verifier};
 use crate::constants::DIGEST_BYTES;
-#[cfg(feature = "gkr-spike")]
-use crate::gkr_spike::Xor8GkrProofWire;
 use crate::interaction::InteractionClaim;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
@@ -98,8 +96,8 @@ impl Default for ProverConfig {
 /// standalone component: the verifier does not mix `digest`/`n_blocks`
 /// into its channel and does not compare them to the trace's `h_out`
 /// columns. Binding the digest to a verifier-checked public input lands
-/// with the integration-layer LogUp surface
-/// (`elementDigest ↔ valueDigests`, `Sig_structure digest ↔ ECDSA z`).
+/// with the integration-layer LogUp surface (for example,
+/// `elementDigest ↔ valueDigests` and `Sig_structure digest ↔ ML-DSA tr`).
 /// Until then, treat `digest` as informational: it is only as trustworthy
 /// as the prover.
 #[derive(Clone, Debug)]
@@ -114,9 +112,8 @@ pub struct Sha256Proof {
     pub n_blocks: usize,
     /// `log2` of the SHA-256 trace's row count.
     pub log_n_rows: u32,
-    /// Group width `W` of the packed Maj/Ch table this proof was generated
-    /// against. The verifier reads it back to reconstruct the matching
-    /// `MajChEval`'s `log_size = 3W`.
+    /// Historical group width metadata. The live AIR no longer commits a
+    /// packed Maj/Ch table, but the field remains part of the proof surface.
     pub group_width: u32,
     /// Per-component LogUp claimed sums. The total **must** be zero for
     /// the verifier to accept — the soundness backbone of the
@@ -128,9 +125,6 @@ pub struct Sha256Proof {
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
-    /// Feature-gated side proof replacing the committed `xor_8` LogUp columns.
-    #[cfg(feature = "gkr-spike")]
-    pub xor_8_gkr_proof: Xor8GkrProofWire,
 }
 
 /// Errors that can be returned by [`prove_sha256`].
@@ -181,8 +175,6 @@ pub enum Sha256VerifyError {
     /// consumer ⇄ producer balance is broken.
     LogupSumNonZero,
     /// `proof.group_width` is outside the supported `[min, max]` range.
-    /// Rejected before any allocation so a malformed proof cannot drive a
-    /// `panic!` inside the preprocessed-table builder (`build_maj_ch_table`).
     UnsupportedGroupWidth {
         group_width: u32,
         min: u32,
@@ -193,10 +185,6 @@ pub enum Sha256VerifyError {
     /// out-of-memory allocation on the verify path (the trace row count is
     /// `2^log_n_rows`).
     UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
-    #[cfg(feature = "gkr-spike")]
-    Xor8GkrUnbalanced,
-    #[cfg(feature = "gkr-spike")]
-    Xor8GkrRejected(String),
 }
 
 impl core::fmt::Display for Sha256VerifyError {
@@ -223,10 +211,6 @@ impl core::fmt::Display for Sha256VerifyError {
                 f,
                 "proof.log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
             ),
-            #[cfg(feature = "gkr-spike")]
-            Self::Xor8GkrUnbalanced => write!(f, "xor_8 GKR output claims do not balance"),
-            #[cfg(feature = "gkr-spike")]
-            Self::Xor8GkrRejected(msg) => write!(f, "xor_8 GKR proof rejected: {msg}"),
         }
     }
 }
@@ -290,8 +274,6 @@ fn prove_sha256_inner(
     let mut prover = Sha256Prover::new(witness, log_n_rows, group_width);
     let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
     let interaction_claim = prover.interaction_claim().clone();
-    #[cfg(feature = "gkr-spike")]
-    let xor_8_gkr_proof = prover.xor_8_gkr_proof().clone();
 
     let digest = witness.digest_from_blocks();
     Ok(Sha256Proof {
@@ -302,8 +284,6 @@ fn prove_sha256_inner(
         interaction_claim,
         pcs_config,
         stark_proof,
-        #[cfg(feature = "gkr-spike")]
-        xor_8_gkr_proof,
     })
 }
 
@@ -323,10 +303,9 @@ pub const MAX_LOG_N_ROWS: u32 = 30;
 /// a real `StarkProof`).
 ///
 /// `group_width` must lie in `[MAX_ROUND_GROUP_BITS, MAX_GROUP_WIDTH]` — the
-/// same range [`crate::tables::build_maj_ch_table`] asserts — and
-/// `log_n_rows` in `[LOG_N_LANES, MAX_LOG_N_ROWS]`. Out-of-range values
-/// would otherwise panic the table builder (`group_width`) or drive an
-/// OOM (`log_n_rows`) on the untrusted verify path.
+/// historical `[MAX_ROUND_GROUP_BITS, MAX_GROUP_WIDTH]` range and `log_n_rows`
+/// in `[LOG_N_LANES, MAX_LOG_N_ROWS]`. Out-of-range values would otherwise
+/// drive an OOM (`log_n_rows`) on the untrusted verify path.
 fn validate_verify_params(group_width: u32, log_n_rows: u32) -> Result<(), Sha256VerifyError> {
     let min_w = crate::partitions::MAX_ROUND_GROUP_BITS;
     let max_w = crate::tables::MAX_GROUP_WIDTH;
@@ -371,10 +350,6 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
         proof.group_width,
         proof.interaction_claim.clone(),
     );
-    #[cfg(feature = "gkr-spike")]
-    {
-        verifier = verifier.with_xor_8_gkr_proof(proof.xor_8_gkr_proof.clone());
-    }
     air_core::verify(&mut [&mut verifier], &proof.stark_proof)
         .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
 }
@@ -563,7 +538,7 @@ mod tests {
         }
 
         // group_width below the floor (would under-cover the witness keys)
-        // and above the cap (would panic `build_maj_ch_table`).
+        // and above the historical cap.
         assert_eq!(
             validate_verify_params(MAX_ROUND_GROUP_BITS - 1, LOG_N_LANES),
             Err(Sha256VerifyError::UnsupportedGroupWidth {

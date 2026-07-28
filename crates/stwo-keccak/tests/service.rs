@@ -13,7 +13,7 @@ use sha3::{Shake128, Shake256};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::M31;
-use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+use stwo::core::fields::qm31::{SecureField, QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
@@ -28,11 +28,13 @@ use stwo_constraint_framework::{
 
 use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 
-use stwo_keccak::relations::{HashIoRelation, SharedKeccakRelations};
-use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
+use stwo_keccak::relations::{HashIoRelation, KeccakRelations, SharedKeccakRelations};
+use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier, PermWitness};
 use stwo_keccak::sponge::Shape;
 use stwo_keccak::sponge_v::{JobList, SpongeVRun};
+use stwo_keccak::tables::{build_conv_table, build_dense_table};
 use stwo_keccak::utils::{col_eval, ColEval};
+use stwo_keccak::utils::{spread_u32, SPREAD_MAX};
 
 // =====================================================================
 // Test io-closer module: yields every job's absorb bytes (+) and requires
@@ -306,7 +308,7 @@ fn prove_jobs_full(
     messages: Vec<Vec<u8>>,
     n_squeezes: Vec<usize>,
     tamper: Option<&dyn Fn(&mut SpongeVRun)>,
-    perm_tamper: Option<&dyn Fn(&mut stwo_keccak::stark::PermWitness)>,
+    perm_tamper: Option<&dyn Fn(&mut PermWitness)>,
     config: PcsConfig,
 ) -> ProvedJobs {
     let shapes = shapes_for(&messages, &n_squeezes);
@@ -317,7 +319,7 @@ fn prove_shapes_full(
     shapes: Vec<Shape>,
     messages: Vec<Vec<u8>>,
     tamper: Option<&dyn Fn(&mut SpongeVRun)>,
-    perm_tamper: Option<&dyn Fn(&mut stwo_keccak::stark::PermWitness)>,
+    perm_tamper: Option<&dyn Fn(&mut PermWitness)>,
     config: PcsConfig,
 ) -> ProvedJobs {
     let handle = SharedKeccakRelations::new();
@@ -364,6 +366,10 @@ fn verify_jobs_with_payloads(
     )
 }
 
+fn m1(v: u32) -> M31 {
+    M31::from(v)
+}
+
 /// A tampered configuration is REJECTED if proving fails/panics or verify errs.
 fn rejected(
     messages: Vec<Vec<u8>>,
@@ -382,7 +388,7 @@ fn rejected(
 fn perm_rejected(
     messages: Vec<Vec<u8>>,
     n_squeezes: Vec<usize>,
-    tamper: &dyn Fn(&mut stwo_keccak::stark::PermWitness),
+    tamper: &dyn Fn(&mut PermWitness),
 ) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let p = prove_jobs_full(
@@ -422,6 +428,35 @@ fn shake128_job_proves_and_matches_sha3() {
     let p = prove_shapes_full(shapes, vec![msg.clone()], None, None, pcs_config());
     assert_eq!(p.outputs[0], shake128_ref(&msg, 2 * 168));
     verify_jobs(&p, &[msg]).expect("SHAKE-128 verify");
+}
+
+/// FIPS-202 SHAKE-256 KAT matrix formerly covered by the standalone prover:
+/// empty, final-byte fuse, block-boundary pad, spillover, ML-DSA μ-sized
+/// absorb, and long squeeze.
+#[test]
+fn shake256_kat_matrix_on_service_path() {
+    for (name, msg, n_squeeze) in [
+        ("empty", Vec::new(), 1usize),
+        ("one-block-135", vec![0xA5u8; 135], 1),
+        ("block-boundary-136", vec![0x5Au8; 136], 1),
+        ("partial-block-137", vec![0x11u8; 137], 1),
+        (
+            "multi-block-mu-shape",
+            (0..1536u32)
+                .map(|i| (i.wrapping_mul(31) & 0xFF) as u8)
+                .collect(),
+            1,
+        ),
+        ("long-squeeze", b"squeeze me across many blocks".to_vec(), 5),
+    ] {
+        let p = prove_jobs(vec![msg.clone()], vec![n_squeeze], None);
+        assert_eq!(
+            p.outputs[0],
+            shake256_ref(&msg, n_squeeze * 136),
+            "{name}: service output != sha3"
+        );
+        verify_jobs(&p, &[msg]).unwrap_or_else(|e| panic!("{name}: verify failed: {e:?}"));
+    }
 }
 
 #[test]
@@ -552,6 +587,67 @@ fn wrong_squeeze_byte_rejects() {
     let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
     p.outputs[0][7] ^= 1; // the verify-side closer now requires a wrong byte
     assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// A tampered service claimed sum must be rejected by the component-local
+/// claimed-sum checks, not hidden by the global cancellation.
+#[test]
+fn service_claimed_sum_tamper_rejects() {
+    let msg = vec![0x89u8; 50];
+    let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
+    p.service_claims[0] += SecureField::one();
+    assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// A tampered committed preprocessed root must reject before any claimed
+/// service output is accepted.
+#[test]
+fn service_preprocessed_root_tamper_rejects() {
+    let msg = vec![0x8au8; 50];
+    let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
+    verify_jobs(&p, &[msg.clone()]).expect("control verify");
+    p.proof.0.commitments[0].0[0] ^= 1;
+    assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// A non-spread value smuggled into a spread-output column cannot collide with
+/// the genuine dense-table row used by the service's xor path.
+#[test]
+fn non_spread_value_in_spread_column_has_no_dense_row() {
+    let rel = KeccakRelations::dummy();
+    let table = build_dense_table();
+    let key = spread_u32(0xAB) + spread_u32(0xCD) + spread_u32(0x37);
+    let [tk, honest_out, _] = table[key as usize];
+    assert_eq!(tk, key);
+    let bad_out = honest_out | 0b11;
+    assert!(
+        bad_out > SPREAD_MAX || (bad_out & 0b10) != 0,
+        "bad_out is non-spread"
+    );
+
+    let honest: QM31 = <_ as Relation<M31, QM31>>::combine(&rel.xor3, &[m1(key), m1(honest_out)]);
+    let tampered: QM31 = <_ as Relation<M31, QM31>>::combine(&rel.xor3, &[m1(key), m1(bad_out)]);
+    assert_ne!(honest, tampered);
+    assert_ne!(honest_out, bad_out);
+}
+
+/// A wrong byte↔spread conversion at the HashIo boundary cannot collide with
+/// the conv table row used by the service.
+#[test]
+fn wrong_conv_at_hashio_boundary_has_no_conv_row() {
+    let rel = KeccakRelations::dummy();
+    let conv = build_conv_table();
+    let byte = 0x5Au32;
+    let [tb, true_spread] = conv[byte as usize];
+    assert_eq!(tb, byte);
+    assert_eq!(true_spread, spread_u32(byte));
+    let wrong_spread = spread_u32(byte ^ 0x01);
+    assert_ne!(true_spread, wrong_spread);
+
+    let honest: QM31 = <_ as Relation<M31, QM31>>::combine(&rel.conv, &[m1(byte), m1(true_spread)]);
+    let tampered: QM31 =
+        <_ as Relation<M31, QM31>>::combine(&rel.conv, &[m1(byte), m1(wrong_spread)]);
+    assert_ne!(honest, tampered);
 }
 
 // =====================================================================

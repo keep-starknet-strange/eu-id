@@ -58,15 +58,14 @@ use stwo::prover::backend::simd::m31::N_LANES;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    INTERACTION_TRACE_IDX,
+    EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry, INTERACTION_TRACE_IDX,
 };
 
-use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
+use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 use crate::constants::{GAMMA2, K, N, OMEGA, Q};
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
-use tables::{RcKind, RcUses};
+use tables::RcUses;
 
 /// `α = 2·γ2`, the decomposition modulus.
 pub const ALPHA: i64 = 2 * GAMMA2 as i64;
@@ -97,9 +96,9 @@ const L_SIGN_VAL: usize = 10;
 const L_SIGN_HI: usize = 11;
 
 const COL_ENABLER: usize = 0;
-const COL_LANE0: usize = 1; // 10 cols
-const COL_LANE1: usize = COL_LANE0 + PER_LANE; // 11
-const COL_HINT_ACC: usize = COL_LANE1 + PER_LANE; // 21
+const COL_LANE0: usize = 1; // lane 0 occupies columns 1..=10
+const COL_LANE1: usize = COL_LANE0 + PER_LANE; // lane 1 occupies columns 11..=20
+const COL_HINT_ACC: usize = COL_LANE1 + PER_LANE; // column 21
 /// Total base columns.
 pub const N_BASE_COLS: usize = COL_HINT_ACC + 1; // 22
 
@@ -264,12 +263,6 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
     cols.into_iter().map(|v| col_eval(log_size, v)).collect()
 }
 
-/// Centered M31 encoding of a small signed value.
-fn enc_signed(v: i64) -> M31 {
-    const P: i64 = (1 << 31) - 1;
-    m31((((v % P) + P) % P) as u32)
-}
-
 // =============================================================================
 // The AIR.
 // =============================================================================
@@ -303,6 +296,8 @@ impl FrameworkEval for DecompEval {
         let byte_pos = eval.get_preprocessed_column(pre_id("byte_pos"));
         let is_last = eval.get_preprocessed_column(pre_id("is_last"));
 
+        // COL_ENABLER remains committed for layout compatibility; active-row
+        // gates are carried by preprocessed selector masks.
         let enabler = eval.next_trace_mask();
         // Two lanes' worth of base columns.
         let lanes: Vec<Vec<E::F>> = (0..2)
@@ -483,13 +478,10 @@ impl FrameworkEval for DecompEval {
             core::slice::from_ref(&acc_room),
         ));
 
-        let _ = enabler;
         eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
-
-pub type DecompComponent = FrameworkComponent<DecompEval>;
 
 // =============================================================================
 // Interaction trace.
@@ -669,13 +661,9 @@ fn gen_decomp_interaction_inner(
     };
 
     // --- Build the logup fraction streams in AIR emission order ---
-    // Per-lane: rc4(w1), rc13(a_lo), rc7(a_hi), rc13(b_lo), rc7(b_hi), rc4(w16+1),
-    //           rc4(w1'), wcell — then the byte yield, then hint_acc rc (2 uses,
-    // but the two rc8 uses share the same is_last gate; emit as ONE combined? No —
-    // each rc use is its own fraction). To match N_LOGUP_ENTRIES = 18 we fold the
-    // two hint_acc uses into the single final "hint" fraction slot pair. Simpler:
-    // emit 16 lane fractions + 1 byte + 1 combined hint (which itself is 2 uses
-    // summed). We keep them explicit and set N_LOGUP_ENTRIES accordingly.
+    // Per row there are 23 fractions total: 10 per lane, one byte yield, and
+    // two final-row rc8 hint-accumulator checks. Keep each use explicit so this
+    // mirrors N_LOGUP_ENTRIES and the AIR emission order.
     // AIR per-lane emission order: w1, a_lo, b_lo, a_hi, b_hi, sign_lo, sign_hi,
     // w16+1, w1', wcell. Mirror it EXACTLY (kind arg is documentation-only).
     for lane in 0..2 {
@@ -691,18 +679,7 @@ fn gen_decomp_interaction_inner(
             RcField::W1P,
         ] {
             push(
-                &|coset| {
-                    lane_rc(
-                        coset,
-                        &coset_rows,
-                        witness,
-                        lane,
-                        RcKind::Rc4,
-                        field,
-                        relations,
-                        gamma2,
-                    )
-                },
+                &|coset| lane_rc(coset, &coset_rows, witness, lane, field, relations, gamma2),
                 &mut entries,
                 &mut claimed,
             );
@@ -827,7 +804,6 @@ fn lane_rc(
     coset_rows: &[Option<(usize, usize)>],
     witness: &MlDsaWitness,
     lane: usize,
-    _kind: RcKind,
     field: RcField,
     relations: &DecompRelations,
     gamma2: i64,

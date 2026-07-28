@@ -21,19 +21,16 @@
 //! The matching multiplicity columns built by `crate::stark` use the same
 //! index convention, so producer and consumer balance correctly.
 //!
-//! ## Wired tables
+//! ## Wired columns
 //!
-//! - 8 σ/Σ decode (`Σ0-S, Σ0-S', Σ1-S, Σ1-S', σ0-S, σ0-S', σ1-S, σ1-S'`)
-//! - 1 packed Maj/Ch
-//! - 1 xor_8
-//! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
+//! The live standalone trace commits 14 preprocessed columns:
+//!
+//! - 4 range-table value columns (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
 //! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
 //!   — value `1` at storage index `Layout::block_slot(0, log_n_rows) = 0`,
 //!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
 //!   anchors the §10.3 chain at block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
-//!
-//! The standalone trace commits 14 columns: four range tables, one
-//! `is_first_row` selector, and nine round-cyclic columns.
+//! - 9 round-cyclic columns at the main trace's `log_n_rows`
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -54,12 +51,6 @@ use crate::trace::Layout;
 
 /// `log2` of the row count for every 2¹⁶-row table.
 pub const LOG_SIZE_16: u32 = 16;
-
-/// `log2` of the row count of the packed Maj/Ch table at group width `W`.
-#[inline]
-pub const fn maj_ch_log_size(group_width: u32) -> u32 {
-    3 * group_width
-}
 
 /// Aggregate of one preprocessed-tree commit input: the column
 /// evaluations, their stable IDs, and their log sizes — all three of
@@ -119,9 +110,8 @@ static PREPROCESSED_TRACE_CACHE: OnceLock<Mutex<HashMap<(u32, u32), Preprocessed
 /// This is the verifier's entry point. To re-commit `tree[0]` the verifier
 /// needs only the per-column log sizes (and the IDs, from
 /// [`all_preprocessed_column_ids`]) — never the column *data*. Calling
-/// [`generate_preprocessed_trace`] on the verify path would rebuild every
-/// lookup table (millions of rows for Maj/Ch at `2^(3W)`) only to discard
-/// the evaluations.
+/// [`generate_preprocessed_trace`] on the verify path would rebuild static
+/// table/selector columns only to discard the evaluations.
 ///
 /// The returned vector is identical, index-for-index, to the `log_sizes`
 /// that [`generate_preprocessed_trace`] returns and to the `log_size()` of

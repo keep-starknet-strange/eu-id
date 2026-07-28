@@ -7,10 +7,9 @@
 //! Run single-threaded: `RAYON_NUM_THREADS=1 cargo test -p stwo-mldsa
 //! --test composed -- --test-threads=1`.
 
-use ml_dsa::signature::{Keypair, Signer, Verifier};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+mod common;
+
+use common::{composed_pcs_config as pcs_config, oracle_input, witness_and_input};
 
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
@@ -20,7 +19,6 @@ use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::service::KeccakServiceVerifier;
 use stwo_keccak::sponge::Shape;
 
-use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
     native_public_mu, native_tr, prove_mldsa, verify_mldsa, MlDsaVerifier, PermIdPlan,
@@ -28,43 +26,6 @@ use stwo_mldsa::statement::{
 };
 use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
 use stwo_mldsa::MlDsaVerifyInput;
-
-/// The direct Keccak round AIR uses batch-four LogUp, so blowup two suffices.
-fn pcs_config() -> PcsConfig {
-    PcsConfig {
-        pow_bits: 10,
-        fri_config: FriConfig::new(0, 2, 3, 1),
-        lifting_log_size: None,
-    }
-}
-
-// =====================================================================
-// Helpers (model: tests/decomp.rs + tests/sampleinball.rs).
-// =====================================================================
-
-fn oracle_input(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut sk_seed = [0u8; 32];
-    rng.fill(&mut sk_seed);
-    let sk = SigningKey::<MlDsa65>::from_seed(&sk_seed.into());
-    let vk = sk.verifying_key();
-    let sig = sk.sign(msg);
-    assert!(vk.verify(msg, &sig).is_ok(), "oracle self-check");
-    let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
-    let sig_bytes: EncodedSignature<MlDsa65> = sig.encode();
-    let pk = pk_decode(vk_bytes.as_slice()).expect("pk_decode");
-    let sp = sig_decode(sig_bytes.as_slice()).expect("sig_decode");
-    let (tr_vec, _) = shake256(&[vk_bytes.as_slice()], 64);
-    let mut tr = [0u8; 64];
-    tr.copy_from_slice(&tr_vec);
-    MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec())
-}
-
-fn witness_and_input(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInput) {
-    let input = oracle_input(seed, msg);
-    let witness = generate_witness(&input).expect("witness");
-    (witness, input)
-}
 
 #[test]
 fn native_tr_and_role_mu_match_reference() {

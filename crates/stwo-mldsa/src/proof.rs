@@ -1,10 +1,10 @@
-//! Standalone prove/verify for the `mldsa_coeffs` component + verifier-native
-//! fold, wired through the `air-core` orchestrator. Scaffolding mirroring
-//! `stwo-p256`'s claim/statement conventions so M7 can register the component.
+//! Test harness for the `mldsa_coeffs` component + verifier-native fold, wired
+//! through the `air-core` orchestrator. The composed production statement lives
+//! in [`crate::statement`]; this module also owns shared native fold helpers.
 //!
 //! One air-core module (`CoeffsModule`) contributes, in commit order:
 //!   1. `coeffs`          — the tall stacked bivariate-Horner component.
-//!   2. rc table providers — `rc9`, `rc13`, `rc8`, `rc7` (one each).
+//!   2. rc table providers — `rc9`, `rc13`, `rc8`, `rc7`, `ternary` (one each).
 //!
 //! and folds two non-component terms into its `claimed_sums`:
 //!   * the coeffs component's logup residue,
@@ -36,7 +36,7 @@ use air_core::{
 };
 
 use crate::air_util::padded_log_size;
-use crate::air_util::{m31, ColEval};
+use crate::air_util::{enc_signed, m31, ColEval};
 use crate::balancer::{
     balancer_base_cols, gen_balancer_interaction, gen_balancer_trace, BalancerEval,
     BalancerRelation, BALANCER_INTERACTION_COLS,
@@ -122,12 +122,6 @@ fn mix_public(channel: &mut Blake2sChannel, input: &MlDsaVerifyInput) {
     // zero at that point) from the verifier's.
 }
 
-/// Centered M31 encoding of a signed value (matches `coeffs::encode_signed`).
-fn enc(v: i128) -> u32 {
-    const P: i128 = (1 << 31) - 1;
-    (((v % P) + P) % P) as u32
-}
-
 /// The `(w_bind_id, w)` tuples the coeffs W groups YIELD (one per w-coefficient),
 /// which the standalone test's WCell balancer CONSUMES (+). In the composed
 /// statement decomp is the consumer instead.
@@ -151,7 +145,7 @@ fn wcell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
 /// standalone test's CCell balancer (composed: sampleinball consumes).
 fn ccell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
     (0..crate::constants::N)
-        .map(|m| vec![m as u32, enc(witness.digits.c[m])])
+        .map(|m| vec![m as u32, enc_signed(witness.digits.c[m]).0])
         .collect()
 }
 
@@ -200,7 +194,6 @@ pub struct CoeffsProver {
     // filled during proving:
     r: SecureField,
     s: SecureField,
-    rho_rlc: SecureField,
     relations: Option<CoeffsRelations>,
     group_evals: Vec<SecureField>,
     coeffs_claimed_sum: SecureField,
@@ -240,7 +233,10 @@ fn draw_challenges(
 }
 
 /// The verifier-native EvalAtRs USE sum: `+Σ_id 1/combine(poly_id, coords)`.
-fn native_use_sum(group_evals: &[SecureField], relations: &CoeffsRelations) -> SecureField {
+pub(crate) fn native_use_sum(
+    group_evals: &[SecureField],
+    relations: &CoeffsRelations,
+) -> SecureField {
     let one = SecureField::from(m31(1));
     let mut sum = SecureField::zero();
     for (poly_id, eval) in group_evals.iter().enumerate() {
@@ -280,13 +276,13 @@ fn build_components(
         },
         coeffs_claimed_sum,
     );
-    let mut rc = Vec::with_capacity(4);
+    let mut rc = Vec::with_capacity(5);
     for (idx, kind) in RcKind::ALL.iter().enumerate() {
         rc.push(FrameworkComponent::new(
             allocator,
             RcTableEval {
                 kind: *kind,
-                relation: relations.rc(*kind).clone(),
+                relation: relations.range.clone(),
             },
             rc_claimed_sums[idx],
         ));
@@ -326,8 +322,7 @@ impl Air for CoeffsProver {
         mix_public(channel, &self.input);
     }
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        let (rho_rlc, r, s, relations) = draw_challenges(channel);
-        self.rho_rlc = rho_rlc;
+        let (_rho_rlc, r, s, relations) = draw_challenges(channel);
         self.r = r;
         self.s = s;
         self.relations = Some(relations);
@@ -463,7 +458,7 @@ impl AirProver for CoeffsProver {
         self.group_evals = interaction.group_evals.clone();
 
         for (idx, kind) in RcKind::ALL.iter().enumerate() {
-            let (tr, sum) = gen_table_interaction(*kind, &self.rc_mult[idx], relations.rc(*kind));
+            let (tr, sum) = gen_table_interaction(*kind, &self.rc_mult[idx], &relations.range);
             evals.extend(tr);
             self.rc_claimed_sums[idx] = sum;
         }
@@ -577,7 +572,6 @@ pub fn prove_coeffs(
         input: input.clone(),
         r: SecureField::zero(),
         s: SecureField::zero(),
-        rho_rlc: SecureField::zero(),
         relations: None,
         group_evals: vec![SecureField::zero(); N_GROUPS],
         coeffs_claimed_sum: SecureField::zero(),

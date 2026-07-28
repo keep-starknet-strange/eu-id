@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 uniffi::setup_scaffolding!();
 
+#[cfg(feature = "demo")]
 mod demo;
 mod mapping;
 
@@ -575,32 +576,36 @@ pub fn ts13_verify_zk_document(
     request: &Ts13PresentationRequest,
     document: &Ts13ZkDocument,
 ) -> Result<bool, ZkError> {
-    if ts13_validate_presentation_request(request).is_err() {
-        return Ok(false);
-    }
-    if document.doc_type != request.doctype
-        || document.zk_system_id != request.zk_system_id
-        || document.circuit_hash != request.circuit_hash
-        || document.request_binding_hash != ts13_request_binding_hash(request)
-        || document.disclosed_attributes != canonical_ts13_disclosures()
-    {
-        return Ok(false);
-    }
-    let Ok(envelope) = decode_ts13_proof_envelope(&document.proof) else {
-        return Ok(false);
-    };
-    if envelope.request_binding_hash != document.request_binding_hash
-        || !ts13_mdoc_statement_matches(request, &envelope.mdoc_statement)?
-    {
-        return Ok(false);
-    }
-    let Some(stark_proof) = decompress_stark_proof_from_ffi(&envelope.stark_proof)
-        .ok()
-        .and_then(|bytes| decode_stark_proof(&bytes))
-    else {
-        return Ok(false);
-    };
-    Ok(eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok())
+    let request = request.clone();
+    let document = document.clone();
+    on_large_stack(move || {
+        if ts13_validate_presentation_request(&request).is_err() {
+            return Ok(false);
+        }
+        if document.doc_type != request.doctype
+            || document.zk_system_id != request.zk_system_id
+            || document.circuit_hash != request.circuit_hash
+            || document.request_binding_hash != ts13_request_binding_hash(&request)
+            || document.disclosed_attributes != canonical_ts13_disclosures()
+        {
+            return Ok(false);
+        }
+        let Ok(envelope) = decode_ts13_proof_envelope(&document.proof) else {
+            return Ok(false);
+        };
+        if envelope.request_binding_hash != document.request_binding_hash
+            || !ts13_mdoc_statement_matches(&request, &envelope.mdoc_statement)?
+        {
+            return Ok(false);
+        }
+        let Some(stark_proof) = decompress_stark_proof_from_ffi(&envelope.stark_proof)
+            .ok()
+            .and_then(|bytes| decode_stark_proof(&bytes))
+        else {
+            return Ok(false);
+        };
+        Ok(eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok())
+    })
 }
 
 pub fn ts13_disclosure_kind(
@@ -980,6 +985,12 @@ fn mdoc_statement_matches_public_statement(
     mdoc_statement: &eu_id_prover::MdocStatement,
     statement: &ZkPublicStatement,
 ) -> Result<bool, ZkError> {
+    if mdoc_statement.ts13_revocation.is_some()
+        || mdoc_statement.ts13_revocation_range.is_some()
+        || mdoc_statement.ts13_revocation_signature.is_some()
+    {
+        return Ok(false);
+    }
     if mdoc_statement.doctype != statement.doctype
         || mdoc_statement.namespace != statement.namespace
     {
@@ -1140,7 +1151,9 @@ mod tests {
             version: 1,
             doctype: TS13_PID_DOCTYPE.to_string(),
             namespace: TS13_PID_NAMESPACE.to_string(),
-            issuer_key: IssuerKey::MlDsa { pk_hash: vec![0x11; 32] },
+            issuer_key: IssuerKey::MlDsa {
+                pk_hash: vec![0x11; 32],
+            },
             today_epoch_day: 20_637,
             nonce: vec![1, 2, 3, 4],
             predicate_mode: PredicateMode::And,

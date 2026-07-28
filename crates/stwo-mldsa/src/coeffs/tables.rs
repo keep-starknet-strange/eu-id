@@ -26,7 +26,10 @@ use stwo_constraint_framework::{
 
 use super::relations::{RangeRelation, SharedRangeRelation};
 use super::RcUses;
-use crate::air_util::{col_eval, m31, ColEval};
+use crate::air_util::{
+    col_eval, gen_value_table_interaction, gen_value_table_multiplicities,
+    gen_value_table_preprocessed, m31, ColEval,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcKind {
@@ -55,10 +58,6 @@ impl RcKind {
             RcKind::Rc7 => 1 << 7,
             RcKind::Ternary => 3,
         }
-    }
-
-    pub const fn value_at(self, i: usize) -> u32 {
-        i as u32
     }
 
     pub const fn bound_id(self) -> u32 {
@@ -368,24 +367,11 @@ impl AirProver for SharedRangeTable {
 // that test harness; their relation and fixed tuple ids are identical to the
 // composed statement's combined provider.
 pub fn gen_table_preprocessed(kind: RcKind) -> ColEval {
-    let rows = 1usize << kind.log_size();
-    col_eval(
-        kind.log_size(),
-        (0..rows)
-            .map(|i| m31(if i < kind.n_values() { i as u32 } else { 0 }))
-            .collect(),
-    )
+    gen_value_table_preprocessed(kind.log_size(), kind.n_values())
 }
 
 pub fn gen_table_multiplicities(kind: RcKind, uses: &[u32]) -> ColEval {
-    assert_eq!(uses.len(), kind.n_values());
-    let rows = 1usize << kind.log_size();
-    col_eval(
-        kind.log_size(),
-        (0..rows)
-            .map(|i| m31(if i < uses.len() { uses[i] } else { 0 }))
-            .collect(),
-    )
+    gen_value_table_multiplicities(kind.log_size(), kind.n_values(), uses)
 }
 
 pub fn gen_table_interaction(
@@ -393,14 +379,13 @@ pub fn gen_table_interaction(
     multiplicity: &ColEval,
     relation: &RangeRelation,
 ) -> (Vec<ColEval>, SecureField) {
-    let value = gen_table_preprocessed(kind);
     let bound_id = PackedM31::from(m31(kind.bound_id()));
-    let mut logup = LogupTraceGenerator::new(kind.log_size());
-    logup.col_from_fn(|row| {
-        let denominator: PackedQM31 = relation.combine(&[value.data[row], bound_id]);
-        (-PackedQM31::from(multiplicity.data[row]), denominator)
-    });
-    logup.finalize_last()
+    gen_value_table_interaction(
+        kind.log_size(),
+        gen_table_preprocessed(kind),
+        multiplicity,
+        |value| relation.combine(&[value, bound_id]),
+    )
 }
 
 #[derive(Clone)]
@@ -432,7 +417,6 @@ impl FrameworkEval for RcTableEval {
     }
 }
 
-pub type RcTableComponent = FrameworkComponent<RcTableEval>;
 pub const RC_TABLE_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 
 #[cfg(test)]

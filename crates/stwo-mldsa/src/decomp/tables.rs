@@ -4,15 +4,14 @@
 //! `−mult / (z − value)`); one provider component per relation instance.
 
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
-use stwo::prover::backend::simd::m31::LOG_N_LANES;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntry};
 
 use super::relations::RcRelation;
-use crate::air_util::{col_eval, m31, ColEval};
+use crate::air_util::{
+    gen_value_table_interaction, gen_value_table_multiplicities, gen_value_table_preprocessed,
+    table_log_size, ColEval,
+};
 
 /// The four range-check widths used by decomp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,13 +35,7 @@ impl RcKind {
     }
 
     pub const fn log_size(self) -> u32 {
-        let n = self.n_values();
-        let bits = usize::BITS - (n - 1).leading_zeros();
-        if bits < LOG_N_LANES {
-            LOG_N_LANES
-        } else {
-            bits
-        }
+        table_log_size(self.n_values())
     }
 
     pub fn name(self) -> &'static str {
@@ -63,25 +56,12 @@ impl RcKind {
 
 /// Preprocessed value column `[0, 1, …, n−1, 0, 0, …]`.
 pub fn gen_table_preprocessed(kind: RcKind) -> ColEval {
-    let log_size = kind.log_size();
-    let rows = 1usize << log_size;
-    let n = kind.n_values();
-    let values = (0..rows)
-        .map(|i| m31(if i < n { i as u32 } else { 0 }))
-        .collect();
-    col_eval(log_size, values)
+    gen_value_table_preprocessed(kind.log_size(), kind.n_values())
 }
 
 /// Multiplicity column: how many times each table value is consumed.
 pub fn gen_table_multiplicities(kind: RcKind, uses: &[u32]) -> ColEval {
-    let log_size = kind.log_size();
-    let rows = 1usize << log_size;
-    let n = kind.n_values();
-    assert_eq!(uses.len(), n, "one multiplicity per table value");
-    let values = (0..rows)
-        .map(|i| m31(if i < n { uses[i] } else { 0 }))
-        .collect();
-    col_eval(log_size, values)
+    gen_value_table_multiplicities(kind.log_size(), kind.n_values(), uses)
 }
 
 /// Interaction column for a table provider: `−mult / (z − value)` per packed row.
@@ -90,16 +70,12 @@ pub fn gen_table_interaction(
     multiplicity: &ColEval,
     relation: &RcRelation,
 ) -> (Vec<ColEval>, SecureField) {
-    let log_size = kind.log_size();
-    let value = gen_table_preprocessed(kind);
-    let mut logup = LogupTraceGenerator::new(log_size);
-    logup.col_from_fn(|vec_row| {
-        let denom: PackedQM31 = relation.combine(&[value.data[vec_row]]);
-        let numerator = -PackedQM31::from(multiplicity.data[vec_row]);
-        (numerator, denom)
-    });
-    let (trace, claimed_sum) = logup.finalize_last();
-    (trace, claimed_sum)
+    gen_value_table_interaction(
+        kind.log_size(),
+        gen_table_preprocessed(kind),
+        multiplicity,
+        |value| relation.combine(&[value]),
+    )
 }
 
 /// A range-check table provider component.
@@ -128,8 +104,6 @@ impl FrameworkEval for RcTableEval {
         eval
     }
 }
-
-pub type RcTableComponent = FrameworkComponent<RcTableEval>;
 
 /// Interaction-column count of a table provider (one batched logup column).
 pub const RC_TABLE_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;

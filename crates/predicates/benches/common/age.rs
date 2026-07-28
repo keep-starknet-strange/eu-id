@@ -22,10 +22,6 @@ fn default_case(name: &'static str, strategy: AgeCheckStrategy) -> BenchCase {
     }
 }
 
-pub fn bit_decomposition_case() -> BenchCase {
-    default_case("age/bit_decomposition", AgeCheckStrategy::BitDecomposition)
-}
-
 pub fn range_check_case() -> BenchCase {
     default_case("age/range_check", AgeCheckStrategy::RangeCheck)
 }

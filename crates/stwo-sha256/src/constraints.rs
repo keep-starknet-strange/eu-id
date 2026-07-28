@@ -6,12 +6,9 @@
 //! finalization), the within-row state-chain that ties round outputs back
 //! to the next round's inputs, and the §10.3 **cross-row block-chain copy
 //! constraint** that pins block `b+1`'s `h_in` to block `b`'s `h_out` via a
-//! `[0, -1]` interaction mask — are emitted here. The **`Σ`/`σ` decode-table
-//! LogUp lookups** (§9.3 of the validated design), the matching σ-output
-//! reassembly + `O2` chunk-bind constraints, the chunk-wise `xor_8`
-//! lookups that close `o2_combined = o2_partial_s ⊕ o2_partial_s'`, and
-//! direct boolean-bit constraints for `Maj`, `Ch`, and the working-state
-//! aliases are all wired below. Separate low/high bit recompositions pin
+//! `[0, -1]` interaction mask — are emitted here. The σ/Σ output reassembly,
+//! `O2` XOR recomposition, direct boolean-bit constraints for `Maj`, `Ch`,
+//! and the working-state aliases are all wired below. Separate low/high bit recompositions pin
 //! every 16-bit word limb. The mod-2³² limb-add carries are range-checked through
 //! `Range_{2,4,5}` lookups (one family per add per
 //! [`emit_mod_2_32_add_linear`] call) and the final-block `h_out` digest
@@ -67,16 +64,16 @@ pub struct Sha256Eval {
     /// `log2` of the row count (the smallest power of two **strictly**
     /// greater than `64 · block count`, per [`crate::trace::min_log_size`]).
     pub log_size: u32,
-    /// LogUp channels: `Σ`/`σ` decode tables (8), packed Maj/Ch (2),
-    /// chunk-wise `xor_8` (1), the four `Range_k` channels, and the
-    /// cross-component `Sha256Digest` channel.
+    /// LogUp relation bundle. The live constraints consume the four `Range_k`
+    /// channels and optionally yield digest/field bytes; the decode/Maj/Ch/xor_8
+    /// fields remain in the bundle only to preserve the transcript draw order.
     pub relations: Sha256Relations,
     /// When set, the AIR *yields* the final-block digest bytes on the
-    /// `Sha256Digest` channel (the producer half of the `SHA_DIGEST ↔ ECDSA_Z`
+    /// `Sha256Digest` channel (the producer half of the SHA digest binding
     /// binding). Off for the standalone SHA proof — the digest has no
     /// in-module consumer, so yielding it would leave the module's claimed
     /// sum non-zero and the standalone proof would not self-balance. The
-    /// combined prover sets it once a consumer (P256 `z`) is composed in. The
+    /// combined prover sets it once the ML-DSA digest consumer is composed in. The
     /// `is_last_block` flag, the digest byte columns, and their decomposition
     /// constraints are present and enforced regardless — only the
     /// cross-module *yield* is gated.

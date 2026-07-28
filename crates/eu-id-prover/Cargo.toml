@@ -8,7 +8,6 @@ edition.workspace = true
 # dependency, so this also turns on the shared STARK prover's parallel paths for
 # the whole composition. Off by default: the honest baseline is single-threaded.
 parallel = ["stwo-sha256/parallel"]
-gkr-spike = ["air-core/gkr-spike", "stwo-sha256/gkr-spike"]
 
 [dependencies]
 air-core = { path = "../air-core" }

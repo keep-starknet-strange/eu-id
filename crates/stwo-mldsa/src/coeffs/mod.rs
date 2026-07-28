@@ -68,12 +68,11 @@ use stwo::prover::backend::simd::m31::N_LANES;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    INTERACTION_TRACE_IDX,
+    EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry, INTERACTION_TRACE_IDX,
 };
 
-use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
-use crate::witness::{MlDsaWitness, B, T_MAX};
+use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
+use crate::witness::{MlDsaWitness, B};
 use layout::{groups, Group, Kind, CARRY_DIGITS, MAX_DIGITS};
 use relations::CoeffsRelations;
 use tables::RcKind;
@@ -125,8 +124,6 @@ fn attacked_stream_value<E: EvalAtRow>(stream: usize, value: E::F) -> E::F {
 // --- Norm bound (worksheet §3.4): γ1 − β − 1 = 524_091. -----------------------
 /// `γ1 − β − 1` for ML-DSA-65 (`γ1 = 2^19`, `β = τ·η = 49·4 = 196`).
 pub const Z_NORM_BOUND: i64 = 524_091;
-/// `a + b = 2·(γ1−β−1)` for the symmetric two-sided norm decomposition.
-pub const Z_NORM_SUM: i64 = 2 * Z_NORM_BOUND; // 1_048_182
 /// Carry offset `2^20` (worksheet §3.3).
 pub const CARRY_OFFSET: i64 = 1 << 20;
 /// Digit offset `2^8` into the 2^9 window (worksheet §3.1).
@@ -327,12 +324,12 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
         cols[COL_ENABLER][row] = m31(1);
         let digits = row_digits(witness, info);
         for (t, &d) in digits.iter().enumerate() {
-            cols[COL_DIGIT0 + t][row] = encode_signed(d);
+            cols[COL_DIGIT0 + t][row] = enc_signed(d);
         }
         match info.group.kind {
             Kind::Z | Kind::W => {
                 let [first, second] = paired_recompositions(&digits);
-                cols[COL_RECOMP][row] = encode_signed(first);
+                cols[COL_RECOMP][row] = enc_signed(first);
                 if info.group.kind == Kind::Z {
                     // Both packed z coefficients receive the exact two-sided
                     // norm decomposition.
@@ -355,7 +352,7 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
             Kind::C => {
                 // Reuse the otherwise-idle norm-a auxiliary as the ternary
                 // range-stream value. The AIR binds it to c+1 on c rows.
-                cols[COL_NORM_A_HI][row] = encode_signed(digits[0] + 1);
+                cols[COL_NORM_A_HI][row] = enc_signed(digits[0] + 1);
             }
             _ => {}
         }
@@ -414,7 +411,6 @@ fn row_digits(witness: &MlDsaWitness, info: &RowInfo) -> [i128; MAX_DIGITS] {
             let m = g.coefficient_index(info.in_group, 0).unwrap();
             let carry = &witness.rows[i].carry[m]; // [i128; T_MAX+1]
             out[..CARRY_DIGITS].copy_from_slice(&carry[..CARRY_DIGITS]);
-            let _ = T_MAX;
         }
     }
     out
@@ -436,13 +432,6 @@ fn paired_recompositions(digits: &[i128; MAX_DIGITS]) -> [i128; 2] {
         recompose_digits(&digits[..split]),
         recompose_digits(&digits[split..]),
     ]
-}
-
-/// Centered M31 encoding of a signed value known to satisfy `|v| < p/2`.
-fn encode_signed(v: i128) -> M31 {
-    const P: i128 = (1 << 31) - 1;
-    let r = ((v % P) + P) % P;
-    m31(r as u32)
 }
 
 // =============================================================================
@@ -498,6 +487,8 @@ impl FrameworkEval for CoeffsEval {
         let c_bind_id = eval.get_preprocessed_column(pre_id("c_bind_id"));
 
         // --- Base columns ---
+        // COL_ENABLER remains committed for layout compatibility even though
+        // active-row gates are carried by preprocessed selector masks.
         let enabler = eval.next_trace_mask();
         let digit: Vec<E::F> = (0..MAX_DIGITS).map(|_| eval.next_trace_mask()).collect();
         let recomp_cell = eval.next_trace_mask();
@@ -711,7 +702,7 @@ impl FrameworkEval for CoeffsEval {
         ));
 
         // C10: CCell YIELD (−is_c) — the coeffs C-cell binding. digit[0] (= c,
-        // encode_signed) with c_bind_id = m. Each challenge coefficient is
+        // enc_signed) with c_bind_id = m. Each challenge coefficient is
         // yielded once; sampleinball consumes it once. Value degree 1.
         let ctuple = [c_bind_id.clone(), digit[0].clone()];
         eval.add_to_relation(RelationEntry::base(
@@ -720,14 +711,10 @@ impl FrameworkEval for CoeffsEval {
             &ctuple,
         ));
 
-        let _ = enabler; // enabler only gates via preprocessed masks (all active rows carry it); its boolean constraint is C0.
-
         eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
-
-pub type CoeffsComponent = FrameworkComponent<CoeffsEval>;
 
 // =============================================================================
 // Interaction trace.
@@ -830,14 +817,14 @@ pub fn gen_coeffs_interaction(
                     let mut first = zero;
                     let mut second = zero;
                     for t in 0..split {
-                        first += s_pow[t] * SecureField::from(encode_signed(digits[t]));
-                        second += s_pow[t] * SecureField::from(encode_signed(digits[split + t]));
+                        first += s_pow[t] * SecureField::from(enc_signed(digits[t]));
+                        second += s_pow[t] * SecureField::from(enc_signed(digits[split + t]));
                     }
                     first * r + second
                 } else {
                     let mut ordinary = zero;
                     for t in 0..MAX_DIGITS {
-                        ordinary += s_pow[t] * SecureField::from(encode_signed(digits[t]));
+                        ordinary += s_pow[t] * SecureField::from(enc_signed(digits[t]));
                     }
                     ordinary
                 };
@@ -931,10 +918,9 @@ pub fn gen_coeffs_interaction(
                             (m31((shifted >> 13) as u32), RcKind::Rc8)
                         })
                     }
-                    Some((digits, group, _)) if stream < group.kind.row_live_digits() => Some((
-                        encode_signed(digits[stream]) + m31(DIGIT_OFFSET),
-                        RcKind::Rc9,
-                    )),
+                    Some((digits, group, _)) if stream < group.kind.row_live_digits() => {
+                        Some((enc_signed(digits[stream]) + m31(DIGIT_OFFSET), RcKind::Rc9))
+                    }
                     Some((digits, group, _)) if group.kind == Kind::Z && stream >= 6 => {
                         let [first, second] = paired_recompositions(digits);
                         let first_a = first + Z_NORM_BOUND as i128;
@@ -954,7 +940,7 @@ pub fn gen_coeffs_interaction(
                         })
                     }
                     Some((digits, group, _)) if group.kind == Kind::C && stream == 7 => {
-                        Some((encode_signed(digits[0]) + m31(1), RcKind::Ternary))
+                        Some((enc_signed(digits[0]) + m31(1), RcKind::Ternary))
                     }
                     _ => None,
                 };
@@ -999,7 +985,7 @@ pub fn gen_coeffs_interaction(
                         .coefficient_index(*in_group, slot)
                         .expect("paired w slot exists");
                     let w_bind_id = (i * crate::constants::N + m) as u32;
-                    let w = encode_signed(paired_recompositions(digits)[slot]);
+                    let w = enc_signed(paired_recompositions(digits)[slot]);
                     let tuple = [m31(w_bind_id), w];
                     (-one, relations.wcell.combine(&tuple))
                 }
@@ -1010,14 +996,14 @@ pub fn gen_coeffs_interaction(
         );
     }
     // C10 CCell YIELD (−1) — c rows only. Mirrors `-is_c`. Value = digit[0]
-    // (encode_signed c); key = m.
+    // (enc_signed c); key = m.
     push_entry(
         &|coset| match &coset_digits[coset] {
             Some((digits, group, in_group)) if group.kind == Kind::C => {
                 let m = group
                     .coefficient_index(*in_group, 0)
                     .expect("c coefficient exists");
-                let c = encode_signed(digits[0]);
+                let c = enc_signed(digits[0]);
                 let tuple = [m31(m as u32), c];
                 (-one, relations.ccell.combine(&tuple))
             }
@@ -1068,7 +1054,7 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
         Kind::Z => {
             let live = info.group.kind.row_live_digits();
             for t in 0..live {
-                let v = (encode_signed(digits[t]) + m31(DIGIT_OFFSET)).0 as usize;
+                let v = (enc_signed(digits[t]) + m31(DIGIT_OFFSET)).0 as usize;
                 rc.rc9[v] += 1;
             }
             for cell in paired_recompositions(digits) {
@@ -1083,12 +1069,12 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
         _ => {
             let live = info.group.kind.row_live_digits();
             for t in 0..live {
-                let v = (encode_signed(digits[t]) + m31(DIGIT_OFFSET)).0 as usize;
+                let v = (enc_signed(digits[t]) + m31(DIGIT_OFFSET)).0 as usize;
                 rc.rc9[v] += 1;
             }
             if info.group.kind == Kind::C {
                 // Ternary membership use: c+1 ∈ {0,1,2}.
-                let v = (encode_signed(digits[0]) + m31(1)).0 as usize;
+                let v = (enc_signed(digits[0]) + m31(1)).0 as usize;
                 rc.ternary[v] += 1;
             }
         }

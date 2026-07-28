@@ -1,60 +1,8 @@
-//! Local fallback for the workspace-shared range-check tables.
+//! Fixed local range-check table contents for the SHA-256 component.
 //!
-//! The eu-id pipeline plans a workspace-shared range-check / LogUp helper
-//! crate (owned by the ECDSA stream — `stwo-p256-utils` today, possibly
-//! generalised or promoted into a new `stwo-air-utils`). Until that crate
-//! ships, the SHA-256 AIR cannot wire its mod-2³² carry lookups without a
-//! parallel `tables_local` stub. This module **is** that stub.
-//!
-//! ## Migration: one import swap
-//!
-//! Every public function here is named **exactly** the same as the
-//! function the shared crate will eventually export. Migration is one
-//! change at every call site:
-//!
-//! ```ignore
-//! // before
-//! use crate::tables_local::{range_2, range_4, range_5, range_8};
-//! // after (shared crate landed)
-//! use stwo_air_utils::range_tables::{range_2, range_4, range_5, range_8};
-//! ```
-//!
-//! No call-site re-architecting; no parallel API pattern. The names
-//! `range_2/4/5/8` are deliberately the obvious thing the shared crate
-//! will export — no `local_*` prefix, no namespace collision with the
-//! future import.
-//!
-//! ## What the upstream `stwo-p256-utils` already ships
-//!
-//! The P-256 audit infrastructure (branch `origin/lucas/p256`) ships:
-//!
-//! - `constants` — limb width, M31 modulus / centered bound, P-256 curve
-//!   constants. SHA-256 has its own 16-bit limb convention; only the M31
-//!   constants are migration candidates.
-//! - `headroom` — per-equation audit, `HeadroomStatus` enum. Mirrored by
-//!   [`crate::headroom`]; the SHA-256 audit is the simpler unsigned case.
-//! - `carry_range` — derives a *signed* `CarryRangeSpec` (signed bound
-//!   `C`, table size `2C + 1`) per equation. SHA-256 carries are unsigned
-//!   (`∈ [0, k)`), so this stream needs *unsigned* `Range_k` tables sized
-//!   `k`, not `2C + 1` — the shape this module ships.
-//! - `selector_tables` — three P-256-specific preprocessed tables. The
-//!   per-table-fn pattern (one `pub fn xxx() -> [Row; N]` per table) is
-//!   what we mirror below.
-//!
-//! ## API shape rationale
-//!
-//! - **`Vec<u32>` return, not `[u32; N]` or const-generic.** One uniform
-//!   return type keeps [`range_8`] aligned with the small `range_2`/`4`/`5` and
-//!   every call site committing the table the same way. The const-generic
-//!   shape (`RangeTable<const N: u32>`) was rejected because the size is
-//!   data, not a type parameter, and call sites are cleaner without
-//!   `::<2>` everywhere.
-//! - **Distinct functions per `k`.** Mirrors
-//!   `stwo-p256-utils::selector_tables` exactly. The shared crate's
-//!   eventual signed-carry variant (`signed_carry_range_c`) takes a
-//!   runtime parameter; the unsigned variant having distinct fns means
-//!   call sites read "this row reads from `range_4`" without parameter
-//!   noise.
+//! Each public function returns the canonical row values for one active
+//! `Range_k` producer. A uniform `Vec<u32>` return type keeps the small carry
+//! tables and byte table committed through the same preprocessed-column path.
 //!
 //! ## What lives here
 //!

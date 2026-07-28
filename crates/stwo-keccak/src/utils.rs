@@ -7,7 +7,6 @@
 //! permutations at once — this is the unit for cells-per-permutation
 //! accounting).
 
-use itertools::Itertools;
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
 use stwo::prover::backend::simd::m31::{PackedM31, N_LANES};
@@ -48,32 +47,6 @@ pub const fn unspread_u32(spread: u32) -> u32 {
         i += 1;
     }
     out
-}
-
-/// `spread(byte)` as an `M31`.
-pub fn spread_m31(byte: u8) -> M31 {
-    M31::from(spread_u32(byte as u32))
-}
-
-/// Splat `spread(byte)` across all SIMD lanes.
-pub fn spread_packed(byte: u8) -> PackedM31 {
-    PackedM31::from(spread_m31(byte))
-}
-
-/// Pack a per-row closure into `PackedM31` chunks of `N_LANES`.
-pub fn pack_column<F>(n_rows: usize, f: F) -> Vec<PackedM31>
-where
-    F: FnMut(usize) -> M31,
-{
-    (0..n_rows)
-        .map(f)
-        .chunks(N_LANES)
-        .into_iter()
-        .map(|chunk| {
-            let arr: [M31; N_LANES] = chunk.collect_vec().try_into().unwrap();
-            PackedM31::from_array(arr)
-        })
-        .collect_vec()
 }
 
 /// A monotone activity mask: the first `padding_offset` rows are active (1),
@@ -162,17 +135,6 @@ const KECCAK_PI: [usize; 24] = [
 ];
 const KECCAK_RC: [u64; N_ROUNDS] = crate::constants::iota_rc_rounds();
 
-/// Full Keccak-f[1600] over all SIMD lanes (24 rounds), in place.
-pub fn keccak_f1600(state: &mut [PackedM31; N_BYTES_IN_STATE]) {
-    for lane in 0..N_LANES {
-        let mut words = load_lane_words(state, lane);
-        for round in 0..N_ROUNDS {
-            keccak_f1600_round_words(&mut words, round);
-        }
-        store_lane_words(state, lane, &words);
-    }
-}
-
 /// A single Keccak-f[1600] round over all SIMD lanes, in place.
 pub fn keccak_f1600_round(state: &mut [PackedM31; N_BYTES_IN_STATE], round: usize) {
     debug_assert!(round < N_ROUNDS);
@@ -252,7 +214,6 @@ fn store_lane_words(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tiny_keccak::keccakf;
 
     #[test]
     fn spread_round_trips_and_is_carry_free() {
@@ -271,49 +232,5 @@ mod tests {
             assert_eq!((s >> (2 * i)) & 0b11, 3, "triple-sum slot {i} == 3");
         }
         assert_eq!(s, (1 << 16) - 1, "3·spread(0xFF) fills the dense key space");
-    }
-
-    #[test]
-    fn keccak_f1600_matches_tiny_keccak() {
-        let cases = [
-            [0u64; 25],
-            std::array::from_fn(|i| i as u64),
-            std::array::from_fn(|i| (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
-        ];
-        for mut reference in cases {
-            let mut state = words_to_packed(reference);
-            keccak_f1600(&mut state);
-            keccakf(&mut reference);
-            assert_eq!(packed_to_words(&state), reference);
-            // A second permutation to catch any state-carry bugs.
-            keccak_f1600(&mut state);
-            keccakf(&mut reference);
-            assert_eq!(packed_to_words(&state), reference);
-        }
-    }
-
-    fn words_to_packed(words: [u64; N_LANES_KECCAK]) -> [PackedM31; N_BYTES_IN_STATE] {
-        let mut out = [PackedM31::zero(); N_BYTES_IN_STATE];
-        for (w, &word) in words.iter().enumerate() {
-            for byte_idx in 0..N_BYTES_IN_U64 {
-                let idx = w * N_BYTES_IN_U64 + byte_idx;
-                let mut lanes = out[idx].to_array();
-                lanes[0] = M31::from(((word >> (8 * byte_idx)) & 0xFF) as u32);
-                out[idx] = PackedM31::from_array(lanes);
-            }
-        }
-        out
-    }
-
-    fn packed_to_words(state: &[PackedM31; N_BYTES_IN_STATE]) -> [u64; N_LANES_KECCAK] {
-        let mut words = [0u64; N_LANES_KECCAK];
-        for (w, word) in words.iter_mut().enumerate() {
-            for byte_idx in 0..N_BYTES_IN_U64 {
-                let idx = w * N_BYTES_IN_U64 + byte_idx;
-                let byte = state[idx].to_array()[0].0 as u64;
-                *word |= byte << (8 * byte_idx);
-            }
-        }
-        words
     }
 }

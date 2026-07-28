@@ -119,24 +119,6 @@ pub fn pointwise(a: &NttPoly, b: &NttPoly) -> NttPoly {
     out
 }
 
-/// Coefficient-wise addition mod `q`.
-pub fn poly_add(a: &Poly, b: &Poly) -> Poly {
-    let mut out = [0u32; N];
-    for i in 0..N {
-        out[i] = addq(a[i], b[i]);
-    }
-    out
-}
-
-/// Coefficient-wise subtraction mod `q`.
-pub fn poly_sub(a: &Poly, b: &Poly) -> Poly {
-    let mut out = [0u32; N];
-    for i in 0..N {
-        out[i] = subq(a[i], b[i]);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

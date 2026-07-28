@@ -238,14 +238,14 @@ pub trait Air {
     /// The module's claimed LogUp sums whose total enters the global balance.
     /// The orchestrator sums these across all modules and rejects unless the
     /// total is zero. For most modules these are the per-component sums; a
-    /// module whose balance also folds in public-input provider terms (P256)
-    /// returns those terms here too.
+    /// module whose balance also folds in public-input/provider terms returns
+    /// those terms here too.
     fn claimed_sums(&self) -> Vec<QM31>;
 
     /// Mix this module's claimed-sum commitment into the transcript, just before
     /// the interaction tree is committed. The default mixes [`Air::claimed_sums`]
     /// as one flat felt slice. A module whose standalone transcript mixed a
-    /// richer structure (P256 mixes per-component claims plus u64 counts) can
+    /// richer structure (for example per-component claims plus native counts) can
     /// override to reproduce it exactly. Must match between prove and verify.
     fn mix_claimed_sums(&self, channel: &mut Ch) {
         channel.mix_felts(&self.claimed_sums());
@@ -318,15 +318,15 @@ pub trait AirProver: Air {
     ///
     /// The default — `max_log_size() + 1` — is exactly the domain a degree-2 AIR
     /// needs, which is what the predicate and SHA modules use. A module with
-    /// higher-degree constraints (the P256 ECDSA AIR) overrides this with the
-    /// real bound computed from its components.
+    /// higher-degree constraints overrides this with the real bound computed
+    /// from its components.
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 1
     }
 
     /// Whether the commitment scheme must retain committed polynomials in
     /// coefficient form (`set_store_polynomials_coefficients`). Off by default;
-    /// the P256 module turns it on for its lifting path. If any module in a
+    /// modules that need coefficient-form openings turn it on. If any module in a
     /// `prove` call needs it, the orchestrator enables it for the whole proof.
     fn store_polynomial_coefficients(&self) -> bool {
         false
@@ -413,6 +413,37 @@ pub fn prove(
     Ok(proof)
 }
 
+fn report_prove_phase(timing: bool, name: &str, t_last: &mut std::time::Instant) {
+    if timing {
+        eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
+        *t_last = std::time::Instant::now();
+    }
+}
+
+fn dump_shape_census_if_requested(modules: &[&mut dyn AirProver]) {
+    if std::env::var_os("AIR_CORE_SHAPE_DUMP").is_none() {
+        return;
+    }
+    for (index, module) in modules.iter().enumerate() {
+        let layout = module.layout();
+        for (tree, sizes) in [
+            ("preprocessed", &layout.preprocessed),
+            ("trace", &layout.trace),
+            ("interaction", &layout.interaction),
+        ] {
+            let mut hist = std::collections::BTreeMap::<u32, usize>::new();
+            for &s in sizes.iter() {
+                *hist.entry(s).or_insert(0) += 1;
+            }
+            let cells: u64 = sizes.iter().map(|&s| 1u64 << s).sum();
+            eprintln!(
+                "air-core shape module={index} tree={tree} cols={} cells={cells} hist={hist:?}",
+                sizes.len()
+            );
+        }
+    }
+}
+
 /// [`prove`], additionally returning each module's opaque post-interaction
 /// payload (a serialized GKR proof, or empty). The payloads are indexed by
 /// module position and must be handed back — in the same order — to
@@ -437,47 +468,17 @@ pub fn prove_with_post_interaction(
     let timing = std::env::var_os("AIR_CORE_PROVE_TIMING").is_some();
     let t_start = std::time::Instant::now();
     let mut t_last = t_start;
-    let phase = |name: &str, t_last: &mut std::time::Instant| {
-        if timing {
-            eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
-            *t_last = std::time::Instant::now();
-        }
-    };
-
-    // Env-gated shape census: per module, per tree, the column count, the
-    // log-size histogram, and the committed cells. QM31 interaction columns
-    // are already expanded to M31 columns in `layout()`, so `cols` here is
-    // directly the proof-size unit (queries × columns).
-    if std::env::var_os("AIR_CORE_SHAPE_DUMP").is_some() {
-        for (index, module) in modules.iter().enumerate() {
-            let layout = module.layout();
-            for (tree, sizes) in [
-                ("preprocessed", &layout.preprocessed),
-                ("trace", &layout.trace),
-                ("interaction", &layout.interaction),
-            ] {
-                let mut hist = std::collections::BTreeMap::<u32, usize>::new();
-                for &s in sizes.iter() {
-                    *hist.entry(s).or_insert(0) += 1;
-                }
-                let cells: u64 = sizes.iter().map(|&s| 1u64 << s).sum();
-                eprintln!(
-                    "air-core shape module={index} tree={tree} cols={} cells={cells} hist={hist:?}",
-                    sizes.len()
-                );
-            }
-        }
-    }
+    dump_shape_census_if_requested(modules);
 
     let twiddles = cached_twiddles(twiddle_log_size);
-    phase("twiddles", &mut t_last);
+    report_prove_phase(timing, "twiddles", &mut t_last);
 
     let channel = &mut Ch::default();
     config.mix_into(channel);
 
     let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, twiddles);
-    // If any module needs committed polynomials kept in coefficient form (the
-    // P256 lifting path), enable it for the shared scheme.
+    // If any module needs committed polynomials kept in coefficient form,
+    // enable it for the shared scheme.
     if modules.iter().any(|m| m.store_polynomial_coefficients()) {
         commitment_scheme.set_store_polynomials_coefficients();
     }
@@ -494,9 +495,9 @@ pub fn prove_with_post_interaction(
     for (module, selected_ids) in modules.iter_mut().zip(&selected_preprocessed_ids) {
         module.write_selected_preprocessed(&mut tb, selected_ids);
     }
-    phase("tree0-write", &mut t_last);
+    report_prove_phase(timing, "tree0-write", &mut t_last);
     tb.commit(channel);
-    phase("tree0-commit", &mut t_last);
+    report_prove_phase(timing, "tree0-commit", &mut t_last);
 
     for m in modules.iter() {
         m.mix_public(channel);
@@ -507,9 +508,9 @@ pub fn prove_with_post_interaction(
     for m in modules.iter_mut() {
         m.write_trace(&mut tb);
     }
-    phase("tree1-write", &mut t_last);
+    report_prove_phase(timing, "tree1-write", &mut t_last);
     tb.commit(channel);
-    phase("tree1-commit", &mut t_last);
+    report_prove_phase(timing, "tree1-commit", &mut t_last);
 
     for m in modules.iter_mut() {
         m.draw_relations(channel);
@@ -521,12 +522,12 @@ pub fn prove_with_post_interaction(
     for m in modules.iter_mut() {
         m.write_interaction(&mut tb);
     }
-    phase("tree2-write", &mut t_last);
+    report_prove_phase(timing, "tree2-write", &mut t_last);
     for m in modules.iter() {
         m.mix_claimed_sums(channel);
     }
     tb.commit(channel);
-    phase("tree2-commit", &mut t_last);
+    report_prove_phase(timing, "tree2-commit", &mut t_last);
 
     // Optional post-tree-2 transcript block. GKR lookup proofs live here:
     // their inputs are already committed (trees 1/2 plus relation draws), and
@@ -563,9 +564,9 @@ pub fn prove_with_post_interaction(
     }
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         modules.iter().flat_map(|m| m.prover_components()).collect();
-    phase("build-components", &mut t_last);
+    report_prove_phase(timing, "build-components", &mut t_last);
     let result = stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme);
-    phase("stark-prove(composition+FRI+open)", &mut t_last);
+    report_prove_phase(timing, "stark-prove(composition+FRI+open)", &mut t_last);
     if timing {
         eprintln!("air-core prove TOTAL: {:?}", t_start.elapsed());
     }
@@ -600,8 +601,10 @@ impl From<VerificationError> for VerifyError {
 /// Merkle tree commits the blown-up LDE, so the root depends on it). The full
 /// key is stored — no key hashing — so cache hits are exact by construction,
 /// with no collision surface at all (strictly stronger than hashing the list).
+#[cfg(test)]
 type PreprocessedShapeKey = (Vec<(String, u32)>, u32);
 
+#[cfg(test)]
 static PREPROCESSED_ROOT_CACHE: OnceLock<Mutex<HashMap<PreprocessedShapeKey, CommitmentRoot>>> =
     OnceLock::new();
 
@@ -626,6 +629,7 @@ static PREPROCESSED_ROOT_CACHE: OnceLock<Mutex<HashMap<PreprocessedShapeKey, Com
 /// column at once. The prover-side `PreprocessedColumnFingerprint` guard uses a
 /// 64-bit `DefaultHasher` and is **NOT** a soundness pin — it is a dev-time
 /// dedup guard only. Do not downgrade this pin to that fingerprint.
+#[cfg(test)]
 pub fn compute_preprocessed_root(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
@@ -680,8 +684,8 @@ pub fn compute_preprocessed_root(
 /// rebuilds and commits tree 0.
 ///
 /// Required whenever a preprocessed column's CONTENT is not determined by its
-/// id — e.g. the legacy P256 hinted-mul schedule columns, which reuse one id
-/// across witnesses while their content follows the signature. The cached
+/// id — e.g. a dynamic preprocessed schedule whose content changes across
+/// witnesses while reusing one id. The cached
 /// variant would return the first witness's root for every later one (a
 /// fail-closed completeness bug, not a soundness one — but a bug). Use the
 /// cached variant only where the id→content invariant of [`prove`] holds

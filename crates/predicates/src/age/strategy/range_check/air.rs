@@ -430,7 +430,7 @@ mod binding_tests {
     //! four DOB bytes on the shared `Sha256Field` channel). This exercises the
     //! whole bound path — the binding layout, the boolean/reconciliation
     //! constraints, and the cross-module balance — through a real
-    //! `air_core::prove`/`verify`, without the (slow) P256 + SHA proof.
+    //! `air_core::prove`/`verify`, without the full SHA + ML-DSA proof.
 
     use super::*;
     use crate::predicate::{PredicateProver, PredicateVerifier};

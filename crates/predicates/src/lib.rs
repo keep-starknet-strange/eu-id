@@ -12,11 +12,9 @@ pub(crate) mod utils;
 // reuse the same type names across strategies) are reached by their full path,
 // e.g. `age::strategy::range_check::lookup_elements::LookupElements`.
 // Each strategy is its own predicate; callers pick one and call it directly.
-pub use age::strategy::bit_decomposition::AgeBitDecomposition;
 pub use age::strategy::range_check::AgeRangeCheck;
 pub use age::types::{
-    AgeBitDecompositionProof, AgeBounds, AgeInputError, AgeRangeCheckProof, Date, DateOfBirth,
-    Error, PublicInput, Witness,
+    AgeBounds, AgeInputError, AgeRangeCheckProof, Date, DateOfBirth, Error, PublicInput, Witness,
 };
 pub use nat::types::{
     Error as NatError, InputError as NatInputError, PrivateInput as NatPrivateInput,

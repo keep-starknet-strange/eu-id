@@ -9,6 +9,7 @@ use euid_zk_sdk::{
     ts13_default_circuit_hash, ts13_prove_zk_document, ts13_verify_zk_document, Ts13MdocWitness,
     Ts13PresentationRequest,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[allow(dead_code)]
@@ -18,6 +19,14 @@ mod mldsa_fixture;
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
+
+#[derive(Serialize, Deserialize)]
+struct Ts13ProofEnvelopeForTest {
+    envelope_format: u16,
+    request_binding_hash: String,
+    mdoc_statement: eu_id_prover::MdocStatement,
+    stark_proof: Vec<u8>,
+}
 
 fn hex_sha256(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
@@ -50,6 +59,18 @@ fn ts13_request(
         revocation_public_key,
         revocation_epoch: 7,
     }
+}
+
+fn tamper_ts13_stark_proof(proof: &[u8]) -> Vec<u8> {
+    let mut envelope: Ts13ProofEnvelopeForTest =
+        bincode::deserialize(proof).expect("TS13 proof envelope decodes in test");
+    assert!(
+        !envelope.stark_proof.is_empty(),
+        "TS13 envelope carries an inner STARK proof"
+    );
+    let tamper_index = envelope.stark_proof.len() / 2;
+    envelope.stark_proof[tamper_index] ^= 0x01;
+    bincode::serialize(&envelope).expect("tampered TS13 proof envelope serializes")
 }
 
 #[test]
@@ -107,11 +128,18 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
         ts13_verify_zk_document(&request, &document).expect("TS13 verification runs"),
         "real TS13 equality envelope must verify"
     );
-    let mut changed_epoch = request;
+    let mut changed_epoch = request.clone();
     changed_epoch.revocation_epoch += 1;
     assert!(
         !ts13_verify_zk_document(&changed_epoch, &document).expect("tampered request runs"),
         "TS13 verifier must bind the revocation epoch"
+    );
+
+    let mut tampered_document = document.clone();
+    tampered_document.proof = tamper_ts13_stark_proof(&document.proof);
+    assert!(
+        !ts13_verify_zk_document(&request, &tampered_document).expect("tampered proof runs"),
+        "TS13 verifier must reject a tampered inner STARK proof"
     );
 
     let id_lo_bytes = id_lo.to_le_bytes();

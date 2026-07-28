@@ -22,12 +22,17 @@
 //! every job shape into the transcript; the schedule preprocessed ids embed a
 //! digest of the full job list (I-5).
 
+use num_traits::Zero;
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
+use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::verifier::VerificationError;
+use stwo::prover::backend::simd::m31::PackedM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::lookups::mle::Mle;
+use stwo::prover::poly::circle::CircleEvaluation;
+use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::mle_eval::{
     build_trace as build_tieback_trace, MleEvalProverComponent, MleEvalVerifierComponent,
@@ -39,14 +44,14 @@ use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
 
+use crate::constants::N_BYTES_IN_STATE;
 use crate::keccak;
 use crate::keccak_round;
 use crate::relations::{KeccakRelations, SharedKeccakRelations};
 use crate::round_gkr::{self, RoundCoeffOracle, RoundGkrProver, RoundTieBack};
 use crate::sponge::Shape;
 use crate::sponge_v::{self, JobList, SpongeVRun};
-use crate::stark::{build_perm_witness, PermWitness};
-use crate::tables_air::{self, TableKind};
+use crate::tables_air::{self, TableKind, TableMultiplicities};
 
 /// The shared commitment-tree index of the post-interaction tie-back trace.
 const POST_INTERACTION_TREE: usize = 3;
@@ -62,6 +67,98 @@ fn round_log_size(n_perms_total: usize) -> u32 {
         .next_power_of_two()
         .ilog2()
         .max(stwo::prover::backend::simd::m31::LOG_N_LANES)
+}
+
+pub type TraceCol = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
+
+/// The keccak + keccak_round witness for a set of permutation requests, plus
+/// the round-derived table multiplicities.
+pub struct PermWitness {
+    pub keccak_claim: keccak::Claim,
+    pub keccak_trace: Vec<TraceCol>,
+    pub keccak_data: keccak::InteractionClaimData,
+    pub round_claim: keccak_round::Claim,
+    pub round_trace: Vec<TraceCol>,
+    pub round_data: keccak_round::InteractionClaimData,
+    pub table_mult: TableMultiplicities,
+}
+
+/// Build the keccak permutation prover + round prover traces for `perm_inputs`
+/// (concatenated across any number of sponge jobs).
+pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> PermWitness {
+    let (keccak_claim, keccak_trace, keccak_data) = keccak::Claim::generate_trace(perm_inputs);
+
+    let mut round_instances: Vec<([u8; N_BYTES_IN_STATE], u32, u32)> = Vec::new();
+    for prow in perm_inputs {
+        let mut state = [0u8; N_BYTES_IN_STATE];
+        for i in 0..N_BYTES_IN_STATE {
+            state[i] = crate::utils::unspread_u32(prow[i].to_array()[0].0) as u8;
+        }
+        let perm_id = prow[N_BYTES_IN_STATE].to_array()[0].0;
+        for round in 0..crate::constants::N_ROUNDS {
+            round_instances.push((state, round as u32, perm_id));
+            let mut sp: [PackedM31; N_BYTES_IN_STATE] = std::array::from_fn(|i| {
+                PackedM31::from(stwo::core::fields::m31::M31::from(state[i] as u32))
+            });
+            crate::utils::keccak_f1600_round(&mut sp, round);
+            for i in 0..N_BYTES_IN_STATE {
+                state[i] = sp[i].to_array()[0].0 as u8;
+            }
+        }
+    }
+    let n_rounds = round_instances.len();
+    let round_inputs = pack_round_instances(&round_instances);
+    let (round_claim, round_ct, round_data) =
+        keccak_round::Claim::generate_trace(round_inputs, n_rounds);
+
+    let table_mult = TableMultiplicities::from_round(&round_data);
+
+    PermWitness {
+        keccak_claim,
+        keccak_trace,
+        keccak_data,
+        round_claim,
+        round_trace: round_ct.to_evals().into_iter().collect(),
+        round_data,
+        table_mult,
+    }
+}
+
+/// Pack per-lane `(state, round_idx, perm_id)` instances into
+/// `[state|round|perm_id]` vec-rows, `N_LANES` distinct instances per row.
+fn pack_round_instances(
+    instances: &[([u8; N_BYTES_IN_STATE], u32, u32)],
+) -> Vec<[PackedM31; N_BYTES_IN_STATE + 2]> {
+    use stwo::core::fields::m31::M31;
+    use stwo::prover::backend::simd::m31::N_LANES;
+
+    let n_vec_rows = instances.len().div_ceil(N_LANES);
+    let mut rows = Vec::with_capacity(n_vec_rows);
+    for vr in 0..n_vec_rows {
+        let mut row = [PackedM31::zero(); N_BYTES_IN_STATE + 2];
+        let mut state_lanes = [[M31::from(0u32); N_LANES]; N_BYTES_IN_STATE];
+        let mut round_lanes = [M31::from(0u32); N_LANES];
+        let mut perm_id_lanes = [M31::from(0u32); N_LANES];
+        for lane in 0..N_LANES {
+            let idx = vr * N_LANES + lane;
+            if idx >= instances.len() {
+                break;
+            }
+            let (state, round, perm_id) = &instances[idx];
+            for i in 0..N_BYTES_IN_STATE {
+                state_lanes[i][lane] = M31::from(crate::utils::spread_u32(state[i] as u32));
+            }
+            round_lanes[lane] = M31::from(*round);
+            perm_id_lanes[lane] = M31::from(*perm_id);
+        }
+        for i in 0..N_BYTES_IN_STATE {
+            row[i] = PackedM31::from_array(state_lanes[i]);
+        }
+        row[N_BYTES_IN_STATE] = PackedM31::from_array(round_lanes);
+        row[N_BYTES_IN_STATE + 1] = PackedM31::from_array(perm_id_lanes);
+        rows.push(row);
+    }
+    rows
 }
 
 // =============================================================================
@@ -236,8 +333,6 @@ fn build_base_components(
             claim: keccak_round::Claim {
                 log_size: round_log_size(n),
             },
-            relations: relations.clone(),
-            gkr_offload: true,
         },
         claims.round,
     );
@@ -424,10 +519,7 @@ impl Air for KeccakServiceProver {
         Ok(gen_preprocessed(&self.jobs))
     }
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        vec![
-            round_log_size(self.jobs.n_perms_total());
-            round_gkr::N_TIEBACK_COLUMNS
-        ]
+        vec![round_log_size(self.jobs.n_perms_total()); round_gkr::N_TIEBACK_COLUMNS]
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
@@ -535,7 +627,11 @@ impl AirProver for KeccakServiceProver {
     fn write_post_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let tie_back = self.tie_back.as_ref().expect("prove_post_interaction ran");
         let mle = self.coeff_mle.as_ref().expect("coeff column built");
-        tb.extend_evals(build_tieback_trace(mle, &tie_back.r_row, tie_back.mle_claim));
+        tb.extend_evals(build_tieback_trace(
+            mle,
+            &tie_back.r_row,
+            tie_back.mle_claim,
+        ));
     }
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         self.built.as_ref().expect("built").ordered_prover()
@@ -606,10 +702,7 @@ impl Air for KeccakServiceVerifier {
         Ok(gen_preprocessed(&self.jobs))
     }
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        vec![
-            round_log_size(self.jobs.n_perms_total());
-            round_gkr::N_TIEBACK_COLUMNS
-        ]
+        vec![round_log_size(self.jobs.n_perms_total()); round_gkr::N_TIEBACK_COLUMNS]
     }
     fn load_post_interaction_payload(&mut self, payload: &[u8]) {
         self.gkr_blob = payload.to_vec();

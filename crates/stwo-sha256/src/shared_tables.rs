@@ -137,32 +137,6 @@ fn blind_extend(real: Vec<u32>) -> Vec<u32> {
 /// sharing one interaction column; the name
 /// joins the producer tags so the probe emits TRUE per-component rows instead
 /// of aggregating every producer under one `(tree, log_size)` bucket.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShaTableComponentShape {
-    pub name: String,
-    pub log_size: u32,
-    pub preprocessed_columns: usize,
-    pub trace_columns: usize,
-    pub interaction_columns: usize,
-}
-
-/// Number of preprocessed columns each producer table reads: the row-content
-/// value columns plus the Class-D `is_dummy` selector (excludes the
-/// multiplicity trace column).
-fn producer_preprocessed_cols(producer: SharedProducer) -> usize {
-    let value_cols = match producer {
-        SharedProducer::Range(..) => 1,
-    };
-    value_cols + 1 // + Class-D is_dummy selector
-}
-
-/// Stable per-producer tag, matching its preprocessed-column family.
-fn producer_name(producer: SharedProducer) -> &'static str {
-    match producer {
-        SharedProducer::Range(kind) => kind.tag(),
-    }
-}
-
 pub struct ShaTablesProver {
     multiplicities: ShaTableMultiplicities,
     shared: SharedShaTableRelations,
@@ -186,40 +160,6 @@ impl ShaTablesProver {
         self.interaction_claim
             .as_ref()
             .expect("shared SHA table interaction claim is set during proving")
-    }
-
-    /// TRUE per-component committed shape, one row per component (chunk of
-    /// [`PRODUCER_PAIRS`]), in registration/commit order. Reconciles exactly to
-    /// `layout()` (Σ preprocessed / trace / interaction columns per tree). A
-    /// two-producer component pairs its fractions into ONE `SecureField`
-    /// interaction column (`SECURE_EXTENSION_DEGREE` base columns); its
-    /// preprocessed count is the sum of both producers' tables and its trace
-    /// count is 2 (one multiplicity column each).
-    pub fn component_shapes(&self) -> Vec<ShaTableComponentShape> {
-        PRODUCER_PAIRS
-            .iter()
-            .map(|chunk| {
-                let name = chunk
-                    .iter()
-                    .map(|&p| producer_name(p))
-                    .collect::<Vec<_>>()
-                    .join("+");
-                let preprocessed_columns =
-                    chunk.iter().map(|&p| producer_preprocessed_cols(p)).sum();
-                ShaTableComponentShape {
-                    name,
-                    log_size: chunk[0].blind_log_size(),
-                    preprocessed_columns,
-                    trace_columns: chunk.len(),
-                    // Class D (single gated fraction): each producer emits ONE
-                    // gated fraction `-(1 − is_dummy)·mult`, so a 2-producer
-                    // chunk's two fractions pair into ONE interaction column and
-                    // a 1-producer chunk gets one column too — one paired column
-                    // per chunk regardless of producer count.
-                    interaction_columns: SECURE_EXTENSION_DEGREE,
-                }
-            })
-            .collect()
     }
 
     fn relations(&self) -> &Sha256Relations {

@@ -24,7 +24,7 @@ use crate::partitions::{apply, bits_to_mask, SigmaFn};
 use crate::tables::pack_half_key;
 use crate::types::{
     AddCarries, BlockWitness, Digest, HashState, LimbPairBytes, PaddingWitness, RoundWitness,
-    Schedule, ScheduleEntryWitness, Sha256Witness, SigmaDecodeWitness, WordLimbs, LIMB_BITS,
+    ScheduleEntryWitness, Sha256Witness, SigmaDecodeWitness, WordLimbs, LIMB_BITS,
 };
 
 /// Pad the message and assemble the padding witness used by the AIR.
@@ -310,158 +310,6 @@ pub fn add_identity_holds(addends: &[u32], result: u32, carries: AddCarries) -> 
     lhs_lo == rhs_lo && lhs_hi == rhs_hi
 }
 
-/// Per-block lookup-multiplicity totals for the eight `Σ`/`σ` decode-table
-/// channels. Each field counts how many times the AIR fires a "use" on the
-/// corresponding decode-table row across one block — equivalently, the sum
-/// of the table component's per-row multiplicity column. The sanity test in
-/// [`crate::constraints`] asserts these against the static per-block totals
-/// expected from the trace shape (64 rounds × one σ-application per round
-/// per relation; 48 schedule entries × one σ-application per relation).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct DecodeLookupMultiplicities {
-    pub sigma0_s: u32,
-    pub sigma0_s_complement: u32,
-    pub sigma1_s: u32,
-    pub sigma1_s_complement: u32,
-    pub lower_sigma0_s: u32,
-    pub lower_sigma0_s_complement: u32,
-    pub lower_sigma1_s: u32,
-    pub lower_sigma1_s_complement: u32,
-}
-
-impl DecodeLookupMultiplicities {
-    /// Sum of every decode lookup the block emits — `2 × N_ROUNDS` from
-    /// the rounds (`Σ0` + `Σ1`, each contributing one S + one S′ lookup),
-    /// `2 × N_SCHEDULE_ENTRIES` from the schedule (`σ0` + `σ1`, same shape).
-    pub fn total(&self) -> u32 {
-        self.sigma0_s
-            + self.sigma0_s_complement
-            + self.sigma1_s
-            + self.sigma1_s_complement
-            + self.lower_sigma0_s
-            + self.lower_sigma0_s_complement
-            + self.lower_sigma1_s
-            + self.lower_sigma1_s_complement
-    }
-}
-
-/// Per-block lookup-multiplicity totals for the Maj/Ch packed-group channels
-/// and the chunk-wise `xor_8` channel.
-///
-/// `maj` counts `add_to_relation(MajRelation, +1, …)` firings: one per group
-/// position per round ⇒ `N_ROUNDS · GROUPS_PER_ROUND_PARTITION` per block.
-/// `ch` is symmetric. `xor_8` counts chunk-wise σ-combine lookups: four per
-/// σ-application, with `2 · N_ROUNDS + 2 · N_SCHEDULE_ENTRIES`
-/// σ-applications per block (two per round, two per schedule entry).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct MajChXorMultiplicities {
-    pub maj: u32,
-    pub ch: u32,
-    pub xor_8: u32,
-}
-
-impl MajChXorMultiplicities {
-    pub fn total(&self) -> u32 {
-        self.maj + self.ch + self.xor_8
-    }
-}
-
-/// Count the number of `add_to_relation` "uses" each decode-table channel
-/// would receive from one block. Derived entirely from the witness — does
-/// not depend on the LogUp framework being plumbed end-to-end. Used as a
-/// pre-finalize sanity check that the wiring actually fires the expected
-/// number of times per block.
-pub fn decode_multiplicities_for_block(block: &BlockWitness) -> DecodeLookupMultiplicities {
-    let mut m = DecodeLookupMultiplicities::default();
-    for entry in &block.schedule_entries {
-        // `compute_sigma_decode_witness` always populates a valid pair —
-        // one "use" per relation per σ-application. We don't bucket by key
-        // here because the per-block total is the property the design's
-        // soundness test pins.
-        let _ = entry.lower_sigma0_decode;
-        m.lower_sigma0_s += 1;
-        m.lower_sigma0_s_complement += 1;
-        let _ = entry.lower_sigma1_decode;
-        m.lower_sigma1_s += 1;
-        m.lower_sigma1_s_complement += 1;
-    }
-    for round in &block.rounds {
-        let _ = round.sigma0_decode;
-        m.sigma0_s += 1;
-        m.sigma0_s_complement += 1;
-        let _ = round.sigma1_decode;
-        m.sigma1_s += 1;
-        m.sigma1_s_complement += 1;
-    }
-    m
-}
-
-/// Count the number of Maj / Ch / `xor_8` "uses" each channel would receive
-/// from one block. Derived entirely from the witness; mirrors
-/// [`decode_multiplicities_for_block`] for these channels. The
-/// constraint-side sanity test asserts these against the static per-block
-/// totals expected from the trace shape.
-pub fn maj_ch_xor_multiplicities_for_block(block: &BlockWitness) -> MajChXorMultiplicities {
-    let groups = crate::partitions::GROUPS_PER_ROUND_PARTITION as u32;
-    let rounds = block.rounds.len() as u32;
-    let entries = block.schedule_entries.len() as u32;
-    // One Maj lookup per a-side group per round, one Ch lookup per e-side
-    // group per round. Four chunk-wise `xor_8` lookups per σ-application,
-    // with two σ-applications per round (Σ0, Σ1) and two per schedule
-    // entry (σ0, σ1).
-    MajChXorMultiplicities {
-        maj: rounds * groups,
-        ch: rounds * groups,
-        xor_8: 4 * (2 * rounds + 2 * entries),
-    }
-}
-
-/// Aggregate [`maj_ch_xor_multiplicities_for_block`] across every block.
-pub fn maj_ch_xor_multiplicities_for_witness(witness: &Sha256Witness) -> MajChXorMultiplicities {
-    witness
-        .blocks
-        .iter()
-        .map(maj_ch_xor_multiplicities_for_block)
-        .fold(MajChXorMultiplicities::default(), |mut acc, m| {
-            acc.maj += m.maj;
-            acc.ch += m.ch;
-            acc.xor_8 += m.xor_8;
-            acc
-        })
-}
-
-/// Aggregate [`decode_multiplicities_for_block`] across every block of a
-/// witness. The integration / test sites use the per-block view; this one
-/// helps the top-level test assert the multi-block scaling is linear.
-pub fn decode_multiplicities_for_witness(witness: &Sha256Witness) -> DecodeLookupMultiplicities {
-    witness
-        .blocks
-        .iter()
-        .map(decode_multiplicities_for_block)
-        .fold(DecodeLookupMultiplicities::default(), |mut acc, m| {
-            acc.sigma0_s += m.sigma0_s;
-            acc.sigma0_s_complement += m.sigma0_s_complement;
-            acc.sigma1_s += m.sigma1_s;
-            acc.sigma1_s_complement += m.sigma1_s_complement;
-            acc.lower_sigma0_s += m.lower_sigma0_s;
-            acc.lower_sigma0_s_complement += m.lower_sigma0_s_complement;
-            acc.lower_sigma1_s += m.lower_sigma1_s;
-            acc.lower_sigma1_s_complement += m.lower_sigma1_s_complement;
-            acc
-        })
-}
-
-/// Sanity: rebuild the final schedule from a `BlockWitness` and confirm it
-/// matches the native expansion. Used by the tests; useful as a debug
-/// helper if a constraint ever disagrees.
-pub fn schedule_from_block_witness(b: &BlockWitness) -> Schedule {
-    let mut s = [0u32; N_ROUNDS];
-    for (i, slot) in s.iter_mut().enumerate() {
-        *slot = b.schedule[i].to_u32();
-    }
-    Schedule(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,8 +365,9 @@ mod tests {
         let native_block = crate::types::Block::from_bytes(&bytes);
         let native_schedule = expand_schedule(&native_block);
 
-        let recovered = schedule_from_block_witness(&bw);
-        assert_eq!(recovered.0, native_schedule.0);
+        for (got, expected) in bw.schedule.iter().zip(native_schedule.0) {
+            assert_eq!(got.to_u32(), expected);
+        }
         // And every schedule entry's `w_t` matches the recurrence.
         for entry in &bw.schedule_entries {
             assert_eq!(entry.w_t.to_u32(), native_schedule.0[entry.t as usize]);
@@ -579,7 +428,7 @@ mod tests {
 
         // Replay 64 rounds natively and check every intermediate.
         let mut state = IV;
-        let sched = schedule_from_block_witness(&bw);
+        let sched: Vec<u32> = bw.schedule.iter().map(|word| word.to_u32()).collect();
         for (t, &k_t) in K.iter().enumerate().take(N_ROUNDS) {
             let r = &bw.rounds[t];
             assert_eq!(r.t, t as u32);
@@ -588,7 +437,7 @@ mod tests {
             assert_eq!(r.sigma1.to_u32(), big_sigma1(e));
             assert_eq!(r.ch.to_u32(), ch(e, f, g));
             assert_eq!(r.maj.to_u32(), maj(a, b, c));
-            assert_eq!(r.w_t.to_u32(), sched.0[t]);
+            assert_eq!(r.w_t.to_u32(), sched[t]);
             assert_eq!(r.k_t.to_u32(), k_t);
 
             // The recurrence drives state forward to the next round.
@@ -596,7 +445,7 @@ mod tests {
                 .wrapping_add(big_sigma1(e))
                 .wrapping_add(ch(e, f, g))
                 .wrapping_add(k_t)
-                .wrapping_add(sched.0[t]);
+                .wrapping_add(sched[t]);
             let t2 = big_sigma0(a).wrapping_add(maj(a, b, c));
             assert_eq!(r.t1.to_u32(), t1);
             assert_eq!(r.t2.to_u32(), t2);

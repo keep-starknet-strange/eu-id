@@ -1,23 +1,12 @@
 //! LogUp relation tags for the SHA-256 component.
 //!
-//! Each preprocessed lookup table is paired with one [`stwo_constraint_framework::Relation`]
-//! channel. The SHA-256 component uses these channels from the **consumer**
-//! side — `add_to_relation` with positive multiplicity, one "use" per
-//! lookup keyed on the row tuple. The actual preprocessed-column commitment
-//! and the per-row multiplicity vector live with the corresponding table
-//! component (committed separately at prover-setup time); the relations
-//! here are the contract between the two.
+//! Active range tables are paired with [`stwo_constraint_framework::Relation`]
+//! channels. The SHA-256 component consumes those channels with positive
+//! multiplicity and the producer components yield the matching rows with
+//! negative multiplicity. The digest and field channels are cross-module
+//! provider surfaces.
 //!
-//! Five channel families are wired into the constraint layer:
-//!   - [`SigmaDecodeRelations`] — the eight `Σ`/`σ` decode tables.
-//!   - [`MajRelation`] / [`ChRelation`] — the packed Maj/Ch lookup,
-//!     sharing one underlying table at width `W ≥ MAX_ROUND_GROUP_BITS`.
-//!     Maj keys on `(a, b, c, maj)`; Ch keys on `(e, f, g, ch)` — two
-//!     row-width-4 relations against the same `(a, b, c, maj, ch)` table
-//!     content (each commits its own multiplicity column).
-//!   - [`Xor8Relation`] — the single 2¹⁶-row `(x, y, z = x ⊕ y)` table,
-//!     fired chunk-wise to combine the two `O2` partials of every
-//!     σ-application.
+//! Four channel families are live in the constraint layer:
 //!   - [`RangeRelations`] — the four width-1 range-check channels
 //!     `Range_2`/`Range_4`/`Range_5`/`Range_8`. `Range_k` pins a single
 //!     base-field value into `[0, k)`. The mod-2³² limb-add carries are
@@ -25,6 +14,12 @@
 //!     (`crate::headroom`); terminal 16-bit limbs (the final block's
 //!     `h_out`, per design §10.2) are range-checked through `Range_8` bytes.
 //!     Row content for each `Range_k` is the table `crate::tables_local::range_k()`.
+//!   - [`Sha256Digest`] — the shared 32-byte digest provider relation.
+//!   - [`Sha256Field`] — the shared credential-field byte provider relation.
+//!   - [`SlotIoRelations`] — per-slot digest/field bridges for multi-message mode.
+//!
+//! The decode/Maj/Ch/xor_8 relation types remain in [`Sha256Relations`] only
+//! as frozen transcript draws for challenge-order compatibility.
 //!
 //! Each `relation!(_, N)` declares a struct holding a `LookupElements<N>`
 //! channel — `N` is the row width of the matched table (number of base-field
@@ -38,10 +33,6 @@
 
 use air_core::relations::SharedRelation;
 use stwo::core::channel::Channel;
-#[cfg(feature = "gkr-spike")]
-use stwo::core::fields::m31::BaseField;
-#[cfg(feature = "gkr-spike")]
-use stwo::core::fields::qm31::SecureField;
 use stwo_constraint_framework::relation;
 
 /// Row width of each `Σ`/`σ` decode table: `(key, o_main_lo, o_main_hi,
@@ -132,39 +123,6 @@ relation!(ChRelation, MAJ_CH_REL_SIZE);
 pub const XOR_8_REL_SIZE: usize = 3;
 
 relation!(Xor8Relation, XOR_8_REL_SIZE);
-
-#[cfg(feature = "gkr-spike")]
-impl Xor8Relation {
-    /// Evaluate the fixed `(x, y, x ^ y)` table denominator MLE at `point`.
-    ///
-    /// The table row order is `index = y * 256 + x`; Stwo's MLE recursion
-    /// consumes the most significant index bit first, so point coordinates
-    /// `0..8` are `y[7..0]` and `8..16` are `x[7..0]`.
-    pub fn eval_fixed_table_denominator_mle(&self, point: &[SecureField]) -> SecureField {
-        assert_eq!(point.len(), XOR_8_REL_SIZE + 13);
-
-        let mut y = SecureField::from(BaseField::from(0));
-        for bit in 0..8 {
-            y += SecureField::from(BaseField::from(1u32 << bit)) * point[7 - bit];
-        }
-
-        let mut x = SecureField::from(BaseField::from(0));
-        for bit in 0..8 {
-            x += SecureField::from(BaseField::from(1u32 << bit)) * point[15 - bit];
-        }
-
-        let mut z = SecureField::from(BaseField::from(0));
-        for bit in 0..8 {
-            let xb = point[15 - bit];
-            let yb = point[7 - bit];
-            let xor_bit = xb + yb - SecureField::from(BaseField::from(2)) * xb * yb;
-            z += SecureField::from(BaseField::from(1u32 << bit)) * xor_bit;
-        }
-
-        self.0.alpha_powers[0] * x + self.0.alpha_powers[1] * y + self.0.alpha_powers[2] * z
-            - self.0.z
-    }
-}
 
 /// Row width of every `Range_k` channel: a single base-field value pinned
 /// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
@@ -288,8 +246,8 @@ impl SharedShaTableRelations {
 /// `word_j.to_be_bytes()` — so cell `4j+k` is digest byte `4j+k`.
 pub const DIGEST_REL_SIZE: usize = crate::constants::DIGEST_BYTES;
 
-/// The cross-component digest channel is **shared** with the consumer (the P256
-/// `z` binding): a yield here only cancels against a require there if both
+/// The cross-component digest channel is **shared** with the consumer: a yield
+/// here only cancels against a require there if both
 /// sides combine over the *same* drawn `LookupElements`. So the relation type is
 /// defined once in the common [`air_core`] crate and aliased here, rather than
 /// declared locally. Width, and the `relation!`-generated `draw`/`dummy`/
@@ -302,12 +260,11 @@ pub use air_core::relations::DigestBytesRelation as Sha256Digest;
 // to balance.
 const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY);
 
-/// The cross-component digest channel (interface-contract item 2:
-/// `SHA_DIGEST ↔ ECDSA_Z`). **This is the one relation the SHA-256 AIR uses
+/// The cross-component digest channel. **This is the relation the SHA-256 AIR uses
 /// from the *provider* side**: on the final block of a multi-block hash it
 /// *yields* the 32 digest bytes (`add_to_relation(&digest, −is_last_block,
-/// &[b0..b31])`), so a downstream module (the P256 ECDSA `z` binding;
-/// the field predicates reuse the same byte-bridge machinery) can
+/// &[b0..b31])`), so a downstream module (the ML-DSA digest binding; the
+/// field predicates reuse the same byte-bridge machinery) can
 /// *require* them. Unlike every other channel here, the yield has no
 /// in-module consumer, so it leaves the SHA module's claimed-sum non-zero —
 /// it only cancels once a consumer requires the same bytes, which is what
@@ -315,9 +272,9 @@ const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY
 /// preimage". The yield is gated behind `Sha256Eval::expose_digest` so the
 /// standalone SHA proof (no consumer) still self-balances.
 ///
-/// **Representation bridge (interface-contract item 4).** SHA holds the
-/// digest as 16-bit `(lo, hi)` limbs; P256 holds `z` as 13-bit limbs. The
-/// two cannot be equated limb-for-limb, so the relation carries **bytes**:
+/// **Representation bridge.** SHA holds the digest as 16-bit `(lo, hi)` limbs,
+/// while consumers bind canonical digest bytes. The two surfaces cannot be
+/// equated limb-for-limb, so the relation carries **bytes**:
 /// the SHA AIR decomposes each limb into two bytes (`limb = 256·b1 + b0`)
 /// and yields the 32 big-endian bytes. The byte values are tied to the
 /// `h_out` limbs by that decomposition constraint, and the provider pins every
@@ -374,7 +331,7 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 /// **Representation bridge (interface-contract item 4).** The message words live
 /// in the trace as 16-bit `(lo, hi)` limbs; the field bytes are their big-endian
 /// decomposition (`limb = 256·b1 + b0`), the same byte bridge the digest uses.
-/// The byte values are tied to the bit-decomposition-pinned message-word limbs by
+/// The byte values are tied to the byte-decomposition-pinned message-word limbs by
 /// that decomposition. Like the digest, the provider range-checks every byte;
 /// this is especially important because a field window can be **sub-word**: an edge byte shares a
 /// limb with a non-exposed neighbour, and a 16-bit limb's split `256·b_hi + b_lo`
@@ -445,10 +402,10 @@ impl SlotIoRelations {
     }
 }
 
-/// All LogUp channels the SHA-256 AIR consumes today: the eight `Σ`/`σ`
-/// decode-table channels, the packed Maj/Ch pair, the chunk-wise `xor_8`
-/// channel, and the four range-check channels. Aggregated so `Sha256Eval` holds a single relations bundle
-/// and the prover-side `draw` walks the transcript once per component.
+/// All LogUp channels in the frozen SHA-256 transcript. The live AIR consumes
+/// the four range-check channels plus optional cross-component digest/field
+/// channels. The decode/Maj/Ch/xor_8 draws are vestigial draws, frozen for
+/// challenge-order compatibility; remove only with a coordinated repin.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sha256Relations {
     pub sigma_decode: SigmaDecodeRelations,
@@ -636,7 +593,7 @@ mod tests {
 
     /// The cross-component digest channel exposes row width 32 — the 32
     /// big-endian bytes of the SHA-256 digest. A regression here would
-    /// desync the provider tuple from the consumer (P256 `z`) tuple and
+    /// desync the provider tuple from the consumer tuple and
     /// silently break the combined-proof balance.
     #[test]
     fn digest_relation_has_row_width_32() {

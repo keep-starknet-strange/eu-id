@@ -4,51 +4,12 @@
 //! provider + a hashio consumer) since coeffs/the sponge are not in this
 //! composition; M6 replaces the balancers with the real components.
 
-use ml_dsa::signature::{Keypair, Signer, Verifier};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+mod common;
 
-use stwo::core::pcs::PcsConfig;
-
-/// Batch-4 logup constraints have log-degree excess 2, so proving needs
-/// `log_blowup >= 2` (production uses 3).
-fn pcs_config() -> PcsConfig {
-    PcsConfig {
-        fri_config: stwo::core::fri::FriConfig::new(0, 2, 3, 1),
-        ..PcsConfig::default()
-    }
-}
+use common::{standalone_pcs_config as pcs_config, witness_and_input};
 
 use stwo_mldsa::decomp::proof::{prove_decomp, verify_decomp};
-use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
-use stwo_mldsa::reference::sponge::shake256;
-use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
-use stwo_mldsa::MlDsaVerifyInput;
-
-fn oracle_input(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut sk_seed = [0u8; 32];
-    rng.fill(&mut sk_seed);
-    let sk = SigningKey::<MlDsa65>::from_seed(&sk_seed.into());
-    let vk = sk.verifying_key();
-    let sig = sk.sign(msg);
-    assert!(vk.verify(msg, &sig).is_ok(), "oracle self-check");
-    let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
-    let sig_bytes: EncodedSignature<MlDsa65> = sig.encode();
-    let pk = pk_decode(vk_bytes.as_slice()).expect("pk_decode");
-    let sp = sig_decode(sig_bytes.as_slice()).expect("sig_decode");
-    let (tr_vec, _) = shake256(&[vk_bytes.as_slice()], 64);
-    let mut tr = [0u8; 64];
-    tr.copy_from_slice(&tr_vec);
-    MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec())
-}
-
-fn witness_and_input(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInput) {
-    let input = oracle_input(seed, msg);
-    let witness = generate_witness(&input).expect("witness");
-    (witness, input)
-}
+use stwo_mldsa::witness::MlDsaWitness;
 
 /// Legacy witness-mutation oracle: proving failure, panic, or verification
 /// failure all count as rejection. Trace-level soundness tests must not use it.

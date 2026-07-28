@@ -44,7 +44,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, ProvingError, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, Relation, TraceLocationAllocator,
+    EvalAtRow, FrameworkComponent, FrameworkEval, TraceLocationAllocator,
 };
 
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
@@ -120,7 +120,7 @@ const RATE: usize = 136;
 pub const HOSTED_MSG_FIELD_ID: u32 = 0;
 
 // =============================================================================
-// Perm-id namespacing plan (extended from the M6 placeholder).
+// Perm-id namespacing plan for the composed SHAKE chains.
 // =============================================================================
 
 /// Disjoint `perm_id_base` assignment across the remaining SHAKE-256 sponge
@@ -148,11 +148,6 @@ impl PermIdPlan {
             c_tilde_base: n_mu,
             sib_base: n_mu + n_c_tilde,
         }
-    }
-
-    /// Build the plan directly from the optional private-µ and c̃ sponge shapes.
-    pub fn from_shapes(mu: Option<&Shape>, ct: &Shape) -> Self {
-        Self::new(mu.map_or(0, Shape::n_perms), ct.n_perms())
     }
 }
 
@@ -304,26 +299,6 @@ fn draw_relations_common(
         decomp,
         sib,
     }
-}
-
-/// The verifier-native EvalAtRs USE sum: `+Σ_id 1/combine(poly_id, coords)`
-/// (copy of `crate::proof::native_use_sum`).
-fn native_use_sum(group_evals: &[SecureField], relations: &CoeffsRelations) -> SecureField {
-    let one = SecureField::from(m31(1));
-    let mut sum = SecureField::zero();
-    for (poly_id, eval) in group_evals.iter().enumerate() {
-        let coords = eval.to_m31_array();
-        let tuple = [
-            m31(poly_id as u32),
-            coords[0],
-            coords[1],
-            coords[2],
-            coords[3],
-        ];
-        let denom: SecureField = relations.eval.combine(&tuple);
-        sum += one / denom;
-    }
-    sum
 }
 
 // =============================================================================
@@ -1028,7 +1003,6 @@ fn full_squeeze(absorbed: &[u8], n_squeeze: usize) -> Vec<u8> {
 struct SpongeOutputs {
     mu: Option<Vec<u8>>,
     ct: Vec<u8>,
-    sib: Vec<u8>,
 }
 
 /// Full squeeze outputs for the in-service jobs. Public-message mode computes
@@ -1037,10 +1011,6 @@ fn sponge_outputs(witness: &MlDsaWitness, native_mu: bool) -> SpongeOutputs {
     SpongeOutputs {
         mu: (!native_mu).then(|| full_squeeze(&witness.sponge.mu_absorbed, 1)),
         ct: full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
-        sib: full_squeeze(
-            &witness.sponge.sample_in_ball_absorbed,
-            sampleinball::MAX_SIB_SQUEEZE_BLOCKS,
-        ),
     }
 }
 
@@ -1693,12 +1663,6 @@ impl AirProver for MlDsaProver {
             self.input.c_tilde[..],
             "c̃ squeeze prefix mismatch"
         );
-        assert_eq!(
-            outputs.sib.len(),
-            sampleinball::MAX_SIB_SQUEEZE_BYTES,
-            "SIB squeeze must fill the fixed five-block resource cap"
-        );
-
         let sbytes = sink_bytes(outputs);
         let sink_descs = sink_evals(
             &self.namespace,
@@ -1844,7 +1808,7 @@ impl AirProver for MlDsaProver {
         tb.extend_evals(evals);
 
         // native_use_sum (folded verifier term) appended LAST.
-        self.claims.native_use = native_use_sum(&self.group_evals, &rel.coeffs);
+        self.claims.native_use = crate::proof::native_use_sum(&self.group_evals, &rel.coeffs);
     }
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         self.built.as_ref().expect("built").ordered_prover()
@@ -2012,7 +1976,7 @@ impl Air for MlDsaVerifier {
             self.shared_range.as_ref(),
             &self.keccak_handle,
         );
-        self.claims.native_use = native_use_sum(&self.group_evals, &rel.coeffs);
+        self.claims.native_use = crate::proof::native_use_sum(&self.group_evals, &rel.coeffs);
         self.relations = Some(rel);
     }
     fn layout(&self) -> TreeLayout {

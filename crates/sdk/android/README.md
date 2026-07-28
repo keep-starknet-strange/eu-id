@@ -23,6 +23,9 @@ directly:
 `preBuild` depends on both; writing into AGP's conventional source dirs means
 they're packaged into the AAR with no source-set DSL. Runs on Gradle 9.x.
 
+The default native library excludes the deterministic issuer demo. For a demo-only build, pass
+the Rust feature explicitly (for example, `cargo build -p sdk --features demo`).
+
 The first `proveIdentity` or `verifyIdentity` call sizes Rayon's global pool to
 the detected performance-core tier. An integrator can call
 `configureProverThreads(threads)` before that first proof operation; a `false`

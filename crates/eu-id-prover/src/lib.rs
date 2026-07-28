@@ -1,8 +1,9 @@
 //! Quantum-safe EU identity prover.
 //!
 //! The product path parses an ISO mdoc PID, proves its ML-DSA-65 issuer,
-//! device, and optional revocation signatures, and binds the hidden attributes
-//! to the verifier's age and nationality policy in one STARK proof.
+//! and device signatures, and binds the hidden attributes to the verifier's
+//! age and nationality policy in one STARK proof. Revocation-bearing proofs
+//! use the dedicated TS13 path.
 
 pub(crate) mod claimed_sum_blinder;
 pub mod mdoc;

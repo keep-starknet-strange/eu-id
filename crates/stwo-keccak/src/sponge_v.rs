@@ -349,7 +349,7 @@ pub struct SpongeVRun {
     /// Active rows in coset order (`len == jobs.n_perms_total()`).
     pub rows: Vec<RowData>,
     /// Permutation input rows `[spread_state(200) | perm_id]` for
-    /// [`crate::stark::build_perm_witness`] (lane 0 real, splatted).
+    /// [`crate::service::build_perm_witness`] (lane 0 real, splatted).
     pub perm_inputs: Vec<[PackedM31; N_BYTES_IN_STATE + 1]>,
     /// xor3 uses per non-first absorb row, for [`crate::tables_air::TableMultiplicities::add_sponge`].
     pub xor: Vec<Vec<[PackedM31; 2]>>,

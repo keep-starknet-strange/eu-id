@@ -319,7 +319,7 @@ mod binding_tests {
     //! the two nationality bytes on the shared `Sha256Field` channel). This
     //! exercises the whole bound path — the binding layout, the
     //! boolean/reconciliation constraints, and the cross-module balance — through
-    //! a real `air_core::prove`/`verify`, without the (slow) P256 + SHA proof.
+    //! a real `air_core::prove`/`verify`, without the full SHA + ML-DSA proof.
 
     use super::*;
     use crate::nat::types::PrivateInput;

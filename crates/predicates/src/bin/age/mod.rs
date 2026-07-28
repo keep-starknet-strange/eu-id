@@ -1,28 +1,25 @@
 #![allow(dead_code)]
 
 use predicates::age::strategy::AgeCheckStrategy;
-use predicates::{
-    AgeBitDecomposition, AgeBitDecompositionProof, AgeRangeCheck, AgeRangeCheckProof, Date,
-    DateOfBirth, PublicInput,
-};
+use predicates::{AgeRangeCheck, AgeRangeCheckProof, Date, DateOfBirth, PublicInput};
 use std::time::{SystemTime, UNIX_EPOCH};
 use stwo::core::pcs::PcsConfig;
 
 use super::common::{get_flag, DEFAULT_PROOF_PATH};
 
 pub fn prove_usage() -> ! {
-    eprintln!("usage: prove age --dob YYYY-MM-DD [--date YYYY-MM-DD] [--min-age N] [--strategy bd|rc] [--output PATH]");
+    eprintln!("usage: prove age --dob YYYY-MM-DD [--date YYYY-MM-DD] [--strategy rc] [--min-age N] [--output PATH]");
     eprintln!("  --dob       date of birth (required)");
     eprintln!("  --date      current date, defaults to today");
     eprintln!("  --min-age   minimum age in years, default 18");
-    eprintln!("  --strategy  bd (bit decomposition) | rc (range check), default rc");
+    eprintln!("  --strategy  rc (range check), default rc");
     eprintln!("  --output    proof output path, default {DEFAULT_PROOF_PATH}");
     std::process::exit(1);
 }
 
 pub fn verify_usage() -> ! {
-    eprintln!("usage: verify age [--strategy bd|rc] [--input PATH]");
-    eprintln!("  --strategy  bd (bit decomposition) | rc (range check), default rc");
+    eprintln!("usage: verify age [--strategy rc] [--input PATH]");
+    eprintln!("  --strategy  rc (range check), default rc");
     eprintln!("  --input     proof file path, default {DEFAULT_PROOF_PATH}");
     std::process::exit(1);
 }
@@ -74,20 +71,9 @@ pub fn prove(args: &[String], output: &str) {
     let public = PublicInput::new(current, min_age);
     let dob = DateOfBirth(dob);
 
-    // Each strategy is its own predicate; call the chosen one directly and
-    // serialize its concrete proof type.
     let proof_bytes = match strategy {
         AgeCheckStrategy::RangeCheck => {
             let proof = AgeRangeCheck::new(PcsConfig::default())
-                .prove(&public, &dob)
-                .unwrap_or_else(|e| {
-                    eprintln!("prove failed: {e}");
-                    std::process::exit(1)
-                });
-            bincode::serialize(&proof).unwrap()
-        }
-        AgeCheckStrategy::BitDecomposition => {
-            let proof = AgeBitDecomposition::new(PcsConfig::default())
                 .prove(&public, &dob)
                 .unwrap_or_else(|e| {
                     eprintln!("prove failed: {e}");
@@ -124,16 +110,10 @@ pub fn verify(args: &[String], input: &str) {
         std::process::exit(1);
     });
 
-    // Deserialize the concrete proof type for the chosen strategy and verify it
-    // with that strategy's predicate directly.
     let result = match strategy {
         AgeCheckStrategy::RangeCheck => {
             let proof: AgeRangeCheckProof = deserialize_proof(&bytes);
             AgeRangeCheck::new(PcsConfig::default()).verify(&proof)
-        }
-        AgeCheckStrategy::BitDecomposition => {
-            let proof: AgeBitDecompositionProof = deserialize_proof(&bytes);
-            AgeBitDecomposition::new(PcsConfig::default()).verify(&proof)
         }
     };
 
@@ -188,9 +168,8 @@ fn parse_date(s: &str) -> Result<Date, String> {
 
 fn parse_strategy(s: &str) -> Result<AgeCheckStrategy, String> {
     match s {
-        "bd" => Ok(AgeCheckStrategy::BitDecomposition),
         "rc" => Ok(AgeCheckStrategy::RangeCheck),
-        other => Err(format!("unknown strategy '{other}', expected: bd, rc")),
+        other => Err(format!("unknown strategy '{other}', expected: rc")),
     }
 }
 

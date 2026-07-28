@@ -12,8 +12,8 @@
 //! Today this hosts two byte-level bridges:
 //!
 //! - the SHA→consumer **digest byte bridge**: SHA-256 yields its 32-byte
-//!   final-block digest; the P256 ECDSA module requires the same 32 bytes as its
-//!   message hash `z`.
+//!   final-block digest; ML-DSA verifier modules require those bytes at their
+//!   hash-binding boundaries.
 //! - the SHA→predicate **credential-field byte bridge**: SHA-256 yields the byte
 //!   windows of the signed credential's fields (date of birth, nationality);
 //!   each predicate requires exactly those bytes so the attribute it reasons
@@ -28,8 +28,7 @@ use std::rc::Rc;
 use stwo_constraint_framework::relation;
 
 /// Number of base-field cells in the cross-module digest relation — the 32
-/// bytes of a SHA-256 digest. Must equal `stwo_sha256::constants::DIGEST_BYTES`
-/// and `stwo_p256::components::digest_bind::DIGEST_BYTES`.
+/// bytes of a SHA-256 digest. Must equal `stwo_sha256::constants::DIGEST_BYTES`.
 pub const DIGEST_BYTES_ARITY: usize = 32;
 
 relation!(DigestBytesRelation, DIGEST_BYTES_ARITY);
@@ -50,8 +49,8 @@ relation!(DigestBytesRelation, DIGEST_BYTES_ARITY);
 /// no `Sync` is required. `Clone` and `Default` are hand-written so they do not
 /// demand `R: Clone` / `R: Default` (the `Rc` is always cloneable).
 ///
-/// Two instances are live today: [`SharedDigestRelation`] (SHA → bridge digest)
-/// and the P256 `ScalarZRelation` handle (P256 → bridge `z` binding).
+/// Live instances include [`SharedDigestRelation`] (SHA → digest consumer) and
+/// [`SharedFieldRelation`] (SHA → credential-field consumers).
 ///
 /// [`set`]: SharedRelation::set
 /// [`get`]: SharedRelation::get
@@ -130,44 +129,7 @@ pub mod field_id {
     /// The nationality window (`code_hi, code_lo`), bound by the nationality
     /// predicate.
     pub const NATIONALITY: u32 = 1;
-    /// The `birth_date` `elementIdentifier` window (10 ASCII bytes), pinned to
-    /// the public constant by the mdoc MSO window-bind component (Phase D1).
-    pub const MDOC_BIRTH_DATE_ELEMENT_ID: u32 = 2;
-    /// The `nationality` `elementIdentifier` window (11 ASCII bytes), pinned to
-    /// the public constant (Phase D1).
-    pub const MDOC_NATIONALITY_ELEMENT_ID: u32 = 3;
-    /// The `valueDigests[ns][birth_digestID]` window (32 bytes) in the issuer
-    /// MSO preimage, bound to the birth_date item SHA digest (Phase D2).
-    pub const MDOC_BIRTH_DATE_DIGEST: u32 = 4;
-    /// The `valueDigests[ns][nat_digestID]` window (32 bytes) in the issuer MSO
-    /// preimage, bound to the nationality item SHA digest (Phase D2).
-    pub const MDOC_NATIONALITY_DIGEST: u32 = 5;
-    /// The `deviceKey` COSE_Key `-2` (x) coordinate window (32 bytes) in the
-    /// issuer MSO preimage, bound to the device signature's public key x
-    /// coordinate (Phase D3).
-    pub const MDOC_DEVICE_KEY_X: u32 = 6;
-    /// The `deviceKey` COSE_Key `-3` (y) coordinate window (32 bytes) in the
-    /// issuer MSO preimage, bound to the device signature's public key y
-    /// coordinate (Phase D3).
-    pub const MDOC_DEVICE_KEY_Y: u32 = 7;
-    /// The `validityInfo.validFrom` full-date window (10 ASCII bytes) in the
-    /// issuer MSO preimage, bound and compared to the public policy date.
-    pub const MDOC_VALID_FROM: u32 = 8;
-    /// The `validityInfo.validUntil` full-date window (10 ASCII bytes) in the
-    /// issuer MSO preimage, bound and compared to the public policy date.
-    pub const MDOC_VALID_UNTIL: u32 = 9;
-    /// Local CBOR anchor before the birth-date digest value.
-    pub const MDOC_BIRTH_DATE_DIGEST_ANCHOR: u32 = 10;
-    /// Local CBOR anchor before the nationality digest value.
-    pub const MDOC_NATIONALITY_DIGEST_ANCHOR: u32 = 11;
-    /// Local CBOR anchor before the deviceKey x-coordinate value.
-    pub const MDOC_DEVICE_KEY_X_ANCHOR: u32 = 12;
-    /// Local CBOR anchor before the deviceKey y-coordinate value.
-    pub const MDOC_DEVICE_KEY_Y_ANCHOR: u32 = 13;
-    /// Local CBOR anchor before the validityInfo.validFrom date text.
-    pub const MDOC_VALID_FROM_ANCHOR: u32 = 14;
-    /// Local CBOR anchor before the validityInfo.validUntil date text.
-    pub const MDOC_VALID_UNTIL_ANCHOR: u32 = 15;
+    // ids 2–15 reserved (legacy); mdoc dynamic fields allocate from 16+.
 }
 
 #[cfg(test)]
@@ -231,26 +193,8 @@ mod tests {
 
     #[test]
     fn credential_field_ids_are_distinct() {
-        let ids = [
-            field_id::DOB,
-            field_id::NATIONALITY,
-            field_id::MDOC_BIRTH_DATE_ELEMENT_ID,
-            field_id::MDOC_NATIONALITY_ELEMENT_ID,
-            field_id::MDOC_BIRTH_DATE_DIGEST,
-            field_id::MDOC_NATIONALITY_DIGEST,
-            field_id::MDOC_DEVICE_KEY_X,
-            field_id::MDOC_DEVICE_KEY_Y,
-            field_id::MDOC_VALID_FROM,
-            field_id::MDOC_VALID_UNTIL,
-            field_id::MDOC_BIRTH_DATE_DIGEST_ANCHOR,
-            field_id::MDOC_NATIONALITY_DIGEST_ANCHOR,
-            field_id::MDOC_DEVICE_KEY_X_ANCHOR,
-            field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
-            field_id::MDOC_VALID_FROM_ANCHOR,
-            field_id::MDOC_VALID_UNTIL_ANCHOR,
-        ];
-        for (index, id) in ids.iter().enumerate() {
-            assert!(!ids[index + 1..].contains(id));
-        }
+        assert_ne!(field_id::DOB, field_id::NATIONALITY);
+        assert!(field_id::DOB < 2);
+        assert!(field_id::NATIONALITY < 2);
     }
 }

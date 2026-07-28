@@ -25,15 +25,6 @@ pub struct SpongeTranscript {
     pub squeezed: Vec<u8>,
 }
 
-/// Which of the two FIPS 204 XOFs a transcript used.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum XofKind {
-    /// SHAKE-128 (`G`) — used by `RejNTTPoly` / `ExpandA`.
-    Shake128,
-    /// SHAKE-256 (`H`) — used by `tr`, `µ`, `c̃`, `SampleInBall`.
-    Shake256,
-}
-
 /// SHAKE-256 (`H`) over the concatenation of `inputs`, squeezing `out_len`
 /// bytes, recording the transcript.
 pub fn shake256(inputs: &[&[u8]], out_len: usize) -> (Vec<u8>, SpongeTranscript) {

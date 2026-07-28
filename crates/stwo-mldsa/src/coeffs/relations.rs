@@ -98,11 +98,6 @@ impl CoeffsRelations {
             ccell: CCellRelation::dummy(),
         }
     }
-
-    /// The relation instance for a table kind.
-    pub fn rc(&self, _kind: super::tables::RcKind) -> &RangeRelation {
-        &self.range
-    }
 }
 
 #[cfg(test)]

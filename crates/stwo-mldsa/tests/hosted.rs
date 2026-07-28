@@ -12,14 +12,13 @@
 //! `RUST_MIN_STACK=536870912 cargo test -p stwo-mldsa --release --test hosted \
 //!   -- --test-threads=1`.
 
-use ml_dsa::signature::{Keypair, Signer, Verifier};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+mod common;
+
+use common::{composed_pcs_config as pcs_config, oracle_input};
 
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::SecureField;
-use stwo::core::fri::FriConfig;
-use stwo::core::pcs::PcsConfig;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -41,8 +40,6 @@ use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_mldsa::air_util::{col_eval, m31, ColEval};
 use stwo_mldsa::coeffs::relations::SharedRangeRelation;
 use stwo_mldsa::coeffs::tables::SharedRangeTable;
-use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
-use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
     hosted_claimed_sums_len, hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProver,
     MlDsaVerifier, HOSTED_MSG_FIELD_ID, STREAM_BASE_STRIDE,
@@ -117,15 +114,6 @@ impl FieldProducer {
     }
     fn field(&self) -> FieldBytesRelation {
         self.field.clone().expect("relation drawn")
-    }
-}
-
-/// The direct Keccak round AIR uses batch-four LogUp, so blowup two suffices.
-fn pcs_config() -> PcsConfig {
-    PcsConfig {
-        pow_bits: 10,
-        fri_config: FriConfig::new(0, 2, 3, 1),
-        lifting_log_size: None,
     }
 }
 
@@ -256,26 +244,6 @@ struct HostedProof {
     service_claimed_sums: Vec<SecureField>,
     post_interaction_payloads: Vec<Vec<u8>>,
     stark_proof: stwo::core::proof::StarkProof<air_core::Hasher>,
-}
-
-fn oracle_input(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut sk_seed = [0u8; 32];
-    rng.fill(&mut sk_seed);
-    let sk = SigningKey::<MlDsa65>::from_seed(&sk_seed.into());
-    let vk = sk.verifying_key();
-    let sig = sk.sign(msg);
-    assert!(vk.verify(msg, &sig).is_ok(), "oracle self-check");
-    let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
-    let sig_bytes: EncodedSignature<MlDsa65> = sig.encode();
-    let pk = pk_decode(vk_bytes.as_slice()).expect("pk_decode");
-    let sp = sig_decode(sig_bytes.as_slice()).expect("sig_decode");
-    let (tr_vec, _) = shake256(&[vk_bytes.as_slice()], 64);
-    let mut tr = [0u8; 64];
-    tr.copy_from_slice(&tr_vec);
-    MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec())
 }
 
 /// Prove the hosted statement: `[range_table, keccak_service,

@@ -94,9 +94,6 @@ pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + ROUND_OPERAND_BIT_COLS;
 /// Columns of the schedule family (live for `t ≥ 16`):
 /// `σ0`, `σ1`, carries (= 6), then lower-sigma output bits.
 pub const SCHEDULE_ENTRY_COLS: usize = 6 + SCHEDULE_SIGMA_OUTPUT_BIT_COLS;
-/// Number of schedule entries: `W[16..64]` ⇒ 48.
-pub const N_SCHEDULE_ENTRIES: usize = N_ROUNDS - 16;
-
 /// Columns dedicated to the per-block padding-role witness (§10.4 of the
 /// validated design), live on each block's `t = 15` row. Laid out in the
 /// order [`write_padding_row`] writes them:

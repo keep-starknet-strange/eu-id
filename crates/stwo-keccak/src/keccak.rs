@@ -169,7 +169,7 @@ impl Claim {
 
     /// Build the boundary-row trace. `perm_inputs` are splatted per-permutation
     /// rows `[spread_state(200) | perm_id]` with lane 0 real (the sponge's
-    /// request order — same feed as [`crate::stark::build_perm_witness`]).
+    /// request order — same feed as [`crate::service::build_perm_witness`]).
     pub fn generate_trace(
         perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]],
     ) -> (Self, Vec<ColEval>, InteractionClaimData) {

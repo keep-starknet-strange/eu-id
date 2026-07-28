@@ -33,11 +33,9 @@
 //!
 //! **Lookup-side rejection (the complement of this file).** This driver
 //! deliberately ignores `add_to_relation` calls, so the four `Range_k`
-//! channels, the σ/Σ decode tables, the packed Maj/Ch lookup, the
-//! `xor_8` chunk-combine, and the eight split-and-pack lookups are not
-//! exercised here. End-to-end coverage of those — including a
-//! carry-out-of-range witness mutation that closes L4 from the lookup
-//! side — lives in `tests/prove_verify_round_trip.rs`
+//! channels are not exercised here. End-to-end coverage of those — including
+//! a carry-out-of-range witness mutation that closes L4 from the lookup side —
+//! lives in `tests/prove_verify_round_trip.rs`
 //! (`rejects_out_of_range_carry_witness_mutation`,
 //! `verify_rejects_range_k_claimed_sum_mutations`).
 

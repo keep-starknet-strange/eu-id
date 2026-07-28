@@ -1,5 +1,5 @@
-//! Standalone prove/verify for `mldsa_decomp` through the `air-core` orchestrator
-//! (mirrors `crate::proof`). The module contributes, in commit order:
+//! Test harness for `mldsa_decomp` through the `air-core` orchestrator. The
+//! module contributes, in commit order:
 //!   1. `decomp`             — the [DECOMP]+[HINT] byte-pair component.
 //!   2. rc providers          — rc4, rc13, rc7, rc8 (one each).
 //!   3. `wcell_provider`      — TEST-SIDE balancer: yields the `(w_bind_id, w)`

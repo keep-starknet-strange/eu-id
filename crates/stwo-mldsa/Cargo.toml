@@ -9,7 +9,7 @@ edition.workspace = true
 # byte streams; the future M3 in-circuit sponge (stwo-keccak) replaces this
 # runtime dependency for the AIR, but the native reference keeps it.
 sha3 = "0.10"
-# Serialize the M2 verification input (mirrors stwo-p256's EcdsaVerifyInput).
+# Serialize the ML-DSA verification input and proof envelopes.
 serde = { workspace = true }
 # AIR / STARK stack for the M4 `mldsa_coeffs` component (bivariate-Horner lift).
 stwo.workspace = true

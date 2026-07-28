@@ -489,6 +489,90 @@ mod quantum_only {
         );
     }
 
+    /// A-719: moving the value/anchor offsets as a consistent pair preserves
+    /// every host-side shape invariant. Prove may still succeed because this
+    /// is a cross-component LogUp binding; the verifier's global claimed-sum
+    /// cancellation gate is the soundness boundary.
+    #[test]
+    fn consistent_value_offset_pair_forgery_rejects_in_circuit() {
+        let session_transcript = openid4vp_session_transcript(b"a719-window-forgery");
+        let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_attribute(
+            &session_transcript,
+            "age_over_18",
+            ciborium::value::Value::Bool(true),
+        );
+        let mut request = MdocPidRequest::eudi_pid(session_transcript);
+        request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+        }];
+        request.trusted_mldsa_issuer_public_keys = vec![fixture.issuer_pk];
+        let extracted =
+            extract_pid_mdoc(&fixture.document, &request).expect("equality fixture extracts");
+        let statement =
+            MdocCircuitStatement::from_extracted(&extracted, demo_policy()).expect("statement");
+        let honest_proof = prove_mdoc_circuit(&extracted, &statement).expect("honest proof");
+        eu_id_prover::verify_mdoc(&honest_proof, &statement).expect("honest proof verifies");
+
+        let attribute = &statement.attributes[0];
+        let item = &extracted.extracted_attributes[0].item;
+        let forged_value_offset = (0..item.len())
+            .find(|&candidate| {
+                let Some(shift) = candidate.checked_sub(attribute.value_offset) else {
+                    return false;
+                };
+                let Some(anchor_offset) = attribute.element_value_anchor_offset.checked_add(shift)
+                else {
+                    return false;
+                };
+                candidate != attribute.value_offset
+                    && candidate + attribute.value.len() <= item.len()
+                    && anchor_offset + attribute.element_value_anchor.len() <= item.len()
+                    && item[candidate..candidate + attribute.value.len()] != attribute.value
+                    && item[anchor_offset..anchor_offset + attribute.element_value_anchor.len()]
+                        != attribute.element_value_anchor
+            })
+            .expect("fixture has an unrelated in-item byte window after the value");
+        let offset_shift = forged_value_offset - attribute.value_offset;
+
+        let mut forged_statement = statement.clone();
+        let forged = &mut forged_statement.attributes[0];
+        forged.value_offset = forged_value_offset;
+        forged.element_value_anchor_offset += offset_shift;
+        assert_eq!(
+            forged.element_value_anchor_offset + forged.element_value_anchor.len(),
+            forged.value_offset + forged.value_head.len(),
+            "forgery retains the host-validated elementValue adjacency shape"
+        );
+        assert_ne!(
+            &item[forged.value_offset..forged.value_offset + forged.value.len()],
+            forged.value.as_slice(),
+            "forged value window is not the signed elementValue"
+        );
+        assert_ne!(
+            &item[forged.element_value_anchor_offset
+                ..forged.element_value_anchor_offset + forged.element_value_anchor.len()],
+            forged.element_value_anchor.as_slice(),
+            "forged anchor window is not the signed elementValue key/head"
+        );
+
+        let forged_proof = prove_mdoc_circuit(&extracted, &forged_statement)
+            .expect("forged prove may succeed; verifier global LogUp balance must reject");
+        let verify_error = eu_id_prover::verify_mdoc(&forged_proof, &forged_statement)
+            .expect_err("verifier must reject the forged statement's shifted item window");
+        assert!(
+            !format!("{verify_error:?}").contains("private elementIdentifier binding"),
+            "host validation must accept the forged shape so this reaches the circuit: {verify_error:?}"
+        );
+
+        let honest_under_forged_error = eu_id_prover::verify_mdoc(&honest_proof, &forged_statement)
+            .expect_err("verifier must reject an honest proof under the forged statement");
+        assert!(
+            !format!("{honest_under_forged_error:?}").contains("private elementIdentifier binding"),
+            "verify-side host validation must accept the forged shape: {honest_under_forged_error:?}"
+        );
+    }
+
     #[test]
     fn nationality_array_member_index_tamper_rejects_at_prove() {
         let session_transcript = openid4vp_session_transcript(b"nationality-array-tamper");
@@ -1111,14 +1195,13 @@ mod quantum_only {
             .expect_err("long revocation claimed-sum vector must reject before parsing");
 
         let mut missing_range_claim = proof_a.clone();
-        missing_range_claim.mldsa_range_table_claimed_sum = None;
+        missing_range_claim.clear_mldsa_range_table_claimed_sum_for_test();
         verify_mdoc_circuit(&missing_range_claim, &statement_a)
             .expect_err("missing proof-wide range claim must reject at the shape gate");
 
         let mut tampered_range_claim = proof_a.clone();
         *tampered_range_claim
-            .mldsa_range_table_claimed_sum
-            .as_mut()
+            .mldsa_range_table_claimed_sum_mut_for_test()
             .expect("proof-wide range claim") += stwo::core::fields::qm31::SecureField::from(
             stwo::core::fields::m31::M31::from_u32_unchecked(1),
         );

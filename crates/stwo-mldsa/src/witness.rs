@@ -97,8 +97,6 @@ pub const Q_DIGITS: [i128; 3] = [1, -16, 32];
 /// Per-row limb-identity witness for one `i ∈ [k]` (worksheet §1, §3).
 #[derive(Clone, Debug)]
 pub struct RowWitness {
-    /// `u_i(X) = Σ_j A_ij·z_j − c·t1_i·2^d`, integer coefficients (deg ≤ 510).
-    pub u: Vec<i128>,
     /// `v_i`: high half of `u_i`, `v_{i,m} = u_{i,m+256}`, `m ∈ [0,254]`.
     pub v: Vec<i128>,
     /// `e_i`: `e_{i,m} = (u_{i,m} − w_{i,m} − v_{i,m})/q`, `m ∈ [0,255]` (exact).
@@ -222,7 +220,7 @@ impl std::error::Error for WitnessError {}
 /// Decompose signed `x` into exactly `T` balanced base-B digits in `[−256, 256)`,
 /// low-first. Panics if `x` does not fit in `T` digits (a soundness assert: the
 /// digit-count budget in §3.1 must cover every honest coefficient).
-fn balanced_digits<const T: usize>(mut x: i128) -> [i128; T] {
+pub(crate) fn balanced_digits<const T: usize>(mut x: i128) -> [i128; T] {
     let mut out = [0i128; T];
     for slot in out.iter_mut() {
         // Centered remainder: r ∈ [−B/2, B/2).
@@ -459,7 +457,7 @@ fn build_from_trace(
             &mut maxima,
         );
 
-        rows.push(RowWitness { u, v, e, w, carry });
+        rows.push(RowWitness { v, e, w, carry });
     }
 
     // --- Decompose / hint witness (S5 [DECOMP]/[HINT]) ----------------------

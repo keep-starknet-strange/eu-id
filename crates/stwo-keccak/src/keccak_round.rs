@@ -47,7 +47,7 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_air_utils::trace::component_trace::ComponentTrace;
 use stwo_air_utils_derive::{IterMut, ParIterMut, Uninitialized};
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
 };
 
 use crate::constants::{
@@ -580,12 +580,6 @@ pub struct RoundLookup<E: EvalAtRow> {
 #[derive(Clone)]
 pub struct Eval {
     pub claim: Claim,
-    pub relations: KeccakRelations,
-    /// `true` = the round's LogUp is offloaded to GKR: the component emits NO
-    /// interaction columns and only the enabler booleanity constraint; the
-    /// lookup multiset is proven by the host's GKR proof + MLE-eval tie-back
-    /// over the same base columns this eval masks.
-    pub gkr_offload: bool,
 }
 
 impl FrameworkEval for Eval {
@@ -593,50 +587,17 @@ impl FrameworkEval for Eval {
         self.claim.log_size
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        if self.gkr_offload {
-            // Only the degree-2 enabler booleanity remains in-AIR.
-            self.log_size() + 1
-        } else {
-            // Every logup numerator is degree ≤ 1 (±enabler or 1) and every
-            // tuple cell — hence every denominator — is degree ≤ 1, so batch-4
-            // logup constraints are degree 1 + 4·1 = 5 ≤ D5 (log + 2).
-            self.log_size() + 2
-        }
+        // Only the degree-2 enabler booleanity remains in-AIR. Round lookups
+        // are always proven by the service's GKR proof + MLE-eval tie-back.
+        self.log_size() + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        if self.gkr_offload {
-            // Mask every base column (the tie-back oracle replays this walk at
-            // the OODS point) and keep the booleanity constraint; the lookups
-            // themselves are GKR's.
-            let _ = collect_round_lookups(&mut eval);
-        } else {
-            evaluate_round(&mut eval, &self.relations);
-        }
+        // Mask every base column (the tie-back oracle replays this walk at the
+        // OODS point) and keep the booleanity constraint; the lookups
+        // themselves are GKR's.
+        let _ = collect_round_lookups(&mut eval);
         eval
     }
-}
-
-/// The legacy columnar round body: collect the lookups, emit them through the
-/// framework's LogUp, batch-finalize. Kept for the standalone `stark.rs` AIR
-/// and as the reference emission order for the GKR offload.
-pub fn evaluate_round<E: EvalAtRow>(eval: &mut E, rel: &KeccakRelations) {
-    for lk in collect_round_lookups(eval) {
-        match lk.kind {
-            RoundLookupKind::Kr => {
-                eval.add_to_relation(RelationEntry::new(&rel.keccak_round, lk.num, &lk.tuple))
-            }
-            RoundLookupKind::Xor3 => {
-                eval.add_to_relation(RelationEntry::new(&rel.xor3, lk.num, &lk.tuple))
-            }
-            RoundLookupKind::Andnot => {
-                eval.add_to_relation(RelationEntry::new(&rel.andnot, lk.num, &lk.tuple))
-            }
-            RoundLookupKind::Split(r) => {
-                eval.add_to_relation(RelationEntry::new(&rel.split[r - 1], lk.num, &lk.tuple))
-            }
-        }
-    }
-    eval.finalize_logup_batched(LOGUP_BATCH);
 }
 
 /// Walk the round's base-column masks, add the enabler booleanity constraint,
@@ -852,7 +813,7 @@ impl InteractionClaim {
 /// in consecutive chunks of [`LOGUP_BATCH`] (matching `finalize_logup_batched`;
 /// the last chunk may be smaller).
 ///
-/// Emission order (must equal `evaluate_round`):
+/// Emission order (must equal `collect_round_lookups`):
 ///   kr[0], [theta C: 2 xor3 per byte, 5·8], [C_rot split 0..40],
 ///   [theta-apply 200 xor3], [rho split 40..216],
 ///   [chi: andnot then closing-xor3, interleaved per byte, 25·8],
@@ -1044,9 +1005,6 @@ fn push_link_fraction<R: Relation<PackedM31, PackedQM31>>(
         (if negate { -e } else { e }, rel.combine(&lookup[vr]))
     }));
 }
-
-pub const N_COLUMNS_PUB: usize = N_COLUMNS;
-pub const N_INTERACTION_COLUMNS_PUB: usize = N_INTERACTION_COLUMNS;
 
 // ─────────────────────── W3a: GKR-offload oracle de-risk ────────────────────
 //

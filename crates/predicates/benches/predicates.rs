@@ -10,7 +10,6 @@ mod age;
 mod nat;
 
 fn bench_all(c: &mut Criterion) {
-    harness::run_bench(c, &age::bit_decomposition_case());
     harness::run_bench(c, &age::range_check_case());
     harness::run_nat_bench(c, &nat::greek_in_schengen_case());
 }

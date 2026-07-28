@@ -1,15 +1,16 @@
-//! Small AIR helpers shared by the M4 `coeffs` component and its proof module —
-//! local copies of the `stwo-p256` column/ordering utilities (the mldsa crate
-//! does not depend on stwo-p256).
+//! Small AIR helpers shared by the ML-DSA components and proof modules.
 
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::SecureField;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::LOG_N_LANES;
+use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
+use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
+use stwo_constraint_framework::LogupTraceGenerator;
 
 /// A base-field column evaluation over the circle domain (bit-reversed order).
 pub type ColEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
@@ -17,6 +18,66 @@ pub type ColEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 /// `M31::from_u32_unchecked` shorthand.
 pub fn m31(value: u32) -> M31 {
     M31::from_u32_unchecked(value)
+}
+
+/// Centered M31 encoding of a signed integer.
+pub(crate) fn enc_signed(value: impl Into<i128>) -> M31 {
+    const P: i128 = (1 << 31) - 1;
+    m31(value.into().rem_euclid(P) as u32)
+}
+
+/// Smallest range-table log size covering `n_values`, floored at the SIMD lane width.
+pub(crate) const fn table_log_size(n_values: usize) -> u32 {
+    let bits = usize::BITS - (n_values - 1).leading_zeros();
+    if bits < LOG_N_LANES {
+        LOG_N_LANES
+    } else {
+        bits
+    }
+}
+
+/// Preprocessed value column `[0, 1, …, n−1, 0, 0, …]`.
+pub(crate) fn gen_value_table_preprocessed(log_size: u32, n_values: usize) -> ColEval {
+    let rows = 1usize << log_size;
+    col_eval(
+        log_size,
+        (0..rows)
+            .map(|i| m31(if i < n_values { i as u32 } else { 0 }))
+            .collect(),
+    )
+}
+
+/// Multiplicity column: how many times each table value is consumed.
+pub(crate) fn gen_value_table_multiplicities(
+    log_size: u32,
+    n_values: usize,
+    uses: &[u32],
+) -> ColEval {
+    assert_eq!(uses.len(), n_values, "one multiplicity per table value");
+    let rows = 1usize << log_size;
+    col_eval(
+        log_size,
+        (0..rows)
+            .map(|i| m31(if i < n_values { uses[i] } else { 0 }))
+            .collect(),
+    )
+}
+
+/// Interaction column for a value table provider: `−mult / denominator(value)`.
+pub(crate) fn gen_value_table_interaction(
+    log_size: u32,
+    value: ColEval,
+    multiplicity: &ColEval,
+    denominator: impl Fn(PackedM31) -> PackedQM31 + Send + Sync,
+) -> (Vec<ColEval>, SecureField) {
+    let mut logup = LogupTraceGenerator::new(log_size);
+    logup.col_from_fn(|row| {
+        (
+            -PackedQM31::from(multiplicity.data[row]),
+            denominator(value.data[row]),
+        )
+    });
+    logup.finalize_last()
 }
 
 /// Wrap a coset-ordered value vector (length `2^log_size`) into a

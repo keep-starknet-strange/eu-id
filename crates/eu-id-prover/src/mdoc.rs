@@ -2602,7 +2602,7 @@ pub struct MdocCircuitProof {
     pub mldsa: Option<MdocMlDsaClaims>,
     pub device_mldsa: Option<MdocMlDsaClaims>,
     pub revocation_mldsa: Option<MdocMlDsaClaims>,
-    pub mldsa_range_table_claimed_sum: Option<QM31>,
+    pub(crate) mldsa_range_table_claimed_sum: Option<QM31>,
     pub keccak_service_claimed_sums: Option<Vec<QM31>>,
     merged_sha_log_n_rows: Option<u32>,
     merged_sha_slot_log: Option<u32>,
@@ -2617,6 +2617,18 @@ pub struct MdocCircuitProof {
     /// Opaque post-interaction payloads; production carries the Keccak
     /// service's round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
+}
+
+impl MdocCircuitProof {
+    #[doc(hidden)]
+    pub fn clear_mldsa_range_table_claimed_sum_for_test(&mut self) {
+        self.mldsa_range_table_claimed_sum = None;
+    }
+
+    #[doc(hidden)]
+    pub fn mldsa_range_table_claimed_sum_mut_for_test(&mut self) -> Option<&mut QM31> {
+        self.mldsa_range_table_claimed_sum.as_mut()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -3729,7 +3741,12 @@ fn prepare_mldsa_role(
     mut input: MlDsaVerifyInput,
     witness_error_context: &'static str,
 ) -> Result<(stwo_mldsa::witness::MlDsaWitness, MlDsaVerifyInput), Error> {
-    input.tr = stwo_mldsa::statement::native_tr(&input);
+    let native_tr = stwo_mldsa::statement::native_tr(&input);
+    debug_assert_eq!(
+        input.tr, native_tr,
+        "{witness_error_context} tr must already match SHAKE256(pk)"
+    );
+    input.tr = native_tr;
     let witness = stwo_mldsa::witness::generate_witness(&input)
         .map_err(|error| Error::Prove(format!("{witness_error_context}: {error:?}")))?;
     stwo_mldsa::sampleinball::validate_stream(&witness)

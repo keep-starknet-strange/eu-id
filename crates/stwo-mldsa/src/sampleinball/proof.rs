@@ -1,7 +1,6 @@
-//! Standalone prove/verify for `sampleinball_fsm` via `air-core` (mirrors
-//! `crate::decomp::proof`). Contributes, in commit order:
+//! Test harness for `sampleinball_fsm` via `air-core`. Contributes, in commit order:
 //!   1. `sib`             — the [CHAL] FSM + ternary/τ + c-binding component.
-//!   2. rc providers       — rc8, rc9 (one each).
+//!   2. rc providers       — rc8, rc9, rc11 (one each).
 //!   3. `ccell_provider`   — TEST-SIDE balancer yielding the coeffs C-cell
 //!      `(c_bind_id, c)` tuples the FSM consumes (M6 uses the real coeffs C group).
 //!   4. `hashio_producer`  — TEST-SIDE balancer yielding the squeeze bytes the FSM
@@ -24,7 +23,7 @@ use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
 
-use crate::air_util::{padded_log_size, ColEval};
+use crate::air_util::{enc_signed, padded_log_size, ColEval};
 use crate::balancer::{
     gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
     BALANCER_INTERACTION_COLS,
@@ -94,7 +93,7 @@ fn gen_all_preprocessed(log_size: u32) -> Vec<ColEval> {
 
 fn ccell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
     (0..N)
-        .map(|m| vec![m as u32, enc(witness.digits.c[m])])
+        .map(|m| vec![m as u32, enc_signed(witness.digits.c[m]).0])
         .collect()
 }
 
@@ -104,11 +103,6 @@ fn hashio_tuples(bytes: &[u8]) -> Vec<Vec<u32>> {
         .enumerate()
         .map(|(pos, &b)| vec![STREAM_ID_SIB_SQUEEZE, pos as u32, b as u32])
         .collect()
-}
-
-fn enc(v: i128) -> u32 {
-    const P: i128 = (1 << 31) - 1;
-    (((v % P) + P) % P) as u32
 }
 
 struct Built {

@@ -40,7 +40,8 @@ fn encode_value(value: &Value) -> Vec<u8> {
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, ZkError> {
-    ciborium::de::from_reader(bytes).map_err(|e| ZkError::InvalidInput(format!("invalid CBOR: {e}")))
+    ciborium::de::from_reader(bytes)
+        .map_err(|e| ZkError::InvalidInput(format!("invalid CBOR: {e}")))
 }
 
 /// COSE `protected` header `{1: -49}` serialized to a bstr.
@@ -73,7 +74,9 @@ fn mldsa_cose_key(pk: &[u8]) -> Value {
 fn as_map(value: &Value, ctx: &str) -> Result<Vec<(Value, Value)>, ZkError> {
     match value {
         Value::Map(entries) => Ok(entries.clone()),
-        _ => Err(ZkError::InvalidInput(format!("expected a CBOR map for {ctx}"))),
+        _ => Err(ZkError::InvalidInput(format!(
+            "expected a CBOR map for {ctx}"
+        ))),
     }
 }
 
@@ -221,8 +224,9 @@ pub fn demo_device_auth_sig_structure(
     doctype: String,
 ) -> Result<Vec<u8>, ZkError> {
     let device_payload =
-        eu_id_prover::mdoc::device_authentication_bytes(&session_transcript, &doctype)
-            .map_err(|e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")))?;
+        eu_id_prover::mdoc::device_authentication_bytes(&session_transcript, &doctype).map_err(
+            |e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")),
+        )?;
     Ok(sig_structure(&mldsa_protected_header(), &device_payload))
 }
 
@@ -247,8 +251,9 @@ pub fn demo_build_ml_dsa_witness(
     }
     let issuer_signed = decode_value(&ml_dsa_issuer_signed)?;
     let device_payload =
-        eu_id_prover::mdoc::device_authentication_bytes(&session_transcript, &doctype)
-            .map_err(|e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")))?;
+        eu_id_prover::mdoc::device_authentication_bytes(&session_transcript, &doctype).map_err(
+            |e| ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {e:?}")),
+        )?;
 
     // deviceSignature COSE_Sign1 [protected {1:-49}, {}, payload, signature].
     let device_signature_cose = Value::Array(vec![
@@ -313,7 +318,10 @@ mod tests {
             ),
             (
                 "deviceKeyInfo".into(),
-                Value::Map(vec![("deviceKey".into(), Value::Text("p256-placeholder".into()))]),
+                Value::Map(vec![(
+                    "deviceKey".into(),
+                    Value::Text("p256-placeholder".into()),
+                )]),
             ),
             (
                 "validityInfo".into(),
@@ -328,8 +336,8 @@ mod tests {
             Box::new(Value::Bytes(encode_value(&mso))),
         ));
         let issuer_auth = Value::Array(vec![
-            Value::Bytes(vec![0xA0]),    // dummy protected header
-            Value::Map(Vec::new()),      // dummy unprotected (x5chain for a real P-256 mdoc)
+            Value::Bytes(vec![0xA0]), // dummy protected header
+            Value::Map(Vec::new()),   // dummy unprotected (x5chain for a real P-256 mdoc)
             Value::Bytes(payload),
             Value::Bytes(vec![0u8; 64]), // dummy P-256 signature
         ]);
@@ -382,9 +390,12 @@ mod tests {
         assert_eq!(ns_digests[0].1, Value::Bytes(vec![0xAB; 32]));
 
         // nameSpaces preserved verbatim.
-        let input_ns = map_get(&as_map(&decode_value(&input).unwrap(), "in").unwrap(), "nameSpaces")
-            .unwrap()
-            .clone();
+        let input_ns = map_get(
+            &as_map(&decode_value(&input).unwrap(), "in").unwrap(),
+            "nameSpaces",
+        )
+        .unwrap()
+        .clone();
         assert_eq!(map_get(&issuer_signed, "nameSpaces").unwrap(), &input_ns);
 
         // The signature verifies under the demo issuer key — using the prover's own
@@ -435,10 +446,14 @@ mod tests {
 
         // Structure: { docType, issuerSigned, deviceSigned { deviceAuth { deviceSignature } } }.
         let doc = as_map(&decode_value(&witness).unwrap(), "Document").unwrap();
-        assert_eq!(map_get(&doc, "docType").unwrap(), &Value::Text(PID_NS.to_string()));
+        assert_eq!(
+            map_get(&doc, "docType").unwrap(),
+            &Value::Text(PID_NS.to_string())
+        );
         assert!(map_get(&doc, "issuerSigned").is_ok());
         let device_signed = as_map(map_get(&doc, "deviceSigned").unwrap(), "deviceSigned").unwrap();
-        let device_auth = as_map(map_get(&device_signed, "deviceAuth").unwrap(), "deviceAuth").unwrap();
+        let device_auth =
+            as_map(map_get(&device_signed, "deviceAuth").unwrap(), "deviceAuth").unwrap();
         let device_sig_cose = match map_get(&device_auth, "deviceSignature").unwrap() {
             Value::Array(items) => items.clone(),
             _ => panic!("deviceSignature not a COSE_Sign1 array"),
@@ -449,8 +464,8 @@ mod tests {
         };
 
         // The embedded device signature verifies against the sig_structure the caller signed.
-        let trace = verify_internals(&device_public_key(), &sig_struct, &embedded_sig)
-            .expect("verify");
+        let trace =
+            verify_internals(&device_public_key(), &sig_struct, &embedded_sig).expect("verify");
         assert!(trace.accepted, "assembled deviceSignature must verify");
     }
 

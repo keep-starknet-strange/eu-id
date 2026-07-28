@@ -14,7 +14,7 @@ use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo::prover::backend::simd::m31::N_LANES;
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
+    EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
@@ -73,13 +73,10 @@ impl FrameworkEval for BalancerEval {
             -E::EF::from(enabler.clone())
         };
         self.relation.add_entry(&mut eval, num, &cells);
-        let _ = &enabler;
         eval.finalize_logup();
         eval
     }
 }
-
-pub type BalancerComponent = FrameworkComponent<BalancerEval>;
 
 /// Base trace: `enabler` + `arity` tuple columns. Padding rows have enabler = 0
 /// and zero tuple cells.
@@ -112,9 +109,7 @@ pub fn gen_balancer_interaction(
     relation: &BalancerRelation,
     sign_positive: bool,
 ) -> (Vec<ColEval>, SecureField) {
-    let rows = 1usize << log_size;
     let row_lookup = circle_row_to_coset(log_size);
-    let _ = log_size;
     let zero = SecureField::from(m31(0));
     let one = SecureField::one();
     let signed_one = if sign_positive { one } else { -one };
@@ -133,6 +128,5 @@ pub fn gen_balancer_interaction(
         }
         (PackedQM31::from_array(n), PackedQM31::from_array(d))
     });
-    let _ = rows;
     logup.finalize_last()
 }

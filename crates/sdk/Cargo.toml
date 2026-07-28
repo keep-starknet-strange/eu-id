@@ -25,6 +25,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # ONLY for the `uniffi-bindgen` bin — kept off by default so the SDK cdylib
 # does not link the whole generator toolchain into the `.so`.
 bindgen = ["uniffi/cli"]
+# Demo-only issuance helpers and their deterministic ML-DSA signing key.
+demo = ["dep:ml-dsa"]
 
 [dependencies]
 # The prover is ML-DSA-only by construction.
@@ -33,7 +35,7 @@ uniffi = { version = "0.29" }
 # Demo-only issuance: the RustCrypto `ml-dsa` signer lets the deterministic demo
 # issuer re-sign a P-256 PID mdoc under ML-DSA-65 (see `demo` module). Same
 # version the eu-id-prover fixture uses.
-ml-dsa = "0.1.1"
+ml-dsa = { version = "0.1.1", optional = true }
 thiserror = "2.0.18"
 # Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`
 # map, so the same bytes come out on prove and verify sides.

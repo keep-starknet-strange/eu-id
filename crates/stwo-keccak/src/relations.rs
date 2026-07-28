@@ -70,32 +70,8 @@ pub const HASH_IO_ARITY: usize = 3;
 
 relation!(HashIoRelation, HASH_IO_ARITY);
 
-/// Byte-stream I/O relation — the contract for feeding message bytes in and
-/// reading squeeze bytes out of a SHAKE-256 instance.
-///
-/// A tuple is `(stream_id, byte_pos, byte)`:
-/// - `stream_id` — labels one logical hash stream within a proof. Absorb bytes
-///   and squeeze bytes of the same SHAKE instance share a `stream_id` only if
-///   they are the same physical byte position of the same direction; callers
-///   pick a disjoint id per (instance, in/out) pair as needed.
-/// - `byte_pos` — the position of the byte within its stream (0-based).
-/// - `byte` — the byte value in `[0, 256)`.
-///
-/// ## Multiplicity convention
-///
-/// Keying on `(stream_id, byte_pos)` lets a producer and a consumer pin the
-/// same byte without an ordering column: they emit the same first two cells.
-/// The direction of yield/require is chosen by the composition:
-/// - For **absorb**: the upstream data provider *yields* each declared input
-///   byte; the sponge *consumes* it. A byte the sponge actually absorbs that
-///   differs from the declared byte breaks the balance (negative test:
-///   "absorbed byte differs from HashIo-declared byte → logup imbalance").
-/// - For **squeeze**: the sponge *yields* each output byte; a downstream
-///   consumer requires it. Reading a wrong squeeze byte breaks the balance.
-///
-/// The sponge module documents the exact per-side signs it uses.
-pub struct HashIoDoc;
-
+/// Byte-stream I/O relation for feeding absorb bytes and requiring squeeze
+/// bytes: `(stream_id, byte_pos, byte)`.
 // ───────────────────────────── Internal relations ──────────────────────────
 
 /// `xor3` channel: `(key, spread(xor))` with `key = s1+s2+s3` — arity 2, the

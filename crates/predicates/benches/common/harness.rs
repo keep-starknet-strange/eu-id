@@ -1,9 +1,7 @@
 use criterion::Criterion;
 use predicates::age::strategy::AgeCheckStrategy;
 use predicates::nat::NationalityPredicate;
-use predicates::{
-    AgeBitDecomposition, AgeRangeCheck, DateOfBirth, NatPrivateInput, NatPublicInput, PublicInput,
-};
+use predicates::{AgeRangeCheck, DateOfBirth, NatPrivateInput, NatPublicInput, PublicInput};
 use stwo::core::pcs::PcsConfig;
 
 pub struct BenchCase {
@@ -16,7 +14,6 @@ pub struct BenchCase {
 pub fn run_bench(c: &mut Criterion, case: &BenchCase) {
     let mut group = c.benchmark_group(case.name);
 
-    // Each strategy is its own predicate; bench the chosen one directly.
     let proof_bytes = match case.strategy {
         AgeCheckStrategy::RangeCheck => {
             group.bench_function("prove", |b| {
@@ -32,26 +29,6 @@ pub fn run_bench(c: &mut Criterion, case: &BenchCase) {
             group.bench_function("verify", |b| {
                 b.iter(|| {
                     AgeRangeCheck::new(PcsConfig::default())
-                        .verify(&proof)
-                        .unwrap()
-                })
-            });
-            bincode::serialize(&proof).unwrap()
-        }
-        AgeCheckStrategy::BitDecomposition => {
-            group.bench_function("prove", |b| {
-                b.iter(|| {
-                    AgeBitDecomposition::new(PcsConfig::default())
-                        .prove(&case.public, &case.dob)
-                        .unwrap()
-                })
-            });
-            let proof = AgeBitDecomposition::new(PcsConfig::default())
-                .prove(&case.public, &case.dob)
-                .unwrap();
-            group.bench_function("verify", |b| {
-                b.iter(|| {
-                    AgeBitDecomposition::new(PcsConfig::default())
                         .verify(&proof)
                         .unwrap()
                 })

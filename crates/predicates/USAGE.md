@@ -5,7 +5,7 @@
 Generate an age predicate proof and write it to disk.
 
 ```
-make prove-age [DOB=YYYY-MM-DD] [DATE=YYYY-MM-DD] [MIN_AGE=N] [STRATEGY=bd|rc] [PROOF=PATH]
+make prove-age [DOB=YYYY-MM-DD] [DATE=YYYY-MM-DD] [MIN_AGE=N] [STRATEGY=rc] [PROOF=PATH]
 ```
 
 | Variable | Description | Default |
@@ -13,7 +13,7 @@ make prove-age [DOB=YYYY-MM-DD] [DATE=YYYY-MM-DD] [MIN_AGE=N] [STRATEGY=bd|rc] [
 | `DOB` | Date of birth | required |
 | `DATE` | Current date | today |
 | `MIN_AGE` | Minimum age in years | `18` |
-| `STRATEGY` | `bd` (bit decomposition) or `rc` (range check) | `rc` |
+| `STRATEGY` | `rc` (range check) | `rc` |
 | `PROOF` | Proof output path | `proof.bin` |
 
 **Examples**
@@ -25,8 +25,8 @@ make prove-age DOB=1990-01-01
 # Prove age >= 21 with a fixed current date
 make prove-age DOB=1990-01-01 MIN_AGE=21 DATE=2026-05-22
 
-# Use bit decomposition strategy, write proof to custom path
-make prove-age DOB=1990-01-01 STRATEGY=bd PROOF=/tmp/age.bin
+# Write proof to custom path
+make prove-age DOB=1990-01-01 STRATEGY=rc PROOF=/tmp/age.bin
 ```
 
 ---
@@ -36,7 +36,7 @@ make prove-age DOB=1990-01-01 STRATEGY=bd PROOF=/tmp/age.bin
 Verify a proof read from disk.
 
 ```
-make verify-age [STRATEGY=bd|rc] [PROOF=PATH]
+make verify-age [STRATEGY=rc] [PROOF=PATH]
 ```
 
 | Variable | Description | Default |
@@ -50,8 +50,8 @@ make verify-age [STRATEGY=bd|rc] [PROOF=PATH]
 # Verify default proof file
 make verify-age
 
-# Verify a bit decomposition proof from a custom path
-make verify-age STRATEGY=bd PROOF=/tmp/age.bin
+# Verify a proof from a custom path
+make verify-age STRATEGY=rc PROOF=/tmp/age.bin
 ```
 
 ---
@@ -66,8 +66,6 @@ Run `prove` before `verify` for each strategy.
 |--------|-------------|
 | `make profile-prove-age-rc` | Profile age prove (range check) |
 | `make profile-verify-age-rc` | Profile age verify (range check) |
-| `make profile-prove-age-bd` | Profile age prove (bit decomposition) |
-| `make profile-verify-age-bd` | Profile age verify (bit decomposition) |
 
 ```bash
 make profile-prove-age-rc
