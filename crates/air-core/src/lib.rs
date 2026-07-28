@@ -82,7 +82,12 @@ static TWIDDLE_CACHE: OnceLock<Mutex<HashMap<u32, &'static TwiddleTree<SimdBacke
 
 fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     let cache = TWIDDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().expect("twiddle cache poisoned");
+    // A panic while the lock is held (e.g. one malformed proof unwinding out
+    // of precompute_twiddles) must not poison every later prove/verify in the
+    // process; the map is always in a consistent state between operations.
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(twiddles) = cache.get(&twiddle_log_size) {
         return twiddles;
     }

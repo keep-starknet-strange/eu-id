@@ -1415,7 +1415,7 @@ fn mdoc_p4b_mac_values(
         eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(statement.device_input.public_key.y.0);
     let [revocation_z_lo, revocation_z_hi] = revocation_input
         .map(|input| eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(input.message_hash.0))
-        .unwrap_or([[0; 16]; 2]);
+        .unwrap_or([eu_id_ec_coprocessor::ecdsa::MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE; 2]);
     [
         issuer_z_lo,
         issuer_z_hi,
@@ -2932,6 +2932,39 @@ pub struct MdocCircuitVerifyProfile {
     pub p4b: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MdocProofShapeLimits {
+    pub(crate) max_sha_log_n_rows: u32,
+    pub(crate) max_cbor_log_size: u32,
+    pub(crate) max_scope_log_size: u32,
+    pub(crate) max_mso_payload_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MdocProofShapeSummary {
+    max_sha_log_n_rows: u32,
+    max_cbor_log_size: u32,
+    scope_log_size: u32,
+    mso_payload_bytes: Option<usize>,
+}
+
+impl MdocProofShapeSummary {
+    fn validate(self, limits: MdocProofShapeLimits) -> Result<(), Error> {
+        if self.max_sha_log_n_rows > limits.max_sha_log_n_rows
+            || self.max_cbor_log_size > limits.max_cbor_log_size
+            || self.scope_log_size > limits.max_scope_log_size
+            || self
+                .mso_payload_bytes
+                .is_some_and(|len| len > limits.max_mso_payload_bytes)
+        {
+            return Err(Error::Verify(
+                "mdoc proof shape exceeds the verifier profile".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl MdocCircuitProof {
     #[cfg(feature = "ec-coprocessor")]
     pub fn p4b_prove_profile(&self) -> Option<&eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile> {
@@ -2941,6 +2974,31 @@ impl MdocCircuitProof {
     /// Per-stage STARK prove profile from the last `prove` call.
     pub fn stark_prove_profile(&self) -> &air_core::StarkProveProfile {
         &self.stark_prove_profile
+    }
+
+    pub(crate) fn validate_shape_limits(&self, limits: MdocProofShapeLimits) -> Result<(), Error> {
+        let max_sha_log_n_rows = std::iter::once(self.issuer_sha_log_n_rows)
+            .chain(std::iter::once(self.device_sha_log_n_rows))
+            .chain(self.mso_sha_log_n_rows)
+            .chain(self.revocation_sha_log_n_rows)
+            .chain(self.attribute_sha_log_n_rows.iter().copied())
+            .max()
+            .unwrap_or(0);
+        let max_cbor_log_size = self.mdoc_cbor_log_sizes.iter().copied().max().unwrap_or(0);
+        let mso_payload_bytes = self
+            .mso_payload_len
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| {
+                Error::Verify("mdoc MSO payload length is not representable".to_string())
+            })?;
+        MdocProofShapeSummary {
+            max_sha_log_n_rows,
+            max_cbor_log_size,
+            scope_log_size: self.mdoc_scope_metadata.log_size,
+            mso_payload_bytes,
+        }
+        .validate(limits)
     }
 }
 
@@ -6292,6 +6350,44 @@ mod mdoc_sha_table_tests {
                 &extended_revocation_padded,
             );
         assert_ne!(extended_revocation_total, zero);
+    }
+
+    #[test]
+    fn proof_shape_summary_enforces_every_profile_limit() {
+        let limits = MdocProofShapeLimits {
+            max_sha_log_n_rows: 15,
+            max_cbor_log_size: 15,
+            max_scope_log_size: 16,
+            max_mso_payload_bytes: 16_384,
+        };
+        let accepted = MdocProofShapeSummary {
+            max_sha_log_n_rows: 15,
+            max_cbor_log_size: 15,
+            scope_log_size: 16,
+            mso_payload_bytes: Some(16_384),
+        };
+        accepted.validate(limits).unwrap();
+
+        for rejected in [
+            MdocProofShapeSummary {
+                max_sha_log_n_rows: 16,
+                ..accepted
+            },
+            MdocProofShapeSummary {
+                max_cbor_log_size: 16,
+                ..accepted
+            },
+            MdocProofShapeSummary {
+                scope_log_size: 17,
+                ..accepted
+            },
+            MdocProofShapeSummary {
+                mso_payload_bytes: Some(16_385),
+                ..accepted
+            },
+        ] {
+            assert!(matches!(rejected.validate(limits), Err(Error::Verify(_))));
+        }
     }
 
     #[test]

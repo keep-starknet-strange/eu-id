@@ -92,6 +92,12 @@ pub const MAC_HALF_GROUP_B_USED_INPUTS: usize = GF128_BITS * MAC_HALF_PARITY_Q_B
 pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
     (MAC_HALF_GROUP_A_USED_INPUTS - 1) + MAC_HALF_GROUP_B_USED_INPUTS;
 pub const MDOC_P4B_MAC_HALF_COUNT: usize = 8;
+/// Public placeholder bound into MAC halves 6/7 when no revocation leg is
+/// present. Must be nonzero: `tag = (ap ^ av) * x`, so a zero value forces
+/// both tags to the constant zero regardless of the fresh key share,
+/// publishing a linkable revocation-off marker in every proof.
+pub const MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE: Gf128 =
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize = MDOC_P4B_MAC_HALF_COUNT
     * MAC_HALF_COMMITTED_PRIVATE_INPUTS
     + MAC_BATCH_CANONICAL_VALUE_COUNT * (MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES);
@@ -2091,7 +2097,7 @@ fn mdoc_p4b_mac_values(
     let [device_qy_lo, device_qy_hi] = gf128_halves_from_be32(device_input.qy);
     let [revocation_z_lo, revocation_z_hi] = revocation_input
         .map(|input| gf128_halves_from_be32(input.z))
-        .unwrap_or_default();
+        .unwrap_or([MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE; 2]);
     [
         issuer_z_lo,
         issuer_z_hi,
@@ -2990,7 +2996,7 @@ fn add_mdoc_p4b_consistency_claims(
         )?;
         add_mac_field_binding(claims, revocation_c3, C3_Z_INDEX, mac, 6, 7);
     } else {
-        add_mac_zero_field_binding(claims, mac, 6, 7);
+        add_mac_absent_revocation_binding(claims, mac, 6, 7);
     }
     Ok(())
 }
@@ -3023,13 +3029,13 @@ fn add_mac_field_binding(
     ));
 }
 
-fn add_mac_zero_field_binding(
+fn add_mac_absent_revocation_binding(
     claims: &mut Vec<LigeroLinearClaim>,
     mac_layout: &BundleCircuitLayout,
     low_half: usize,
     high_half: usize,
 ) {
-    let (point, _) = mac_half_x_recompose_claim_point();
+    let (point, scale) = mac_half_x_recompose_claim_point();
     let half_term = |half, coefficient| LigeroLinearTerm {
         offset: mac_layout.input_offset
             + mac_batch_half_group_a_input_offset(half)
@@ -3043,7 +3049,11 @@ fn add_mac_zero_field_binding(
             half_term(low_half, Fp::ONE),
             half_term(high_half, two_pow_128()),
         ],
-        Fp::ZERO,
+        scale
+            * recompose_gf128_halves(
+                &MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE,
+                &MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE,
+            ),
     ));
 }
 
@@ -5972,8 +5982,8 @@ mod tests {
         let key_shares = p4b_microbench_key_shares();
         let av = [0x5au8; 16];
         let absent = mdoc_p4b_mac_values(&issuer, &device, None);
-        assert_eq!(absent[6], [0u8; 16]);
-        assert_eq!(absent[7], [0u8; 16]);
+        assert_eq!(absent[6], MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE);
+        assert_eq!(absent[7], MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE);
         assert_eq!(
             mac_batch_group_a_input(&key_shares, &absent).unwrap().len(),
             1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE
@@ -6003,9 +6013,11 @@ mod tests {
     }
 
     #[test]
-    fn p4b_absent_revocation_halves_are_bound_to_zero() {
+    fn p4b_absent_revocation_halves_are_bound_to_public_placeholder() {
         let key_shares = p4b_microbench_key_shares();
-        let values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
+        let mut values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
+        values[6] = MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE;
+        values[7] = MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE;
         let mut committed = mac_batch_group_a_input(&key_shares, &values).unwrap();
         let layout = BundleCircuitLayout {
             input_offset: 0,
@@ -6014,7 +6026,7 @@ mod tests {
             pad_len: 0,
         };
         let mut claims = Vec::new();
-        add_mac_zero_field_binding(&mut claims, &layout, 6, 7);
+        add_mac_absent_revocation_binding(&mut claims, &layout, 6, 7);
         let claim = &claims[0];
         let evaluate = |values: &[Fp]| {
             claim.terms.iter().fold(Fp::ZERO, |sum, term| {
@@ -6023,7 +6035,9 @@ mod tests {
             })
         };
         assert_eq!(evaluate(&committed), claim.value);
-        committed[mac_batch_half_group_a_input_offset(6) + MAC_HALF_X_BITS_START] = Fp::ONE;
+        // Zeroing the placeholder's low bit reproduces the old all-zero
+        // encoding, which the binding must now reject.
+        committed[mac_batch_half_group_a_input_offset(6) + MAC_HALF_X_BITS_START] = Fp::ZERO;
         assert_ne!(evaluate(&committed), claim.value);
     }
 

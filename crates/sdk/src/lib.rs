@@ -166,7 +166,10 @@ const TS13_UNSUPPORTED_JWT_FORMAT: &str = "zk-jwt";
 const TS13_DEVICE_AUTH_PROFILE: &str = "iso18013-5";
 const TS13_PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const TS13_PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
-const TS13_MAX_MDOC_BYTES: u32 = 16_384;
+const TS13_MAX_MSO_PAYLOAD_BYTES: u32 = 16_384;
+const TS13_MAX_SHA_LOG_N_ROWS: u32 = 15;
+const TS13_MAX_CBOR_LOG_SIZE: u32 = 15;
+const TS13_MAX_SCOPE_LOG_SIZE: u32 = 16;
 const TS13_NUM_ATTRIBUTES: u32 = 1;
 const TS13_MAX_ATTRIBUTE_BYTES: u32 = 32;
 const TS13_POTENTIAL_ISSUERS: u32 = 1;
@@ -186,9 +189,12 @@ pub struct Ts13PresentationRequest {
     pub doctype: String,
     pub namespace: String,
     pub circuit_hash: String,
-    pub preprocessed_root: Vec<u8>,
+    pub root_policy_hash: Vec<u8>,
     pub num_attributes: u32,
-    pub max_mdoc_bytes: u32,
+    pub max_mso_payload_bytes: u32,
+    pub max_sha_log_n_rows: u32,
+    pub max_cbor_log_size: u32,
+    pub max_scope_log_size: u32,
     pub max_attribute_bytes: u32,
     pub potential_issuers: u32,
     pub revocation_enabled: bool,
@@ -215,7 +221,7 @@ pub struct Ts13ZkDocument {
     pub doc_type: String,
     pub zk_system_id: String,
     pub circuit_hash: String,
-    pub preprocessed_root: Vec<u8>,
+    pub root_policy_hash: Vec<u8>,
     pub request_binding_hash: String,
     pub disclosed_attributes: Vec<Ts13DisclosedAttribute>,
     pub proof: Vec<u8>,
@@ -272,7 +278,22 @@ fn ts13_tuple_value(request: &Ts13PresentationRequest) -> Value {
         ("doctype".into(), request.doctype.as_str().into()),
         ("namespace".into(), request.namespace.as_str().into()),
         ("num_attributes".into(), Value::from(request.num_attributes)),
-        ("max_mdoc_bytes".into(), Value::from(request.max_mdoc_bytes)),
+        (
+            "max_mso_payload_bytes".into(),
+            Value::from(request.max_mso_payload_bytes),
+        ),
+        (
+            "max_sha_log_n_rows".into(),
+            Value::from(request.max_sha_log_n_rows),
+        ),
+        (
+            "max_cbor_log_size".into(),
+            Value::from(request.max_cbor_log_size),
+        ),
+        (
+            "max_scope_log_size".into(),
+            Value::from(request.max_scope_log_size),
+        ),
         (
             "max_attribute_bytes".into(),
             Value::from(request.max_attribute_bytes),
@@ -301,8 +322,8 @@ fn ts13_request_binding_hash(request: &Ts13PresentationRequest) -> String {
         ("tuple".into(), ts13_tuple_value(request)),
         ("circuit_hash".into(), request.circuit_hash.as_str().into()),
         (
-            "preprocessed_root".into(),
-            Value::Bytes(request.preprocessed_root.clone()),
+            "root_policy_hash".into(),
+            Value::Bytes(request.root_policy_hash.clone()),
         ),
         (
             "current_date_epoch_day".into(),
@@ -344,15 +365,18 @@ pub fn ts13_default_circuit_hash() -> String {
 }
 
 #[uniffi::export]
-pub fn ts13_default_preprocessed_root() -> Vec<u8> {
-    eu_id_prover::ts13::ts13_default_preprocessed_root().to_vec()
+pub fn ts13_default_root_policy_hash() -> Vec<u8> {
+    eu_id_prover::ts13::ts13_default_root_policy_hash().to_vec()
 }
 
 fn ts13_tuple_is_supported(request: &Ts13PresentationRequest) -> bool {
     request.doctype == TS13_PID_DOCTYPE
         && request.namespace == TS13_PID_NAMESPACE
         && request.num_attributes == TS13_NUM_ATTRIBUTES
-        && request.max_mdoc_bytes == TS13_MAX_MDOC_BYTES
+        && request.max_mso_payload_bytes == TS13_MAX_MSO_PAYLOAD_BYTES
+        && request.max_sha_log_n_rows == TS13_MAX_SHA_LOG_N_ROWS
+        && request.max_cbor_log_size == TS13_MAX_CBOR_LOG_SIZE
+        && request.max_scope_log_size == TS13_MAX_SCOPE_LOG_SIZE
         && request.max_attribute_bytes == TS13_MAX_ATTRIBUTE_BYTES
         && request.potential_issuers == TS13_POTENTIAL_ISSUERS
         && request.revocation_enabled == TS13_REVOCATION_ENABLED
@@ -398,10 +422,10 @@ pub fn ts13_validate_presentation_request(
             request.circuit_hash
         )));
     }
-    let expected_root = ts13_default_preprocessed_root();
-    if request.preprocessed_root != expected_root {
+    let expected_root_policy_hash = ts13_default_root_policy_hash();
+    if request.root_policy_hash != expected_root_policy_hash {
         return Err(ZkError::InvalidInput(
-            "unknown preprocessed_root for the requested circuit_hash".to_string(),
+            "unknown root_policy_hash for the requested circuit_hash".to_string(),
         ));
     }
     if request.trusted_issuer_hashes.len() != request.potential_issuers as usize {
@@ -437,7 +461,7 @@ pub fn ts13_build_zk_document(
         doc_type: request.doctype.clone(),
         zk_system_id: request.zk_system_id.clone(),
         circuit_hash: request.circuit_hash.clone(),
-        preprocessed_root: request.preprocessed_root.clone(),
+        root_policy_hash: request.root_policy_hash.clone(),
         request_binding_hash: ts13_request_binding_hash(&request),
         disclosed_attributes,
         proof,
@@ -453,7 +477,7 @@ pub fn ts13_verify_zk_document(
         || document.doc_type != request.doctype
         || document.zk_system_id != request.zk_system_id
         || document.circuit_hash != request.circuit_hash
-        || document.preprocessed_root != request.preprocessed_root
+        || document.root_policy_hash != request.root_policy_hash
         || document.request_binding_hash != ts13_request_binding_hash(request)
     {
         return Ok(false);
@@ -1260,9 +1284,12 @@ mod tests {
             doctype: "eu.europa.ec.eudi.pid.1".to_string(),
             namespace: "eu.europa.ec.eudi.pid.1".to_string(),
             circuit_hash: ts13_default_circuit_hash(),
-            preprocessed_root: ts13_default_preprocessed_root(),
+            root_policy_hash: ts13_default_root_policy_hash(),
             num_attributes: 1,
-            max_mdoc_bytes: 16_384,
+            max_mso_payload_bytes: 16_384,
+            max_sha_log_n_rows: 15,
+            max_cbor_log_size: 15,
+            max_scope_log_size: 16,
             max_attribute_bytes: 32,
             potential_issuers: 1,
             revocation_enabled: true,
@@ -1346,7 +1373,7 @@ mod tests {
         let document =
             ts13_build_zk_document(request.clone(), Vec::new(), b"proof".to_vec()).unwrap();
         let mut other_request = request;
-        other_request.max_mdoc_bytes += 1;
+        other_request.max_scope_log_size += 1;
 
         assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
     }
@@ -1383,26 +1410,26 @@ mod tests {
     }
 
     #[test]
-    fn ts13_presentation_rejects_preprocessed_root_drift() {
+    fn ts13_presentation_rejects_root_policy_drift() {
         let request = ts13_request();
         let document =
             ts13_build_zk_document(request.clone(), Vec::new(), b"proof".to_vec()).unwrap();
-        assert_eq!(document.preprocessed_root, request.preprocessed_root);
+        assert_eq!(document.root_policy_hash, request.root_policy_hash);
 
         let mut other_request = request;
-        other_request.preprocessed_root[0] ^= 1;
+        other_request.root_policy_hash[0] ^= 1;
 
         assert!(!ts13_verify_zk_document(&other_request, &document).unwrap());
     }
 
     #[test]
-    fn ts13_presentation_rejects_malformed_preprocessed_root() {
+    fn ts13_presentation_rejects_malformed_root_policy_hash() {
         let mut request = ts13_request();
-        request.preprocessed_root.pop();
+        request.root_policy_hash.pop();
 
         assert!(matches!(
             ts13_validate_presentation_request(&request),
-            Err(ZkError::InvalidInput(message)) if message.contains("preprocessed_root")
+            Err(ZkError::InvalidInput(message)) if message.contains("root_policy_hash")
         ));
     }
 

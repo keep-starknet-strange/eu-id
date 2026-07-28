@@ -45,14 +45,16 @@ val cargoVersion: String = run {
 val jniLibsOut = file("$projectDir/src/main/jniLibs")
 val bindingsOut = file("$projectDir/src/main/kotlin")
 
-val ndkVer = "30.0.14904198"
+val ndkVer = providers.gradleProperty("ndkVersion").getOrElse("30.0.14904198")
+val noUndefinedLinkerFlag = "-C link-arg=-Wl,--no-undefined"
+val buildIdLinkerFlag = "-C link-arg=-Wl,--build-id=sha1"
 
 android {
     namespace = "com.kss.euid.zk.sdk"
     compileSdk = 36
     // Installed NDK; AGP uses it to strip the bundled .so on release packaging,
     // and we hand it to cargo-ndk below. Must be installed (AGP 9.2's default is
-    // 28.2.13676358). Adjust to one you have.
+    // 28.2.13676358). Override with `-PndkVersion=<installed-version>` when needed.
     ndkVersion = ndkVer
 
     defaultConfig {
@@ -101,6 +103,9 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     workingDir = workspaceRoot
     environment("PATH", toolPath)
     environment("ANDROID_NDK_HOME", ndkHome)
+    // Reject unresolved native symbols at link time. Android otherwise permits them in a
+    // shared object and reports the problem only when JNA calls dlopen().
+    val linkerFlags = mutableListOf(noUndefinedLinkerFlag)
     // Opt-in via `-PemitBuildId=true` (see the `publish-android-symbols` make target):
     // emit a GNU build-id note into each .so so Perfetto/heapprofd & simpleperf can
     // match the stripped on-device lib to the local unstripped copy in jniLibs for
@@ -111,11 +116,12 @@ val cargoNdkBuild by tasks.registering(Exec::class) {
     // regardless of the Gradle daemon's own environment.
     val emitBuildId = (project.findProperty("emitBuildId") as String?)?.toBoolean() ?: false
     if (emitBuildId) {
-        val buildIdFlag = "-C link-arg=-Wl,--build-id=sha1"
-        environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", buildIdFlag)
-        environment("CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", buildIdFlag)
+        linkerFlags += buildIdLinkerFlag
     }
     inputs.property("emitBuildId", emitBuildId)
+    inputs.property("linkerFlags", linkerFlags)
+    environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", linkerFlags.joinToString(" "))
+    environment("CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", linkerFlags.joinToString(" "))
     commandLine(
         cargoExe, "ndk",
         "-t", "arm64-v8a", "-t", "x86_64",

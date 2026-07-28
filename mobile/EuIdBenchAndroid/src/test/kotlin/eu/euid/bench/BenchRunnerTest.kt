@@ -27,6 +27,13 @@ class BenchRunnerTest {
             ),
             P256Variant.values().map(P256Variant::fileName),
         )
+        assertEquals(
+            listOf(
+                "p256-range16" to "p256_range16_build_manifest.json",
+                "p256-range8" to "p256_range8_build_manifest.json",
+            ),
+            P256Variant.values().map { it.manifestSlot to it.manifestAssetName },
+        )
     }
 
     @Test
@@ -47,5 +54,22 @@ class BenchRunnerTest {
             requireAllBigForGameLoop(scenario = 1, allPerformanceCores = false)
         }
         requireAllBigForGameLoop(scenario = 8, allPerformanceCores = true)
+    }
+
+    @Test
+    fun nativeStatementSelectsTruthfulProfile() {
+        assertEquals(
+            BenchmarkProfile(
+                apiEntrypoint = "native_ts13_circuit_core",
+                proofScope =
+                    "mdoc_issuer_es256_device_es256_age_over_18_equality_sorted_pair_revocation",
+                proofEncoding = "raw_bincode",
+                revocation = true,
+            ),
+            benchmarkProfile("ts13_n1_age_over_18_revocation"),
+        )
+        assertThrows(IllegalStateException::class.java) {
+            benchmarkProfile("unknown")
+        }
     }
 }

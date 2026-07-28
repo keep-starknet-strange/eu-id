@@ -10,13 +10,54 @@ dependencies {
 
 val workspaceRoot = file("$projectDir/../..")
 val jniLibsOut = layout.buildDirectory.dir("generated/jniLibs")
+val benchAssetsOut = layout.buildDirectory.dir("generated/benchAssets")
 val ndkVersionInstalled = "27.1.12297006"
+// Validate at resolution time, NOT in the Sync task's doFirst: a Sync task
+// whose source files are missing runs with an empty source set, skips doFirst
+// checks, and deletes everything already staged in the destination — a green
+// build that ships an APK with no native libraries.
+fun requireBenchInput(property: String, path: File, description: String): File {
+    require(path.isFile) {
+        "$property must point to $description; set -P$property=/absolute/path"
+    }
+    return path
+}
 val p256Range16So = providers.gradleProperty("p256Range16So")
-    .map { path -> file(path) }
-    .orElse(file("$projectDir/prebuilt/p256-range16/arm64-v8a/libeuid_zk_sdk.so"))
+    .orElse("$projectDir/prebuilt/p256-range16/arm64-v8a/libeuid_zk_sdk.so")
+    .map { path ->
+        requireBenchInput(
+            "p256Range16So",
+            file(path),
+            "the fat-LTO revocation-enabled arm64-v8a libeuid_zk_sdk.so",
+        )
+    }
 val p256Range8So = providers.gradleProperty("p256Range8So")
-    .map { path -> file(path) }
-    .orElse(file("$projectDir/prebuilt/p256-range8/arm64-v8a/libeuid_zk_sdk.so"))
+    .orElse("$projectDir/prebuilt/p256-range8/arm64-v8a/libeuid_zk_sdk.so")
+    .map { path ->
+        requireBenchInput(
+            "p256Range8So",
+            file(path),
+            "the fat-LTO revocation-disabled arm64-v8a libeuid_zk_sdk.so",
+        )
+    }
+val p256Range16Manifest = providers.gradleProperty("p256Range16Manifest")
+    .orElse("$projectDir/prebuilt/p256-range16/build-manifest.json")
+    .map { path ->
+        requireBenchInput(
+            "p256Range16Manifest",
+            file(path),
+            "the revocation-enabled native build manifest",
+        )
+    }
+val p256Range8Manifest = providers.gradleProperty("p256Range8Manifest")
+    .orElse("$projectDir/prebuilt/p256-range8/build-manifest.json")
+    .map { path ->
+        requireBenchInput(
+            "p256Range8Manifest",
+            file(path),
+            "the revocation-disabled native build manifest",
+        )
+    }
 val p256Range16PackagedName = "libeuid_zk_sdk_p256_range16.so"
 val p256Range8PackagedName = "libeuid_zk_sdk_p256_range8.so"
 val p256BigCores = providers.gradleProperty("p256BigCores")
@@ -71,6 +112,7 @@ android {
     }
 
     sourceSets["main"].jniLibs.setSrcDirs(listOf(jniLibsOut))
+    sourceSets["main"].assets.srcDir(benchAssetsOut.get().asFile)
 
     buildTypes {
         release {
@@ -98,19 +140,26 @@ val stageP256BenchLibraries by tasks.registering(Sync::class) {
         rename { p256Range8PackagedName }
     }
     into(jniLibsOut.map { it.dir("arm64-v8a") })
-    doFirst {
-        listOf(
-            "p256Range16So" to p256Range16So.get(),
-            "p256Range8So" to p256Range8So.get(),
-        ).forEach { (property, input) ->
-            require(input.isFile) {
-                "$property must point to a prebuilt arm64-v8a libeuid_zk_sdk.so; " +
-                    "set -P$property=/absolute/path/libeuid_zk_sdk.so"
-            }
-        }
+}
+
+val stageP256BenchManifests by tasks.registering(Sync::class) {
+    group = "rust"
+    description = "Package the exact native build provenance for both benchmark libraries."
+    inputs.file(p256Range16Manifest)
+        .withPropertyName("p256Range16Manifest")
+        .withPathSensitivity(PathSensitivity.NONE)
+    inputs.file(p256Range8Manifest)
+        .withPropertyName("p256Range8Manifest")
+        .withPathSensitivity(PathSensitivity.NONE)
+    from(p256Range16Manifest) {
+        rename { "p256_range16_build_manifest.json" }
     }
+    from(p256Range8Manifest) {
+        rename { "p256_range8_build_manifest.json" }
+    }
+    into(benchAssetsOut)
 }
 
 tasks.named("preBuild") {
-    dependsOn(stageP256BenchLibraries)
+    dependsOn(stageP256BenchLibraries, stageP256BenchManifests)
 }

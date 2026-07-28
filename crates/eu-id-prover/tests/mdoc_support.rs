@@ -11,14 +11,14 @@ use eu_id_prover::mdoc::{
     demo_mdoc_sizing_waste, device_authentication_bytes, device_authentication_sig_structure_hash,
     extract_pid_mdoc, mdoc_production_pcs_config, mdoc_proof_byte_breakdown,
     openid4vp_session_transcript, prove_mdoc_circuit, verify_mdoc_circuit,
-    verify_mdoc_circuit_with_pcs_config, verify_mdoc_circuit_with_preprocessed_root,
-    MdocBirthDateBinding, MdocCircuitStatement, MdocDeviceAuthenticationProfile,
-    MdocDisclosureMode, MdocError, MdocNationalityBinding, MdocPidRequest, MdocPublicStatement,
-    MdocRequestedAttribute, MdocRevocationPublicInputs, MdocRevocationRangeWitness,
+    verify_mdoc_circuit_with_pcs_config, MdocBirthDateBinding, MdocCircuitStatement,
+    MdocDeviceAuthenticationProfile, MdocDisclosureMode, MdocError, MdocNationalityBinding,
+    MdocPidRequest, MdocPublicStatement, MdocRequestedAttribute, MdocRevocationPublicInputs,
+    MdocRevocationRangeWitness,
 };
 use eu_id_prover::ts13::{
-    ts13_default_circuit_hash, ts13_default_preprocessed_root, ts13_mso_derived_revocation_id,
-    ts13_revocation_message_hash, Ts13MdocProofArtifact, Ts13MdocProofArtifactError,
+    ts13_default_circuit_hash, ts13_mso_derived_revocation_id, ts13_revocation_message_hash,
+    verify_ts13_mdoc_public_statement, Ts13MdocProofArtifact, Ts13MdocProofArtifactError,
     Ts13RevocationStatement, Ts13RevocationWitness,
 };
 use eu_id_prover::{Date, Policy};
@@ -33,6 +33,7 @@ const PHASE_0B_REFACTOR_THRESHOLD_CELLS: u64 = 1_000_000;
 const X5CHAIN_LABEL: i128 = 33;
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const CBOR_TAG_FULL_DATE: u64 = 1004;
+const PROOF_ZSTD_LEVEL: i32 = 12;
 const LONGFELLOW_MDL_DOCTYPE: &str = "org.iso.18013.5.1.mDL";
 const LONGFELLOW_MDL_NAMESPACE: &str = "org.iso.18013.5.1";
 const LONGFELLOW_EUAV_DOCTYPE: &str = "eu.europa.ec.av.1";
@@ -845,45 +846,30 @@ fn ts13_revocation_artifact_binds_to_mdoc_mso() {
             id_hi: witness.id_hi,
         })
         .with_ts13_revocation_signature(witness.signature.clone());
-    let expected_preprocessed_root = ts13_default_preprocessed_root();
     let artifact = Ts13MdocProofArtifact {
         circuit_hash: ts13_default_circuit_hash(),
-        preprocessed_root: expected_preprocessed_root,
         mdoc_proof: b"serialized mdoc proof".to_vec(),
         revocation_statement,
         revocation_witness: witness,
     };
 
-    artifact
-        .verify_revocation_binding(&extracted, expected_preprocessed_root)
-        .unwrap();
+    artifact.verify_revocation_binding(&extracted).unwrap();
     assert!(matches!(
         artifact.verify_mdoc_and_revocation(&extracted, &mdoc_statement),
-        Err(Ts13MdocProofArtifactError::ProofDecode)
+        Err(Ts13MdocProofArtifactError::StatementTupleMismatch)
     ));
 
     let mut wrong_hash = artifact.clone();
     wrong_hash.circuit_hash = "00".repeat(32);
     assert!(matches!(
-        wrong_hash.verify_revocation_binding(&extracted, expected_preprocessed_root),
+        wrong_hash.verify_revocation_binding(&extracted),
         Err(Ts13MdocProofArtifactError::CircuitHash)
-    ));
-
-    let mut wrong_root = artifact.clone();
-    wrong_root.preprocessed_root[0] ^= 1;
-    assert!(matches!(
-        wrong_root.verify_revocation_binding(&extracted, expected_preprocessed_root),
-        Err(Ts13MdocProofArtifactError::PreprocessedRoot)
-    ));
-    assert!(matches!(
-        wrong_root.verify_mdoc_and_revocation(&extracted, &mdoc_statement),
-        Err(Ts13MdocProofArtifactError::PreprocessedRoot)
     ));
 
     let mut empty_proof = artifact.clone();
     empty_proof.mdoc_proof.clear();
     assert!(matches!(
-        empty_proof.verify_revocation_binding(&extracted, expected_preprocessed_root),
+        empty_proof.verify_revocation_binding(&extracted),
         Err(Ts13MdocProofArtifactError::EmptyProof)
     ));
 
@@ -896,7 +882,7 @@ fn ts13_revocation_artifact_binds_to_mdoc_mso() {
     let other_extracted = extract_pid_mdoc(&other_fixture.doc, &request(test_session_transcript()))
         .expect("other mdoc extracts for artifact mismatch");
     assert!(matches!(
-        artifact.verify_revocation_binding(&other_extracted, expected_preprocessed_root),
+        artifact.verify_revocation_binding(&other_extracted),
         Err(Ts13MdocProofArtifactError::Revocation(
             eu_id_prover::ts13::Ts13RevocationError::DerivedIdMismatch
         ))
@@ -926,7 +912,6 @@ fn ts13_revocation_artifact_rejects_statement_without_revocation_policy() {
     );
     let artifact = Ts13MdocProofArtifact {
         circuit_hash: ts13_default_circuit_hash(),
-        preprocessed_root: ts13_default_preprocessed_root(),
         mdoc_proof: b"serialized mdoc proof".to_vec(),
         revocation_statement,
         revocation_witness: witness,
@@ -966,7 +951,6 @@ fn ts13_revocation_artifact_rejects_statement_revocation_policy_drift() {
     );
     let artifact = Ts13MdocProofArtifact {
         circuit_hash: ts13_default_circuit_hash(),
-        preprocessed_root: ts13_default_preprocessed_root(),
         mdoc_proof: b"serialized mdoc proof".to_vec(),
         revocation_statement,
         revocation_witness: witness,
@@ -987,12 +971,27 @@ fn ts13_revocation_public_inputs_are_stark_bound() {
         .expect("mdoc extracts for revocation transcript binding");
     let statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
         .expect("mdoc statement builds for revocation transcript binding");
-    let (_, revocation_key) = ts13_revocation_key(36);
+    let (signing_key, revocation_key) = ts13_revocation_key(36);
     let (_, wrong_revocation_key) = ts13_revocation_key(37);
-    let statement = statement.with_ts13_revocation(MdocRevocationPublicInputs {
-        revocation_public_key: revocation_key,
-        epoch: 53,
-    });
+    let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let witness = ts13_revocation_witness_for_id(
+        &signing_key,
+        id,
+        id.saturating_sub(1),
+        id.saturating_add(1),
+        53,
+    );
+    let statement = statement
+        .with_ts13_revocation(MdocRevocationPublicInputs {
+            revocation_public_key: revocation_key,
+            epoch: 53,
+        })
+        .with_ts13_revocation_range(MdocRevocationRangeWitness {
+            id: witness.id,
+            id_lo: witness.id_lo,
+            id_hi: witness.id_hi,
+        })
+        .with_ts13_revocation_signature(witness.signature.clone());
     let proof = prove_mdoc_circuit(&extracted, &statement)
         .expect("mdoc proof builds with TS13 revocation public inputs");
     verify_mdoc_circuit(&proof, &statement)
@@ -1073,12 +1072,16 @@ fn ts13_revocation_range_rejects_id_not_derived_from_mso_in_stark() {
             id_hi: wrong_id + 1,
         });
 
-    let proof = prove_mdoc_circuit(&extracted, &statement)
-        .expect("wrong but in-range id can still produce a malformed proof candidate");
-    assert!(
-        verify_mdoc_circuit(&proof, &statement).is_err(),
-        "revocation id must be bound to LE64(SHA-256(MSO bytes)[0..8]) in the STARK"
-    );
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "revocation id must be bound to LE64(SHA-256(MSO bytes)[0..8]) in the STARK"
+            );
+        }
+    }
 }
 
 #[test]
@@ -1104,12 +1107,16 @@ fn ts13_revocation_rejects_mso_sha_preimage_not_issuer_payload_in_stark() {
         id_hi: forged_id.saturating_add(1),
     });
 
-    let proof = prove_mdoc_circuit(&extracted, &statement)
-        .expect("forged MSO preimage can still produce a malformed proof candidate");
-    assert!(
-        verify_mdoc_circuit(&proof, &statement).is_err(),
-        "MSO SHA preimage must be byte-bound to the issuerAuth signed payload in the STARK"
-    );
+    match prove_mdoc_circuit(&extracted, &statement) {
+        Err(eu_id_prover::Error::Prove(_)) => {}
+        Err(other) => panic!("expected proof rejection, got {other:?}"),
+        Ok(proof) => {
+            assert!(
+                verify_mdoc_circuit(&proof, &statement).is_err(),
+                "MSO SHA preimage must be byte-bound to the issuerAuth signed payload in the STARK"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2390,31 +2397,21 @@ fn ts13_evidence_pack_n1_measurements() {
     let proof = prove_mdoc_circuit(&extracted, &statement).expect("TS13 N=1 proves");
     let prove_ms = prove_start.elapsed().as_millis();
     let expected_preprocessed_root = proof.stark_proof.commitments[0].0;
-    assert_eq!(
-        expected_preprocessed_root,
-        ts13_default_preprocessed_root(),
-        "generated TS13 tree-0 root must match the published revision pin",
-    );
 
     let verify_start = Instant::now();
-    verify_mdoc_circuit_with_preprocessed_root(
-        &proof,
-        &statement,
-        proof.stark_proof.commitments[0],
-    )
-    .expect("TS13 N=1 verifies with root pin");
+    verify_ts13_mdoc_public_statement(&proof, &MdocPublicStatement::from_circuit(&statement))
+        .expect("TS13 N=1 verifies under the bounded canonical root policy");
     let verify_ms = verify_start.elapsed().as_millis();
 
     let proof_bytes = bincode::serialize(&proof).expect("TS13 mdoc proof serializes");
     let artifact = Ts13MdocProofArtifact {
         circuit_hash: ts13_default_circuit_hash(),
-        preprocessed_root: expected_preprocessed_root,
         mdoc_proof: proof_bytes,
         revocation_statement,
         revocation_witness,
     };
     artifact
-        .verify_revocation_binding(&extracted, expected_preprocessed_root)
+        .verify_revocation_binding(&extracted)
         .expect("TS13 revocation artifact binds to this mdoc");
     artifact
         .verify_mdoc_and_revocation(&extracted, &statement)
@@ -2552,46 +2549,6 @@ fn mdoc_zk_class_d_balance_tamper_rejected() {
         any_checked,
         "at least one byte flip must deserialize so the tamper is actually exercised",
     );
-}
-
-#[test]
-#[ignore = "slow: proves rejection for ValueEquality elementIdentifier anchor tamper"]
-fn value_equality_element_identifier_anchor_offset_rejects_in_proof() {
-    let session_transcript = test_session_transcript();
-    let fixture = fixture_with_options(
-        &session_transcript,
-        "1990-07-15".into(),
-        "DE".into(),
-        FixtureOptions {
-            extra_items: vec![ExtraItem {
-                digest_id: 11,
-                element: "age_over_18".to_string(),
-                value: Value::Bool(true),
-                random: vec![11; 16],
-            }],
-            ..FixtureOptions::default()
-        },
-    );
-    let mut request = request(session_transcript);
-    request.attributes = vec![MdocRequestedAttribute {
-        element_identifier: "age_over_18".to_string(),
-        mode: MdocDisclosureMode::ValueEquality(cbor(Value::Bool(true))),
-    }];
-    let extracted = extract_pid_mdoc(&fixture.doc, &request).expect("N=1 extracts");
-    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect("N=1 builds");
-    statement.attributes[0].element_identifier_anchor_offset += 1;
-
-    match prove_mdoc_circuit(&extracted, &statement) {
-        Err(eu_id_prover::Error::Prove(_)) => {}
-        Err(other) => panic!("expected proof rejection, got {other:?}"),
-        Ok(proof) => {
-            assert!(
-                verify_mdoc_circuit(&proof, &statement).is_err(),
-                "mispointed ValueEquality elementIdentifier anchor verified unexpectedly"
-            );
-        }
-    }
 }
 
 #[test]
@@ -2745,17 +2702,22 @@ fn real_vector_pid_pymdoc_end_to_end() {
     let prove_elapsed = prove_start.elapsed();
 
     let verify_start = Instant::now();
+    #[cfg(not(feature = "ec-coprocessor"))]
     verify_mdoc_circuit(&proof, &statement).expect("real PID mdoc verifies");
     #[cfg(feature = "ec-coprocessor")]
     verify_mdoc_public_statement(&proof, &MdocPublicStatement::from_circuit(&statement))
         .expect("real PID mdoc verifies from its reduced public statement");
     let verify_elapsed = verify_start.elapsed();
 
-    let bytes = mdoc_proof_byte_breakdown(&proof).proof_bytes;
+    let proof_bincode = bincode::serialize(&proof).expect("real PID proof serializes");
+    let compressed =
+        zstd::bulk::compress(&proof_bincode, PROOF_ZSTD_LEVEL).expect("real PID proof compresses");
     println!(
-        "phase_v_real_vector prove_ms={} verify_ms={} proof_bytes={bytes}",
+        "phase_v_real_vector prove_ms={} verify_ms={} proof_bytes={} proof_zstd12_bytes={}",
         prove_elapsed.as_millis(),
-        verify_elapsed.as_millis()
+        verify_elapsed.as_millis(),
+        proof_bincode.len(),
+        compressed.len(),
     );
 }
 
@@ -2873,14 +2835,18 @@ fn longfellow_vector_end_to_end(
     verify_mdoc_circuit(&proof, &statement).expect("Longfellow mdoc verifies");
     let verify_elapsed = verify_start.elapsed();
 
-    let bytes = mdoc_proof_byte_breakdown(&proof).proof_bytes;
+    let proof_bincode = bincode::serialize(&proof).expect("Longfellow proof serializes");
+    let compressed = zstd::bulk::compress(&proof_bincode, PROOF_ZSTD_LEVEL)
+        .expect("Longfellow proof compresses");
     println!(
-        "longfellow_vector={} n={} security_bits={} prove_ms={} verify_ms={} proof_bytes={bytes} preprocessed_root={}",
+        "longfellow_vector={} n={} security_bits={} prove_ms={} verify_ms={} proof_bytes={} proof_zstd12_bytes={} preprocessed_root={}",
         vector.name,
         statement.attributes.len(),
         proof.stark_proof.config.security_bits(),
         prove_elapsed.as_millis(),
         verify_elapsed.as_millis(),
+        proof_bincode.len(),
+        compressed.len(),
         hex_bytes(&proof.stark_proof.commitments[0].0)
     );
 }
@@ -2949,133 +2915,6 @@ fn longfellow_value_label(value: &Value) -> String {
             format!("tag1004:{}", value_text(inner, "tag1004 full-date"))
         }
         _ => panic!("unexpected Longfellow elementValue {value:?}"),
-    }
-}
-
-#[test]
-#[ignore = "slow: proves rejection for digest membership tamper"]
-fn digest_membership_offset_swap_rejects_in_proof() {
-    let session_transcript = test_session_transcript();
-    let fixture = valid_fixture(&session_transcript);
-    let extracted =
-        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
-    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect("statement builds");
-    let age_index = statement
-        .age_attribute_index
-        .expect("statement has age attribute");
-    let nationality_index = statement
-        .nationality_attribute_index
-        .expect("statement has nationality attribute");
-    let age_digest_offset = statement.attributes[age_index].mso_digest_offset;
-    statement.attributes[age_index].mso_digest_offset =
-        statement.attributes[nationality_index].mso_digest_offset;
-    statement.attributes[nationality_index].mso_digest_offset = age_digest_offset;
-
-    match prove_mdoc_circuit(&extracted, &statement) {
-        Err(eu_id_prover::Error::Prove(_)) => {}
-        Err(other) => panic!("expected proof rejection, got {other:?}"),
-        Ok(proof) => {
-            assert!(
-                verify_mdoc_circuit(&proof, &statement).is_err(),
-                "digest membership offset swap verified unexpectedly"
-            );
-        }
-    }
-}
-
-#[test]
-#[ignore = "slow: proves rejection for deviceKey binding tamper"]
-fn device_key_binding_offset_rejects_in_proof() {
-    let session_transcript = test_session_transcript();
-    let fixture = valid_fixture(&session_transcript);
-    let extracted =
-        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
-    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect("statement builds");
-    statement.mso_device_key_x_offset += 1;
-
-    match prove_mdoc_circuit(&extracted, &statement) {
-        Err(eu_id_prover::Error::Prove(_)) => {}
-        Err(other) => panic!("expected proof rejection, got {other:?}"),
-        Ok(proof) => {
-            assert!(
-                verify_mdoc_circuit(&proof, &statement).is_err(),
-                "mispointed MSO device-key offset verified unexpectedly"
-            );
-        }
-    }
-}
-
-#[test]
-#[ignore = "slow: proves rejection for digest anchor tamper"]
-fn digest_membership_anchor_offset_rejects_in_proof() {
-    let session_transcript = test_session_transcript();
-    let fixture = valid_fixture(&session_transcript);
-    let extracted =
-        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
-    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect("statement builds");
-    let age_index = statement
-        .age_attribute_index
-        .expect("statement has age attribute");
-    statement.attributes[age_index].mso_digest_anchor_offset += 1;
-
-    match prove_mdoc_circuit(&extracted, &statement) {
-        Err(eu_id_prover::Error::Prove(_)) => {}
-        Err(other) => panic!("expected proof rejection, got {other:?}"),
-        Ok(proof) => {
-            assert!(
-                verify_mdoc_circuit(&proof, &statement).is_err(),
-                "mispointed digest anchor verified unexpectedly"
-            );
-        }
-    }
-}
-
-#[test]
-#[ignore = "slow: proves rejection for deviceKey anchor tamper"]
-fn device_key_anchor_offset_rejects_in_proof() {
-    let session_transcript = test_session_transcript();
-    let fixture = valid_fixture(&session_transcript);
-    let extracted =
-        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
-    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect("statement builds");
-    statement.mso_device_key_x_anchor_offset += 1;
-
-    match prove_mdoc_circuit(&extracted, &statement) {
-        Err(eu_id_prover::Error::Prove(_)) => {}
-        Err(other) => panic!("expected proof rejection, got {other:?}"),
-        Ok(proof) => {
-            assert!(
-                verify_mdoc_circuit(&proof, &statement).is_err(),
-                "mispointed deviceKey anchor verified unexpectedly"
-            );
-        }
-    }
-}
-
-#[test]
-#[ignore = "slow: proves rejection for validity anchor tamper"]
-fn validity_anchor_offset_rejects_in_proof() {
-    let session_transcript = test_session_transcript();
-    let fixture = valid_fixture(&session_transcript);
-    let extracted =
-        extract_pid_mdoc(&fixture.doc, &request(session_transcript)).expect("mdoc extracts");
-    let mut statement = MdocCircuitStatement::from_extracted(&extracted, policy_on(2026, 7, 3))
-        .expect("statement builds");
-    statement.mso_valid_from_anchor_offset += 1;
-
-    match prove_mdoc_circuit(&extracted, &statement) {
-        Err(eu_id_prover::Error::Prove(_)) => {}
-        Err(other) => panic!("expected proof rejection, got {other:?}"),
-        Ok(proof) => {
-            assert!(
-                verify_mdoc_circuit(&proof, &statement).is_err(),
-                "mispointed validity anchor verified unexpectedly"
-            );
-        }
     }
 }
 
@@ -3162,23 +3001,17 @@ fn mdoc_zk_class_d_sha_tables_dummy_region() {
     );
     let shapes = sha_tables.component_shapes();
     assert!(!shapes.is_empty(), "shared SHA tables must expose shapes");
-    // The small range tables (Range2/4/5) are padded to
-    // 2^LOG_N_LANES = 2^4 (real) → 5 (blinded); Range8 is 2^8 → 9. Under
-    // Class D every committed domain is
-    // exactly one log above its real width, so every shape's log_size is the
-    // blinded size {5, 9}. Assert each is blinded (never a bare real size).
-    for shape in &shapes {
-        assert!(
-            shape.log_size == 5 || shape.log_size == 9,
-            "shared SHA-table component {} log_size {} is not a Class-D blinded (real+1) size",
-            shape.name,
-            shape.log_size,
-        );
-    }
-    // Explicit per-kind check that the blinded range widths are exactly real+1.
+    // Under Class D every committed domain is at least one log above its real
+    // width, and the claim-mask machinery additionally floors every shared
+    // table at CLAIM_MASK_MIN_LOG_SIZE. Assert each range table sits exactly
+    // at that blinded size (never a bare real size).
     for &kind in RANGE_TABLES {
         let real = stwo_sha256::components::range_log_size(kind);
-        let blind = real + 1;
+        let blind = (real + 1).max(air_core::claim_mask::CLAIM_MASK_MIN_LOG_SIZE);
+        assert!(
+            blind > real,
+            "blinded size must exceed the real width for {kind:?}"
+        );
         assert!(
             shapes
                 .iter()

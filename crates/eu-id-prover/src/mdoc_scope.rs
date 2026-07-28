@@ -62,6 +62,10 @@ pub(crate) const MDOC_SCOPE_MAX_DIGEST_ID: u32 = u16::MAX as u32;
 const MDOC_SCOPE_NATIONALITY_SLACK_BITS: usize = 8;
 const MDOC_SCOPE_UNORDERED_MAP_DEPTH: usize = 3;
 const _: () = assert!(MAX_PRESENTED_NATIONALITIES == 1usize << MDOC_SCOPE_NATIONALITY_SLACK_BITS);
+const ISO_MDL_DOCTYPE: &[u8] = b"org.iso.18013.5.1.mDL";
+const ISO_MDL_NAMESPACE: &[u8] = b"org.iso.18013.5.1";
+const ISO_MDL_AAMVA_NAMESPACE: &[u8] = b"org.iso.18013.5.1.aamva";
+const DIGEST_EXIT_REQUIRES_SELECTED_ITEMS: u32 = 1;
 
 pub(crate) const ISSUER_SIG_STRUCTURE_STREAM_ID: u32 = 0x4d53_0000;
 pub(crate) const ISSUER_PAYLOAD_STREAM_ID: u32 = 0x4d53_0001;
@@ -720,7 +724,7 @@ impl ProgramBuilder {
             unknown_last,
             continuation,
             ScopeAction::UnknownDigestExit,
-            0,
+            u32::from(items != 0) * DIGEST_EXIT_REQUIRES_SELECTED_ITEMS,
             31,
         );
         let mut unknown_value = unknown_last;
@@ -1209,11 +1213,30 @@ fn validity_grammar() -> Grammar {
 }
 
 fn mso_grammar(statement: &MdocScopeStatement) -> Grammar {
-    let value_digests = Grammar::Sequence(vec![
+    let selected_digests = Grammar::DynamicDigestMap(statement.items.len());
+    let selected_namespace_only = Grammar::Sequence(vec![
         Grammar::Exact(cbor_head(5, 1)),
         exact_text(&statement.namespace),
-        Grammar::DynamicDigestMap(statement.items.len()),
+        selected_digests.clone(),
     ]);
+    let value_digests =
+        if statement.doc_type == ISO_MDL_DOCTYPE && statement.namespace == ISO_MDL_NAMESPACE {
+            Grammar::Choice(vec![
+                selected_namespace_only,
+                Grammar::UnorderedMap {
+                    level: 1,
+                    fields: vec![
+                        (cbor_text(&statement.namespace), selected_digests),
+                        (
+                            cbor_text(ISO_MDL_AAMVA_NAMESPACE),
+                            Grammar::DynamicDigestMap(0),
+                        ),
+                    ],
+                },
+            ])
+        } else {
+            selected_namespace_only
+        };
     let device_key_info = Grammar::UnorderedMap {
         level: 1,
         fields: vec![(cbor_text(b"deviceKey"), cose_key_grammar())],
@@ -1752,9 +1775,11 @@ fn apply_edge_native(
             ok
         }
         ScopeAction::SelectedDigestExit | ScopeAction::UnknownDigestExit => {
+            let requires_selected_items = matches!(action, ScopeAction::SelectedDigestExit)
+                || edge.p0 == DIGEST_EXIT_REQUIRES_SELECTED_ITEMS;
             let ok = !row.header
                 && before.remaining == 1
-                && before.seen[..item_count].iter().all(|seen| *seen);
+                && (!requires_selected_items || before.seen[..item_count].iter().all(|seen| *seen));
             if ok {
                 after.remaining = 0;
             }
@@ -3174,8 +3199,8 @@ impl FrameworkEval for MdocScopeEval {
                     - trace[columns.byte].clone()),
         );
 
-        let digest_exit =
-            action(ScopeAction::SelectedDigestExit) + action(ScopeAction::UnknownDigestExit);
+        let digest_exit = action(ScopeAction::SelectedDigestExit)
+            + action(ScopeAction::UnknownDigestExit) * trace[columns.p0].clone();
         for bit in seen_before.iter().take(item_count) {
             eval.add_constraint(digest_exit.clone() * (bit.clone() - one.clone()));
         }
@@ -4447,8 +4472,8 @@ mod tests {
         ])
     }
 
-    fn value_digests(namespace: &[u8], digest_ids: &[u64]) -> Vec<u8> {
-        let digests = digest_ids
+    fn digest_map(digest_ids: &[u64]) -> Vec<u8> {
+        let entries = digest_ids
             .iter()
             .map(|id| {
                 (
@@ -4457,7 +4482,11 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        encoded_map(&[(cbor_text(namespace), encoded_map(&digests))])
+        encoded_map(&entries)
+    }
+
+    fn value_digests(namespace: &[u8], digest_ids: &[u64]) -> Vec<u8> {
+        encoded_map(&[(cbor_text(namespace), digest_map(digest_ids))])
     }
 
     fn mso_entries(
@@ -4874,6 +4903,99 @@ mod tests {
         ));
         let scope = construct(statement, mso, v2_item_inners(&[b"FR"]), false).unwrap();
         assert_eq!(scope.metadata().nationality_count, Some(1));
+    }
+
+    #[test]
+    fn accepts_mdl_aamva_digest_namespace_without_cross_namespace_selection() {
+        let statement = v2_statement(true);
+        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
+        entries[3].1 = encoded_map(&[
+            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
+            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[1, 2])),
+        ]);
+
+        let scope = construct(
+            statement.clone(),
+            encoded_map(&entries),
+            v2_item_inners(&[b"FR"]),
+            false,
+        )
+        .unwrap();
+        let witness = scope.witness.as_ref().unwrap();
+        assert_eq!(witness.item_digest_bytes[0], [7; 32]);
+        assert_eq!(witness.item_digest_bytes[1], [9; 32]);
+
+        let malformed_aamva = encoded_map(&[(
+            cbor_head(0, 1),
+            encoded_bstr(&[0x11; SCOPE_DIGEST_BYTES - 1]),
+        )]);
+        entries[3].1 = encoded_map(&[
+            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
+            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), malformed_aamva),
+        ]);
+        assert!(construct(
+            statement,
+            encoded_map(&entries),
+            v2_item_inners(&[b"FR"]),
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_selected_digest_found_only_in_mdl_aamva_namespace() {
+        let statement = v2_statement(true);
+        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
+        entries[3].1 = encoded_map(&[
+            (cbor_text(&statement.namespace), digest_map(&[7])),
+            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[9])),
+        ]);
+
+        assert!(construct(
+            statement,
+            encoded_map(&entries),
+            v2_item_inners(&[b"FR"]),
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_aamva_digest_namespace_for_non_mdl_statement() {
+        let mut statement = v2_statement(true);
+        statement.doc_type = b"eu.europa.ec.eudi.pid.1".to_vec();
+        statement.namespace = b"eu.europa.ec.eudi.pid.1".to_vec();
+        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
+        entries[3].1 = encoded_map(&[
+            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
+            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[1, 2])),
+        ]);
+
+        assert!(construct(
+            statement,
+            encoded_map(&entries),
+            v2_item_inners(&[b"FR"]),
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn accepts_mdl_digest_namespaces_in_reverse_order() {
+        let statement = v2_statement(true);
+        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
+        entries[3].1 = encoded_map(&[
+            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[1, 2])),
+            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
+        ]);
+
+        construct(
+            statement,
+            encoded_map(&entries),
+            v2_item_inners(&[b"FR"]),
+            false,
+        )
+        .unwrap();
     }
 
     #[test]

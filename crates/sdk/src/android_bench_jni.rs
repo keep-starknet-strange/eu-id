@@ -99,6 +99,17 @@ fn frequency_snapshot_json(snapshot: &CpuFrequencySnapshot) -> String {
     format!(r#"{{"scaling_max_khz":{scaling_max_khz},"scaling_cur_khz":{scaling_cur_khz}}}"#)
 }
 
+/// The statement this build actually benchmarks, so result JSONs stay honest
+/// even when the TS13 revocation A/B pair ships under the legacy range16/
+/// range8 library names.
+fn bench_statement_label() -> &'static str {
+    match TS13_REVOCATION_MODE {
+        None => "sdk_identity_v6_envelope",
+        Some("1") => "ts13_n1_age_over_18_revocation",
+        Some(_) => "ts13_n1_age_over_18_no_revocation",
+    }
+}
+
 fn result_json(result: IdentityBenchResult) -> String {
     let worker_cpu_ids = cpu_ids_json(&result.threading.worker_cpu_ids);
     let performance_cpu_ids = cpu_ids_json(&result.threading.performance_cpu_ids);
@@ -107,6 +118,11 @@ fn result_json(result: IdentityBenchResult) -> String {
     let frequency_before = frequency_snapshot_json(&result.frequency_before);
     let frequency_after = frequency_snapshot_json(&result.frequency_after);
     let core_metric = core_metric_name(result.threading.core_metric);
+    let statement = bench_statement_label();
+    let build_id = option_env!("EUID_BENCH_BUILD_ID").unwrap_or("untracked");
+    let library_slot = option_env!("EUID_BENCH_LIBRARY_SLOT").unwrap_or("untracked");
+    let cargo_profile = option_env!("EUID_BENCH_CARGO_PROFILE").unwrap_or("untracked");
+    let lto = option_env!("EUID_BENCH_LTO").unwrap_or("untracked");
     let rayon_threads = result.threading.worker_cpu_ids.len();
     let IdentityBenchResult {
         prove_ms,
@@ -118,7 +134,7 @@ fn result_json(result: IdentityBenchResult) -> String {
         ..
     } = result;
     format!(
-        r#"{{"prove_ms":{prove_ms},"process_cpu_ms":{process_cpu_ms},"verify_ms":{verify_ms},"peak_bytes":{peak_bytes},"proof_bytes":{proof_bytes},"rayon_threads":{rayon_threads},"worker_cpu_ids":{worker_cpu_ids},"performance_cpu_ids":{performance_cpu_ids},"efficiency_cpu_ids":{efficiency_cpu_ids},"cpu_metric_values":{cpu_metric_values},"frequency_before":{frequency_before},"frequency_after":{frequency_after},"core_metric":"{core_metric}","ok":{ok}}}"#
+        r#"{{"statement":"{statement}","build_id":"{build_id}","library_slot":"{library_slot}","cargo_profile":"{cargo_profile}","lto":"{lto}","prove_ms":{prove_ms},"process_cpu_ms":{process_cpu_ms},"verify_ms":{verify_ms},"peak_bytes":{peak_bytes},"proof_bytes":{proof_bytes},"rayon_threads":{rayon_threads},"worker_cpu_ids":{worker_cpu_ids},"performance_cpu_ids":{performance_cpu_ids},"efficiency_cpu_ids":{efficiency_cpu_ids},"cpu_metric_values":{cpu_metric_values},"frequency_before":{frequency_before},"frequency_after":{frequency_after},"core_metric":"{core_metric}","ok":{ok}}}"#
     )
 }
 
@@ -154,6 +170,14 @@ fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
     )
 }
 
+// Compile-time bench statement selector. Unset (the default build) keeps the
+// SDK proveIdentity/verifyIdentity path. "0"/"1" switches the benchmark body
+// to the TS13 N=1 age_over_18 circuit without/with in-STARK sorted-pair
+// revocation (proof_bytes is then the bincode circuit proof, not the v6
+// envelope). Used to package a revocation A/B pair under the two legacy
+// variant .so names.
+const TS13_REVOCATION_MODE: Option<&str> = option_env!("EUID_BENCH_TS13_REVOCATION");
+
 fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult {
     if !matches!(crate::zk_system(), ZkSystemKind::P256) {
         eprintln!("identity benchmark requires the P-256 SDK build");
@@ -168,6 +192,9 @@ fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult 
             threading,
             ok: false,
         };
+    }
+    if let Some(mode) = TS13_REVOCATION_MODE {
+        return run_ts13_benchmark(threading, mode == "1");
     }
     let (statement, witness) = benchmark_fixture();
     let monitored_cpu_ids = threading.performance_cpu_ids.clone();
@@ -203,6 +230,120 @@ fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult 
             Ok(result) => result.ok,
             Err(error) => {
                 eprintln!("SDK verifyIdentity benchmark failed: {error}");
+                false
+            }
+        };
+        (
+            prove_ms,
+            process_cpu_ms,
+            started.elapsed().as_millis() as u64,
+            proof_bytes,
+            frequency_before,
+            frequency_after,
+            ok,
+        )
+    });
+
+    IdentityBenchResult {
+        prove_ms,
+        process_cpu_ms,
+        verify_ms,
+        peak_bytes,
+        proof_bytes,
+        frequency_before,
+        frequency_after,
+        threading,
+        ok,
+    }
+}
+
+fn run_ts13_benchmark(threading: BenchmarkThreading, revocation: bool) -> IdentityBenchResult {
+    use eu_id_prover::mdoc::{
+        demo_mdoc_circuit_fixture_with_attributes, prove_mdoc_circuit, MdocDisclosureMode,
+        MdocPublicStatement, MdocRequestedAttribute, MdocRevocationRangeWitness,
+    };
+    use eu_id_prover::ts13::{
+        demo_ts13_revocation_inputs, verify_ts13_mdoc_public_statement,
+        verify_ts13_no_revocation_ablation_public_statement,
+    };
+
+    let mut value_bytes = Vec::new();
+    ciborium::ser::into_writer(&ciborium::value::Value::Bool(true), &mut value_bytes)
+        .expect("age_over_18 value encodes");
+    let fixture = demo_mdoc_circuit_fixture_with_attributes(vec![MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: MdocDisclosureMode::ValueEquality(value_bytes),
+    }]);
+    let statement = if revocation {
+        let (revocation_statement, revocation_witness) =
+            demo_ts13_revocation_inputs(&fixture.extracted.mso);
+        fixture
+            .statement
+            .clone()
+            .with_ts13_revocation((&revocation_statement).into())
+            .with_ts13_revocation_range(MdocRevocationRangeWitness {
+                id: revocation_witness.id,
+                id_lo: revocation_witness.id_lo,
+                id_hi: revocation_witness.id_hi,
+            })
+            .with_ts13_revocation_signature(revocation_witness.signature.clone())
+    } else {
+        fixture.statement.clone()
+    };
+    let public_statement = MdocPublicStatement::from_circuit(&statement);
+
+    let monitored_cpu_ids = threading.performance_cpu_ids.clone();
+    let (
+        (prove_ms, process_cpu_ms, verify_ms, proof_bytes, frequency_before, frequency_after, ok),
+        peak_bytes,
+    ) = with_peak_sampler(|| {
+        let frequency_before = cpu_frequency_snapshot(&monitored_cpu_ids);
+        let cpu_started = process_cpu_time();
+        let started = Instant::now();
+        let proof = match prove_mdoc_circuit(&fixture.extracted, &statement) {
+            Ok(proof) => proof,
+            Err(error) => {
+                eprintln!("TS13 bench prove failed: {error:?}");
+                return (
+                    0,
+                    0,
+                    0,
+                    0,
+                    frequency_before,
+                    CpuFrequencySnapshot::default(),
+                    false,
+                );
+            }
+        };
+        let prove_ms = started.elapsed().as_millis() as u64;
+        let process_cpu_ms = process_cpu_time().saturating_sub(cpu_started).as_millis() as u64;
+        let frequency_after = cpu_frequency_snapshot(&monitored_cpu_ids);
+        let proof_bytes = match bincode::serialize(&proof) {
+            Ok(bytes) => bytes.len() as u64,
+            Err(error) => {
+                eprintln!("TS13 bench proof serialization failed: {error}");
+                return (
+                    prove_ms,
+                    process_cpu_ms,
+                    0,
+                    0,
+                    frequency_before,
+                    frequency_after,
+                    false,
+                );
+            }
+        };
+
+        let started = Instant::now();
+        let verification = if revocation {
+            verify_ts13_mdoc_public_statement(&proof, &public_statement)
+        } else {
+            verify_ts13_no_revocation_ablation_public_statement(&proof, &public_statement)
+        };
+        let ok = match verification {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("TS13 bench verify failed: {error:?}");
                 false
             }
         };
@@ -352,7 +493,7 @@ fn android_allowed_cpu_ids() -> Result<Vec<usize>, String> {
     if result != 0 {
         return Err(std::io::Error::last_os_error().to_string());
     }
-    let cpu_ids = (0..libc::CPU_SETSIZE as usize)
+    let cpu_ids = (0..libc::CPU_SETSIZE)
         // SAFETY: sched_getaffinity initialized `mask`; indices are bounded by CPU_SETSIZE.
         .filter(|cpu_id| unsafe { libc::CPU_ISSET(*cpu_id, &mask) })
         .collect::<Vec<_>>();
@@ -438,11 +579,7 @@ fn build_global_pool(cpu_ids: &[usize]) -> Result<(), String> {
 
 #[cfg(target_os = "android")]
 fn pin_current_thread(cpu_ids: &[usize]) -> Result<(), String> {
-    if cpu_ids.is_empty()
-        || cpu_ids
-            .iter()
-            .any(|cpu_id| *cpu_id >= libc::CPU_SETSIZE as usize)
-    {
+    if cpu_ids.is_empty() || cpu_ids.iter().any(|cpu_id| *cpu_id >= libc::CPU_SETSIZE) {
         return Err("invalid empty or out-of-range CPU affinity set".to_string());
     }
     let mut mask = unsafe { std::mem::zeroed::<libc::cpu_set_t>() };

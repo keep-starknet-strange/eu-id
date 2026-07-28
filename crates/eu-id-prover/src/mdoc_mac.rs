@@ -777,10 +777,18 @@ impl FrameworkEval for MacBindingEval {
             &bytes,
         ));
 
+        // A slot with no live binding (the revocation slot when the statement
+        // carries no revocation leg) is pinned to the public nonzero
+        // placeholder; pinning it to zero would zero its MAC tags and publish
+        // a constant revocation-off marker in every proof.
+        let placeholder_bytes = absent_revocation_slot_bytes();
         let zero_active =
             active.clone() - issuer_digest_active - revocation_digest_active - field_active.clone();
-        for byte in &bytes {
-            eval.add_constraint(zero_active.clone() * byte.clone());
+        for (byte_idx, byte) in bytes.iter().enumerate() {
+            eval.add_constraint(
+                zero_active.clone()
+                    * (byte.clone() - m31_const::<E>(u32::from(placeholder_bytes[byte_idx]))),
+            );
         }
 
         for (byte_idx, byte) in bytes.iter().enumerate() {
@@ -863,6 +871,19 @@ fn binding_preprocessed_trace(has_revocation: bool) -> Vec<MacColumnEval> {
         .into_iter()
         .map(|values| column_eval(BINDING_LOG_SIZE, values))
         .collect()
+}
+
+/// The 32 binding-slot bytes an absent revocation slot must carry: the
+/// `MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE` placeholder in both halves, laid out
+/// exactly as `binding_value_rows` lays out live values.
+fn absent_revocation_slot_bytes() -> [u8; 32] {
+    let placeholder = eu_id_ec_coprocessor::ecdsa::MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE;
+    let mut bytes = [0u8; 32];
+    for i in 0..HALF_BYTES {
+        bytes[i] = placeholder[HALF_BYTES - 1 - i];
+        bytes[HALF_BYTES + i] = placeholder[HALF_BYTES - 1 - i];
+    }
+    bytes
 }
 
 fn binding_value_rows(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> [[u8; 32]; MACS_PER_PROOF / 2] {

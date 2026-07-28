@@ -3,44 +3,40 @@ use ecdsa::signature::hazmat::PrehashVerifier;
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey};
 use p256::EncodedPoint;
 use sha2::{Digest, Sha256};
-use stwo::core::vcs::blake2_hash::Blake2sHash;
-use stwo_p256::types::{AffinePoint, Signature};
+use stwo_p256::types::{AffinePoint, Signature, U256};
 
 use crate::mdoc::{
-    verify_mdoc_circuit_with_preprocessed_root, ExtractedPidMdoc, MdocCircuitProof,
-    MdocCircuitStatement, MdocRevocationPublicInputs,
+    ExtractedPidMdoc, MdocCircuitProof, MdocCircuitStatement, MdocDisclosureMode,
+    MdocProfileVersion, MdocProofShapeLimits, MdocPublicStatement, MdocRevocationPublicInputs,
 };
 
-// Published identifiers pin the default `ec-coprocessor` circuit composition.
-// The no-default backend is not a published TS13 profile and canonical artifact
-// verification there fails closed. Regenerated 2026-07-27 for circuit revision
-// 6: the mdoc scope's DFA edge table moves to its own narrow component at the
-// edge-count height, letting the semantic walk run at its natural byte-count
-// height (masked table claimed sum joins the cyclic claim-mask ring).
+// Published identifiers pin the default `ec-coprocessor` circuit family. Every
+// accepted statement shape reconstructs and verifies its own canonical tree-0
+// root; the circuit hash commits to that root policy rather than to one
+// credential fixture's exact byte lengths.
 // Old hashes:
 // 5445c650a6f57d6b...0d4f21e6 (revision 1); a43f41e4745a053a...a3232591
 // (revision 2, SHA field exposure from constrained W bit planes 2026-07-13);
 // d09852c1343dcf59...2b84fc96 (revision 3, split-pack deletion 2026-07-21);
 // b1f58a97cbcffc1b...04252bf3 (revision 4, terminal Range8 checks 2026-07-24);
-// 8fbe779f33710584...f386886f (revision 5, in-circuit CBOR scope 2026-07-24).
+// 8fbe779f33710584...f386886f (revision 5, in-circuit CBOR scope 2026-07-24);
+// ad2f48128677588d...7a266557 (revision 6, fixture-specific tree-0 root).
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "ad2f48128677588d08c67fc742cadeeabaceef1f8d33bb38d33045d47a266557";
-// Regenerated 2026-07-27 for revision 6. Value is the real
-// `commitments[0]` of the published N=1 revocation-enabled age_over_18 mdoc
-// proof (captured via ts13_evidence_pack_n1_measurements). Old values:
-// 3532fa24129acba9...8583169f (Class-D blinding repin 2026-07-08);
-// ba943f9deed4cf5e...55e8a8b7 (P4b coprocessor revocation reroute 2026-07-08);
-// bc8ad8a2f9440f66...2a9babcf (split-pack deletion 2026-07-21);
-// ea5754a08fdd9ca9...6b7d3c7c (revision 4, terminal Range8 checks 2026-07-24);
-// d824fce24daae4c6...7d2e7bae (revision 5, in-circuit CBOR scope 2026-07-24).
-// See tasks/p4c-leakage-table.md.
-pub const TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT: &[u8; 32] =
-    b"\xf0\x7c\xc4\x55\xfa\xda\x60\x38\x21\xf3\x9a\x68\x4c\xaa\xdd\xf2\xc4\x40\xb5\xcc\x64\xc4\x34\x0b\x0a\x2a\xdf\x88\x65\x47\x9a\xb9";
+    "81fbe0e68fdd5f354f4b086c8fa1964f6eae3503d33e6076a6a7c914df4d2448";
+pub const TS13_CANONICAL_ROOT_POLICY: &str = "canonical-public-statement-bounded-proof-shape-v1";
+const TS13_PUBLISHED_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
+const TS13_PUBLISHED_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
+const TS13_PUBLISHED_ATTRIBUTE: &str = "age_over_18";
+const TS13_CBOR_TRUE: &[u8] = &[0xf5];
+const TS13_MAX_MSO_PAYLOAD_BYTES: usize = 16_384;
+const TS13_MAX_SHA_LOG_N_ROWS: u32 = 15;
+const TS13_MAX_CBOR_LOG_SIZE: u32 = 15;
+const TS13_MAX_SCOPE_LOG_SIZE: u32 = 16;
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CIRCUIT_REVISION: u32 = 6;
+pub const TS13_CIRCUIT_REVISION: u32 = 8;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 pub const TS13_PCS_QUERIES: u32 = 54;
 pub const TS13_PCS_POW_BITS: u32 = 20;
@@ -65,7 +61,10 @@ pub struct Ts13CircuitTuple {
     pub doctype: &'static str,
     pub namespace: &'static str,
     pub num_attributes: u32,
-    pub max_mdoc_bytes: u32,
+    pub max_mso_payload_bytes: u32,
+    pub max_sha_log_n_rows: u32,
+    pub max_cbor_log_size: u32,
+    pub max_scope_log_size: u32,
     pub max_attribute_bytes: u32,
     pub potential_issuers: u32,
     pub revocation_enabled: bool,
@@ -76,7 +75,7 @@ pub struct Ts13CircuitTuple {
     pub pcs_pow_bits: u32,
     pub pcs_fold_step: u32,
     pub fixed_table_fingerprints: Vec<Ts13FixedTableFingerprint>,
-    pub preprocessed_root: [u8; 32],
+    pub preprocessed_root_policy: &'static str,
     pub composed_soundness_bits: u32,
 }
 
@@ -89,7 +88,10 @@ impl Ts13CircuitTuple {
             doctype: "eu.europa.ec.eudi.pid.1",
             namespace: "eu.europa.ec.eudi.pid.1",
             num_attributes: 1,
-            max_mdoc_bytes: 16_384,
+            max_mso_payload_bytes: TS13_MAX_MSO_PAYLOAD_BYTES as u32,
+            max_sha_log_n_rows: TS13_MAX_SHA_LOG_N_ROWS,
+            max_cbor_log_size: TS13_MAX_CBOR_LOG_SIZE,
+            max_scope_log_size: TS13_MAX_SCOPE_LOG_SIZE,
             max_attribute_bytes: 32,
             potential_issuers: 1,
             revocation_enabled: true,
@@ -100,7 +102,7 @@ impl Ts13CircuitTuple {
             pcs_pow_bits: TS13_PCS_POW_BITS,
             pcs_fold_step: TS13_PCS_FOLD_STEP,
             fixed_table_fingerprints: ts13_published_fixed_table_fingerprints(),
-            preprocessed_root: *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT,
+            preprocessed_root_policy: TS13_CANONICAL_ROOT_POLICY,
             composed_soundness_bits: ts13_published_soundness_table().composed_soundness_bits(),
         }
     }
@@ -116,7 +118,22 @@ impl Ts13CircuitTuple {
             ("doctype".into(), self.doctype.into()),
             ("namespace".into(), self.namespace.into()),
             ("num_attributes".into(), Value::from(self.num_attributes)),
-            ("max_mdoc_bytes".into(), Value::from(self.max_mdoc_bytes)),
+            (
+                "max_mso_payload_bytes".into(),
+                Value::from(self.max_mso_payload_bytes),
+            ),
+            (
+                "max_sha_log_n_rows".into(),
+                Value::from(self.max_sha_log_n_rows),
+            ),
+            (
+                "max_cbor_log_size".into(),
+                Value::from(self.max_cbor_log_size),
+            ),
+            (
+                "max_scope_log_size".into(),
+                Value::from(self.max_scope_log_size),
+            ),
             (
                 "max_attribute_bytes".into(),
                 Value::from(self.max_attribute_bytes),
@@ -160,8 +177,8 @@ impl Ts13CircuitTuple {
                 ),
             ),
             (
-                "preprocessed_root".into(),
-                Value::Bytes(self.preprocessed_root.to_vec()),
+                "preprocessed_root_policy".into(),
+                self.preprocessed_root_policy.into(),
             ),
             (
                 "composed_soundness_bits".into(),
@@ -173,9 +190,10 @@ impl Ts13CircuitTuple {
 
 pub fn ts13_published_fixed_table_fingerprints() -> Vec<Ts13FixedTableFingerprint> {
     vec![Ts13FixedTableFingerprint {
-        name: "mdoc_preprocessed_tree",
-        digest: *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT,
-        rationale: "tree-0 preprocessed commitment root for the published TS13 age_over_18 tuple",
+        name: "mdoc_canonical_root_policy",
+        digest: ts13_default_root_policy_hash(),
+        rationale:
+            "versioned policy that reconstructs tree-0 from the bounded public statement shape",
     }]
 }
 
@@ -236,27 +254,27 @@ pub fn ts13_published_soundness_table() -> Ts13SoundnessTable {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13CircuitPin {
     circuit_hash: String,
-    preprocessed_root: [u8; 32],
+    root_policy_hash: [u8; 32],
 }
 
 impl Ts13CircuitPin {
-    pub fn for_tuple(tuple: &Ts13CircuitTuple, preprocessed_root: [u8; 32]) -> Self {
+    pub fn for_tuple(tuple: &Ts13CircuitTuple, root_policy_hash: [u8; 32]) -> Self {
         Self {
             circuit_hash: ts13_circuit_hash(tuple),
-            preprocessed_root,
+            root_policy_hash,
         }
     }
 
     pub fn verify(
         &self,
         tuple: &Ts13CircuitTuple,
-        preprocessed_root: [u8; 32],
+        root_policy_hash: [u8; 32],
     ) -> Result<(), Ts13CircuitPinError> {
         if self.circuit_hash != ts13_circuit_hash(tuple) {
             return Err(Ts13CircuitPinError::CircuitHashMismatch);
         }
-        if self.preprocessed_root != preprocessed_root {
-            return Err(Ts13CircuitPinError::PreprocessedRootMismatch);
+        if self.root_policy_hash != root_policy_hash {
+            return Err(Ts13CircuitPinError::RootPolicyMismatch);
         }
         Ok(())
     }
@@ -265,7 +283,7 @@ impl Ts13CircuitPin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ts13CircuitPinError {
     CircuitHashMismatch,
-    PreprocessedRootMismatch,
+    RootPolicyMismatch,
 }
 
 pub fn ts13_circuit_hash(tuple: &Ts13CircuitTuple) -> String {
@@ -294,8 +312,74 @@ pub fn ts13_default_circuit_hash() -> String {
     ts13_circuit_hash(&Ts13CircuitTuple::published_age_over_18())
 }
 
-pub fn ts13_default_preprocessed_root() -> [u8; 32] {
-    *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT
+pub fn ts13_default_root_policy_hash() -> [u8; 32] {
+    let policy = Value::Map(vec![
+        ("name".into(), TS13_CANONICAL_ROOT_POLICY.into()),
+        (
+            "root_reconstruction".into(),
+            "air_core.compute_canonical_preprocessed_root".into(),
+        ),
+        (
+            "shape_source".into(),
+            "public_statement_and_bounded_proof_metadata".into(),
+        ),
+        (
+            "max_mso_payload_bytes".into(),
+            Value::from(TS13_MAX_MSO_PAYLOAD_BYTES as u32),
+        ),
+        (
+            "max_sha_log_n_rows".into(),
+            Value::from(TS13_MAX_SHA_LOG_N_ROWS),
+        ),
+        (
+            "max_cbor_log_size".into(),
+            Value::from(TS13_MAX_CBOR_LOG_SIZE),
+        ),
+        (
+            "max_scope_log_size".into(),
+            Value::from(TS13_MAX_SCOPE_LOG_SIZE),
+        ),
+    ]);
+    let mut bytes = Vec::new();
+    ciborium::ser::into_writer(&policy, &mut bytes)
+        .expect("CBOR serialization of the TS13 root policy is infallible");
+    Sha256::digest(bytes).into()
+}
+
+#[cfg(feature = "ec-coprocessor")]
+pub fn verify_ts13_mdoc_public_statement(
+    proof: &MdocCircuitProof,
+    statement: &MdocPublicStatement,
+) -> Result<(), crate::Error> {
+    verify_ts13_mdoc_public_statement_profile(proof, statement, true)
+}
+
+#[cfg(feature = "ec-coprocessor")]
+pub fn verify_ts13_no_revocation_ablation_public_statement(
+    proof: &MdocCircuitProof,
+    statement: &MdocPublicStatement,
+) -> Result<(), crate::Error> {
+    verify_ts13_mdoc_public_statement_profile(proof, statement, false)
+}
+
+#[cfg(feature = "ec-coprocessor")]
+fn verify_ts13_mdoc_public_statement_profile(
+    proof: &MdocCircuitProof,
+    statement: &MdocPublicStatement,
+    revocation_enabled: bool,
+) -> Result<(), crate::Error> {
+    if !published_public_statement_matches(statement, revocation_enabled) {
+        return Err(crate::Error::Verify(
+            "mdoc public statement does not match the requested TS13 benchmark profile".to_string(),
+        ));
+    }
+    proof.validate_shape_limits(MdocProofShapeLimits {
+        max_sha_log_n_rows: TS13_MAX_SHA_LOG_N_ROWS,
+        max_cbor_log_size: TS13_MAX_CBOR_LOG_SIZE,
+        max_scope_log_size: TS13_MAX_SCOPE_LOG_SIZE,
+        max_mso_payload_bytes: TS13_MAX_MSO_PAYLOAD_BYTES,
+    })?;
+    crate::mdoc::verify_mdoc_public_statement(proof, statement)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -445,7 +529,6 @@ pub enum Ts13RevocationError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13MdocProofArtifact {
     pub circuit_hash: String,
-    pub preprocessed_root: [u8; 32],
     pub mdoc_proof: Vec<u8>,
     pub revocation_statement: Ts13RevocationStatement,
     pub revocation_witness: Ts13RevocationWitness,
@@ -454,10 +537,11 @@ pub struct Ts13MdocProofArtifact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ts13MdocProofArtifactError {
     CircuitHash,
-    PreprocessedRoot,
     EmptyProof,
     StatementRevocationMissing,
     StatementRevocationMismatch,
+    StatementTupleMismatch,
+    MsoPayloadTooLarge,
     ProofDecode,
     MdocProof,
     Revocation(Ts13RevocationError),
@@ -467,13 +551,9 @@ impl Ts13MdocProofArtifact {
     pub fn verify_revocation_binding(
         &self,
         extracted: &ExtractedPidMdoc,
-        expected_preprocessed_root: [u8; 32],
     ) -> Result<(), Ts13MdocProofArtifactError> {
         if self.circuit_hash != ts13_default_circuit_hash() {
             return Err(Ts13MdocProofArtifactError::CircuitHash);
-        }
-        if self.preprocessed_root != expected_preprocessed_root {
-            return Err(Ts13MdocProofArtifactError::PreprocessedRoot);
         }
         if self.mdoc_proof.is_empty() {
             return Err(Ts13MdocProofArtifactError::EmptyProof);
@@ -489,16 +569,20 @@ impl Ts13MdocProofArtifact {
         statement: &MdocCircuitStatement,
     ) -> Result<(), Ts13MdocProofArtifactError> {
         self.verify_statement_revocation_binding(statement)?;
-        let expected_preprocessed_root = ts13_default_preprocessed_root();
-        self.verify_revocation_binding(extracted, expected_preprocessed_root)?;
+        verify_published_mdoc_tuple(extracted, statement)?;
+        self.verify_revocation_binding(extracted)?;
         let proof: MdocCircuitProof = bincode::deserialize(&self.mdoc_proof)
             .map_err(|_| Ts13MdocProofArtifactError::ProofDecode)?;
-        verify_mdoc_circuit_with_preprocessed_root(
-            &proof,
-            statement,
-            Blake2sHash(expected_preprocessed_root),
-        )
-        .map_err(|_| Ts13MdocProofArtifactError::MdocProof)
+        #[cfg(feature = "ec-coprocessor")]
+        {
+            verify_ts13_mdoc_public_statement(&proof, &MdocPublicStatement::from_circuit(statement))
+                .map_err(|_| Ts13MdocProofArtifactError::MdocProof)
+        }
+        #[cfg(not(feature = "ec-coprocessor"))]
+        {
+            let _ = (proof, statement);
+            Err(Ts13MdocProofArtifactError::MdocProof)
+        }
     }
 
     fn verify_statement_revocation_binding(
@@ -524,6 +608,45 @@ impl Ts13MdocProofArtifact {
         }
         Ok(())
     }
+}
+
+fn verify_published_mdoc_tuple(
+    extracted: &ExtractedPidMdoc,
+    statement: &MdocCircuitStatement,
+) -> Result<(), Ts13MdocProofArtifactError> {
+    if !published_public_statement_matches(&MdocPublicStatement::from_circuit(statement), true)
+        || extracted.doctype != statement.doctype
+        || extracted.namespace != statement.namespace
+    {
+        return Err(Ts13MdocProofArtifactError::StatementTupleMismatch);
+    }
+
+    if extracted.mso.len() > TS13_MAX_MSO_PAYLOAD_BYTES {
+        return Err(Ts13MdocProofArtifactError::MsoPayloadTooLarge);
+    }
+    Ok(())
+}
+
+fn published_public_statement_matches(
+    statement: &MdocPublicStatement,
+    revocation_enabled: bool,
+) -> bool {
+    let [attribute] = statement.attributes.as_slice() else {
+        return false;
+    };
+    statement.doctype == TS13_PUBLISHED_DOCTYPE
+        && statement.namespace == TS13_PUBLISHED_NAMESPACE
+        && statement.profile == MdocProfileVersion::V2
+        && statement.ts13_revocation.is_some() == revocation_enabled
+        && statement.ts13_revocation_range_enabled == revocation_enabled
+        && statement.ts13_revocation_signature_enabled == revocation_enabled
+        && statement.birth_date_encoding.is_none()
+        && statement.nationality_encoding.is_none()
+        && attribute.element_identifier == TS13_PUBLISHED_ATTRIBUTE
+        && matches!(
+            &attribute.mode,
+            MdocDisclosureMode::ValueEquality(value) if value == TS13_CBOR_TRUE
+        )
 }
 
 impl From<&Ts13RevocationStatement> for MdocRevocationPublicInputs {
@@ -563,6 +686,45 @@ impl Ts13RevocationStatement {
             .verify_prehash(&message_hash, &signature)
             .map_err(|_| Ts13RevocationError::InvalidSignature)
     }
+}
+
+/// Deterministic demo revocation inputs shared by the TS13 perf probe and the
+/// Android bench JNI: a fixed demo authority key, epoch 51, and the tightest
+/// sorted-pair gap around the MSO-derived id. Bench/demo fixtures only.
+pub fn demo_ts13_revocation_inputs(mso: &[u8]) -> (Ts13RevocationStatement, Ts13RevocationWitness) {
+    use ecdsa::signature::hazmat::PrehashSigner;
+    use p256::ecdsa::SigningKey;
+
+    let signing_key = SigningKey::from_bytes((&[33u8; 32]).into()).expect("demo revocation key");
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let x: [u8; 32] = encoded.x().expect("x")[..].try_into().expect("x len");
+    let y: [u8; 32] = encoded.y().expect("y")[..].try_into().expect("y len");
+    let statement = Ts13RevocationStatement {
+        revocation_public_key: AffinePoint {
+            x: U256(x),
+            y: U256(y),
+        },
+        epoch: 51,
+    };
+    let id = ts13_mso_derived_revocation_id(mso);
+    let (id_lo, id_hi) = (id.saturating_sub(1), id.saturating_add(1));
+    let message_hash = ts13_revocation_message_hash(id_lo, id_hi, statement.epoch);
+    let pair_signature: P256Signature = signing_key
+        .sign_prehash(&message_hash)
+        .expect("demo revocation prehash signs");
+    let r: [u8; 32] = pair_signature.r().to_bytes().into();
+    let s: [u8; 32] = pair_signature.s().to_bytes().into();
+    let witness = Ts13RevocationWitness {
+        id,
+        id_lo,
+        id_hi,
+        epoch: statement.epoch,
+        signature: Signature {
+            r: U256(r),
+            s: U256(s),
+        },
+    };
+    (statement, witness)
 }
 
 pub fn ts13_mso_derived_revocation_id(mso: &[u8]) -> u64 {
@@ -702,13 +864,13 @@ mod tests {
     }
 
     #[test]
-    fn circuit_hash_rejects_stale_preprocessed_root() {
+    fn circuit_hash_rejects_stale_root_policy_hash() {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let pin = Ts13CircuitPin::for_tuple(&tuple, [7u8; 32]);
 
         assert!(matches!(
             pin.verify(&tuple, [8u8; 32]),
-            Err(Ts13CircuitPinError::PreprocessedRootMismatch)
+            Err(Ts13CircuitPinError::RootPolicyMismatch)
         ));
     }
 
@@ -717,7 +879,11 @@ mod tests {
         let tuple = Ts13CircuitTuple::published_age_over_18();
         let soundness = ts13_published_soundness_table();
 
-        assert_eq!(tuple.circuit_revision, 6);
+        assert_eq!(tuple.circuit_revision, 8);
+        assert_eq!(tuple.max_mso_payload_bytes, 16_384);
+        assert_eq!(tuple.max_sha_log_n_rows, 15);
+        assert_eq!(tuple.max_cbor_log_size, 15);
+        assert_eq!(tuple.max_scope_log_size, 16);
         assert_eq!(tuple.pcs_log_blowup_factor, 2);
         assert_eq!(tuple.pcs_queries, 54);
         assert_eq!(tuple.pcs_pow_bits, 20);
@@ -734,16 +900,13 @@ mod tests {
     }
 
     #[test]
-    fn circuit_hash_tuple_includes_preprocessed_root() {
+    fn circuit_hash_tuple_includes_canonical_root_policy() {
         let tuple = Ts13CircuitTuple::published_age_over_18();
 
-        assert_eq!(
-            tuple.preprocessed_root,
-            *TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT
-        );
+        assert_eq!(tuple.preprocessed_root_policy, TS13_CANONICAL_ROOT_POLICY);
         assert!(ts13_circuit_tuple_cbor(&tuple)
-            .windows(TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT.len())
-            .any(|window| window == TS13_PUBLISHED_AGE_OVER_18_PREPROCESSED_ROOT));
+            .windows(TS13_CANONICAL_ROOT_POLICY.len())
+            .any(|window| window == TS13_CANONICAL_ROOT_POLICY.as_bytes()));
     }
 
     #[test]
@@ -754,8 +917,8 @@ mod tests {
             tuple
                 .fixed_table_fingerprints
                 .iter()
-                .any(|fingerprint| fingerprint.name == "mdoc_preprocessed_tree"),
-            "published tuple must name the fixed table/preprocessed tree fingerprint"
+                .any(|fingerprint| fingerprint.name == "mdoc_canonical_root_policy"),
+            "published tuple must name the canonical preprocessed-root policy fingerprint"
         );
         assert!(ts13_circuit_tuple_cbor(&tuple)
             .windows(b"fixed_table_fingerprints".len())
@@ -778,6 +941,47 @@ mod tests {
         println!(
             "ts13_circuit_hash={}",
             TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH
+        );
+    }
+
+    #[test]
+    fn canonical_root_policy_accepts_only_the_bounded_published_statement() {
+        let fixture = crate::mdoc::demo_mdoc_circuit_fixture_with_attributes(vec![
+            crate::mdoc::MdocRequestedAttribute {
+                element_identifier: TS13_PUBLISHED_ATTRIBUTE.to_string(),
+                mode: MdocDisclosureMode::ValueEquality(TS13_CBOR_TRUE.to_vec()),
+            },
+        ]);
+        assert!(published_public_statement_matches(
+            &MdocPublicStatement::from_circuit(&fixture.statement),
+            false,
+        ));
+        let (revocation_statement, revocation_witness) =
+            demo_ts13_revocation_inputs(&fixture.extracted.mso);
+        let statement = fixture
+            .statement
+            .clone()
+            .with_ts13_revocation((&revocation_statement).into())
+            .with_ts13_revocation_range(crate::mdoc::MdocRevocationRangeWitness {
+                id: revocation_witness.id,
+                id_lo: revocation_witness.id_lo,
+                id_hi: revocation_witness.id_hi,
+            })
+            .with_ts13_revocation_signature(revocation_witness.signature);
+        verify_published_mdoc_tuple(&fixture.extracted, &statement).unwrap();
+
+        let mut wrong_statement = statement.clone();
+        wrong_statement.doctype = "org.example.other".to_string();
+        assert_eq!(
+            verify_published_mdoc_tuple(&fixture.extracted, &wrong_statement),
+            Err(Ts13MdocProofArtifactError::StatementTupleMismatch)
+        );
+
+        let mut oversized = fixture.extracted;
+        oversized.mso = vec![0; TS13_MAX_MSO_PAYLOAD_BYTES + 1];
+        assert_eq!(
+            verify_published_mdoc_tuple(&oversized, &statement),
+            Err(Ts13MdocProofArtifactError::MsoPayloadTooLarge)
         );
     }
 
