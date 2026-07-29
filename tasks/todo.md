@@ -674,3 +674,38 @@ claim-layout, degree-bound, test-hook, or file-footprint issue. No branch was pu
   `PQ_PERF_PROBE rayon_threads=1 prove_ms=1173 cold_verify_ms=107 cold_tree0_root_ms=91
   cold_stark_verify_ms=16 warm_verify_ms=15 warm_tree0_root_ms=0 warm_stark_verify_ms=15
   proof_bytes=1265795`.
+
+## Demo-prep implementation (2026-07-29)
+
+- [x] Preserve verified WO-D1 as `fix/mldsa-decompose-boundary` commit `e9e20241`.
+- [x] WO-D2: project product issuer/device ML-DSA inputs to verifier-only key/message data and
+      prove the serialized envelope contains no signature witness bytes.
+- [x] WO-D3: commit the completed demo-prep changes on their scoped branches.
+- [x] WO-D4: hide the coefficient range-boundary attack installer unless tests or the explicit
+      `attack-hooks` feature enable it; verify default and feature-enabled builds.
+- [x] WO-D6: on `feat/ts13-in-prove-identity`, dispatch the existing identity API to the exact TS13
+      prover/verifier under a distinct envelope tag while preserving product bytes.
+- [x] Run focused tests, the scoped SDK/prover suites, formatting/lint checks, and the TS13 perf
+      probe; review both branch diffs before committing.
+
+### Review
+
+- D5 was explicitly excluded and received no implementation changes.
+- D1 remains the independently verified `e9e20241` commit (6/6 work-order checks, including the
+  proof-level negatives, deterministic mdoc boundary regression, and 585/580 ms cold perf).
+- D2 now serializes product issuer/device authentication through the existing compact TS13 public
+  projection and reconstructs canonical zero witnesses on decode. The release e2e both proves the
+  raw `c_tilde`/`z`/`hint` controls are distinctive and absent from the envelope and records
+  `d2_envelope_bytes_delta=22048`; prove/verify and all tamper negatives pass.
+- D4 cfg-gates the thread-local, helpers, installer, and every evaluator/interaction call site.
+  Full release suites pass without hooks (110 passed, 1 ignored) and with `attack-hooks`
+  (115 passed, 1 ignored); the default release archive reports
+  `d4_default_release_attack_hook_symbols=0`. Cold `d4_prove_ms=548` at 12 Rayon threads.
+- The full release `eu-id-prover` suite passes (52 tests) and full release SDK suite passes
+  (43 tests). Release rustfmt/check and strict no-dependency clippy checks pass; the dependency
+  build still emits the 15 pre-existing `mdoc_cbor_stream` dead-code warnings.
+- D6 stays scoped to six `crates/sdk` files on `feat/ts13-in-prove-identity`: tag 7 dispatches the
+  exact shared TS13 helpers, tag 6 remains the product path, and cross-profile/unknown/tampered
+  tags fail closed. Generated Kotlin constructors were inspected with all new optional fields
+  defaulting to `null`. The final release probe reports
+  `d6_ts13_via_identity_prove_ms=686`, 78 ms verify, and a 975,853-byte outer envelope.

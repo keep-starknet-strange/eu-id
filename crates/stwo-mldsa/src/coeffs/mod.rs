@@ -77,6 +77,7 @@ use layout::{groups, Group, Kind, CARRY_DIGITS, MAX_DIGITS};
 use relations::CoeffsRelations;
 use tables::RcKind;
 
+#[cfg(any(test, feature = "attack-hooks"))]
 thread_local! {
     static RANGE_BOUNDARY_ATTACK: core::cell::RefCell<Option<RcKind>> =
         const { core::cell::RefCell::new(None) };
@@ -88,8 +89,10 @@ thread_local! {
 /// This preserves every non-lookup constraint and exercises the real shared
 /// relation/table path at the exact `log_size + 1` degree bound.
 #[doc(hidden)]
+#[cfg(any(test, feature = "attack-hooks"))]
 pub struct CoeffsRangeBoundaryGuard;
 
+#[cfg(any(test, feature = "attack-hooks"))]
 impl Drop for CoeffsRangeBoundaryGuard {
     fn drop(&mut self) {
         RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = None);
@@ -97,11 +100,13 @@ impl Drop for CoeffsRangeBoundaryGuard {
 }
 
 #[doc(hidden)]
+#[cfg(any(test, feature = "attack-hooks"))]
 pub fn install_range_boundary_attack(kind: RcKind) -> CoeffsRangeBoundaryGuard {
     RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = Some(kind));
     CoeffsRangeBoundaryGuard
 }
 
+#[cfg(any(test, feature = "attack-hooks"))]
 fn attacked_stream_boundary(stream: usize) -> Option<u32> {
     RANGE_BOUNDARY_ATTACK.with(|attack| {
         attack.borrow().and_then(|kind| {
@@ -117,6 +122,7 @@ fn attacked_stream_boundary(stream: usize) -> Option<u32> {
     })
 }
 
+#[cfg(any(test, feature = "attack-hooks"))]
 fn attacked_stream_value<E: EvalAtRow>(stream: usize, value: E::F) -> E::F {
     attacked_stream_boundary(stream).map_or(value, |boundary| E::F::from(m31(boundary)))
 }
@@ -560,6 +566,7 @@ impl FrameworkEval for CoeffsEval {
                 + is_digit.clone() * digit_offset.clone()
                 + is_carry.clone() * carry_offset.clone()
                 - two_pow_13.clone() * carry_hi[t].clone();
+            #[cfg(any(test, feature = "attack-hooks"))]
             let value = attacked_stream_value::<E>(t, value);
             let bound_id = is_digit.clone() * rc9_id.clone() + is_carry.clone() * rc13_id.clone();
             eval.add_to_relation(RelationEntry::base(
@@ -571,6 +578,7 @@ impl FrameworkEval for CoeffsEval {
         // Slot 5: sixth digit rc9. Carry highs are interleaved below.
         let gate = is_digit.clone() * live_mask[5].clone();
         let value = digit[5].clone() + is_digit.clone() * digit_offset;
+        #[cfg(any(test, feature = "attack-hooks"))]
         let value = attacked_stream_value::<E>(5, value);
         let bound_id = is_digit.clone() * rc9_id;
         eval.add_to_relation(RelationEntry::base(
@@ -584,6 +592,7 @@ impl FrameworkEval for CoeffsEval {
         let bound = E::F::from(M31::from_u32_unchecked(Z_NORM_BOUND as u32));
         let value = carry_hi[2].clone() + recomp_cell.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_a_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
         let value = attacked_stream_value::<E>(6, value);
         let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
         eval.add_to_relation(RelationEntry::base(
@@ -592,7 +601,9 @@ impl FrameworkEval for CoeffsEval {
             &[value, bound_id],
         ));
 
-        let value = attacked_stream_value::<E>(7, carry_hi[3].clone() + norm_a_hi.clone());
+        let value = carry_hi[3].clone() + norm_a_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
+        let value = attacked_stream_value::<E>(7, value);
         let bound_id = is_carry.clone() * rc8_id.clone()
             + is_norm.clone() * rc7_id.clone()
             + is_c.clone() * ternary_id;
@@ -604,6 +615,7 @@ impl FrameworkEval for CoeffsEval {
 
         let value = carry_hi[4].clone() - recomp_cell.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_b_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
         let value = attacked_stream_value::<E>(8, value);
         let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
         eval.add_to_relation(RelationEntry::base(
@@ -612,7 +624,9 @@ impl FrameworkEval for CoeffsEval {
             &[value, bound_id],
         ));
 
-        let value = attacked_stream_value::<E>(9, norm_b_hi.clone());
+        let value = norm_b_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
+        let value = attacked_stream_value::<E>(9, value);
         let bound_id = is_norm.clone() * rc7_id.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
@@ -624,6 +638,7 @@ impl FrameworkEval for CoeffsEval {
         // simultaneously range-check carry highs 0/1 on disjoint carry rows.
         let value = second_recomp_expr.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm2_a_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
         let value = attacked_stream_value::<E>(10, value);
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
@@ -631,7 +646,9 @@ impl FrameworkEval for CoeffsEval {
             &[value, is_norm.clone() * rc13_id.clone()],
         ));
 
-        let value = attacked_stream_value::<E>(11, carry_hi[0].clone() + norm2_a_hi.clone());
+        let value = carry_hi[0].clone() + norm2_a_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
+        let value = attacked_stream_value::<E>(11, value);
         let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc7_id.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
@@ -641,6 +658,7 @@ impl FrameworkEval for CoeffsEval {
 
         let value =
             -second_recomp_expr.clone() + is_norm.clone() * bound - two_pow_13 * norm2_b_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
         let value = attacked_stream_value::<E>(12, value);
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
@@ -648,7 +666,9 @@ impl FrameworkEval for CoeffsEval {
             &[value, is_norm.clone() * rc13_id],
         ));
 
-        let value = attacked_stream_value::<E>(13, carry_hi[1].clone() + norm2_b_hi.clone());
+        let value = carry_hi[1].clone() + norm2_b_hi.clone();
+        #[cfg(any(test, feature = "attack-hooks"))]
+        let value = attacked_stream_value::<E>(13, value);
         let bound_id = is_carry.clone() * rc8_id + is_norm.clone() * rc7_id;
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
@@ -946,6 +966,7 @@ pub fn gen_coeffs_interaction(
                 };
                 match selected {
                     Some((value, kind)) => {
+                        #[cfg(any(test, feature = "attack-hooks"))]
                         let value = attacked_stream_boundary(stream).map_or(value, m31);
                         (one, relations.range.combine(&[value, m31(kind.bound_id())]))
                     }

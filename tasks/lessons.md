@@ -55,3 +55,19 @@
   interaction generation, prover workers, and verifier reconstruction all exercise the same attack.
 - A malformed optional-arm regression must first build a fixture that actually contains that arm.
   Prove the three-role control fixture before shortening or extending revocation claim vectors.
+
+## 2026-07-29 — Treat a work-order exclusion as an immediate scope override
+
+Pattern: the demo-prep document listed D5 alongside the requested implementation, but the user
+subsequently said to ignore D5.
+
+Rule: immediately stop D5 research/implementation, remove it from the active plan, and do not carry
+its suggested code or tests into adjacent demo-prep branches.
+
+## 2026-07-29 — Use release mode for all verification suites when requested
+
+Pattern: the default work-order commands used the normal Cargo test profile, but the user wanted
+the substantially faster optimized test binaries throughout.
+
+Rule: add `--release` to every remaining Cargo test run and report only release-suite results as
+final verification evidence; keep perf probes release-built as well.

@@ -3,6 +3,10 @@ name = "stwo-mldsa"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Test-only coefficient range-boundary fault injection.
+attack-hooks = []
+
 [dependencies]
 # SHAKE-128 / SHAKE-256 (Keccak) for ExpandA, SampleInBall, the message-rep
 # hash µ, and the commitment hash c̃. The M1 reference records absorb/squeeze

@@ -342,6 +342,32 @@ impl MdocMlDsaPublicAuthInput {
     }
 }
 
+/// Serde adapter for verifier-bound circuit statements. The in-memory circuit
+/// type retains the full prover witness, while its wire representation reuses
+/// the compact TS13 public-auth projection and reconstructs canonical zero
+/// signature placeholders when decoded by a verifier.
+mod public_auth_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{MdocAuthInput, MdocMlDsaPublicAuthInput};
+
+    pub fn serialize<S>(input: &MdocAuthInput, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        MdocMlDsaPublicAuthInput::from_circuit(input).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<MdocAuthInput, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        MdocMlDsaPublicAuthInput::deserialize(deserializer)?
+            .verifier_input("serialized")
+            .map_err(|error| serde::de::Error::custom(format!("{error:?}")))
+    }
+}
+
 fn auth_inputs_equal(left: &MdocAuthInput, right: &MdocAuthInput) -> bool {
     match (left, right) {
         (MdocAuthInput::MlDsa(l), MdocAuthInput::MlDsa(r)) => l == r,
@@ -2206,10 +2232,12 @@ pub struct MdocCircuitStatement {
     /// semantic navigation of the public issuer `Sig_structure` payload.
     pub doctype: String,
     pub namespace: String,
+    #[serde(with = "public_auth_serde")]
     pub issuer_input: IssuerAuthInput,
     /// Device-auth input. Scheme uniformity with `issuer_input` (and, when
     /// present, the revocation key/signature) is enforced fail-closed at prove
     /// AND verify — a mixed statement never reaches STARK work.
+    #[serde(with = "public_auth_serde")]
     pub device_input: DeviceAuthInput,
     pub ts13_revocation: Option<MdocRevocationPublicInputs>,
     /// Prover-only private witness.  It is deliberately absent from every
@@ -2631,6 +2659,12 @@ impl MdocCircuitStatement {
                 MdocNationalityBinding::Alpha2(_) => MdocNationalityBinding::Alpha2([0; 2]),
             };
         }
+        self.issuer_input = MdocMlDsaPublicAuthInput::from_circuit(&self.issuer_input)
+            .verifier_input("issuer")
+            .expect("canonical issuer public key round-trips");
+        self.device_input = MdocMlDsaPublicAuthInput::from_circuit(&self.device_input)
+            .verifier_input("device")
+            .expect("canonical device public key round-trips");
         self.ts13_revocation_range = None;
         self
     }

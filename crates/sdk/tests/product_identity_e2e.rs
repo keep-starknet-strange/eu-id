@@ -78,14 +78,81 @@ fn assert_rejects(result: Result<ZkVerifyResult, euid_zk_sdk::ZkError>, context:
     }
 }
 
+fn signature_witness_markers(
+    role: &str,
+    input: &stwo_mldsa::MlDsaVerifyInput,
+) -> Vec<(String, Vec<u8>)> {
+    let z = input.z.iter().flatten().copied().collect::<Vec<_>>();
+    let hint = input.hint.iter().flatten().copied().collect::<Vec<_>>();
+    vec![
+        (
+            format!("{role} c_tilde"),
+            bincode::serialize(input.c_tilde.as_slice()).expect("c_tilde marker serializes"),
+        ),
+        (
+            format!("{role} z"),
+            bincode::serialize(&z).expect("z marker serializes"),
+        ),
+        (
+            format!("{role} hint"),
+            bincode::serialize(&hint).expect("hint marker serializes"),
+        ),
+    ]
+}
+
 #[test]
 fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() {
     let session_transcript =
         eu_id_prover::mdoc::openid4vp_session_transcript(b"sdk-product-identity-session");
     let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_transcript(&session_transcript);
+    let extraction_request = eu_id_prover::MdocPidRequest {
+        doctype: PID_DOCTYPE.to_string(),
+        namespace: PID_NAMESPACE.to_string(),
+        attributes: vec![
+            eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
+            },
+            eu_id_prover::mdoc::MdocRequestedAttribute {
+                element_identifier: "nationality".to_string(),
+                mode: eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
+            },
+        ],
+        birth_date_element: "birth_date".to_string(),
+        nationality_element: "nationality".to_string(),
+        session_transcript: session_transcript.clone(),
+        trusted_mldsa_issuer_public_keys: vec![fixture.issuer_pk.clone()],
+        device_authentication_profile:
+            eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
+    };
+    let extracted = eu_id_prover::mdoc::extract_pid_mdoc(&fixture.document, &extraction_request)
+        .expect("product fixture extracts");
+    let signature_witness_markers = [
+        (
+            "issuer",
+            extracted
+                .issuer_auth_input
+                .as_mldsa()
+                .expect("ML-DSA issuer"),
+        ),
+        (
+            "device",
+            extracted
+                .device_auth_input
+                .as_mldsa()
+                .expect("ML-DSA device"),
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(role, input)| signature_witness_markers(role, input))
+    .collect::<Vec<_>>();
+    let private_issuer_input = extracted.issuer_auth_input;
+    let private_device_input = extracted.device_auth_input;
     let statement = product_statement(session_transcript, &fixture.issuer_pk);
     let (revocation_pk, revocation_signature) = mldsa_fixture::mldsa_revocation_fixture(1, 2, 7);
     assert_eq!(revocation_pk, fixture.revocation_pk);
+    let issuer_signature = fixture.issuer_signature.clone();
+    let device_signature = fixture.device_signature.clone();
     let witness = ZkMdocWitness {
         document: fixture.document,
         trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk]),
@@ -111,6 +178,75 @@ fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() 
             "product identity envelope must not contain the credential's {name}"
         );
     }
+    for (name, signature) in [
+        ("issuer", issuer_signature.as_slice()),
+        ("device", device_signature.as_slice()),
+    ] {
+        assert!(
+            !proof
+                .windows(signature.len())
+                .any(|window| window == signature),
+            "product identity envelope must not contain the raw {name} signature"
+        );
+        assert!(
+            !proof
+                .windows(stwo_mldsa::constants::C_TILDE_BYTES)
+                .any(|window| window == &signature[..stwo_mldsa::constants::C_TILDE_BYTES]),
+            "product identity envelope must not contain the {name} c_tilde witness"
+        );
+    }
+    for (name, marker) in &signature_witness_markers {
+        assert!(
+            !proof
+                .windows(marker.len())
+                .any(|window| window == marker.as_slice()),
+            "product identity envelope must not contain the serialized {name} witness"
+        );
+    }
+
+    let public_envelope: ProductProofEnvelopeForTest =
+        bincode::deserialize(&proof).expect("product proof envelope decodes");
+    for (name, input) in [
+        ("issuer", &public_envelope.mdoc_statement.issuer_input),
+        ("device", &public_envelope.mdoc_statement.device_input),
+    ] {
+        let input = input.as_mldsa().expect("product role is ML-DSA");
+        assert!(
+            input.c_tilde.iter().all(|&value| value == 0)
+                && input.z.iter().flatten().all(|&value| value == 0)
+                && input.hint.iter().flatten().all(|&value| value == 0),
+            "product verifier statement must zero the {name} signature witness"
+        );
+    }
+    let private_inputs = [
+        ("issuer", &private_issuer_input),
+        ("device", &private_device_input),
+    ];
+    for (name, marker) in &signature_witness_markers {
+        assert!(
+            private_inputs.iter().any(|(_, input)| {
+                let serialized = bincode::serialize(input).expect("private auth input serializes");
+                serialized
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_slice())
+            }),
+            "pre-scrub control envelope must contain the serialized {name} witness"
+        );
+    }
+    let d2_envelope_bytes_delta = private_inputs
+        .iter()
+        .map(|(_, input)| {
+            let input = input.as_mldsa().expect("ML-DSA private auth input");
+            let public_input = (input.encode_pk(), input.message.clone());
+            bincode::serialized_size(input).expect("private auth input size") as usize
+                - bincode::serialized_size(&public_input).expect("public auth input size") as usize
+        })
+        .sum::<usize>();
+    eprintln!("d2_envelope_bytes_delta={d2_envelope_bytes_delta}");
+    assert!(
+        d2_envelope_bytes_delta >= 7 * 1024,
+        "signature scrub must save at least the expected ~7 KiB"
+    );
 
     let mut relabeled = statement.clone();
     relabeled.spec_id.push_str("-relabeled");

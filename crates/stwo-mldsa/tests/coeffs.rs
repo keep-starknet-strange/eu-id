@@ -142,6 +142,7 @@ fn negative_out_of_range_digit() {
     assert!(rejected(w, input), "out-of-range digit must be rejected");
 }
 
+#[cfg(feature = "attack-hooks")]
 fn coeffs_range_boundary_rejects(
     kind: stwo_mldsa::coeffs::tables::RcKind,
     seed: u64,
@@ -156,11 +157,13 @@ fn coeffs_range_boundary_rejects(
     );
 }
 
+#[cfg(feature = "attack-hooks")]
 #[test]
 fn coeffs_split_coeffs_rc9_boundary_rejects() {
     coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc9, 3010, b"split-rc9");
 }
 
+#[cfg(feature = "attack-hooks")]
 #[test]
 fn coeffs_split_coeffs_rc13_boundary_rejects() {
     coeffs_range_boundary_rejects(
@@ -170,16 +173,19 @@ fn coeffs_split_coeffs_rc13_boundary_rejects() {
     );
 }
 
+#[cfg(feature = "attack-hooks")]
 #[test]
 fn coeffs_split_coeffs_rc8_boundary_rejects() {
     coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc8, 3012, b"split-rc8");
 }
 
+#[cfg(feature = "attack-hooks")]
 #[test]
 fn coeffs_split_coeffs_rc7_boundary_rejects() {
     coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc7, 3013, b"split-rc7");
 }
 
+#[cfg(feature = "attack-hooks")]
 #[test]
 fn coeffs_split_coeffs_ternary_boundary_rejects() {
     coeffs_range_boundary_rejects(
