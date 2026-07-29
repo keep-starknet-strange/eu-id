@@ -55,3 +55,7 @@
   interaction generation, prover workers, and verifier reconstruction all exercise the same attack.
 - A malformed optional-arm regression must first build a fixture that actually contains that arm.
   Prove the three-role control fixture before shortening or extending revocation claim vectors.
+- Before reporting a repository-required file as absent, search hidden tracked
+  paths too (`rg --files -uu` or `git ls-tree -r HEAD`); ordinary file
+  discovery can omit `.agents` and turn a search mistake into a false
+  protocol-escalation premise.

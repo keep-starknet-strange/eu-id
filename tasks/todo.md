@@ -674,3 +674,188 @@ claim-layout, degree-bound, test-hook, or file-footprint issue. No branch was pu
   `PQ_PERF_PROBE rayon_threads=1 prove_ms=1173 cold_verify_ms=107 cold_tree0_root_ms=91
   cold_stark_verify_ms=16 warm_verify_ms=15 warm_tree0_root_ms=0 warm_stark_verify_ms=15
   proof_bytes=1265795`.
+
+## Unlinkability campaign implementation (2026-07-29)
+
+Branch/worktree: `codex/unlinkability` at
+`/Users/lucas/eu-id/.claude/worktrees/codex-unlinkability`, created from the
+exact `feat/quantum-safe` HEAD `abf9c27f32bc857f6de7994cfca7ab9372e43baa`.
+
+### Plan
+
+- [x] Import the authoritative unlinkability work orders into this isolated
+      worktree, reconcile their `41530e51+working-tree` scope with current
+      branch history, and record the mailbox convention.
+- [x] Implement WO-U0a as an example-local private-message issuer spike;
+      prove and verify completeness, then record three cold process
+      measurements and Keccak/round shape.
+- [x] Implement WO-U0b as an example-local Keccak scaling spike; record cold
+      37/100/202-permutation measurements and enforce the STOP/GO budget.
+- [x] Resolve the U0b STOP/replan gate through `A-727`, land the exact
+      `4f39939e` four-family repin as a two-file commit, and reproduce the full
+      post-repin test/parity/performance/demo acceptance matrix.
+- [x] Append the witness-offset constraint design and the U1/U2/U4 sequencing,
+      digest-ID, and compatibility-cut questions to the mailbox.
+- [x] Obtain mailbox approval for Q-728 through Q-731 and fold every additive
+      range, same-cell, versioning, tree-0, polarity, anchor, and µ-totality
+      condition into the authoritative constraint addendum.
+- [ ] Implement the approved Phase-1 pair with its full proof-level negative
+      matrix, product/TS13 e2e gates, wire byte-grep privacy gates, identical
+      public-shape tree-0 regression, and three cold measurements.
+  - [x] Land the dynamic private issuer-message provider and fixed-width
+        padded-MSO SHA stream exposure with independent component tests.
+  - [ ] Land the private MSO binder, complete tdate/profile/device binds, and
+        the Q-732 namespace scanner with exact provider multiplicities.
+  - [ ] Resolve Q-738's product-v1 IssuerSignedItem CBOR-language ruling
+        before replacing the currently Ciborium-permissive host parse with the
+        strict private semantic parser.
+  - [ ] Make each private digest ID one canonical witness across item and MSO
+        surfaces; remove public digest binds and credential-derived
+        preprocessing/transcript inputs.
+  - [ ] Delete the provisional verifier dependence on
+        `check_mldsa_device_key_binding`/`mldsa_public_mso_facts`, remove
+        `PublicDigestBind` and the old equality-scope path, and construct the
+        issuer provider only after binder+scanner use censuses are frozen.
+  - [ ] Integrate private issuer mode, conditional revocation MSO SHA, and
+        decoupled revocation-message polarity in identical prove/verify order.
+  - [x] Namespace the conditional standalone MSO-SHA consumer without
+        changing legacy SHA IDs/transcripts, so its log-13 preprocessing
+        coexists with the smaller merged attribute SHA instead of colliding.
+  - [ ] Freeze the layout, then apply A-730's single V7/V3/v10/cache-v5 cut and
+        republish the TS13 caps/hash in one commit.
+  - [ ] Run the complete Phase-1 positive/negative/privacy/cache/performance
+        gate before proceeding to the remaining U3/U4 sweep.
+- [ ] Implement U3's public-statement fingerprint scrub and U4's in-circuit
+      revocation-id derivation after appending U4's constraint/cost design.
+  - [x] Close reduced U4's public-exposure gate: document epoch partitioning,
+        keep the revocation id/endpoints/digest/signature out of the clear TS13
+        statement, and retain Phase-3 masking as the anonymity precondition.
+  - [ ] Resolve Q-736's sequencing choice for the still-public Phase-1 device
+        key in U3's stable-region detector and whether `valid_today=true` is a
+        serialized bit or only a successful-proof invariant.
+- [x] Append the U5 rejection-sampler constraint, width, six-block cap, and
+      transcript design after main-loop review.
+- [x] Close the independent U5 audit findings before Phase-2 integration:
+      pin tree zero in proof tests, finish the frozen negative/host-validator
+      matrix, reject invalid stream bases without wrap/panic, and retain named
+      ignored proof/service acceptance gates.
+- [ ] Resolve and append U6's coefficient-domain/NTT design, then implement
+      U5/U6/U7/U9 with forged-coefficient, rejection-sampler, `tr`, and
+      device-key negatives.
+  - [x] Append U9's fixed-log-9 canonical FIPS packed-key decoder, private
+        MSO-start bridge, exact range census, relation polarity, and negative
+        matrix; keep its `T1Cell` dependency explicit in Q-733.
+  - [x] Append U7's private-pk `tr` plus mandatory private-µ Keccak wiring,
+        exact claim/layout delta, normalized U9 byte bridge, wire projection,
+        module order, and adversarial matrix.
+  - [x] Land and independently exercise U7's hosted-private-key core mode:
+        four service jobs, field-id-1 `pkEncode` bridge, key-independent
+        public mix, exact 20-claim/layout API, and wrong-key/shape negatives.
+  - [x] Make the new hosted-private-key verifier constructor reject short or
+        long group-evaluation/claim vectors before the legacy
+        `Claims::from_flat` panic boundary; add all four malformed-shape tests.
+  - [ ] Replace U7's explicitly temporary native `rho/t1` folded-evaluation
+        dependency with the approved U6/U9 relation chain and integrate the
+        mode into the mdoc device role.
+- [x] After mailbox authorization, pin the exact already-pushed Stwo GKR
+      parallel candidate `4f39939e` and rerun all gates. The permanent pin
+      closes U0b at +462/+545/+471 ms, so the full permutation-chain U8 is
+      skipped unless a later Phase-2 gate reactivates it.
+- [ ] Design and implement pre-challenge committed trace/OODS/FRI/claimed-sum
+      blinding without share-splitting private columns, with freshness,
+      balanced-tamper, and verifier-rejection regressions.
+  - [x] Create a clean `codex/unlinkability-zk` Stwo fork checkout at the
+        exact pinned `4f39939e` revision without touching the user's dirty
+        `/Users/lucas/stwo` checkout.
+  - [ ] Resolve Q-737's protocol-design and release-claim ruling after Math
+        Review found that trace dummy rows do not mask independently opened
+        composition parts or the FRI transcript.
+- [ ] Run `RAYON_NUM_THREADS=1 cargo test --workspace`, the ignored prover
+      suite, formatting/lint policy, all named privacy/soundness gates, and
+      final cold performance measurements; update the demo-prep table with
+      V7/V3 results before any landing onto a demo-quoted branch; review the
+      complete diff and fill in this section's Review.
+
+### Review
+
+- Phase-0 probes live behind the default-off `eu-id-prover/unlink-spikes`
+  feature. Default builds exclude the spike AIR and hidden APIs, retain the
+  production inner entrypoint shape, and serialize the byte-identical v4
+  tree-0 cache material. Feature/default checks and cache-key tests pass.
+- U0a completes and verifies from a serialized+Bzip2-round-tripped proof,
+  rejects production public-message verification, and measures 674–696 ms
+  prove across three cold 12-thread processes for 55 total Keccak
+  permutations. Its issuer message is 2,294 bytes; the measured rail passes
+  the 1.2 s gate.
+- U0b completes and verifies at all three points and rejects a same-proof
+  verifier configured for a different dummy-job count. Both probes now use a
+  named local Rayon pool with 32 MiB per worker after an outer-thread-only
+  diagnostic exposed an intermittent worker-stack overflow. The stack-safe
+  cold 12-thread point-202 prove time is 1,505–1,544 ms versus 523–530 ms at
+  point 37: paired overhead is 976–1,014 ms, exceeding the 700 ms hard budget.
+- Work therefore stopped before Phase 1. Watched mailbox question
+  `Q-727-unlinkability-u0-stop-go.md` requests the required replan decision.
+  Read-only U8 reconnaissance first attributes 7,992,320 of the 10,062,720
+  point-37→202 marginal service cells to the committed Keccak-round trace, but
+  finer timers localize the immediate scaling fault to the existing
+  lookup-GKR prover: `prove_batch` grows from 87.7 ms to 663.9–719.8 ms while
+  actual component/tie-back generation remains below 1.4 ms. The current pin
+  leaves those SIMD kernels sequential; already-pushed fork revision
+  `4f39939e` parallelizes them and carries CPU/SIMD proof-parity tests without
+  verifier or proof-format edits. A clean reversible A/B measured point 37 at
+  463–481 ms and point 202 at 966–997 ms, giving paired overheads of
+  +523/+485/+505 ms; encoded transcript equality, serial/parallel parity, and
+  stable-digest tests pass. The override was removed and the pins restored.
+  The mailbox question now requests the exact permanent repin; if approved,
+  the original full-transition U8 is unnecessary under its own cost gate.
+- Blocking audit: three consecutive goal turns found no `A-727` response
+  after bounded watches and direct outbox checks. Phase 1 and the permanent
+  four-pin change remain paused rather than silently overriding the
+  cross-repository authorization rule.
+- `A-727` subsequently authorized the exact repin. Commit
+  `821d8c7d967043678d0c7486a40377937d0b06bc` contains only the four manifest
+  revisions and four matching lockfile sources; the lock graph has no
+  transitive or `hashbrown` drift. Default workspace, `unlink-spikes`
+  workspace, all ignored gates, consumer encoded-GKR equality, exact-pin
+  CPU/SIMD GKR+MLE parity, and serial/parallel stable-digest checks all pass.
+- Permanent-pin cold U0b pairs are +462/+545/+471 ms (all below +700), the
+  one-worker point-202 result is 2,853 ms versus the old 2,914 ms, and U0a is
+  542/561/607 ms. Product demo prove improves to 507–513 ms and TS13 to
+  487–500 ms; the full named results are recorded in both campaign reports.
+- Phase 1 is GO, but read-only implementation mapping found two
+  soundness/spec sequencing conflicts that must be resolved before U2: TS13
+  loses its public MSO digest before U4 supplies an in-circuit replacement,
+  and U2's no-digestID wire gate conflicts with U3 owning the digestID move.
+  Q-728 through Q-730 request those sequencing and compatibility rulings.
+  Q-731 submits the degree-2 row-wise provider/binder design, common
+  payload-anchor and range proof, full padded-stream SHA bridge, complete tdate
+  and profile-constant binds, namespace-scope decision, and corrected capacity
+  census. A-728 approves pulling the range-exact private-MSO SHA/revocation
+  bridge into Phase 1; A-729 approves pulling digest-ID privacy into the pair
+  with one committed ID/canonical encoding consumed on both signed surfaces.
+  A-730 approves the one post-layout V7/V3/v10/cache-v5 compatibility cut and
+  makes credential-independent tree-0 roots a gate. A-731 approves the U2
+  design with an explicit polarity table, honest-fixture anchor negative, and
+  exhaustive issuer µ-consumer test. Phase-1 implementation is authorized;
+  Q-732 now asks the one remaining compatibility-specific choice: the exact
+  bounded multi-namespace valueDigests scan instead of an unapproved
+  single-namespace narrowing.
+- Phase-2 exact-domain review found that U5 emits NTT-domain `Â` while the
+  current folded identity consumes coefficient-domain `A`. Q-733 asks whether
+  to restore the historical stacked inverse-NTT AIR or use a separately
+  approved NTT-domain identity; direct Horner substitution is forbidden.
+- The requested `air-writer` skill was unavailable in this Codex session.
+  Phase-0 relation signs, degree bounds, module order, and claim shapes were
+  instead derived from and cross-checked against the existing hosted-message
+  and Keccak-service AIR implementations; this deviation is also recorded in
+  the authoritative work-order report.
+- U5's two claimed sums now have an explicit serialized proof-claim type and
+  an exact bincode round-trip regression, ready for composed-proof wiring.
+- U6 now has two complete in-repo domain designs with exact signs, bounds,
+  claims, tree timing, and cell censuses. Q-733 selects between the audited
+  inverse path and the 655,360-cell-smaller clean NTT-domain refactor before
+  either implementation begins.
+- The full product statement serialization regression now proves that private
+  issuer bytes, both authentication signature witnesses, the revocation
+  signature, and revocation gap endpoints are absent; deserialization
+  reconstructs only verifier-safe placeholders.
