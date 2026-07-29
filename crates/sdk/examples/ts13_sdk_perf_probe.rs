@@ -88,6 +88,24 @@ fn ts13_request(
         max_attribute_bytes: 32,
         max_attribute_item_bytes: eu_id_prover::ts13::TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32,
         max_requested_digest_id: eu_id_prover::ts13::TS13_MAX_REQUESTED_DIGEST_ID,
+        value_digests_scan_log_size: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_LOG_SIZE,
+        value_digests_scan_max_items: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS,
+        value_digests_scan_preprocessed_cols:
+            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS,
+        value_digests_scan_trace_cols: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_TRACE_COLS,
+        value_digests_scan_relation_sites:
+            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_RELATION_SITES,
+        value_digests_scan_interaction_cols:
+            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS,
+        country_code_dataset: eu_id_prover::ts13::TS13_COUNTRY_CODE_DATASET.to_string(),
+        country_code_table_log_size: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_LOG_SIZE,
+        country_code_count: eu_id_prover::ts13::TS13_COUNTRY_CODE_COUNT,
+        country_code_table_preprocessed_cols:
+            eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS,
+        country_code_table_trace_cols: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_TRACE_COLS,
+        country_code_table_interaction_cols:
+            eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS,
+        country_code_table_sha256: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_SHA256.to_vec(),
         max_issuer_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
             as u32,
         max_device_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES

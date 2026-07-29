@@ -8,6 +8,9 @@ edition.workspace = true
 # dependency, so this also turns on the shared STARK prover's parallel paths for
 # the whole composition. Off by default: the honest baseline is single-threaded.
 parallel = ["stwo-sha256/parallel"]
+# Cost-model probes used only by the unlinkability work orders. Keeping the
+# feature off excludes their AIR and hidden entrypoints from production builds.
+unlink-spikes = []
 
 [dependencies]
 air-core = { path = "../air-core" }
@@ -27,7 +30,7 @@ sha2 = "0.10"
 rand = "0.8"
 rayon = "1"
 ciborium = "0.2.2"
-celes = "2.8.2"
+celes = "=2.8.2"
 
 [dev-dependencies]
 serde_json = "1"
@@ -39,6 +42,10 @@ ml-dsa = "0.1.1"
 # Full-PQ mdoc performance probe.
 [[example]]
 name = "pq_perf_probe"
+
+[[example]]
+name = "unlink_spike_keccak"
+required-features = ["unlink-spikes"]
 
 [lints]
 workspace = true

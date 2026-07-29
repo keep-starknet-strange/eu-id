@@ -1,9 +1,10 @@
 # Unlinkability campaign — work orders (feat/quantum-safe)
 
-Scoped 2026-07-29 @ 41530e51+working-tree. Goal: single-credential cryptographic
-unlinkability for the PQ mdoc proof — presentations reveal only (issuer,
-statement shape, disclosed predicate outcomes), even against issuer–verifier
-collusion.
+Scoped 2026-07-29 @ 41530e51+working-tree. The original campaign goal was
+single-credential cryptographic unlinkability for the PQ mdoc proof. A-741
+subsequently removed Phase 3/ZK from scope, so the authorized delivery claim
+is narrower: post-quantum issuer and holder authentication with selective
+disclosure, with no ZK or unlinkability claim.
 
 Pre-repin baseline (measured, cold, 12-core Apple Silicon, fat-LTO release):
 prove 587–616 ms / verify 76–79 ms / envelope ~952 KB (product path);
@@ -134,7 +135,9 @@ natively on the public MSO (`mldsa_public_mso_facts`, mdoc.rs:1466-1511):
    supported digest-ID value/encoding length.
 2. **validity** — bind `validFrom`/`validUntil` byte windows; in-circuit date
    compare against public `today` (reuse the AgeRangeCheck byte-compare
-   pattern). Public output: one bit ("valid today"), not the timestamps.
+   pattern). Per A-736 there is no serialized validity bit: successful
+   verification itself means the private window contained the verifier's
+   public `today`.
 3. **docType** — window equals public constant.
 4. **deviceKey binding** — bind the MSO `deviceKeyInfo` COSE_Key bytes region
    and constrain equality with the (still public, Phase 1) device instance pk
@@ -178,8 +181,9 @@ envelope.
 2. Attribute/value lengths padded to the TS13 buckets
    (`TS13_ALLOWED_REQUESTED_ITEM_PADDED_LENGTHS = [64,128,192]`, ts13.rs:27)
    on the product path too.
-3. Validity public output quantized (bit only — done in U2; here: assert no
-   timestamp field survives serialization).
+3. Per A-736, validity has no serialized output field; assert that no
+   timestamp or validity-result field survives serialization. Successful
+   verification is the result.
 4. Fold in the standing envelope fix: apply the TS13 zeroing projection
    (`MdocMlDsaPublicAuthInput::verifier_input`, mdoc.rs:302-342) to the
    PRODUCT path so raw `c_tilde`/`z`/`hint` never serialize
@@ -208,6 +212,16 @@ nothing else about the gap endpoints, and record the anonymity note.
 ---
 
 ## Phase 2 — private device pk (fully-PQ device binding)
+
+**A-733/A-739 scope stop:** Phase 2 is not authorized. The already-created
+U5/U7 slices are preserved only on
+`parked/unlinkability-phase2-u5-u7`: `0e60a4d3` (U5 ExpandA),
+and `81946a21` (U7 hosted private-key hashing). They are **parked, unreviewed
+for merge, not authorized** and contribute no Phase-1 progress or acceptance
+evidence. A-740 corrected A-739's misclassification of `bf1deb32`: its
+constant-width SHA-256 padded-stream/namespace support is mandatory Phase-1
+infrastructure under A-728/A-731 and is re-landed with fresh Phase-1
+provenance. The Phase-1 delivery contains zero actual Phase-2 files.
 
 Order: U5 → U6/U7 (parallel) → U9. U8 gates the whole phase's perf.
 
@@ -279,8 +293,9 @@ reject delta, NttCell), twelve interaction M31 columns under batch-four
 LogUp, direct degree at most two, and D5 bound `log+2`. No new range tables
 are introduced; Rc7/Rc8/Rc13 use the proof-wide range provider. Claim order
 is `[absorb_claimed_sum, rejection_claimed_sum]`; log sizes and candidate
-counts are verifier-derived and absent from serialization. Phase 3 must mask
-both private claimed sums without changing their global balance.
+counts are verifier-derived and absent from serialization. Both private
+claimed sums remain unmasked; A-741 forbids extending the ZK machinery, so
+they support no ZK or unlinkability claim.
 
 Module order is
 `SharedRangeTable → KeccakService → ExpandAAbsorb → ExpandARejection → U6 → U9`.
@@ -547,15 +562,13 @@ coefficient, out-of-range candidate accepted, wrong pk) green;
 
 ---
 
-## Phase 3 — ZK blinding [design-first, engine — out of dumb-agent scope]
+## Phase 3 — out of scope
 
-Complete trace/OODS/FRI/claimed-sum blinding in the stwo fork. Constraints
-from prior findings: NO share-splitting of committed secret columns
-(split-mask OODS joint-sampling leak — dummy-row blinding only); mask columns
-must land in a tree committed BEFORE the interaction challenges are drawn
-(claim_mask is sound because masks are in tree 1 pre-β; moving them to the
-interaction tree makes LogUp forgeable). Budget: +15–30% prove. Ships last;
-unlinkability claims are conditional on it.
+A-741 supersedes A-737 and rescinds the design-only ZK spike. Do not produce
+the four-obligation design or worksheet, request a ZK Math Review, edit the
+Stwo proof system, or measure/forward-plan ZK work. Existing shipped partial
+measures remain unchanged. The profile stays `ZK=false`, and the delivery
+makes no ZK or unlinkability claim.
 
 ---
 
@@ -600,6 +613,12 @@ Cold 12-thread fresh-process measurements:
 | 3 | 674 | 38 | 2,079,326 | 1,717,824 |
 
 Decision: PASS (`max prove = 696 ms ≤ 1.2 s`).
+
+Lifecycle: once U1 made the issuer private-message path unconditional, the
+U0a-only entrypoints/example and cache-key mode bit became semantically
+identical to production and were removed. The measurements above remain the
+gate evidence; the default-off dummy-Keccak probe remains active for service
+scaling.
 
 Deviations:
 
@@ -813,7 +832,8 @@ the profile to one namespace.
 
 - Public, bounded before allocation: issuer message length (≤ 4,160), MSO
   payload length (≤ 4,096), attribute count (≤ 4), public `docType`, Phase-1 device
-  ML-DSA public key, policy date, and one `valid_today=true` result bit.
+  ML-DSA public key and policy date. Per A-736, no `valid_today` field is
+  serialized; verification success is the assertion.
 - Prover-only and skipped by serialization: issuer Sig_structure bytes, MSO
   bytes, the Sig_structure payload-anchor offset, every MSO-relative window
   offset, dates, digest-entry metadata, and (subject to Q-729) digest IDs.
@@ -932,7 +952,7 @@ on the earlier 206-row estimate.
    restored syntax, digit, month/day/hour/minute/second range, UTC suffix, and
    23-bit date-key slack constraints preserve every check currently performed
    by `mldsa_public_mso_facts` and prove
-   `validFrom ≤ today ≤ validUntil`; only `valid_today=true` is public.
+   `validFrom ≤ today ≤ validUntil`; there is no serialized validity output.
 3. **docType:** a canonical `"docType"` key plus text value run equals the
    public statement constant.
 4. **deviceKey:** the complete canonical
@@ -952,7 +972,7 @@ non-canonical-issuer profile must replace that anchor with a full private MSO
 CBOR parse; this WO intentionally relies on the trusted issuer's canonical
 encoding.
 
-### Q-732 scanner alternatives — exact audit, pending ruling
+### A-732 scanner ruling — exact audit resolved
 
 Current `parse_mso_value` semantically matches only the requested text
 namespace. Every nonmatching outer key and value may be arbitrary
@@ -961,8 +981,8 @@ encodings, tags, floats, and nested containers. The existing
 `MdocCborStream` is not an exact replacement: it has depth 8, definite/minimal
 container rules, a smaller simple-value language, and no UTF-8 validation.
 
-The narrow scanner is viable only if A-732 explicitly authorizes a definite
-outer map with canonical definite text keys and definite canonical
+The narrow scanner is authorized by A-732: the compatibility cut requires a
+definite outer map with canonical definite text keys and definite canonical
 `uint -> bstr32` values for every namespace. It uses the fixed-log-9
 `HEAD,(NS,DIGEST*)*,INACTIVE` schedule, a private cursor/count state machine,
 exact requested-namespace match count one, per-attribute ID/digest selectors,
@@ -971,7 +991,8 @@ For four attributes its frozen census is four preprocessing columns, 324
 trace columns, 51 main relation sites, and 108 interaction M31 columns
 including the blinder counterpart.
 
-Exact compatibility instead needs a fixed-log-13 Ciborium-language parser
+The rejected exact-compatibility alternative needs a fixed-log-13
+Ciborium-language parser
 pipeline. It normalizes direct-map versus tag-24/bstr MSO roots, fully parses
 and skips arbitrary nonrequested subtrees, validates segmented text/UTF-8,
 and emits compact descriptors only for the direct top-level `valueDigests`,
@@ -1085,32 +1106,98 @@ remains a required serialized public input. Fresh and memoized tree-0 roots
 must agree, failed verification must not populate the cache, and product
 proofs must not instantiate the U4 MSO SHA.
 
-### Pending integration rulings — 2026-07-29
+### Resolved integration rulings — 2026-07-29
 
-- Q-732 selects a narrow canonical fixed-log9 multi-namespace `valueDigests`
-  scan or an exact-Ciborium parser bundle plus semantic scanner; current HEAD
-  accepts arbitrary nonmatching outer entries, so the smaller construction is
-  a compatibility cut rather than exact preservation.
-- Q-734 records the item-order privacy/soundness fork found during integration
-  and proposes one private binder-to-item v1/v2 relation with a degree-2
-  conditional-order slack. Its follow-up offers a smaller zero-site
-  binder → scanner → item handoff by extending the already-required
-  `mso_start` and digest tuples with the same private version bit. No version
-  value would enter serialization, preprocessing, tree zero, or transcript
-  mixing under either construction.
-- Q-735 asks whether U3 also privatizes product predicate encoding and
-  nationality-array metadata, with fixed packed/numeric semantic
-  normalization so the verifier no longer selects a credential-derived AIR.
-- Q-736 selects whether U7/U9 move ahead of U3 or the Phase-1 fingerprint gate
-  temporarily whitelists the still-public device key, and whether validity is
-  an explicit public `true` bit or only a successful-proof invariant.
-- Q-733 remains the Phase-2 domain-semantics gate: U5 emits NTT-domain `Â`,
-  while the existing folded identity consumes coefficient-domain `A`.
-- Q-737 governs the Phase-3 proof-system design/review sequence and the
-  classical-ROM versus QROM release claim.
-- Q-738 asks whether the single compatibility cut may replace product-v1's
-  permissive Ciborium item language with the private parser's exact
-  minimal/definite grammar.
+- A-732 selects the 324-column fixed-log-9 canonical multi-namespace
+  `valueDigests` scanner and rejects the 4,138-column Ciborium-compatible
+  bundle. The cut must return typed errors and pass every available real
+  vector, including demo output with extra namespaces.
+- A-734 selects the zero-site binder → scanner → item chain. The private
+  `is_v2` bit rides in the same `(mso_start,is_v2)` and selected-digest tuples,
+  is boolean/constant at every active prefix, and conditionally enforces v2
+  key order without entering public material.
+- A-735 selects full fixed-shape private predicate normalization while
+  preserving the wide accepted value language. The celes 2.8.2 mapping
+  (250 rows plus XK) is pinned in a log-9 tagged table; all date encodings and
+  nationality scalar/array encodings share one maximal public shape.
+- A-736 selects the exact two-entry Phase-1 stable-region whitelist (device
+  public key, removed by U7/U9; issuer trust key, permanently public), forbids
+  a serialized `valid_today` field, and requires an ignored empty-whitelist
+  Phase-2 gate now.
+- A-733 defers all Phase-2 implementation. The inverse-NTT path is
+  presumptively dead, the old 1–1.5 s estimate is invalid, and a future clean
+  NTT path must first ship a new integer-lift/pointwise worksheet while
+  preserving the canonical unscaled coefficient-domain `T1Cell` producer.
+- A-741 supersedes A-737 and removes Phase 3/ZK entirely from scope. No
+  design, worksheet, Math Review, fork edit, measurement, or forward plan is
+  authorized; `ZK=false` and the no-unlinkability-claim boundary remain.
+- A-738 authorizes minimal/definite/exact product IssuerSignedItem tokens and
+  no trailing data while preserving v1 key order and value forms. Rejection
+  is typed with token+offset, the outer tag-24 length assumption is bounded,
+  and every available real item vector must pass.
+
+### A-735 fixed-shape predicate-normalization design
+
+The public item contract is reduced to three request modes:
+`ValueEquality`, `BirthDate`, and `Nationality`.  The private witness carries
+the padded item plus an optional selected nationality-member index.  No
+birth-date encoding, nationality encoding, scalar/array selector, member
+count, selected index, or private MSO version is mixed into the transcript or
+tree-zero material.  All request modes pay the same maximal private-item
+shape.
+
+Starting from A-734's 110-column item trace, normalization adds 44 trace
+columns: one normalized output byte; one nationality member count; three
+`count - 1` bits; one selected-text selector; two ASCII case-fold bits; 32
+date-digit bits; and four country-lookup payload cells
+`(num_hi,num_lo,upper0,upper1)`.  The final item trace is 154 columns.
+Nationality adds one logical country lookup before the final claimed-sum
+blinder (55 to 56 sites), which still occupies 28 paired secure columns; the
+counterpart keeps the total item interaction width at 116 M31 columns.
+Booleanity is global and every remaining identity is linear or
+selector-times-linear, so the `log N + 2` degree bound and coefficient
+retention remain unchanged.
+
+Birth-date mode privately selects canonical packed `bstr(4)`, direct
+`tstr(10)`, or tag-1004 `tstr(10)`.  Text digits and separators are proved,
+then every form emits exactly four normalized bytes
+`(year_hi,year_lo,month,day)`.  Product composition therefore always uses the
+packed DOB predicate binding.
+
+Nationality mode privately selects a scalar or canonical definite array of
+one through eight canonical two-byte bstr/tstr members.  A running count
+proves the declared array cardinality; a one-hot proven member header carries
+the private selection.  Numeric members pass any u16 through and consume the
+dummy country tuple.  Text members prove two ASCII lowercase-fold bits,
+consume their real country tuple, and emit the mapped numeric u16.  Product
+composition therefore always uses the numeric nationality predicate and the
+numeric accepted set is the only public policy table.
+
+The country relation is the arity-five tuple
+`(tag,num_hi,num_lo,upper0,upper1)` on a fixed log-9 table.  Row zero is the
+active numeric dummy `(0,0,0,0,0)`.  Rows 1 through 250 are the exact
+`celes = 2.8.2` `Country::get_countries()` order with tag one; that 250-entry
+array already includes unique XK/383, so XK is asserted explicitly rather
+than appended as a 251st country.  Rows 251 through 511 are inactive,
+deterministically masked preprocessing.  One multiplicity trace column
+provides negative tuples; each nationality item consumes one positive tuple.
+The exact table rows, golden digest, celes pin, and XK uniqueness are v10
+determinants.
+
+The exact marginal census is 22,528 item trace cells at log 9 or 45,056 at
+log 10, plus 5,632 cells for one shared country table.  Thus a log-9
+nationality item adds 28,160 committed cells and a log-10 item adds 50,688.
+The measured gate is named `u3_normalization_prove_ms`.
+
+The proof-level negative matrix covers private-form flips, date
+digit/decomposition/output mutations, wrong alpha-2 mappings, array
+cardinality and selection faults, numeric/real-row and alpha/dummy-row swaps,
+unknown alpha-2 values, and country multiplicity/claimed-sum faults.  The
+equal-shape gate covers all three date forms, numeric and case-varied alpha-2
+scalars, arrays of every length 1 through 8 with varying selections and mixed
+member encodings, plus the A-734 v1/v2 pair.  Within one request mode and
+bucket, serialized public statements, module layouts, public transcript
+prefixes, and fresh tree-zero roots must be byte-identical.
 
 ### Phase-3 Math Review checkpoint — 2026-07-29
 
@@ -1132,15 +1219,10 @@ follow Circle STARKs section 5.4 and Haböck--Al Kindi ePrint 2024/1037
 Protocol 2; the published monomial/Lagrange quotient construction cannot be
 ported mechanically to the exact Stwo basis.
 
-Q-737 escalates the missing proof-system design and the release-claim scope.
-Until that ruling, no Stwo proof-system code changes, the existing profile's
-zero-knowledge flag remains false, and no QROM/post-quantum unlinkability
-claim is permitted. The exact checkout's required paper digests were located
-under the hidden `.agents/papers/llm` tree after an initial search omitted
-hidden paths. They confirm the substantive implementation divergence: the
-whitepaper does not provide a full LDR proof for the current
-non-squaring-consistent sampling variant and records release-vs-idealized
-Merkle/query/quotient differences.
+A-741 later superseded A-737 and rescinded this design-only work. The review
+above is retained solely as historical rationale for keeping
+`zero_knowledge=false`; it is not an active design plan. No Stwo proof-system
+change, ZK review, measurement, or unlinkability claim is authorized.
 
 ### WO-U7 core implementation checkpoint — 2026-07-29
 
@@ -1185,7 +1267,8 @@ reject. Legacy constructors and transcript encodings remain unchanged.
 
 ### Phase-1 standalone SHA namespace checkpoint — 2026-07-29
 
-Commit: `bf1deb32`.
+Commit: `362743af` (fresh Phase-1 provenance after A-740 corrected
+`bf1deb32`'s A-739 misclassification).
 
 The conditional log-13 MSO SHA instance now uses the fixed
 `mdoc/mso-sha` consumer namespace on both prover and verifier. Empty namespace
@@ -1207,11 +1290,19 @@ round trip now completes proving and reaches only the separately tracked
 public-statement projection rejection, confirming that the preprocessing
 collision itself is closed.
 
+The same checkpoint carries A-728's constant-width full-padded stream:
+one block counter and 64 row-wise W-bit-derived relation sites, with no byte
+columns, per-block selectors, or duplicate Range8 checks. Fresh compilation
+found the historical patch's trace test nested inside `impl Layout`; the test
+body was moved unchanged into the existing `cfg(test)` module. The final
+fresh-provenance gates are 165 normal + 18 ignored SHA tests, 13 focused
+stream tests, six namespace/fail-closed tests, and a clean eu-id-prover check.
+
 ### Phase-3 Math Review disposition — 2026-07-29
 
-Decision: **NO SIGN-OFF** at Stwo `4f39939e`; do not modify the proof system
-or advertise zero knowledge before Q-737, Crypto Specialist design and
-implementation, a fresh independent Math Review, and human approval.
+Historical decision: **NO SIGN-OFF** at Stwo `4f39939e`. A-741 subsequently
+removed all Phase-3/ZK design, review, implementation, and measurement work
+from scope. Do not modify the proof system or advertise zero knowledge.
 
 The exact implementation independently commits every recursively midpoint-
 split composition part (`prover/mod.rs`), discloses each part at OODS
@@ -1221,15 +1312,12 @@ coset, and serializes last-layer coefficients (`prover/fri.rs`). The current
 TS13 rank test is only a synthetic monomial Vandermonde and proves no rank
 property of those Circle disclosures.
 
-The missing acceptance evidence is: a complete private/public committed-
-column census; an actual Circle barycentric disclosure-matrix rank proof
-modulo every affine constraint; dummy-selector degree and terminal-boundary
-proofs; a Circle-native randomized composition decomposition; a BSCR mask
-port to the exact mixed-domain fold schedule; a per-claim registry whose
-targets are uniform in each public invariant kernel; a classical-ROM
-simulator statement; the complete adversarial/distribution suite; and cold
-measurements within the +15–30% budget. The primary references do not support
-a QROM/post-quantum transcript-unlinkability claim.
+The review had identified missing evidence across the committed-column
+census, Circle disclosure matrix, composition decomposition, FRI masking,
+claimed-sum masking, simulator statement, adversarial suite, and cold
+measurements. A-741 makes that list historical and non-actionable. The
+primary references do not support a QROM/post-quantum
+transcript-unlinkability claim.
 
 ### WO-U5 independent audit checkpoint — 2026-07-29
 
@@ -1281,7 +1369,12 @@ authoritative valueDigests path. Provider multiplicities currently include
 only binder reads and must be rebuilt from checked-added binder+scanner
 censuses. Whole-proof tree zero and serialization still contain credential
 offsets, anchors, digest IDs, values, and dates, and cache v4 omits the
-binder's docType-length shape determinant.
+binder's docType-length shape determinant. That omission becomes a soundness
+risk once the fail-closed host parser is removed: the binder's docType byte
+enables are preprocessed, so a memoized shorter-docType root could omit issuer
+relation bindings for a longer suffix. A-730's final cache-v5 cut must add the
+canonical docType byte length and prove fresh/memoized root agreement plus key
+separation across otherwise-identical lengths.
 
 These are not candidates for completeness-only bypasses. Q-732/Q-734/Q-735
 must select the scanner/version/normalization contracts, after which the
@@ -1298,6 +1391,108 @@ the single compatibility cut may reject those legacy encodings or must carry
 a bounded exact-v1 parser. The same review confirms that Q-734/Q-735 and
 proof-level parser/digest relation negatives remain mandatory before sign-off.
 
+The follow-up dead-path sweep removed the superseded U0a
+example/configuration and the unreachable issuer-field half of the U0b Keccak
+probe. It also collapsed `MdocRevocationRangeBind` to its only constructed
+mode: the private MSO SHA digest relation plus the private revocation-message
+relation. The live geometry is unchanged at 336 trace columns and 48
+interaction M31 columns. TS13 public verifier reconstruction now carries
+neither a private range nor an invented zero revocation signature. Focused
+release tests pin that public-only projection, the fixed relation geometry,
+and rejection of a tampered provider-side revocation message.
+
+The broad fully-PQ e2e currently proves and then stops at the already-known
+Phase-1 boundary: its first legacy direct verify passes the prover-side
+statement, and the public-auth projection guard correctly rejects the private
+issuer/signature witnesses. This is not a cleanup regression or a candidate
+for bypass. The e2e moves to the final public statement only after the pending
+Q-732/Q-734/Q-735/Q-738 scanner/item rulings close all host-parser gaps.
+
+The bounded U3 sweep removed the serialized age/nationality attribute-index
+caches and their tree-zero material. Prover, verifier, TS13, and SDK now derive
+the positions from the ordered public identifier/mode list; the release prover
+library reports 59/59 and four exact SDK/integration controls report 1/1 each.
+The stale test-only `Ts13MdocProofArtifact` was also deleted: it called the
+generic verifier and bypassed the real TS13 profile/resource/proof-shape
+checks. The SDK `Ts13ProofEnvelope` path is the sole authoritative gate.
+
+That SDK gate now proves successfully and then returns `false` at the same
+known boundary: public projection zeroes the issuer message, while
+`check_mldsa_device_key_binding` and `mldsa_public_mso_facts` still parse it
+before STARK verification. A relation-census audit also confirms the private
+MSO binder emits one negative `MdocMsoStartRelation` tuple with no consumer,
+and `mdoc_private_item_bind.rs` is not yet wired into the production claim
+order. Q-732 owns that scanner/start consumer and its checked provider census;
+Q-734/Q-735/Q-738 own the private version, predicate-normalization, and v1
+CBOR-language choices needed before the item binder can replace the legacy
+host/public paths.
+
+The private issuer-message provider now has proof-level multiplicity evidence.
+A minimal test-only `FieldBytes` consumer composes with the real provider
+through `air_core::prove/verify`: the honest 37-byte control uses every index
+once and verifies, while missing first/middle/last and extra-middle use proofs
+reject at the exact global LogUp cancellation check. A separate exhaustive claim test
+pins ±1 at every fixture position plus the largest non-wrapping M31
+multiplicity and indexed overflow. The module reports 8/8 release tests.
+This closes the isolated provider contract; the final Phase-1 proof must still
+repeat the totality rail against the actual hosted issuer µ consumer after the
+scanner census is added.
+
+A real production-PCS proof of the private MSO binder first uncovered an
+underreported constraint degree. Consecutive live LogUp sites enforce
+`Δ·d1·d2 = n1·d2 + n2·d1`; two linear denominators make that identity cubic.
+A follow-up degree census then found that the old issuer key multiplied the
+private `window_offset` by a selector, making each issuer denominator
+quadratic and a pair's recurrence quintic.
+
+The lower-cost repair keeps the intended cubic budget rather than raising it
+to `log N + 3`. The active payload-anchor row now sets and constrains
+`window_offset=0`; inactive rows remain freshly blinded. AIR evaluation and
+packed interaction generation share one linear issuer-index expression:
+`payload_offset + chunk_relative + byte_index +
+mso_window·payload_anchor_len + window_offset`. A symbolic polynomial-degree
+regression rejects the old product form. Both `MdocPrivateMsoEval` and its
+prover retain the exact `log N + 2` bound and polynomial coefficients without
+adding a committed column.
+
+The six-column test counter supplies the exact opposite issuer/SHA/start
+relation signs. Its honest full-profile proof verifies under the production
+PCS config, while shifted payload anchor/start, raw MSO byte, SHA padding
+marker/zero/bit-length, and missing/extra start-use counterparts all reject at
+the pre-STARK global LogUp check. A second honest proof verifies under the
+default minimum-blowup PCS configuration, exercising coefficient-backed
+domain extension. The binder module reports 13/13. The repair changes no
+claim, relation order, layout, tree-zero material, transcript field, or
+serialization; the planned global constraint-system cut already owns the
+identity update.
+
+A follow-up degree census found the same underreported paired-LogUp bound in
+the private IssuerSignedItem binder. Its consecutive trace-linear
+denominators make
+`Δ·d1·d2 = n1·d2 + n2·d1` cubic, so both evaluator and prover now report
+`log N + 2` and the prover retains polynomial coefficients. Claims, relation
+order, committed columns, public mixing, tree-zero material, and serialization
+are unchanged; A-730's single final constraint-system cut already owns the
+identity change.
+
+A compact five-family counter supplies the exact opposite `item_fields`,
+outer/inner parsed-CBOR, `inner_raw`, and digest-ID relation tuples. Its honest
+production-PCS composition verifies, while one representative tuple mutation
+per family rejects specifically at the global LogUp cancellation check. Static
+tests pin both degree declarations and coefficient retention. The focused
+release item-binder module reports 17/17; formatting and `git diff --check`
+pass.
+
+The degree-seven private CBOR parser now requests polynomial coefficient
+retention itself instead of relying on an unrelated co-composed SHA, MSO, or
+item module. A minimal real composition uses the existing private-message
+provider as the exact opposite raw-byte relation: all three parser rows
+balance, and prove plus verify succeeds under `PcsConfig::default()` at minimum
+blowup. The combined release prover library reports 65/65, the release SDK
+library remains 29/29, and `unlink-spikes` examples check. Independent
+degree/sign/layout reviews found no outstanding P0–P3 issue across the MSO,
+item, and CBOR repairs.
+
 ### WO-U4 reduced public-exposure checkpoint — 2026-07-29
 
 Commit: `5244904f`.
@@ -1306,12 +1501,93 @@ The TS13 exposure inventory now states the exact revocation anonymity
 boundary: the public authority key and epoch are verifier inputs, and the
 epoch deliberately partitions the anonymity set. The derived revocation id,
 `id_lo`, `id_hi`, private MSO digest, and revocation signature are absent from
-the clear public statement/transcript input surface. Endpoint
-indistinguishability remains conditional on the still-open Phase-3
-proof-wide masking work.
+the clear public statement/transcript input surface. A-741 puts proof-wide
+masking out of scope, so this checkpoint makes no endpoint-indistinguishability
+or unlinkability claim.
 
 A focused CBOR schema/round-trip regression proves the public TS13 statement
 contains `revocation_public_key` and `epoch` but no `id`, `id_lo`, `id_hi`,
 `signature`, or `mso_digest` field. The paired inventory regression pins the
 public/private classifications. All three focused release inventory tests,
 formatting, and `git diff --check` pass.
+
+### Phase-1 implementation and acceptance checkpoint — 2026-07-29
+
+The authorized U1/U2/U3/reduced-U4 landing is complete. The issuer ML-DSA
+message, MSO payload, issuer/device/revocation signatures, revocation range,
+private digest IDs, item values/randomizers, validity timestamps, and
+credential-selected valueDigests entries are witness-only. Production now
+composes the private message provider, strict outer/inner item CBOR parsers,
+154-column private item binders, the celes-2.8.2 country table, the fixed
+log-9 canonical multi-namespace valueDigests scanner, the private MSO binder,
+the conditional namespaced MSO SHA, and the private revocation relation.
+Provider use counts are checked-added from the final binder and scanner
+censuses before the issuer provider is instantiated. Prover and verifier use
+the same module and transcript order.
+
+The compatibility cut is singular: product envelope V7, TS13 envelope V3,
+constraint system v10, and tree-zero cache v5. The v10 tuple pins scanner
+geometry `(log=9,max_items=255,preprocessed=4,trace=324,sites=51,
+interaction=108)` plus the celes-2.8.2 table geometry and golden SHA-256.
+Pre-V7/pre-V3 envelopes fail before body decode. Tree-zero material contains
+only verifier-known shape/policy/cap determinants, including canonical
+docType length. Fresh and memoized roots agree for genuinely different
+same-public-shape credentials; changed policy and docType length separate
+cache keys.
+
+The final U3 wire regression builds two presentations of one high-digest-ID
+credential under different nonces and one genuinely different credential
+with the same public preprocessing determinants. After removing the exact
+public nonce/device-auth challenge, all public statement bytes are equal.
+Tree zero is equal across all three proofs. The exact Phase-1 stable-region
+whitelist has two full-byte entries: the 1,952-byte device public key and the
+issuer trust public key. Full MSO bytes, high digest-ID+digest contexts,
+validity timestamps, `valid_today`, issuer Sig_structure/signature fragments,
+device signature fragments, private item values, and item randomizers occur
+neither in the wire envelope nor the decompressed proof. The ignored Phase-2
+gate uses an empty device-key whitelist and rejects every common device-key
+run of at least 32 bytes.
+
+Release verification is green:
+
+- `eu-id-prover` library: 99 passed; `unlink-spikes`: 101 passed.
+- Full mdoc integration: 27 passed.
+- `stwo-sha256`: 165 passed plus 18/18 ignored gates.
+- `stwo-mldsa`: 110 passed plus 1/1 ignored gate.
+- `stwo-keccak`: 34 passed; predicates: 66; Air Core: 18.
+- SDK library: 33; product e2e: 7; TS13 e2e: 7; FFI: 2.
+- Release workspace/all-target check, strict release all-target Clippy with
+  warnings denied, formatting, and `git diff --check` pass.
+
+Three fresh 12-core release processes give the following Phase-1 numbers:
+
+| Gate | Run 1 | Run 2 | Run 3 | Median |
+| --- | ---: | ---: | ---: | ---: |
+| `phase1_prove_ms` (TS13 core) | 742 | 769 | 759 | 759 |
+| `phase1_verify_ms` (forced-fresh) | 48 | 49 | 42 | 48 |
+| `phase1_proof_bytes` (raw) | 1,552,867 | 1,557,427 | 1,555,443 | 1,555,443 |
+| TS13 core Bzip2 wire bytes | 1,213,977 | 1,220,424 | 1,217,117 | 1,217,117 |
+| Product SDK prove ms | 609 | 615 | 627 | 615 |
+| Product SDK verify ms | 85 | 86 | 86 | 86 |
+| `phase1_envelope_bytes` (product) | 1,248,787 | 1,247,593 | 1,238,851 | 1,247,593 |
+| TS13 SDK prove ms | 851 | 887 | 847 | 851 |
+| TS13 SDK first verify ms | 93 | 94 | 95 | 94 |
+| TS13 SDK document wire bytes | 1,229,490 | 1,228,810 | 1,229,517 | 1,229,490 |
+
+The realistic seven-attribute fixture has a 2,513-byte MSO, so
+`phase1_revocation_sha_rows=2560` and 40 SHA blocks. The named timing is a
+conservative whole-bridge upper bound:
+`phase1_revocation_sha_ms<=198`, obtained from the Phase-1 core median minus
+the U0a median. It includes scanner, binder, and normalization work; it is
+deliberately not presented as an isolated SHA attribution. The isolated
+normalization matrix reports `u3_normalization_prove_ms=52`, the median of 15
+one-worker release composed proofs. The 769 ms maximum remains below the
+work-order's 607×1.3 = 789 ms worst-case ceiling.
+
+This checkpoint does **not** claim unlinkability or zero knowledge. After
+Phase 1 the device public key is still a credential-stable public value, so
+presentations of the same credential remain linkable by that key. The
+published flag remains `zero_knowledge=false`. Per A-733, no U5/U6/U7/U9
+Phase-2 implementation, export, feature, or file is active here. A-741
+supersedes A-737 and removes Phase 3/ZK design, review, implementation, and
+measurement from scope; `zero_knowledge=false` remains the final boundary.

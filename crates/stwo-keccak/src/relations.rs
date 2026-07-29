@@ -70,8 +70,6 @@ pub const HASH_IO_ARITY: usize = 3;
 
 relation!(HashIoRelation, HASH_IO_ARITY);
 
-/// Byte-stream I/O relation for feeding absorb bytes and requiring squeeze
-/// bytes: `(stream_id, byte_pos, byte)`.
 // ───────────────────────────── Internal relations ──────────────────────────
 
 /// `xor3` channel: `(key, spread(xor))` with `key = s1+s2+s3` — arity 2, the

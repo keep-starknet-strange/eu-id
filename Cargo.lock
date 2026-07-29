@@ -1742,7 +1742,6 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bzip2",
- "celes",
  "ciborium",
  "eu-id-prover",
  "ml-dsa",

@@ -17,10 +17,11 @@ use eu_id_prover::mdoc::{
     extract_pid_mdoc, openid4vp_session_transcript, select_accepted_nationality, ExtractedPidMdoc,
     MdocAuthInput, MdocCircuitStatement, MdocError, MdocPidRequest, MdocRevocationKey,
     MdocRevocationPublicInputs, MdocRevocationRangeWitness, MdocRevocationSignature,
+    MdocTs13PublicStatement,
 };
 use eu_id_prover::ts13::{
-    ts13_default_circuit_hash, ts13_mso_derived_revocation_id, Ts13MdocProofArtifact,
-    Ts13RevocationError, Ts13RevocationStatement, Ts13RevocationWitness,
+    ts13_mso_derived_revocation_id, Ts13RevocationError, Ts13RevocationStatement,
+    Ts13RevocationWitness,
 };
 use eu_id_prover::Policy;
 
@@ -36,8 +37,37 @@ fn demo_policy() -> Policy {
         },
         min_age_years: 18,
         accepted_nationalities: vec![276, 250],
-        accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
     }
+}
+
+fn cbor_text_keys<T: serde::Serialize>(value: &T) -> Vec<String> {
+    fn collect(value: &ciborium::value::Value, keys: &mut Vec<String>) {
+        match value {
+            ciborium::value::Value::Map(entries) => {
+                for (key, value) in entries {
+                    if let ciborium::value::Value::Text(key) = key {
+                        keys.push(key.clone());
+                    }
+                    collect(value, keys);
+                }
+            }
+            ciborium::value::Value::Array(values) => {
+                for value in values {
+                    collect(value, keys);
+                }
+            }
+            ciborium::value::Value::Tag(_, value) => collect(value, keys),
+            _ => {}
+        }
+    }
+
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(value, &mut encoded).expect("public contract serializes as CBOR");
+    let decoded: ciborium::value::Value =
+        ciborium::de::from_reader(encoded.as_slice()).expect("public contract CBOR decodes");
+    let mut keys = Vec::new();
+    collect(&decoded, &mut keys);
+    keys
 }
 
 /// The fully-PQ fixture + a request pinning ITS issuer key (D5: an ML-DSA
@@ -60,12 +90,49 @@ fn full_pq_extracted_and_statement_for(nonce: &[u8]) -> (ExtractedPidMdoc, MdocC
     (extracted, statement)
 }
 
+fn full_pq_variant_extracted_and_statement_for(
+    nonce: &[u8],
+) -> (ExtractedPidMdoc, MdocCircuitStatement) {
+    let session_transcript = openid4vp_session_transcript(nonce);
+    let fixture = mldsa_fixture::mldsa_full_pq_fixture_variant_with_transcript(&session_transcript);
+    let request = MdocPidRequest::eudi_pid(session_transcript)
+        .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk.clone()]);
+    let extracted = extract_pid_mdoc(&fixture.document, &request)
+        .expect("fully-PQ credential variant extracts");
+    let statement =
+        MdocCircuitStatement::from_extracted(&extracted, demo_policy()).expect("statement builds");
+    (extracted, statement)
+}
+
 fn full_pq_extracted_and_statement() -> (ExtractedPidMdoc, MdocCircuitStatement) {
     full_pq_extracted_and_statement_for(b"session-transcript-123")
 }
 
-/// Distinctive private bound offset (G6): the id_lo/id_hi LE-byte patterns
-/// derived from it cannot collide with unrelated proof bytes by accident.
+fn ts13_extracted_and_statement_for(nonce: &[u8]) -> (ExtractedPidMdoc, MdocCircuitStatement) {
+    let session_transcript = openid4vp_session_transcript(nonce);
+    let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_attribute(
+        &session_transcript,
+        "age_over_18",
+        ciborium::value::Value::Bool(true),
+    );
+    let mut request = MdocPidRequest::eudi_pid(session_transcript);
+    request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+    }];
+    request.trusted_mldsa_issuer_public_keys = vec![fixture.issuer_pk];
+    let extracted = extract_pid_mdoc(&fixture.document, &request).expect("TS13 mdoc extracts");
+    let statement =
+        MdocCircuitStatement::from_extracted(&extracted, demo_policy()).expect("statement builds");
+    (extracted, statement)
+}
+
+fn ts13_extracted_and_statement() -> (ExtractedPidMdoc, MdocCircuitStatement) {
+    ts13_extracted_and_statement_for(b"session-transcript-123")
+}
+
+/// Preferred private bound offset (G6). It is clamped for each fixture-derived
+/// id so the bounds remain strict while retaining high-entropy byte patterns.
 const DISTINCTIVE_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
 
 /// The revocation triple for the fully-PQ statement: derived id, distinctive
@@ -73,12 +140,15 @@ const DISTINCTIVE_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
 /// signature over the raw 20-byte message.
 fn mldsa_revocation_parts(extracted: &ExtractedPidMdoc) -> (u64, u64, u64, u32, Vec<u8>, Vec<u8>) {
     let id = ts13_mso_derived_revocation_id(&extracted.mso);
+    let bound_offset = DISTINCTIVE_BOUND_OFFSET
+        .min(id / 2)
+        .min((u64::MAX - id) / 2);
     assert!(
-        id > DISTINCTIVE_BOUND_OFFSET && id < u64::MAX - DISTINCTIVE_BOUND_OFFSET,
-        "fixture-derived id supports the distinctive bounds"
+        bound_offset > 0,
+        "fixture-derived id supports strict bounds"
     );
-    let id_lo = id - DISTINCTIVE_BOUND_OFFSET;
-    let id_hi = id + DISTINCTIVE_BOUND_OFFSET;
+    let id_lo = id - bound_offset;
+    let id_hi = id + bound_offset;
     let epoch = 7u32;
     let (pk, sig) = mldsa_fixture::mldsa_revocation_fixture(id_lo, id_hi, epoch);
     (id, id_lo, id_hi, epoch, pk, sig)
@@ -124,6 +194,89 @@ fn full_pq_mdoc_extracts_with_mldsa_issuer_and_device_arms() {
 }
 
 #[test]
+fn predicate_attribute_indices_follow_ordered_modes() {
+    let (_, mut statement) = full_pq_extracted_and_statement();
+    assert_eq!(statement.age_attribute_index(), Some(0));
+    assert_eq!(statement.nationality_attribute_index(), Some(1));
+
+    statement.attributes.swap(0, 1);
+    assert_eq!(statement.age_attribute_index(), Some(1));
+    assert_eq!(statement.nationality_attribute_index(), Some(0));
+}
+
+#[test]
+fn public_statement_cbor_omits_private_credential_fields() {
+    let (_, statement) = full_pq_extracted_and_statement();
+    let circuit_keys = cbor_text_keys(&statement);
+    for expected in [
+        "element_identifier",
+        "mode",
+        "item_padded_len",
+        "mso_payload_len",
+    ] {
+        assert!(
+            circuit_keys.iter().any(|key| key == expected),
+            "public circuit statement must retain {expected}"
+        );
+    }
+    for forbidden in [
+        "digest_id",
+        "value",
+        "value_head",
+        "value_offset",
+        "element_identifier_offset",
+        "element_identifier_anchor_offset",
+        "element_identifier_anchor",
+        "element_value_anchor_offset",
+        "element_value_anchor",
+        "mso_digest_offset",
+        "mso_digest_anchor_offset",
+        "mso_digest_anchor",
+        "birth_date_binding",
+        "birth_date_value_offset",
+        "nationality_binding",
+        "nationality_value_offset",
+        "nationality_array_len",
+        "nationality_array_index",
+        "valid_from",
+        "valid_until",
+        "ts13_revocation_range",
+        "ts13_revocation_signature",
+        "accepted_nationalities_alpha2",
+    ] {
+        assert!(
+            circuit_keys.iter().all(|key| key != forbidden),
+            "private CBOR key {forbidden} leaked into the public circuit statement"
+        );
+    }
+
+    let session_transcript = openid4vp_session_transcript(b"ts13-public-contract");
+    let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_attribute(
+        &session_transcript,
+        "age_over_18",
+        ciborium::value::Value::Bool(true),
+    );
+    let mut request = MdocPidRequest::eudi_pid(session_transcript);
+    request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+    }];
+    request.trusted_mldsa_issuer_public_keys = vec![fixture.issuer_pk];
+    let extracted =
+        extract_pid_mdoc(&fixture.document, &request).expect("TS13 equality fixture extracts");
+    let statement =
+        MdocCircuitStatement::from_extracted(&extracted, demo_policy()).expect("statement builds");
+    let (statement, _, _) = with_mldsa_revocation(statement, &extracted);
+    let public =
+        MdocTs13PublicStatement::from_circuit(&statement).expect("TS13 public statement builds");
+    let ts13_keys = cbor_text_keys(&public);
+    assert!(ts13_keys
+        .iter()
+        .any(|key| key == "requested_item_padded_len"));
+    assert!(ts13_keys.iter().all(|key| key != "requested_digest_id"));
+}
+
+#[test]
 fn nationality_array_selection_has_canonical_member_stride() {
     let session_transcript = openid4vp_session_transcript(b"nationality-array-session");
     let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_nationality_array(&session_transcript);
@@ -135,21 +288,21 @@ fn nationality_array_selection_has_canonical_member_stride() {
 
     let mut policy = demo_policy();
     policy.accepted_nationalities = vec![276];
-    policy.accepted_nationalities_alpha2 = vec![*b"DE"];
     select_accepted_nationality(&mut extracted, &policy);
     assert_eq!(extracted.nationality_array_index, Some(1));
     let statement =
         MdocCircuitStatement::from_extracted(&extracted, policy).expect("array statement builds");
     let index = statement
-        .nationality_attribute_index
+        .nationality_attribute_index()
         .expect("nationality attribute exists");
     let attribute = &statement.attributes[index];
-    assert_eq!(statement.nationality_array_len, Some(2));
-    assert_eq!(statement.nationality_array_index, Some(1));
     assert_eq!(
-        statement.nationality_value_offset,
-        attribute.value_offset + 1 + 3 + 1,
-        "array member is bound by its canonical head plus fixed alpha-2 stride"
+        attribute.element_identifier, "nationality",
+        "the public statement retains only the requested semantic scope"
+    );
+    assert_eq!(
+        attribute.mode,
+        eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set
     );
 }
 
@@ -176,6 +329,65 @@ fn ts13_equality_fixture_extracts_only_the_boolean_claim() {
         "age_over_18"
     );
     assert_eq!(extracted.extracted_attributes[0].value, [0xf5]);
+}
+
+#[test]
+fn high_digest_id_credentials_preserve_public_resource_shape() {
+    const HIGH_BIRTH_DATE_ID_ENCODING: [u8; 3] = [0x19, 0x12, 0x34];
+    const HIGH_NATIONALITY_ID_ENCODING: [u8; 3] = [0x19, 0x43, 0x21];
+
+    let session_transcript = openid4vp_session_transcript(b"high-digest-id-shape");
+    let base = mldsa_fixture::mldsa_high_digest_id_fixture_with_transcript(&session_transcript);
+    let variant = mldsa_fixture::mldsa_high_digest_id_variant_with_transcript(&session_transcript);
+    assert_eq!(base.issuer_pk, variant.issuer_pk);
+    assert_eq!(base.device_pk, variant.device_pk);
+    assert_ne!(base.document, variant.document);
+    for encoding in [HIGH_BIRTH_DATE_ID_ENCODING, HIGH_NATIONALITY_ID_ENCODING] {
+        assert!(base
+            .document
+            .windows(encoding.len())
+            .any(|window| window == encoding));
+        assert!(variant
+            .document
+            .windows(encoding.len())
+            .any(|window| window == encoding));
+    }
+
+    let request = MdocPidRequest::eudi_pid(session_transcript)
+        .with_trusted_mldsa_issuer_public_keys(vec![base.issuer_pk.clone()]);
+    let base_extracted =
+        extract_pid_mdoc(&base.document, &request).expect("high-ID base credential extracts");
+    let variant_extracted =
+        extract_pid_mdoc(&variant.document, &request).expect("high-ID variant credential extracts");
+    let base_statement = MdocCircuitStatement::from_extracted(&base_extracted, demo_policy())
+        .expect("high-ID base statement builds");
+    let variant_statement = MdocCircuitStatement::from_extracted(&variant_extracted, demo_policy())
+        .expect("high-ID variant statement builds");
+
+    assert_eq!(
+        base_statement.mso_payload_len,
+        variant_statement.mso_payload_len
+    );
+    assert_eq!(
+        base_statement
+            .attributes
+            .iter()
+            .map(|attribute| (
+                &attribute.element_identifier,
+                &attribute.mode,
+                attribute.item_padded_len,
+            ))
+            .collect::<Vec<_>>(),
+        variant_statement
+            .attributes
+            .iter()
+            .map(|attribute| (
+                &attribute.element_identifier,
+                &attribute.mode,
+                attribute.item_padded_len,
+            ))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// D5: an ML-DSA issuer REQUIRES a non-empty pin list whose member is
@@ -303,6 +515,10 @@ mod quantum_only {
     use std::time::Instant;
     use stwo::core::fields::{m31::M31, qm31::QM31};
 
+    fn public_view(statement: &MdocCircuitStatement) -> MdocCircuitStatement {
+        statement.clone().into_public_view()
+    }
+
     fn sib_consumed_len(input: &stwo_mldsa::types::MlDsaVerifyInput) -> usize {
         let stream = stwo_mldsa::reference::sample_in_ball::sample_in_ball(&input.c_tilde)
             .transcript
@@ -320,14 +536,14 @@ mod quantum_only {
         position
     }
 
-    /// A device-key ↔ MSO binding violation rejects at prove entry.
+    /// Replaying the issuer authentication arm into the device slot rejects at
+    /// prove entry before any STARK work.
     #[test]
     fn full_pq_statement_binding_tamper_rejects_at_prove() {
         let (extracted, statement) = full_pq_extracted_and_statement();
 
-        // D2: statement + extracted whose device key is NOT the MSO deviceKey
-        // (the issuer's own input replayed into the device slot) → the
-        // canonical byte-equality binding rejects at prove, before any STARK.
+        // The replay changes both the key and signed preimage, so the canonical
+        // extracted/statement coherence gate rejects it before witness work.
         let mut extracted_swapped = extracted.clone();
         extracted_swapped.device_auth_input = extracted.issuer_auth_input.clone();
         let mut statement_swapped = statement.clone();
@@ -337,7 +553,7 @@ mod quantum_only {
             Ok(_) => panic!("device-key binding tamper must reject at prove"),
         };
         assert!(
-            format!("{err:?}").contains("device-key MSO binding"),
+            format!("{err:?}").contains("device message length"),
             "unexpected error: {err:?}"
         );
     }
@@ -358,7 +574,7 @@ mod quantum_only {
             signature[0] ^= 1;
         }
 
-        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (extracted, statement) = ts13_extracted_and_statement();
         let (statement, _, _) = with_mldsa_revocation(statement, &extracted);
 
         // All roles fail independently, but the public API retains the
@@ -408,207 +624,42 @@ mod quantum_only {
     }
 
     #[test]
-    fn mldsa_semantic_mso_and_identifier_tampers_reject_at_prove() {
+    fn mldsa_public_scope_and_identifier_tampers_reject_at_prove() {
         let (extracted, statement) = full_pq_extracted_and_statement();
 
         let mut wrong_doctype = statement.clone();
-        wrong_doctype.doctype.push_str(".other");
+        wrong_doctype.doctype.replace_range(..1, "x");
         let error = match prove_mdoc_circuit(&extracted, &wrong_doctype) {
             Err(error) => error,
             Ok(_) => panic!("statement docType must match the signed MSO"),
         };
         assert!(
-            format!("{error:?}").contains("public MSO binding"),
+            format!("{error:?}").contains("document scope"),
             "unexpected docType rejection: {error:?}"
         );
 
         let mut wrong_namespace = statement.clone();
-        wrong_namespace.namespace.push_str(".other");
+        wrong_namespace.namespace.replace_range(..1, "x");
         let error = match prove_mdoc_circuit(&extracted, &wrong_namespace) {
             Err(error) => error,
             Ok(_) => panic!("digest lookup must stay in the statement namespace"),
         };
         assert!(
-            format!("{error:?}").contains("public MSO binding"),
+            format!("{error:?}").contains("document scope"),
             "unexpected namespace rejection: {error:?}"
         );
 
-        let mut missing_digest_id = statement.clone();
-        missing_digest_id.attributes[0].digest_id = u32::MAX;
-        let error = match prove_mdoc_circuit(&extracted, &missing_digest_id) {
+        let mut wrong_identifier = statement;
+        wrong_identifier.attributes[0]
+            .element_identifier
+            .replace_range(..1, "x");
+        let error = match prove_mdoc_circuit(&extracted, &wrong_identifier) {
             Err(error) => error,
-            Ok(_) => panic!("digestID must resolve in the scoped valueDigests map"),
+            Ok(_) => panic!("public elementIdentifier must match the requested private item"),
         };
         assert!(
-            format!("{error:?}").contains("digestID missing"),
-            "unexpected digestID rejection: {error:?}"
-        );
-
-        let mut noncanonical_anchor = statement.clone();
-        noncanonical_anchor.attributes[0].element_identifier_anchor[0] ^= 1;
-        let error = match prove_mdoc_circuit(&extracted, &noncanonical_anchor) {
-            Err(error) => error,
-            Ok(_) => panic!("statement-carried elementIdentifier anchor must be rederived"),
-        };
-        assert!(
-            format!("{error:?}").contains("private elementIdentifier binding"),
-            "unexpected canonical-anchor rejection: {error:?}"
-        );
-
-        let mut noncanonical_value_anchor = statement.clone();
-        noncanonical_value_anchor.attributes[0].element_value_anchor[0] ^= 1;
-        let error = match prove_mdoc_circuit(&extracted, &noncanonical_value_anchor) {
-            Err(error) => error,
-            Ok(_) => panic!("statement-carried elementValue anchor must be rederived"),
-        };
-        assert!(
-            format!("{error:?}").contains("private elementIdentifier binding"),
-            "unexpected elementValue anchor rejection: {error:?}"
-        );
-
-        let mut nonadjacent_value_anchor = statement.clone();
-        nonadjacent_value_anchor.attributes[0].element_value_anchor_offset += 1;
-        let error = match prove_mdoc_circuit(&extracted, &nonadjacent_value_anchor) {
-            Err(error) => error,
-            Ok(_) => panic!("elementValue anchor must end at its value body"),
-        };
-        assert!(
-            format!("{error:?}").contains("not adjacent"),
-            "unexpected elementValue anchor-adjacency rejection: {error:?}"
-        );
-
-        let mut nonadjacent_anchor = statement;
-        nonadjacent_anchor.attributes[0].element_identifier_anchor_offset += 1;
-        let error = match prove_mdoc_circuit(&extracted, &nonadjacent_anchor) {
-            Err(error) => error,
-            Ok(_) => panic!("elementIdentifier anchor must end at its value window"),
-        };
-        assert!(
-            format!("{error:?}").contains("not adjacent"),
-            "unexpected anchor-adjacency rejection: {error:?}"
-        );
-    }
-
-    /// A-719: moving the value/anchor offsets as a consistent pair preserves
-    /// every host-side shape invariant. Prove may still succeed because this
-    /// is a cross-component LogUp binding; the verifier's global claimed-sum
-    /// cancellation gate is the soundness boundary.
-    #[test]
-    fn consistent_value_offset_pair_forgery_rejects_in_circuit() {
-        let session_transcript = openid4vp_session_transcript(b"a719-window-forgery");
-        let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_attribute(
-            &session_transcript,
-            "age_over_18",
-            ciborium::value::Value::Bool(true),
-        );
-        let mut request = MdocPidRequest::eudi_pid(session_transcript);
-        request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
-            element_identifier: "age_over_18".to_string(),
-            mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
-        }];
-        request.trusted_mldsa_issuer_public_keys = vec![fixture.issuer_pk];
-        let extracted =
-            extract_pid_mdoc(&fixture.document, &request).expect("equality fixture extracts");
-        let statement =
-            MdocCircuitStatement::from_extracted(&extracted, demo_policy()).expect("statement");
-        let honest_proof = prove_mdoc_circuit(&extracted, &statement).expect("honest proof");
-        eu_id_prover::verify_mdoc(&honest_proof, &statement).expect("honest proof verifies");
-
-        let attribute = &statement.attributes[0];
-        let item = &extracted.extracted_attributes[0].item;
-        let forged_value_offset = (0..item.len())
-            .find(|&candidate| {
-                let Some(shift) = candidate.checked_sub(attribute.value_offset) else {
-                    return false;
-                };
-                let Some(anchor_offset) = attribute.element_value_anchor_offset.checked_add(shift)
-                else {
-                    return false;
-                };
-                candidate != attribute.value_offset
-                    && candidate + attribute.value.len() <= item.len()
-                    && anchor_offset + attribute.element_value_anchor.len() <= item.len()
-                    && item[candidate..candidate + attribute.value.len()] != attribute.value
-                    && item[anchor_offset..anchor_offset + attribute.element_value_anchor.len()]
-                        != attribute.element_value_anchor
-            })
-            .expect("fixture has an unrelated in-item byte window after the value");
-        let offset_shift = forged_value_offset - attribute.value_offset;
-
-        let mut forged_statement = statement.clone();
-        let forged = &mut forged_statement.attributes[0];
-        forged.value_offset = forged_value_offset;
-        forged.element_value_anchor_offset += offset_shift;
-        assert_eq!(
-            forged.element_value_anchor_offset + forged.element_value_anchor.len(),
-            forged.value_offset + forged.value_head.len(),
-            "forgery retains the host-validated elementValue adjacency shape"
-        );
-        assert_ne!(
-            &item[forged.value_offset..forged.value_offset + forged.value.len()],
-            forged.value.as_slice(),
-            "forged value window is not the signed elementValue"
-        );
-        assert_ne!(
-            &item[forged.element_value_anchor_offset
-                ..forged.element_value_anchor_offset + forged.element_value_anchor.len()],
-            forged.element_value_anchor.as_slice(),
-            "forged anchor window is not the signed elementValue key/head"
-        );
-
-        let forged_proof = prove_mdoc_circuit(&extracted, &forged_statement)
-            .expect("forged prove may succeed; verifier global LogUp balance must reject");
-        let verify_error = eu_id_prover::verify_mdoc(&forged_proof, &forged_statement)
-            .expect_err("verifier must reject the forged statement's shifted item window");
-        assert!(
-            !format!("{verify_error:?}").contains("private elementIdentifier binding"),
-            "host validation must accept the forged shape so this reaches the circuit: {verify_error:?}"
-        );
-
-        let honest_under_forged_error = eu_id_prover::verify_mdoc(&honest_proof, &forged_statement)
-            .expect_err("verifier must reject an honest proof under the forged statement");
-        assert!(
-            !format!("{honest_under_forged_error:?}").contains("private elementIdentifier binding"),
-            "verify-side host validation must accept the forged shape: {honest_under_forged_error:?}"
-        );
-    }
-
-    #[test]
-    fn nationality_array_member_index_tamper_rejects_at_prove() {
-        let session_transcript = openid4vp_session_transcript(b"nationality-array-tamper");
-        let fixture =
-            mldsa_fixture::mldsa_full_pq_fixture_with_nationality_array(&session_transcript);
-        let request = MdocPidRequest::eudi_pid(session_transcript)
-            .with_trusted_mldsa_issuer_public_keys(vec![fixture.issuer_pk]);
-        let mut extracted =
-            extract_pid_mdoc(&fixture.document, &request).expect("array mdoc extracts");
-        let mut policy = demo_policy();
-        policy.accepted_nationalities = vec![276];
-        policy.accepted_nationalities_alpha2 = vec![*b"DE"];
-        select_accepted_nationality(&mut extracted, &policy);
-        let statement =
-            MdocCircuitStatement::from_extracted(&extracted, policy).expect("array statement");
-
-        let mut invalid_index = statement.clone();
-        invalid_index.nationality_array_index = Some(2);
-        let error = match prove_mdoc_circuit(&extracted, &invalid_index) {
-            Err(error) => error,
-            Ok(_) => panic!("array index outside the canonical array must reject"),
-        };
-        assert!(
-            format!("{error:?}").contains("private elementIdentifier binding"),
-            "unexpected nationality-array index rejection: {error:?}"
-        );
-
-        let mut wrong_stride = statement;
-        wrong_stride.nationality_value_offset += 1;
-        let error = match prove_mdoc_circuit(&extracted, &wrong_stride) {
-            Err(error) => error,
-            Ok(_) => panic!("array member offset outside its canonical stride must reject"),
-        };
-        assert!(
-            format!("{error:?}").contains("private elementIdentifier binding"),
-            "unexpected nationality-array stride rejection: {error:?}"
+            format!("{error:?}").contains("attribute"),
+            "unexpected elementIdentifier rejection: {error:?}"
         );
     }
 
@@ -632,13 +683,12 @@ mod quantum_only {
             extract_pid_mdoc(&fixture.document, &request).expect("age-only mdoc extracts");
         let policy = Policy {
             accepted_nationalities: Vec::new(),
-            accepted_nationalities_alpha2: Vec::new(),
             ..demo_policy()
         };
         let statement = MdocCircuitStatement::from_extracted(&extracted, policy)
             .expect("age-only statement builds");
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("age-only mdoc proves");
-        verify_mdoc_circuit(&proof, &statement).expect("age-only mdoc verifies");
+        verify_mdoc_circuit(&proof, &public_view(&statement)).expect("age-only mdoc verifies");
     }
 
     /// G2 + G3 + G5 + G6 in one proving pass: the fully post-quantum e2e —
@@ -648,15 +698,16 @@ mod quantum_only {
     /// verifier statement + proof contain no private id-bound bytes.
     #[test]
     fn full_pq_mdoc_proves_and_verifies_with_revocation_end_to_end() {
-        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (extracted, statement) = ts13_extracted_and_statement();
         let (statement, id_lo, id_hi) = with_mldsa_revocation(statement, &extracted);
 
         let prove_start = Instant::now();
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
         let prove_time = prove_start.elapsed();
+        let public_statement = public_view(&statement);
 
         let verify_start = Instant::now();
-        verify_mdoc_circuit(&proof, &statement).expect("fully-PQ mdoc verifies");
+        verify_mdoc_circuit(&proof, &public_statement).expect("fully-PQ mdoc verifies");
         let verify_time = verify_start.elapsed();
 
         // Q14 soundness spine: drift one hosted instance's coeffs/use-side
@@ -668,7 +719,7 @@ mod quantum_only {
             .as_mut()
             .expect("issuer ML-DSA claims")
             .claimed_sums[0] += QM31::from(M31::from_u32_unchecked(1));
-        let error = verify_mdoc_circuit(&range_use_tamper, &statement)
+        let error = verify_mdoc_circuit(&range_use_tamper, &public_statement)
             .expect_err("one-instance range-use accounting drift must reject");
         assert!(
             format!("{error:?}").contains("LogUp claimed sums do not cancel"),
@@ -686,19 +737,14 @@ mod quantum_only {
         let proof_bytes = bincode::serialize(&proof).expect("proof serializes");
         let restored: eu_id_prover::mdoc::MdocCircuitProof =
             bincode::deserialize(&proof_bytes).expect("proof deserializes");
-        verify_mdoc_circuit(&restored, &statement).expect("round-tripped proof verifies");
+        verify_mdoc_circuit(&restored, &public_statement).expect("round-tripped proof verifies");
 
-        // The TS13 artifact carries no tree-0 authority; verification derives
-        // the canonical commitment internally from the public statement.
-        let revocation_public = statement
-            .ts13_revocation
-            .as_ref()
-            .expect("statement carries revocation public inputs");
         // The verifier envelope must not serialize the private range.  Its
         // layout is reconstructed from the public revocation key/epoch and
-        // signature, while an attempted re-prove fails because no witness is
-        // available after the round trip.
-        let statement_bytes = bincode::serialize(&statement).expect("statement serializes");
+        // proof claim shape, while an attempted re-prove fails because no
+        // witness is available after the round trip.
+        let statement_bytes =
+            bincode::serialize(&public_statement).expect("public statement serializes");
         let verifier_statement: MdocCircuitStatement =
             bincode::deserialize(&statement_bytes).expect("statement deserializes");
         assert!(verifier_statement.ts13_revocation_range.is_none());
@@ -706,22 +752,10 @@ mod quantum_only {
             .expect("verifier statement without a private range verifies");
         assert!(prove_mdoc_circuit(&extracted, &verifier_statement).is_err());
 
-        let artifact = Ts13MdocProofArtifact {
-            circuit_hash: ts13_default_circuit_hash(),
-            mdoc_proof: proof_bytes.clone(),
-            revocation_statement: Ts13RevocationStatement {
-                revocation_public_key: revocation_public.revocation_public_key.clone(),
-                epoch: revocation_public.epoch,
-            },
-        };
-        artifact
-            .verify_mdoc_and_revocation(&verifier_statement)
-            .expect("TS13 artifact verifies with a public-only statement");
-
         // Q11: each hosted role binds verifier-native ExpandA(ρ) and t1 to
         // the transcript-mixed public key. Statement-side mutations reject.
         for tamper_t1 in [false, true] {
-            let mut tampered = statement.clone();
+            let mut tampered = public_statement.clone();
             let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.issuer_input;
             if tamper_t1 {
                 input.t1[0][0] ^= 1;
@@ -731,7 +765,7 @@ mod quantum_only {
             verify_mdoc_circuit(&proof, &tampered).expect_err("tampered issuer rho/t1 must reject");
         }
         for tamper_t1 in [false, true] {
-            let mut tampered = statement.clone();
+            let mut tampered = public_statement.clone();
             let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.device_input;
             if tamper_t1 {
                 input.t1[0][0] ^= 1;
@@ -741,7 +775,7 @@ mod quantum_only {
             verify_mdoc_circuit(&proof, &tampered).expect_err("tampered device rho/t1 must reject");
         }
         for tamper_t1 in [false, true] {
-            let mut tampered = statement.clone();
+            let mut tampered = public_statement.clone();
             let MdocRevocationKey::MlDsa(pk) = &mut tampered
                 .ts13_revocation
                 .as_mut()
@@ -780,7 +814,7 @@ mod quantum_only {
             &mut device_revocation_swap.device_mldsa,
             &mut device_revocation_swap.revocation_mldsa,
         );
-        verify_mdoc_circuit(&device_revocation_swap, &statement)
+        verify_mdoc_circuit(&device_revocation_swap, &public_statement)
             .expect_err("device/revocation claim swap must reject");
 
         // G3 role replay: issuer ↔ device claim-tree swap rejects.
@@ -789,20 +823,23 @@ mod quantum_only {
             &mut issuer_device_swap.mldsa,
             &mut issuer_device_swap.device_mldsa,
         );
-        verify_mdoc_circuit(&issuer_device_swap, &statement)
+        verify_mdoc_circuit(&issuer_device_swap, &public_statement)
             .expect_err("issuer/device claim swap must reject");
 
-        // G5 verify side: a statement whose device key does not match the MSO
-        // deviceKey (issuer input replayed into the device slot) rejects at
-        // the D2 binding check, before the STARK.
-        let mut binding_tamper = statement.clone();
-        binding_tamper.device_input = statement.issuer_input.clone();
-        let err = verify_mdoc_circuit(&proof, &binding_tamper)
+        // G5 verify side: replace only the public device key, retaining the
+        // verifier-selected DeviceAuthentication bytes and resource shape.
+        // The proof's private MSO binding must reject the replacement.
+        let mut binding_tamper = public_statement.clone();
+        let issuer_key = statement
+            .issuer_input
+            .as_mldsa()
+            .expect("issuer input is ML-DSA")
+            .clone();
+        let MdocAuthInput::MlDsa(device) = &mut binding_tamper.device_input;
+        device.rho = issuer_key.rho;
+        device.t1 = issuer_key.t1;
+        verify_mdoc_circuit(&proof, &binding_tamper)
             .expect_err("device-key binding tamper rejects at verify");
-        assert!(
-            format!("{err:?}").contains("device-key MSO binding"),
-            "unexpected error: {err:?}"
-        );
 
         // G6: a tampered PUBLIC revocation KEY byte in the statement diverges
         // the rebuilt verifier input (ρ/t1/tr are transcript-mixed and drive
@@ -812,7 +849,7 @@ mod quantum_only {
         // key over this message"); the tampered-signature negative lives at
         // the native layer (`ts13_mldsa_revocation_native_positive_and_negatives`)
         // and at prove (an invalid witness cannot satisfy the constraints).
-        let mut revocation_key_tamper = statement.clone();
+        let mut revocation_key_tamper = public_statement;
         match &mut revocation_key_tamper
             .ts13_revocation
             .as_mut()
@@ -829,9 +866,10 @@ mod quantum_only {
     fn legacy_coeffs_interaction_arity_rejects_without_panicking() {
         const LEGACY_COEFFS_INTERACTION_COLUMN_DELTA: usize = 3 * (56 - 20);
 
-        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (extracted, statement) = ts13_extracted_and_statement();
         let (statement, _, _) = with_mldsa_revocation(statement, &extracted);
         let mut proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
+        let public_statement = public_view(&statement);
         let expected_interaction_columns = proof.stark_proof.0.sampled_values[2].len();
         let legacy_interaction_columns =
             expected_interaction_columns + LEGACY_COEFFS_INTERACTION_COLUMN_DELTA;
@@ -856,7 +894,7 @@ mod quantum_only {
         // Keep the outer catch as an abort detector: without the air-core
         // arity gate, the engine panic plus LogUp drop panic aborts here.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            verify_mdoc_circuit(&proof, &statement)
+            verify_mdoc_circuit(&proof, &public_statement)
         }));
         match result {
             Ok(Err(eu_id_prover::Error::Verify(message))) => {
@@ -880,7 +918,7 @@ mod quantum_only {
     /// verification must reject.
     #[test]
     fn mldsa_revocation_provider_message_tamper_rejects() {
-        let (extracted, statement) = full_pq_extracted_and_statement();
+        let (extracted, statement) = ts13_extracted_and_statement();
         let (mut statement, _, _) = with_mldsa_revocation(statement, &extracted);
         statement
             .ts13_revocation_range
@@ -890,69 +928,40 @@ mod quantum_only {
 
         let rejected = match prove_mdoc_circuit(&extracted, &statement) {
             Err(_) => true,
-            Ok(proof) => verify_mdoc_circuit(&proof, &statement).is_err(),
+            Ok(proof) => verify_mdoc_circuit(&proof, &public_view(&statement)).is_err(),
         };
         assert!(rejected, "tampered direct-provider message must reject");
     }
 
-    /// Q12 statement-side M′ tamper: flip one PUBLIC issuer/device message byte
-    /// after proving. Since pure-mode `M′ = 0x00 || 0x00 || M`, the
-    /// verifier-native µ and the FS-mixed message diverge from the proof.
+    /// The issuer message is private and only its length survives projection;
+    /// DeviceAuthentication remains verifier-selected public bytes.
     #[test]
-    fn mldsa_mdoc_statement_message_tampers_reject() {
+    fn mldsa_mdoc_private_issuer_message_is_not_a_verifier_input() {
         let (extracted, statement) = full_pq_extracted_and_statement();
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("honest prove");
+        let public_statement = public_view(&statement);
+        verify_mdoc_circuit(&proof, &public_statement).expect("public projection verifies");
 
-        // The legacy public-MSO byte offsets and anchors are compatibility
-        // metadata only. Verification derives all digest, scope, validity,
-        // and MSO-hash facts by semantic navigation of the signed payload.
-        let mut stale_public_offsets = statement.clone();
-        for attribute in &mut stale_public_offsets.attributes {
-            attribute.mso_digest_offset = usize::MAX;
-            attribute.mso_digest_anchor_offset = usize::MAX;
-            attribute.mso_digest_anchor.clear();
-        }
-        stale_public_offsets.mso_birth_date_digest_offset = usize::MAX;
-        stale_public_offsets.mso_birth_date_digest_anchor_offset = usize::MAX;
-        stale_public_offsets.mso_birth_date_digest_anchor.clear();
-        stale_public_offsets.mso_nationality_digest_offset = usize::MAX;
-        stale_public_offsets.mso_nationality_digest_anchor_offset = usize::MAX;
-        stale_public_offsets.mso_nationality_digest_anchor.clear();
-        stale_public_offsets.mso_valid_from_date_offset = usize::MAX;
-        stale_public_offsets.mso_valid_from_anchor_offset = usize::MAX;
-        stale_public_offsets.mso_valid_from_anchor.clear();
-        stale_public_offsets.mso_valid_until_date_offset = usize::MAX;
-        stale_public_offsets.mso_valid_until_anchor_offset = usize::MAX;
-        stale_public_offsets.mso_valid_until_anchor.clear();
-        stale_public_offsets.mso_payload_offset = usize::MAX;
-        stale_public_offsets.mso_payload_len = usize::MAX;
-        verify_mdoc_circuit(&proof, &stale_public_offsets)
-            .expect("legacy public-MSO offsets do not authorize verification");
-
-        let mut wrong_scope = statement.clone();
+        let mut wrong_scope = public_statement.clone();
         wrong_scope.doctype.push_str(".other");
         verify_mdoc_circuit(&proof, &wrong_scope)
             .expect_err("verify must reject a statement docType outside the signed MSO");
-
-        let mut noncanonical_anchor = statement.clone();
-        noncanonical_anchor.attributes[0]
-            .element_identifier_anchor
-            .pop();
-        let error = verify_mdoc_circuit(&proof, &noncanonical_anchor)
-            .expect_err("verify must rederive private elementIdentifier anchors");
-        assert!(
-            format!("{error:?}").contains("private elementIdentifier binding"),
-            "unexpected verify-side anchor rejection: {error:?}"
-        );
 
         let mut issuer_tampered = statement.clone();
         match &mut issuer_tampered.issuer_input {
             MdocAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
         }
-        verify_mdoc_circuit(&proof, &issuer_tampered)
-            .expect_err("tampered statement issuer M′ must reject");
+        verify_mdoc_circuit(&proof, &issuer_tampered.into_public_view())
+            .expect("private issuer bytes are absent from the verifier contract");
 
-        let mut device_tampered = statement;
+        let mut leaked_issuer_byte = public_statement.clone();
+        match &mut leaked_issuer_byte.issuer_input {
+            MdocAuthInput::MlDsa(input) => input.message[2] = 1,
+        }
+        verify_mdoc_circuit(&proof, &leaked_issuer_byte)
+            .expect_err("a nonzero private issuer byte must fail the public projection gate");
+
+        let mut device_tampered = public_statement;
         match &mut device_tampered.device_input {
             MdocAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
         }
@@ -969,16 +978,17 @@ mod quantum_only {
         let (extracted, mut statement) = full_pq_extracted_and_statement();
         // Give this test a unique valid policy key so its first lookup is cold
         // regardless of the rest of this process-global-cache test binary.
-        statement.policy.accepted_nationalities_alpha2.push(*b"PL");
+        statement.policy.accepted_nationalities.push(616);
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
+        let public_statement = public_view(&statement);
 
         let mut forged_root = proof.clone();
         forged_root.stark_proof.0.commitments[0].0[0] ^= 1;
-        verify_mdoc_circuit(&forged_root, &statement)
+        verify_mdoc_circuit(&forged_root, &public_statement)
             .expect_err("a forged tree-0 commitment must reject cold");
         let cold = verify_mdoc_circuit_with_pcs_config_profiled(
             &proof,
-            &statement,
+            &public_statement,
             mdoc_production_pcs_config(),
         )
         .expect("honest proof verifies after failed cold tamper");
@@ -986,40 +996,105 @@ mod quantum_only {
             !cold.tree0_cache_hit,
             "a failed verification must not populate the root cache"
         );
-        verify_mdoc_circuit(&forged_root, &statement)
+        verify_mdoc_circuit(&forged_root, &public_statement)
             .expect_err("a forged tree-0 commitment must also reject warm");
         let warm = verify_mdoc_circuit_with_pcs_config_profiled(
             &proof,
-            &statement,
+            &public_statement,
             mdoc_production_pcs_config(),
         )
         .expect("honest proof verifies warm");
         assert!(warm.tree0_cache_hit);
 
-        let mut noncanonical_t1 = statement.clone();
-        let eu_id_prover::mdoc::IssuerAuthInput::MlDsa(input) = &mut noncanonical_t1.issuer_input;
+        let mut noncanonical_public_t1 = public_statement;
+        let eu_id_prover::mdoc::IssuerAuthInput::MlDsa(input) =
+            &mut noncanonical_public_t1.issuer_input;
         input.t1[0][0] = stwo_mldsa::types::T1_COEFFICIENT_BOUND;
-        verify_mdoc_circuit(&proof, &noncanonical_t1)
+        verify_mdoc_circuit(&proof, &noncanonical_public_t1)
             .expect_err("a non-canonical public t1 must reject at verify entry");
+
+        let mut noncanonical_private_t1 = statement;
+        let eu_id_prover::mdoc::IssuerAuthInput::MlDsa(input) =
+            &mut noncanonical_private_t1.issuer_input;
+        input.t1[0][0] = stwo_mldsa::types::T1_COEFFICIENT_BOUND;
         assert!(
-            prove_mdoc_circuit(&extracted, &noncanonical_t1).is_err(),
+            prove_mdoc_circuit(&extracted, &noncanonical_private_t1).is_err(),
             "a non-canonical public t1 must reject at prove entry"
         );
     }
 
-    /// Q13 regression: signature-dependent rejection history cannot affect
-    /// tree 0. Distinct real signatures with different SIB consumption share
-    /// one canonical root and warm cache entry; a changed RP policy gets a
-    /// distinct root/cache miss, and the fresh audit path agrees with cache.
+    /// Q13/A-730 regression: private credential contents and
+    /// signature-dependent rejection history cannot affect tree 0. Distinct
+    /// credentials with different SIB consumption share one canonical root
+    /// and warm cache entry; a changed RP policy gets a distinct root/cache
+    /// miss, and the fresh audit path agrees with cache.
     #[test]
     fn mldsa_mdoc_tree0_is_signature_independent_and_policy_cached() {
         let (extracted_a, mut statement_a) = full_pq_extracted_and_statement_for(b"nonce-A");
-        let (extracted_b, mut statement_b) = full_pq_extracted_and_statement_for(b"nonce-B");
-        statement_a
-            .policy
-            .accepted_nationalities_alpha2
-            .push(*b"ES");
+        let (extracted_b, mut statement_b) =
+            full_pq_variant_extracted_and_statement_for(b"nonce-B");
+        statement_a.policy.accepted_nationalities.push(724);
         statement_b.policy = statement_a.policy.clone();
+        assert_ne!(
+            extracted_a.mso, extracted_b.mso,
+            "test vectors must be distinct credentials"
+        );
+        assert_eq!(statement_a.doctype, statement_b.doctype);
+        assert_eq!(statement_a.namespace, statement_b.namespace);
+        assert_eq!(statement_a.mso_payload_len, statement_b.mso_payload_len);
+        assert_eq!(
+            statement_a
+                .attributes
+                .iter()
+                .map(|attribute| (
+                    &attribute.element_identifier,
+                    &attribute.mode,
+                    attribute.item_padded_len,
+                ))
+                .collect::<Vec<_>>(),
+            statement_b
+                .attributes
+                .iter()
+                .map(|attribute| (
+                    &attribute.element_identifier,
+                    &attribute.mode,
+                    attribute.item_padded_len,
+                ))
+                .collect::<Vec<_>>(),
+            "distinct credentials must retain identical public item shapes"
+        );
+        for (role, input_a, input_b) in [
+            (
+                "issuer",
+                statement_a
+                    .issuer_input
+                    .as_mldsa()
+                    .expect("issuer A is ML-DSA"),
+                statement_b
+                    .issuer_input
+                    .as_mldsa()
+                    .expect("issuer B is ML-DSA"),
+            ),
+            (
+                "device",
+                statement_a
+                    .device_input
+                    .as_mldsa()
+                    .expect("device A is ML-DSA"),
+                statement_b
+                    .device_input
+                    .as_mldsa()
+                    .expect("device B is ML-DSA"),
+            ),
+        ] {
+            assert_eq!(input_a.rho, input_b.rho, "{role} rho differs");
+            assert_eq!(input_a.t1, input_b.t1, "{role} t1 differs");
+            assert_eq!(
+                input_a.message.len(),
+                input_b.message.len(),
+                "{role} message shape differs"
+            );
+        }
 
         let consumed_a = [
             sib_consumed_len(
@@ -1056,6 +1131,8 @@ mod quantum_only {
 
         let proof_a = prove_mdoc_circuit(&extracted_a, &statement_a).expect("proof A proves");
         let proof_b = prove_mdoc_circuit(&extracted_b, &statement_b).expect("proof B proves");
+        let public_a = public_view(&statement_a);
+        let public_b = public_view(&statement_b);
 
         assert_eq!(
             proof_a.stark_proof.commitments[0], proof_b.stark_proof.commitments[0],
@@ -1063,39 +1140,37 @@ mod quantum_only {
         );
         let cold = verify_mdoc_circuit_with_pcs_config_profiled(
             &proof_a,
-            &statement_a,
+            &public_a,
             mdoc_production_pcs_config(),
         )
         .expect("proof A verifies cold");
         assert!(!cold.tree0_cache_hit);
         let warm = verify_mdoc_circuit_with_pcs_config_profiled(
             &proof_b,
-            &statement_b,
+            &public_b,
             mdoc_production_pcs_config(),
         )
         .expect("proof B verifies through the same policy entry");
         assert!(warm.tree0_cache_hit);
         let fresh = verify_mdoc_circuit_with_pcs_config_profiled_fresh(
             &proof_b,
-            &statement_b,
+            &public_b,
             mdoc_production_pcs_config(),
         )
         .expect("fresh canonical root agrees with the memoized root");
         assert!(!fresh.tree0_cache_hit);
 
         let mut statement_c = statement_b.clone();
-        statement_c
-            .policy
-            .accepted_nationalities_alpha2
-            .push(*b"IT");
+        statement_c.policy.accepted_nationalities.push(380);
         let proof_c = prove_mdoc_circuit(&extracted_b, &statement_c).expect("proof C proves");
+        let public_c = public_view(&statement_c);
         assert_ne!(
             proof_a.stark_proof.commitments[0], proof_c.stark_proof.commitments[0],
             "a different RP policy must produce a different canonical root"
         );
         let other_policy = verify_mdoc_circuit_with_pcs_config_profiled(
             &proof_c,
-            &statement_c,
+            &public_c,
             mdoc_production_pcs_config(),
         )
         .expect("different policy verifies after its own recomputation");
@@ -1109,14 +1184,16 @@ mod quantum_only {
     /// SERVICE claim vector (missing / truncated / value-tampered) rejects.
     #[test]
     fn mldsa_malformed_claim_tree_rejects() {
-        let (extracted_a, statement_a) = full_pq_extracted_and_statement_for(b"claim-tree-A");
+        let (extracted_a, statement_a) = ts13_extracted_and_statement_for(b"claim-tree-A");
         let (statement_a, _, _) = with_mldsa_revocation(statement_a, &extracted_a);
-        let (extracted_b, statement_b) = full_pq_extracted_and_statement_for(b"claim-tree-B");
+        let (extracted_b, statement_b) = ts13_extracted_and_statement_for(b"claim-tree-B");
         let (statement_b, _, _) = with_mldsa_revocation(statement_b, &extracted_b);
 
         let proof_a = prove_mdoc_circuit(&extracted_a, &statement_a).expect("proof A proves");
-        verify_mdoc_circuit(&proof_a, &statement_a).expect("control: A verifies under A");
-        verify_mdoc_circuit(&proof_a, &statement_b)
+        let public_a = public_view(&statement_a);
+        let public_b = public_view(&statement_b);
+        verify_mdoc_circuit(&proof_a, &public_a).expect("control: A verifies under A");
+        verify_mdoc_circuit(&proof_a, &public_b)
             .expect_err("proof A must not verify against a different statement B");
 
         let mut tampered_group_eval = proof_a.clone();
@@ -1127,7 +1204,7 @@ mod quantum_only {
             .group_evals[0] += stwo::core::fields::qm31::SecureField::from(
             stwo::core::fields::m31::M31::from_u32_unchecked(1),
         );
-        verify_mdoc_circuit(&tampered_group_eval, &statement_a)
+        verify_mdoc_circuit(&tampered_group_eval, &public_a)
             .expect_err("tampered coefficient evaluation must reject");
 
         let mut short_group_evals = proof_a.clone();
@@ -1137,7 +1214,7 @@ mod quantum_only {
             .expect("issuer claims")
             .group_evals
             .pop();
-        verify_mdoc_circuit(&short_group_evals, &statement_a)
+        verify_mdoc_circuit(&short_group_evals, &public_a)
             .expect_err("malformed coefficient-eval shape must reject before construction");
 
         let mut short_issuer_claims = proof_a.clone();
@@ -1147,7 +1224,7 @@ mod quantum_only {
             .expect("issuer claims")
             .claimed_sums
             .pop();
-        verify_mdoc_circuit(&short_issuer_claims, &statement_a)
+        verify_mdoc_circuit(&short_issuer_claims, &public_a)
             .expect_err("short issuer claimed-sum vector must reject before parsing");
 
         let mut long_issuer_claims = proof_a.clone();
@@ -1164,7 +1241,7 @@ mod quantum_only {
             .expect("issuer claims")
             .claimed_sums
             .push(extra);
-        verify_mdoc_circuit(&long_issuer_claims, &statement_a)
+        verify_mdoc_circuit(&long_issuer_claims, &public_a)
             .expect_err("long issuer claimed-sum vector must reject before parsing");
 
         let mut short_revocation_claims = proof_a.clone();
@@ -1174,7 +1251,7 @@ mod quantum_only {
             .expect("revocation claims")
             .claimed_sums
             .pop();
-        verify_mdoc_circuit(&short_revocation_claims, &statement_a)
+        verify_mdoc_circuit(&short_revocation_claims, &public_a)
             .expect_err("short revocation claimed-sum vector must reject before parsing");
 
         let mut long_revocation_claims = proof_a.clone();
@@ -1191,12 +1268,12 @@ mod quantum_only {
             .expect("revocation claims")
             .claimed_sums
             .push(extra);
-        verify_mdoc_circuit(&long_revocation_claims, &statement_a)
+        verify_mdoc_circuit(&long_revocation_claims, &public_a)
             .expect_err("long revocation claimed-sum vector must reject before parsing");
 
         let mut missing_range_claim = proof_a.clone();
         missing_range_claim.clear_mldsa_range_table_claimed_sum_for_test();
-        verify_mdoc_circuit(&missing_range_claim, &statement_a)
+        verify_mdoc_circuit(&missing_range_claim, &public_a)
             .expect_err("missing proof-wide range claim must reject at the shape gate");
 
         let mut tampered_range_claim = proof_a.clone();
@@ -1205,14 +1282,14 @@ mod quantum_only {
             .expect("proof-wide range claim") += stwo::core::fields::qm31::SecureField::from(
             stwo::core::fields::m31::M31::from_u32_unchecked(1),
         );
-        verify_mdoc_circuit(&tampered_range_claim, &statement_a)
+        verify_mdoc_circuit(&tampered_range_claim, &public_a)
             .expect_err("tampered proof-wide range claim must reject");
 
         // S1 service claims, presence gate: an ML-DSA statement whose proof
         // carries NO service claim vector rejects at the shape gate.
         let mut missing_service = proof_a.clone();
         missing_service.keccak_service_claimed_sums = None;
-        verify_mdoc_circuit(&missing_service, &statement_a)
+        verify_mdoc_circuit(&missing_service, &public_a)
             .expect_err("missing keccak service claim vector must reject");
 
         // S1 service claims, length gate: a truncated vector rejects BEFORE
@@ -1223,7 +1300,7 @@ mod quantum_only {
             .as_mut()
             .expect("proof carries service claims")
             .pop();
-        verify_mdoc_circuit(&short_service, &statement_a)
+        verify_mdoc_circuit(&short_service, &public_a)
             .expect_err("truncated keccak service claim vector must reject");
 
         // S1 service claims, value tamper: swapping two claimed sums keeps the
@@ -1234,7 +1311,7 @@ mod quantum_only {
             .as_mut()
             .expect("proof carries service claims")
             .swap(0, 1);
-        verify_mdoc_circuit(&tampered_service, &statement_a)
+        verify_mdoc_circuit(&tampered_service, &public_a)
             .expect_err("tampered keccak service claimed sums must reject");
     }
 
@@ -1253,8 +1330,8 @@ mod quantum_only {
 
         let proof_a = prove_mdoc_circuit(&extracted_a, &statement_a).expect("A proves");
         let proof_b = prove_mdoc_circuit(&extracted_b, &statement_b).expect("B proves");
-        verify_mdoc_circuit(&proof_a, &statement_a).expect("A verifies");
-        verify_mdoc_circuit(&proof_b, &statement_b).expect("B verifies");
+        verify_mdoc_circuit(&proof_a, &public_view(&statement_a)).expect("A verifies");
+        verify_mdoc_circuit(&proof_b, &public_view(&statement_b)).expect("B verifies");
 
         let bd_a = mdoc_proof_byte_breakdown(&proof_a);
         let bd_b = mdoc_proof_byte_breakdown(&proof_b);

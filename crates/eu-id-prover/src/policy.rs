@@ -7,7 +7,6 @@ pub struct Policy {
     pub current_date: Date,
     pub min_age_years: u32,
     pub accepted_nationalities: Vec<u32>,
-    pub accepted_nationalities_alpha2: Vec<[u8; 2]>,
 }
 
 impl Policy {
@@ -19,16 +18,15 @@ impl Policy {
         NatPublicInput::new(self.accepted_nationalities.clone())
     }
 
-    pub fn nat_alpha2_public_input(&self) -> NatPublicInput {
-        NatPublicInput::new_alpha2(
-            self.accepted_nationalities_alpha2
-                .iter()
-                .map(|code| u32::from(u16::from_be_bytes(*code)))
-                .collect(),
-        )
-    }
-
     pub fn age_cutoff(&self) -> Date {
         self.age_public_input().cutoff_date()
     }
+}
+
+/// Convert an ISO 3166-1 alpha-2 code to the numeric value used by the
+/// nationality predicate and the private item-normalization circuit.
+pub fn iso_alpha2_to_numeric(alpha2: &str) -> Option<u32> {
+    celes::Country::from_alpha2(alpha2)
+        .ok()
+        .and_then(|country| u32::try_from(country.value).ok())
 }

@@ -605,7 +605,7 @@ fn service_claimed_sum_tamper_rejects() {
 fn service_preprocessed_root_tamper_rejects() {
     let msg = vec![0x8au8; 50];
     let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
-    verify_jobs(&p, &[msg.clone()]).expect("control verify");
+    verify_jobs(&p, std::slice::from_ref(&msg)).expect("control verify");
     p.proof.0.commitments[0].0[0] ^= 1;
     assert!(verify_jobs(&p, &[msg]).is_err());
 }

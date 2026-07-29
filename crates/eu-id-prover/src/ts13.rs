@@ -3,26 +3,51 @@ use sha2::{Digest, Sha256};
 
 use crate::mdoc::{
     mdoc_statement_resource_lengths, mdoc_ts13_public_statement_resource_lengths,
-    verify_mdoc_circuit, verify_mdoc_ts13_public_statement, ExtractedPidMdoc, MdocCircuitProof,
-    MdocCircuitStatement, MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationSignature,
-    MdocTs13PublicStatement, MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR, MDOC_PRODUCTION_PCS_POW_BITS,
+    verify_mdoc_ts13_public_statement, ExtractedPidMdoc, MdocCircuitProof, MdocCircuitStatement,
+    MdocRevocationKey, MdocRevocationSignature, MdocTs13PublicStatement,
+    MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR, MDOC_PRODUCTION_PCS_POW_BITS,
     MDOC_PRODUCTION_PCS_QUERIES,
 };
 
 // Regenerated whenever the canonical published tuple changes.
 // Repinned for the exact-item CBOR parser/scope and full-padded SHA binding.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "a0b589f7a1b0b2bc97fff5e4ed3b0d145c55f23379d6ac87abd377225537e2b5";
+    "d35d5f25a07a10c9abf96272f81edffa705087f373f4c194a0c250abf2c5d6d6";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v9";
+pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v10";
 /// The one published equality attribute's canonical IssuerSignedItem is
 /// allocated in a three-block SHA slot (256 rows), including padding.
 pub const TS13_MAX_ATTRIBUTE_ITEM_BYTES: usize = 183;
 /// Published finite range for the credential-stable `IssuerSignedItem.digestID`.
 pub const TS13_MAX_REQUESTED_DIGEST_ID: u32 = u16::MAX as u32;
+pub const TS13_VALUE_DIGESTS_SCAN_LOG_SIZE: u32 =
+    crate::mdoc_value_digests_scan::MDOC_VALUE_DIGESTS_SCAN_LOG_SIZE;
+pub const TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS: u32 =
+    crate::mdoc_value_digests_scan::MDOC_MAX_VALUE_DIGEST_SCAN_ITEMS as u32;
+pub const TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS: u32 =
+    crate::mdoc_value_digests_scan::MDOC_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS as u32;
+pub const TS13_VALUE_DIGESTS_SCAN_TRACE_COLS: u32 =
+    crate::mdoc_value_digests_scan::MDOC_VALUE_DIGESTS_SCAN_TRACE_COLS as u32;
+pub const TS13_VALUE_DIGESTS_SCAN_RELATION_SITES: u32 =
+    crate::mdoc_value_digests_scan::MDOC_VALUE_DIGESTS_SCAN_RELATION_SITES as u32;
+pub const TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS: u32 =
+    crate::mdoc_value_digests_scan::MDOC_VALUE_DIGESTS_SCAN_INTERACTION_COLS as u32;
+pub const TS13_COUNTRY_CODE_DATASET: &str = "celes-2.8.2";
+pub const TS13_COUNTRY_CODE_TABLE_LOG_SIZE: u32 =
+    crate::mdoc_country_code_table::MDOC_COUNTRY_CODE_TABLE_LOG_SIZE;
+pub const TS13_COUNTRY_CODE_COUNT: u32 =
+    crate::mdoc_country_code_table::MDOC_COUNTRY_CODE_COUNT as u32;
+pub const TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS: u32 =
+    crate::mdoc_country_code_table::MDOC_COUNTRY_CODE_PREPROCESSED_COLS as u32;
+pub const TS13_COUNTRY_CODE_TABLE_TRACE_COLS: u32 =
+    crate::mdoc_country_code_table::MDOC_COUNTRY_CODE_TRACE_COLS as u32;
+pub const TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS: u32 =
+    crate::mdoc_country_code_table::MDOC_COUNTRY_CODE_INTERACTION_COLS as u32;
+pub const TS13_COUNTRY_CODE_TABLE_SHA256: [u8; 32] =
+    crate::mdoc_country_code_table::MDOC_COUNTRY_CODE_TABLE_SHA256;
 /// SHA-256-padded size buckets reachable under the 183-byte item cap.
 pub const TS13_ALLOWED_REQUESTED_ITEM_PADDED_LENGTHS: [u16; 3] = [64, 128, 192];
 
@@ -73,6 +98,19 @@ pub struct Ts13CircuitTuple {
     pub max_attribute_bytes: u32,
     pub max_attribute_item_bytes: u32,
     pub max_requested_digest_id: u32,
+    pub value_digests_scan_log_size: u32,
+    pub value_digests_scan_max_items: u32,
+    pub value_digests_scan_preprocessed_cols: u32,
+    pub value_digests_scan_trace_cols: u32,
+    pub value_digests_scan_relation_sites: u32,
+    pub value_digests_scan_interaction_cols: u32,
+    pub country_code_dataset: &'static str,
+    pub country_code_table_log_size: u32,
+    pub country_code_count: u32,
+    pub country_code_table_preprocessed_cols: u32,
+    pub country_code_table_trace_cols: u32,
+    pub country_code_table_interaction_cols: u32,
+    pub country_code_table_sha256: [u8; 32],
     pub max_issuer_mldsa_message_bytes: u32,
     pub max_device_mldsa_message_bytes: u32,
     pub merged_sha_slot_log: u32,
@@ -100,6 +138,19 @@ impl Ts13CircuitTuple {
             max_attribute_bytes: 32,
             max_attribute_item_bytes: TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32,
             max_requested_digest_id: TS13_MAX_REQUESTED_DIGEST_ID,
+            value_digests_scan_log_size: TS13_VALUE_DIGESTS_SCAN_LOG_SIZE,
+            value_digests_scan_max_items: TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS,
+            value_digests_scan_preprocessed_cols: TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS,
+            value_digests_scan_trace_cols: TS13_VALUE_DIGESTS_SCAN_TRACE_COLS,
+            value_digests_scan_relation_sites: TS13_VALUE_DIGESTS_SCAN_RELATION_SITES,
+            value_digests_scan_interaction_cols: TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS,
+            country_code_dataset: TS13_COUNTRY_CODE_DATASET,
+            country_code_table_log_size: TS13_COUNTRY_CODE_TABLE_LOG_SIZE,
+            country_code_count: TS13_COUNTRY_CODE_COUNT,
+            country_code_table_preprocessed_cols: TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS,
+            country_code_table_trace_cols: TS13_COUNTRY_CODE_TABLE_TRACE_COLS,
+            country_code_table_interaction_cols: TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS,
+            country_code_table_sha256: TS13_COUNTRY_CODE_TABLE_SHA256,
             max_issuer_mldsa_message_bytes: TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES as u32,
             max_device_mldsa_message_bytes: TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES as u32,
             merged_sha_slot_log: TS13_MERGED_SHA_SLOT_LOG,
@@ -138,6 +189,58 @@ impl Ts13CircuitTuple {
             (
                 "max_requested_digest_id".into(),
                 Value::from(self.max_requested_digest_id),
+            ),
+            (
+                "value_digests_scan_log_size".into(),
+                Value::from(self.value_digests_scan_log_size),
+            ),
+            (
+                "value_digests_scan_max_items".into(),
+                Value::from(self.value_digests_scan_max_items),
+            ),
+            (
+                "value_digests_scan_preprocessed_cols".into(),
+                Value::from(self.value_digests_scan_preprocessed_cols),
+            ),
+            (
+                "value_digests_scan_trace_cols".into(),
+                Value::from(self.value_digests_scan_trace_cols),
+            ),
+            (
+                "value_digests_scan_relation_sites".into(),
+                Value::from(self.value_digests_scan_relation_sites),
+            ),
+            (
+                "value_digests_scan_interaction_cols".into(),
+                Value::from(self.value_digests_scan_interaction_cols),
+            ),
+            (
+                "country_code_dataset".into(),
+                self.country_code_dataset.into(),
+            ),
+            (
+                "country_code_table_log_size".into(),
+                Value::from(self.country_code_table_log_size),
+            ),
+            (
+                "country_code_count".into(),
+                Value::from(self.country_code_count),
+            ),
+            (
+                "country_code_table_preprocessed_cols".into(),
+                Value::from(self.country_code_table_preprocessed_cols),
+            ),
+            (
+                "country_code_table_trace_cols".into(),
+                Value::from(self.country_code_table_trace_cols),
+            ),
+            (
+                "country_code_table_interaction_cols".into(),
+                Value::from(self.country_code_table_interaction_cols),
+            ),
+            (
+                "country_code_table_sha256".into(),
+                Value::Bytes(self.country_code_table_sha256.to_vec()),
             ),
             (
                 "max_issuer_mldsa_message_bytes".into(),
@@ -312,6 +415,9 @@ pub enum Ts13MdocVerifierError {
 /// Fail-closed verifier for the one published TS13 equality+revocation
 /// statement.  All profile and resource checks intentionally happen before
 /// the generic verifier constructs tree-0 from proof-controlled layout.
+/// `Ok(())` also proves that the private credential validity window contained
+/// the verifier-supplied `statement.policy.current_date`; no `valid_today`
+/// field, validity date, timestamp, or offset is serialized.
 pub fn verify_ts13_age_over_18_circuit(
     proof: &MdocCircuitProof,
     statement: &MdocTs13PublicStatement,
@@ -343,7 +449,10 @@ pub fn validate_ts13_age_over_18_proving_inputs(
         stwo_sha256::native::pad_message(&extracted.extracted_attributes[0].item).len(),
     )
     .map_err(|_| Ts13MdocVerifierError::ResourceCap)?;
-    if statement.ts13_requested_item_padded_len != Some(actual_item_padded_len) {
+    if statement.attributes.len() != 1
+        || statement.attributes[0].item_padded_len != actual_item_padded_len
+        || !ts13_requested_digest_id_is_supported(extracted.extracted_attributes[0].digest_id)
+    {
         return Err(Ts13MdocVerifierError::Statement);
     }
     validate_ts13_age_over_18_proving_statement(statement)
@@ -356,19 +465,13 @@ fn validate_ts13_age_over_18_proving_statement(
         || statement.namespace != "eu.europa.ec.eudi.pid.1"
         || statement.policy.min_age_years != 0
         || !statement.policy.accepted_nationalities.is_empty()
-        || !statement.policy.accepted_nationalities_alpha2.is_empty()
-        || statement.age_attribute_index.is_some()
-        || statement.nationality_attribute_index.is_some()
+        || statement.age_attribute_index().is_some()
+        || statement.nationality_attribute_index().is_some()
         || statement.attributes.len() != 1
         || statement.attributes[0].element_identifier != "age_over_18"
         || statement.attributes[0].mode
             != crate::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5])
-        || statement.attributes[0].value != [0xf5]
-        || !ts13_requested_digest_id_is_supported(statement.attributes[0].digest_id)
-        || !matches!(
-            statement.ts13_requested_item_padded_len,
-            Some(padded_len) if ts13_requested_item_padded_len_is_supported(padded_len)
-        )
+        || !ts13_requested_item_padded_len_is_supported(statement.attributes[0].item_padded_len)
         || statement.ts13_revocation.is_none()
         || statement.ts13_revocation_signature.is_none()
         || statement.ts13_revocation_range.is_none()
@@ -380,7 +483,6 @@ fn validate_ts13_age_over_18_proving_statement(
     if lengths.issuer_mso_payload_bytes > TS13_MAX_MSO_PAYLOAD_BYTES
         || lengths.issuer_message_bytes > TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
         || lengths.device_message_bytes > TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
-        || statement.attributes[0].value.len() > 32
     {
         return Err(Ts13MdocVerifierError::ResourceCap);
     }
@@ -394,12 +496,10 @@ fn validate_ts13_age_over_18_public_statement(
         || statement.namespace != "eu.europa.ec.eudi.pid.1"
         || statement.policy.min_age_years != 0
         || !statement.policy.accepted_nationalities.is_empty()
-        || !statement.policy.accepted_nationalities_alpha2.is_empty()
         || statement.attributes.len() != 1
         || statement.attributes[0].element_identifier != "age_over_18"
         || statement.attributes[0].mode
             != crate::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5])
-        || !ts13_requested_digest_id_is_supported(statement.requested_digest_id)
         || !ts13_requested_item_padded_len_is_supported(statement.requested_item_padded_len)
     {
         return Err(Ts13MdocVerifierError::Statement);
@@ -494,8 +594,8 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
         },
         Ts13ZkExposure {
             name: "issuer Sig_structure and MobileSecurityObject",
-            classification: LinkablePublic,
-            rationale: "the staged verifier hashes the public issuer message natively; its credential-stable MSO and digest map make presentations correlatable",
+            classification: UnmaskedPrivateTrace,
+            rationale: "private message provider and MSO binder remove these credential bytes from clear statement/transcript inputs, but Phase 3 proof-wide masking is still absent",
         },
         Ts13ZkExposure {
             name: "device public key",
@@ -504,8 +604,8 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
         },
         Ts13ZkExposure {
             name: "requested IssuerSignedItem digestID",
-            classification: LinkablePublic,
-            rationale: "the staged verifier publishes the credential-stable digest-map selector used by the semantic equality scope",
+            classification: UnmaskedPrivateTrace,
+            rationale: "the private item binder and valueDigests scanner carry the selector only as a private relation tuple; Phase 3 proof-wide masking is still absent",
         },
         Ts13ZkExposure {
             name: "requested IssuerSignedItem padded length",
@@ -611,68 +711,6 @@ pub enum Ts13RevocationError {
     Epoch,
     InvalidSignatureEncoding,
     InvalidSignature,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ts13MdocProofArtifact {
-    pub circuit_hash: String,
-    pub mdoc_proof: Vec<u8>,
-    pub revocation_statement: Ts13RevocationStatement,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ts13MdocProofArtifactError {
-    CircuitHash,
-    EmptyProof,
-    StatementRevocationMissing,
-    StatementRevocationMismatch,
-    ProofDecode,
-    MdocProof,
-}
-
-impl Ts13MdocProofArtifact {
-    fn verify_artifact_shape(&self) -> Result<(), Ts13MdocProofArtifactError> {
-        if self.circuit_hash != ts13_default_circuit_hash() {
-            return Err(Ts13MdocProofArtifactError::CircuitHash);
-        }
-        if self.mdoc_proof.is_empty() {
-            return Err(Ts13MdocProofArtifactError::EmptyProof);
-        }
-        Ok(())
-    }
-
-    pub fn verify_mdoc_and_revocation(
-        &self,
-        statement: &MdocCircuitStatement,
-    ) -> Result<(), Ts13MdocProofArtifactError> {
-        self.verify_artifact_shape()?;
-        self.verify_statement_revocation_binding(statement)?;
-        let proof: MdocCircuitProof = bincode::deserialize(&self.mdoc_proof)
-            .map_err(|_| Ts13MdocProofArtifactError::ProofDecode)?;
-        verify_mdoc_circuit(&proof, statement).map_err(|_| Ts13MdocProofArtifactError::MdocProof)
-    }
-
-    fn verify_statement_revocation_binding(
-        &self,
-        statement: &MdocCircuitStatement,
-    ) -> Result<(), Ts13MdocProofArtifactError> {
-        let Some(public_inputs) = &statement.ts13_revocation else {
-            return Err(Ts13MdocProofArtifactError::StatementRevocationMissing);
-        };
-        if public_inputs != &MdocRevocationPublicInputs::from(&self.revocation_statement) {
-            return Err(Ts13MdocProofArtifactError::StatementRevocationMismatch);
-        }
-        Ok(())
-    }
-}
-
-impl From<&Ts13RevocationStatement> for MdocRevocationPublicInputs {
-    fn from(statement: &Ts13RevocationStatement) -> Self {
-        Self {
-            revocation_public_key: statement.revocation_public_key.clone(),
-            epoch: statement.epoch,
-        }
-    }
 }
 
 impl Ts13RevocationStatement {
@@ -807,8 +845,6 @@ mod tests {
     use super::*;
 
     const PRE_PACKED_COEFFS_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v6";
-    const PRE_PACKED_COEFFS_CIRCUIT_HASH: &str =
-        "74b70ce9bf2e5bb230df71cf8d2b513c887607030eb1eda91f6ca00d126215f4";
 
     fn cbor_has_map_key(value: &Value, expected: &str) -> bool {
         match value {
@@ -845,6 +881,22 @@ mod tests {
             TS13_MAX_ATTRIBUTE_ITEM_BYTES
         );
         assert_eq!(tuple.max_requested_digest_id, TS13_MAX_REQUESTED_DIGEST_ID);
+        assert_eq!(tuple.value_digests_scan_log_size, 9);
+        assert_eq!(tuple.value_digests_scan_max_items, 255);
+        assert_eq!(tuple.value_digests_scan_preprocessed_cols, 4);
+        assert_eq!(tuple.value_digests_scan_trace_cols, 324);
+        assert_eq!(tuple.value_digests_scan_relation_sites, 51);
+        assert_eq!(tuple.value_digests_scan_interaction_cols, 108);
+        assert_eq!(tuple.country_code_dataset, "celes-2.8.2");
+        assert_eq!(tuple.country_code_table_log_size, 9);
+        assert_eq!(tuple.country_code_count, 250);
+        assert_eq!(tuple.country_code_table_preprocessed_cols, 6);
+        assert_eq!(tuple.country_code_table_trace_cols, 1);
+        assert_eq!(tuple.country_code_table_interaction_cols, 4);
+        assert_eq!(
+            tuple.country_code_table_sha256,
+            TS13_COUNTRY_CODE_TABLE_SHA256
+        );
         assert_eq!(tuple.merged_sha_slot_log, TS13_MERGED_SHA_SLOT_LOG);
         assert_eq!(tuple.merged_sha_log_n_rows, TS13_MERGED_SHA_LOG_N_ROWS);
     }
@@ -898,19 +950,6 @@ mod tests {
         assert_eq!(
             current_pin.verify(&previous),
             Err(Ts13CircuitPinError::CircuitHashMismatch)
-        );
-
-        let previous_artifact = Ts13MdocProofArtifact {
-            circuit_hash: PRE_PACKED_COEFFS_CIRCUIT_HASH.to_string(),
-            mdoc_proof: vec![0],
-            revocation_statement: Ts13RevocationStatement {
-                revocation_public_key: MdocRevocationKey::MlDsa(Vec::new()),
-                epoch: 0,
-            },
-        };
-        assert_eq!(
-            previous_artifact.verify_artifact_shape(),
-            Err(Ts13MdocProofArtifactError::CircuitHash)
         );
     }
 
@@ -982,7 +1021,7 @@ mod tests {
         );
         assert!(inventory.iter().any(|entry| {
             entry.name == "requested IssuerSignedItem digestID"
-                && entry.classification == Ts13ZkExposureClassification::LinkablePublic
+                && entry.classification == Ts13ZkExposureClassification::UnmaskedPrivateTrace
         }));
         assert!(inventory.iter().any(|entry| {
             entry.name == "requested IssuerSignedItem padded length"
@@ -1046,11 +1085,10 @@ mod tests {
             namespace: "eu.europa.ec.eudi.pid.1".to_string(),
             issuer: auth.clone(),
             device: auth,
-            revocation: MdocRevocationPublicInputs {
+            revocation: crate::mdoc::MdocRevocationPublicInputs {
                 revocation_public_key: MdocRevocationKey::MlDsa(revocation_public_key),
                 epoch: EPOCH,
             },
-            requested_digest_id: 0,
             mso_payload_len: 1,
             requested_item_padded_len: TS13_ALLOWED_REQUESTED_ITEM_PADDED_LENGTHS[0],
             attributes: Vec::new(),
@@ -1062,7 +1100,6 @@ mod tests {
                 },
                 min_age_years: 18,
                 accepted_nationalities: Vec::new(),
-                accepted_nationalities_alpha2: Vec::new(),
             },
         };
 

@@ -11,6 +11,7 @@ use euid_zk_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 #[allow(dead_code)]
 #[path = "../../eu-id-prover/tests/mldsa_fixture.rs"]
@@ -19,6 +20,8 @@ mod mldsa_fixture;
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
+const SHA256_BLOCK_BYTES: usize = 64;
+const TS13_ENVELOPE_FORMAT_V3: u16 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct Ts13ProofEnvelopeForTest {
@@ -51,6 +54,24 @@ fn ts13_request(
         max_attribute_bytes: 32,
         max_attribute_item_bytes: eu_id_prover::ts13::TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32,
         max_requested_digest_id: eu_id_prover::ts13::TS13_MAX_REQUESTED_DIGEST_ID,
+        value_digests_scan_log_size: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_LOG_SIZE,
+        value_digests_scan_max_items: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS,
+        value_digests_scan_preprocessed_cols:
+            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS,
+        value_digests_scan_trace_cols: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_TRACE_COLS,
+        value_digests_scan_relation_sites:
+            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_RELATION_SITES,
+        value_digests_scan_interaction_cols:
+            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS,
+        country_code_dataset: eu_id_prover::ts13::TS13_COUNTRY_CODE_DATASET.to_string(),
+        country_code_table_log_size: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_LOG_SIZE,
+        country_code_count: eu_id_prover::ts13::TS13_COUNTRY_CODE_COUNT,
+        country_code_table_preprocessed_cols:
+            eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS,
+        country_code_table_trace_cols: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_TRACE_COLS,
+        country_code_table_interaction_cols:
+            eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS,
+        country_code_table_sha256: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_SHA256.to_vec(),
         max_issuer_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
             as u32,
         max_device_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
@@ -69,6 +90,16 @@ fn ts13_request(
     }
 }
 
+fn distinctive_revocation_bounds(id: u64) -> (u64, u64) {
+    const PREFERRED_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
+    let bound_offset = PREFERRED_BOUND_OFFSET.min(id / 2).min((u64::MAX - id) / 2);
+    assert!(
+        bound_offset > 0,
+        "fixture-derived id supports strict bounds"
+    );
+    (id - bound_offset, id + bound_offset)
+}
+
 fn tamper_ts13_stark_proof(proof: &[u8]) -> Vec<u8> {
     let mut envelope: Ts13ProofEnvelopeForTest =
         bincode::deserialize(proof).expect("TS13 proof envelope decodes in test");
@@ -82,7 +113,7 @@ fn tamper_ts13_stark_proof(proof: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
+fn ts13_equality_envelope_proves_and_verifies_with_public_only_envelope() {
     let session_transcript =
         eu_id_prover::mdoc::openid4vp_session_transcript(b"sdk-ts13-equality-session");
     let fixture = mldsa_fixture::mldsa_realistic_pid_fixture_with_age_over_18(&session_transcript);
@@ -115,12 +146,10 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
         .expect("ML-DSA device")
         .c_tilde;
     let requested_item_len = extracted.extracted_attributes[0].item.len();
-    let expected_requested_item_padded_len = ((requested_item_len + 9 + 63) / 64 * 64) as u16;
+    let expected_requested_item_padded_len =
+        ((requested_item_len + 9).div_ceil(SHA256_BLOCK_BYTES) * SHA256_BLOCK_BYTES) as u16;
     let id = eu_id_prover::ts13::ts13_mso_derived_revocation_id(&extracted.mso);
-    const DISTINCTIVE_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
-    assert!(id > DISTINCTIVE_BOUND_OFFSET && id < u64::MAX - DISTINCTIVE_BOUND_OFFSET);
-    let id_lo = id - DISTINCTIVE_BOUND_OFFSET;
-    let id_hi = id + DISTINCTIVE_BOUND_OFFSET;
+    let (id_lo, id_hi) = distinctive_revocation_bounds(id);
     let (_, revocation_signature) = mldsa_fixture::mldsa_revocation_fixture(id_lo, id_hi, 7);
     let revocation_signature_marker = revocation_signature[..64].to_vec();
 
@@ -132,8 +161,8 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
     let document = ts13_prove_zk_document(
         request.clone(),
         Ts13MdocWitness {
-            document: fixture.document,
-            trusted_issuer_public_keys: vec![fixture.issuer_pk],
+            document: fixture.document.clone(),
+            trusted_issuer_public_keys: vec![fixture.issuer_pk.clone()],
             revocation_id_lo: id_lo,
             revocation_id_hi: id_hi,
             revocation_signature,
@@ -143,12 +172,41 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
 
     let envelope: Ts13ProofEnvelopeForTest =
         bincode::deserialize(&document.proof).expect("public TS13 envelope decodes");
-    assert_eq!(envelope.envelope_format, 2);
+    assert_eq!(envelope.envelope_format, TS13_ENVELOPE_FORMAT_V3);
+
+    let phase1_stable_region_whitelist: [(&str, &[u8]); 2] = [
+        // U7/U9: the full device public key remains public in Phase 1 and this
+        // exact entry must disappear when private device-key binding lands.
+        ("1,952-byte device public key", fixture.device_pk.as_slice()),
+        // Permanent: the issuer trust key is verifier input and is never removed.
+        ("issuer trust key", fixture.issuer_pk.as_slice()),
+    ];
+    assert_eq!(
+        phase1_stable_region_whitelist.len(),
+        2,
+        "Phase-1 stable-region whitelist is exactly enumerated"
+    );
+    assert_eq!(
+        phase1_stable_region_whitelist[0].1.len(),
+        ML_DSA_65_PUBLIC_KEY_BYTES
+    );
+    for (name, stable_region) in phase1_stable_region_whitelist {
+        assert!(
+            document
+                .proof
+                .windows(stable_region.len())
+                .any(|window| window == stable_region),
+            "serialized TS13 envelope must contain the explicitly whitelisted {name}"
+        );
+    }
+
     assert_eq!(
         envelope.mdoc_statement.attributes,
         extraction_request.attributes
     );
-    assert_eq!(envelope.mdoc_statement.requested_digest_id, 17);
+    // `requested_digest_id` is deliberately absent from the verifier
+    // envelope. Wrong-ID, wrong-position, and decoy substitution are covered
+    // by proof-level valueDigests scanner negatives in the prover crate.
     assert_eq!(
         envelope.mdoc_statement.requested_item_padded_len,
         expected_requested_item_padded_len
@@ -162,18 +220,6 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
     assert!(
         !ts13_verify_zk_document(&changed_epoch, &document).expect("tampered request runs"),
         "TS13 verifier must bind the revocation epoch"
-    );
-
-    let mut changed_digest_id = document.clone();
-    let mut envelope: Ts13ProofEnvelopeForTest =
-        bincode::deserialize(&changed_digest_id.proof).expect("TS13 envelope decodes");
-    envelope.mdoc_statement.requested_digest_id += 1;
-    changed_digest_id.proof =
-        bincode::serialize(&envelope).expect("changed TS13 envelope serializes");
-    assert!(
-        !ts13_verify_zk_document(&request, &changed_digest_id)
-            .expect("tampered digest ID request runs"),
-        "TS13 verifier must bind the requested digest ID"
     );
 
     let mut changed_item_padded_len = document.clone();
@@ -236,4 +282,70 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
             "serialized TS13 verifier envelope must not contain {name}"
         );
     }
+}
+
+#[test]
+#[ignore = "U9 Phase-2 gate: the device public key is intentionally public in Phase 1"]
+fn phase2_u9_device_key_whitelist_is_empty_and_envelope_has_no_stable_run() {
+    const MIN_STABLE_DEVICE_KEY_RUN_BYTES: usize = 32;
+
+    let session_transcript =
+        eu_id_prover::mdoc::openid4vp_session_transcript(b"sdk-ts13-phase2-u9-gate");
+    let fixture = mldsa_fixture::mldsa_realistic_pid_fixture_with_age_over_18(&session_transcript);
+    let device_public_key = fixture.device_pk.clone();
+    let extraction_request = eu_id_prover::MdocPidRequest {
+        doctype: PID_DOCTYPE.to_string(),
+        namespace: PID_NAMESPACE.to_string(),
+        attributes: vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: "age_over_18".to_string(),
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+        }],
+        birth_date_element: "birth_date".to_string(),
+        nationality_element: "nationality".to_string(),
+        session_transcript: session_transcript.clone(),
+        trusted_mldsa_issuer_public_keys: vec![fixture.issuer_pk.clone()],
+        device_authentication_profile:
+            eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
+    };
+    let extracted = eu_id_prover::mdoc::extract_pid_mdoc(&fixture.document, &extraction_request)
+        .expect("U9 gate fixture extracts");
+    let id = eu_id_prover::ts13::ts13_mso_derived_revocation_id(&extracted.mso);
+    let (id_lo, id_hi) = distinctive_revocation_bounds(id);
+    let (_, revocation_signature) = mldsa_fixture::mldsa_revocation_fixture(id_lo, id_hi, 7);
+    let request = ts13_request(
+        session_transcript,
+        &fixture.issuer_pk,
+        fixture.revocation_pk.clone(),
+    );
+    let document = ts13_prove_zk_document(
+        request,
+        Ts13MdocWitness {
+            document: fixture.document,
+            trusted_issuer_public_keys: vec![fixture.issuer_pk],
+            revocation_id_lo: id_lo,
+            revocation_id_hi: id_hi,
+            revocation_signature,
+        },
+    )
+    .expect("U9 gate proof builds");
+
+    let phase2_device_key_stable_region_whitelist = Vec::<&[u8]>::new();
+    assert!(
+        phase2_device_key_stable_region_whitelist.is_empty(),
+        "Phase-2 device-key stable-region whitelist must be empty"
+    );
+
+    let envelope_runs: HashSet<&[u8]> = document
+        .proof
+        .windows(MIN_STABLE_DEVICE_KEY_RUN_BYTES)
+        .collect();
+    let leaked_device_key_offset = device_public_key
+        .windows(MIN_STABLE_DEVICE_KEY_RUN_BYTES)
+        .position(|run| envelope_runs.contains(run));
+    assert!(
+        leaked_device_key_offset.is_none(),
+        "serialized TS13 envelope contains a device-key run of at least \
+         {MIN_STABLE_DEVICE_KEY_RUN_BYTES} bytes beginning at device-key offset {}",
+        leaked_device_key_offset.unwrap_or_default()
+    );
 }

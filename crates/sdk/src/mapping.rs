@@ -46,26 +46,8 @@ pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError
     Ok(Policy {
         current_date: current,
         min_age_years,
-        accepted_nationalities_alpha2: accepted_alpha2_set(&accepted_nationalities)?,
         accepted_nationalities,
     })
-}
-
-fn accepted_alpha2_set(accepted_numeric: &[u32]) -> Result<Vec<[u8; 2]>, ZkError> {
-    accepted_numeric
-        .iter()
-        .map(|code| {
-            let country = celes::Country::from_value(
-                usize::try_from(*code).map_err(|_| invalid("country code out of range"))?,
-            )
-            .map_err(|_| invalid(format!("unknown ISO-3166 numeric code {code}")))?;
-            country
-                .alpha2
-                .as_bytes()
-                .try_into()
-                .map_err(|_| invalid(format!("country {code} has malformed alpha-2 code")))
-        })
-        .collect()
 }
 
 fn validate_min_age(current: Date, min_age: u32) -> Result<(), ZkError> {
@@ -73,7 +55,6 @@ fn validate_min_age(current: Date, min_age: u32) -> Result<(), ZkError> {
         current_date: current,
         min_age_years: 0,
         accepted_nationalities: Vec::new(),
-        accepted_nationalities_alpha2: Vec::new(),
     }
     .age_public_input()
     .bounds

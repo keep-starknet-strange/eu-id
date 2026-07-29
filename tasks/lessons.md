@@ -59,3 +59,14 @@
   paths too (`rg --files -uu` or `git ls-tree -r HEAD`); ordinary file
   discovery can omit `.agents` and turn a search mistake into a false
   protocol-escalation premise.
+- An exact Cargo test filter is not evidence unless the result reports at
+  least one executed test. Confirm the fully qualified module path and the
+  nonzero `passed` count; a green `0 passed` run is only a filter typo.
+- Hold every verifier-preprocessing determinant fixed in cross-credential
+  privacy-region comparisons, especially the public device key. Otherwise a
+  legitimate tree-zero change is indistinguishable from a private-witness
+  leak; test the known public key exposure in a separate exact-whitelist gate.
+- Run every Cargo gate for this proof system with release optimizations.
+  Repeating debug proofs adds wall-clock cost without improving protocol
+  diagnosis. If symbols are needed, add a release-optimized profile that keeps
+  debug information instead of falling back to the dev profile.
