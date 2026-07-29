@@ -20,6 +20,7 @@ pub mod binding;
 pub mod coeffs;
 pub mod constants;
 pub mod decomp;
+pub mod expand_a;
 pub mod msglink;
 pub mod proof;
 pub mod reference;

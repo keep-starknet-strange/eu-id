@@ -742,7 +742,11 @@ pub struct RcUses {
 }
 
 impl RcUses {
-    fn new() -> Self {
+    /// Empty proof-wide range-use accumulator.
+    ///
+    /// Hosted sibling components such as `ExpandA` reuse the same range table,
+    /// so they build one of these before the shared provider is constructed.
+    pub fn new() -> Self {
         Self {
             rc9: vec![0; 1 << 9],
             rc13: vec![0; 1 << 13],
@@ -750,6 +754,18 @@ impl RcUses {
             rc7: vec![0; 1 << 7],
             ternary: vec![0; 3],
         }
+    }
+
+    /// Record one lookup against `kind`.
+    pub fn record(&mut self, kind: RcKind, value: u32) {
+        let uses = match kind {
+            RcKind::Rc9 => &mut self.rc9,
+            RcKind::Rc13 => &mut self.rc13,
+            RcKind::Rc8 => &mut self.rc8,
+            RcKind::Rc7 => &mut self.rc7,
+            RcKind::Ternary => &mut self.ternary,
+        };
+        uses[value as usize] += 1;
     }
 
     /// The multiplicity slice for a table kind.
@@ -761,6 +777,12 @@ impl RcUses {
             RcKind::Rc7 => &self.rc7,
             RcKind::Ternary => &self.ternary,
         }
+    }
+}
+
+impl Default for RcUses {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
