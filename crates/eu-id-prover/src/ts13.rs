@@ -454,6 +454,10 @@ pub struct Ts13P4cNumericalBound {
     pub union_bound_bits: u32,
 }
 
+/// Revocation anonymity note: the public epoch partitions the anonymity set
+/// by design. The derived `id`, `id_lo`, `id_hi`, MSO digest, and revocation
+/// signature are not clear public statement or transcript inputs. Endpoint
+/// indistinguishability remains conditional on Phase-3 proof-wide masking.
 pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
     use Ts13ZkExposureClassification::*;
 
@@ -516,7 +520,12 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
         Ts13ZkExposure {
             name: "revocation public key and epoch",
             classification: PublicByDesign,
-            rationale: "caller-bound revocation statement",
+            rationale: "the authority key is caller-bound and the public epoch deliberately partitions the anonymity set",
+        },
+        Ts13ZkExposure {
+            name: "private revocation id, endpoints, MSO digest, and signature",
+            classification: UnmaskedPrivateTrace,
+            rationale: "absent from clear public statement and transcript inputs; endpoint indistinguishability still depends on Phase-3 proof-wide masking",
         },
         Ts13ZkExposure {
             name: "private base and interaction trace openings",
@@ -801,6 +810,18 @@ mod tests {
     const PRE_PACKED_COEFFS_CIRCUIT_HASH: &str =
         "74b70ce9bf2e5bb230df71cf8d2b513c887607030eb1eda91f6ca00d126215f4";
 
+    fn cbor_has_map_key(value: &Value, expected: &str) -> bool {
+        match value {
+            Value::Map(entries) => entries.iter().any(|(key, value)| {
+                matches!(key, Value::Text(key) if key == expected)
+                    || cbor_has_map_key(value, expected)
+            }),
+            Value::Array(values) => values.iter().any(|value| cbor_has_map_key(value, expected)),
+            Value::Tag(_, value) => cbor_has_map_key(value, expected),
+            _ => false,
+        }
+    }
+
     #[test]
     fn circuit_hash_golden_matches_canonical_serialization() {
         let tuple = Ts13CircuitTuple::published_age_over_18();
@@ -993,6 +1014,82 @@ mod tests {
                 !entry.rationale.is_empty(),
                 "inventory entry {} has no rationale",
                 entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn mdoc_zk_revocation_inventory_records_the_anonymity_boundary() {
+        let inventory = ts13_mdoc_zk_exposure_inventory();
+
+        assert!(inventory.iter().any(|entry| {
+            entry.name == "revocation public key and epoch"
+                && entry.classification == Ts13ZkExposureClassification::PublicByDesign
+        }));
+        assert!(inventory.iter().any(|entry| {
+            entry.name == "private revocation id, endpoints, MSO digest, and signature"
+                && entry.classification == Ts13ZkExposureClassification::UnmaskedPrivateTrace
+        }));
+    }
+
+    #[test]
+    fn ts13_public_statement_exposes_only_public_revocation_inputs() {
+        const EPOCH: u32 = 0xface_b00c;
+        let revocation_public_key = vec![0xa7; stwo_mldsa::constants::PK_BYTES];
+        let auth = crate::mdoc::MdocMlDsaPublicAuthInput {
+            public_key: Vec::new(),
+            message_len: 0,
+            message: Vec::new(),
+        };
+        let statement = MdocTs13PublicStatement {
+            doctype: "eu.europa.ec.eudi.pid.1".to_string(),
+            namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+            issuer: auth.clone(),
+            device: auth,
+            revocation: MdocRevocationPublicInputs {
+                revocation_public_key: MdocRevocationKey::MlDsa(revocation_public_key),
+                epoch: EPOCH,
+            },
+            requested_digest_id: 0,
+            mso_payload_len: 1,
+            requested_item_padded_len: TS13_ALLOWED_REQUESTED_ITEM_PADDED_LENGTHS[0],
+            attributes: Vec::new(),
+            policy: crate::policy::Policy {
+                current_date: predicates::Date {
+                    year: 2026,
+                    month: 7,
+                    day: 29,
+                },
+                min_age_years: 18,
+                accepted_nationalities: Vec::new(),
+                accepted_nationalities_alpha2: Vec::new(),
+            },
+        };
+
+        let mut encoded = Vec::new();
+        ciborium::ser::into_writer(&statement, &mut encoded)
+            .expect("TS13 public statement serializes");
+        let decoded: Value =
+            ciborium::de::from_reader(encoded.as_slice()).expect("TS13 public statement decodes");
+        let restored: MdocTs13PublicStatement =
+            ciborium::de::from_reader(encoded.as_slice()).expect("TS13 statement round-trips");
+
+        assert_eq!(restored, statement);
+        assert_eq!(restored.revocation.epoch, EPOCH);
+        assert_eq!(
+            restored.revocation.revocation_public_key,
+            statement.revocation.revocation_public_key
+        );
+        for public_key in ["revocation_public_key", "epoch"] {
+            assert!(
+                cbor_has_map_key(&decoded, public_key),
+                "missing clear public revocation input {public_key}"
+            );
+        }
+        for private_key in ["id", "id_lo", "id_hi", "signature", "mso_digest"] {
+            assert!(
+                !cbor_has_map_key(&decoded, private_key),
+                "private revocation input {private_key} leaked into the public statement"
             );
         }
     }
