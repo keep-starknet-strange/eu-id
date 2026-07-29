@@ -4,8 +4,9 @@
 //! [`MlDsaVerifier`] impl `Air`) proves the entire ML-DSA-65 verification via a
 //! single [`air_core::prove`] / [`air_core::verify`] call. It stitches together:
 //!
-//!   * verifier-native `ExpandA(ρ)` — deterministic from the transcript-mixed
-//!     public key and consumed directly by the folded identity.
+//!   * verifier-native `ExpandA(ρ)` — deterministic from the public key and
+//!     consumed directly by the folded identity. Hosted-private-key mode keeps
+//!     this as an explicitly temporary U6 compatibility dependency.
 //!   * `coeffs` — the tall bivariate-Horner integer-lift component (yields the
 //!     W-cell / C-cell bindings + constrained public fold).
 //!   * `decomp` — [DECOMP]+[HINT]; consumes W-cells, yields the 768 `w1Encode`
@@ -13,8 +14,9 @@
 //!   * `sib`         — SampleInBall FSM; consumes C-cells + the SIB squeeze stream.
 //!   * `msglink`     — the public message-byte producer (M7 swap point).
 //!   * public-byte links / bridges / sinks ([`crate::sponge_link`]) that feed
-//!     verifier-native `tr`/µ constants, move bytes between the remaining
-//!     HashIo streams, and close every squeeze balance.
+//!     public prefixes, move bytes between the remaining HashIo streams, and
+//!     close every squeeze balance. Hosted-private-key mode computes `tr` in
+//!     the shared Keccak service from field-id-1 private `pkEncode` bytes.
 //!
 //! The remaining SHAKE-256 signature chains are jobs of the proof-wide
 //! [`stwo_keccak::service::KeccakServiceProver`], which owns the rotated
@@ -100,6 +102,10 @@ use crate::sampleinball::{self, SibEval};
 pub const MU_ABSORB: u32 = 10;
 /// Private µ-chain squeeze stream offset.
 pub const MU_SQUEEZE: u32 = 11;
+/// Private-key `tr = SHAKE256(pkEncode)` absorb stream offset.
+pub const TR_ABSORB: u32 = 8;
+/// Private-key `tr` squeeze stream offset.
+pub const TR_SQUEEZE: u32 = 9;
 /// c̃-chain absorb stream offset (`µ ‖ w1Encode(w1')`).
 pub const CT_ABSORB: u32 = 12;
 /// c̃-chain squeeze stream offset.
@@ -118,6 +124,17 @@ const RATE: usize = 136;
 /// msg bridge requires them under the same id. Distinct from the standalone
 /// `MSG_FIELD_ID` (which keys the self-drawn `MsgLinkRelation`).
 pub const HOSTED_MSG_FIELD_ID: u32 = 0;
+/// The normalized private `pkEncode` field yielded by the mdoc key binder.
+///
+/// It deliberately shares the host-drawn [`FieldBytesRelation`] with
+/// [`HOSTED_MSG_FIELD_ID`]. The distinct field id keeps the two byte domains
+/// disjoint without introducing another relation draw (which would create a
+/// U6 → U9 → U7 module-order cycle).
+pub const HOSTED_DEVICE_PK_FIELD_ID: u32 = 1;
+
+/// Transcript tag separating hosted-private-key statements from every
+/// existing public-key mode while keeping legacy modes byte-for-byte stable.
+const HOSTED_PRIVATE_KEY_MODE_TAG: u64 = 0x4d4c_4453_4150_4b01;
 
 // =============================================================================
 // Perm-id namespacing plan for the composed SHAKE chains.
@@ -179,13 +196,16 @@ pub struct MlDsaProof {
 // Shared shape derivation (identical prover / verifier).
 // =============================================================================
 
-/// The remaining sponge shapes for a statement, derived from PUBLIC data only.
+/// The sponge shapes for a statement, derived from PUBLIC lengths/mode only.
 ///
+/// * tr: private-public-key mode only; absorbs `pkEncode` (1,952 bytes),
+///   squeezes 1 block.
 /// * µ:  private-message mode only; absorbs `tr ‖ 0x00 ‖ 0x00 ‖ M`
 ///   (len `66 + |M|`), squeezes 1 block.
 /// * c̃:  absorbs `µ ‖ w1Encode(w1')` (len 832 = 64 + 768), squeezes 1 block.
 /// * SIB: absorbs `c̃` (48 bytes), squeezes the fixed five-block resource cap.
 struct Shapes {
+    tr: Option<Shape>,
     mu: Option<Shape>,
     ct: Shape,
     sib: Shape,
@@ -195,8 +215,11 @@ struct Shapes {
 /// `stream_base`. `native_mu` omits the private µ job.
 /// Perm-id bases stay 0 — the proof-wide [`stwo_keccak::sponge_v::JobList`]
 /// stamps the global plan over the concatenated job list.
-fn shapes(message_len: usize, stream_base: u32, native_mu: bool) -> Shapes {
+fn shapes(message_len: usize, stream_base: u32, native_mu: bool, private_key: bool) -> Shapes {
+    debug_assert!(!(native_mu && private_key));
     let b = stream_base;
+    let tr = private_key
+        .then(|| Shape::new(crate::constants::PK_BYTES, 1, b + TR_ABSORB, b + TR_SQUEEZE));
     let mu = (!native_mu).then(|| Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE));
     let ct = Shape::new(64 + 768, 1, b + CT_ABSORB, b + CT_SQUEEZE);
     let sib = Shape::new(
@@ -205,15 +228,30 @@ fn shapes(message_len: usize, stream_base: u32, native_mu: bool) -> Shapes {
         b + SIB_ABSORB,
         b + STREAM_ID_SIB_SQUEEZE,
     );
-    Shapes { mu, ct, sib }
+    Shapes { tr, mu, ct, sib }
 }
 
 /// PUBLIC: all sponge jobs contributed to the proof-wide service: optional
 /// private µ, then c̃ and SIB. `native_mu = true` is the hosted-public
 /// issuer/device shape; `false` is standalone/private revocation.
 pub fn keccak_job_shapes(message_len: usize, stream_base: u32, native_mu: bool) -> Vec<Shape> {
-    let sh = shapes(message_len, stream_base, native_mu);
-    sh.mu.into_iter().chain([sh.ct, sh.sib]).collect()
+    let sh = shapes(message_len, stream_base, native_mu, false);
+    sh.tr
+        .into_iter()
+        .chain(sh.mu)
+        .chain([sh.ct, sh.sib])
+        .collect()
+}
+
+/// Sponge jobs for a hosted public-message statement whose public key is
+/// private: in-circuit `tr`, then in-circuit µ, c̃, and SIB.
+pub fn hosted_private_key_keccak_job_shapes(message_len: usize, stream_base: u32) -> Vec<Shape> {
+    let sh = shapes(message_len, stream_base, false, true);
+    sh.tr
+        .into_iter()
+        .chain(sh.mu)
+        .chain([sh.ct, sh.sib])
+        .collect()
 }
 
 // =============================================================================
@@ -310,6 +348,7 @@ fn mix_public(
     input: &MlDsaVerifyInput,
     namespace: &str,
     private_message: bool,
+    private_key: bool,
     stream_base: u32,
 ) {
     // Instance role/domain separation: two hosted instances with compatible
@@ -319,19 +358,23 @@ fn mix_public(
     for b in namespace.as_bytes() {
         channel.mix_u64(*b as u64);
     }
-    // ρ bytes.
-    for b in &input.rho {
-        channel.mix_u64(*b as u64);
-    }
-    // t1 coeffs (copy of proof.rs::mix_public).
-    for i in 0..K {
-        for m in 0..N {
-            channel.mix_u64(input.t1[i][m] as u64);
+    if private_key {
+        channel.mix_u64(HOSTED_PRIVATE_KEY_MODE_TAG);
+    } else {
+        // ρ bytes.
+        for b in &input.rho {
+            channel.mix_u64(*b as u64);
         }
-    }
-    // tr bytes.
-    for b in &input.tr {
-        channel.mix_u64(*b as u64);
+        // t1 coeffs (copy of proof.rs::mix_public).
+        for i in 0..K {
+            for m in 0..N {
+                channel.mix_u64(input.t1[i][m] as u64);
+            }
+        }
+        // tr bytes.
+        for b in &input.tr {
+            channel.mix_u64(*b as u64);
+        }
     }
     // Message length + bytes. Private-message mode (revocation: the signed
     // bytes carry the PRIVATE id_lo/id_hi bounds) mixes only the length: the
@@ -362,9 +405,10 @@ fn bridge_log_size(len: usize) -> u32 {
 
 /// Verifier-native `tr = SHAKE256(pkEncode(ρ,t1), 64)`.
 ///
-/// This is the only source of `tr` used by the composed statement. Constructors
-/// overwrite the compatibility field `input.tr` with this value before mixing
-/// or building any component.
+/// Public-key constructors overwrite the compatibility field `input.tr` with
+/// this value before mixing or building any component. Hosted-private-key mode
+/// computes `tr` only as a private service witness and retains a zero
+/// placeholder in its statement input.
 pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
     let bytes = full_squeeze(&input.encode_pk(), 1);
     let mut tr = [0u8; 64];
@@ -389,23 +433,31 @@ pub fn native_public_mu(input: &MlDsaVerifyInput) -> [u8; 64] {
 ///
 /// - private-message mode: native `tr ‖ 0x00 ‖ 0x00` into µ-absorb;
 /// - public-message mode: native µ directly into c̃-absorb.
+/// - private-key mode: public `0x00 ‖ 0x00 ‖ M` into µ-absorb@64; the
+///   in-circuit tr→µ bridge supplies positions 0..64.
 fn prefix_eval(
     input: &MlDsaVerifyInput,
     stream_base: u32,
     native_mu: bool,
+    private_key: bool,
     hash_io: &HashIoRelation,
 ) -> PublicPrefixEval {
-    let (dst_stream, bytes) = if native_mu {
-        (stream_base + CT_ABSORB, native_public_mu(input).to_vec())
+    let (dst_stream, dst_off, bytes) = if private_key {
+        let mut bytes = Vec::with_capacity(2 + input.message.len());
+        bytes.extend_from_slice(&[0x00, 0x00]);
+        bytes.extend_from_slice(&input.message);
+        (stream_base + MU_ABSORB, 64, bytes)
+    } else if native_mu {
+        (stream_base + CT_ABSORB, 0, native_public_mu(input).to_vec())
     } else {
         let mut bytes = Vec::with_capacity(66);
         bytes.extend_from_slice(&input.tr);
         bytes.extend_from_slice(&[0x00, 0x00]);
-        (stream_base + MU_ABSORB, bytes)
+        (stream_base + MU_ABSORB, 0, bytes)
     };
     PublicPrefixEval {
         dst_stream,
-        dst_off: 0,
+        dst_off,
         bytes,
         yield_positive: true,
         hash_io: hash_io.clone(),
@@ -439,16 +491,47 @@ fn msg_bridge_eval(
     }
 }
 
-/// The remaining fixed bridges. Private mode starts with µ→c̃; native-µ mode
-/// starts directly with w1Encode→c̃.
+/// Fixed sponge bridges. Private-public-key mode prepends pk→tr and tr→µ;
+/// private-µ modes include µ→c̃; native-µ mode starts at w1Encode→c̃.
 fn bridge_evals(
     ns: &str,
     stream_base: u32,
     native_mu: bool,
+    private_key: bool,
+    shared_field: Option<&FieldBytesRelation>,
     hash_io: &HashIoRelation,
 ) -> Vec<BridgeEval> {
     let b = stream_base;
-    let mut bridges = Vec::with_capacity(if native_mu { 2 } else { 3 });
+    let mut bridges = Vec::with_capacity(if private_key {
+        5
+    } else if native_mu {
+        2
+    } else {
+        3
+    });
+    if private_key {
+        let field = shared_field.expect("private-key mode requires a hosted field relation");
+        bridges.push(BridgeEval {
+            tag: "pk_tr",
+            ns: ns.to_string(),
+            log_size: bridge_log_size(crate::constants::PK_BYTES),
+            src: SrcRelation::FieldBytes(field.clone(), HOSTED_DEVICE_PK_FIELD_ID),
+            dst_stream: b + TR_ABSORB,
+            dst_off: 0,
+            len: crate::constants::PK_BYTES,
+            hash_io: hash_io.clone(),
+        });
+        bridges.push(BridgeEval {
+            tag: "tr_mu",
+            ns: ns.to_string(),
+            log_size: bridge_log_size(64),
+            src: SrcRelation::HashIo(hash_io.clone(), b + TR_SQUEEZE, 0),
+            dst_stream: b + MU_ABSORB,
+            dst_off: 0,
+            len: 64,
+            hash_io: hash_io.clone(),
+        });
+    }
     if !native_mu {
         bridges.push(BridgeEval {
             tag: "mu_ct",
@@ -485,18 +568,38 @@ fn bridge_evals(
     bridges
 }
 
-/// Consume the remaining squeeze tails. Native-µ mode has only c̃ and SIB;
-/// private mode also has µ.
+/// Consume squeeze tails not used by bridges or domain components. Native-µ
+/// mode needs only the c̃ tail; private µ adds its tail, and private-key mode
+/// adds the `tr` tail too.
 fn sink_evals(
     ns: &str,
     message_len: usize,
     stream_base: u32,
     native_mu: bool,
+    private_key: bool,
     hash_io: &HashIoRelation,
 ) -> Vec<SqueezeSinkEval> {
     let b = stream_base;
-    let sh = shapes(message_len, b, native_mu);
-    let mut sinks = Vec::with_capacity(if native_mu { 1 } else { 2 });
+    let sh = shapes(message_len, b, native_mu, private_key);
+    let mut sinks = Vec::with_capacity(if private_key {
+        3
+    } else if native_mu {
+        1
+    } else {
+        2
+    });
+    if let Some(tr) = sh.tr {
+        let tr_len = RATE * tr.n_squeeze - 64;
+        sinks.push(SqueezeSinkEval {
+            tag: "tr",
+            ns: ns.to_string(),
+            log_size: bridge_log_size(tr_len),
+            stream: b + TR_SQUEEZE,
+            off: 64,
+            len: tr_len,
+            hash_io: hash_io.clone(),
+        });
+    }
     if let Some(mu) = sh.mu {
         let mu_len = RATE * mu.n_squeeze - 64;
         sinks.push(SqueezeSinkEval {
@@ -540,9 +643,12 @@ fn all_preprocessed_ids(
     input: &MlDsaVerifyInput,
     hosted: bool,
     public_message: bool,
+    private_key: bool,
 ) -> Vec<PreProcessedColumnId> {
     let hash_io = HashIoRelation::dummy();
+    let field = private_key.then(FieldBytesRelation::dummy);
     let msglink = MsgLinkRelation::dummy();
+    let native_mu = public_message && !private_key;
     let mut ids = Vec::new();
     // coeffs + its unified range table (standalone only; hosted uses the
     // proof-wide provider module).
@@ -567,10 +673,10 @@ fn all_preprocessed_ids(
                 .preprocessed_ids(),
         );
     }
-    for b in bridge_evals(ns, 0, public_message, &hash_io) {
+    for b in bridge_evals(ns, 0, native_mu, private_key, field.as_ref(), &hash_io) {
         ids.extend(b.preprocessed_ids());
     }
-    for s in sink_evals(ns, input.message.len(), 0, public_message, &hash_io) {
+    for s in sink_evals(ns, input.message.len(), 0, native_mu, private_key, &hash_io) {
         ids.extend(s.preprocessed_ids());
     }
     ids
@@ -580,7 +686,9 @@ fn all_preprocessed_log_sizes(
     input: &MlDsaVerifyInput,
     hosted: bool,
     public_message: bool,
+    private_key: bool,
 ) -> Vec<u32> {
+    let native_mu = public_message && !private_key;
     let mut sizes = Vec::new();
     let cls = coeffs_log_size();
     sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids().len()]);
@@ -603,27 +711,30 @@ fn all_preprocessed_log_sizes(
     if !public_message {
         sizes.extend(vec![bridge_log_size(input.message.len()); 2]);
     }
-    for len in bridge_lens(public_message) {
+    for len in bridge_lens(native_mu, private_key) {
         sizes.extend(vec![bridge_log_size(len); 2]);
     }
-    for len in sink_lens(input.message.len(), public_message) {
+    for len in sink_lens(input.message.len(), native_mu, private_key) {
         sizes.extend(vec![bridge_log_size(len); 2]);
     }
     sizes
 }
 
-fn bridge_lens(native_mu: bool) -> Vec<usize> {
-    if native_mu {
+fn bridge_lens(native_mu: bool, private_key: bool) -> Vec<usize> {
+    if private_key {
+        vec![crate::constants::PK_BYTES, 64, 64, 768, 48]
+    } else if native_mu {
         vec![768, 48]
     } else {
         vec![64, 768, 48]
     }
 }
-fn sink_lens(message_len: usize, native_mu: bool) -> Vec<usize> {
-    let sh = shapes(message_len, 0, native_mu);
-    sh.mu
+fn sink_lens(message_len: usize, native_mu: bool, private_key: bool) -> Vec<usize> {
+    let sh = shapes(message_len, 0, native_mu, private_key);
+    sh.tr
         .into_iter()
-        .map(|mu| RATE * mu.n_squeeze - 64)
+        .map(|tr| RATE * tr.n_squeeze - 64)
+        .chain(sh.mu.into_iter().map(|mu| RATE * mu.n_squeeze - 64))
         .chain([RATE * sh.ct.n_squeeze - 48])
         .collect()
 }
@@ -638,9 +749,12 @@ fn gen_all_preprocessed(
     input: &MlDsaVerifyInput,
     hosted: bool,
     public_message: bool,
+    private_key: bool,
 ) -> Vec<ColEval> {
     let hash_io = HashIoRelation::dummy();
+    let field = private_key.then(FieldBytesRelation::dummy);
     let msglink = MsgLinkRelation::dummy();
+    let native_mu = public_message && !private_key;
     let mut cols = Vec::new();
     let cls = coeffs_log_size();
     cols.extend(coeffs::gen_coeffs_preprocessed(cls));
@@ -663,10 +777,10 @@ fn gen_all_preprocessed(
                 .gen_preprocessed(),
         );
     }
-    for b in bridge_evals("", 0, public_message, &hash_io) {
+    for b in bridge_evals("", 0, native_mu, private_key, field.as_ref(), &hash_io) {
         cols.extend(b.gen_preprocessed());
     }
-    for s in sink_evals("", input.message.len(), 0, public_message, &hash_io) {
+    for s in sink_evals("", input.message.len(), 0, native_mu, private_key, &hash_io) {
         cols.extend(s.gen_preprocessed());
     }
     cols
@@ -823,25 +937,29 @@ impl Claims {
 
     /// Reconstruct the bag from a flat vector (verifier side). Table counts are
     /// derived from the public component structure. `hosted` omits the msglink slot.
-    fn from_flat(flat: &[SecureField], hosted: bool, native_mu: bool) -> Self {
+    fn from_flat(flat: &[SecureField], ctx: &LayoutCtx) -> Self {
         let mut it = flat.iter().copied();
         let mut next = || it.next().expect("claimed sums length mismatch");
         let coeffs = next();
-        let coeffs_rc = if hosted { Vec::new() } else { vec![next()] };
+        let coeffs_rc = if ctx.hosted { Vec::new() } else { vec![next()] };
         let decomp = next();
         let decomp_rc = (0..decomp_tables::RcKind::ALL.len())
             .map(|_| next())
             .collect();
         let sib = next();
         let sib_rc = (0..sib_tables::RcKind::ALL.len()).map(|_| next()).collect();
-        let msglink = if hosted { SecureField::zero() } else { next() };
+        let msglink = if ctx.hosted {
+            SecureField::zero()
+        } else {
+            next()
+        };
         let prefix = next();
-        let bridges = (0..if native_mu { 2 } else { 4 }).map(|_| next()).collect();
-        let sinks = (0..if native_mu { 1 } else { 2 }).map(|_| next()).collect();
+        let bridges = (0..ctx.bridge_claims_len()).map(|_| next()).collect();
+        let sinks = (0..ctx.sink_claims_len()).map(|_| next()).collect();
         let native_use = next();
         assert!(it.next().is_none(), "claimed sums length mismatch");
         Self {
-            hosted,
+            hosted: ctx.hosted,
             coeffs,
             coeffs_rc,
             decomp,
@@ -865,18 +983,39 @@ impl Claims {
 struct LayoutCtx {
     hosted: bool,
     /// Hosted PUBLIC-message mode: µ is verifier-native and the µ sponge plus
-    /// message bridge are omitted.
+    /// message bridge are omitted unless `private_key` requires in-circuit µ.
     public_message: bool,
+    /// Hosted private-key mode: tr and µ are both service jobs and pk bytes
+    /// enter through the host's shared FieldBytes relation.
+    private_key: bool,
     message_len: usize,
 }
 
 impl LayoutCtx {
-    fn new(input: &MlDsaVerifyInput, hosted: bool, public_message: bool) -> Self {
+    fn new(
+        input: &MlDsaVerifyInput,
+        hosted: bool,
+        public_message: bool,
+        private_key: bool,
+    ) -> Self {
         Self {
             hosted,
             public_message,
+            private_key,
             message_len: input.message.len(),
         }
+    }
+
+    fn native_mu(&self) -> bool {
+        self.public_message && !self.private_key
+    }
+
+    fn bridge_claims_len(&self) -> usize {
+        usize::from(!self.public_message) + bridge_lens(self.native_mu(), self.private_key).len()
+    }
+
+    fn sink_claims_len(&self) -> usize {
+        sink_lens(self.message_len, self.native_mu(), self.private_key).len()
     }
 }
 
@@ -903,17 +1042,17 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     if !ctx.hosted {
         t.extend(vec![msglink::MSGLINK_LOG_SIZE; msglink::N_BASE_COLS]);
     }
-    // Verifier-native prefix: private tr‖00‖00 or public µ.
+    // Public prefix: tr‖00‖00, native µ, or private-key mode's 00‖00‖M.
     t.extend(vec![crate::sponge_link::LINK_LOG_SIZE; PREFIX_BASE_COLS]);
     // Private/standalone message bridge.
     if !ctx.public_message {
         t.extend(vec![bridge_log_size(ctx.message_len); BRIDGE_BASE_COLS]);
     }
-    for len in bridge_lens(ctx.public_message) {
+    for len in bridge_lens(ctx.native_mu(), ctx.private_key) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; BRIDGE_BASE_COLS]);
     }
-    for len in sink_lens(ctx.message_len, ctx.public_message) {
+    for len in sink_lens(ctx.message_len, ctx.native_mu(), ctx.private_key) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; SINK_BASE_COLS]);
     }
@@ -952,7 +1091,7 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
             msglink::n_interaction_cols(ctx.message_len)
         ]);
     }
-    // Verifier-native prefix: private tr‖00‖00 or public µ.
+    // Public prefix: tr‖00‖00, native µ, or private-key mode's 00‖00‖M.
     i.extend(vec![
         crate::sponge_link::LINK_LOG_SIZE;
         prefix_n_interaction()
@@ -963,26 +1102,31 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
             BRIDGE_INTERACTION_COLS
         ]);
     }
-    for len in bridge_lens(ctx.public_message) {
+    for len in bridge_lens(ctx.native_mu(), ctx.private_key) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; BRIDGE_INTERACTION_COLS]);
     }
-    for len in sink_lens(ctx.message_len, ctx.public_message) {
+    for len in sink_lens(ctx.message_len, ctx.native_mu(), ctx.private_key) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; SINK_INTERACTION_COLS]);
     }
     i
 }
 
-/// The native-prefix producer's interaction column count: one batched
-/// accumulator for either 66 private-µ prefix bytes or 64 public µ bytes.
+/// The public-prefix producer's interaction column count: one batched
+/// accumulator independent of the selected prefix length.
 fn prefix_n_interaction() -> usize {
     stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
 }
 
 fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {
     TreeLayout {
-        preprocessed: all_preprocessed_log_sizes(input, ctx.hosted, ctx.public_message),
+        preprocessed: all_preprocessed_log_sizes(
+            input,
+            ctx.hosted,
+            ctx.public_message,
+            ctx.private_key,
+        ),
         trace: module_trace_layout(ctx),
         interaction: module_interaction_layout(ctx),
     }
@@ -1001,14 +1145,21 @@ fn full_squeeze(absorbed: &[u8], n_squeeze: usize) -> Vec<u8> {
 
 #[derive(Debug, PartialEq, Eq)]
 struct SpongeOutputs {
+    tr: Option<Vec<u8>>,
     mu: Option<Vec<u8>>,
     ct: Vec<u8>,
 }
 
 /// Full squeeze outputs for the in-service jobs. Public-message mode computes
-/// µ natively and therefore has no µ service output.
-fn sponge_outputs(witness: &MlDsaWitness, native_mu: bool) -> SpongeOutputs {
+/// µ natively and therefore has no µ service output unless the key is private.
+fn sponge_outputs(
+    witness: &MlDsaWitness,
+    input: &MlDsaVerifyInput,
+    native_mu: bool,
+    private_key: bool,
+) -> SpongeOutputs {
     SpongeOutputs {
+        tr: private_key.then(|| full_squeeze(&input.encode_pk(), 1)),
         mu: (!native_mu).then(|| full_squeeze(&witness.sponge.mu_absorbed, 1)),
         ct: full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
     }
@@ -1127,10 +1278,16 @@ fn build_components(
             claims.msglink,
         )
     });
-    // Verifier-native private tr prefix or public µ prefix.
+    // Public prefix for the selected message/key mode.
     let prefix = FrameworkComponent::new(
         allocator,
-        prefix_eval(input, stream_base, ctx.public_message, &rel.keccak.hash_io),
+        prefix_eval(
+            input,
+            stream_base,
+            ctx.native_mu(),
+            ctx.private_key,
+            &rel.keccak.hash_io,
+        ),
         claims.prefix,
     );
     let msg = (!ctx.public_message).then(|| {
@@ -1148,7 +1305,14 @@ fn build_components(
         )
     });
     let bridge_claim_offset = usize::from(msg.is_some());
-    let bridge_descs = bridge_evals(ns, stream_base, ctx.public_message, &rel.keccak.hash_io);
+    let bridge_descs = bridge_evals(
+        ns,
+        stream_base,
+        ctx.native_mu(),
+        ctx.private_key,
+        rel.shared_field.as_ref(),
+        &rel.keccak.hash_io,
+    );
     let bridges = bridge_descs
         .into_iter()
         .enumerate()
@@ -1160,7 +1324,8 @@ fn build_components(
         ns,
         input.message.len(),
         stream_base,
-        ctx.public_message,
+        ctx.native_mu(),
+        ctx.private_key,
         &rel.keccak.hash_io,
     );
     let sinks = sink_descs
@@ -1267,7 +1432,15 @@ impl MlDsaProver {
             shared_field.is_none(),
             "hosted ML-DSA requires a shared range provider; use MlDsaProver::hosted"
         );
-        Self::build(witness, input, shared_field, false, None, keccak_handle)
+        Self::build(
+            witness,
+            input,
+            shared_field,
+            false,
+            false,
+            None,
+            keccak_handle,
+        )
     }
 
     fn build(
@@ -1275,14 +1448,19 @@ impl MlDsaProver {
         mut input: MlDsaVerifyInput,
         shared_field: Option<SharedFieldRelation>,
         public_message: bool,
+        private_key: bool,
         shared_range: Option<SharedRangeRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        input.tr = native_tr(&input);
+        input.tr = if private_key {
+            [0; 64]
+        } else {
+            native_tr(&input)
+        };
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(&input, hosted, public_message);
+        let ctx = LayoutCtx::new(&input, hosted, public_message, private_key);
         let coeffs_rc_uses = coeffs::gen_coeffs_rc_uses(&witness);
-        let sponge_outputs = sponge_outputs(&witness, public_message);
+        let sponge_outputs = sponge_outputs(&witness, &input, ctx.native_mu(), private_key);
         let claims = Claims {
             hosted,
             ..Claims::default()
@@ -1324,6 +1502,7 @@ impl MlDsaProver {
             input,
             Some(shared_field),
             false,
+            false,
             Some(shared_range),
             keccak_handle,
         )
@@ -1345,6 +1524,34 @@ impl MlDsaProver {
             input,
             None,
             true,
+            false,
+            Some(shared_range),
+            keccak_handle,
+        )
+    }
+
+    /// Hosted public-message constructor for a private device public key.
+    ///
+    /// The normalized encoded public key is consumed from shared
+    /// [`FieldBytesRelation`] field id [`HOSTED_DEVICE_PK_FIELD_ID`], and both
+    /// `tr` and µ are constrained as proof-wide Keccak service jobs. The
+    /// current folded ML-DSA identity still reads `rho` and `t1` from `input`
+    /// until the native public-key evaluation is replaced by the U6 packed-key
+    /// lookup; private-key mode deliberately excludes those compatibility
+    /// fields (and the derived `tr`) from [`Air::mix_public`].
+    pub fn hosted_private_key(
+        witness: MlDsaWitness,
+        input: MlDsaVerifyInput,
+        shared_field: SharedFieldRelation,
+        shared_range: SharedRangeRelation,
+        keccak_handle: SharedKeccakRelations,
+    ) -> Self {
+        Self::build(
+            witness,
+            input,
+            Some(shared_field),
+            true,
+            true,
             Some(shared_range),
             keccak_handle,
         )
@@ -1365,15 +1572,26 @@ impl MlDsaProver {
     }
 
     /// The sponge job shapes + witness byte streams this instance contributes
-    /// to the proof-wide service: optional private µ, then c̃ and SIB.
+    /// to the proof-wide service: optional private-key `tr`, optional private
+    /// µ, then c̃ and SIB.
     pub fn keccak_jobs(&self) -> (Vec<Shape>, Vec<Vec<u8>>) {
-        let shapes = keccak_job_shapes(
+        let job_shapes = shapes(
             self.input.message.len(),
             self.stream_base,
-            self.ctx.public_message,
+            self.ctx.native_mu(),
+            self.ctx.private_key,
         );
+        let shapes: Vec<_> = job_shapes
+            .tr
+            .into_iter()
+            .chain(job_shapes.mu)
+            .chain([job_shapes.ct, job_shapes.sib])
+            .collect();
         let mut streams = Vec::with_capacity(shapes.len());
-        if !self.ctx.public_message {
+        if self.ctx.private_key {
+            streams.push(self.input.encode_pk());
+        }
+        if !self.ctx.native_mu() {
             streams.push(self.witness.sponge.mu_absorbed.clone());
         }
         streams.extend([
@@ -1393,6 +1611,10 @@ impl MlDsaProver {
     /// Enable private-message mode (see the `private_message` field). Prover
     /// and verifier must agree per role.
     pub fn with_private_message(mut self) -> Self {
+        assert!(
+            !self.ctx.private_key,
+            "hosted private-key mode requires a public message"
+        );
         self.private_message = true;
         self
     }
@@ -1407,31 +1629,43 @@ impl MlDsaProver {
     pub fn claimed_sums(&self) -> Vec<SecureField> {
         self.claims.ordered()
     }
-    /// The public statement input.
+    /// The statement input. In hosted-private-key mode, `rho`/`t1` are
+    /// temporary U6 compatibility data and must remain internal to the host;
+    /// `tr` is retained only as a zero placeholder.
     pub fn input(&self) -> &MlDsaVerifyInput {
         &self.input
     }
 }
 
-/// Byte payloads for the fixed bridges. Private mode includes µ→c̃; both modes
-/// include w1Encode→c̃ and c̃→SIB.
-fn bridge_bytes(outputs: &SpongeOutputs, w1_bytes: &[u8]) -> Vec<Vec<u8>> {
-    outputs
-        .mu
-        .iter()
-        .map(|mu| mu[..64].to_vec())
-        .chain([w1_bytes.to_vec(), outputs.ct[..48].to_vec()])
-        .collect()
+/// Byte payloads for the fixed bridges, in [`bridge_evals`] order.
+fn bridge_bytes(outputs: &SpongeOutputs, pk_bytes: Option<&[u8]>, w1_bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if let Some(tr) = &outputs.tr {
+        bytes.push(
+            pk_bytes
+                .expect("private-key bridge requires encoded public-key bytes")
+                .to_vec(),
+        );
+        bytes.push(tr[..64].to_vec());
+    }
+    if let Some(mu) = &outputs.mu {
+        bytes.push(mu[..64].to_vec());
+    }
+    bytes.extend([w1_bytes.to_vec(), outputs.ct[..48].to_vec()]);
+    bytes
 }
 
-/// Byte payloads for the remaining sinks: optional µ, then c̃.
+/// Byte payloads for the remaining sinks: optional `tr`, optional µ, then c̃.
 fn sink_bytes(outputs: &SpongeOutputs) -> Vec<Vec<u8>> {
-    outputs
-        .mu
-        .iter()
-        .map(|mu| mu[64..].to_vec())
-        .chain([outputs.ct[48..].to_vec()])
-        .collect()
+    let mut bytes = Vec::new();
+    if let Some(tr) = &outputs.tr {
+        bytes.push(tr[64..].to_vec());
+    }
+    if let Some(mu) = &outputs.mu {
+        bytes.push(mu[64..].to_vec());
+    }
+    bytes.push(outputs.ct[48..].to_vec());
+    bytes
 }
 
 impl Air for MlDsaProver {
@@ -1441,6 +1675,7 @@ impl Air for MlDsaProver {
             &self.input,
             &self.namespace,
             self.private_message,
+            self.ctx.private_key,
             self.stream_base,
         );
     }
@@ -1468,6 +1703,7 @@ impl Air for MlDsaProver {
             &self.input,
             self.ctx.hosted,
             self.ctx.public_message,
+            self.ctx.private_key,
         )
     }
     fn canonical_preprocessed_columns(
@@ -1477,6 +1713,7 @@ impl Air for MlDsaProver {
             &self.input,
             self.ctx.hosted,
             self.ctx.public_message,
+            self.ctx.private_key,
         ))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -1512,6 +1749,7 @@ impl AirProver for MlDsaProver {
             &self.input,
             self.ctx.hosted,
             self.ctx.public_message,
+            self.ctx.private_key,
         ));
     }
     /// Partial preprocessed writes: with multiple hosted ML-DSA instances, the
@@ -1530,8 +1768,14 @@ impl AirProver for MlDsaProver {
             &self.input,
             self.ctx.hosted,
             self.ctx.public_message,
+            self.ctx.private_key,
         );
-        let cols = gen_all_preprocessed(&self.input, self.ctx.hosted, self.ctx.public_message);
+        let cols = gen_all_preprocessed(
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+            self.ctx.private_key,
+        );
         assert_eq!(
             ids.len(),
             cols.len(),
@@ -1558,8 +1802,14 @@ impl AirProver for MlDsaProver {
             &self.input,
             self.ctx.hosted,
             self.ctx.public_message,
+            self.ctx.private_key,
         );
-        let cols = gen_all_preprocessed(&self.input, self.ctx.hosted, self.ctx.public_message);
+        let cols = gen_all_preprocessed(
+            &self.input,
+            self.ctx.hosted,
+            self.ctx.public_message,
+            self.ctx.private_key,
+        );
         fingerprint_preprocessed_columns("mldsa_statement", &ids, &cols)
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -1613,7 +1863,7 @@ impl AirProver for MlDsaProver {
             evals.extend(msglink::gen_msglink_base_trace());
         }
 
-        // Verifier-native private tr prefix or public µ prefix. Base traces run
+        // Public prefix for the selected message/key mode. Base traces run
         // before relations are drawn, so use dummy relation descriptors.
         let dummy_hash_io = HashIoRelation::dummy();
         let dummy_msglink = MsgLinkRelation::dummy();
@@ -1621,7 +1871,8 @@ impl AirProver for MlDsaProver {
             prefix_eval(
                 &self.input,
                 self.stream_base,
-                self.ctx.public_message,
+                self.ctx.native_mu(),
+                self.ctx.private_key,
                 &dummy_hash_io,
             )
             .gen_base(),
@@ -1641,20 +1892,31 @@ impl AirProver for MlDsaProver {
                 .gen_base(&self.input.message),
             );
         }
-        let bbytes = bridge_bytes(outputs, &self.decomp_w1_bytes);
+        let pk_bytes = self.ctx.private_key.then(|| self.input.encode_pk());
+        let dummy_field = self.ctx.private_key.then(FieldBytesRelation::dummy);
+        let bbytes = bridge_bytes(outputs, pk_bytes.as_deref(), &self.decomp_w1_bytes);
         let bridge_descs = bridge_evals(
             &self.namespace,
             self.stream_base,
-            self.ctx.public_message,
+            self.ctx.native_mu(),
+            self.ctx.private_key,
+            dummy_field.as_ref(),
             &dummy_hash_io,
         );
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
             evals.extend(b.gen_base(bytes));
         }
 
-        // Private µ remains an in-service witness and keeps its sanity check.
-        // Native/public µ deliberately has no prover-side equality assertion:
-        // disagreement is rejected by the c̃ absorb constraint, not a panic.
+        // Private tr and µ remain in-service witnesses and keep their sanity
+        // checks. Native/public µ deliberately has no prover-side equality
+        // assertion: disagreement is rejected by the c̃ absorb constraint.
+        if let Some(tr) = &outputs.tr {
+            assert_eq!(
+                tr[..64],
+                self.witness.sponge.mu_absorbed[..64],
+                "tr squeeze prefix mismatch"
+            );
+        }
         if let Some(mu) = &outputs.mu {
             assert_eq!(mu[..64], self.witness.sponge.mu_squeezed[..64]);
         }
@@ -1668,7 +1930,8 @@ impl AirProver for MlDsaProver {
             &self.namespace,
             self.input.message.len(),
             self.stream_base,
-            self.ctx.public_message,
+            self.ctx.native_mu(),
+            self.ctx.private_key,
             &dummy_hash_io,
         );
         for (s, bytes) in sink_descs.iter().zip(sbytes.iter()) {
@@ -1755,7 +2018,8 @@ impl AirProver for MlDsaProver {
         let (prefix_tr, prefix_sum) = prefix_eval(
             &self.input,
             self.stream_base,
-            self.ctx.public_message,
+            self.ctx.native_mu(),
+            self.ctx.private_key,
             &rel.keccak.hash_io,
         )
         .gen_interaction();
@@ -1777,11 +2041,14 @@ impl AirProver for MlDsaProver {
             self.claims.bridges.push(msg_sum);
             evals.extend(msg_tr);
         }
-        let bbytes = bridge_bytes(outputs, &self.decomp_w1_bytes);
+        let pk_bytes = self.ctx.private_key.then(|| self.input.encode_pk());
+        let bbytes = bridge_bytes(outputs, pk_bytes.as_deref(), &self.decomp_w1_bytes);
         let bridge_descs = bridge_evals(
             &self.namespace,
             self.stream_base,
-            self.ctx.public_message,
+            self.ctx.native_mu(),
+            self.ctx.private_key,
+            rel.shared_field.as_ref(),
             &rel.keccak.hash_io,
         );
         for (b, bytes) in bridge_descs.iter().zip(bbytes.iter()) {
@@ -1795,7 +2062,8 @@ impl AirProver for MlDsaProver {
             &self.namespace,
             self.input.message.len(),
             self.stream_base,
-            self.ctx.public_message,
+            self.ctx.native_mu(),
+            self.ctx.private_key,
             &rel.keccak.hash_io,
         );
         self.claims.sinks.clear();
@@ -1866,24 +2134,31 @@ impl MlDsaVerifier {
             claimed_sums,
             shared_field,
             false,
+            false,
             None,
             keccak_handle,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         mut input: MlDsaVerifyInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
         shared_field: Option<SharedFieldRelation>,
         public_message: bool,
+        private_key: bool,
         shared_range: Option<SharedRangeRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        input.tr = native_tr(&input);
+        input.tr = if private_key {
+            [0; 64]
+        } else {
+            native_tr(&input)
+        };
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(&input, hosted, public_message);
-        let claims = Claims::from_flat(&claimed_sums, hosted, public_message);
+        let ctx = LayoutCtx::new(&input, hosted, public_message, private_key);
+        let claims = Claims::from_flat(&claimed_sums, &ctx);
         Self {
             input,
             ctx,
@@ -1915,6 +2190,7 @@ impl MlDsaVerifier {
             claimed_sums,
             Some(shared_field),
             false,
+            false,
             Some(shared_range),
             keccak_handle,
         )
@@ -1935,9 +2211,46 @@ impl MlDsaVerifier {
             claimed_sums,
             None,
             true,
+            false,
             Some(shared_range),
             keccak_handle,
         )
+    }
+
+    /// Hosted private-public-key mirror of
+    /// [`MlDsaProver::hosted_private_key`].
+    pub fn hosted_private_key(
+        input: MlDsaVerifyInput,
+        group_evals: Vec<SecureField>,
+        claimed_sums: Vec<SecureField>,
+        shared_field: SharedFieldRelation,
+        shared_range: SharedRangeRelation,
+        keccak_handle: SharedKeccakRelations,
+    ) -> Result<Self, VerificationError> {
+        if group_evals.len() != n_group_evals() {
+            return Err(VerificationError::InvalidStructure(format!(
+                "ML-DSA hosted private key: expected {} group evaluations, got {}",
+                n_group_evals(),
+                group_evals.len()
+            )));
+        }
+        if claimed_sums.len() != hosted_private_key_claimed_sums_len() {
+            return Err(VerificationError::InvalidStructure(format!(
+                "ML-DSA hosted private key: expected {} claimed sums, got {}",
+                hosted_private_key_claimed_sums_len(),
+                claimed_sums.len()
+            )));
+        }
+        Ok(Self::build(
+            input,
+            group_evals,
+            claimed_sums,
+            Some(shared_field),
+            true,
+            true,
+            Some(shared_range),
+            keccak_handle,
+        ))
     }
 
     /// Set the instance namespace (must match the prover's per role).
@@ -1954,6 +2267,10 @@ impl MlDsaVerifier {
 
     /// Enable private-message mode (must match the prover's per role).
     pub fn with_private_message(mut self) -> Self {
+        assert!(
+            !self.ctx.private_key,
+            "hosted private-key mode requires a public message"
+        );
         self.private_message = true;
         self
     }
@@ -1966,6 +2283,7 @@ impl Air for MlDsaVerifier {
             &self.input,
             &self.namespace,
             self.private_message,
+            self.ctx.private_key,
             self.stream_base,
         );
     }
@@ -1995,6 +2313,7 @@ impl Air for MlDsaVerifier {
             &self.input,
             self.ctx.hosted,
             self.ctx.public_message,
+            self.ctx.private_key,
         )
     }
     fn canonical_preprocessed_columns(
@@ -2004,6 +2323,7 @@ impl Air for MlDsaVerifier {
             &self.input,
             self.ctx.hosted,
             self.ctx.public_message,
+            self.ctx.private_key,
         ))
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -2062,7 +2382,16 @@ pub fn prove_mldsa(
 /// the total committed M31-cell count; interaction QM31 columns are
 /// pre-expanded to 4 M31 columns in the layout.
 pub fn debug_layout(input: &MlDsaVerifyInput) -> TreeLayout {
-    let ctx = LayoutCtx::new(input, false, false);
+    let ctx = LayoutCtx::new(input, false, false, false);
+    layout_for(&ctx, input)
+}
+
+/// Exact committed column layout for hosted public-message/private-public-key
+/// mode. Hosts can use this together with
+/// [`hosted_private_key_claimed_sums_len`] to validate proof structure before
+/// constructing [`MlDsaVerifier`].
+pub fn hosted_private_key_layout(input: &MlDsaVerifyInput) -> TreeLayout {
+    let ctx = LayoutCtx::new(input, true, true, true);
     layout_for(&ctx, input)
 }
 
@@ -2072,27 +2401,34 @@ pub fn n_group_evals() -> usize {
     coeffs::layout::N_GROUPS
 }
 
-fn claimed_sums_len(hosted: bool, native_mu: bool) -> usize {
+fn claimed_sums_len(hosted: bool, public_message: bool, private_key: bool) -> usize {
+    let native_mu = public_message && !private_key;
     1 + usize::from(!hosted) * coeffs_tables::RANGE_TABLE_COMPONENTS
         + 1
         + decomp_tables::RcKind::ALL.len()
         + 1
         + sib_tables::RcKind::ALL.len()
         + usize::from(!hosted)
-        + 1 // native tr/private prefix or native public µ prefix
-        + if native_mu { 2 } else { 4 } // msg + fixed bridges
-        + if native_mu { 1 } else { 2 } // sinks
+        + 1 // public prefix for the selected message/key mode
+        + usize::from(!public_message)
+        + bridge_lens(native_mu, private_key).len()
+        + sink_lens(0, native_mu, private_key).len()
         + 1 // coeffs native use
 }
 
 /// Exact claimed-sum length for hosted private-message/revocation mode.
 pub fn hosted_claimed_sums_len() -> usize {
-    claimed_sums_len(true, false)
+    claimed_sums_len(true, false, false)
 }
 
 /// Exact claimed-sum length for hosted-public issuer/device native-µ mode.
 pub fn hosted_public_claimed_sums_len() -> usize {
-    claimed_sums_len(true, true)
+    claimed_sums_len(true, true, false)
+}
+
+/// Exact claimed-sum length for hosted public-message/private-public-key mode.
+pub fn hosted_private_key_claimed_sums_len() -> usize {
+    claimed_sums_len(true, true, true)
 }
 
 pub fn verify_mldsa(
@@ -2108,7 +2444,7 @@ pub fn verify_mldsa(
         VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
     })?;
     if proof.group_evals.len() != n_group_evals()
-        || proof.claimed_sums.len() != claimed_sums_len(false, false)
+        || proof.claimed_sums.len() != claimed_sums_len(false, false, false)
     {
         return Err(VerificationError::InvalidStructure(
             "ML-DSA statement: bad claim shape".to_string(),
@@ -2191,7 +2527,7 @@ mod tests {
     #[test]
     fn prover_cache_equals_fresh_sponge_outputs_in_both_message_modes() {
         let (witness, input) = witness_and_input();
-        let expected_private = sponge_outputs(&witness, false);
+        let expected_private = sponge_outputs(&witness, &input, false, false);
         let private = MlDsaProver::new(
             witness.clone(),
             input.clone(),
@@ -2200,7 +2536,7 @@ mod tests {
         );
         assert_eq!(private.sponge_outputs, expected_private);
 
-        let expected_public = sponge_outputs(&witness, true);
+        let expected_public = sponge_outputs(&witness, &input, true, false);
         let public = MlDsaProver::hosted_public(
             witness,
             input,
