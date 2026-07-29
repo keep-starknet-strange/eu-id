@@ -39,6 +39,7 @@ fn product_statement(session_transcript: Vec<u8>, issuer_pk: &[u8]) -> ZkPublicS
         age_threshold_years: Some(18),
         accepted_numeric_countries: Some(vec![276, 250]),
         nat_mode: NatMode::Any,
+        ts13_request: None,
     }
 }
 
@@ -156,9 +157,19 @@ fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() 
     let witness = ZkMdocWitness {
         document: fixture.document,
         trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk]),
+        ts13_trusted_issuer_public_keys: None,
+        ts13_revocation_id_lo: None,
+        ts13_revocation_id_hi: None,
+        ts13_revocation_signature: None,
     };
 
     let proof = prove_identity(statement.clone(), witness).expect("product proof builds");
+    let product_envelope: ProductProofEnvelopeForTest =
+        bincode::deserialize(&proof).expect("product proof envelope decodes");
+    assert_eq!(
+        product_envelope.envelope_format, 6,
+        "product envelope tag must remain byte-compatible"
+    );
     assert!(
         verify_identity(statement.clone(), proof.clone())
             .expect("product verification runs")

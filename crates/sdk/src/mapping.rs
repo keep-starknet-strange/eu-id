@@ -163,6 +163,7 @@ mod tests {
             age_threshold_years: Some(18),
             accepted_numeric_countries: Some(vec![276, 250]),
             nat_mode: NatMode::Any,
+            ts13_request: None,
         }
     }
 
