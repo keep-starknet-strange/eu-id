@@ -46,6 +46,12 @@ impl MultiSlotConfig {
             "slot_log {slot_log} cannot hold a block plus in-slot padding"
         );
         assert!(!slots.is_empty(), "multi-slot config needs at least 1 slot");
+        assert!(
+            slots
+                .iter()
+                .all(|slot| slot.field_exposure.full_padded_stream().is_none()),
+            "full padded stream exposure is supported only by a separate single-slot Sha256Prover/Verifier"
+        );
         Self { slot_log, slots }
     }
 
@@ -89,6 +95,12 @@ impl MultiSlotConfig {
 
     /// Total dynamic field-tail width of the merged trace.
     pub fn n_field_columns(&self) -> usize {
+        assert!(
+            self.slots
+                .iter()
+                .all(|slot| slot.field_exposure.full_padded_stream().is_none()),
+            "full padded stream exposure is unsupported in multi-slot SHA"
+        );
         self.field_tail_base(self.n_slots())
     }
 
@@ -138,5 +150,17 @@ mod tests {
     #[should_panic(expected = "cannot hold a block")]
     fn rejects_slot_log_without_padding_room() {
         let _ = MultiSlotConfig::new(6, vec![spec(false, &[])]);
+    }
+
+    #[test]
+    #[should_panic(expected = "separate single-slot Sha256Prover/Verifier")]
+    fn rejects_full_padded_stream_exposure() {
+        let _ = MultiSlotConfig::new(
+            8,
+            vec![SlotSpec {
+                expose_digest: false,
+                field_exposure: FieldExposure::from_full_padded_stream(77, 64),
+            }],
+        );
     }
 }

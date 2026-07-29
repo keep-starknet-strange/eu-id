@@ -407,3 +407,41 @@ fn multi_block_field_provider_proof_is_unbalanced_without_consumer() {
         "unbalanced multi-block field yields (no consumer) must fail verification",
     );
 }
+
+/// Constant-width full padded-stream provider end-to-end. This exercises the
+/// one-counter trace tail, the 16-word W-bit mask, all 64 fixed field
+/// relation sites on each enabled block, and the interaction-column parity in
+/// a real proof.
+#[ignore = "slow: produces a real multi-block release STARK proof"]
+#[test]
+fn full_padded_stream_provider_proof_is_unbalanced_without_consumer() {
+    use num_traits::Zero;
+    use stwo::core::fields::qm31::SecureField;
+    use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+    use stwo_sha256::field_exposure::FieldExposure;
+
+    let message: Vec<u8> = (0..70).map(|i| (i * 13 + 7) as u8).collect();
+    let witness = compute_sha256_witness(&message);
+    assert_eq!(witness.blocks.len(), 2);
+    let exposure = FieldExposure::from_full_padded_stream(77, witness.padding.padded.len());
+    let config = config_for(witness.blocks.len());
+
+    let mut prover = Sha256Prover::new(&witness, config.log_n_rows, config.group_width)
+        .with_field_provider(exposure.clone());
+    let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
+        .expect("prove with full padded-stream provider");
+    let interaction_claim = prover.interaction_claim().clone();
+    assert_ne!(
+        interaction_claim.total(),
+        SecureField::zero(),
+        "stream provider must leave outstanding field terms",
+    );
+
+    let mut verifier =
+        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
+            .with_field_provider(exposure);
+    assert!(
+        air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
+        "an unconsumed full padded-stream provider must fail global balance",
+    );
+}

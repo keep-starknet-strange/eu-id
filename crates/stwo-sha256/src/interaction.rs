@@ -46,7 +46,7 @@ use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 use crate::components::{range_log_size, RangeKind, RANGE_TABLES};
 use crate::constants::DIGEST_BYTES;
 use crate::constraints::LOGUP_BATCH;
-use crate::field_exposure::{word_be_bytes, FieldExposure};
+use crate::field_exposure::{word_be_bytes, FieldExposure, FULL_PADDED_STREAM_SITES_PER_ROW};
 use crate::multiplicities::range_k_multiplicities;
 use crate::relations::Sha256Relations;
 use crate::trace::{h_out_digest_bytes, Layout};
@@ -79,13 +79,14 @@ pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 58;
 #[inline]
 pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
     let base = SHA_LOOKUPS_PER_ROW_BASE;
-    let field_range_sites = if field_exposure.is_empty() {
-        0
-    } else if field_exposure.needs_block_witness() {
-        field_exposure.n_byte_columns() * field_exposure.target_blocks().len()
-    } else {
-        field_exposure.n_byte_columns()
-    };
+    let field_range_sites =
+        if field_exposure.is_empty() || field_exposure.full_padded_stream().is_some() {
+            0
+        } else if field_exposure.needs_block_witness() {
+            field_exposure.n_byte_columns() * field_exposure.target_blocks().len()
+        } else {
+            field_exposure.n_byte_columns()
+        };
     base + usize::from(expose_digest) + field_range_sites + field_exposure.n_yields()
 }
 
@@ -561,6 +562,23 @@ fn write_field_row_lookups(
 ) {
     if !hot {
         *cursor += field_exposure_sites(field_exposure);
+        return;
+    }
+    if let Some((field_id, _)) = field_exposure.full_padded_stream() {
+        for byte_in_block in 0..FULL_PADDED_STREAM_SITES_PER_ROW {
+            let word_idx = byte_in_block / crate::constants::WORD_BYTES;
+            let byte_in_word = byte_in_block % crate::constants::WORD_BYTES;
+            let limb = block.schedule[word_idx];
+            let value = word_be_bytes(limb.lo, limb.hi)[byte_in_word];
+            let byte_index = block_idx * FULL_PADDED_STREAM_SITES_PER_ROW + byte_in_block;
+            let tuple = [
+                BaseField::from(field_id),
+                BaseField::from(byte_index as u32),
+                BaseField::from(value),
+            ];
+            all[*cursor][slot] = (-SecureField::one(), field_rel.combine(&tuple));
+            *cursor += 1;
+        }
         return;
     }
     let word_bytes: Vec<[u32; crate::constants::WORD_BYTES]> = field_exposure
@@ -1209,6 +1227,78 @@ mod tests {
             claim.total() + wrong_consumer,
             SecureField::zero(),
             "a consumer requiring a different DOB byte must not balance the yield",
+        );
+    }
+
+    #[test]
+    fn full_padded_stream_balances_exact_bytes_indices_and_block_totality() {
+        const STREAM_FIELD_ID: u32 = 77;
+        let message: Vec<u8> = (0..130).map(|i| ((i * 37 + 11) % 251) as u8).collect();
+        let witness = compute_sha256_witness(&message);
+        assert_eq!(
+            witness.padding.padded.len(),
+            3 * crate::constants::BLOCK_BYTES
+        );
+        let exposure =
+            FieldExposure::from_full_padded_stream(STREAM_FIELD_ID, witness.padding.padded.len());
+        assert_eq!(
+            field_exposure_sites(&exposure),
+            FULL_PADDED_STREAM_SITES_PER_ROW,
+            "interaction width stays at 64 sites regardless of block count",
+        );
+
+        let log_size = min_log_size(witness.blocks.len());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, claim) = generate_interaction_trace(
+            &relations,
+            &witness,
+            log_size,
+            MAX_ROUND_GROUP_BITS,
+            false,
+            &exposure,
+        );
+        let tuples: Vec<(u32, u32, u32)> = witness
+            .padding
+            .padded
+            .iter()
+            .enumerate()
+            .map(|(index, &byte)| (STREAM_FIELD_ID, index as u32, byte as u32))
+            .collect();
+        assert_eq!(
+            claim.total() + synthetic_field_consumer(&relations, &tuples),
+            SecureField::zero(),
+            "all padded bytes in canonical block/byte order must balance",
+        );
+
+        let truncated = &tuples[..2 * crate::constants::BLOCK_BYTES];
+        assert_ne!(
+            claim.total() + synthetic_field_consumer(&relations, truncated),
+            SecureField::zero(),
+            "a consumer omitting the final block must not balance",
+        );
+
+        let mut wrong_order = tuples.clone();
+        let left = crate::constants::BLOCK_BYTES - 1;
+        let right = crate::constants::BLOCK_BYTES;
+        let left_byte = wrong_order[left].2;
+        assert_ne!(
+            left_byte, wrong_order[right].2,
+            "test boundary bytes differ"
+        );
+        wrong_order[left].2 = wrong_order[right].2;
+        wrong_order[right].2 = left_byte;
+        assert_ne!(
+            claim.total() + synthetic_field_consumer(&relations, &wrong_order),
+            SecureField::zero(),
+            "swapping bytes across a block boundary must not balance",
+        );
+
+        let mut wrong_index = tuples.clone();
+        wrong_index[crate::constants::BLOCK_BYTES].1 += 1;
+        assert_ne!(
+            claim.total() + synthetic_field_consumer(&relations, &wrong_index),
+            SecureField::zero(),
+            "changing an absolute stream index must not balance",
         );
     }
 }

@@ -209,9 +209,10 @@ impl Layout {
     /// The field columns are a **dynamic tail** appended after every base
     /// column (including `enabler_step`), so enabling field exposure never
     /// shifts a base offset. The first `WORD_BYTES ×` (distinct exposed message
-    /// words) columns are byte columns; multi-block exposure then appends a
-    /// block counter and one selector per yielded byte (block-0 legacy exposure
-    /// has neither) — see
+    /// words) columns are byte columns; multi-block window exposure then
+    /// appends a block counter and one selector per target block (block-0
+    /// legacy exposure has neither). Full padded-stream exposure is the
+    /// constant-width exception: one counter, no byte columns or selectors. See
     /// [`crate::field_exposure::FieldExposure::n_columns`]. Each `(lo, hi)` limb
     /// of an exposed word is tied to its two bytes by `limb = 256·b1 + b0` in
     /// `crate::constraints::Sha256Eval` on the `t = 15` row (which reads the
@@ -1128,6 +1129,28 @@ mod tests {
     use super::*;
     use crate::witness::compute_sha256_witness;
     use sha2::{Digest as Sha2Digest, Sha256};
+
+    #[test]
+    fn full_padded_stream_trace_adds_only_the_block_counter() {
+        let witness = compute_sha256_witness(&[0x33; 100]);
+        assert_eq!(witness.blocks.len(), 2);
+        let log_size = min_log_size(witness.blocks.len());
+        let exposure = FieldExposure::from_full_padded_stream(77, witness.padding.padded.len());
+        let trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+        assert_eq!(trace.len(), Layout::TOTAL_COLS + 1);
+        assert_eq!(exposure.block_counter_column_slot(), Some(0));
+        let counter_col = Layout::field_byte_col(0);
+        for block_idx in 0..witness.blocks.len() {
+            for t in 0..N_ROUNDS {
+                let slot = Layout::round_row_slot(block_idx, t, log_size);
+                assert_eq!(
+                    trace[counter_col][slot].0, block_idx as u32,
+                    "counter at block {block_idx}, round {t}",
+                );
+            }
+        }
+    }
 
     fn sha2_reference(msg: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();

@@ -114,7 +114,11 @@ pub fn range_k_multiplicities(
     // `interaction::write_round_row_lookups`. Count them here so the `Range8`
     // producer absorbs them.
     if matches!(kind, RangeKind::Range8) {
-        if field_exposure.needs_block_witness() {
+        if field_exposure.full_padded_stream().is_some() {
+            // Stream bytes are linear combinations of already
+            // boolean-constrained W bits, so this mode deliberately adds no
+            // duplicate Range8 sites.
+        } else if field_exposure.needs_block_witness() {
             for block_idx in field_exposure.target_blocks() {
                 let Some(block) = witness.blocks.get(*block_idx) else {
                     continue;
@@ -268,6 +272,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn full_padded_stream_adds_no_duplicate_range_8_checks() {
+        use crate::components::RangeKind;
+
+        let w = compute_sha256_witness(&[0x42u8; 150]);
+        let exposure = FieldExposure::from_full_padded_stream(77, w.padding.padded.len());
+        assert_eq!(
+            range_k_multiplicities(&w, RangeKind::Range8, &exposure),
+            range_k_multiplicities(&w, RangeKind::Range8, &FieldExposure::empty()),
+            "stream bytes come from boolean W bits and need no Range8 duplication",
+        );
     }
 
     /// Honest `Range_k` carry counts never fall outside `[0, k)` — the
