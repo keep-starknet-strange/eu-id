@@ -34,19 +34,22 @@ use crate::air_util::{padded_log_size, ColEval};
 use crate::binding::STREAM_ID_CTILDE_ABSORB;
 use crate::witness::MlDsaWitness;
 
+#[cfg(not(test))]
+use super::gen_decomp_metadata;
 use super::relations::DecompRelations;
 use super::tables::{
     gen_table_interaction, gen_table_multiplicities, gen_table_preprocessed, RcKind, RcTableEval,
     RC_TABLE_INTERACTION_COLS,
 };
 use super::{
-    decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction, gen_decomp_metadata,
+    decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction,
     gen_decomp_preprocessed, DecompEval, DecompMetadata, N_BASE_COLS, N_INTERACTION_COLS, N_PAIRS,
 };
 #[cfg(test)]
 use super::{
-    gen_decomp_interaction_with_checked_hint_total, gen_decomp_metadata_with_checked_hint_total,
-    COL_HINT_ACC,
+    gen_decomp_interaction_with_test_options, gen_decomp_metadata_with_test_options,
+    DecompTracePoke, COL_HINT_ACC, COL_LANE0, COL_V_INV, COL_V_ZERO, L_A_HI, L_B_HI, L_HINT, L_S0,
+    L_SIGN_HI, L_SIGN_VAL, L_W, L_W0, L_W1, L_W1P, L_WRAP16, L_WRAPK,
 };
 use crate::balancer::{
     gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
@@ -155,6 +158,8 @@ pub struct DecompProver {
     witness: MlDsaWitness,
     #[cfg(test)]
     checked_hint_total: Option<u32>,
+    #[cfg(test)]
+    trace_poke: Option<DecompTracePoke>,
     relations: Option<DecompRelations>,
     decomp_claimed_sum: SecureField,
     rc_claimed_sums: [SecureField; N_RC],
@@ -166,17 +171,20 @@ pub struct DecompProver {
 }
 
 impl DecompProver {
+    #[cfg(test)]
     fn gen_interaction(&self, relations: &DecompRelations) -> super::DecompInteraction {
-        #[cfg(test)]
-        if let Some(checked_hint_total) = self.checked_hint_total {
-            return gen_decomp_interaction_with_checked_hint_total(
-                &self.witness,
-                decomp_log_size(),
-                STREAM_ID_CTILDE_ABSORB,
-                relations,
-                checked_hint_total,
-            );
-        }
+        gen_decomp_interaction_with_test_options(
+            &self.witness,
+            decomp_log_size(),
+            STREAM_ID_CTILDE_ABSORB,
+            relations,
+            self.checked_hint_total,
+            self.trace_poke,
+        )
+    }
+
+    #[cfg(not(test))]
+    fn gen_interaction(&self, relations: &DecompRelations) -> super::DecompInteraction {
         gen_decomp_interaction(
             &self.witness,
             decomp_log_size(),
@@ -185,13 +193,49 @@ impl DecompProver {
         )
     }
 
+    #[cfg(test)]
     fn gen_metadata(&self) -> DecompMetadata {
-        #[cfg(test)]
-        if let Some(checked_hint_total) = self.checked_hint_total {
-            return gen_decomp_metadata_with_checked_hint_total(&self.witness, checked_hint_total);
-        }
+        gen_decomp_metadata_with_test_options(
+            &self.witness,
+            self.checked_hint_total,
+            self.trace_poke,
+        )
+    }
+
+    #[cfg(not(test))]
+    fn gen_metadata(&self) -> DecompMetadata {
         gen_decomp_metadata(&self.witness)
     }
+}
+
+#[cfg(test)]
+fn apply_trace_poke(evals: &mut [ColEval], poke: DecompTracePoke) {
+    let row = crate::air_util::circle_row_to_coset(decomp_log_size())
+        .iter()
+        .position(|&coset| coset == 0)
+        .expect("first decomp row");
+    let mut set_lane0 = |offset: usize, value: i64| {
+        evals[COL_LANE0 + offset]
+            .values
+            .set(row, crate::air_util::enc_signed(value));
+    };
+    let lane = poke.lane();
+    set_lane0(L_W, lane.w);
+    set_lane0(L_W1, lane.w1);
+    set_lane0(L_W0, lane.w0);
+    set_lane0(L_HINT, lane.hint);
+    set_lane0(L_WRAPK, lane.wrap_k);
+    set_lane0(L_S0, lane.s0);
+    set_lane0(L_W1P, lane.w1p);
+    set_lane0(L_WRAP16, lane.wrap16);
+    set_lane0(L_A_HI, lane.a_hi);
+    set_lane0(L_B_HI, lane.b_hi);
+    set_lane0(L_SIGN_VAL, lane.sign_val);
+    set_lane0(L_SIGN_HI, lane.sign_hi);
+    evals[COL_V_ZERO[0]]
+        .values
+        .set(row, crate::air_util::m31(lane.v_is_zero as u32));
+    evals[COL_V_INV[0]].values.set(row, lane.v_inv);
 }
 
 struct DecompVerifier {
@@ -373,6 +417,10 @@ impl AirProver for DecompProver {
                 .values
                 .set(final_row, crate::air_util::m31(checked_hint_total));
         }
+        #[cfg(test)]
+        if let Some(poke) = self.trace_poke {
+            apply_trace_poke(&mut evals, poke);
+        }
         let metadata = self.gen_metadata();
         self.w1_encode_bytes = metadata.w1_encode_bytes;
         self.rc_mult = RcKind::ALL
@@ -478,6 +526,8 @@ pub fn prove_decomp(witness: MlDsaWitness, config: PcsConfig) -> Result<DecompPr
         witness,
         #[cfg(test)]
         checked_hint_total: None,
+        #[cfg(test)]
+        trace_poke: None,
         relations: None,
         decomp_claimed_sum: SecureField::zero(),
         rc_claimed_sums: [SecureField::zero(); N_RC],
@@ -536,10 +586,12 @@ pub fn verify_decomp(
 mod tests {
     use ml_dsa::signature::{Keypair, Signer};
     use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+    use stwo::core::pcs::TreeVec;
+    use stwo_constraint_framework::{assert_constraints_on_trace, FrameworkEval};
 
     use super::*;
-    use crate::constants::{K, N, OMEGA};
-    use crate::reference::decompose::use_hint;
+    use crate::constants::{GAMMA2, K, N, OMEGA, Q};
+    use crate::reference::decompose::{decompose, use_hint};
     use crate::reference::encoding::{pk_decode, sig_decode};
     use crate::reference::sponge::shake256;
     use crate::witness::generate_witness;
@@ -572,13 +624,75 @@ mod tests {
         generate_witness(&input).expect("honest witness")
     }
 
-    fn prove_with_checked_hint_total(
+    fn witness_with_first_w(w_value: u32, hint: u8) -> MlDsaWitness {
+        let mut witness = witness();
+        for i in 0..K {
+            for m in 0..N {
+                let (w1, w0) = decompose(witness.rows[i].w[m]);
+                witness.decomp.w0[i][m] = w0;
+                witness.decomp.hint[i][m] = 0;
+                witness.decomp.w1[i][m] = w1 as u32;
+            }
+            witness.decomp.hint_weight[i] = 0;
+        }
+
+        let (w1, w0) = decompose(w_value);
+        witness.rows[0].w[0] = w_value;
+        witness.decomp.w0[0][0] = w0;
+        witness.decomp.hint[0][0] = hint;
+        witness.decomp.w1[0][0] = use_hint(hint, w_value) as u32;
+        witness.decomp.hint_weight[0] = hint as usize;
+        assert_eq!(w1, decompose(witness.rows[0].w[0]).0);
+        witness
+    }
+
+    fn boundary_witness() -> MlDsaWitness {
+        let witness = witness_with_first_w(Q - GAMMA2, 1);
+        assert_eq!(decompose(witness.rows[0].w[0]), (0, -(GAMMA2 as i32)));
+        assert_eq!(witness.decomp.w0[0][0], -(GAMMA2 as i32));
+        assert_eq!(witness.decomp.w1[0][0], 15);
+        witness
+    }
+
+    fn assert_decomp_constraints(witness: &MlDsaWitness) {
+        let relations = DecompRelations::dummy();
+        let interaction = gen_decomp_interaction(
+            witness,
+            decomp_log_size(),
+            STREAM_ID_CTILDE_ABSORB,
+            &relations,
+        );
+        let trace = TreeVec::new(vec![
+            gen_decomp_preprocessed(decomp_log_size()),
+            gen_decomp_base_trace(witness, decomp_log_size()),
+            interaction.trace,
+        ]);
+        let trace = trace.as_ref().map_cols(|column| column.to_cpu().values);
+        let trace = trace.as_cols_ref();
+        let component = DecompEval {
+            log_size: decomp_log_size(),
+            ct_stream: STREAM_ID_CTILDE_ABSORB,
+            relations,
+        };
+        assert_constraints_on_trace(
+            &trace,
+            decomp_log_size(),
+            |eval| {
+                component.evaluate(eval);
+            },
+            interaction.claimed_sum,
+        );
+    }
+
+    fn prove_with_test_options(
         witness: MlDsaWitness,
-        checked_hint_total: u32,
+        checked_hint_total: Option<u32>,
+        trace_poke: Option<DecompTracePoke>,
     ) -> Result<DecompProof, ProvingError> {
         let mut prover = DecompProver {
             witness,
-            checked_hint_total: Some(checked_hint_total),
+            checked_hint_total,
+            trace_poke,
             relations: None,
             decomp_claimed_sum: SecureField::zero(),
             rc_claimed_sums: [SecureField::zero(); N_RC],
@@ -596,6 +710,45 @@ mod tests {
             hashio_claimed_sum: prover.hashio_claimed_sum,
             stark_proof,
         })
+    }
+
+    #[test]
+    fn fips_wrap_boundary_constraints_pass() {
+        assert_decomp_constraints(&boundary_witness());
+    }
+
+    #[test]
+    fn fips_wrap_boundary_standalone_proves_and_verifies() {
+        let proof = prove_decomp(boundary_witness(), pcs_config()).expect("boundary must prove");
+        verify_decomp(&proof, pcs_config()).expect("boundary proof must verify");
+    }
+
+    #[test]
+    fn decomp_boundary_requires_zero_w1() {
+        let witness = witness_with_first_w(GAMMA2, 0);
+        assert!(
+            matches!(
+                prove_with_test_options(
+                    witness,
+                    None,
+                    Some(DecompTracePoke::BoundaryWithNonzeroW1),
+                ),
+                Err(ProvingError::ConstraintsNotSatisfied)
+            ),
+            "(w1,w0)=(1,−γ2) must be rejected even though it reconstructs w=+γ2"
+        );
+    }
+
+    #[test]
+    fn decomp_below_negative_gamma2_rejects() {
+        let witness = witness_with_first_w(Q - GAMMA2 - 1, 0);
+        assert!(
+            matches!(
+                prove_with_test_options(witness, None, Some(DecompTracePoke::BelowNegativeGamma2),),
+                Err(ProvingError::ConstraintsNotSatisfied)
+            ),
+            "w0=−γ2−1 must be rejected by the shifted lower range"
+        );
     }
 
     #[test]
@@ -623,13 +776,14 @@ mod tests {
         }
         assert_eq!(total, target, "fixture must have exactly ω+1 hints");
 
-        let metadata = gen_decomp_metadata_with_checked_hint_total(&witness, OMEGA as u32);
-        let interaction = gen_decomp_interaction_with_checked_hint_total(
+        let metadata = gen_decomp_metadata_with_test_options(&witness, Some(OMEGA as u32), None);
+        let interaction = gen_decomp_interaction_with_test_options(
             &witness,
             decomp_log_size(),
             STREAM_ID_CTILDE_ABSORB,
             &DecompRelations::dummy(),
-            OMEGA as u32,
+            Some(OMEGA as u32),
+            None,
         );
         for kind in RcKind::ALL {
             assert_eq!(
@@ -645,7 +799,7 @@ mod tests {
 
         assert!(
             matches!(
-                prove_with_checked_hint_total(witness, OMEGA as u32),
+                prove_with_test_options(witness, Some(OMEGA as u32), None),
                 Err(ProvingError::ConstraintsNotSatisfied)
             ),
             "the final base hint accumulator must equal the true interaction sum"

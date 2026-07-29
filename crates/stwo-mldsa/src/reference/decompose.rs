@@ -34,8 +34,8 @@ fn mod_pm(r: u32, alpha: u32) -> i32 {
 }
 
 /// FIPS 204 Algorithm 36 `Decompose(r)` → `(r1, r0)` with
-/// `r = r1·α + r0 (mod q)`, `r0 ∈ (−α/2, α/2]`, and the special-case wrap so
-/// `r1 ∈ [0, (q−1)/α)`.
+/// `r = r1·α + r0 (mod q)`, `r0 ∈ (−α/2, α/2]` except for the special
+/// `(r1,r0)=(0,−α/2)` wrap point, and `r1 ∈ [0, (q−1)/α)`.
 pub fn decompose(r: u32) -> (i32, i32) {
     let r = r % Q;
     let r0 = mod_pm(r, ALPHA);
@@ -106,6 +106,15 @@ mod tests {
             assert_eq!(recon, (r % Q) as i64, "decompose must reconstruct r mod q");
             assert!(r1 >= 0 && (r1 as u32) < M, "r1 in range for r={r}");
         }
+    }
+
+    #[test]
+    fn decompose_emits_fips_negative_gamma2_wrap_point() {
+        assert_eq!(
+            decompose(Q - GAMMA2),
+            (0, -(GAMMA2 as i32)),
+            "FIPS wrap point must use the unique (w1,w0)=(0,−γ2) encoding"
+        );
     }
 
     #[test]

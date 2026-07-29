@@ -133,7 +133,8 @@ pub struct DigitTables {
 pub struct DecompWitness {
     /// `w1[i][m] ∈ [0,16)` — high bits recovered via `UseHint`.
     pub w1: [[u32; N]; K],
-    /// `w0[i][m]` — centered low part in `(−γ2, γ2]` of `w_approx`.
+    /// `w0[i][m]` — centered low part in `(−γ2, γ2]`, plus the FIPS wrap
+    /// special case `−γ2` when the pre-hint high part is zero.
     pub w0: [[i32; N]; K],
     /// `hint[i][m] ∈ {0,1}` — the hint bits.
     pub hint: [[u8; N]; K],

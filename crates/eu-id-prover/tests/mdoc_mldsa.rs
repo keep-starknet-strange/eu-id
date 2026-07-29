@@ -303,6 +303,8 @@ mod quantum_only {
     use std::time::Instant;
     use stwo::core::fields::{m31::M31, qm31::QM31};
 
+    const FIPS_DECOMPOSE_BOUNDARY_NONCE: &[u8] = b"wo-d1-device-boundary-2568";
+
     fn sib_consumed_len(input: &stwo_mldsa::types::MlDsaVerifyInput) -> usize {
         let stream = stwo_mldsa::reference::sample_in_ball::sample_in_ball(&input.c_tilde)
             .transcript
@@ -639,6 +641,41 @@ mod quantum_only {
             .expect("age-only statement builds");
         let proof = prove_mdoc_circuit(&extracted, &statement).expect("age-only mdoc proves");
         verify_mdoc_circuit(&proof, &statement).expect("age-only mdoc verifies");
+    }
+
+    #[test]
+    fn full_pq_mdoc_proves_device_negative_gamma2_boundary() {
+        let (extracted, statement) =
+            full_pq_extracted_and_statement_for(FIPS_DECOMPOSE_BOUNDARY_NONCE);
+        let device_input = extracted
+            .device_auth_input
+            .as_mldsa()
+            .expect("device arm is ML-DSA");
+        let device_witness =
+            stwo_mldsa::generate_witness(device_input).expect("device witness generates");
+        let boundary_count = device_witness
+            .decomp
+            .w0
+            .iter()
+            .flatten()
+            .filter(|&&w0| w0 == -(stwo_mldsa::constants::GAMMA2 as i32))
+            .count();
+        assert!(
+            boundary_count > 0,
+            "pinned device signature must exercise w0 = -gamma2"
+        );
+
+        let prove_start = Instant::now();
+        let proof =
+            prove_mdoc_circuit(&extracted, &statement).expect("boundary fully-PQ mdoc proves");
+        let prove_time = prove_start.elapsed();
+        let verify_start = Instant::now();
+        verify_mdoc_circuit(&proof, &statement).expect("boundary fully-PQ mdoc verifies");
+        println!(
+            "FIPS decompose boundary: coefficients = {boundary_count}, \
+             prove = {prove_time:?}, verify = {:?}",
+            verify_start.elapsed()
+        );
     }
 
     /// G2 + G3 + G5 + G6 in one proving pass: the fully post-quantum e2e —
