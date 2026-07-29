@@ -12,8 +12,8 @@ mod mldsa_fixture;
 use std::time::Instant;
 
 use euid_zk_sdk::{
-    ts13_default_circuit_hash, ts13_prove_zk_document, ts13_verify_zk_document, Ts13MdocWitness,
-    Ts13PresentationRequest,
+    prove_identity, ts13_default_circuit_hash, verify_identity, IssuerKey, NatMode, PredicateMode,
+    TrustedIssuers, Ts13PresentationRequest, ZkMdocWitness, ZkPublicStatement,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -34,6 +34,13 @@ struct Ts13ProofEnvelopeForProbe {
     #[allow(dead_code)]
     mdoc_statement: eu_id_prover::MdocTs13Statement,
     compressed_mdoc_proof: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+struct IdentityTs13ProofEnvelopeForProbe {
+    #[allow(dead_code)]
+    envelope_format: u16,
+    document: Vec<u8>,
 }
 
 fn main() {
@@ -106,6 +113,28 @@ fn ts13_request(
     }
 }
 
+fn identity_statement(
+    request: Ts13PresentationRequest,
+    issuer_public_key: &[u8],
+) -> ZkPublicStatement {
+    ZkPublicStatement {
+        spec_id: "stwo-euid-pid-v1".to_string(),
+        version: 1,
+        doctype: request.doctype.clone(),
+        namespace: request.namespace.clone(),
+        issuer_key: IssuerKey::MlDsa {
+            pk_hash: Sha256::digest(issuer_public_key).to_vec(),
+        },
+        today_epoch_day: request.current_date_epoch_day,
+        nonce: request.session_transcript.clone(),
+        predicate_mode: PredicateMode::Age,
+        age_threshold_years: Some(18),
+        accepted_numeric_countries: None,
+        nat_mode: NatMode::Any,
+        ts13_request: Some(request),
+    }
+}
+
 fn run(iterations: usize) {
     let session_transcript =
         eu_id_prover::mdoc::openid4vp_session_transcript(b"sdk-ts13-perf-equality-session");
@@ -139,6 +168,7 @@ fn run(iterations: usize) {
         &fixture.issuer_pk,
         fixture.revocation_pk.clone(),
     );
+    let statement = identity_statement(request, &fixture.issuer_pk);
     println!(
         "TS13_SDK_FIXTURE document_bytes={} issuer_sig_structure_bytes={} mso_payload_bytes={} device_sig_structure_bytes={} requested_item_bytes={}",
         fixture.document.len(),
@@ -159,22 +189,28 @@ fn run(iterations: usize) {
     let mut final_proof_envelope_bytes = 0usize;
     let mut final_compressed_inner_proof_bytes = 0usize;
     let mut final_proof_envelope_metadata_bytes = 0usize;
+    let mut final_identity_envelope_bytes = 0usize;
 
     for _ in 0..iterations {
         let prove_start = Instant::now();
-        let document = ts13_prove_zk_document(
-            request.clone(),
-            Ts13MdocWitness {
+        let identity_proof = prove_identity(
+            statement.clone(),
+            ZkMdocWitness {
                 document: fixture.document.clone(),
-                trusted_issuer_public_keys: vec![fixture.issuer_pk.clone()],
-                revocation_id_lo: id_lo,
-                revocation_id_hi: id_hi,
-                revocation_signature: revocation_signature.clone(),
+                trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk.clone()]),
+                ts13_trusted_issuer_public_keys: Some(vec![fixture.issuer_pk.clone()]),
+                ts13_revocation_id_lo: Some(id_lo),
+                ts13_revocation_id_hi: Some(id_hi),
+                ts13_revocation_signature: Some(revocation_signature.clone()),
             },
         )
-        .expect("SDK TS13 equality proof builds");
+        .expect("SDK identity TS13 equality proof builds");
         prove_ms.push(prove_start.elapsed().as_millis());
 
+        let identity_envelope: IdentityTs13ProofEnvelopeForProbe =
+            bincode::deserialize(&identity_proof).expect("identity TS13 envelope decodes");
+        let document: euid_zk_sdk::Ts13ZkDocument =
+            bincode::deserialize(&identity_envelope.document).expect("TS13 document decodes");
         let envelope: Ts13ProofEnvelopeForProbe =
             bincode::deserialize(&document.proof).expect("SDK TS13 envelope decodes");
         let serialized_document =
@@ -188,11 +224,14 @@ fn run(iterations: usize) {
         final_proof_envelope_bytes = document.proof.len();
         final_compressed_inner_proof_bytes = envelope.compressed_mdoc_proof.len();
         final_proof_envelope_metadata_bytes = metadata_bytes;
+        final_identity_envelope_bytes = identity_proof.len();
 
         let verify_start = Instant::now();
         assert!(
-            ts13_verify_zk_document(&request, &document).expect("SDK TS13 verification runs"),
-            "SDK TS13 equality envelope verifies"
+            verify_identity(statement.clone(), identity_proof)
+                .expect("SDK identity TS13 verification runs")
+                .ok,
+            "SDK identity TS13 equality envelope verifies"
         );
         let elapsed = verify_start.elapsed().as_millis();
         first_verify_ms.get_or_insert(elapsed);
@@ -200,7 +239,7 @@ fn run(iterations: usize) {
     }
 
     println!(
-        "TS13_SDK_PERF_PROBE zero_knowledge=false fixture=deterministic_rustcrypto_mldsa65_realistic_7_attribute_pid_demo_not_deployed_credential verify_scope=first_verification_is_tree0_cache_miss_after_prover_warmed_process iterations={iterations} rayon_threads={} sdk_prove_median_ms={} sdk_verify_first_ms={} sdk_verify_median_ms={} final_document_wire_bytes={final_document_wire_bytes} final_proof_envelope_bytes={final_proof_envelope_bytes} final_compressed_inner_mdoc_proof_bytes={final_compressed_inner_proof_bytes} final_proof_envelope_public_metadata_bytes={final_proof_envelope_metadata_bytes} document_wire_median_bytes={} proof_envelope_median_bytes={} compressed_inner_mdoc_proof_median_bytes={} proof_envelope_public_metadata_median_bytes={} fixture_document_bytes={} fixture_issuer_sig_structure_bytes={} fixture_device_sig_structure_bytes={} session_transcript_bytes={}",
+        "TS13_SDK_PERF_PROBE zero_knowledge=false fixture=deterministic_rustcrypto_mldsa65_realistic_7_attribute_pid_demo_not_deployed_credential verify_scope=first_verification_is_tree0_cache_miss_after_prover_warmed_process iterations={iterations} rayon_threads={} d6_ts13_via_identity_prove_ms={} sdk_verify_first_ms={} sdk_verify_median_ms={} final_identity_envelope_bytes={final_identity_envelope_bytes} final_document_wire_bytes={final_document_wire_bytes} final_proof_envelope_bytes={final_proof_envelope_bytes} final_compressed_inner_mdoc_proof_bytes={final_compressed_inner_proof_bytes} final_proof_envelope_public_metadata_bytes={final_proof_envelope_metadata_bytes} document_wire_median_bytes={} proof_envelope_median_bytes={} compressed_inner_mdoc_proof_median_bytes={} proof_envelope_public_metadata_median_bytes={} fixture_document_bytes={} fixture_issuer_sig_structure_bytes={} fixture_device_sig_structure_bytes={} session_transcript_bytes={}",
         rayon::current_num_threads(),
         median(&mut prove_ms),
         first_verify_ms.expect("at least one probe iteration"),

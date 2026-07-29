@@ -35,10 +35,15 @@ fn fixture() -> (ZkPublicStatement, ZkMdocWitness) {
             age_threshold_years: Some(18),
             accepted_numeric_countries: Some(vec![250, 276]),
             nat_mode: NatMode::Any,
+            ts13_request: None,
         },
         ZkMdocWitness {
             document: fixture.document,
             trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk]),
+            ts13_trusted_issuer_public_keys: None,
+            ts13_revocation_id_lo: None,
+            ts13_revocation_id_hi: None,
+            ts13_revocation_signature: None,
         },
     )
 }
