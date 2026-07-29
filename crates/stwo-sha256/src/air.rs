@@ -14,6 +14,7 @@
 //! component's sum individually. Both `air_core::prove` and `air_core::verify`
 //! mix identically, so the round trip is self-consistent.
 
+use air_core::claim_mask::{ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
@@ -269,6 +270,7 @@ impl Air for Sha256Prover<'_> {
             &self.field_exposure,
             !self.uses_shared_tables(),
             &None,
+            None,
         ));
     }
 
@@ -603,6 +605,7 @@ impl Air for Sha256Verifier {
             &self.field_exposure,
             !self.uses_shared_tables(),
             &None,
+            None,
         ));
     }
 
@@ -632,6 +635,7 @@ struct Stmt0 {
     /// rejects.
     n_field_columns: u32,
     n_field_yields: u32,
+    binds_full_padded_message: bool,
     /// Whether fixed SHA table providers are supplied by a sibling module.
     /// Only the enabled case is mixed so the legacy standalone transcript
     /// remains byte-identical.
@@ -651,6 +655,7 @@ impl Stmt0 {
             expose_digest,
             n_field_columns: field_exposure.n_columns() as u32,
             n_field_yields: field_exposure.n_yields() as u32,
+            binds_full_padded_message: field_exposure.binds_full_padded_message(),
             shared_tables,
         }
     }
@@ -661,6 +666,7 @@ impl Stmt0 {
         channel.mix_u64(u64::from(self.expose_digest));
         channel.mix_u64(u64::from(self.n_field_columns));
         channel.mix_u64(u64::from(self.n_field_yields));
+        channel.mix_u64(u64::from(self.binds_full_padded_message));
         if self.shared_tables {
             channel.mix_u64(1);
         }
@@ -834,6 +840,7 @@ impl Sha256Components {
         field_exposure: &FieldExposure,
         include_table_providers: bool,
         multi: &Option<crate::constraints::MultiSlotEval>,
+        claim_mask_beta: Option<QM31>,
     ) -> Self {
         // The shared TraceLocationAllocator (seeded by the orchestrator with
         // every module's `preprocessed_column_ids` in commit order) runs the
@@ -847,6 +854,7 @@ impl Sha256Components {
                 expose_digest,
                 field_exposure: field_exposure.clone(),
                 multi: multi.clone(),
+                claim_mask_beta,
             },
             claim.sha256.claimed_sum,
         );
@@ -928,21 +936,31 @@ impl Stmt0Multi<'_> {
             channel.mix_u64(u64::from(spec.expose_digest));
             channel.mix_u64(spec.field_exposure.n_columns() as u64);
             channel.mix_u64(spec.field_exposure.n_yields() as u64);
+            channel.mix_u64(u64::from(spec.field_exposure.binds_full_padded_message()));
         }
     }
 }
 
 /// Column log-sizes of the multi-slot consumer. Preprocessed:
 /// `slot_starts + 9 cyclic + n_slots slot_sel`, all at `log_n_rows`.
-fn multi_layout(log_n_rows: u32, config: &crate::slots::MultiSlotConfig) -> TreeLayout {
+fn multi_layout(
+    log_n_rows: u32,
+    config: &crate::slots::MultiSlotConfig,
+    claim_masked: bool,
+) -> TreeLayout {
     const EXT: usize = SECURE_EXTENSION_DEGREE;
     let sha_cols = num_batched_cols(
-        crate::interaction::sha_multi_lookups_per_row(config),
+        crate::interaction::sha_multi_lookups_per_row_with_mask(config, claim_masked),
         LOGUP_BATCH,
     );
     TreeLayout {
         preprocessed: vec![log_n_rows; 10 + config.n_slots()],
-        trace: vec![log_n_rows; Layout::TOTAL_COLS + config.n_field_columns()],
+        trace: vec![
+            log_n_rows;
+            Layout::TOTAL_COLS
+                + config.n_field_columns()
+                + usize::from(claim_masked) * CLAIM_MASK_TRACE_COLUMNS
+        ],
         interaction: vec![log_n_rows; sha_cols * EXT],
     }
 }
@@ -959,6 +977,8 @@ pub struct Sha256MultiProver<'a> {
     relations: Option<Sha256Relations>,
     slot_relations: Option<Vec<crate::relations::SlotIoRelations>>,
     interaction_claim: Option<InteractionClaim>,
+    claim_mask: Option<ClaimMaskTrace>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     components: Option<Sha256Components>,
 }
 
@@ -990,6 +1010,8 @@ impl<'a> Sha256MultiProver<'a> {
             relations: None,
             slot_relations: None,
             interaction_claim: None,
+            claim_mask: None,
+            claim_mask_challenge: None,
             components: None,
         }
     }
@@ -1026,6 +1048,27 @@ impl<'a> Sha256MultiProver<'a> {
         self.interaction_claim
             .as_ref()
             .expect("interaction claim is set during the interaction phase")
+    }
+
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        vec![self.log_n_rows]
+    }
+
+    pub fn with_claim_mask(
+        mut self,
+        trace: ClaimMaskTrace,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Self {
+        assert_eq!(trace.log_size(), self.log_n_rows);
+        self.claim_mask = Some(trace);
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge
+            .as_ref()
+            .map(|shared| shared.require().expect("claim-mask anchor drawn last"))
     }
 
     fn built_components(&self) -> &Sha256Components {
@@ -1077,7 +1120,11 @@ impl Air for Sha256MultiProver<'_> {
     }
 
     fn layout(&self) -> TreeLayout {
-        multi_layout(self.log_n_rows, &self.config)
+        multi_layout(
+            self.log_n_rows,
+            &self.config,
+            self.claim_mask_challenge.is_some(),
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -1118,6 +1165,7 @@ impl Air for Sha256MultiProver<'_> {
             &FieldExposure::empty(),
             false,
             &multi,
+            self.claim_mask_beta(),
         ));
     }
 
@@ -1202,21 +1250,41 @@ impl AirProver for Sha256MultiProver<'_> {
             .map(|col| CircleEvaluation::new(domain, col))
             .collect();
         tb.extend_evals(evals);
+        if let Some(mask) = &self.claim_mask {
+            tb.extend_evals(mask.columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let (interaction_evals, interaction_claim) =
-            crate::interaction::generate_multi_consumer_interaction_trace(
-                self.relations
-                    .as_ref()
-                    .expect("relations are drawn before the interaction phase"),
-                self.slot_relations
-                    .as_ref()
-                    .expect("slot relations are drawn before the interaction phase"),
-                &self.witnesses,
-                self.log_n_rows,
-                &self.config,
-            );
+        let generated =
+            if let (Some(mask), Some(beta)) = (self.claim_mask.as_ref(), self.claim_mask_beta()) {
+                crate::interaction::generate_multi_consumer_interaction_trace_with_claim_mask(
+                    self.relations
+                        .as_ref()
+                        .expect("relations are drawn before the interaction phase"),
+                    self.slot_relations
+                        .as_ref()
+                        .expect("slot relations are drawn before the interaction phase"),
+                    &self.witnesses,
+                    self.log_n_rows,
+                    &self.config,
+                    mask,
+                    beta,
+                )
+            } else {
+                crate::interaction::generate_multi_consumer_interaction_trace(
+                    self.relations
+                        .as_ref()
+                        .expect("relations are drawn before the interaction phase"),
+                    self.slot_relations
+                        .as_ref()
+                        .expect("slot relations are drawn before the interaction phase"),
+                    &self.witnesses,
+                    self.log_n_rows,
+                    &self.config,
+                )
+            };
+        let (interaction_evals, interaction_claim) = generated;
         tb.extend_evals(interaction_evals);
         self.interaction_claim = Some(interaction_claim);
     }
@@ -1238,6 +1306,7 @@ pub struct Sha256MultiVerifier {
     interaction_claim: InteractionClaim,
     relations: Option<Sha256Relations>,
     slot_relations: Option<Vec<crate::relations::SlotIoRelations>>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     components: Option<Sha256Components>,
 }
 
@@ -1261,6 +1330,7 @@ impl Sha256MultiVerifier {
             interaction_claim,
             relations: None,
             slot_relations: None,
+            claim_mask_challenge: None,
             components: None,
         }
     }
@@ -1293,6 +1363,21 @@ impl Sha256MultiVerifier {
         self
     }
 
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        vec![self.log_n_rows]
+    }
+
+    pub fn with_claim_mask(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge
+            .as_ref()
+            .map(|shared| shared.require().expect("claim-mask anchor drawn last"))
+    }
+
     fn built_components(&self) -> &Sha256Components {
         self.components
             .as_ref()
@@ -1321,7 +1406,11 @@ impl Air for Sha256MultiVerifier {
     }
 
     fn layout(&self) -> TreeLayout {
-        multi_layout(self.log_n_rows, &self.config)
+        multi_layout(
+            self.log_n_rows,
+            &self.config,
+            self.claim_mask_challenge.is_some(),
+        )
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
@@ -1368,6 +1457,7 @@ impl Air for Sha256MultiVerifier {
             &FieldExposure::empty(),
             false,
             &multi,
+            self.claim_mask_beta(),
         ));
     }
 

@@ -29,6 +29,7 @@
 //! single-row path here for correctness; SIMD-packing the producers is
 //! a benchmark-driven future micro-optimisation.
 
+use air_core::claim_mask::ClaimMaskTrace;
 use num_traits::{One, Zero};
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
@@ -95,8 +96,17 @@ pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) 
 /// column sizing so the three never drift.
 #[inline]
 pub fn sha_multi_lookups_per_row(config: &crate::slots::MultiSlotConfig) -> usize {
+    sha_multi_lookups_per_row_with_mask(config, false)
+}
+
+#[inline]
+pub(crate) fn sha_multi_lookups_per_row_with_mask(
+    config: &crate::slots::MultiSlotConfig,
+    claim_masked: bool,
+) -> usize {
     SHA_LOOKUPS_PER_ROW_BASE
         + config.n_digest_slots()
+        + usize::from(claim_masked)
         + config
             .slots
             .iter()
@@ -163,6 +173,17 @@ impl InteractionClaim {
 /// the lookup's multiplicity (positive on the consumer side, negative on
 /// the producer); denominator is `combine(values) = sum α^i · v_i − z`.
 pub(crate) type Frac = (SecureField, SecureField);
+
+fn claim_mask_fraction_column(trace: &ClaimMaskTrace, beta: SecureField) -> Vec<Frac> {
+    (0..1usize << trace.log_size())
+        .map(|row| {
+            let mask = SecureField::from_m31_array(std::array::from_fn(|coordinate| {
+                trace.columns()[coordinate].values.as_slice()[row]
+            }));
+            (mask * beta, SecureField::one())
+        })
+        .collect()
+}
 
 /// Build one interaction trace for a component from its list of
 /// row-iterators. `lookups[k]` is the k-th lookup the component fires —
@@ -698,11 +719,54 @@ pub fn generate_multi_consumer_interaction_trace(
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
 ) {
+    generate_multi_consumer_interaction_trace_inner(
+        relations,
+        slot_relations,
+        witnesses,
+        log_size,
+        config,
+        None,
+    )
+}
+
+pub(crate) fn generate_multi_consumer_interaction_trace_with_claim_mask(
+    relations: &Sha256Relations,
+    slot_relations: &[crate::relations::SlotIoRelations],
+    witnesses: &[&Sha256Witness],
+    log_size: u32,
+    config: &crate::slots::MultiSlotConfig,
+    claim_mask: &ClaimMaskTrace,
+    beta: SecureField,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
+    generate_multi_consumer_interaction_trace_inner(
+        relations,
+        slot_relations,
+        witnesses,
+        log_size,
+        config,
+        Some((claim_mask, beta)),
+    )
+}
+
+fn generate_multi_consumer_interaction_trace_inner(
+    relations: &Sha256Relations,
+    slot_relations: &[crate::relations::SlotIoRelations],
+    witnesses: &[&Sha256Witness],
+    log_size: u32,
+    config: &crate::slots::MultiSlotConfig,
+    claim_mask: Option<(&ClaimMaskTrace, SecureField)>,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
     assert_eq!(witnesses.len(), config.n_slots());
     assert_eq!(slot_relations.len(), config.n_slots());
     let n_rows = 1usize << log_size;
     let slot_rows = config.slot_rows();
-    let lookups_per_row = sha_multi_lookups_per_row(config);
+    let lookups_per_row = sha_multi_lookups_per_row_with_mask(config, claim_mask.is_some());
     let empty_exposure = FieldExposure::empty();
     let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_row)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
@@ -768,9 +832,20 @@ pub fn generate_multi_consumer_interaction_trace(
                         k == s && t == 15,
                     );
                 }
-                debug_assert_eq!(cursor, lookups_per_row, "multi row lookup miscount");
+                debug_assert_eq!(
+                    cursor + usize::from(claim_mask.is_some()),
+                    lookups_per_row,
+                    "multi row lookup miscount"
+                );
             }
         }
+    }
+
+    if let Some((mask, beta)) = claim_mask {
+        *all_lookups
+            .last_mut()
+            .expect("masked SHA interaction has a mask site") =
+            claim_mask_fraction_column(mask, beta);
     }
 
     let (evals, claimed_sum) = build_interaction_columns(log_size, LOGUP_BATCH, all_lookups);

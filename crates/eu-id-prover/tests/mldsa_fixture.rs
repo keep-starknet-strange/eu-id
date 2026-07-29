@@ -258,6 +258,54 @@ pub fn mldsa_full_pq_fixture_with_attribute(
     )
 }
 
+/// A realistic seven-attribute PID envelope for performance measurements.
+///
+/// There is no deployed ML-DSA PID issuer vector yet, so this keeps the
+/// deterministic RustCrypto keys while matching the field count and 32-byte
+/// per-item randoms of a normal issuer document. The TS13 request still proves
+/// only the `age_over_18` equality item.
+pub fn mldsa_realistic_pid_fixture_with_age_over_18(
+    session_transcript: &[u8],
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_attributes(
+        session_transcript,
+        vec![
+            (
+                1,
+                "given_name",
+                Value::Text("Erika".to_string()),
+                vec![1; 32],
+            ),
+            (2, "nationality", Value::Text("DE".to_string()), vec![2; 32]),
+            (
+                3,
+                "family_name",
+                Value::Text("Mustermann".to_string()),
+                vec![3; 32],
+            ),
+            (
+                4,
+                "birth_date",
+                Value::Text("1985-05-05".to_string()),
+                vec![4; 32],
+            ),
+            (
+                5,
+                "issuance_date",
+                Value::Text("2026-01-01".to_string()),
+                vec![5; 32],
+            ),
+            (
+                6,
+                "expiry_date",
+                Value::Text("2030-01-01".to_string()),
+                vec![6; 32],
+            ),
+            (17, "age_over_18", Value::Bool(true), vec![17; 32]),
+        ],
+    )
+}
+
 fn mldsa_full_pq_fixture_with_transcript_and_nationality(
     session_transcript: &[u8],
     nationality_value: Value,

@@ -1,9 +1,9 @@
 //! Full-PQ mdoc perf probe — the S3 campaign's executable perf gate.
 //!
 //! Builds the fully post-quantum credential (ML-DSA issuer + device + TS13
-//! revocation), extracts, proves once, verifies cold and then warm under the
-//! same verifier policy, and prints one machine-readable line plus the
-//! serde_json proof byte breakdown.
+//! revocation), extracts, proves, forces a fresh tree-0 verification, and
+//! reports in-process core timings plus Bzip2 transport measurements. It does
+//! not measure document parsing, network transport, or disk I/O.
 //!
 //! Run (the campaign's iron measurement):
 //! ```sh
@@ -16,13 +16,47 @@
 mod mldsa_fixture;
 
 fn main() {
+    let iterations = parse_iterations();
+    std::thread::Builder::new()
+        .name("pq-perf-probe".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || run(iterations))
+        .expect("PQ perf probe worker starts")
+        .join()
+        .expect("PQ perf probe worker does not panic");
+}
+
+fn parse_iterations() -> usize {
+    let mut args = std::env::args().skip(1);
+    match (args.next().as_deref(), args.next()) {
+        (None, None) => 1,
+        (Some("--iterations" | "-n"), Some(value)) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|iterations| *iterations > 0)
+            .expect("--iterations must be a positive integer"),
+        _ => panic!("usage: pq_perf_probe [--iterations N]"),
+    }
+}
+
+fn median(values: &mut [u128]) -> u128 {
+    values.sort_unstable();
+    values[values.len() / 2]
+}
+
+fn run(iterations: usize) {
+    use std::io::{Read, Write};
     use std::time::Instant;
+
+    use bzip2::read::BzDecoder;
+    use bzip2::write::BzEncoder;
+    use bzip2::Compression;
 
     use eu_id_prover::mdoc::{
         extract_pid_mdoc, mdoc_proof_byte_breakdown, openid4vp_session_transcript,
-        prove_mdoc_circuit, verify_mdoc_circuit_with_pcs_config_profiled, MdocCircuitStatement,
-        MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationRangeWitness,
-        MdocRevocationSignature,
+        prove_mdoc_circuit, verify_mdoc_circuit_with_pcs_config_profiled_fresh,
+        MdocCircuitStatement, MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs,
+        MdocRevocationRangeWitness, MdocRevocationSignature,
     };
     use eu_id_prover::ts13::ts13_mso_derived_revocation_id;
     use eu_id_prover::Policy;
@@ -79,39 +113,67 @@ fn main() {
         .with_ts13_revocation_signature(MdocRevocationSignature::MlDsa(sig));
 
     let rayon_threads = rayon::current_num_threads();
-    let prove_start = Instant::now();
-    let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
-    let prove_ms = prove_start.elapsed().as_millis();
+    let mut prove_ms = Vec::with_capacity(iterations);
+    let mut fresh_verify_ms = Vec::with_capacity(iterations);
+    let mut fresh_tree0_root_ms = Vec::with_capacity(iterations);
+    let mut fresh_stark_verify_ms = Vec::with_capacity(iterations);
+    let mut bzip2_compress_ms = Vec::with_capacity(iterations);
+    let mut bzip2_decompress_ms = Vec::with_capacity(iterations);
+    let mut raw_proof_bytes = Vec::with_capacity(iterations);
+    let mut bzip2_wire_bytes = Vec::with_capacity(iterations);
+    let mut breakdown = None;
 
-    let cold_verify_profile = verify_mdoc_circuit_with_pcs_config_profiled(
-        &proof,
-        &statement,
-        eu_id_prover::mdoc::mdoc_production_pcs_config(),
-    )
-    .expect("fully-PQ mdoc verifies cold");
-    assert!(!cold_verify_profile.tree0_cache_hit, "first verify is cold");
-    let warm_verify_profile = verify_mdoc_circuit_with_pcs_config_profiled(
-        &proof,
-        &statement,
-        eu_id_prover::mdoc::mdoc_production_pcs_config(),
-    )
-    .expect("fully-PQ mdoc verifies warm");
-    assert!(warm_verify_profile.tree0_cache_hit, "second verify is warm");
+    for _ in 0..iterations {
+        let prove_start = Instant::now();
+        let proof = prove_mdoc_circuit(&extracted, &statement).expect("fully-PQ mdoc proves");
+        prove_ms.push(prove_start.elapsed().as_millis());
 
-    let breakdown = mdoc_proof_byte_breakdown(&proof);
-    std::fs::write("/tmp/pq_proof.bin", bincode::serialize(&proof).unwrap()).unwrap();
+        let raw = bincode::serialize(&proof).expect("proof serializes");
+        let compress_start = Instant::now();
+        let mut encoder = BzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&raw).expect("proof compresses");
+        let wire = encoder.finish().expect("proof compression completes");
+        bzip2_compress_ms.push(compress_start.elapsed().as_millis());
+        let decompress_start = Instant::now();
+        let mut decoded = Vec::new();
+        BzDecoder::new(wire.as_slice())
+            .read_to_end(&mut decoded)
+            .expect("proof decompresses");
+        bzip2_decompress_ms.push(decompress_start.elapsed().as_millis());
+        assert_eq!(decoded, raw, "Bzip2 wire round trip");
+        raw_proof_bytes.push(raw.len() as u128);
+        bzip2_wire_bytes.push(wire.len() as u128);
+
+        let fresh_verify_profile = verify_mdoc_circuit_with_pcs_config_profiled_fresh(
+            &proof,
+            &statement,
+            eu_id_prover::mdoc::mdoc_production_pcs_config(),
+        )
+        .expect("fully-PQ mdoc verifies with a forced-fresh tree-0 root");
+        assert!(
+            !fresh_verify_profile.tree0_cache_hit,
+            "forced-fresh verification must not use tree-0 cache"
+        );
+        fresh_verify_ms.push(fresh_verify_profile.total.as_millis());
+        fresh_tree0_root_ms.push(fresh_verify_profile.tree0_canonical_root.as_millis());
+        fresh_stark_verify_ms.push(fresh_verify_profile.stark_verify.as_millis());
+        breakdown = Some(mdoc_proof_byte_breakdown(&proof));
+    }
+
     println!(
-        "PQ_PERF_PROBE rayon_threads={rayon_threads} prove_ms={prove_ms} cold_verify_ms={} cold_tree0_root_ms={} cold_stark_verify_ms={} warm_verify_ms={} warm_tree0_root_ms={} warm_stark_verify_ms={} proof_bytes={}",
-        cold_verify_profile.total.as_millis(),
-        cold_verify_profile.tree0_canonical_root.as_millis(),
-        cold_verify_profile.stark_verify.as_millis(),
-        warm_verify_profile.total.as_millis(),
-        warm_verify_profile.tree0_canonical_root.as_millis(),
-        warm_verify_profile.stark_verify.as_millis(),
-        breakdown.proof_bytes
+        "PQ_PERF_PROBE zero_knowledge=false scope=in_process_core iterations={iterations} rayon_threads={rayon_threads} prove_median_ms={} fresh_verify_median_ms={} fresh_tree0_root_median_ms={} fresh_stark_verify_median_ms={} bzip2_compress_median_ms={} bzip2_decompress_median_ms={} raw_proof_median_bytes={} bzip2_wire_median_bytes={}",
+        median(&mut prove_ms),
+        median(&mut fresh_verify_ms),
+        median(&mut fresh_tree0_root_ms),
+        median(&mut fresh_stark_verify_ms),
+        median(&mut bzip2_compress_ms),
+        median(&mut bzip2_decompress_ms),
+        median(&mut raw_proof_bytes),
+        median(&mut bzip2_wire_bytes),
     );
     println!(
         "{}",
-        serde_json::to_string(&breakdown).expect("byte breakdown serializes")
+        serde_json::to_string(&breakdown.expect("at least one probe iteration"))
+            .expect("byte breakdown serializes")
     );
 }

@@ -14,9 +14,21 @@ import java.util.zip.ZipFile
 internal enum class MldsaVariant(
     val resultName: String,
     val libraryName: String,
+    val manifestSlot: String,
+    val manifestAssetName: String,
 ) {
-    BASELINE("A_mldsa_baseline", "eu_id_ffi_mldsa_baseline"),
-    PACKED("B_mldsa_packed_candidate", "eu_id_ffi_mldsa_packed");
+    REFERENCE(
+        "A_mldsa_reference",
+        "eu_id_ffi_mldsa_reference",
+        "mldsa-reference",
+        "mldsa_reference_build_manifest.json",
+    ),
+    CANDIDATE(
+        "B_mldsa_candidate",
+        "eu_id_ffi_mldsa_candidate",
+        "mldsa-candidate",
+        "mldsa_candidate_build_manifest.json",
+    );
 
     val fileName: String
         get() = "lib$libraryName.so"
@@ -24,19 +36,19 @@ internal enum class MldsaVariant(
 
 private const val MANUAL_SCENARIO = 0
 private val GAME_LOOP_VARIANTS = listOf(
-    MldsaVariant.BASELINE,
-    MldsaVariant.PACKED,
-    MldsaVariant.PACKED,
-    MldsaVariant.BASELINE,
-    MldsaVariant.PACKED,
-    MldsaVariant.BASELINE,
-    MldsaVariant.BASELINE,
-    MldsaVariant.PACKED,
+    MldsaVariant.REFERENCE,
+    MldsaVariant.CANDIDATE,
+    MldsaVariant.CANDIDATE,
+    MldsaVariant.REFERENCE,
+    MldsaVariant.CANDIDATE,
+    MldsaVariant.REFERENCE,
+    MldsaVariant.REFERENCE,
+    MldsaVariant.CANDIDATE,
 )
 
 internal fun mldsaVariantForScenario(scenario: Int): MldsaVariant =
     if (scenario == MANUAL_SCENARIO) {
-        MldsaVariant.BASELINE
+        MldsaVariant.CANDIDATE
     } else {
         requireNotNull(GAME_LOOP_VARIANTS.getOrNull(scenario - 1)) {
             "ML-DSA Game Loop scenario must be in 1..${GAME_LOOP_VARIANTS.size}, got $scenario"
@@ -49,21 +61,56 @@ internal fun requireAllBigForGameLoop(scenario: Int, allPerformanceCores: Boolea
     }
 }
 
+/** JNI binds a native method to its first resolved library within a process. */
+internal class MldsaVariantLoadGuard {
+    private var loadedVariant: MldsaVariant? = null
+
+    fun requireCompatible(variant: MldsaVariant) {
+        require(loadedVariant == null || loadedVariant == variant) {
+            "Cannot load ML-DSA variant $variant after $loadedVariant in one process"
+        }
+    }
+
+    fun recordLoaded(variant: MldsaVariant) {
+        requireCompatible(variant)
+        loadedVariant = variant
+    }
+}
+
 object BenchRunner {
     const val PROFILE_NAME = "full_pq_mdoc_mldsa65_ts13_revocation_paired"
+    private val mldsaVariantLoadGuard = MldsaVariantLoadGuard()
 
     @JvmStatic
     external fun fullPq(allPerformanceCores: Boolean): String
 
+    @Synchronized
     fun runSuite(context: Context, allPerformanceCores: Boolean, scenario: Int): String {
         requireAllBigForGameLoop(scenario, allPerformanceCores)
         val variant = mldsaVariantForScenario(scenario)
+        mldsaVariantLoadGuard.requireCompatible(variant)
         System.loadLibrary(variant.libraryName)
+        mldsaVariantLoadGuard.recordLoaded(variant)
         val topology = cpuTopology()
         val frequencyBefore = frequencySnapshot(topology.performanceCpuIds)
         val thermalBefore = thermalTemperatures()
         val thermalStatusBefore = thermalStatus(context)
         val benchmark = JSONObject(fullPq(allPerformanceCores))
+        val nativeBuild = JSONObject(
+            context.assets.open(variant.manifestAssetName).bufferedReader().use { it.readText() },
+        )
+        require(nativeBuild.getString("library_slot") == variant.manifestSlot) {
+            "Native build manifest slot does not match loaded library ${variant.libraryName}"
+        }
+        require(nativeBuild.getString("benchmark_entrypoint") == "fullPq") {
+            "Native build manifest does not describe the loaded benchmark entry point"
+        }
+        require(nativeBuild.getString("benchmark_profile") == PROFILE_NAME) {
+            "Native build manifest does not describe the current full-PQ profile"
+        }
+        require(nativeBuild.getString("unstripped_library_sha256") == selectedSoSha256(context, variant.fileName)) {
+            "Loaded native library does not match its packaged build manifest"
+        }
         check(benchmark.getString("core_metric") == topology.metric) {
             "Kotlin/native CPU topology metric mismatch"
         }
@@ -85,6 +132,7 @@ object BenchRunner {
             .put("branch", BuildConfig.BENCH_BRANCH)
             .put("git", BuildConfig.BENCH_GIT)
             .put("stwo_rev", BuildConfig.STWO_REV)
+            .put("native_build", nativeBuild)
             .put("apk_sha256", apkSha256(context))
             .put("variant", variant.resultName)
             .put("selected_so", variant.fileName)
@@ -96,6 +144,15 @@ object BenchRunner {
 
         val profile = JSONObject()
             .put("name", PROFILE_NAME)
+            .put("zero_knowledge", false)
+            .put(
+                "fixture",
+                "deterministic_rustcrypto_mldsa65_demo_not_deployed_credential",
+            )
+            .put(
+                "privacy_status",
+                "unblinded STWO trace openings; benchmark is a soundness/performance prototype",
+            )
             .put("issuer_auth", "ML-DSA-65")
             .put("device_auth", "ML-DSA-65")
             .put("revocation_auth", "ML-DSA-65")
@@ -110,11 +167,13 @@ object BenchRunner {
                     "single_highest_capacity_performance_core"
                 },
             )
-            .put("fresh_process_proofs", 1)
+            .put("fresh_process_proofs", if (scenario == MANUAL_SCENARIO) 0 else 1)
+            .put("fresh_tree0_verifications", 1)
             .put("pcs_blowup", 3)
             .put("pcs_queries", 36)
             .put("pcs_pow_bits", 20)
-            .put("timing_scope", "prove plus public-statement cold/warm verification")
+            .put("timing_scope", "circuit prove plus forced-fresh and cached core verification; SDK envelope and compression excluded")
+            .put("proof_size_scope", "raw bincode circuit proof; SDK envelope and compression excluded")
             .put("peak_scope", "timed prove/verify window; fixture and serialization excluded")
             .put("cold_verify_scope", "fresh canonical tree-0 reconstruction; process already initialized")
 

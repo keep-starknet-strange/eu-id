@@ -48,7 +48,7 @@ pub struct ProverConfig {
     /// [`Sha256ProveError::LogSizeBelowSimdMin`].
     ///
     /// Caller recipe for any non-trivial message:
-    /// ```ignore
+    /// ```text
     /// let witness = compute_sha256_witness(&message);
     /// let config = ProverConfig {
     ///     log_n_rows: trace::min_log_size(witness.blocks.len()),

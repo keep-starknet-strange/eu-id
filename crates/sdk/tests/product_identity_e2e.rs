@@ -99,6 +99,19 @@ fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() 
         "real product proof must verify"
     );
 
+    // The age/nationality predicates prove facts ABOUT the birth date and
+    // nationality; neither value may travel to the verifier. `prove_mdoc`
+    // ships `MdocCircuitStatement::public_view()` for exactly this reason.
+    for (name, secret) in [
+        ("birth_date", b"1990-07-15".as_slice()),
+        ("nationality", b"cDE".as_slice()),
+    ] {
+        assert!(
+            !proof.windows(secret.len()).any(|window| window == secret),
+            "product identity envelope must not contain the credential's {name}"
+        );
+    }
+
     let mut relabeled = statement.clone();
     relabeled.spec_id.push_str("-relabeled");
     assert_rejects(

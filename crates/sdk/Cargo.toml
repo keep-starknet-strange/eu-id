@@ -58,6 +58,7 @@ stwo-mldsa = { path = "../stwo-mldsa" }
 # Deterministic fully-PQ issuer/device/revocation fixture for the TS13
 # end-to-end envelope regression.
 ml-dsa = "0.1.1"
+rayon = "1"
 
 [[bin]]
 # Bundled binding generator. Run as:

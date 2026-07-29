@@ -306,6 +306,7 @@ fn collect_constraint_residuals_with_fields(
         expose_digest: false,
         field_exposure,
         multi: None,
+        claim_mask_beta: None,
     };
     let n_rows = 1usize << log_size;
     let mut all = Vec::new();
@@ -421,6 +422,94 @@ fn rejects_field_selector_on_wrong_block() {
     assert!(
         !residuals.is_empty(),
         "AIR must reject a field selector enabled on the wrong SHA block",
+    );
+}
+
+#[test]
+fn rejects_field_selector_on_disabled_block() {
+    let message = [0xABu8; 70];
+    let witness = compute_sha256_witness(&message);
+    assert_eq!(
+        witness.blocks.len(),
+        2,
+        "fixture needs one unused trace block"
+    );
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 1)]);
+    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    assert!(
+        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    let counter_col = Layout::field_byte_col(
+        exposure
+            .block_counter_column_slot()
+            .expect("nonzero-block exposure has a block counter"),
+    );
+    let selector_col = Layout::field_byte_col(
+        exposure
+            .selector_column_slot(0)
+            .expect("nonzero-block exposure has selector columns"),
+    );
+    let disabled_slot = Layout::round_row_slot(2, 15, log_size);
+    trace[counter_col][disabled_slot] = BaseField::from(1u32);
+    trace[selector_col][disabled_slot] = BaseField::from(1u32);
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a field selector enabled on an unhashed row",
+    );
+}
+
+#[test]
+fn rejects_full_padded_exposure_that_is_only_a_hashed_prefix() {
+    let message = [0xABu8; 130];
+    let witness = compute_sha256_witness(&message);
+    assert_eq!(
+        witness.blocks.len(),
+        3,
+        "fixture needs a third enabled block"
+    );
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_full_padded_message(field_id::NATIONALITY, 128);
+    let trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a complete-message exposure that omits an enabled suffix block",
+    );
+}
+
+#[test]
+fn rejects_cleared_full_padded_final_block_selector() {
+    let message = [0xABu8; 70];
+    let witness = compute_sha256_witness(&message);
+    assert_eq!(witness.blocks.len(), 2);
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_full_padded_message(field_id::NATIONALITY, 128);
+    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    assert!(
+        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    let selector_col = Layout::field_byte_col(
+        exposure
+            .selector_column_slot_for_block(1)
+            .expect("two-block exposure has a final-block selector"),
+    );
+    let final_t15 = Layout::round_row_slot(1, 15, log_size);
+    trace[selector_col][final_t15] = BaseField::from(0u32);
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject clearing a required complete-message selector",
     );
 }
 
@@ -880,6 +969,7 @@ fn collect_multi_constraint_residuals(
             config: config.clone(),
             relations: SlotIoRelations::dummy_per_slot(config.n_slots()),
         }),
+        claim_mask_beta: None,
     };
     let n_rows = 1usize << MULTI_LOG;
     let mut all = Vec::new();
@@ -970,6 +1060,79 @@ fn multi_slot_rejects_selector_fired_on_foreign_slot() {
     assert!(
         !residuals.is_empty(),
         "foreign-slot selector must trip the slot-attribution rail",
+    );
+}
+
+#[test]
+fn multi_slot_rejects_selector_fired_on_disabled_slot_row() {
+    let (mut trace, config) = multi_trace_and_config();
+    let exposure = &config.slots[2].field_exposure;
+    assert!(exposure.needs_block_witness());
+    let selector_col = Layout::TOTAL_COLS
+        + config.field_tail_base(2)
+        + exposure
+            .selector_column_slot(0)
+            .expect("multi-block exposure has selectors");
+    let counter_col = Layout::TOTAL_COLS
+        + config.field_tail_base(2)
+        + exposure
+            .block_counter_column_slot()
+            .expect("multi-block exposure has a block counter");
+    let disabled_row = Layout::row_slot(config.slot_start_row(2) + 2 * 64 + 15, MULTI_LOG);
+    trace[counter_col][disabled_row] = BaseField::from(1u32);
+    trace[selector_col][disabled_row] = BaseField::from(1u32);
+
+    let residuals = collect_multi_constraint_residuals(&trace, &config);
+    assert!(
+        !residuals.is_empty(),
+        "selector on an unhashed row must trip the liveness rail",
+    );
+}
+
+#[test]
+fn multi_slot_rejects_cleared_full_padded_final_block_selector() {
+    let witnesses = [
+        compute_sha256_witness(&[0x11u8; 80]),
+        compute_sha256_witness(b"abc"),
+        compute_sha256_witness(&[0x42u8; 100]),
+    ];
+    let config = MultiSlotConfig::new(
+        8,
+        vec![
+            SlotSpec {
+                expose_digest: false,
+                field_exposure: FieldExposure::empty(),
+            },
+            SlotSpec {
+                expose_digest: true,
+                field_exposure: FieldExposure::empty(),
+            },
+            SlotSpec {
+                expose_digest: true,
+                field_exposure: FieldExposure::from_full_padded_message(9, 128),
+            },
+        ],
+    );
+    let refs: Vec<_> = witnesses.iter().collect();
+    let mut trace = generate_multi_trace(&refs, MULTI_LOG, &config);
+    assert!(
+        collect_multi_constraint_residuals(&trace, &config).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    let exposure = &config.slots[2].field_exposure;
+    let selector_col = Layout::TOTAL_COLS
+        + config.field_tail_base(2)
+        + exposure
+            .selector_column_slot_for_block(1)
+            .expect("two-block exposure has a final-block selector");
+    let final_t15 = Layout::row_slot(config.slot_start_row(2) + 64 + 15, MULTI_LOG);
+    trace[selector_col][final_t15] = BaseField::from(0u32);
+
+    let residuals = collect_multi_constraint_residuals(&trace, &config);
+    assert!(
+        !residuals.is_empty(),
+        "merged AIR must reject clearing a required complete-message selector",
     );
 }
 

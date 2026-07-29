@@ -586,3 +586,91 @@ claim-layout, degree-bound, test-hook, or file-footprint issue. No branch was pu
   `tasks/bench-results/firebase-full-pq-mldsa-bigcores-d5c4ac98/analysis.md`.
 - Firebase matrices: `matrix-3nz2f9fdjljw4`, `matrix-3a19u6n95ow70`,
   `matrix-36djloxhx3pl9`, and `matrix-1bqd9g5yesl5k`.
+
+## Quantum-safe Android SDK native-link failure
+
+- [x] Resolve the user-named `feat/quantum-safe` branch to its owning worktree and preserve
+      unrelated changes in the main checkout.
+- [x] Trace the SDK compression dependency, Android AAR publication, wallet dependency
+      resolution, and the exact native library currently packaged by the local wallet build.
+- [x] Add the smallest Android build guard that rejects unresolved non-platform symbols in
+      `libeuid_zk_sdk.so`.
+- [x] Cross-compile the quantum-safe ARM64 SDK and prove that it has no zstd dependency or
+      unresolved `ZSTD_*` symbols.
+- [x] Republish the quantum-safe AAR locally, refresh the wallet dependency, and verify its
+      merged ARM64 library is the new quantum-safe artifact.
+- [ ] Migrate the consuming wallet from the classical `ZkWitness`/P-256 statement API to the
+      quantum-safe `ZkMdocWitness`/ML-DSA API before producing a new final APK.
+- [x] Record the root cause, artifact hashes, commands, and final review here.
+
+### Review
+
+- Root cause: `feat/android-bench` and `feat/quantum-safe` both publish
+  `com.kss:eu-id-zk-sdk:0.1.0`. The wallet had packaged the zstd/classical branch's AAR while
+  the current quantum-safe SDK uses `bzip2 -> libbz2-rs-sys` and has no zstd package at all.
+  JNA found the APK library; its later resource-path errors were only fallback noise.
+- Added `-Wl,--no-undefined` to both Android Cargo targets so a missing native dependency fails
+  the SDK link rather than on-device `dlopen()`. Cargo fingerprints confirm the flag reached
+  both targets. The NDK remains pinned to 30 by default but can now be selected explicitly with
+  `-PndkVersion=...`; local verification used the installed `27.1.12297006`.
+- Updated the Android instrumented smoke test to the current `IssuerKey.MlDsa` and
+  `TrustedIssuers.PublicKeys` UniFFI types. `cargo test -p sdk --lib` passed all 30 tests;
+  `assembleRelease`, `assembleAndroidTest`, and `lintRelease` all passed.
+- Published AAR SHA-256:
+  `4e6714c90f30112cc4680f5af433558f9459cb3d5e43bd20b8207fd858a092ef`.
+  Its unstripped ARM64 library is
+  `67170a5b9d01cce48b95111deb7abb695f2605e7b6a4292a50f489e7b5164a79`;
+  the packaged/stripped ARM64 library is
+  `cf71323e5e6d467fba12951c1a4d9318d2e7c9b7730d9b2e2e72baedb50e48dc`.
+- `llvm-nm -D -u` on the published and wallet-merged ARM64 libraries contains no `ZSTD_*`
+  symbol. `llvm-readelf -d` reports only `libdl.so` and `libc.so`. The refreshed wallet merge
+  contains the exact packaged hash `cf7132...`, proving the bad native artifact was replaced.
+- The final wallet APK is not rebuilt yet: refreshed Kotlin compilation correctly rejects the
+  old classical consumer source (`ZkWitness`, `issuerKeyX`, `issuerKeyY`) against the quantum
+  API (`ZkMdocWitness`, `IssuerKey.MlDsa`). That migration belongs in
+  `/Users/lucas/profiling/eudi-zk-android-wallet`; no source there was modified.
+
+## WO-S2 + WO-C1 implementation on feat/quantum-safe
+
+- [x] Verify the target worktree is `feat/quantum-safe` at `c5145004`, read both work orders,
+      COMMON.md, the mailbox protocol, and the existing campaign lessons.
+- [x] Capture the pre-change AIR shape census and establish focused test baselines.
+- [x] Implement WO-S2 in order: boundary fixes, circuit/product/TS13 negatives, then hygiene.
+- [x] Implement WO-C1 in order C1-C7, preserving relation order, AIR shape, pins, and negative
+      coverage; resolve the gated `expand_a.rs` deletion through the mailbox.
+- [x] Run every phase's focused release tests, then the full touched-crate/workspace acceptance
+      suite with `RAYON_NUM_THREADS=1`.
+- [x] Re-run the AIR census and performance probe, compare the census byte-for-byte, review the
+      complete diff, and record measured numbers.
+- [x] Commit only the WO-S2/WO-C1 implementation on `feat/quantum-safe`, preserving the unrelated
+      Android and pre-existing task-tracking edits.
+
+### Review
+
+- A-719 mailbox resolved by `A-726`: prove-side acceptance is not the forgery signal because the
+  private-window binding is cross-component LogUp; verifier global claimed-sum cancellation is the
+  soundness boundary. The regression now proves an honest control, proves the consistently moved
+  statement, and asserts `eu_id_prover::verify_mdoc` rejects outside host validation.
+- WO-S2 safe scope completed: SDK demo code is gated behind the `demo` feature; the TS13 verifier
+  runs on `on_large_stack`; product identity and TS13 real-proof/tampered-STARK negatives pass;
+  `mldsa_range_table_claimed_sum` is crate-private with test hooks; `prepare_mldsa_role` now
+  asserts it does not overwrite a non-default `tr`.
+- WO-C1 C1-C7 safe scope completed: removed gkr-spike, deleted vestigial SHA decode/Maj/Ch/xor_8
+  committed-table machinery, cleaned dead ML-DSA modules/items and duplicated helpers, retired the
+  standalone keccak test prover after porting service-path coverage, removed predicate
+  bit-decomposition strategy code and air-core dead utilities, then swept stale active-source
+  comments.
+- Mailbox-gated items resolved and applied: `A-723` approved deleting abandoned
+  `crates/stwo-mldsa/src/expand_a.rs`; `A-724` approved fail-closed product rejection for
+  revocation-bearing statements and one-line docs; `A-725` approved top-level Makefile and
+  predicate usage-doc removal of deleted bit-decomposition commands.
+- Verification run: `cargo build -p sdk`; `cargo test -p sdk --features demo --lib`;
+  release `product_identity_e2e`, `ts13_e2e`, full `eu-id-prover --test mdoc_mldsa`,
+  `eu-id-ffi`, `stwo-keccak`, `stwo-mldsa`, and final release bundle
+  `stwo-sha256 stwo-mldsa predicates air-core`.
+- Final AIR check: `/private/tmp/wo-c1-census-before.log` vs
+  `/private/tmp/wo-c1-census-final-after-mailbox.log` has byte-identical `air-core shape` lines
+  (`42 == 42`). Final probe:
+  `PQ_PERF_PROBE rayon_threads=1 prove_ms=1173 cold_verify_ms=107 cold_tree0_root_ms=91
+  cold_stark_verify_ms=16 warm_verify_ms=15 warm_tree0_root_ms=0 warm_stark_verify_ms=15
+  proof_bytes=1265795`.

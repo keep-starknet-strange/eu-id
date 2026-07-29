@@ -11,6 +11,7 @@ use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use air_core::claim_mask::{ClaimMaskChallengeModule, ClaimMaskRing, SharedClaimMaskChallenge};
 use air_core::relations::{
     field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
 };
@@ -70,6 +71,12 @@ use stwo_sha256::witness::compute_sha256_witness;
 use crate::claimed_sum_blinder::{
     add_blinder_relation_entry, blinder_counter_interaction, random_qm31, ClaimedSumBlinderEval,
     ClaimedSumBlinderRelation,
+};
+use crate::mdoc_cbor_stream::{MdocCborInputMode, MdocCborStream, MdocCborStreamInteractionClaim};
+use crate::mdoc_equality_scope::{
+    MdocEqualityScope, MdocEqualityScopeHandles, MdocEqualityScopeInteractionClaim,
+    MdocEqualityScopeProofMetadata, MdocEqualityScopeStatement, MDOC_EQUALITY_INNER_STREAM_ID,
+    MDOC_EQUALITY_OUTER_STREAM_ID,
 };
 use crate::mdoc_window_bind::{MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow};
 use crate::policy::Policy;
@@ -289,6 +296,49 @@ impl MdocAuthInput {
     /// digest-handle selection compiles in every feature combination.
     pub fn is_mldsa(&self) -> bool {
         true
+    }
+}
+
+/// Verifier-visible part of an ML-DSA authentication input.
+///
+/// The signature witness (`c_tilde`, `z`, and `hint`) is intentionally absent.
+/// Verification reconstructs canonical zero placeholders because those fields
+/// affect neither public-input mixing nor verifier-side layout/evaluations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocMlDsaPublicAuthInput {
+    /// FIPS 204 `pkEncode` bytes.
+    pub public_key: Vec<u8>,
+    /// Public COSE `Sig_structure` bytes for this profile.
+    pub message: Vec<u8>,
+}
+
+impl MdocMlDsaPublicAuthInput {
+    fn from_circuit(input: &MdocAuthInput) -> Self {
+        let input = input
+            .as_mldsa()
+            .expect("the quantum-safe mdoc statement is always ML-DSA");
+        Self {
+            public_key: input.encode_pk(),
+            message: input.message.clone(),
+        }
+    }
+
+    fn verifier_input(&self, role: &'static str) -> Result<MdocAuthInput, Error> {
+        let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(&self.public_key)
+            .map_err(|error| Error::Verify(format!("mdoc {role} public key decode: {error:?}")))?;
+        let zero_signature = stwo_mldsa::reference::encoding::SignatureParts {
+            c_tilde: [0; stwo_mldsa::constants::C_TILDE_BYTES],
+            z: [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::L],
+            h: [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::K],
+        };
+        Ok(MdocAuthInput::MlDsa(Box::new(
+            MlDsaVerifyInput::from_decoded(
+                &decoded_pk,
+                &zero_signature,
+                [0; 64],
+                self.message.clone(),
+            ),
+        )))
     }
 }
 
@@ -1037,6 +1087,38 @@ fn attribute_exposure(statement: &MdocCircuitStatement, index: usize) -> FieldEx
     FieldExposure::from_preimage_windows_multi(&windows)
 }
 
+fn ts13_equality_scope_statement(
+    statement: &MdocCircuitStatement,
+    phase: &'static str,
+) -> Result<Option<MdocEqualityScopeStatement>, Error> {
+    if statement.ts13_revocation.is_none() || statement.ts13_requested_item_padded_len.is_none() {
+        return Ok(None);
+    }
+    let fail = |message: &str| {
+        let message = format!("TS13 equality semantic scope: {message}");
+        if phase == "prove" {
+            Error::Prove(message)
+        } else {
+            Error::Verify(message)
+        }
+    };
+    let [attribute] = statement.attributes.as_slice() else {
+        return Err(fail("exactly one requested attribute is required"));
+    };
+    let MdocDisclosureMode::ValueEquality(element_value) = &attribute.mode else {
+        return Err(fail("the requested attribute must use value equality"));
+    };
+    let item_padded_len = statement
+        .ts13_requested_item_padded_len
+        .expect("presence was checked above");
+    Ok(Some(MdocEqualityScopeStatement {
+        element_identifier: attribute.element_identifier.as_bytes().to_vec(),
+        element_value: element_value.clone(),
+        digest_id: attribute.digest_id,
+        item_padded_len,
+    }))
+}
+
 /// Field exposure over the issuer `Sig_structure` preimage: the two 32-byte
 /// `valueDigests` windows (D2) and the two 32-byte deviceKey coordinate windows
 /// (D3), all consumed by the MSO window-bind component.
@@ -1560,6 +1642,50 @@ fn issuer_mso_payload(sig_structure: &[u8]) -> Result<Vec<u8>, MdocError> {
         ));
     }
     Ok(expect_bytes(&items[3], "issuer Sig_structure.payload")?.to_vec())
+}
+
+/// Public byte lengths which determine the hosted ML-DSA/Keccak and mdoc-SHA
+/// layouts.  Profile verifiers use this instead of trusting legacy serialized
+/// offset metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MdocStatementResourceLengths {
+    pub issuer_message_bytes: usize,
+    pub issuer_mso_payload_bytes: usize,
+    pub device_message_bytes: usize,
+}
+
+pub fn mdoc_statement_resource_lengths(
+    statement: &MdocCircuitStatement,
+) -> Result<MdocStatementResourceLengths, Error> {
+    let issuer = statement
+        .issuer_input
+        .as_mldsa()
+        .ok_or_else(|| Error::Verify("mdoc statement issuer input is not ML-DSA".to_string()))?;
+    let device = statement
+        .device_input
+        .as_mldsa()
+        .ok_or_else(|| Error::Verify("mdoc statement device input is not ML-DSA".to_string()))?;
+    let issuer_mso_payload_bytes = issuer_mso_payload(&issuer.message)
+        .map_err(|error| Error::Verify(format!("mdoc issuer MSO payload shape: {error:?}")))?
+        .len();
+    Ok(MdocStatementResourceLengths {
+        issuer_message_bytes: issuer.message.len(),
+        issuer_mso_payload_bytes,
+        device_message_bytes: device.message.len(),
+    })
+}
+
+pub fn mdoc_ts13_public_statement_resource_lengths(
+    statement: &MdocTs13PublicStatement,
+) -> Result<MdocStatementResourceLengths, Error> {
+    let issuer_mso_payload_bytes = issuer_mso_payload(&statement.issuer.message)
+        .map_err(|error| Error::Verify(format!("mdoc issuer MSO payload shape: {error:?}")))?
+        .len();
+    Ok(MdocStatementResourceLengths {
+        issuer_message_bytes: statement.issuer.message.len(),
+        issuer_mso_payload_bytes,
+        device_message_bytes: statement.device.message.len(),
+    })
 }
 
 fn encode_value(value: Value) -> Vec<u8> {
@@ -2091,6 +2217,9 @@ pub struct MdocCircuitStatement {
     #[serde(skip, default)]
     pub ts13_revocation_range: Option<MdocRevocationRangeWitness>,
     pub ts13_revocation_signature: Option<MdocRevocationSignature>,
+    /// Exact SHA-256-padded length of the single TS13 IssuerSignedItem.
+    /// `None` outside the dedicated one-attribute TS13 profile.
+    pub ts13_requested_item_padded_len: Option<u16>,
     pub attributes: Vec<MdocStatementAttribute>,
     pub age_attribute_index: Option<usize>,
     pub nationality_attribute_index: Option<usize>,
@@ -2244,6 +2373,198 @@ impl MdocStatementAttribute {
     }
 }
 
+/// Public verifier statement for the dedicated TS13 equality-and-revocation
+/// profile.
+///
+/// This type deliberately cannot carry credential attribute witnesses,
+/// byte-window offsets/anchors, revocation bounds, or ML-DSA signature
+/// witnesses. The prover keeps those in [`MdocCircuitStatement`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocTs13PublicStatement {
+    pub doctype: String,
+    pub namespace: String,
+    pub issuer: MdocMlDsaPublicAuthInput,
+    pub device: MdocMlDsaPublicAuthInput,
+    pub revocation: MdocRevocationPublicInputs,
+    /// Credential-stable `IssuerSignedItem.digestID` selected by this proof.
+    pub requested_digest_id: u32,
+    /// Public 64-byte SHA-256 size bucket of the selected IssuerSignedItem.
+    pub requested_item_padded_len: u16,
+    pub attributes: Vec<MdocRequestedAttribute>,
+    pub policy: Policy,
+}
+
+impl MdocTs13PublicStatement {
+    pub fn from_circuit(statement: &MdocCircuitStatement) -> Result<Self, Error> {
+        if statement.ts13_revocation_signature.is_none()
+            || statement.ts13_revocation_range.is_none()
+        {
+            return Err(Error::Prove(
+                "TS13 public statement requires a complete revocation witness".to_string(),
+            ));
+        }
+        let revocation = statement.ts13_revocation.clone().ok_or_else(|| {
+            Error::Prove("TS13 public statement requires revocation inputs".to_string())
+        })?;
+        let [requested_attribute] = statement.attributes.as_slice() else {
+            return Err(Error::Prove(
+                "TS13 public statement requires exactly one attribute".to_string(),
+            ));
+        };
+        if !crate::ts13::ts13_requested_digest_id_is_supported(requested_attribute.digest_id) {
+            return Err(Error::Prove(
+                "TS13 requested digest ID exceeds the published bound".to_string(),
+            ));
+        }
+        let requested_item_padded_len =
+            statement.ts13_requested_item_padded_len.ok_or_else(|| {
+                Error::Prove("TS13 requested item padded length is missing".to_string())
+            })?;
+        if !crate::ts13::ts13_requested_item_padded_len_is_supported(requested_item_padded_len) {
+            return Err(Error::Prove(
+                "TS13 requested item padded length is unsupported".to_string(),
+            ));
+        }
+        Ok(Self {
+            doctype: statement.doctype.clone(),
+            namespace: statement.namespace.clone(),
+            issuer: MdocMlDsaPublicAuthInput::from_circuit(&statement.issuer_input),
+            device: MdocMlDsaPublicAuthInput::from_circuit(&statement.device_input),
+            revocation,
+            requested_digest_id: requested_attribute.digest_id,
+            requested_item_padded_len,
+            attributes: statement
+                .attributes
+                .iter()
+                .map(|attribute| MdocRequestedAttribute {
+                    element_identifier: attribute.element_identifier.clone(),
+                    mode: attribute.mode.clone(),
+                })
+                .collect(),
+            policy: statement.policy.clone(),
+        })
+    }
+
+    fn verifier_circuit_statement(&self) -> Result<MdocCircuitStatement, Error> {
+        if !crate::ts13::ts13_requested_digest_id_is_supported(self.requested_digest_id) {
+            return Err(Error::Verify(
+                "TS13 requested digest ID exceeds the published bound".to_string(),
+            ));
+        }
+        if !crate::ts13::ts13_requested_item_padded_len_is_supported(self.requested_item_padded_len)
+        {
+            return Err(Error::Verify(
+                "TS13 requested item padded length is unsupported".to_string(),
+            ));
+        }
+        let attributes = self
+            .attributes
+            .iter()
+            .map(|attribute| {
+                let element_identifier_anchor = element_identifier_anchor_bytes(
+                    &attribute.element_identifier,
+                )
+                .map_err(|_| {
+                    Error::Verify(
+                        "TS13 elementIdentifier has unsupported CBOR encoding".to_string(),
+                    )
+                })?;
+                let value = match &attribute.mode {
+                    MdocDisclosureMode::ValueEquality(value) => value.clone(),
+                    MdocDisclosureMode::AgeOver | MdocDisclosureMode::Alpha2Set => Vec::new(),
+                };
+                let value_head = if value.is_empty() {
+                    Vec::new()
+                } else {
+                    cbor_value_head(&value).map_err(|_| {
+                        Error::Verify(
+                            "TS13 equality value has unsupported CBOR encoding".to_string(),
+                        )
+                    })?
+                };
+                let element_value_anchor = if value.is_empty() {
+                    Vec::new()
+                } else {
+                    element_value_anchor_bytes(&value).map_err(|_| {
+                        Error::Verify("TS13 equality value anchor is unsupported".to_string())
+                    })?
+                };
+                let value_offset = element_value_anchor
+                    .len()
+                    .checked_sub(value_head.len())
+                    .ok_or_else(|| {
+                        Error::Verify("TS13 equality value placeholder overflow".to_string())
+                    })?;
+                Ok(MdocStatementAttribute {
+                    element_identifier: attribute.element_identifier.clone(),
+                    mode: attribute.mode.clone(),
+                    element_identifier_offset: element_identifier_anchor.len(),
+                    element_identifier_anchor_offset: 0,
+                    element_identifier_anchor,
+                    element_value_anchor_offset: 0,
+                    element_value_anchor,
+                    value_offset,
+                    value,
+                    value_head,
+                    digest_id: self.requested_digest_id,
+                    mso_digest_offset: 0,
+                    mso_digest_anchor_offset: 0,
+                    mso_digest_anchor: Vec::new(),
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let zero_signature = stwo_mldsa::reference::encoding::sig_encode(
+            &[0; stwo_mldsa::constants::C_TILDE_BYTES],
+            &[[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::L],
+            &[[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::K],
+        );
+        Ok(MdocCircuitStatement {
+            doctype: self.doctype.clone(),
+            namespace: self.namespace.clone(),
+            issuer_input: self.issuer.verifier_input("issuer")?,
+            device_input: self.device.verifier_input("device")?,
+            ts13_revocation: Some(self.revocation.clone()),
+            ts13_revocation_range: None,
+            ts13_revocation_signature: Some(MdocRevocationSignature::MlDsa(zero_signature)),
+            ts13_requested_item_padded_len: Some(self.requested_item_padded_len),
+            attributes,
+            age_attribute_index: None,
+            nationality_attribute_index: None,
+            birth_date_binding: MdocBirthDateBinding::Text([0; 10]),
+            nationality_binding: MdocNationalityBinding::Alpha2([0; 2]),
+            birth_date_value_offset: 0,
+            nationality_value_offset: 0,
+            nationality_array_len: None,
+            nationality_array_index: None,
+            birth_date_element_offset: 0,
+            nationality_element_offset: 0,
+            mso_birth_date_digest_offset: 0,
+            mso_birth_date_digest_anchor_offset: 0,
+            mso_birth_date_digest_anchor: Vec::new(),
+            mso_nationality_digest_offset: 0,
+            mso_nationality_digest_anchor_offset: 0,
+            mso_nationality_digest_anchor: Vec::new(),
+            mso_device_key_x_offset: 0,
+            mso_device_key_x_anchor_offset: 0,
+            mso_device_key_x_anchor: Vec::new(),
+            mso_device_key_y_offset: 0,
+            mso_device_key_y_anchor_offset: 0,
+            mso_device_key_y_anchor: Vec::new(),
+            valid_from: (0, 0, 0),
+            valid_until: (0, 0, 0),
+            mso_valid_from_date_offset: 0,
+            mso_valid_from_anchor_offset: 0,
+            mso_valid_from_anchor: Vec::new(),
+            mso_valid_until_date_offset: 0,
+            mso_valid_until_anchor_offset: 0,
+            mso_valid_until_anchor: Vec::new(),
+            mso_payload_offset: 0,
+            mso_payload_len: 0,
+            policy: self.policy.clone(),
+        })
+    }
+}
+
 impl MdocCircuitStatement {
     pub fn with_ts13_revocation(mut self, revocation: MdocRevocationPublicInputs) -> Self {
         self.ts13_revocation = Some(revocation);
@@ -2257,6 +2578,60 @@ impl MdocCircuitStatement {
 
     pub fn with_ts13_revocation_signature(mut self, signature: MdocRevocationSignature) -> Self {
         self.ts13_revocation_signature = Some(signature);
+        self
+    }
+
+    /// The view of this statement that may be shipped to a verifier.
+    ///
+    /// `from_extracted` fills in the credential's real `birth_date` and
+    /// `nationality` values because the prover needs them, but the verifier
+    /// does not: those attributes reach the circuit through private *windows*
+    /// (`field_id::DOB` / `field_id::NATIONALITY` — an offset and a length, not
+    /// pinned bytes), and every public quantity derived from a value depends
+    /// only on its CBOR head. So the payload is replaced by zeros while the
+    /// head and total length are preserved, which keeps
+    /// `element_value_anchor_bytes`, `cbor_value_head` and every resource
+    /// length bit-identical to what the prover used.
+    ///
+    /// `ValueEquality` values are the verifier's own request and stay. A
+    /// nationality *array* member is pinned as a public in-circuit constant
+    /// (`nationality_member_field_id`), so it cannot be scrubbed — that mode
+    /// discloses which accepted member matched.
+    pub fn into_public_view(mut self) -> Self {
+        let scrub_payload = |value: &[u8]| -> Vec<u8> {
+            match cbor_value_head(value) {
+                Ok(head) => {
+                    let mut scrubbed = head;
+                    scrubbed.resize(value.len(), 0);
+                    scrubbed
+                }
+                // Not canonically encoded: `validate_private_element_identifier_bindings`
+                // rejects it on both sides, so leave it for that error path.
+                Err(_) => value.to_vec(),
+            }
+        };
+        let nationality_array = self.nationality_array_len.is_some();
+        for attribute in &mut self.attributes {
+            let keep = match &attribute.mode {
+                MdocDisclosureMode::ValueEquality(_) => true,
+                MdocDisclosureMode::Alpha2Set => nationality_array,
+                MdocDisclosureMode::AgeOver => false,
+            };
+            if !keep {
+                attribute.value = scrub_payload(&attribute.value);
+            }
+        }
+        self.birth_date_binding = match self.birth_date_binding {
+            MdocBirthDateBinding::Packed(_) => MdocBirthDateBinding::Packed([0; 4]),
+            MdocBirthDateBinding::Text(_) => MdocBirthDateBinding::Text([0; 10]),
+        };
+        if !nationality_array {
+            self.nationality_binding = match self.nationality_binding {
+                MdocNationalityBinding::Numeric(_) => MdocNationalityBinding::Numeric([0; 2]),
+                MdocNationalityBinding::Alpha2(_) => MdocNationalityBinding::Alpha2([0; 2]),
+            };
+        }
+        self.ts13_revocation_range = None;
         self
     }
 
@@ -2362,6 +2737,16 @@ impl MdocCircuitStatement {
         let nationality_attribute_index = statement_attributes
             .iter()
             .position(|attribute| matches!(attribute.mode, MdocDisclosureMode::Alpha2Set));
+        let ts13_requested_item_padded_len = if let [attribute] =
+            extracted.extracted_attributes.as_slice()
+        {
+            Some(
+                u16::try_from(stwo_sha256::native::pad_message(&attribute.item).len())
+                    .map_err(|_| MdocError::UnsupportedCircuitValue("attribute padded length"))?,
+            )
+        } else {
+            None
+        };
 
         // Phase D: locate the windows the in-circuit MSO bindings pin. The two
         // digests and the device key are no longer public inputs; they are
@@ -2481,6 +2866,7 @@ impl MdocCircuitStatement {
             ts13_revocation: None,
             ts13_revocation_range: None,
             ts13_revocation_signature: None,
+            ts13_requested_item_padded_len,
             attributes: statement_attributes,
             age_attribute_index,
             nationality_attribute_index,
@@ -2609,6 +2995,9 @@ pub struct MdocCircuitProof {
     merged_sha_interaction_claim: Option<Sha256InteractionClaim>,
     mdoc_window_bind_interaction_claim: MdocWindowBindInteractionClaim,
     attribute_public_digest_bind_interaction_claims: Option<Vec<PublicDigestBindInteractionClaim>>,
+    mdoc_cbor_interaction_claims: Option<Vec<MdocCborStreamInteractionClaim>>,
+    mdoc_equality_scope_metadata: Option<MdocEqualityScopeProofMetadata>,
+    mdoc_equality_scope_interaction_claim: Option<MdocEqualityScopeInteractionClaim>,
     ts13_revocation_range_interaction_claim: Option<MdocRevocationRangeInteractionClaim>,
     age_public: Option<predicates::PublicInput>,
     age_claimed_sums: Option<Vec<QM31>>,
@@ -2620,6 +3009,38 @@ pub struct MdocCircuitProof {
 }
 
 impl MdocCircuitProof {
+    /// Public shape view for profile verifiers.  The schedule is part of the
+    /// transcript and determines tree-0 preprocessing, so callers that pin a
+    /// profile must reject a proof before constructing its tree when this is
+    /// absent or outside that profile's resource contract.
+    pub fn merged_sha_layout(&self) -> Option<(u32, u32)> {
+        self.merged_sha_slot_log.zip(self.merged_sha_log_n_rows)
+    }
+
+    /// True only when the proof carries the three ML-DSA role claim trees and
+    /// the TS13 range claim required by the fully-PQ revocation profile.
+    pub fn has_ts13_mldsa_shape(&self) -> bool {
+        self.mldsa
+            .as_ref()
+            .is_some_and(|claims| claims.has_expected_shape(true))
+            && self
+                .device_mldsa
+                .as_ref()
+                .is_some_and(|claims| claims.has_expected_shape(true))
+            && self
+                .revocation_mldsa
+                .as_ref()
+                .is_some_and(|claims| claims.has_expected_shape(false))
+            && self.ts13_revocation_range_interaction_claim.is_some()
+            && self.mldsa_range_table_claimed_sum.is_some()
+            && self
+                .keccak_service_claimed_sums
+                .as_ref()
+                .is_some_and(|sums| {
+                    sums.len() == stwo_mldsa::stwo_keccak::service::service_claimed_sums_len()
+                })
+    }
+
     #[doc(hidden)]
     pub fn clear_mldsa_range_table_claimed_sum_for_test(&mut self) {
         self.mldsa_range_table_claimed_sum = None;
@@ -2647,6 +3068,7 @@ pub struct MdocCircuitVerifyProfile {
 #[derive(Clone, Debug, Serialize)]
 struct MdocTree0AttributeKey {
     mode: u8,
+    digest_id: u32,
     element_identifier: Vec<u8>,
     element_identifier_offset: usize,
     element_identifier_anchor_offset: usize,
@@ -2666,8 +3088,9 @@ struct MdocTree0AttributeKey {
 /// The key contains: PCS blowup; merged-SHA slot/row logs; optional revocation
 /// module presence; ordered attribute count/modes, element windows/anchors,
 /// and equality constants; predicate window offsets/binding widths; and the
-/// normalized age/nationality public tables. Fixed protocol tables, role
-/// namespaces, and the now-constant five-block SIB rail need no key fields.
+/// normalized age/nationality public tables, and the issuer/device public
+/// message lengths. Fixed protocol tables, role namespaces, and the
+/// now-constant five-block SIB rail need no key fields.
 ///
 /// The merged-SHA layout fields originate in the proof, but are shape-gated
 /// before this key is built and were already used to reconstruct that verifier
@@ -2675,8 +3098,10 @@ struct MdocTree0AttributeKey {
 /// Every stored value is a verifier-recomputed canonical root; an accidentally
 /// omitted determinant therefore causes a fail-closed wrong-root rejection
 /// (and is caught by the fresh-audit test), never acceptance of a proof root.
-/// Signature bytes, keys, messages, private revocation bounds, claimed sums,
-/// and commitments are deliberately absent: none determines preprocessing.
+/// Signature bytes, keys, public message *contents*, private revocation
+/// bounds, claimed sums, and commitments are deliberately absent: none
+/// determines preprocessing. The issuer/device public message lengths are
+/// included because hosted ML-DSA bridge/sink schedules depend on them.
 #[derive(Clone, Debug, Serialize)]
 struct MdocTree0CacheKeyMaterial {
     version: u8,
@@ -2684,6 +3109,10 @@ struct MdocTree0CacheKeyMaterial {
     merged_sha_slot_log: u32,
     merged_sha_log_n_rows: u32,
     has_ts13_revocation: bool,
+    issuer_mldsa_message_bytes: usize,
+    device_mldsa_message_bytes: usize,
+    ts13_requested_item_padded_len: Option<u16>,
+    ts13_equality_random_len: Option<u16>,
     age_attribute_index: Option<usize>,
     nationality_attribute_index: Option<usize>,
     nationality_array_len: Option<u8>,
@@ -2713,6 +3142,22 @@ fn mdoc_tree0_cache_key(
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
 ) -> Result<MdocTree0CacheKey, Error> {
+    let issuer_mldsa_message_bytes = statement
+        .issuer_input
+        .as_mldsa()
+        .ok_or_else(|| {
+            Error::Verify("mdoc tree-0 cache key issuer input is not ML-DSA".to_string())
+        })?
+        .message
+        .len();
+    let device_mldsa_message_bytes = statement
+        .device_input
+        .as_mldsa()
+        .ok_or_else(|| {
+            Error::Verify("mdoc tree-0 cache key device input is not ML-DSA".to_string())
+        })?
+        .message
+        .len();
     let attributes = statement
         .attributes
         .iter()
@@ -2732,6 +3177,7 @@ fn mdoc_tree0_cache_key(
             };
             MdocTree0AttributeKey {
                 mode,
+                digest_id: attribute.digest_id,
                 element_identifier: attribute.element_identifier.as_bytes().to_vec(),
                 element_identifier_offset: attribute.element_identifier_offset,
                 element_identifier_anchor_offset: attribute.element_identifier_anchor_offset,
@@ -2754,7 +3200,7 @@ fn mdoc_tree0_cache_key(
         })
         .collect();
     let material = MdocTree0CacheKeyMaterial {
-        version: 2,
+        version: 4,
         pcs_log_blowup_factor: expected_pcs_config.fri_config.log_blowup_factor,
         merged_sha_slot_log: proof
             .merged_sha_slot_log
@@ -2763,6 +3209,13 @@ fn mdoc_tree0_cache_key(
             .merged_sha_log_n_rows
             .expect("merged SHA row log shape-gated before cache-key construction"),
         has_ts13_revocation: validate_ts13_revocation_shape(statement, false, "verify")?,
+        issuer_mldsa_message_bytes,
+        device_mldsa_message_bytes,
+        ts13_requested_item_padded_len: statement.ts13_requested_item_padded_len,
+        ts13_equality_random_len: proof
+            .mdoc_equality_scope_metadata
+            .as_ref()
+            .map(|metadata| metadata.random_len),
         age_attribute_index: statement.age_attribute_index,
         nationality_attribute_index: statement.nationality_attribute_index,
         nationality_array_len: statement.nationality_array_len,
@@ -2830,9 +3283,11 @@ fn mdoc_tree0_cache_insert(key: MdocTree0CacheKey, root: MdocTree0Root) -> Resul
 pub struct MdocProofByteBreakdown {
     pub proof_bytes: usize,
     pub stark_proof_bytes: usize,
-    pub non_stark_metadata_bytes: usize,
-    /// Reserved auxiliary payload bytes. Pure-STARK production proofs require
-    /// this to be zero.
+    /// Everything serialized outside `stark_proof`, including metadata and
+    /// post-interaction payloads.
+    pub outer_proof_bytes: usize,
+    /// Auxiliary post-interaction payloads, including the ML-DSA round-GKR
+    /// proof. This is a subset of `outer_proof_bytes`.
     pub post_interaction_payload_bytes: usize,
     pub stark: MdocStarkProofByteBreakdown,
 }
@@ -2852,12 +3307,12 @@ pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreak
     let stark = &proof.stark_proof.0;
     let proof_bytes = bincode_len(proof);
     let stark_proof_bytes = bincode_len(&proof.stark_proof);
-    let non_stark_metadata_bytes = proof_bytes.saturating_sub(stark_proof_bytes);
+    let outer_proof_bytes = proof_bytes.saturating_sub(stark_proof_bytes);
 
     MdocProofByteBreakdown {
         proof_bytes,
         stark_proof_bytes,
-        non_stark_metadata_bytes,
+        outer_proof_bytes,
         post_interaction_payload_bytes: proof.post_interaction_payloads.iter().map(Vec::len).sum(),
         stark: MdocStarkProofByteBreakdown {
             config: bincode_len(&stark.config),
@@ -3760,7 +4215,10 @@ fn prove_mdoc_circuit_inner(
     config: PcsConfig,
 ) -> Result<MdocCircuitProof, Error> {
     validate_mldsa_public_keys(statement, "prove")?;
-    validate_private_element_identifier_bindings(statement, "prove")?;
+    let equality_scope_statement = ts13_equality_scope_statement(statement, "prove")?;
+    if equality_scope_statement.is_none() {
+        validate_private_element_identifier_bindings(statement, "prove")?;
+    }
     let has_ts13_revocation = validate_ts13_revocation_shape(statement, true, "prove")?;
     if statement.birth_date_value_offset != extracted.birth_date_value_offset
         || statement.nationality_value_offset != extracted.nationality_value_offset
@@ -3821,9 +4279,16 @@ fn prove_mdoc_circuit_inner(
         .map(|_| SharedFieldRelation::new())
         .collect();
     let sha_table_relations = SharedShaTableRelations::new();
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(|index| attribute_exposure(statement, index))
-        .collect();
+    let attribute_exposures: Vec<_> = if let Some(scope_statement) = &equality_scope_statement {
+        vec![FieldExposure::from_full_padded_message(
+            MDOC_EQUALITY_OUTER_STREAM_ID,
+            usize::from(scope_statement.item_padded_len),
+        )]
+    } else {
+        (0..statement.attributes.len())
+            .map(|index| attribute_exposure(statement, index))
+            .collect()
+    };
 
     let sha_consumers: Vec<_> = attribute_sha_params
         .iter()
@@ -3973,10 +4438,100 @@ fn prove_mdoc_circuit_inner(
         prover
     };
 
-    let mut mdoc_window_bind = MdocWindowBind::new_for_attributes(
-        mdoc_window_bind_rows_from(statement, None),
-        attribute_fields.clone(),
-    );
+    let mut mdoc_cbor_streams = Vec::new();
+    let mut mdoc_equality_scope = None;
+    if let Some(scope_statement) = equality_scope_statement.clone() {
+        let [attribute] = extracted.extracted_attributes.as_slice() else {
+            return Err(Error::Prove(
+                "TS13 equality scope needs exactly one extracted item".to_string(),
+            ));
+        };
+        let handles = MdocEqualityScopeHandles::fresh();
+        let scope =
+            MdocEqualityScope::new(scope_statement, attribute.item.clone(), handles.clone())
+                .map_err(|error| Error::Prove(format!("TS13 equality semantic scope: {error}")))?;
+        let inner_bytes = scope.inner_bytes();
+        let outer_parser = MdocCborStream::new(
+            stwo_sha256::native::pad_message(&attribute.item),
+            MdocCborInputMode::ShaPadded,
+            MDOC_EQUALITY_OUTER_STREAM_ID,
+            attribute_fields[0].clone(),
+            Some(handles.outer_parsed.clone()),
+        )
+        .map_err(|error| Error::Prove(format!("TS13 outer CBOR parser: {error}")))?;
+        let inner_parser = MdocCborStream::new(
+            inner_bytes,
+            MdocCborInputMode::Raw,
+            MDOC_EQUALITY_INNER_STREAM_ID,
+            handles.inner_raw.clone(),
+            Some(handles.inner_parsed.clone()),
+        )
+        .map_err(|error| Error::Prove(format!("TS13 inner CBOR parser: {error}")))?;
+        mdoc_cbor_streams = vec![outer_parser, inner_parser];
+        mdoc_equality_scope = Some(scope);
+    }
+
+    // Every private parser/SHA claim is randomized as one cyclic zero-sum
+    // ring. The challenge anchor is transcript-bound and is always composed
+    // when the equality scope exists; an unmasked private parser layout is not
+    // a production option.
+    let mut claim_mask_anchor = None;
+    if let Some(scope) = mdoc_equality_scope.as_ref() {
+        let challenge = SharedClaimMaskChallenge::new();
+        let mut log_sizes = merged_sha.ordered_claim_mask_log_sizes();
+        for parser in &mdoc_cbor_streams {
+            log_sizes.extend(parser.ordered_claim_mask_log_sizes());
+        }
+        log_sizes.extend(scope.ordered_claim_mask_log_sizes());
+        let mut ring = ClaimMaskRing::new(&log_sizes)
+            .map_err(|error| Error::Prove(format!("TS13 claim-mask ring: {error}")))?;
+        let merged_log = merged_sha.ordered_claim_mask_log_sizes()[0];
+        merged_sha = merged_sha.with_claim_mask(
+            ring.take(merged_log)
+                .map_err(|error| Error::Prove(format!("TS13 SHA claim mask: {error}")))?,
+            challenge.clone(),
+        );
+        let mut masked_parsers = Vec::with_capacity(mdoc_cbor_streams.len());
+        for parser in mdoc_cbor_streams {
+            let log_size = parser.ordered_claim_mask_log_sizes()[0];
+            masked_parsers.push(
+                parser.with_claim_mask(
+                    ring.take(log_size).map_err(|error| {
+                        Error::Prove(format!("TS13 parser claim mask: {error}"))
+                    })?,
+                    challenge.clone(),
+                ),
+            );
+        }
+        mdoc_cbor_streams = masked_parsers;
+        let scope = mdoc_equality_scope
+            .take()
+            .expect("scope existed while building its mask");
+        let scope_log = scope.ordered_claim_mask_log_sizes()[0];
+        mdoc_equality_scope = Some(
+            scope.with_claim_mask(
+                ring.take(scope_log)
+                    .map_err(|error| Error::Prove(format!("TS13 scope claim mask: {error}")))?,
+                challenge.clone(),
+            ),
+        );
+        ring.finish()
+            .map_err(|error| Error::Prove(format!("TS13 claim-mask ring: {error}")))?;
+        claim_mask_anchor = Some(
+            ClaimMaskChallengeModule::new(challenge, log_sizes)
+                .map_err(|error| Error::Prove(format!("TS13 claim-mask anchor: {error}")))?,
+        );
+    }
+
+    let (window_rows, window_handles) = if equality_scope_statement.is_some() {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            mdoc_window_bind_rows_from(statement, None),
+            attribute_fields.clone(),
+        )
+    };
+    let mut mdoc_window_bind = MdocWindowBind::new_for_attributes(window_rows, window_handles);
     // S4 ML-DSA: attribute digests bind to the PUBLIC `valueDigests` values
     // (host-derived facts) instead of the window-bind digest rows; validity is
     // a host-side check over the public MSO windows.
@@ -4083,6 +4638,12 @@ fn prove_mdoc_circuit_inner(
             modules.push(device);
         }
         modules.push(&mut merged_sha);
+        for parser in &mut mdoc_cbor_streams {
+            modules.push(parser);
+        }
+        if let Some(scope) = mdoc_equality_scope.as_mut() {
+            modules.push(scope);
+        }
         // Quantum revocation: the range AIR owns and publishes the private
         // message relation, so it must draw that handle before the hosted
         // ML-DSA bridge reads it.
@@ -4106,6 +4667,9 @@ fn prove_mdoc_circuit_inner(
         }
         if let Some(revocation_public) = ts13_revocation_public.as_mut() {
             modules.push(revocation_public);
+        }
+        if let Some(anchor) = claim_mask_anchor.as_mut() {
+            modules.push(anchor);
         }
         air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
             .map_err(|e| Error::Prove(format!("{e:?}")))?
@@ -4132,6 +4696,18 @@ fn prove_mdoc_circuit_inner(
                 .map(|bind| bind.interaction_claim().clone())
                 .collect()
         }),
+        mdoc_cbor_interaction_claims: mdoc_equality_scope.as_ref().map(|_| {
+            mdoc_cbor_streams
+                .iter()
+                .map(|parser| parser.interaction_claim().clone())
+                .collect()
+        }),
+        mdoc_equality_scope_metadata: mdoc_equality_scope
+            .as_ref()
+            .map(|scope| scope.metadata().clone()),
+        mdoc_equality_scope_interaction_claim: mdoc_equality_scope
+            .as_ref()
+            .map(|scope| scope.interaction_claim().clone()),
         ts13_revocation_range_interaction_claim: ts13_revocation_range
             .as_ref()
             .map(|range| range.interaction_claim().clone()),
@@ -4153,6 +4729,14 @@ pub fn verify_mdoc_circuit(
     statement: &MdocCircuitStatement,
 ) -> Result<(), Error> {
     verify_mdoc_circuit_with_pcs_config(proof, statement, mdoc_production_pcs_config())
+}
+
+pub fn verify_mdoc_ts13_public_statement(
+    proof: &MdocCircuitProof,
+    statement: &MdocTs13PublicStatement,
+) -> Result<(), Error> {
+    let verifier_statement = statement.verifier_circuit_statement()?;
+    verify_mdoc_circuit(proof, &verifier_statement)
 }
 
 pub fn verify_mdoc_circuit_with_pcs_config(
@@ -4207,7 +4791,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
 ) -> Result<MdocCircuitVerifyProfile, Error> {
     let total_start = Instant::now();
     validate_mldsa_public_keys(statement, "verify")?;
-    validate_private_element_identifier_bindings(statement, "verify")?;
+    let equality_scope_statement = ts13_equality_scope_statement(statement, "verify")?;
+    if equality_scope_statement.is_none() {
+        validate_private_element_identifier_bindings(statement, "verify")?;
+    }
     let has_ts13_revocation = validate_ts13_revocation_shape(statement, false, "verify")?;
     check_mldsa_device_key_binding(statement)?;
     let mldsa_mso_facts = mldsa_public_mso_facts(statement)?;
@@ -4272,6 +4859,20 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         _ => {
             return Err(Error::Verify(
                 "mdoc proof attribute digest-bind shape mismatch".into(),
+            ))
+        }
+    }
+    match (
+        equality_scope_statement.is_some(),
+        &proof.mdoc_cbor_interaction_claims,
+        &proof.mdoc_equality_scope_metadata,
+        &proof.mdoc_equality_scope_interaction_claim,
+    ) {
+        (true, Some(parser_claims), Some(_), Some(_)) if parser_claims.len() == 2 => {}
+        (false, None, None, None) => {}
+        _ => {
+            return Err(Error::Verify(
+                "mdoc proof equality parser/scope shape mismatch".to_string(),
             ))
         }
     }
@@ -4436,9 +5037,16 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         KeccakServiceVerifier::new(shapes, sums.clone(), mldsa_keccak_handle.clone())
     });
 
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(|index| attribute_exposure(statement, index))
-        .collect();
+    let attribute_exposures: Vec<_> = if let Some(scope_statement) = &equality_scope_statement {
+        vec![FieldExposure::from_full_padded_message(
+            MDOC_EQUALITY_OUTER_STREAM_ID,
+            usize::from(scope_statement.item_padded_len),
+        )]
+    } else {
+        (0..statement.attributes.len())
+            .map(|index| attribute_exposure(statement, index))
+            .collect()
+    };
     let mut merged_sha = (|| -> Result<Sha256MultiVerifier, Error> {
         let mut slot_specs = Vec::new();
         for exposure in &attribute_exposures {
@@ -4483,9 +5091,85 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         Ok(verifier)
     })()?;
 
+    let mut mdoc_cbor_streams = Vec::new();
+    let mut mdoc_equality_scope = None;
+    if let Some(scope_statement) = equality_scope_statement.clone() {
+        let handles = MdocEqualityScopeHandles::fresh();
+        let scope = MdocEqualityScope::verifier(
+            scope_statement,
+            proof
+                .mdoc_equality_scope_metadata
+                .clone()
+                .expect("equality scope metadata shape-gated above"),
+            handles.clone(),
+            proof
+                .mdoc_equality_scope_interaction_claim
+                .clone()
+                .expect("equality scope claim shape-gated above"),
+        )
+        .map_err(|error| Error::Verify(format!("TS13 equality semantic scope: {error}")))?;
+        let parser_claims = proof
+            .mdoc_cbor_interaction_claims
+            .as_ref()
+            .expect("parser claims shape-gated above");
+        let outer_parser = MdocCborStream::verifier(
+            MdocCborInputMode::ShaPadded,
+            MDOC_EQUALITY_OUTER_STREAM_ID,
+            scope.outer_parser_log_size(),
+            attribute_fields[0].clone(),
+            Some(handles.outer_parsed.clone()),
+            parser_claims[0].clone(),
+        )
+        .map_err(|error| Error::Verify(format!("TS13 outer CBOR parser: {error}")))?;
+        let inner_parser = MdocCborStream::verifier(
+            MdocCborInputMode::Raw,
+            MDOC_EQUALITY_INNER_STREAM_ID,
+            scope.inner_parser_log_size(),
+            handles.inner_raw.clone(),
+            Some(handles.inner_parsed.clone()),
+            parser_claims[1].clone(),
+        )
+        .map_err(|error| Error::Verify(format!("TS13 inner CBOR parser: {error}")))?;
+        mdoc_cbor_streams = vec![outer_parser, inner_parser];
+        mdoc_equality_scope = Some(scope);
+    }
+
+    let mut claim_mask_anchor = None;
+    if let Some(scope) = mdoc_equality_scope.as_ref() {
+        let challenge = SharedClaimMaskChallenge::new();
+        let mut log_sizes = merged_sha.ordered_claim_mask_log_sizes();
+        for parser in &mdoc_cbor_streams {
+            log_sizes.extend(parser.ordered_claim_mask_log_sizes());
+        }
+        log_sizes.extend(scope.ordered_claim_mask_log_sizes());
+        merged_sha = merged_sha.with_claim_mask(challenge.clone());
+        mdoc_cbor_streams = mdoc_cbor_streams
+            .into_iter()
+            .map(|parser| parser.with_claim_mask_verifier(challenge.clone()))
+            .collect();
+        mdoc_equality_scope = Some(
+            mdoc_equality_scope
+                .take()
+                .expect("scope existed while enabling its claim mask")
+                .with_claim_mask_verifier(challenge.clone()),
+        );
+        claim_mask_anchor = Some(
+            ClaimMaskChallengeModule::new(challenge, log_sizes)
+                .map_err(|error| Error::Verify(format!("TS13 claim-mask anchor: {error}")))?,
+        );
+    }
+
+    let (window_rows, window_handles) = if equality_scope_statement.is_some() {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            mdoc_window_bind_rows_from(statement, None),
+            attribute_fields.clone(),
+        )
+    };
     let mut mdoc_window_bind = MdocWindowBind::verifier_for_attributes(
-        mdoc_window_bind_rows_from(statement, None),
-        attribute_fields.clone(),
+        window_rows,
+        window_handles,
         proof.mdoc_window_bind_interaction_claim.clone(),
     );
     // S4 ML-DSA: per-attribute PUBLIC digest binds against the host-derived
@@ -4589,6 +5273,12 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         modules.push(device);
     }
     modules.push(&mut merged_sha);
+    for parser in &mut mdoc_cbor_streams {
+        modules.push(parser);
+    }
+    if let Some(scope) = mdoc_equality_scope.as_mut() {
+        modules.push(scope);
+    }
     if let Some(revocation_range) = ts13_revocation_range.as_mut() {
         modules.push(revocation_range);
     }
@@ -4609,6 +5299,9 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     }
     if let Some(revocation_public) = ts13_revocation_public.as_mut() {
         modules.push(revocation_public);
+    }
+    if let Some(anchor) = claim_mask_anchor.as_mut() {
+        modules.push(anchor);
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let tree0_start = Instant::now();
@@ -4824,4 +5517,50 @@ fn expect_digest(value: &Value, field: &'static str) -> Result<[u8; 32], MdocErr
 
 fn expect_32(bytes: &[u8], field: &'static str) -> Result<[u8; 32], MdocError> {
     bytes.try_into().map_err(|_| MdocError::WrongType(field))
+}
+
+#[cfg(test)]
+mod tree0_cache_key_tests {
+    use super::*;
+
+    fn material(
+        issuer_mldsa_message_bytes: usize,
+        device_mldsa_message_bytes: usize,
+    ) -> MdocTree0CacheKeyMaterial {
+        MdocTree0CacheKeyMaterial {
+            version: 4,
+            pcs_log_blowup_factor: 3,
+            merged_sha_slot_log: 8,
+            merged_sha_log_n_rows: 8,
+            has_ts13_revocation: true,
+            issuer_mldsa_message_bytes,
+            device_mldsa_message_bytes,
+            ts13_requested_item_padded_len: Some(192),
+            ts13_equality_random_len: Some(16),
+            age_attribute_index: None,
+            nationality_attribute_index: None,
+            nationality_array_len: None,
+            nationality_array_index: None,
+            birth_date_binding: 1,
+            nationality_binding: 1,
+            attributes: Vec::new(),
+            age_public: None,
+            nat_public: None,
+        }
+    }
+
+    #[test]
+    fn tree0_cache_material_distinguishes_hosted_mldsa_message_lengths() {
+        let baseline = bincode::serialize(&material(200, 120)).expect("cache material encodes");
+        assert_ne!(
+            baseline,
+            bincode::serialize(&material(201, 120)).expect("cache material encodes"),
+            "issuer ML-DSA message length determines hosted tree-0 preprocessing"
+        );
+        assert_ne!(
+            baseline,
+            bincode::serialize(&material(200, 121)).expect("cache material encodes"),
+            "device ML-DSA message length determines hosted tree-0 preprocessing"
+        );
+    }
 }

@@ -49,6 +49,17 @@ cd crates/sdk/android
 ./gradlew publishToMavenLocal      # builds .so (all ABIs) + bindings + AAR -> ~/.m2
 ```
 
+Local publications overwrite the same development coordinate. After switching SDK branches,
+refresh and rebuild the consuming wallet so its APK cannot retain the previous branch's AAR:
+
+```bash
+# From the consuming wallet checkout:
+./gradlew --refresh-dependencies :app:assembleDemoDebug
+```
+
+The Android native link uses `--no-undefined`, so a missing dependency such as zstd fails the
+SDK build instead of surfacing later as a JNA `dlopen()` error.
+
 Useful intermediate tasks:
 
 - `./gradlew cargoNdkBuild` — cross-compile `libeuid_zk_sdk.so` per ABI.

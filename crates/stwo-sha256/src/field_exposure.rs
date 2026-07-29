@@ -73,6 +73,7 @@ pub struct FieldExposure {
     // ~10% of single-core prove time.
     decomposed_words: Vec<usize>,
     target_blocks: Vec<usize>,
+    full_padded_message: bool,
 }
 
 impl FieldExposure {
@@ -148,12 +149,34 @@ impl FieldExposure {
             yields,
             decomposed_words,
             target_blocks,
+            full_padded_message: false,
         }
+    }
+
+    /// Expose one complete, canonically padded SHA-256 compression input.
+    ///
+    /// Unlike a regular byte window, this also asks the AIR to prove that the
+    /// final exposed block is the final enabled hash block. A downstream
+    /// parser can therefore bind the exact message and its padding, rather
+    /// than only a prefix of a longer hashed stream.
+    pub fn from_full_padded_message(field_id: u32, padded_len: usize) -> Self {
+        assert!(
+            padded_len != 0 && padded_len.is_multiple_of(BLOCK_BYTES),
+            "full padded SHA message must contain whole non-empty blocks"
+        );
+        let mut exposure = Self::from_preimage_windows_multi(&[(field_id, 0, padded_len)]);
+        exposure.full_padded_message = true;
+        exposure
     }
 
     /// Whether the provider is off (no field columns, no yields).
     pub fn is_empty(&self) -> bool {
         self.yields.is_empty()
+    }
+
+    /// Whether this exposure covers the exact complete padded message.
+    pub fn binds_full_padded_message(&self) -> bool {
+        self.full_padded_message
     }
 
     /// The yields, in the fixed order the trace, constraints, and interaction
@@ -280,6 +303,16 @@ mod tests {
             (field_id::DOB, 5, 4),
             (field_id::NATIONALITY, 9, 2),
         ])
+    }
+
+    #[test]
+    fn full_padded_message_marks_exact_contiguous_blocks() {
+        let exposure = FieldExposure::from_full_padded_message(77, 128);
+        assert!(exposure.binds_full_padded_message());
+        assert_eq!(exposure.n_yields(), 128);
+        assert_eq!(exposure.target_blocks(), &[0, 1]);
+        assert_eq!(exposure.yields().first().unwrap().byte_index, 0);
+        assert_eq!(exposure.yields().last().unwrap().byte_index, 127);
     }
 
     #[test]

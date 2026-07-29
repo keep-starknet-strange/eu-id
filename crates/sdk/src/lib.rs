@@ -95,9 +95,18 @@ const TS13_UNSUPPORTED_JWT_FORMAT: &str = "zk-jwt";
 const TS13_DEVICE_AUTH_PROFILE: &str = "iso18013-5";
 const TS13_PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const TS13_PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
-const TS13_MAX_MDOC_BYTES: u32 = 16_384;
+const TS13_MAX_MSO_PAYLOAD_BYTES: u32 = eu_id_prover::ts13::TS13_MAX_MSO_PAYLOAD_BYTES as u32;
 const TS13_NUM_ATTRIBUTES: u32 = 1;
 const TS13_MAX_ATTRIBUTE_BYTES: u32 = 32;
+const TS13_MAX_ATTRIBUTE_ITEM_BYTES: u32 = eu_id_prover::ts13::TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32;
+const TS13_MAX_REQUESTED_DIGEST_ID: u32 = eu_id_prover::ts13::TS13_MAX_REQUESTED_DIGEST_ID;
+const TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES: u32 =
+    eu_id_prover::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES as u32;
+const TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES: u32 =
+    eu_id_prover::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES as u32;
+const TS13_MAX_SESSION_TRANSCRIPT_BYTES: usize = TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES as usize;
+const TS13_MERGED_SHA_SLOT_LOG: u32 = eu_id_prover::ts13::TS13_MERGED_SHA_SLOT_LOG;
+const TS13_MERGED_SHA_LOG_N_ROWS: u32 = eu_id_prover::ts13::TS13_MERGED_SHA_LOG_N_ROWS;
 const TS13_POTENTIAL_ISSUERS: u32 = 1;
 const TS13_REVOCATION_ENABLED: bool = true;
 const TS13_REVOCATION_ID_WIDTH_BYTES: u32 = 8;
@@ -105,7 +114,7 @@ const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1_952;
 /// Deliberately independent from the product SDK envelope versions. A TS13
 /// verifier never accepts a ProductDefault proof as an equality+revocation
 /// presentation, or vice versa.
-const TS13_ENVELOPE_FORMAT_V1: u16 = 1;
+const TS13_ENVELOPE_FORMAT_V2: u16 = 2;
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ts13DisclosureKind {
@@ -121,8 +130,14 @@ pub struct Ts13PresentationRequest {
     pub namespace: String,
     pub circuit_hash: String,
     pub num_attributes: u32,
-    pub max_mdoc_bytes: u32,
+    pub max_mso_payload_bytes: u32,
     pub max_attribute_bytes: u32,
+    pub max_attribute_item_bytes: u32,
+    pub max_requested_digest_id: u32,
+    pub max_issuer_mldsa_message_bytes: u32,
+    pub max_device_mldsa_message_bytes: u32,
+    pub merged_sha_slot_log: u32,
+    pub merged_sha_log_n_rows: u32,
     pub potential_issuers: u32,
     pub revocation_enabled: bool,
     pub revocation_id_width_bytes: u32,
@@ -215,10 +230,37 @@ fn ts13_tuple_value(request: &Ts13PresentationRequest) -> Value {
         ("doctype".into(), request.doctype.as_str().into()),
         ("namespace".into(), request.namespace.as_str().into()),
         ("num_attributes".into(), Value::from(request.num_attributes)),
-        ("max_mdoc_bytes".into(), Value::from(request.max_mdoc_bytes)),
+        (
+            "max_mso_payload_bytes".into(),
+            Value::from(request.max_mso_payload_bytes),
+        ),
         (
             "max_attribute_bytes".into(),
             Value::from(request.max_attribute_bytes),
+        ),
+        (
+            "max_attribute_item_bytes".into(),
+            Value::from(request.max_attribute_item_bytes),
+        ),
+        (
+            "max_requested_digest_id".into(),
+            Value::from(request.max_requested_digest_id),
+        ),
+        (
+            "max_issuer_mldsa_message_bytes".into(),
+            Value::from(request.max_issuer_mldsa_message_bytes),
+        ),
+        (
+            "max_device_mldsa_message_bytes".into(),
+            Value::from(request.max_device_mldsa_message_bytes),
+        ),
+        (
+            "merged_sha_slot_log".into(),
+            Value::from(request.merged_sha_slot_log),
+        ),
+        (
+            "merged_sha_log_n_rows".into(),
+            Value::from(request.merged_sha_log_n_rows),
         ),
         (
             "potential_issuers".into(),
@@ -282,8 +324,14 @@ fn ts13_tuple_is_supported(request: &Ts13PresentationRequest) -> bool {
     request.doctype == TS13_PID_DOCTYPE
         && request.namespace == TS13_PID_NAMESPACE
         && request.num_attributes == TS13_NUM_ATTRIBUTES
-        && request.max_mdoc_bytes == TS13_MAX_MDOC_BYTES
+        && request.max_mso_payload_bytes == TS13_MAX_MSO_PAYLOAD_BYTES
         && request.max_attribute_bytes == TS13_MAX_ATTRIBUTE_BYTES
+        && request.max_attribute_item_bytes == TS13_MAX_ATTRIBUTE_ITEM_BYTES
+        && request.max_requested_digest_id == TS13_MAX_REQUESTED_DIGEST_ID
+        && request.max_issuer_mldsa_message_bytes == TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
+        && request.max_device_mldsa_message_bytes == TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
+        && request.merged_sha_slot_log == TS13_MERGED_SHA_SLOT_LOG
+        && request.merged_sha_log_n_rows == TS13_MERGED_SHA_LOG_N_ROWS
         && request.potential_issuers == TS13_POTENTIAL_ISSUERS
         && request.revocation_enabled == TS13_REVOCATION_ENABLED
         && request.revocation_id_width_bytes == TS13_REVOCATION_ID_WIDTH_BYTES
@@ -346,6 +394,11 @@ pub fn ts13_validate_presentation_request(
             "ML-DSA-65 revocation public key must be {ML_DSA_65_PUBLIC_KEY_BYTES} bytes"
         )));
     }
+    if request.session_transcript.len() > TS13_MAX_SESSION_TRANSCRIPT_BYTES {
+        return Err(ZkError::InvalidInput(format!(
+            "TS13 session transcript exceeds {TS13_MAX_SESSION_TRANSCRIPT_BYTES} bytes"
+        )));
+    }
     Ok(())
 }
 
@@ -370,7 +423,7 @@ pub fn ts13_build_zk_document(
 struct Ts13ProofEnvelope {
     envelope_format: u16,
     request_binding_hash: String,
-    mdoc_statement: eu_id_prover::MdocStatement,
+    mdoc_statement: eu_id_prover::MdocTs13Statement,
     stark_proof: Vec<u8>,
 }
 
@@ -422,7 +475,7 @@ fn decode_ts13_proof_envelope(proof: &[u8]) -> Result<Ts13ProofEnvelope, ZkError
         .allow_trailing_bytes()
         .deserialize(proof)
         .map_err(|_| ZkError::Verify("unsupported TS13 envelope format".to_string()))?;
-    if envelope_format != TS13_ENVELOPE_FORMAT_V1 {
+    if envelope_format != TS13_ENVELOPE_FORMAT_V2 {
         return Err(ZkError::Verify(
             "unsupported TS13 envelope format".to_string(),
         ));
@@ -441,15 +494,17 @@ fn decode_ts13_proof_envelope(proof: &[u8]) -> Result<Ts13ProofEnvelope, ZkError
 
 fn ts13_mdoc_statement_matches(
     request: &Ts13PresentationRequest,
-    statement: &eu_id_prover::MdocStatement,
+    statement: &eu_id_prover::MdocTs13Statement,
 ) -> Result<bool, ZkError> {
     let expected_attributes =
         expected_mdoc_attributes_for_profile(MdocRequestProfile::Ts13AgeOver18Equality);
     if statement.doctype != request.doctype
         || statement.namespace != request.namespace
         || statement.policy != ts13_policy(request)?
-        || statement.age_attribute_index.is_some()
-        || statement.nationality_attribute_index.is_some()
+        || statement.requested_digest_id > TS13_MAX_REQUESTED_DIGEST_ID
+        || !eu_id_prover::ts13::ts13_requested_item_padded_len_is_supported(
+            statement.requested_item_padded_len,
+        )
         || statement.attributes.len() != expected_attributes.len()
         || statement
             .attributes
@@ -462,13 +517,10 @@ fn ts13_mdoc_statement_matches(
     {
         return Ok(false);
     }
-    let Some(issuer_pk) = eu_id_prover::mdoc::mdoc_statement_issuer_mldsa_pk(statement) else {
-        return Ok(false);
-    };
     if !request
         .trusted_issuer_hashes
         .iter()
-        .any(|trusted| trusted == &hex_sha256(&issuer_pk))
+        .any(|trusted| trusted == &hex_sha256(&statement.issuer.public_key))
     {
         return Ok(false);
     }
@@ -481,27 +533,15 @@ fn ts13_mdoc_statement_matches(
             "invalid TS13 DeviceAuthentication input: {error:?}"
         ))
     })?;
-    let Some(device_input) = statement.device_input.as_mldsa() else {
-        return Ok(false);
-    };
-    if <[u8; 32]>::from(Sha256::digest(&device_input.message)) != expected_device_hash {
+    if <[u8; 32]>::from(Sha256::digest(&statement.device.message)) != expected_device_hash {
         return Ok(false);
     }
-    match &statement.ts13_revocation {
-        Some(public)
-            if public.epoch == request.revocation_epoch
-                && matches!(
-                    &public.revocation_public_key,
-                    eu_id_prover::mdoc::MdocRevocationKey::MlDsa(key)
-                        if key == &request.revocation_public_key
-                )
-                && statement.ts13_revocation_signature.is_some()
-                && statement.ts13_revocation_range.is_none() =>
-        {
-            Ok(true)
-        }
-        _ => Ok(false),
-    }
+    Ok(statement.revocation.epoch == request.revocation_epoch
+        && matches!(
+            &statement.revocation.revocation_public_key,
+            eu_id_prover::mdoc::MdocRevocationKey::MlDsa(key)
+                if key == &request.revocation_public_key
+        ))
 }
 
 /// Create the dedicated TS13 equality-and-revocation proof envelope.  This
@@ -552,7 +592,7 @@ pub fn ts13_prove_zk_document(
             .and_then(|bytes| compress_stark_proof_for_ffi(&bytes))?;
         let request_binding_hash = ts13_request_binding_hash(&request);
         let proof = bincode::serialize(&Ts13ProofEnvelope {
-            envelope_format: TS13_ENVELOPE_FORMAT_V1,
+            envelope_format: TS13_ENVELOPE_FORMAT_V2,
             request_binding_hash: request_binding_hash.clone(),
             mdoc_statement,
             stark_proof,
@@ -576,20 +616,25 @@ pub fn ts13_verify_zk_document(
     request: &Ts13PresentationRequest,
     document: &Ts13ZkDocument,
 ) -> Result<bool, ZkError> {
+    if ts13_validate_presentation_request(request).is_err()
+        || document.proof.len() > MAX_MDOC_ENVELOPE_BYTES
+    {
+        return Ok(false);
+    }
+    if document.doc_type != request.doctype
+        || document.zk_system_id != request.zk_system_id
+        || document.circuit_hash != request.circuit_hash
+        || document.request_binding_hash != ts13_request_binding_hash(request)
+        || document.disclosed_attributes != canonical_ts13_disclosures()
+    {
+        return Ok(false);
+    }
+
+    // All caller-controlled variable-length fields are bounded or equal to
+    // canonical constants before they are copied onto the large-stack worker.
     let request = request.clone();
     let document = document.clone();
     on_large_stack(move || {
-        if ts13_validate_presentation_request(&request).is_err() {
-            return Ok(false);
-        }
-        if document.doc_type != request.doctype
-            || document.zk_system_id != request.zk_system_id
-            || document.circuit_hash != request.circuit_hash
-            || document.request_binding_hash != ts13_request_binding_hash(&request)
-            || document.disclosed_attributes != canonical_ts13_disclosures()
-        {
-            return Ok(false);
-        }
         let Ok(envelope) = decode_ts13_proof_envelope(&document.proof) else {
             return Ok(false);
         };
@@ -604,7 +649,11 @@ pub fn ts13_verify_zk_document(
         else {
             return Ok(false);
         };
-        Ok(eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok())
+        Ok(eu_id_prover::ts13::verify_ts13_age_over_18_circuit(
+            &stark_proof,
+            &envelope.mdoc_statement,
+        )
+        .is_ok())
     })
 }
 
@@ -1171,8 +1220,14 @@ mod tests {
             namespace: TS13_PID_NAMESPACE.to_string(),
             circuit_hash: ts13_default_circuit_hash(),
             num_attributes: TS13_NUM_ATTRIBUTES,
-            max_mdoc_bytes: TS13_MAX_MDOC_BYTES,
+            max_mso_payload_bytes: TS13_MAX_MSO_PAYLOAD_BYTES,
             max_attribute_bytes: TS13_MAX_ATTRIBUTE_BYTES,
+            max_attribute_item_bytes: TS13_MAX_ATTRIBUTE_ITEM_BYTES,
+            max_requested_digest_id: TS13_MAX_REQUESTED_DIGEST_ID,
+            max_issuer_mldsa_message_bytes: TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES,
+            max_device_mldsa_message_bytes: TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES,
+            merged_sha_slot_log: TS13_MERGED_SHA_SLOT_LOG,
+            merged_sha_log_n_rows: TS13_MERGED_SHA_LOG_N_ROWS,
             potential_issuers: TS13_POTENTIAL_ISSUERS,
             revocation_enabled: TS13_REVOCATION_ENABLED,
             revocation_id_width_bytes: TS13_REVOCATION_ID_WIDTH_BYTES,
@@ -1227,6 +1282,58 @@ mod tests {
             ts13_validate_presentation_request(&request),
             Err(ZkError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn ts13_rejects_resource_tuple_drift() {
+        let mut request = ts13_request();
+        request.max_mso_payload_bytes += 1;
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message))
+                if message == "unsupported TS13 tuple; no circuit_hash lookup entry"
+        ));
+
+        let mut request = ts13_request();
+        request.merged_sha_slot_log += 1;
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message))
+                if message == "unsupported TS13 tuple; no circuit_hash lookup entry"
+        ));
+
+        let mut request = ts13_request();
+        request.max_requested_digest_id += 1;
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message))
+                if message == "unsupported TS13 tuple; no circuit_hash lookup entry"
+        ));
+    }
+
+    #[test]
+    fn ts13_rejects_oversized_session_transcript() {
+        let mut request = ts13_request();
+        request.session_transcript = vec![0; TS13_MAX_SESSION_TRANSCRIPT_BYTES + 1];
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message))
+                if message == format!(
+                    "TS13 session transcript exceeds {TS13_MAX_SESSION_TRANSCRIPT_BYTES} bytes"
+                )
+        ));
+    }
+
+    #[test]
+    fn ts13_verify_rejects_oversized_document_before_worker_clone() {
+        let request = ts13_request();
+        let document = ts13_build_zk_document(
+            request.clone(),
+            canonical_ts13_disclosures(),
+            vec![0; MAX_MDOC_ENVELOPE_BYTES + 1],
+        )
+        .expect("valid request builds");
+        assert!(!ts13_verify_zk_document(&request, &document).unwrap());
     }
 
     #[test]

@@ -24,7 +24,7 @@ class SdkInstrumentedTest {
         version = 1u,
         doctype = "eu.europa.ec.eudi.pid.1",
         namespace = "eu.europa.ec.eudi.pid.1",
-        issuerPublicKeyHash = ByteArray(32) { 0x11 },
+        issuerKey = IssuerKey.MlDsa(pkHash = ByteArray(32) { 0x11 }),
         todayEpochDay = 7305,
         nonce = byteArrayOf(0xab.toByte(), 0xcd.toByte(), 0xef.toByte()),
         predicateMode = PredicateMode.AND,
@@ -35,7 +35,7 @@ class SdkInstrumentedTest {
 
     private fun malformedWitness() = ZkMdocWitness(
         document = byteArrayOf(),
-        trustedIssuerPublicKeys = emptyList(),
+        trustedIssuers = TrustedIssuers.PublicKeys(emptyList()),
     )
 
     @Test

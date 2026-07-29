@@ -7,6 +7,8 @@
 
 pub(crate) mod claimed_sum_blinder;
 pub mod mdoc;
+mod mdoc_cbor_stream;
+mod mdoc_equality_scope;
 mod mdoc_window_bind;
 pub mod policy;
 mod public_digest_bind;
@@ -16,6 +18,7 @@ use stwo::core::pcs::PcsConfig;
 
 pub use mdoc::{
     MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
+    MdocTs13PublicStatement as MdocTs13Statement,
 };
 pub use policy::Policy;
 pub use predicates::{all_nationality_codes, Date};
@@ -48,7 +51,9 @@ pub fn prove_mdoc(
     let statement =
         mdoc::MdocCircuitStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
-    Ok((proof, statement))
+    // Never hand the prover's statement to a verifier: it carries the
+    // credential's real birth_date and nationality values.
+    Ok((proof, statement.into_public_view()))
 }
 
 /// Prove the TS13 profile with a private revocation range witness.  The range
@@ -63,7 +68,12 @@ pub fn prove_mdoc_with_ts13_revocation(
     id_lo: u64,
     id_hi: u64,
     signature: mdoc::MdocRevocationSignature,
-) -> Result<(MdocProof, MdocStatement), Error> {
+) -> Result<(MdocProof, MdocTs13Statement), Error> {
+    if document.len() > ts13::TS13_MAX_DOCUMENT_BYTES {
+        return Err(Error::Prove(
+            "TS13 document exceeds published resource cap".to_string(),
+        ));
+    }
     let mut extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
     mdoc::select_accepted_nationality(&mut extracted, &policy);
     let id = ts13::ts13_mso_derived_revocation_id(&extracted.mso);
@@ -72,8 +82,11 @@ pub fn prove_mdoc_with_ts13_revocation(
         .with_ts13_revocation(revocation)
         .with_ts13_revocation_range(mdoc::MdocRevocationRangeWitness { id, id_lo, id_hi })
         .with_ts13_revocation_signature(signature);
+    ts13::validate_ts13_age_over_18_proving_inputs(document, &extracted, &statement)
+        .map_err(|error| Error::Prove(format!("TS13 published resource contract: {error:?}")))?;
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
-    Ok((proof, statement))
+    let public_statement = mdoc::MdocTs13PublicStatement::from_circuit(&statement)?;
+    Ok((proof, public_statement))
 }
 
 /// Verify a product mdoc proof against its public statement. Tree-0 is

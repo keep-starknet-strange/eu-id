@@ -2,23 +2,52 @@ use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
 use crate::mdoc::{
-    verify_mdoc_circuit, ExtractedPidMdoc, MdocCircuitProof, MdocCircuitStatement,
-    MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationSignature,
-    MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR, MDOC_PRODUCTION_PCS_POW_BITS,
+    mdoc_statement_resource_lengths, mdoc_ts13_public_statement_resource_lengths,
+    verify_mdoc_circuit, verify_mdoc_ts13_public_statement, ExtractedPidMdoc, MdocCircuitProof,
+    MdocCircuitStatement, MdocRevocationKey, MdocRevocationPublicInputs, MdocRevocationSignature,
+    MdocTs13PublicStatement, MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR, MDOC_PRODUCTION_PCS_POW_BITS,
     MDOC_PRODUCTION_PCS_QUERIES,
 };
 
 // Regenerated whenever the canonical published tuple changes.
-// Repinned: packed z/w coefficient AIR/tree shape 2026-07-24. Previous:
-// mldsa65-pure-stark-direct-v6 /
-// 74b70ce9bf2e5bb230df71cf8d2b513c887607030eb1eda91f6ca00d126215f4.
+// Repinned for the exact-item CBOR parser/scope and full-padded SHA binding.
 pub const TS13_PUBLISHED_AGE_OVER_18_CIRCUIT_HASH: &str =
-    "375954cc8370dd241c5bc3ecce8da5c447edfe4c720e6dc786a7353ef0985919";
+    "a0b589f7a1b0b2bc97fff5e4ed3b0d145c55f23379d6ac87abd377225537e2b5";
 pub const TS13_P4C_MIN_BLIND_ROWS: usize = 256;
 pub const TS13_P4C_MAX_OPENINGS: usize = 256;
 pub const TS13_P4C_MIN_DECOY_MESSAGE_BITS: usize = 512;
 pub const TS13_P4C_PER_OPENING_STATISTICAL_BITS: u32 = 64;
-pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v7";
+pub const TS13_CONSTRAINT_SYSTEM: &str = "mldsa65-pure-stark-direct-v9";
+/// The one published equality attribute's canonical IssuerSignedItem is
+/// allocated in a three-block SHA slot (256 rows), including padding.
+pub const TS13_MAX_ATTRIBUTE_ITEM_BYTES: usize = 183;
+/// Published finite range for the credential-stable `IssuerSignedItem.digestID`.
+pub const TS13_MAX_REQUESTED_DIGEST_ID: u32 = u16::MAX as u32;
+/// SHA-256-padded size buckets reachable under the 183-byte item cap.
+pub const TS13_ALLOWED_REQUESTED_ITEM_PADDED_LENGTHS: [u16; 3] = [64, 128, 192];
+
+pub(crate) fn ts13_requested_digest_id_is_supported(digest_id: u32) -> bool {
+    digest_id <= TS13_MAX_REQUESTED_DIGEST_ID
+}
+
+pub fn ts13_requested_item_padded_len_is_supported(padded_len: u16) -> bool {
+    TS13_ALLOWED_REQUESTED_ITEM_PADDED_LENGTHS.contains(&padded_len)
+}
+pub const TS13_MERGED_SHA_SLOT_LOG: u32 = 8;
+pub const TS13_MERGED_SHA_LOG_N_ROWS: u32 = 8;
+/// The signed MSO, not the whole transport document, is the issuer-side
+/// resource consumed by the ML-DSA/Keccak statement.
+pub const TS13_MAX_MSO_PAYLOAD_BYTES: usize = 4_096;
+/// The canonical Signature1 envelope around the MSO is bounded separately
+/// because ML-DSA absorbs the full issuer message.
+pub const TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES: usize = 4_160;
+/// The DeviceAuthentication Sig_structure is also absorbed by ML-DSA.  This
+/// cap leaves room for the published session binding without accepting an
+/// arbitrary message layout under this circuit pin.
+pub const TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES: usize = 512;
+/// Prover-only transport cap. A verifier does not receive the document, so
+/// its proof-side analogue is the MSO/item/message contract below.
+pub const TS13_MAX_DOCUMENT_BYTES: usize = 16_384;
 pub const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = MDOC_PRODUCTION_PCS_LOG_BLOWUP_FACTOR;
 pub const TS13_PCS_QUERIES: u32 = MDOC_PRODUCTION_PCS_QUERIES as u32;
 pub const TS13_PCS_POW_BITS: u32 = MDOC_PRODUCTION_PCS_POW_BITS;
@@ -40,8 +69,14 @@ pub struct Ts13CircuitTuple {
     pub doctype: &'static str,
     pub namespace: &'static str,
     pub num_attributes: u32,
-    pub max_mdoc_bytes: u32,
+    pub max_mso_payload_bytes: u32,
     pub max_attribute_bytes: u32,
+    pub max_attribute_item_bytes: u32,
+    pub max_requested_digest_id: u32,
+    pub max_issuer_mldsa_message_bytes: u32,
+    pub max_device_mldsa_message_bytes: u32,
+    pub merged_sha_slot_log: u32,
+    pub merged_sha_log_n_rows: u32,
     pub potential_issuers: u32,
     pub revocation_enabled: bool,
     pub revocation_id_width_bytes: u32,
@@ -61,8 +96,14 @@ impl Ts13CircuitTuple {
             doctype: "eu.europa.ec.eudi.pid.1",
             namespace: "eu.europa.ec.eudi.pid.1",
             num_attributes: 1,
-            max_mdoc_bytes: 16_384,
+            max_mso_payload_bytes: TS13_MAX_MSO_PAYLOAD_BYTES as u32,
             max_attribute_bytes: 32,
+            max_attribute_item_bytes: TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32,
+            max_requested_digest_id: TS13_MAX_REQUESTED_DIGEST_ID,
+            max_issuer_mldsa_message_bytes: TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES as u32,
+            max_device_mldsa_message_bytes: TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES as u32,
+            merged_sha_slot_log: TS13_MERGED_SHA_SLOT_LOG,
+            merged_sha_log_n_rows: TS13_MERGED_SHA_LOG_N_ROWS,
             potential_issuers: 1,
             revocation_enabled: true,
             revocation_id_width_bytes: 8,
@@ -82,10 +123,37 @@ impl Ts13CircuitTuple {
             ("doctype".into(), self.doctype.into()),
             ("namespace".into(), self.namespace.into()),
             ("num_attributes".into(), Value::from(self.num_attributes)),
-            ("max_mdoc_bytes".into(), Value::from(self.max_mdoc_bytes)),
+            (
+                "max_mso_payload_bytes".into(),
+                Value::from(self.max_mso_payload_bytes),
+            ),
             (
                 "max_attribute_bytes".into(),
                 Value::from(self.max_attribute_bytes),
+            ),
+            (
+                "max_attribute_item_bytes".into(),
+                Value::from(self.max_attribute_item_bytes),
+            ),
+            (
+                "max_requested_digest_id".into(),
+                Value::from(self.max_requested_digest_id),
+            ),
+            (
+                "max_issuer_mldsa_message_bytes".into(),
+                Value::from(self.max_issuer_mldsa_message_bytes),
+            ),
+            (
+                "max_device_mldsa_message_bytes".into(),
+                Value::from(self.max_device_mldsa_message_bytes),
+            ),
+            (
+                "merged_sha_slot_log".into(),
+                Value::from(self.merged_sha_slot_log),
+            ),
+            (
+                "merged_sha_log_n_rows".into(),
+                Value::from(self.merged_sha_log_n_rows),
             ),
             (
                 "potential_issuers".into(),
@@ -234,8 +302,138 @@ pub fn ts13_default_circuit_hash() -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ts13MdocVerifierError {
+    Statement,
+    ResourceCap,
+    ProofShape,
+    MdocProof,
+}
+
+/// Fail-closed verifier for the one published TS13 equality+revocation
+/// statement.  All profile and resource checks intentionally happen before
+/// the generic verifier constructs tree-0 from proof-controlled layout.
+pub fn verify_ts13_age_over_18_circuit(
+    proof: &MdocCircuitProof,
+    statement: &MdocTs13PublicStatement,
+) -> Result<(), Ts13MdocVerifierError> {
+    validate_ts13_age_over_18_public_statement(statement)?;
+    validate_ts13_age_over_18_proof_shape(proof)?;
+    verify_mdoc_ts13_public_statement(proof, statement)
+        .map_err(|_| Ts13MdocVerifierError::MdocProof)
+}
+
+/// Proving-side resource check. The transport document itself is available
+/// only here; verification pins every representation that survives in the
+/// statement/proof instead.
+pub fn validate_ts13_age_over_18_proving_inputs(
+    document: &[u8],
+    extracted: &ExtractedPidMdoc,
+    statement: &MdocCircuitStatement,
+) -> Result<(), Ts13MdocVerifierError> {
+    if document.len() > TS13_MAX_DOCUMENT_BYTES
+        || extracted.mso.len() > TS13_MAX_MSO_PAYLOAD_BYTES
+        || extracted.issuer_sig_structure.len() > TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
+        || extracted.device_sig_structure.len() > TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
+        || extracted.extracted_attributes.len() != 1
+        || extracted.extracted_attributes[0].item.len() > TS13_MAX_ATTRIBUTE_ITEM_BYTES
+    {
+        return Err(Ts13MdocVerifierError::ResourceCap);
+    }
+    let actual_item_padded_len = u16::try_from(
+        stwo_sha256::native::pad_message(&extracted.extracted_attributes[0].item).len(),
+    )
+    .map_err(|_| Ts13MdocVerifierError::ResourceCap)?;
+    if statement.ts13_requested_item_padded_len != Some(actual_item_padded_len) {
+        return Err(Ts13MdocVerifierError::Statement);
+    }
+    validate_ts13_age_over_18_proving_statement(statement)
+}
+
+fn validate_ts13_age_over_18_proving_statement(
+    statement: &MdocCircuitStatement,
+) -> Result<(), Ts13MdocVerifierError> {
+    if statement.doctype != "eu.europa.ec.eudi.pid.1"
+        || statement.namespace != "eu.europa.ec.eudi.pid.1"
+        || statement.policy.min_age_years != 0
+        || !statement.policy.accepted_nationalities.is_empty()
+        || !statement.policy.accepted_nationalities_alpha2.is_empty()
+        || statement.age_attribute_index.is_some()
+        || statement.nationality_attribute_index.is_some()
+        || statement.attributes.len() != 1
+        || statement.attributes[0].element_identifier != "age_over_18"
+        || statement.attributes[0].mode
+            != crate::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5])
+        || statement.attributes[0].value != [0xf5]
+        || !ts13_requested_digest_id_is_supported(statement.attributes[0].digest_id)
+        || !matches!(
+            statement.ts13_requested_item_padded_len,
+            Some(padded_len) if ts13_requested_item_padded_len_is_supported(padded_len)
+        )
+        || statement.ts13_revocation.is_none()
+        || statement.ts13_revocation_signature.is_none()
+        || statement.ts13_revocation_range.is_none()
+    {
+        return Err(Ts13MdocVerifierError::Statement);
+    }
+    let lengths =
+        mdoc_statement_resource_lengths(statement).map_err(|_| Ts13MdocVerifierError::Statement)?;
+    if lengths.issuer_mso_payload_bytes > TS13_MAX_MSO_PAYLOAD_BYTES
+        || lengths.issuer_message_bytes > TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
+        || lengths.device_message_bytes > TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
+        || statement.attributes[0].value.len() > 32
+    {
+        return Err(Ts13MdocVerifierError::ResourceCap);
+    }
+    Ok(())
+}
+
+fn validate_ts13_age_over_18_public_statement(
+    statement: &MdocTs13PublicStatement,
+) -> Result<(), Ts13MdocVerifierError> {
+    if statement.doctype != "eu.europa.ec.eudi.pid.1"
+        || statement.namespace != "eu.europa.ec.eudi.pid.1"
+        || statement.policy.min_age_years != 0
+        || !statement.policy.accepted_nationalities.is_empty()
+        || !statement.policy.accepted_nationalities_alpha2.is_empty()
+        || statement.attributes.len() != 1
+        || statement.attributes[0].element_identifier != "age_over_18"
+        || statement.attributes[0].mode
+            != crate::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5])
+        || !ts13_requested_digest_id_is_supported(statement.requested_digest_id)
+        || !ts13_requested_item_padded_len_is_supported(statement.requested_item_padded_len)
+    {
+        return Err(Ts13MdocVerifierError::Statement);
+    }
+    let lengths = mdoc_ts13_public_statement_resource_lengths(statement)
+        .map_err(|_| Ts13MdocVerifierError::Statement)?;
+    if lengths.issuer_mso_payload_bytes > TS13_MAX_MSO_PAYLOAD_BYTES
+        || lengths.issuer_message_bytes > TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
+        || lengths.device_message_bytes > TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
+    {
+        return Err(Ts13MdocVerifierError::ResourceCap);
+    }
+    Ok(())
+}
+
+fn validate_ts13_age_over_18_proof_shape(
+    proof: &MdocCircuitProof,
+) -> Result<(), Ts13MdocVerifierError> {
+    if proof.merged_sha_layout() != Some((TS13_MERGED_SHA_SLOT_LOG, TS13_MERGED_SHA_LOG_N_ROWS))
+        || !proof.has_ts13_mldsa_shape()
+    {
+        return Err(Ts13MdocVerifierError::ProofShape);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ts13ZkExposureClassification {
     PublicByDesign,
+    /// Public and credential-stable, so repeated presentations are correlatable.
+    LinkablePublic,
+    /// A private-witness-dependent value is opened without a proof-wide
+    /// zero-knowledge polynomial mask.
+    UnmaskedPrivateTrace,
     PerfectlyMasked,
     StatisticallyMasked,
     RejectedAtTs13Entry,
@@ -291,9 +489,39 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
             rationale: "baseline TS13 tuple uses public issuer trust policy",
         },
         Ts13ZkExposure {
+            name: "issuer Sig_structure and MobileSecurityObject",
+            classification: LinkablePublic,
+            rationale: "the staged verifier hashes the public issuer message natively; its credential-stable MSO and digest map make presentations correlatable",
+        },
+        Ts13ZkExposure {
+            name: "device public key",
+            classification: LinkablePublic,
+            rationale: "ML-DSA verification currently takes the credential-bound device key as a verifier-native public input",
+        },
+        Ts13ZkExposure {
+            name: "requested IssuerSignedItem digestID",
+            classification: LinkablePublic,
+            rationale: "the staged verifier publishes the credential-stable digest-map selector used by the semantic equality scope",
+        },
+        Ts13ZkExposure {
+            name: "requested IssuerSignedItem padded length",
+            classification: LinkablePublic,
+            rationale: "the staged verifier publishes the selected item's credential-stable 64-byte SHA-256 size bucket",
+        },
+        Ts13ZkExposure {
+            name: "device authentication Sig_structure",
+            classification: PublicByDesign,
+            rationale: "the message is derived from the caller-bound session transcript and document type",
+        },
+        Ts13ZkExposure {
             name: "revocation public key and epoch",
             classification: PublicByDesign,
             rationale: "caller-bound revocation statement",
+        },
+        Ts13ZkExposure {
+            name: "private base and interaction trace openings",
+            classification: UnmaskedPrivateTrace,
+            rationale: "the locked STWO PCS serializes private-witness-dependent OODS and FRI openings without proof-wide trace-polynomial blinding; this profile is not zero knowledge",
         },
         Ts13ZkExposure {
             name: "longfellow-libzk-v1 proof bytes",
@@ -317,8 +545,8 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
         },
         Ts13ZkExposure {
             name: "LogUp claimed sums",
-            classification: PerfectlyMasked,
-            rationale: "Q-015 blinder pairs make each published private-data sum uniform",
+            classification: UnmaskedPrivateTrace,
+            rationale: "local blinder pairs cover selected components only; ML-DSA, Keccak, and other published component sums remain witness-dependent",
         },
         Ts13ZkExposure {
             name: "SHA w/a/e decoy bit columns",
@@ -326,6 +554,13 @@ pub fn ts13_mdoc_zk_exposure_inventory() -> Vec<Ts13ZkExposure> {
             rationale: "fresh decoy SHA message bits drive the Case-2 character-sum bound",
         },
     ]
+}
+
+/// The current locked STWO commitment path opens unblinded private trace
+/// polynomials. Local blind cells and claimed-sum masks do not provide a
+/// proof-wide zero-knowledge simulator.
+pub const fn ts13_profile_is_zero_knowledge() -> bool {
+    false
 }
 
 pub fn ts13_p4c_numerical_bound() -> Ts13P4cNumericalBound {
@@ -577,6 +812,44 @@ mod tests {
     }
 
     #[test]
+    fn published_tuple_pins_the_equality_resource_layout() {
+        let tuple = Ts13CircuitTuple::published_age_over_18();
+
+        assert_eq!(
+            tuple.max_mso_payload_bytes as usize,
+            TS13_MAX_MSO_PAYLOAD_BYTES
+        );
+        assert_eq!(
+            tuple.max_attribute_item_bytes as usize,
+            TS13_MAX_ATTRIBUTE_ITEM_BYTES
+        );
+        assert_eq!(tuple.max_requested_digest_id, TS13_MAX_REQUESTED_DIGEST_ID);
+        assert_eq!(tuple.merged_sha_slot_log, TS13_MERGED_SHA_SLOT_LOG);
+        assert_eq!(tuple.merged_sha_log_n_rows, TS13_MERGED_SHA_LOG_N_ROWS);
+    }
+
+    #[test]
+    fn requested_digest_id_is_bounded_by_the_published_contract() {
+        assert!(ts13_requested_digest_id_is_supported(0));
+        assert!(ts13_requested_digest_id_is_supported(
+            TS13_MAX_REQUESTED_DIGEST_ID
+        ));
+        assert!(!ts13_requested_digest_id_is_supported(
+            TS13_MAX_REQUESTED_DIGEST_ID + 1
+        ));
+    }
+
+    #[test]
+    fn requested_item_padded_len_is_bounded_by_the_published_contract() {
+        for padded_len in TS13_ALLOWED_REQUESTED_ITEM_PADDED_LENGTHS {
+            assert!(ts13_requested_item_padded_len_is_supported(padded_len));
+        }
+        for padded_len in [0, 63, 65, 127, 129, 191, 193, u16::MAX] {
+            assert!(!ts13_requested_item_padded_len_is_supported(padded_len));
+        }
+    }
+
+    #[test]
     fn circuit_hash_rejects_cross_tuple_proof() {
         let expected = Ts13CircuitTuple::published_age_over_18();
         let mut actual = expected.clone();
@@ -594,7 +867,11 @@ mod tests {
         let current = Ts13CircuitTuple::published_age_over_18();
         let mut previous = current.clone();
         previous.constraint_system = PRE_PACKED_COEFFS_CONSTRAINT_SYSTEM;
-        assert_eq!(ts13_circuit_hash(&previous), PRE_PACKED_COEFFS_CIRCUIT_HASH);
+        assert_ne!(
+            ts13_circuit_hash(&previous),
+            ts13_circuit_hash(&current),
+            "the constraint-system identity must remain tuple-bound"
+        );
 
         let current_pin = Ts13CircuitPin::for_tuple(&current);
         assert_eq!(
@@ -661,11 +938,35 @@ mod tests {
 
         assert!(!inventory.is_empty(), "TS13 ZK inventory must not be empty");
         assert!(
+            !ts13_profile_is_zero_knowledge(),
+            "the profile must remain fail-honest until every private trace is polynomial-masked"
+        );
+        assert!(
             inventory
                 .iter()
                 .any(|entry| entry.classification == Ts13ZkExposureClassification::PublicByDesign),
             "inventory must name public-by-design surfaces"
         );
+        assert!(
+            inventory
+                .iter()
+                .any(|entry| entry.classification == Ts13ZkExposureClassification::LinkablePublic),
+            "inventory must name credential-stable public surfaces"
+        );
+        assert!(
+            inventory.iter().any(|entry| {
+                entry.classification == Ts13ZkExposureClassification::UnmaskedPrivateTrace
+            }),
+            "inventory must name the proof-wide zero-knowledge blocker"
+        );
+        assert!(inventory.iter().any(|entry| {
+            entry.name == "requested IssuerSignedItem digestID"
+                && entry.classification == Ts13ZkExposureClassification::LinkablePublic
+        }));
+        assert!(inventory.iter().any(|entry| {
+            entry.name == "requested IssuerSignedItem padded length"
+                && entry.classification == Ts13ZkExposureClassification::LinkablePublic
+        }));
         assert!(
             inventory
                 .iter()

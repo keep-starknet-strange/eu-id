@@ -1,10 +1,10 @@
 //! Dedicated TS13 equality-and-revocation envelope regression.
 //!
-//! This uses a real ML-DSA issuer, device, and revocation signature. It is
-//! intentionally separate from the product profile, whose mdoc request proves
-//! age/nationality predicates rather than the TS13 Boolean equality claim.
+//! This uses cryptographically real, deterministic RustCrypto ML-DSA issuer,
+//! device, and revocation signatures around a realistic seven-attribute PID.
+//! It is not a deployed issuer credential. The test is intentionally separate
+//! from the product age/nationality-predicate profile.
 
-use ciborium::value::Value;
 use euid_zk_sdk::{
     ts13_default_circuit_hash, ts13_prove_zk_document, ts13_verify_zk_document, Ts13MdocWitness,
     Ts13PresentationRequest,
@@ -24,7 +24,7 @@ const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1952;
 struct Ts13ProofEnvelopeForTest {
     envelope_format: u16,
     request_binding_hash: String,
-    mdoc_statement: eu_id_prover::MdocStatement,
+    mdoc_statement: eu_id_prover::MdocTs13Statement,
     stark_proof: Vec<u8>,
 }
 
@@ -47,8 +47,16 @@ fn ts13_request(
         namespace: PID_NAMESPACE.to_string(),
         circuit_hash: ts13_default_circuit_hash(),
         num_attributes: 1,
-        max_mdoc_bytes: 16_384,
+        max_mso_payload_bytes: eu_id_prover::ts13::TS13_MAX_MSO_PAYLOAD_BYTES as u32,
         max_attribute_bytes: 32,
+        max_attribute_item_bytes: eu_id_prover::ts13::TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32,
+        max_requested_digest_id: eu_id_prover::ts13::TS13_MAX_REQUESTED_DIGEST_ID,
+        max_issuer_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
+            as u32,
+        max_device_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
+            as u32,
+        merged_sha_slot_log: eu_id_prover::ts13::TS13_MERGED_SHA_SLOT_LOG,
+        merged_sha_log_n_rows: eu_id_prover::ts13::TS13_MERGED_SHA_LOG_N_ROWS,
         potential_issuers: 1,
         revocation_enabled: true,
         revocation_id_width_bytes: 8,
@@ -77,11 +85,7 @@ fn tamper_ts13_stark_proof(proof: &[u8]) -> Vec<u8> {
 fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
     let session_transcript =
         eu_id_prover::mdoc::openid4vp_session_transcript(b"sdk-ts13-equality-session");
-    let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_attribute(
-        &session_transcript,
-        "age_over_18",
-        Value::Bool(true),
-    );
+    let fixture = mldsa_fixture::mldsa_realistic_pid_fixture_with_age_over_18(&session_transcript);
     assert_eq!(fixture.revocation_pk.len(), ML_DSA_65_PUBLIC_KEY_BYTES);
 
     let extraction_request = eu_id_prover::MdocPidRequest {
@@ -100,12 +104,25 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
     };
     let extracted = eu_id_prover::mdoc::extract_pid_mdoc(&fixture.document, &extraction_request)
         .expect("TS13 equality fixture extracts");
+    let issuer_c_tilde = extracted
+        .issuer_auth_input
+        .as_mldsa()
+        .expect("ML-DSA issuer")
+        .c_tilde;
+    let device_c_tilde = extracted
+        .device_auth_input
+        .as_mldsa()
+        .expect("ML-DSA device")
+        .c_tilde;
+    let requested_item_len = extracted.extracted_attributes[0].item.len();
+    let expected_requested_item_padded_len = ((requested_item_len + 9 + 63) / 64 * 64) as u16;
     let id = eu_id_prover::ts13::ts13_mso_derived_revocation_id(&extracted.mso);
     const DISTINCTIVE_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
     assert!(id > DISTINCTIVE_BOUND_OFFSET && id < u64::MAX - DISTINCTIVE_BOUND_OFFSET);
     let id_lo = id - DISTINCTIVE_BOUND_OFFSET;
     let id_hi = id + DISTINCTIVE_BOUND_OFFSET;
     let (_, revocation_signature) = mldsa_fixture::mldsa_revocation_fixture(id_lo, id_hi, 7);
+    let revocation_signature_marker = revocation_signature[..64].to_vec();
 
     let request = ts13_request(
         session_transcript,
@@ -124,6 +141,18 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
     )
     .expect("dedicated TS13 equality proof builds");
 
+    let envelope: Ts13ProofEnvelopeForTest =
+        bincode::deserialize(&document.proof).expect("public TS13 envelope decodes");
+    assert_eq!(envelope.envelope_format, 2);
+    assert_eq!(
+        envelope.mdoc_statement.attributes,
+        extraction_request.attributes
+    );
+    assert_eq!(envelope.mdoc_statement.requested_digest_id, 17);
+    assert_eq!(
+        envelope.mdoc_statement.requested_item_padded_len,
+        expected_requested_item_padded_len
+    );
     assert!(
         ts13_verify_zk_document(&request, &document).expect("TS13 verification runs"),
         "real TS13 equality envelope must verify"
@@ -133,6 +162,35 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
     assert!(
         !ts13_verify_zk_document(&changed_epoch, &document).expect("tampered request runs"),
         "TS13 verifier must bind the revocation epoch"
+    );
+
+    let mut changed_digest_id = document.clone();
+    let mut envelope: Ts13ProofEnvelopeForTest =
+        bincode::deserialize(&changed_digest_id.proof).expect("TS13 envelope decodes");
+    envelope.mdoc_statement.requested_digest_id += 1;
+    changed_digest_id.proof =
+        bincode::serialize(&envelope).expect("changed TS13 envelope serializes");
+    assert!(
+        !ts13_verify_zk_document(&request, &changed_digest_id)
+            .expect("tampered digest ID request runs"),
+        "TS13 verifier must bind the requested digest ID"
+    );
+
+    let mut changed_item_padded_len = document.clone();
+    let mut envelope: Ts13ProofEnvelopeForTest =
+        bincode::deserialize(&changed_item_padded_len.proof).expect("TS13 envelope decodes");
+    envelope.mdoc_statement.requested_item_padded_len = if expected_requested_item_padded_len == 64
+    {
+        128
+    } else {
+        64
+    };
+    changed_item_padded_len.proof =
+        bincode::serialize(&envelope).expect("changed TS13 envelope serializes");
+    assert!(
+        !ts13_verify_zk_document(&request, &changed_item_padded_len)
+            .expect("tampered item padded length request runs"),
+        "TS13 verifier must bind the requested item padded length"
     );
 
     let mut tampered_document = document.clone();
@@ -158,4 +216,24 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_artifact() {
             .any(|window| window == id_hi_bytes),
         "serialized TS13 verifier envelope must not contain id_hi"
     );
+    for (name, private_marker) in [
+        ("issuer c_tilde", issuer_c_tilde.as_slice()),
+        ("device c_tilde", device_c_tilde.as_slice()),
+        (
+            "revocation signature",
+            revocation_signature_marker.as_slice(),
+        ),
+        // The credential carries a birth_date the request never asks for. The
+        // product (window-bind) path puts undisclosed attribute values in the
+        // statement it ships; the TS13 equality path must not.
+        ("undisclosed birth_date", b"1985-05-05".as_slice()),
+    ] {
+        assert!(
+            !document
+                .proof
+                .windows(private_marker.len())
+                .any(|window| window == private_marker),
+            "serialized TS13 verifier envelope must not contain {name}"
+        );
+    }
 }

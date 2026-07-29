@@ -1,3 +1,6 @@
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application") version "9.2.1"
 }
@@ -8,15 +11,81 @@ dependencies {
 
 val workspaceRoot = file("$projectDir/../..")
 val jniLibsOut = layout.buildDirectory.dir("generated/jniLibs")
+val benchAssetsOut = layout.buildDirectory.dir("generated/benchAssets")
 val ndkVersionInstalled = "27.1.12297006"
-val mldsaBaselineSo = providers.gradleProperty("mldsaBaselineSo")
-    .map { path -> file(path) }
-    .orElse(file("$projectDir/prebuilt/mldsa-baseline/arm64-v8a/libeu_id_ffi.so"))
-val mldsaPackedSo = providers.gradleProperty("mldsaPackedSo")
-    .map { path -> file(path) }
-    .orElse(file("$projectDir/prebuilt/mldsa-packed/arm64-v8a/libeu_id_ffi.so"))
-val mldsaBaselinePackagedName = "libeu_id_ffi_mldsa_baseline.so"
-val mldsaPackedPackagedName = "libeu_id_ffi_mldsa_packed.so"
+val benchmarkProfile = "full_pq_mdoc_mldsa65_ts13_revocation_paired"
+val benchmarkEntrypoint = "fullPq"
+fun requireBenchInput(property: String, path: File, description: String): File {
+    require(path.isFile) {
+        "$property must point to $description; set -P$property=/absolute/path"
+    }
+    return path
+}
+fun sha256(file: File): String = MessageDigest.getInstance("SHA-256")
+    .digest(file.readBytes())
+    .joinToString("") { "%02x".format(it) }
+fun requireBenchManifest(
+    property: String,
+    path: File,
+    library: File,
+    slot: String,
+    variant: String,
+): File {
+    requireBenchInput(property, path, "the $variant ML-DSA native build manifest")
+    val manifest = JsonSlurper().parse(path) as? Map<*, *>
+        ?: error("$property must contain a JSON object")
+    fun field(name: String): String = manifest[name] as? String
+        ?: error("$property is missing string field '$name'")
+    require(manifest["schema"] == 1) { "$property has an unsupported schema" }
+    require(field("library_slot") == slot) { "$property belongs to the wrong library slot" }
+    require(field("benchmark_variant") == variant) { "$property belongs to the wrong variant" }
+    require(field("benchmark_entrypoint") == benchmarkEntrypoint) {
+        "$property does not describe the $benchmarkEntrypoint benchmark"
+    }
+    require(field("benchmark_profile") == benchmarkProfile) {
+        "$property does not describe the current full-PQ profile"
+    }
+    require(field("source_ref") == field("git_commit")) {
+        "$property does not bind its source ref to its commit"
+    }
+    require(field("git_commit").matches(Regex("[0-9a-f]{40}"))) {
+        "$property has an invalid source commit"
+    }
+    require(manifest["git_dirty"] == false) { "$property must come from a clean source tree" }
+    require(field("source_sha256_no_md").matches(Regex("[0-9a-f]{64}"))) {
+        "$property has an invalid source hash"
+    }
+    require(field("build_id").matches(Regex("[0-9a-f]{64}"))) {
+        "$property has an invalid build id"
+    }
+    require(field("rustc").isNotBlank()) { "$property is missing the Rust compiler version" }
+    require(field("ndk_revision") == ndkVersionInstalled) { "$property has the wrong Android NDK" }
+    require(field("target_abi") == "arm64-v8a") { "$property has the wrong ABI" }
+    require(field("cargo_profile") == "bench") { "$property was not built with Cargo's bench profile" }
+    require(field("lto") == "fat") { "$property was not built with fat LTO" }
+    require(manifest["codegen_units"] == 1) { "$property must use one codegen unit" }
+    require((manifest["features"] as? List<*>) == listOf("jni")) {
+        "$property must record exactly the JNI feature set"
+    }
+    require(field("unstripped_library_sha256") == sha256(library)) {
+        "$property does not match the supplied native library"
+    }
+    return path
+}
+val mldsaReferenceSo = providers.gradleProperty("mldsaReferenceSo")
+    .orElse("$projectDir/prebuilt/mldsa-reference/arm64-v8a/libeu_id_ffi.so")
+    .map { path -> requireBenchInput("mldsaReferenceSo", file(path), "the fat-LTO reference arm64-v8a libeu_id_ffi.so") }
+val mldsaCandidateSo = providers.gradleProperty("mldsaCandidateSo")
+    .orElse("$projectDir/prebuilt/mldsa-candidate/arm64-v8a/libeu_id_ffi.so")
+    .map { path -> requireBenchInput("mldsaCandidateSo", file(path), "the fat-LTO candidate arm64-v8a libeu_id_ffi.so") }
+val mldsaReferenceManifest = providers.gradleProperty("mldsaReferenceManifest")
+    .orElse("$projectDir/prebuilt/mldsa-reference/build-manifest.json")
+    .map { path -> requireBenchManifest("mldsaReferenceManifest", file(path), mldsaReferenceSo.get(), "mldsa-reference", "reference") }
+val mldsaCandidateManifest = providers.gradleProperty("mldsaCandidateManifest")
+    .orElse("$projectDir/prebuilt/mldsa-candidate/build-manifest.json")
+    .map { path -> requireBenchManifest("mldsaCandidateManifest", file(path), mldsaCandidateSo.get(), "mldsa-candidate", "candidate") }
+val mldsaReferencePackagedName = "libeu_id_ffi_mldsa_reference.so"
+val mldsaCandidatePackagedName = "libeu_id_ffi_mldsa_candidate.so"
 
 fun gitValue(vararg args: String): String = providers.exec {
     workingDir = workspaceRoot
@@ -62,7 +131,12 @@ android {
         buildConfig = true
     }
 
+    packaging {
+        jniLibs.keepDebugSymbols += "**/*.so"
+    }
+
     sourceSets["main"].jniLibs.setSrcDirs(listOf(jniLibsOut))
+    sourceSets["main"].assets.srcDir(benchAssetsOut.get().asFile)
 
     buildTypes {
         release {
@@ -74,33 +148,40 @@ android {
 
 val stageMldsaBenchLibraries by tasks.registering(Sync::class) {
     group = "rust"
-    description = "Stage the prebuilt ML-DSA baseline and packed JNI libraries into one APK."
-    inputs.file(mldsaBaselineSo)
-        .withPropertyName("mldsaBaselineSo")
+    description = "Stage the prebuilt ML-DSA reference and candidate JNI libraries into one APK."
+    inputs.file(mldsaReferenceSo)
+        .withPropertyName("mldsaReferenceSo")
         .withPathSensitivity(PathSensitivity.NONE)
-    inputs.file(mldsaPackedSo)
-        .withPropertyName("mldsaPackedSo")
+    inputs.file(mldsaCandidateSo)
+        .withPropertyName("mldsaCandidateSo")
         .withPathSensitivity(PathSensitivity.NONE)
-    from(mldsaBaselineSo) {
-        rename { mldsaBaselinePackagedName }
+    from(mldsaReferenceSo) {
+        rename { mldsaReferencePackagedName }
     }
-    from(mldsaPackedSo) {
-        rename { mldsaPackedPackagedName }
+    from(mldsaCandidateSo) {
+        rename { mldsaCandidatePackagedName }
     }
     into(jniLibsOut.map { it.dir("arm64-v8a") })
-    doFirst {
-        listOf(
-            "mldsaBaselineSo" to mldsaBaselineSo.get(),
-            "mldsaPackedSo" to mldsaPackedSo.get(),
-        ).forEach { (property, input) ->
-            require(input.isFile) {
-                "$property must point to a prebuilt arm64-v8a libeu_id_ffi.so; " +
-                    "set -P$property=/absolute/path/libeu_id_ffi.so"
-            }
-        }
+}
+
+val stageMldsaBenchManifests by tasks.registering(Sync::class) {
+    group = "rust"
+    description = "Package verified native build provenance for both ML-DSA libraries."
+    inputs.file(mldsaReferenceManifest)
+        .withPropertyName("mldsaReferenceManifest")
+        .withPathSensitivity(PathSensitivity.NONE)
+    inputs.file(mldsaCandidateManifest)
+        .withPropertyName("mldsaCandidateManifest")
+        .withPathSensitivity(PathSensitivity.NONE)
+    from(mldsaReferenceManifest) {
+        rename { "mldsa_reference_build_manifest.json" }
     }
+    from(mldsaCandidateManifest) {
+        rename { "mldsa_candidate_build_manifest.json" }
+    }
+    into(benchAssetsOut)
 }
 
 tasks.named("preBuild") {
-    dependsOn(stageMldsaBenchLibraries)
+    dependsOn(stageMldsaBenchLibraries, stageMldsaBenchManifests)
 }

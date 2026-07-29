@@ -23,6 +23,7 @@
 //! Switching the system to a different (e.g. Stwo-friendly) hash is a one-line
 //! change to these aliases.
 
+pub mod claim_mask;
 pub mod gkr;
 pub mod relations;
 

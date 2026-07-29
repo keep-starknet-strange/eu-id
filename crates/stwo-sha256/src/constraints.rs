@@ -33,8 +33,9 @@
 //! offsets are not used directly here — they are documented in
 //! [`crate::trace::Layout`] for cross-checking.
 
-use num_traits::One;
+use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
+use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX};
 
 use crate::components::{
@@ -98,6 +99,8 @@ pub struct Sha256Eval {
     /// `expose_digest == false` and an empty `field_exposure` (the per-slot
     /// specs carry the exposure surface instead).
     pub multi: Option<MultiSlotEval>,
+    /// Optional zero-sum claim mask, anchored after tree 1.
+    pub claim_mask_beta: Option<QM31>,
 }
 
 /// Slot schedule + per-slot cross-module relations for a multi-message
@@ -175,8 +178,8 @@ impl FrameworkEval for Sha256Eval {
         // contiguity constraint can pin `enabler_prev` (first-real-row
         // marker `enabler_step`) and the digest gate can pin `enabler_next`
         // (last-real-row marker `is_last_block`).
-        let [enabler, enabler_prev, enabler_next] =
-            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, 1]);
+        let [enabler, enabler_prev, enabler_next, enabler_after_block] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, 1, 49]);
         eval.add_constraint(enabler.clone() * (E::F::one() - enabler.clone()));
 
         // The row-family gates. Each is `enabler · indicator` — degree 2,
@@ -838,6 +841,29 @@ impl FrameworkEval for Sha256Eval {
                 }
 
                 let legacy_slot_selector = is_first_block_m15.clone() * sel_slot.clone();
+                if exposure.binds_full_padded_message() {
+                    let final_selector = if exposure.needs_block_witness() {
+                        let selector_sum = selectors
+                            .iter()
+                            .cloned()
+                            .fold(E::F::zero(), |sum, selector| sum + selector);
+                        // A complete padded-message exposure covers every
+                        // enabled block in this slot.  Pinning the selector
+                        // sum makes those selectors live rather than merely
+                        // constraining them conditionally when the prover
+                        // chooses to set one.
+                        eval.add_constraint(
+                            selector_sum - sel_slot.clone() * enabler.clone() * r15.clone(),
+                        );
+                        selectors
+                            .last()
+                            .expect("full padded exposure has a final-block selector")
+                            .clone()
+                    } else {
+                        legacy_slot_selector.clone()
+                    };
+                    eval.add_constraint(final_selector * enabler_after_block.clone());
+                }
                 if !exposure.needs_block_witness() {
                     // Legacy block-0 path, slot-gated: every byte
                     // range-checked once on the slot's block-0 t = 15 row.
@@ -858,6 +884,7 @@ impl FrameworkEval for Sha256Eval {
                     {
                         let selector = selectors[selector_idx].clone();
                         eval.add_constraint(selector.clone() * (selector.clone() - E::F::one()));
+                        eval.add_constraint(selector.clone() * (E::F::one() - enabler.clone()));
                         eval.add_constraint(selector.clone() * (E::F::one() - r15.clone()));
                         eval.add_constraint(
                             selector.clone()
@@ -952,6 +979,26 @@ impl FrameworkEval for Sha256Eval {
             }
 
             let legacy_block0_selector = is_first_block_m15;
+            if self.field_exposure.binds_full_padded_message() {
+                let final_selector = if self.field_exposure.needs_block_witness() {
+                    let selector_sum = selectors
+                        .iter()
+                        .cloned()
+                        .fold(E::F::zero(), |sum, selector| sum + selector);
+                    // A complete padded-message exposure covers every enabled
+                    // block.  This equality forces one target selector to be
+                    // live at each real t=15 row, closing the all-zero
+                    // selector escape hatch.
+                    eval.add_constraint(selector_sum - enabler.clone() * r15.clone());
+                    selectors
+                        .last()
+                        .expect("full padded exposure has a final-block selector")
+                        .clone()
+                } else {
+                    legacy_block0_selector.clone()
+                };
+                eval.add_constraint(final_selector * enabler_after_block);
+            }
             if !self.field_exposure.needs_block_witness() {
                 // Legacy block-0 path: every byte range-checked once, gated by
                 // the block-0 flag.
@@ -975,6 +1022,7 @@ impl FrameworkEval for Sha256Eval {
                 {
                     let selector = selectors[selector_idx].clone();
                     eval.add_constraint(selector.clone() * (selector.clone() - E::F::one()));
+                    eval.add_constraint(selector.clone() * (E::F::one() - enabler.clone()));
                     eval.add_constraint(selector.clone() * (E::F::one() - r15.clone()));
                     eval.add_constraint(
                         selector.clone() * (b.clone() - E::F::from(M31::from(target_block as u32))),
@@ -1022,6 +1070,9 @@ impl FrameworkEval for Sha256Eval {
             }
         }
 
+        if let Some(beta) = self.claim_mask_beta {
+            air_core::claim_mask::add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup_batched(LOGUP_BATCH);
 
         eval

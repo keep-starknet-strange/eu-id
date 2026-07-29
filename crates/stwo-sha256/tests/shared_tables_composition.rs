@@ -209,9 +209,10 @@ fn standalone_sha_proof_bytes_unchanged_by_shared_tables_feature() {
         "standalone SHA proof {} bytes exceeds {upper} — shared-tables/blinding bloat?",
         bytes.len(),
     );
-    // Sanity floor: a real proof is never trivially small.
+    // Sanity floor: a real proof is never trivially small. (Observed 36.4 KB
+    // after the field-exposure/interaction slimming; keep headroom below it.)
     assert!(
-        bytes.len() >= 40_000,
+        bytes.len() >= 25_000,
         "suspiciously small proof: {}",
         bytes.len()
     );
