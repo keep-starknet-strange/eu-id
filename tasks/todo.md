@@ -1072,9 +1072,12 @@ Normative specification:
 
 - [x] Inventory relevant branches and verify that the combined prototype
       contains Phase 1 plus byte-identical copies of the parked U5/U7 work.
-- [ ] Resolve the integration conflicts once: keep Phase-1 cryptographic
+- [x] Resolve the integration conflicts once: keep Phase-1 cryptographic
       composition authoritative, retain the later Decompose boundary and
       attack-hook hardening, and preserve `proveIdentity` as the external route.
+- [x] Import the frozen normative specification byte-for-byte into this clean
+      branch and pin its SHA-256 as
+      `b31fa7fbb86360bbc1e46b0194017aa116c0a689d074f77543549ca0916521eb`.
 - [ ] Freeze canonical A/B credentials and the supported request-context
       corpus; derive and commit `DEVICE_SIG_STRUCTURE_CAPACITY` from the
       measured maximum plus the specified margin.
@@ -1136,6 +1139,10 @@ Normative specification:
 
 ### Review
 
-- [ ] Record the resolved merge strategy and exact retained provenance.
+- [x] Record the resolved merge strategy and exact retained provenance:
+      merge `088df064` combines `feat/quantum-safe@20f9d7a8` with
+      `codex/ts13-demo-unlinkable@d4b7ab0e`; the latter already contains the
+      reviewed Phase-1 work and byte-identical U5/U7 parked prototypes, so no
+      older unlinkability branch is merged again.
 - [ ] Record the final public allowlist, circuit artifact/hash, V4 capacity,
       release test matrix, A1/A2/B evidence, and matched performance results.
