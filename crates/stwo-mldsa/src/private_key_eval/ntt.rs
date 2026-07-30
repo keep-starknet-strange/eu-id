@@ -230,10 +230,7 @@ fn write_canonical(
     }
 }
 
-fn mul_witness(constant: u32, value: u32) -> (u32, u32, [i64; 4]) {
-    let product = constant as u64 * value as u64;
-    let output = (product % Q as u64) as u32;
-    let quotient = (product / Q as u64) as u32;
+fn mul_carries(constant: u32, value: u32, output: u32, quotient: u32) -> [i64; 4] {
     let z = split_u23(constant);
     let x = split_u23(value);
     let q = split_u23(Q);
@@ -267,7 +264,18 @@ fn mul_witness(constant: u32, value: u32) -> (u32, u32, [i64; 4]) {
         z[2] as i64 * x[2] as i64 - q[2] as i64 * k[2] as i64 + c4,
         0
     );
-    (output, quotient, [c1, c2, c3, c4])
+    [c1, c2, c3, c4]
+}
+
+fn mul_witness(constant: u32, value: u32) -> (u32, u32, [i64; 4]) {
+    let product = constant as u64 * value as u64;
+    let output = (product % Q as u64) as u32;
+    let quotient = (product / Q as u64) as u32;
+    (
+        output,
+        quotient,
+        mul_carries(constant, value, output, quotient),
+    )
 }
 
 fn balanced3(value: u32) -> [i64; 3] {
@@ -418,12 +426,59 @@ fn add_canonical_constraint<E: EvalAtRow>(
     value: &[E::F; 3],
     slack: &[E::F; 3],
 ) {
+    add_canonical_constraint_with_bound(eval, gate, value, slack, Q - 1);
+}
+
+fn add_canonical_constraint_with_bound<E: EvalAtRow>(
+    eval: &mut E,
+    gate: E::F,
+    value: &[E::F; 3],
+    slack: &[E::F; 3],
+    bound: u32,
+) {
     let c256 = E::F::from(m31(256));
     let c65536 = E::F::from(m31(1 << 16));
     eval.add_constraint(
         gate * (recompose3(value, c256.clone(), c65536.clone()) + recompose3(slack, c256, c65536)
-            - E::F::from(m31(Q - 1))),
+            - E::F::from(m31(bound))),
     );
+}
+
+struct ButterflyTransition<F> {
+    active: F,
+    input0: F,
+    input1: F,
+    output0: F,
+    diff: F,
+    reduce: F,
+    borrow: F,
+    output_adjustment: i64,
+}
+
+fn add_butterfly_transition_constraints<E: EvalAtRow>(
+    eval: &mut E,
+    transition: ButterflyTransition<E::F>,
+) {
+    let ButterflyTransition {
+        active,
+        input0,
+        input1,
+        output0,
+        diff,
+        reduce,
+        borrow,
+        output_adjustment,
+    } = transition;
+    let one = E::F::one();
+    let q = E::F::from(m31(Q));
+    eval.add_constraint(reduce.clone() * (one.clone() - reduce.clone()));
+    eval.add_constraint(borrow.clone() * (one - borrow.clone()));
+    eval.add_constraint(
+        active.clone()
+            * (input0.clone() + input1.clone() - output0 - q.clone() * reduce
+                + E::F::from(enc_signed(output_adjustment))),
+    );
+    eval.add_constraint(active * (input0 + q * borrow - input1 - diff));
 }
 
 fn add_canonical_range_lookups<E: EvalAtRow>(
@@ -499,22 +554,23 @@ impl FrameworkEval for NttButterflyEval {
         let one = E::F::one();
         let c256 = E::F::from(m31(256));
         let c65536 = E::F::from(m31(1 << 16));
-        let q = E::F::from(m31(Q));
         let input0_value = recompose3(&input0, c256.clone(), c65536.clone());
         let input1_value = recompose3(&input1, c256.clone(), c65536.clone());
         let output0_value = recompose3(&output0, c256.clone(), c65536.clone());
         let diff_value = recompose3(&diff, c256, c65536);
 
-        eval.add_constraint(reduce.clone() * (one.clone() - reduce.clone()));
-        eval.add_constraint(borrow.clone() * (one.clone() - borrow.clone()));
-        eval.add_constraint(
-            active.clone()
-                * (input0_value.clone() + input1_value.clone()
-                    - output0_value
-                    - q.clone() * reduce),
-        );
-        eval.add_constraint(
-            active.clone() * (input0_value + q * borrow - input1_value - diff_value),
+        add_butterfly_transition_constraints(
+            &mut eval,
+            ButterflyTransition {
+                active: active.clone(),
+                input0: input0_value,
+                input1: input1_value,
+                output0: output0_value,
+                diff: diff_value,
+                reduce,
+                borrow,
+                output_adjustment: 0,
+            },
         );
         for (value, slack) in [
             (&output0, &output0_slack),
@@ -913,6 +969,139 @@ pub fn gen_ntt_interaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::private_key_eval::proof_test::{active_id as test_active_id, OneRowAir};
+    use stwo::core::pcs::PcsConfig;
+    use stwo::prover::backend::simd::m31::LOG_N_LANES;
+
+    #[derive(Clone, Copy)]
+    enum Formula {
+        Butterfly { output_adjustment: i64 },
+        Normalizer { constant: u32 },
+        Canonical { bound: u32 },
+    }
+
+    #[derive(Clone)]
+    struct FormulaEval {
+        formula: Formula,
+    }
+
+    impl FrameworkEval for FormulaEval {
+        fn log_size(&self) -> u32 {
+            LOG_N_LANES
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            LOG_N_LANES + 1
+        }
+
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let fixed_active = eval.get_preprocessed_column(test_active_id());
+            let active = eval.next_trace_mask();
+            eval.add_constraint(active.clone() - fixed_active);
+            match self.formula {
+                Formula::Butterfly { output_adjustment } => {
+                    let input0 = eval.next_trace_mask();
+                    let input1 = eval.next_trace_mask();
+                    let output0 = eval.next_trace_mask();
+                    let diff = eval.next_trace_mask();
+                    let reduce = eval.next_trace_mask();
+                    let borrow = eval.next_trace_mask();
+                    add_butterfly_transition_constraints(
+                        &mut eval,
+                        ButterflyTransition {
+                            active,
+                            input0,
+                            input1,
+                            output0,
+                            diff,
+                            reduce,
+                            borrow,
+                            output_adjustment,
+                        },
+                    );
+                }
+                Formula::Normalizer { constant } => {
+                    let input = core::array::from_fn(|_| eval.next_trace_mask());
+                    let quotient = core::array::from_fn(|_| eval.next_trace_mask());
+                    let output = core::array::from_fn(|_| eval.next_trace_mask());
+                    let carries = core::array::from_fn(|_| eval.next_trace_mask());
+                    add_mul_constraints(
+                        &mut eval,
+                        active,
+                        &split_u23(constant).map(|value| E::F::from(m31(value))),
+                        &input,
+                        &quotient,
+                        &output,
+                        &carries,
+                    );
+                }
+                Formula::Canonical { bound } => {
+                    let value = core::array::from_fn(|_| eval.next_trace_mask());
+                    let slack = core::array::from_fn(|_| eval.next_trace_mask());
+                    add_canonical_constraint_with_bound(&mut eval, active, &value, &slack, bound);
+                }
+            }
+            let dummy = eval.next_interaction_mask(INTERACTION_TRACE_IDX, [0]);
+            eval.add_constraint(dummy[0].clone());
+            eval
+        }
+    }
+
+    fn assert_forged_formula_rejected(label: &str, trace: &[M31], forged: Formula, exact: Formula) {
+        let mut prover = OneRowAir::new(FormulaEval { formula: forged }, trace);
+        let proof = air_core::prove(&mut [&mut prover], PcsConfig::default())
+            .unwrap_or_else(|error| panic!("{label}: forged proving failed: {error:?}"));
+        let mut forged_verifier = OneRowAir::new(FormulaEval { formula: forged }, trace);
+        air_core::verify(&mut [&mut forged_verifier], &proof)
+            .unwrap_or_else(|error| panic!("{label}: forged control failed: {error:?}"));
+        let mut exact_verifier = OneRowAir::new(FormulaEval { formula: exact }, trace);
+        assert!(
+            air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
+            "{label}: production formula must reject"
+        );
+    }
+
+    #[test]
+    fn malformed_inverse_ntt_rows_prove_only_under_forged_formulas() {
+        assert_forged_formula_rejected(
+            "inverse-butterfly transition",
+            &[m31(1), m31(10), m31(3), m31(14), m31(7), m31(0), m31(0)],
+            Formula::Butterfly {
+                output_adjustment: 1,
+            },
+            Formula::Butterfly {
+                output_adjustment: 0,
+            },
+        );
+
+        let input = 123_456;
+        let (output, quotient, carries) = mul_witness(N_INV - 1, input);
+        let mut normalization_trace = vec![m31(1)];
+        normalization_trace.extend(split_u23(input).map(m31));
+        normalization_trace.extend(split_u23(quotient).map(m31));
+        normalization_trace.extend(split_u23(output).map(m31));
+        normalization_trace.extend(carries.map(enc_signed));
+        assert_forged_formula_rejected(
+            "inverse normalization",
+            &normalization_trace,
+            Formula::Normalizer {
+                constant: N_INV - 1,
+            },
+            Formula::Normalizer { constant: N_INV },
+        );
+
+        let alias = Q + 5;
+        let slack = Q - 1 - 5;
+        let mut alias_trace = vec![m31(1)];
+        alias_trace.extend(split_u23(alias).map(m31));
+        alias_trace.extend(split_u23(slack).map(m31));
+        assert_forged_formula_rejected(
+            "inverse-NTT modular alias",
+            &alias_trace,
+            Formula::Canonical { bound: 2 * Q - 1 },
+            Formula::Canonical { bound: Q - 1 },
+        );
+    }
 
     #[test]
     fn schedules_cover_every_required_cell_once() {

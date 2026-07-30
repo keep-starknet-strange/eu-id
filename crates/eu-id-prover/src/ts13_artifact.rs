@@ -19,6 +19,7 @@ use sha2::{Digest as _, Sha256};
 pub const ARTIFACT_PATH: &str = "artifacts/ts13-demo-v1/circuit-artifact-v1.cbor";
 pub const SHAPE_MANIFEST_PATH: &str = "artifacts/ts13-demo-v1/shape-manifest.cbor";
 pub const HASH_EMBED_PATH: &str = "crates/eu-id-prover/src/generated/ts13_demo_artifact.rs";
+pub const NORMATIVE_SPEC_PATH: &str = "docs/ts13-unlinkable-age18-demo-spec.md";
 
 /// The only generated files omitted from the soundness source-tree digest.
 ///
@@ -59,6 +60,14 @@ pub const FROZEN_MODULE_ORDER: [&str; 19] = [
     "public_revocation_key_epoch_bind",
 ];
 
+const FROZEN_MERKLE_TREE_ORDER: [&str; 5] = [
+    "tree_0_preprocessed",
+    "tree_1_trace",
+    "tree_2_interaction",
+    "tree_3_post_interaction",
+    "tree_4_composition",
+];
+
 const PROFILE_ID: &str = "ts13-pid-age-over-18-unlinkable-demo-v1";
 const PROOF_SYSTEM_ID: &str = "stwo-euid-ts13-demo-v1";
 const CONSTRAINT_SYSTEM_VERSION: &str = "ts13-unlinkable-air-v1";
@@ -67,6 +76,118 @@ const SHAPE_SCHEMA_VERSION: u64 = 1;
 const V4_ENVELOPE_VERSION: u64 = 4;
 const V4_HEADER_BYTES: u64 = 46;
 const V4_CAPACITY_ALIGNMENT: u64 = 65_536;
+const FROZEN_ISSUER_COSE_SIG_STRUCTURE_BYTES: u32 = 2_534;
+const FROZEN_MSO_PAYLOAD_BYTES: u32 = 2_513;
+const FROZEN_PADDED_ISSUER_SIGNED_ITEM_BYTES: u32 = 128;
+const FROZEN_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 4] = [1, 2, 3, 5];
+const FROZEN_REQUEST_CONTEXT_CORPUS_SHA256: &str =
+    "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
+const FROZEN_NORMATIVE_SPEC_SHA256: &str =
+    "b31fa7fbb86360bbc1e46b0194017aa116c0a689d074f77543549ca0916521eb";
+const FROZEN_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
+const FROZEN_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
+const FROZEN_DEVICE_SIG_STRUCTURE_CAPACITY: u32 = 1_024;
+const FROZEN_TREE_COLUMN_COUNTS: [u64; 5] = [947, 5_000, 2_416, 8, 32];
+const FROZEN_TREE_DEPTHS: [u32; 5] = [19, 19, 19, 16, 19];
+const FROZEN_FRI_LAYER_INPUT_LOGS: [u32; 8] = [19, 17, 15, 13, 11, 9, 7, 5];
+const FROZEN_FRI_LAYER_OUTPUT_LOGS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
+const FROZEN_FRI_WITNESS_CAPS: [u64; 8] = [108, 108, 108, 108, 108, 108, 108, 36];
+const FROZEN_FRI_MERKLE_DEPTHS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
+const FROZEN_SAMPLED_SECURE_FIELD_COUNT: u64 = 10_852;
+const FROZEN_OUTER_CLAIMS_AND_FRAMING_BYTES: u64 = 3_890;
+const FROZEN_COMPONENT_COUNT: usize = 96;
+const FROZEN_RELATION_COUNT: usize = 85;
+const FROZEN_RELATION_USE_COUNT: usize = 251;
+const FROZEN_PUBLIC_MIX_COUNT: usize = 20;
+const FROZEN_CHALLENGE_ENTRY_COUNT: usize = 94;
+const FROZEN_RAW_MLDSA_CHALLENGE_COUNT: usize = 9;
+const FROZEN_SERIALIZED_CLAIM_COUNT: usize = 26;
+const FROZEN_SERIALIZED_CLAIM_BYTES: u64 = 24_186;
+const FROZEN_STREAM_ID_COUNT: usize = 83;
+const FROZEN_HASH_STREAM_COUNT: usize = 40;
+const FROZEN_RANGE_TABLE_COUNT: usize = 26;
+const FROZEN_BUILTIN_CONSTANT_NAMES: [&str; 40] = [
+    "cbor.device_key_info_prefix",
+    "context.domain",
+    "context.public_mix_domain",
+    "privacy.claim",
+    "profile.device_authentication",
+    "profile.device_authentication_profile",
+    "profile.disclosed_attributes",
+    "profile.document_type",
+    "profile.element",
+    "profile.expected_cbor_hex",
+    "profile.format",
+    "profile.hash",
+    "profile.issuer_authentication",
+    "profile.namespace",
+    "profile.potential_issuers",
+    "profile.revocation_authentication",
+    "profile.revocation_mandatory",
+    "profile.timestamp_precision",
+    "spec.eudi_arf_commit",
+    "spec.eudi_arf_ts13_path",
+    "spec.normative_document_sha256",
+    "u5.accepted_coefficients_per_polynomial",
+    "u5.candidate_bits",
+    "u5.expand_a_jobs",
+    "u5.modulus_q",
+    "u5.squeeze_blocks_per_job",
+    "u6.a_evaluation_count",
+    "u6.coefficient_evaluation_count",
+    "u6.inverse_ntt_normalizer",
+    "u6.radix",
+    "u6.scaled_t1_factor",
+    "u6.t1_evaluation_count",
+    "u6.t1_hi_bits",
+    "u6.t1_lo_bits",
+    "u9.active_rows",
+    "u9.device_public_key_bytes",
+    "u9.rho_rows",
+    "v4.magic",
+    "validity.maximum_year",
+    "validity.minimum_year",
+];
+const FROZEN_IMPLEMENTATION_CONSTANT_NAMES: [&str; 38] = [
+    "impl.air_instance_count",
+    "impl.cargo_feature_scope",
+    "impl.challenge.raw_mldsa_secure_field_draws",
+    "impl.challenge.relation_instances",
+    "impl.challenge.relation_secure_field_draws",
+    "impl.challenge.total_secure_field_draws",
+    "impl.component_count",
+    "impl.device_sig_structure_capacity_bytes",
+    "impl.digest_identifier_integer_widths",
+    "impl.eval_at_rs_public_cancellation",
+    "impl.expand_a_job_count",
+    "impl.hash_job_count",
+    "impl.hash_stream_record_stream_id_semantics",
+    "impl.issuer_cose_sig_structure_bytes",
+    "impl.keccak.job_order",
+    "impl.keccak_service_claimed_sum_count",
+    "impl.logical_module_count",
+    "impl.mldsa.device_claimed_sum_count",
+    "impl.mldsa.device_group_eval_count",
+    "impl.mldsa.issuer_claimed_sum_count",
+    "impl.mldsa.issuer_group_eval_count",
+    "impl.mldsa.revocation_claimed_sum_count",
+    "impl.mldsa.revocation_group_eval_count",
+    "impl.mso_payload_bytes",
+    "impl.outer_claim_bytes_excluding_stark_and_post_payloads",
+    "impl.padded_issuer_signed_item_bytes",
+    "impl.post_interaction_nonempty_payload_bytes",
+    "impl.post_interaction_payload_vector_wire_bytes",
+    "impl.relation_tuple_counts_semantics",
+    "impl.serialized_claim_bytes_excluding_stark",
+    "impl.stream_base.device_mldsa",
+    "impl.stream_base.expand_a",
+    "impl.stream_base.issuer_mldsa",
+    "impl.stream_base.revocation_mldsa",
+    "impl.transcript.claim_mix_order",
+    "impl.transcript.global_claimed_sum_count",
+    "impl.transcript.phase_order",
+    "impl.tuple_scalar_semantics",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GenerationMode {
@@ -294,7 +415,6 @@ pub struct GenerationInputV1 {
     implementation_constants: Vec<ArtifactConstantV1>,
     tree_zero: TreeZeroV1,
     proof_system: ProofSystemV1,
-    proof_serialization_bound: Vec<ProofBoundTermV1>,
     enabled_cargo_features: Vec<PackageFeaturesV1>,
 }
 
@@ -319,6 +439,15 @@ struct RequestContextCorpusV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ModuleLayoutV1 {
     name: String,
+    air_instances: Vec<AirInstanceLayoutV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AirInstanceLayoutV1 {
+    columns: AirColumnLayoutV1,
+    max_log_size: u32,
+    max_constraint_log_degree_bound: u32,
     components: Vec<AirComponentLayoutV1>,
 }
 
@@ -326,40 +455,50 @@ struct ModuleLayoutV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AirComponentLayoutV1 {
     name: String,
+    trace_rows: u32,
     active_rows: u32,
-    constraint_log_degree_bound: u32,
-    columns: ColumnTreesV1,
+    constraint_count: u32,
+    max_constraint_log_degree_bound: u32,
+    trace_mask_column_counts: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ColumnTreesV1 {
-    preprocessed: Vec<ColumnSchemaV1>,
-    base: Vec<ColumnSchemaV1>,
-    extension: Vec<ColumnSchemaV1>,
-    interaction: Vec<ColumnSchemaV1>,
+struct AirColumnLayoutV1 {
+    preprocessed_m31_log_sizes: Vec<u32>,
+    trace_m31_log_sizes: Vec<u32>,
+    interaction_m31_log_sizes: Vec<u32>,
+    post_interaction_m31_log_sizes: Vec<u32>,
 }
 
-impl ColumnTreesV1 {
-    fn all(&self) -> impl Iterator<Item = (&'static str, &ColumnSchemaV1)> {
-        self.preprocessed
+impl AirColumnLayoutV1 {
+    fn all(&self) -> impl Iterator<Item = (&'static str, &u32)> {
+        self.preprocessed_m31_log_sizes
             .iter()
-            .map(|column| ("preprocessed", column))
-            .chain(self.base.iter().map(|column| ("base", column)))
-            .chain(self.extension.iter().map(|column| ("extension", column)))
+            .map(|log_size| ("preprocessed", log_size))
             .chain(
-                self.interaction
+                self.trace_m31_log_sizes
                     .iter()
-                    .map(|column| ("interaction", column)),
+                    .map(|log_size| ("trace", log_size)),
+            )
+            .chain(
+                self.interaction_m31_log_sizes
+                    .iter()
+                    .map(|log_size| ("interaction", log_size)),
+            )
+            .chain(
+                self.post_interaction_m31_log_sizes
+                    .iter()
+                    .map(|log_size| ("post_interaction", log_size)),
             )
     }
 
     fn counts(&self) -> Result<ColumnCountsV1, ArtifactError> {
         Ok(ColumnCountsV1 {
-            preprocessed: sum_column_counts(&self.preprocessed)?,
-            base: sum_column_counts(&self.base)?,
-            extension: sum_column_counts(&self.extension)?,
-            interaction: sum_column_counts(&self.interaction)?,
+            preprocessed: checked_column_count(&self.preprocessed_m31_log_sizes)?,
+            trace: checked_column_count(&self.trace_m31_log_sizes)?,
+            interaction: checked_column_count(&self.interaction_m31_log_sizes)?,
+            post_interaction: checked_column_count(&self.post_interaction_m31_log_sizes)?,
         })
     }
 }
@@ -374,15 +513,6 @@ enum ColumnScalarV1 {
     M31,
     Qm31,
     SecureField,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ColumnSchemaV1 {
-    name: String,
-    scalar: ColumnScalarV1,
-    count: u32,
-    log_size: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -494,6 +624,7 @@ struct TreeZeroV1 {
     derivation: String,
     hash: String,
     preprocessed_column_order: Vec<String>,
+    committed_column_log_sizes: Vec<u32>,
     root: Digest32,
 }
 
@@ -524,6 +655,14 @@ struct MerkleTreeParametersV1 {
     depth: u32,
     digest_bytes: u32,
     maximum_opened_columns: u32,
+    sampled_value_length_histogram: Vec<ValueCountV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ValueCountV1 {
+    value: u32,
+    count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -545,11 +684,12 @@ enum ProofBoundSectionV1 {
     FriLayers,
     Claims,
     ColumnValues,
+    PostInteractionPayloads,
     Pow,
     SerializationOverhead,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProofBoundTermV1 {
     section: ProofBoundSectionV1,
@@ -558,7 +698,7 @@ struct ProofBoundTermV1 {
     maximum_serialized_bytes_per_item: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PackageFeaturesV1 {
     package: String,
@@ -572,6 +712,8 @@ struct ShapeManifestV1 {
     profile: &'static str,
     credential_shape: CredentialShapeV1,
     request_context_corpus: RequestContextCorpusV1,
+    modules: Vec<ShapeModuleV1>,
+    air_instances: Vec<ShapeAirInstanceV1>,
     components: Vec<ShapeComponentV1>,
     stream_ids: Vec<NamedU64V1>,
     hash_streams: Vec<HashStreamV1>,
@@ -581,23 +723,47 @@ struct ShapeManifestV1 {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ShapeModuleV1 {
+    module_ordinal: u32,
+    module: String,
+    air_instance_count: u32,
+    component_count: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShapeAirInstanceV1 {
+    module_ordinal: u32,
+    module: String,
+    air_instance_ordinal: u32,
+    columns: ColumnCountsV1,
+    column_log_sizes: AirColumnLayoutV1,
+    max_log_size: u32,
+    max_constraint_log_degree_bound: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ShapeComponentV1 {
     module_ordinal: u32,
     module: String,
     component_ordinal: u32,
+    air_instance_ordinal: u32,
     component: String,
+    trace_rows: u32,
     active_rows: u32,
-    constraint_log_degree_bound: u32,
-    column_counts: ColumnCountsV1,
+    constraint_count: u32,
+    max_constraint_log_degree_bound: u32,
+    trace_mask_column_counts: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ColumnCountsV1 {
     preprocessed: u32,
-    base: u32,
-    extension: u32,
+    trace: u32,
     interaction: u32,
+    post_interaction: u32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -699,6 +865,7 @@ struct SourceFileEntryV1 {
 #[derive(Clone, Debug)]
 struct GenerationEnvironmentV1 {
     cargo_lock_sha256: Digest32,
+    enabled_cargo_features: Vec<PackageFeaturesV1>,
     rust_toolchain: RustToolchainV1,
     git: GitMetadataV1,
     source_manifest: SourceTreeManifestV1,
@@ -757,21 +924,29 @@ fn checked_name_list<'a>(
 
 impl GenerationInputV1 {
     fn validate(&self) -> Result<(), ArtifactError> {
-        if self.credential_shape.issuer_cose_sig_structure_bytes == 0
-            || self.credential_shape.mso_payload_bytes == 0
-            || self.credential_shape.padded_issuer_signed_item_bytes == 0
+        if self.credential_shape.issuer_cose_sig_structure_bytes
+            != FROZEN_ISSUER_COSE_SIG_STRUCTURE_BYTES
+            || self.credential_shape.mso_payload_bytes != FROZEN_MSO_PAYLOAD_BYTES
+            || self.credential_shape.padded_issuer_signed_item_bytes
+                != FROZEN_PADDED_ISSUER_SIGNED_ITEM_BYTES
+            || self.credential_shape.digest_identifier_integer_widths
+                != FROZEN_DIGEST_IDENTIFIER_INTEGER_WIDTHS
         {
             return Err(ArtifactError::InvalidInput(
-                "credential byte lengths must be non-zero".to_owned(),
+                "credential shape does not match the frozen A/B fixtures".to_owned(),
             ));
         }
-        let widths = &self.credential_shape.digest_identifier_integer_widths;
-        if widths.is_empty()
-            || widths.windows(2).any(|pair| pair[0] >= pair[1])
-            || widths.contains(&0)
+        if self.request_context_corpus.corpus_sha256.to_string()
+            != FROZEN_REQUEST_CONTEXT_CORPUS_SHA256
+            || self
+                .request_context_corpus
+                .observed_max_device_cose_sig_structure_bytes
+                != FROZEN_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES
+            || self.request_context_corpus.device_sig_structure_capacity
+                != FROZEN_DEVICE_SIG_STRUCTURE_CAPACITY
         {
             return Err(ArtifactError::InvalidInput(
-                "digest identifier integer widths must be non-zero, sorted, and unique".to_owned(),
+                "request-context corpus does not match the frozen corpus measurement".to_owned(),
             ));
         }
 
@@ -804,79 +979,154 @@ impl GenerationInputV1 {
                 FROZEN_MODULE_ORDER
             )));
         }
+        let air_instance_count = self.modules.iter().try_fold(0_u32, |sum, module| {
+            let count = u32::try_from(module.air_instances.len()).map_err(|_| {
+                ArtifactError::InvalidInput("AIR instance count exceeds u32".to_owned())
+            })?;
+            sum.checked_add(count).ok_or_else(|| {
+                ArtifactError::InvalidInput("AIR instance count exceeds u32".to_owned())
+            })
+        })?;
+        if air_instance_count != 20 {
+            return Err(ArtifactError::InvalidInput(format!(
+                "the 19 logical module slots must expand to exactly 20 AIR instances, got \
+                 {air_instance_count}"
+            )));
+        }
 
         let mut component_names = BTreeSet::new();
         for module in &self.modules {
-            if module.components.is_empty() {
+            if module.air_instances.is_empty() {
                 return Err(ArtifactError::InvalidInput(format!(
-                    "module {:?} has no AIR components",
+                    "module {:?} has no AIR instances",
                     module.name
                 )));
             }
-            for component in &module.components {
-                if component.name.is_empty() || !component_names.insert(component.name.as_str()) {
-                    return Err(ArtifactError::InvalidInput(format!(
-                        "AIR component names must be non-empty and globally unique: {:?}",
-                        component.name
-                    )));
-                }
-                let max_log_size = component
-                    .columns
-                    .all()
-                    .map(|(_, column)| column.log_size)
-                    .max();
-                if let Some(max_log_size) = max_log_size {
-                    if max_log_size >= u32::BITS {
+            for air in &module.air_instances {
+                let max_column_log_size = air.columns.all().map(|(_, log_size)| *log_size).max();
+                if let Some(max_column_log_size) = max_column_log_size {
+                    if max_column_log_size >= u32::BITS {
                         return Err(ArtifactError::InvalidInput(format!(
-                            "component {:?} has unsupported log size {max_log_size}",
-                            component.name
+                            "module {:?} has an unsupported column log size",
+                            module.name
                         )));
                     }
-                    if component.active_rows > (1_u32 << max_log_size) {
-                        return Err(ArtifactError::InvalidInput(format!(
-                            "component {:?} active rows exceed its largest trace",
-                            component.name
-                        )));
-                    }
-                } else if component.active_rows != 0 {
+                } else if air.max_log_size != 0 {
                     return Err(ArtifactError::InvalidInput(format!(
-                        "zero-column component {:?} must have zero active rows",
-                        component.name
+                        "zero-column AIR in module {:?} must have max log size zero",
+                        module.name
                     )));
                 }
-                let mut column_names = BTreeSet::new();
-                for (tree, column) in component.columns.all() {
-                    if column.name.is_empty()
-                        || column.count == 0
-                        || !column_names.insert((tree, column.name.as_str()))
+                if air.max_constraint_log_degree_bound == 0 {
+                    return Err(ArtifactError::InvalidInput(format!(
+                        "module {:?} has a zero constraint-degree bound",
+                        module.name
+                    )));
+                }
+                for (tree, log_sizes) in [
+                    ("preprocessed", &air.columns.preprocessed_m31_log_sizes),
+                    ("trace", &air.columns.trace_m31_log_sizes),
+                    ("interaction", &air.columns.interaction_m31_log_sizes),
+                    (
+                        "post_interaction",
+                        &air.columns.post_interaction_m31_log_sizes,
+                    ),
+                ] {
+                    if log_sizes.iter().any(|&log_size| log_size >= u32::BITS) {
+                        return Err(ArtifactError::InvalidInput(format!(
+                            "module {:?} has an invalid ordered {tree} M31 column log size",
+                            module.name
+                        )));
+                    }
+                }
+                for component in &air.components {
+                    if component.name.is_empty()
+                        || !component_names.insert(component.name.as_str())
+                        || component.constraint_count == 0
+                        || component.max_constraint_log_degree_bound == 0
+                        || component.trace_rows == 0
+                        || !component.trace_rows.is_power_of_two()
+                        || component.active_rows == 0
+                        || component.active_rows > component.trace_rows
+                        || component.trace_mask_column_counts.is_empty()
+                        || component.trace_mask_column_counts.len() > 4
                     {
                         return Err(ArtifactError::InvalidInput(format!(
-                            "component {:?} has an invalid or duplicate {tree} column group {:?}",
-                            component.name, column.name
+                            "AIR component names and constraint/mask geometry must be complete and \
+                             globally unique: {:?}",
+                            component.name
                         )));
                     }
                 }
             }
         }
+        if component_names.len() != FROZEN_COMPONENT_COUNT {
+            return Err(ArtifactError::InvalidInput(format!(
+                "the frozen profile must contain exactly {FROZEN_COMPONENT_COUNT} components, got {}",
+                component_names.len()
+            )));
+        }
         let public_context = &self.modules[3];
-        if public_context.components.len() != 1
-            || public_context.components[0].active_rows != 0
-            || public_context.components[0].columns.all().next().is_some()
+        if public_context.air_instances.len() != 1
+            || !public_context.air_instances[0].components.is_empty()
         {
             return Err(ArtifactError::InvalidInput(
-                "Ts13PublicContextBindV1 must be exactly one zero-column component".to_owned(),
+                "Ts13PublicContextBindV1 must be exactly one zero-component AIR instance"
+                    .to_owned(),
+            ));
+        }
+        let item_parsers = &self.modules[8];
+        if item_parsers.air_instances.len() != 2 {
+            return Err(ArtifactError::InvalidInput(
+                "the private item parser slot must contain its outer and inner AIR instances"
+                    .to_owned(),
             ));
         }
         let u9 = &self.modules[14];
-        if u9.components.len() != 1 || u9.components[0].active_rows != 416 {
+        if u9.air_instances.len() != 1
+            || !u9
+                .air_instances
+                .iter()
+                .flat_map(|air| &air.components)
+                .any(|component| component.active_rows == 416)
+        {
             return Err(ArtifactError::InvalidInput(
-                "U9 must be exactly one component with 416 active rows".to_owned(),
+                "U9 must be one AIR instance with a 416-active-row component".to_owned(),
             ));
         }
-        if self.modules[15].components.len() != 1 {
+        if self.modules[15].air_instances.len() != 1 {
             return Err(ArtifactError::InvalidInput(
-                "U6 and U7 must be one contiguous private-device ML-DSA AIR component".to_owned(),
+                "U6 and U7 must be one contiguous private-device ML-DSA AIR instance".to_owned(),
             ));
+        }
+        let public_revocation = &self.modules[18];
+        if public_revocation.air_instances.len() != 1
+            || !public_revocation.air_instances[0].components.is_empty()
+        {
+            return Err(ArtifactError::InvalidInput(
+                "the public revocation binder must be exactly one zero-component AIR instance"
+                    .to_owned(),
+            ));
+        }
+        for (module_ordinal, module) in self.modules.iter().enumerate() {
+            let post_interaction_columns =
+                module.air_instances.iter().try_fold(0_u32, |sum, air| {
+                    sum.checked_add(checked_column_count(
+                        &air.columns.post_interaction_m31_log_sizes,
+                    )?)
+                    .ok_or_else(|| {
+                        ArtifactError::InvalidInput(
+                            "post-interaction column count exceeds u32".to_owned(),
+                        )
+                    })
+                })?;
+            let expected = if module_ordinal == 2 { 8 } else { 0 };
+            if post_interaction_columns != expected {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "module {:?} must declare exactly {expected} physical post-interaction columns",
+                    module.name
+                )));
+            }
         }
 
         let modules: BTreeSet<_> = self
@@ -912,8 +1162,9 @@ impl GenerationInputV1 {
                     .iter()
                     .find(|module| {
                         module
-                            .components
+                            .air_instances
                             .iter()
+                            .flat_map(|air| &air.components)
                             .any(|component| component.name == relation_use.component)
                     })
                     .map(|module| module.name.as_str());
@@ -925,6 +1176,24 @@ impl GenerationInputV1 {
                 }
             }
         }
+        let relation_use_count = self.relations.iter().try_fold(0_usize, |sum, relation| {
+            sum.checked_add(relation.uses.len()).ok_or_else(|| {
+                ArtifactError::InvalidInput("relation use count exceeds usize".to_owned())
+            })
+        })?;
+        if self.relations.len() != FROZEN_RELATION_COUNT
+            || relation_use_count != FROZEN_RELATION_USE_COUNT
+        {
+            return Err(ArtifactError::InvalidInput(format!(
+                "the frozen profile must contain exactly {FROZEN_RELATION_COUNT} relations and \
+                 {FROZEN_RELATION_USE_COUNT} uses, got {} and {relation_use_count}",
+                self.relations.len()
+            )));
+        }
+        checked_name_list(
+            "relation",
+            self.relations.iter().map(|relation| relation.name.as_str()),
+        )?;
 
         for (kind, entries) in [
             ("public mix", &self.transcript.public_mix_order),
@@ -946,18 +1215,118 @@ impl GenerationInputV1 {
                 }
             }
         }
-
-        if self.serialized_claims.is_empty() {
+        if self.transcript.public_mix_order.len() != FROZEN_PUBLIC_MIX_COUNT
+            || self.transcript.challenge_order.len() != FROZEN_CHALLENGE_ENTRY_COUNT
+        {
+            return Err(ArtifactError::InvalidInput(format!(
+                "the frozen transcript must contain exactly {FROZEN_PUBLIC_MIX_COUNT} public \
+                 mixes and {FROZEN_CHALLENGE_ENTRY_COUNT} challenge entries"
+            )));
+        }
+        let expected_public_mix_owners = self
+            .modules
+            .iter()
+            .flat_map(|module| module.air_instances.iter().map(|_| module.name.as_str()))
+            .collect::<Vec<_>>();
+        if self
+            .transcript
+            .public_mix_order
+            .iter()
+            .zip(expected_public_mix_owners)
+            .enumerate()
+            .any(|(ordinal, (entry, owner))| {
+                entry.owner_module != owner || !entry.name.starts_with(&format!("p{ordinal:02}_"))
+            })
+        {
             return Err(ArtifactError::InvalidInput(
-                "serialized claim order cannot be empty".to_owned(),
+                "public mixes must follow the exact physical AIR order".to_owned(),
             ));
         }
+        if self
+            .transcript
+            .challenge_order
+            .iter()
+            .enumerate()
+            .any(|(ordinal, entry)| !entry.name.starts_with(&format!("c{ordinal:03}_")))
+        {
+            return Err(ArtifactError::InvalidInput(
+                "challenge entries must carry their exact transcript ordinal".to_owned(),
+            ));
+        }
+        let mut relation_challenge_count = 0_usize;
+        for relation in &self.relations {
+            let suffix = format!("_{}", relation.name);
+            let mut matches = self
+                .transcript
+                .challenge_order
+                .iter()
+                .filter(|entry| entry.name.ends_with(&suffix));
+            let Some(entry) = matches.next() else {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "relation {:?} has no transcript challenge",
+                    relation.name
+                )));
+            };
+            if matches.next().is_some()
+                || entry.owner_module != relation.challenge_owner_module
+                || entry.fixed_length != Some(32)
+            {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "relation {:?} must have exactly one 32-byte challenge owned by {:?}",
+                    relation.name, relation.challenge_owner_module
+                )));
+            }
+            relation_challenge_count += 1;
+        }
+        let raw_challenges = self
+            .transcript
+            .challenge_order
+            .len()
+            .checked_sub(relation_challenge_count)
+            .ok_or_else(|| {
+                ArtifactError::InvalidInput(
+                    "relation challenge count exceeds transcript length".to_owned(),
+                )
+            })?;
+        if raw_challenges != FROZEN_RAW_MLDSA_CHALLENGE_COUNT {
+            return Err(ArtifactError::InvalidInput(format!(
+                "the frozen transcript must contain exactly \
+                 {FROZEN_RAW_MLDSA_CHALLENGE_COUNT} raw ML-DSA challenges, got {raw_challenges}"
+            )));
+        }
+        checked_name_list(
+            "challenge",
+            self.transcript
+                .challenge_order
+                .iter()
+                .map(|entry| entry.name.as_str()),
+        )?;
+
+        if self.serialized_claims.len() != FROZEN_SERIALIZED_CLAIM_COUNT {
+            return Err(ArtifactError::InvalidInput(
+                "serialized claim order must contain exactly 26 entries".to_owned(),
+            ));
+        }
+        let mut claim_names = BTreeSet::new();
+        let mut serialized_claim_bytes = 0_u64;
         for claim in &self.serialized_claims {
-            if claim.name.is_empty() || claim.encoding.is_empty() || claim.fixed_length == 0 {
+            if claim.name.is_empty()
+                || !claim_names.insert(claim.name.as_str())
+                || claim.encoding.is_empty()
+                || claim.fixed_length == 0
+            {
                 return Err(ArtifactError::InvalidInput(
-                    "serialized claims require a name, encoding, and fixed byte length".to_owned(),
+                    "serialized claims require a unique name, encoding, and fixed byte length"
+                        .to_owned(),
                 ));
             }
+            serialized_claim_bytes = serialized_claim_bytes
+                .checked_add(u64::from(claim.fixed_length))
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput(
+                        "serialized claim byte count exceeds u64".to_owned(),
+                    )
+                })?;
             checked_name_list(
                 "claim fixed-vector",
                 claim
@@ -966,18 +1335,35 @@ impl GenerationInputV1 {
                     .map(|entry| entry.name.as_str()),
             )?;
         }
+        if serialized_claim_bytes != FROZEN_SERIALIZED_CLAIM_BYTES {
+            return Err(ArtifactError::InvalidInput(format!(
+                "serialized claims must occupy exactly {FROZEN_SERIALIZED_CLAIM_BYTES} bytes \
+                 excluding StarkProof, got {serialized_claim_bytes}"
+            )));
+        }
 
         checked_named_values("stream ID", &self.stream_ids)?;
+        if self.stream_ids.len() != FROZEN_STREAM_ID_COUNT {
+            return Err(ArtifactError::InvalidInput(format!(
+                "the frozen profile must contain exactly {FROZEN_STREAM_ID_COUNT} stream IDs"
+            )));
+        }
         checked_name_list(
             "hash stream",
             self.hash_streams.iter().map(|stream| stream.name.as_str()),
         )?;
-        if self.hash_streams.is_empty()
+        let declared_stream_ids = self
+            .stream_ids
+            .iter()
+            .map(|entry| entry.value)
+            .collect::<BTreeSet<_>>();
+        if self.hash_streams.len() != FROZEN_HASH_STREAM_COUNT
             || self.hash_streams.iter().any(|stream| {
                 stream.hash_function.is_empty()
                     || stream.job_count == 0
                     || stream.input_capacity_bytes == 0
                     || stream.output_bytes == 0
+                    || !declared_stream_ids.contains(&stream.stream_id)
             })
             || self
                 .hash_streams
@@ -996,7 +1382,7 @@ impl GenerationInputV1 {
             "range table",
             self.range_tables.iter().map(|table| table.name.as_str()),
         )?;
-        if self.range_tables.is_empty()
+        if self.range_tables.len() != FROZEN_RANGE_TABLE_COUNT
             || self.range_tables.iter().any(|table| {
                 table.value_kind.is_empty()
                     || table.bit_width == 0
@@ -1011,43 +1397,77 @@ impl GenerationInputV1 {
             ));
         }
         checked_named_values("relation tuple count", &self.relation_tuple_counts)?;
+        if self.relation_tuple_counts.len() != self.relations.len()
+            || self
+                .relation_tuple_counts
+                .iter()
+                .zip(&self.relations)
+                .any(|(count, relation)| {
+                    count.name != relation.name || count.value != relation.tuple.len() as u64
+                })
+        {
+            return Err(ArtifactError::InvalidInput(
+                "relation tuple counts must exactly match every ordered relation schema".to_owned(),
+            ));
+        }
         checked_name_list(
             "implementation constant",
             self.implementation_constants
                 .iter()
                 .map(|constant| constant.name.as_str()),
         )?;
-        if self
+        let implementation_constant_names = self
             .implementation_constants
             .iter()
-            .any(|constant| !constant.name.starts_with("impl."))
-        {
+            .map(|constant| constant.name.as_str())
+            .collect::<Vec<_>>();
+        if implementation_constant_names != FROZEN_IMPLEMENTATION_CONSTANT_NAMES {
             return Err(ArtifactError::InvalidInput(
-                "implementation constant names must start with \"impl.\"".to_owned(),
+                "implementation constants differ from the frozen universal allowlist".to_owned(),
             ));
         }
 
         if self.tree_zero.derivation.is_empty()
-            || self.tree_zero.hash.is_empty()
-            || self.tree_zero.preprocessed_column_order.is_empty()
+            || self.tree_zero.hash != "Blake2s-256"
+            || self.tree_zero.preprocessed_column_order.len()
+                != FROZEN_TREE_COLUMN_COUNTS[0] as usize
+            || self
+                .tree_zero
+                .preprocessed_column_order
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.tree_zero.preprocessed_column_order.len()
+            || self.tree_zero.committed_column_log_sizes.len()
+                != FROZEN_TREE_COLUMN_COUNTS[0] as usize
+            || self
+                .tree_zero
+                .committed_column_log_sizes
+                .iter()
+                .any(|&log_size| log_size >= u32::BITS)
         {
             return Err(ArtifactError::InvalidInput(
-                "tree-zero derivation, hash, and preprocessed order are required".to_owned(),
+                "tree zero must carry the exact 947-column deduplicated order and log geometry"
+                    .to_owned(),
             ));
         }
-        if self.proof_system.field.is_empty()
-            || self.proof_system.secure_extension_field.is_empty()
-            || self.proof_system.pcs.is_empty()
-            || self.proof_system.commitment_hash.is_empty()
-            || self.proof_system.merkle_hash.is_empty()
-            || self.proof_system.field_modulus == 0
-            || self.proof_system.secure_extension_degree == 0
-            || self.proof_system.fri_query_count == 0
-            || self.proof_system.merkle_trees.is_empty()
-            || self.proof_system.fri_layers.is_empty()
+        if self.proof_system.field != "M31"
+            || self.proof_system.field_modulus != 2_147_483_647
+            || self.proof_system.secure_extension_field != "QM31"
+            || self.proof_system.secure_extension_degree != 4
+            || self.proof_system.pcs != "CirclePcs"
+            || self.proof_system.commitment_hash != "Blake2s-256"
+            || self.proof_system.merkle_hash != "Blake2s-256"
+            || self.proof_system.fri_log_last_layer_degree_bound != 1
+            || self.proof_system.fri_log_blowup_factor != 3
+            || self.proof_system.fri_query_count != 36
+            || self.proof_system.fri_fold_step != 2
+            || self.proof_system.pow_bits != 20
+            || self.proof_system.lifting_log_size.is_some()
         {
             return Err(ArtifactError::InvalidInput(
-                "proof-system field, PCS, hash, FRI, query, and extension parameters are required"
+                "proof-system field, PCS, hash, FRI, query, PoW, and lifting parameters differ \
+                 from the frozen demo"
                     .to_owned(),
             ));
         }
@@ -1058,18 +1478,65 @@ impl GenerationInputV1 {
                 .iter()
                 .map(|tree| tree.name.as_str()),
         )?;
-        if self.proof_system.merkle_trees.iter().any(|tree| {
-            tree.depth == 0 || tree.digest_bytes == 0 || tree.maximum_opened_columns == 0
-        }) || self.proof_system.fri_layers.iter().any(|layer| {
-            layer.input_log_size <= layer.output_log_size
-                || layer.merkle_depth == 0
-                || layer.maximum_opened_values == 0
-        }) {
+        let merkle_tree_names = self
+            .proof_system
+            .merkle_trees
+            .iter()
+            .map(|tree| tree.name.as_str())
+            .collect::<Vec<_>>();
+        if merkle_tree_names != FROZEN_MERKLE_TREE_ORDER {
+            return Err(ArtifactError::InvalidInput(format!(
+                "Merkle-tree order must be exactly {FROZEN_MERKLE_TREE_ORDER:?}"
+            )));
+        }
+        if self.proof_system.merkle_trees.len() != 5
+            || self
+                .proof_system
+                .merkle_trees
+                .iter()
+                .zip(FROZEN_TREE_DEPTHS)
+                .zip(FROZEN_TREE_COLUMN_COUNTS)
+                .any(|((tree, depth), columns)| {
+                    tree.depth != depth
+                        || tree.digest_bytes != 32
+                        || u64::from(tree.maximum_opened_columns) != columns
+                        || tree.sampled_value_length_histogram.is_empty()
+                        || tree
+                            .sampled_value_length_histogram
+                            .iter()
+                            .map(|entry| u64::from(entry.count))
+                            .sum::<u64>()
+                            != columns
+                        || tree
+                            .sampled_value_length_histogram
+                            .iter()
+                            .any(|entry| entry.value == 0 || entry.count == 0)
+                        || tree
+                            .sampled_value_length_histogram
+                            .windows(2)
+                            .any(|pair| pair[0].value >= pair[1].value)
+                })
+            || self.proof_system.fri_layers.len() != 8
+            || self
+                .proof_system
+                .fri_layers
+                .iter()
+                .zip(FROZEN_FRI_LAYER_INPUT_LOGS)
+                .zip(FROZEN_FRI_LAYER_OUTPUT_LOGS)
+                .zip(FROZEN_FRI_MERKLE_DEPTHS)
+                .zip(FROZEN_FRI_WITNESS_CAPS)
+                .any(|((((layer, input), output), depth), witness_cap)| {
+                    layer.input_log_size != input
+                        || layer.output_log_size != output
+                        || layer.merkle_depth != depth
+                        || u64::from(layer.maximum_opened_values) != witness_cap
+                })
+        {
             return Err(ArtifactError::InvalidInput(
-                "Merkle-tree depths and FRI-layer maxima must be explicit and non-zero".to_owned(),
+                "Merkle-tree and FRI-layer geometry differs from the frozen demo".to_owned(),
             ));
         }
-        validate_proof_bound(&self.proof_serialization_bound)?;
+        validate_proof_bound(&ts13_demo_proof_bound_terms())?;
 
         let expected_packages: Vec<_> = SOURCE_PACKAGE_ROOTS
             .iter()
@@ -1092,22 +1559,71 @@ impl GenerationInputV1 {
     }
 
     fn shape_manifest(&self) -> Result<ShapeManifestV1, ArtifactError> {
-        let mut components = Vec::new();
-        for (module_ordinal, module) in self.modules.iter().enumerate() {
-            for (component_ordinal, component) in module.components.iter().enumerate() {
-                components.push(ShapeComponentV1 {
+        let modules = self
+            .modules
+            .iter()
+            .enumerate()
+            .map(|(module_ordinal, module)| {
+                Ok(ShapeModuleV1 {
                     module_ordinal: u32::try_from(module_ordinal).map_err(|_| {
                         ArtifactError::InvalidInput("module ordinal exceeds u32".to_owned())
                     })?,
                     module: module.name.clone(),
-                    component_ordinal: u32::try_from(component_ordinal).map_err(|_| {
-                        ArtifactError::InvalidInput("component ordinal exceeds u32".to_owned())
+                    air_instance_count: u32::try_from(module.air_instances.len()).map_err(
+                        |_| {
+                            ArtifactError::InvalidInput("AIR instance count exceeds u32".to_owned())
+                        },
+                    )?,
+                    component_count: u32::try_from(
+                        module
+                            .air_instances
+                            .iter()
+                            .map(|air| air.components.len())
+                            .sum::<usize>(),
+                    )
+                    .map_err(|_| {
+                        ArtifactError::InvalidInput("component count exceeds u32".to_owned())
                     })?,
-                    component: component.name.clone(),
-                    active_rows: component.active_rows,
-                    constraint_log_degree_bound: component.constraint_log_degree_bound,
-                    column_counts: component.columns.counts()?,
+                })
+            })
+            .collect::<Result<Vec<_>, ArtifactError>>()?;
+        let mut air_instances = Vec::new();
+        let mut components = Vec::new();
+        for (module_ordinal, module) in self.modules.iter().enumerate() {
+            let module_ordinal = u32::try_from(module_ordinal).map_err(|_| {
+                ArtifactError::InvalidInput("module ordinal exceeds u32".to_owned())
+            })?;
+            let mut component_ordinal = 0_u32;
+            for (air_instance_ordinal, air) in module.air_instances.iter().enumerate() {
+                let air_instance_ordinal = u32::try_from(air_instance_ordinal).map_err(|_| {
+                    ArtifactError::InvalidInput("AIR instance ordinal exceeds u32".to_owned())
+                })?;
+                air_instances.push(ShapeAirInstanceV1 {
+                    module_ordinal,
+                    module: module.name.clone(),
+                    air_instance_ordinal,
+                    columns: air.columns.counts()?,
+                    column_log_sizes: air.columns.clone(),
+                    max_log_size: air.max_log_size,
+                    max_constraint_log_degree_bound: air.max_constraint_log_degree_bound,
                 });
+                for component in &air.components {
+                    components.push(ShapeComponentV1 {
+                        module_ordinal,
+                        module: module.name.clone(),
+                        component_ordinal,
+                        air_instance_ordinal,
+                        component: component.name.clone(),
+                        trace_rows: component.trace_rows,
+                        active_rows: component.active_rows,
+                        constraint_count: component.constraint_count,
+                        max_constraint_log_degree_bound: component.max_constraint_log_degree_bound,
+                        trace_mask_column_counts: component.trace_mask_column_counts.clone(),
+                    });
+                    component_ordinal = component_ordinal.checked_add(1).ok_or_else(|| {
+                        ArtifactError::InvalidInput("component ordinal exceeds u32".to_owned())
+                    })?;
+                }
             }
         }
         Ok(ShapeManifestV1 {
@@ -1115,6 +1631,8 @@ impl GenerationInputV1 {
             profile: PROFILE_ID,
             credential_shape: self.credential_shape.clone(),
             request_context_corpus: self.request_context_corpus.clone(),
+            modules,
+            air_instances,
             components,
             stream_ids: self.stream_ids.clone(),
             hash_streams: self.hash_streams.clone(),
@@ -1122,6 +1640,11 @@ impl GenerationInputV1 {
             relation_tuple_counts: self.relation_tuple_counts.clone(),
         })
     }
+}
+
+fn checked_column_count(log_sizes: &[u32]) -> Result<u32, ArtifactError> {
+    u32::try_from(log_sizes.len())
+        .map_err(|_| ArtifactError::InvalidInput("AIR column count exceeds u32".to_owned()))
 }
 
 fn checked_named_values(kind: &str, values: &[NamedU64V1]) -> Result<(), ArtifactError> {
@@ -1133,6 +1656,134 @@ fn checked_named_values(kind: &str, values: &[NamedU64V1]) -> Result<(), Artifac
     checked_name_list(kind, values.iter().map(|entry| entry.name.as_str()))
 }
 
+fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
+    let committed_columns = FROZEN_TREE_COLUMN_COUNTS.iter().sum::<u64>();
+    let queried_base_fields = committed_columns * 36;
+    let tree_hashes = FROZEN_TREE_DEPTHS
+        .iter()
+        .map(|depth| u64::from(*depth) * 36)
+        .sum::<u64>();
+    let fri_hashes = FROZEN_FRI_MERKLE_DEPTHS
+        .iter()
+        .map(|depth| u64::from(*depth) * 36)
+        .sum::<u64>();
+    let fri_witnesses = FROZEN_FRI_WITNESS_CAPS.iter().sum::<u64>();
+    let tree_vector_framing = 8 + 5 * 8 + committed_columns * 8;
+    let terms = vec![
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::ProofHeader,
+            name: "pcs_config_and_none_tag".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: 28,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::Commitments,
+            name: "blake2s_roots".to_owned(),
+            maximum_item_count: 5,
+            maximum_serialized_bytes_per_item: 32,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::Commitments,
+            name: "vector_length".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: 8,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::Queries,
+            name: "base_field_vector_framing".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: tree_vector_framing,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::MerkleDecommitments,
+            name: "hash_witnesses".to_owned(),
+            maximum_item_count: tree_hashes,
+            maximum_serialized_bytes_per_item: 32,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::MerkleDecommitments,
+            name: "vector_framing".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: 8 + 5 * 8,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::FriLayers,
+            name: "commitments".to_owned(),
+            maximum_item_count: 8,
+            maximum_serialized_bytes_per_item: 32,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::FriLayers,
+            name: "hash_witnesses".to_owned(),
+            maximum_item_count: fri_hashes,
+            maximum_serialized_bytes_per_item: 32,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::FriLayers,
+            name: "last_layer_coefficients".to_owned(),
+            maximum_item_count: 2,
+            maximum_serialized_bytes_per_item: 16,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::FriLayers,
+            name: "secure_field_witnesses".to_owned(),
+            maximum_item_count: fri_witnesses,
+            maximum_serialized_bytes_per_item: 16,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::FriLayers,
+            name: "vector_framing".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: 148,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::Claims,
+            name: "fixed_outer_claims_and_framing".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: FROZEN_OUTER_CLAIMS_AND_FRAMING_BYTES,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::ColumnValues,
+            name: "queried_base_fields".to_owned(),
+            maximum_item_count: queried_base_fields,
+            maximum_serialized_bytes_per_item: 4,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::ColumnValues,
+            name: "sampled_secure_fields".to_owned(),
+            maximum_item_count: FROZEN_SAMPLED_SECURE_FIELD_COUNT,
+            maximum_serialized_bytes_per_item: 16,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::ColumnValues,
+            name: "sampled_vector_framing".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: tree_vector_framing,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::PostInteractionPayloads,
+            name: "keccak_round_gkr".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES
+                as u64,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::Pow,
+            name: "nonce".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: 8,
+        },
+        ProofBoundTermV1 {
+            section: ProofBoundSectionV1::SerializationOverhead,
+            name: "post_payload_vector_framing".to_owned(),
+            maximum_item_count: 1,
+            maximum_serialized_bytes_per_item: 8 + 20 * 8,
+        },
+    ];
+    debug_assert!(validate_proof_bound(&terms).is_ok());
+    terms
+}
+
 fn validate_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(), ArtifactError> {
     let required = [
         ProofBoundSectionV1::ProofHeader,
@@ -1142,6 +1793,7 @@ fn validate_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(), ArtifactError>
         ProofBoundSectionV1::FriLayers,
         ProofBoundSectionV1::Claims,
         ProofBoundSectionV1::ColumnValues,
+        ProofBoundSectionV1::PostInteractionPayloads,
         ProofBoundSectionV1::Pow,
         ProofBoundSectionV1::SerializationOverhead,
     ];
@@ -1149,7 +1801,8 @@ fn validate_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(), ArtifactError>
     if present != BTreeSet::from(required) {
         return Err(ArtifactError::InvalidInput(
             "proof serialization bound must cover header, commitments, queries, Merkle \
-             decommitments, FRI layers, claims, column values, PoW, and serialization overhead"
+             decommitments, FRI layers, claims, column values, post-interaction payloads, PoW, \
+             and serialization overhead"
                 .to_owned(),
         ));
     }
@@ -1171,14 +1824,6 @@ fn validate_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(), ArtifactError>
         ));
     }
     Ok(())
-}
-
-fn sum_column_counts(columns: &[ColumnSchemaV1]) -> Result<u32, ArtifactError> {
-    columns.iter().try_fold(0_u32, |sum, column| {
-        sum.checked_add(column.count).ok_or_else(|| {
-            ArtifactError::InvalidInput("component column count exceeds u32".to_owned())
-        })
-    })
 }
 
 fn deterministic_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(u64, u32), ArtifactError> {
@@ -1204,6 +1849,8 @@ fn deterministic_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(u64, u32), A
 }
 
 fn builtin_constants() -> Vec<ArtifactConstantV1> {
+    let normative_spec_digest =
+        decode_hex(FROZEN_NORMATIVE_SPEC_SHA256).expect("frozen specification digest is valid hex");
     let mut constants = vec![
         constant_bytes(
             "cbor.device_key_info_prefix",
@@ -1232,6 +1879,16 @@ fn builtin_constants() -> Vec<ArtifactConstantV1> {
         constant_unsigned("profile.potential_issuers", 1),
         constant_unsigned("profile.revocation_mandatory", 1),
         constant_text("profile.timestamp_precision", "UTC-whole-Unix-second"),
+        constant_text(
+            "privacy.claim",
+            "public-input unlinkable; transcript zero knowledge pending",
+        ),
+        constant_text("spec.eudi_arf_commit", FROZEN_EUDI_ARF_COMMIT),
+        constant_text(
+            "spec.eudi_arf_ts13_path",
+            "docs/technical-specifications/ts13-zksnarks.md",
+        ),
+        constant_bytes("spec.normative_document_sha256", &normative_spec_digest),
         constant_unsigned("u5.accepted_coefficients_per_polynomial", 256),
         constant_unsigned("u5.candidate_bits", 23),
         constant_unsigned("u5.expand_a_jobs", 30),
@@ -1504,6 +2161,125 @@ fn command_output(
     Ok(output.stdout)
 }
 
+fn resolved_source_package_features(
+    workspace: &Path,
+) -> Result<Vec<PackageFeaturesV1>, ArtifactError> {
+    let output = command_output(
+        "cargo",
+        &["metadata", "--format-version", "1", "--locked"],
+        workspace,
+    )?;
+    let metadata: serde_json::Value = serde_json::from_slice(&output).map_err(|error| {
+        ArtifactError::InvalidInput(format!("cargo metadata is not valid JSON: {error}"))
+    })?;
+    let packages = metadata
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| ArtifactError::InvalidInput("cargo metadata omitted packages".to_owned()))?;
+    let nodes = metadata
+        .get("resolve")
+        .and_then(|resolve| resolve.get("nodes"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput("cargo metadata omitted resolved nodes".to_owned())
+        })?;
+
+    SOURCE_PACKAGE_ROOTS
+        .iter()
+        .map(|root| {
+            let expected_manifest = fs::canonicalize(workspace.join(root).join("Cargo.toml"))
+                .map_err(|source| {
+                    io_error(
+                        "canonicalize",
+                        &workspace.join(root).join("Cargo.toml"),
+                        source,
+                    )
+                })?;
+            let package = packages
+                .iter()
+                .find(|package| {
+                    package
+                        .get("manifest_path")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|path| fs::canonicalize(path).ok())
+                        .as_ref()
+                        == Some(&expected_manifest)
+                })
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput(format!(
+                        "cargo metadata omitted source package {root:?}"
+                    ))
+                })?;
+            let id = package
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput(format!(
+                        "cargo metadata package {root:?} omitted its ID"
+                    ))
+                })?;
+            let name = package
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput(format!(
+                        "cargo metadata package {root:?} omitted its name"
+                    ))
+                })?;
+            let node = nodes
+                .iter()
+                .find(|node| node.get("id").and_then(serde_json::Value::as_str) == Some(id))
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput(format!(
+                        "cargo metadata omitted resolved features for {name:?}"
+                    ))
+                })?;
+            let mut features = node
+                .get("features")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput(format!(
+                        "cargo metadata package {name:?} omitted features"
+                    ))
+                })?
+                .iter()
+                .map(|feature| {
+                    feature.as_str().map(str::to_owned).ok_or_else(|| {
+                        ArtifactError::InvalidInput(format!(
+                            "cargo metadata package {name:?} has a non-string feature"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            features.sort();
+            if features.windows(2).any(|pair| pair[0] == pair[1]) {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "cargo metadata package {name:?} has duplicate features"
+                )));
+            }
+            Ok(PackageFeaturesV1 {
+                package: name.to_owned(),
+                features,
+            })
+        })
+        .collect()
+}
+
+fn checked_compiled_feature_profile() -> Result<(), ArtifactError> {
+    if cfg!(feature = "parallel")
+        || cfg!(feature = "unlink-spikes")
+        || stwo_mldsa::ATTACK_HOOKS_FEATURE_ENABLED
+        || stwo_sha256::PARALLEL_FEATURE_ENABLED
+        || !stwo_sha256::STD_FEATURE_ENABLED
+        || !predicates::STD_FEATURE_ENABLED
+    {
+        return Err(ArtifactError::InvalidInput(
+            "artifact generation requires the frozen default feature profile".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn git_path_arguments(prefix: &[&'static str]) -> Vec<&'static str> {
     let mut arguments = prefix.to_vec();
     arguments.push("--");
@@ -1555,6 +2331,20 @@ fn checked_git_source_paths(
         )));
     }
     Ok(())
+}
+
+fn checked_git_source_clean(workspace: &Path) -> Result<(), ArtifactError> {
+    let arguments =
+        git_path_arguments(&["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+    let output = command_output("git", &arguments, workspace)?;
+    if output.is_empty() {
+        Ok(())
+    } else {
+        Err(ArtifactError::InvalidInput(
+            "soundness source files are dirty; commit them before generating an artifact"
+                .to_owned(),
+        ))
+    }
 }
 
 fn git_metadata(workspace: &Path) -> Result<GitMetadataV1, ArtifactError> {
@@ -1642,12 +2432,27 @@ fn toolchain_metadata(workspace: &Path) -> Result<RustToolchainV1, ArtifactError
     })
 }
 
+fn checked_normative_spec(workspace: &Path) -> Result<(), ArtifactError> {
+    let normative_spec_digest = Digest32::of(&read(&workspace.join(NORMATIVE_SPEC_PATH))?);
+    if normative_spec_digest.to_string() != FROZEN_NORMATIVE_SPEC_SHA256 {
+        return Err(ArtifactError::InvalidInput(format!(
+            "normative specification digest differs: expected {FROZEN_NORMATIVE_SPEC_SHA256}, \
+             got {normative_spec_digest}"
+        )));
+    }
+    Ok(())
+}
+
 fn generation_environment(workspace: &Path) -> Result<GenerationEnvironmentV1, ArtifactError> {
+    checked_compiled_feature_profile()?;
+    checked_normative_spec(workspace)?;
     let source_manifest = collect_source_tree(workspace)?;
     checked_git_source_paths(workspace, &source_manifest)?;
+    checked_git_source_clean(workspace)?;
     let source_manifest_sha256 = Digest32::of(&canonical_cbor(&source_manifest)?);
     Ok(GenerationEnvironmentV1 {
         cargo_lock_sha256: Digest32::of(&read(&workspace.join("Cargo.lock"))?),
+        enabled_cargo_features: resolved_source_package_features(workspace)?,
         rust_toolchain: toolchain_metadata(workspace)?,
         git: git_metadata(workspace)?,
         source_manifest,
@@ -1660,12 +2465,28 @@ fn build_outputs(
     environment: GenerationEnvironmentV1,
 ) -> Result<GeneratedOutputs, ArtifactError> {
     input.validate()?;
+    if input.enabled_cargo_features != environment.enabled_cargo_features {
+        return Err(ArtifactError::InvalidInput(format!(
+            "declared Cargo features differ from the resolved build: declared {:?}, resolved {:?}",
+            input.enabled_cargo_features, environment.enabled_cargo_features
+        )));
+    }
     let shape_manifest = canonical_cbor(&input.shape_manifest()?)?;
     let shape_manifest_sha256 = Digest32::of(&shape_manifest);
-    let (worst_case, proof_body_capacity) =
-        deterministic_proof_bound(&input.proof_serialization_bound)?;
+    let proof_serialization_bound = ts13_demo_proof_bound_terms();
+    let (worst_case, proof_body_capacity) = deterministic_proof_bound(&proof_serialization_bound)?;
 
     let mut constants = builtin_constants();
+    if constants
+        .iter()
+        .map(|constant| constant.name.as_str())
+        .collect::<Vec<_>>()
+        != FROZEN_BUILTIN_CONSTANT_NAMES
+    {
+        return Err(ArtifactError::InvalidInput(
+            "built-in constants differ from the frozen universal allowlist".to_owned(),
+        ));
+    }
     constants.extend(input.implementation_constants.clone());
     constants.sort_by(|left, right| left.name.cmp(&right.name));
     if constants
@@ -1703,7 +2524,7 @@ fn build_outputs(
             envelope_version: V4_ENVELOPE_VERSION,
             envelope_header_bytes: V4_HEADER_BYTES,
             capacity_alignment_bytes: V4_CAPACITY_ALIGNMENT,
-            bound_terms: input.proof_serialization_bound.clone(),
+            bound_terms: proof_serialization_bound,
             deterministic_worst_case_bytes: worst_case,
             proof_body_capacity,
             padding: "zero bytes to exact capacity; no encoded used length",
@@ -1731,6 +2552,7 @@ fn build_outputs(
         shape_manifest_sha256,
         environment.source_manifest_sha256,
         proof_body_capacity,
+        input,
     );
     Ok(GeneratedOutputs {
         shape_manifest,
@@ -1758,6 +2580,7 @@ fn render_hash_embedding(
     shape_manifest_sha256: Digest32,
     source_manifest_sha256: Digest32,
     proof_body_capacity: u32,
+    input: &GenerationInputV1,
 ) -> String {
     let mut output = String::from(
         "// @generated by `ts13_demo_artifact`; do not edit.\n\
@@ -1779,6 +2602,90 @@ fn render_hash_embedding(
     writeln!(
         output,
         "\npub const TS13_DEMO_PROOF_BODY_CAPACITY: u32 = {proof_body_capacity};"
+    )
+    .expect("writing to String cannot fail");
+    let query_count = input.proof_system.fri_query_count as usize;
+    writeln!(
+        output,
+        "pub const TS13_DEMO_QUERY_COUNT: usize = {query_count};"
+    )
+    .expect("writing to String cannot fail");
+
+    output.push_str("pub const TS13_DEMO_TREE_COLUMN_COUNTS: [usize; 5] = [\n");
+    for tree in &input.proof_system.merkle_trees {
+        writeln!(output, "    {},", tree.maximum_opened_columns)
+            .expect("writing to String cannot fail");
+    }
+    output.push_str("];\n");
+
+    output.push_str("pub const TS13_DEMO_TREE_MERKLE_HASH_CAPS: [usize; 5] = [\n");
+    for tree in &input.proof_system.merkle_trees {
+        writeln!(
+            output,
+            "    {},",
+            u64::from(input.proof_system.fri_query_count) * u64::from(tree.depth)
+        )
+        .expect("writing to String cannot fail");
+    }
+    output.push_str("];\n");
+
+    output.push_str(
+        "pub const TS13_DEMO_SAMPLED_VALUE_LENGTH_HISTOGRAMS: \
+         [&[(usize, usize)]; 5] = [\n",
+    );
+    for tree in &input.proof_system.merkle_trees {
+        output.push_str("    &[\n");
+        for entry in &tree.sampled_value_length_histogram {
+            writeln!(output, "        ({}, {}),", entry.value, entry.count)
+                .expect("writing to String cannot fail");
+        }
+        output.push_str("    ],\n");
+    }
+    output.push_str("];\n");
+
+    let first_fri_layer = &input.proof_system.fri_layers[0];
+    writeln!(
+        output,
+        "pub const TS13_DEMO_FRI_FIRST_WITNESS_CAP: usize = {};",
+        first_fri_layer.maximum_opened_values
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "pub const TS13_DEMO_FRI_FIRST_HASH_CAP: usize = {};",
+        u64::from(input.proof_system.fri_query_count) * u64::from(first_fri_layer.merkle_depth)
+    )
+    .expect("writing to String cannot fail");
+    output.push_str("pub const TS13_DEMO_FRI_INNER_WITNESS_CAPS: [usize; 7] = [\n");
+    for layer in &input.proof_system.fri_layers[1..] {
+        writeln!(output, "    {},", layer.maximum_opened_values)
+            .expect("writing to String cannot fail");
+    }
+    output.push_str("];\n");
+    output.push_str("pub const TS13_DEMO_FRI_INNER_HASH_CAPS: [usize; 7] = [\n");
+    for layer in &input.proof_system.fri_layers[1..] {
+        writeln!(
+            output,
+            "    {},",
+            u64::from(input.proof_system.fri_query_count) * u64::from(layer.merkle_depth)
+        )
+        .expect("writing to String cannot fail");
+    }
+    output.push_str("];\n");
+    writeln!(
+        output,
+        "pub const TS13_DEMO_FRI_LAST_LAYER_COEFFICIENT_COUNT: usize = {};",
+        1_usize << input.proof_system.fri_log_last_layer_degree_bound
+    )
+    .expect("writing to String cannot fail");
+    writeln!(
+        output,
+        "pub const TS13_DEMO_POST_INTERACTION_PAYLOAD_COUNT: usize = {};",
+        input
+            .modules
+            .iter()
+            .map(|module| module.air_instances.len())
+            .sum::<usize>()
     )
     .expect("writing to String cannot fail");
     output
@@ -1870,6 +2777,220 @@ pub fn generate_from_json(
     })
 }
 
+/// Compare a generated-artifact input with geometry captured from an actual
+/// composed TS13 demo proof. This is the CI drift bridge between declarative
+/// JSON and the executable prover; it deliberately compares dimensions only,
+/// never witness values.
+#[doc(hidden)]
+pub fn validate_live_ts13_demo_profile(
+    input_json: &[u8],
+    geometry: &crate::mdoc::MdocTs13DemoCircuitGeometry,
+    proof: &crate::mdoc::MdocTs13DemoProofShape,
+) -> Result<(), ArtifactError> {
+    fn value_histogram(values: &[usize]) -> BTreeMap<u32, u32> {
+        let mut counts = BTreeMap::new();
+        for &value in values {
+            *counts.entry(value as u32).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    fn declared_value_histogram(groups: &[ValueCountV1]) -> BTreeMap<u32, u32> {
+        groups
+            .iter()
+            .map(|group| (group.value, group.count))
+            .collect()
+    }
+
+    let input = serde_json::from_slice::<GenerationInputV1>(input_json).map_err(|error| {
+        ArtifactError::InvalidInput(format!("live artifact input is not valid JSON: {error}"))
+    })?;
+    input.validate()?;
+
+    let declared_airs = input
+        .modules
+        .iter()
+        .flat_map(|module| &module.air_instances)
+        .collect::<Vec<_>>();
+    if declared_airs.len() != geometry.air_instances.len() {
+        return Err(ArtifactError::InvalidInput(format!(
+            "live AIR count differs: artifact {}, prover {}",
+            declared_airs.len(),
+            geometry.air_instances.len()
+        )));
+    }
+    for (ordinal, (declared, live)) in declared_airs
+        .iter()
+        .zip(&geometry.air_instances)
+        .enumerate()
+    {
+        let layouts_match = [
+            (
+                &declared.columns.preprocessed_m31_log_sizes,
+                &live.preprocessed_log_sizes,
+            ),
+            (&declared.columns.trace_m31_log_sizes, &live.trace_log_sizes),
+            (
+                &declared.columns.interaction_m31_log_sizes,
+                &live.interaction_log_sizes,
+            ),
+            (
+                &declared.columns.post_interaction_m31_log_sizes,
+                &live.post_interaction_log_sizes,
+            ),
+        ]
+        .into_iter()
+        .all(|(expected, actual)| expected == actual);
+        if !layouts_match
+            || declared.max_log_size != live.max_log_size
+            || declared.max_constraint_log_degree_bound != live.max_constraint_log_degree_bound
+            || declared.components.len() != live.components.len()
+            || declared
+                .components
+                .iter()
+                .zip(&live.components)
+                .any(|(expected, actual)| {
+                    expected.trace_rows != actual.trace_rows
+                        || expected.active_rows != actual.active_rows
+                        || expected.constraint_count as usize != actual.constraint_count
+                        || expected.max_constraint_log_degree_bound
+                            != actual.max_constraint_log_degree_bound
+                        || expected.trace_mask_column_counts
+                            != actual
+                                .trace_log_degree_bounds
+                                .iter()
+                                .map(|tree| tree.len() as u32)
+                                .collect::<Vec<_>>()
+                })
+        {
+            return Err(ArtifactError::InvalidInput(format!(
+                "live AIR geometry differs at physical ordinal {ordinal}"
+            )));
+        }
+    }
+
+    if input.tree_zero.preprocessed_column_order != geometry.committed_preprocessed_ids
+        || input.tree_zero.committed_column_log_sizes != geometry.committed_preprocessed_log_sizes
+    {
+        return Err(ArtifactError::InvalidInput(
+            "live first-writer tree-zero order or log geometry differs".to_owned(),
+        ));
+    }
+
+    let expected_tree_columns = input
+        .proof_system
+        .merkle_trees
+        .iter()
+        .map(|tree| tree.maximum_opened_columns as usize)
+        .collect::<Vec<_>>();
+    let sampled_tree_columns = proof
+        .sampled_values
+        .iter()
+        .map(Vec::len)
+        .collect::<Vec<_>>();
+    let queried_tree_columns = proof
+        .queried_values
+        .iter()
+        .map(Vec::len)
+        .collect::<Vec<_>>();
+    let query_count = input.proof_system.fri_query_count as usize;
+    let sampled_secure_field_count = proof
+        .sampled_values
+        .iter()
+        .flatten()
+        .copied()
+        .sum::<usize>();
+    let sampled_value_histograms_match = proof.sampled_values.len()
+        == input.proof_system.merkle_trees.len()
+        && proof
+            .sampled_values
+            .iter()
+            .zip(&input.proof_system.merkle_trees)
+            .all(|(live, expected)| {
+                value_histogram(live)
+                    == declared_value_histogram(&expected.sampled_value_length_histogram)
+            });
+    let queried_value_shape_matches = proof
+        .queried_values
+        .iter()
+        .flatten()
+        .all(|&count| count == query_count);
+    let decommitment_shape_matches = proof.decommitment_hash_counts.len()
+        == input.proof_system.merkle_trees.len()
+        && proof
+            .decommitment_hash_counts
+            .iter()
+            .zip(&input.proof_system.merkle_trees)
+            .all(|(&count, tree)| count <= query_count * tree.depth as usize);
+    let fri_shape_matches =
+        input
+            .proof_system
+            .fri_layers
+            .split_first()
+            .is_some_and(|(first, inner)| {
+                proof.fri_first_layer_witness_count <= first.maximum_opened_values as usize
+                    && proof.fri_first_layer_hash_count <= query_count * first.merkle_depth as usize
+                    && proof.fri_inner_layers.len() == inner.len()
+                    && proof
+                        .fri_inner_layers
+                        .iter()
+                        .zip(inner)
+                        .all(|(live, expected)| {
+                            live.witness_count <= expected.maximum_opened_values as usize
+                                && live.hash_count <= query_count * expected.merkle_depth as usize
+                        })
+            });
+    let expected_last_layer_coefficients = 1_usize
+        .checked_shl(input.proof_system.fri_log_last_layer_degree_bound)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput("FRI last-layer coefficient count exceeds usize".to_owned())
+        })?;
+    let (proof_worst_case, _) = deterministic_proof_bound(&ts13_demo_proof_bound_terms())?;
+    if proof.commitment_count != 5
+        || proof.tree_zero_root != Some(input.tree_zero.root.0)
+        || sampled_tree_columns != expected_tree_columns
+        || queried_tree_columns != expected_tree_columns
+        || sampled_secure_field_count != FROZEN_SAMPLED_SECURE_FIELD_COUNT as usize
+        || !sampled_value_histograms_match
+        || !queried_value_shape_matches
+        || !decommitment_shape_matches
+        || !fri_shape_matches
+        || proof.outer_claims_and_framing_bytes != FROZEN_OUTER_CLAIMS_AND_FRAMING_BYTES as usize
+        || proof.proof_bytes > proof_worst_case as usize
+        || proof.fri_last_layer_coefficient_count != expected_last_layer_coefficients
+        || proof.merged_sha_layout != Some((8, 8))
+        || proof.post_interaction_payload_bytes.len() != 20
+        || proof
+            .post_interaction_payload_bytes
+            .iter()
+            .enumerate()
+            .any(|(index, &bytes)| {
+                if index == 2 {
+                    bytes > air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES
+                } else {
+                    bytes != 0
+                }
+            })
+        || proof.sha_table_pair_claim_count != 3
+        || proof.attribute_sha_range_claim_counts != [0]
+        || proof.mso_sha_range_claim_count != Some(0)
+        || proof.issuer_mldsa_group_eval_count != Some(30)
+        || proof.issuer_mldsa_claimed_sum_count != Some(18)
+        || proof.device_mldsa_group_eval_count != Some(66)
+        || proof.device_mldsa_claimed_sum_count != Some(23)
+        || proof.revocation_mldsa_group_eval_count != Some(30)
+        || proof.revocation_mldsa_claimed_sum_count != Some(18)
+        || proof.keccak_service_claimed_sum_count != Some(12)
+        || proof.private_item_claim_count != 1
+        || proof.cbor_parser_claim_count != 2
+    {
+        return Err(ArtifactError::InvalidInput(
+            "live proof claim, tree, payload, or serialization geometry differs".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1905,58 +3026,80 @@ mod tests {
         workspace
     }
 
-    fn sample_input() -> GenerationInputV1 {
+    fn minimal_input() -> GenerationInputV1 {
         let modules = FROZEN_MODULE_ORDER
             .iter()
             .map(|name| ModuleLayoutV1 {
                 name: (*name).to_owned(),
-                components: vec![AirComponentLayoutV1 {
-                    name: format!("{name}_component"),
-                    active_rows: match *name {
-                        "ts13_public_context_bind_v1" => 0,
-                        "u9_private_device_key_binder" => 416,
-                        _ => 1,
-                    },
-                    constraint_log_degree_bound: 1,
-                    columns: if *name == "ts13_public_context_bind_v1" {
-                        ColumnTreesV1 {
-                            preprocessed: Vec::new(),
-                            base: Vec::new(),
-                            extension: Vec::new(),
-                            interaction: Vec::new(),
+                air_instances: (0..if *name == "private_item_cbor_parsers" {
+                    2
+                } else {
+                    1
+                })
+                    .map(|air_instance_ordinal| {
+                        let zero_component = matches!(
+                            *name,
+                            "ts13_public_context_bind_v1" | "public_revocation_key_epoch_bind"
+                        );
+                        let max_log_size = if *name == "u9_private_device_key_binder" {
+                            9
+                        } else if zero_component {
+                            0
+                        } else {
+                            1
+                        };
+                        AirInstanceLayoutV1 {
+                            columns: AirColumnLayoutV1 {
+                                preprocessed_m31_log_sizes: Vec::new(),
+                                trace_m31_log_sizes: (!zero_component)
+                                    .then_some(max_log_size)
+                                    .into_iter()
+                                    .collect(),
+                                interaction_m31_log_sizes: Vec::new(),
+                                post_interaction_m31_log_sizes: (*name == "shared_keccak_service"
+                                    && air_instance_ordinal == 0)
+                                    .then_some(vec![1; 8])
+                                    .unwrap_or_default(),
+                            },
+                            max_log_size,
+                            max_constraint_log_degree_bound: max_log_size + 1,
+                            components: (!zero_component)
+                                .then_some(AirComponentLayoutV1 {
+                                    name: format!("{name}_component_{air_instance_ordinal}"),
+                                    trace_rows: 1_u32 << max_log_size,
+                                    active_rows: if *name == "u9_private_device_key_binder" {
+                                        416
+                                    } else {
+                                        1
+                                    },
+                                    constraint_count: 1,
+                                    max_constraint_log_degree_bound: max_log_size + 1,
+                                    trace_mask_column_counts: vec![0, 1],
+                                })
+                                .into_iter()
+                                .collect(),
                         }
-                    } else {
-                        ColumnTreesV1 {
-                            preprocessed: Vec::new(),
-                            base: vec![ColumnSchemaV1 {
-                                name: "value".to_owned(),
-                                scalar: ColumnScalarV1::M31,
-                                count: 1,
-                                log_size: if *name == "u9_private_device_key_binder" {
-                                    9
-                                } else {
-                                    1
-                                },
-                            }],
-                            extension: Vec::new(),
-                            interaction: Vec::new(),
-                        }
-                    },
-                }],
+                    })
+                    .collect(),
             })
             .collect::<Vec<_>>();
-        let first_component = modules[0].components[0].name.clone();
+        let first_component = modules[0].air_instances[0].components[0].name.clone();
+        let corpus_sha256: [u8; 32] = decode_hex(FROZEN_REQUEST_CONTEXT_CORPUS_SHA256)
+            .expect("frozen corpus digest is hex")
+            .try_into()
+            .expect("frozen corpus digest is 32 bytes");
         GenerationInputV1 {
             credential_shape: CredentialShapeV1 {
-                issuer_cose_sig_structure_bytes: 128,
-                mso_payload_bytes: 2_048,
-                padded_issuer_signed_item_bytes: 256,
-                digest_identifier_integer_widths: vec![1, 2],
+                issuer_cose_sig_structure_bytes: FROZEN_ISSUER_COSE_SIG_STRUCTURE_BYTES,
+                mso_payload_bytes: FROZEN_MSO_PAYLOAD_BYTES,
+                padded_issuer_signed_item_bytes: FROZEN_PADDED_ISSUER_SIGNED_ITEM_BYTES,
+                digest_identifier_integer_widths: FROZEN_DIGEST_IDENTIFIER_INTEGER_WIDTHS.to_vec(),
             },
             request_context_corpus: RequestContextCorpusV1 {
-                corpus_sha256: Digest32([1; 32]),
-                observed_max_device_cose_sig_structure_bytes: 300,
-                device_sig_structure_capacity: 512,
+                corpus_sha256: Digest32(corpus_sha256),
+                observed_max_device_cose_sig_structure_bytes:
+                    FROZEN_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES,
+                device_sig_structure_capacity: FROZEN_DEVICE_SIG_STRUCTURE_CAPACITY,
             },
             modules,
             relations: vec![RelationLayoutV1 {
@@ -2027,7 +3170,10 @@ mod tests {
             tree_zero: TreeZeroV1 {
                 derivation: "fixture".to_owned(),
                 hash: "Blake2s-256".to_owned(),
-                preprocessed_column_order: vec!["fixture".to_owned()],
+                preprocessed_column_order: (0..FROZEN_TREE_COLUMN_COUNTS[0])
+                    .map(|index| format!("fixture_{index}"))
+                    .collect(),
+                committed_column_log_sizes: vec![1; FROZEN_TREE_COLUMN_COUNTS[0] as usize],
                 root: Digest32([2; 32]),
             },
             proof_system: ProofSystemV1 {
@@ -2044,39 +3190,38 @@ mod tests {
                 fri_fold_step: 2,
                 pow_bits: 20,
                 lifting_log_size: None,
-                merkle_trees: vec![MerkleTreeParametersV1 {
-                    name: "tree0".to_owned(),
-                    depth: 9,
-                    digest_bytes: 32,
-                    maximum_opened_columns: 1,
-                }],
-                fri_layers: vec![FriLayerParametersV1 {
-                    input_log_size: 12,
-                    output_log_size: 10,
-                    merkle_depth: 10,
-                    maximum_opened_values: 2,
-                }],
+                merkle_trees: FROZEN_MERKLE_TREE_ORDER
+                    .iter()
+                    .zip(FROZEN_TREE_DEPTHS)
+                    .zip(FROZEN_TREE_COLUMN_COUNTS)
+                    .map(|((name, depth), columns)| MerkleTreeParametersV1 {
+                        name: (*name).to_owned(),
+                        depth,
+                        digest_bytes: 32,
+                        maximum_opened_columns: columns as u32,
+                        sampled_value_length_histogram: vec![ValueCountV1 {
+                            value: 1,
+                            count: columns as u32,
+                        }],
+                    })
+                    .collect(),
+                fri_layers: FROZEN_FRI_LAYER_INPUT_LOGS
+                    .into_iter()
+                    .zip(FROZEN_FRI_LAYER_OUTPUT_LOGS)
+                    .zip(FROZEN_FRI_MERKLE_DEPTHS)
+                    .zip(FROZEN_FRI_WITNESS_CAPS)
+                    .map(
+                        |(((input_log_size, output_log_size), merkle_depth), witness_cap)| {
+                            FriLayerParametersV1 {
+                                input_log_size,
+                                output_log_size,
+                                merkle_depth,
+                                maximum_opened_values: witness_cap as u32,
+                            }
+                        },
+                    )
+                    .collect(),
             },
-            proof_serialization_bound: [
-                ProofBoundSectionV1::ProofHeader,
-                ProofBoundSectionV1::Commitments,
-                ProofBoundSectionV1::Queries,
-                ProofBoundSectionV1::MerkleDecommitments,
-                ProofBoundSectionV1::FriLayers,
-                ProofBoundSectionV1::Claims,
-                ProofBoundSectionV1::ColumnValues,
-                ProofBoundSectionV1::Pow,
-                ProofBoundSectionV1::SerializationOverhead,
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(index, section)| ProofBoundTermV1 {
-                section,
-                name: format!("term_{index}"),
-                maximum_item_count: 1,
-                maximum_serialized_bytes_per_item: 8,
-            })
-            .collect(),
             enabled_cargo_features: SOURCE_PACKAGE_ROOTS
                 .iter()
                 .map(|root| PackageFeaturesV1 {
@@ -2085,6 +3230,13 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn sample_input() -> GenerationInputV1 {
+        serde_json::from_slice(include_bytes!(
+            "../../../artifacts/ts13-demo-v1/generation-input-v1.json"
+        ))
+        .expect("committed generation input is valid JSON")
     }
 
     fn sample_environment() -> GenerationEnvironmentV1 {
@@ -2107,6 +3259,7 @@ mod tests {
         };
         GenerationEnvironmentV1 {
             cargo_lock_sha256: Digest32([4; 32]),
+            enabled_cargo_features: sample_input().enabled_cargo_features,
             rust_toolchain: RustToolchainV1 {
                 channel: "nightly-fixture".to_owned(),
                 rust_toolchain_file_sha256: Digest32([5; 32]),
@@ -2150,7 +3303,11 @@ mod tests {
         assert_eq!(first.artifact, second.artifact);
         assert_eq!(first.hash_embedding, second.hash_embedding);
         assert_eq!(first.circuit_hash, second.circuit_hash);
-        assert_eq!(first.proof_body_capacity, 65_536);
+        assert_eq!(
+            deterministic_proof_bound(&ts13_demo_proof_bound_terms()).unwrap(),
+            (1_755_050, 1_769_472)
+        );
+        assert_eq!(first.proof_body_capacity, 1_769_472);
 
         let decoded: Value =
             ciborium::de::from_reader(first.artifact.as_slice()).expect("artifact decodes");
@@ -2225,6 +3382,86 @@ mod tests {
     }
 
     #[test]
+    fn normative_specification_digest_is_pinned() {
+        let workspace = temporary_directory("normative-spec");
+        let path = workspace.join(NORMATIVE_SPEC_PATH);
+        write_fixture(
+            &path,
+            include_bytes!("../../../docs/ts13-unlinkable-age18-demo-spec.md"),
+        );
+        checked_normative_spec(&workspace).expect("checked-in normative specification matches");
+        let mut changed = read(&path).expect("fixture specification is readable");
+        changed.push(b'\n');
+        write_fixture(&path, &changed);
+        assert!(matches!(
+            checked_normative_spec(&workspace),
+            Err(ArtifactError::InvalidInput(detail))
+                if detail.contains("normative specification digest differs")
+        ));
+        fs::remove_dir_all(workspace).expect("temporary workspace is removable");
+    }
+
+    #[test]
+    fn committed_generation_input_is_schema_valid() {
+        let input = sample_input();
+        input
+            .validate()
+            .expect("committed generation input matches the frozen profile");
+    }
+
+    #[test]
+    fn frozen_generation_input_rejects_census_and_cross_list_drift() {
+        assert!(
+            minimal_input().validate().is_err(),
+            "a shape-only skeleton is not the frozen circuit"
+        );
+
+        let mut drifted = sample_input();
+        drifted.relations[0].uses.pop();
+        assert!(
+            drifted.validate().is_err(),
+            "the exact 251-use census is mandatory"
+        );
+
+        let mut drifted = sample_input();
+        drifted.transcript.challenge_order[0].owner_module = FROZEN_MODULE_ORDER[1].to_owned();
+        assert!(
+            drifted.validate().is_err(),
+            "each relation challenge is owned by its exact module"
+        );
+
+        let mut drifted = sample_input();
+        drifted.relation_tuple_counts[0].value += 1;
+        assert!(
+            drifted.validate().is_err(),
+            "tuple-count metadata must equal the relation schema"
+        );
+
+        let mut drifted = sample_input();
+        drifted.hash_streams[0].stream_id = u64::MAX;
+        assert!(
+            drifted.validate().is_err(),
+            "every hash stream must reference a declared stream ID"
+        );
+
+        let mut drifted = sample_input();
+        drifted.implementation_constants.pop();
+        assert!(
+            drifted.validate().is_err(),
+            "the implementation-constant allowlist is exact"
+        );
+
+        let mut environment = sample_environment();
+        environment.enabled_cargo_features[0]
+            .features
+            .push("unexpected".to_owned());
+        assert!(
+            build_outputs(&sample_input(), environment).is_err(),
+            "resolved Cargo-feature drift must reject artifact generation"
+        );
+    }
+
+    #[test]
     fn check_mode_reports_every_drifted_output() {
         let workspace = temporary_directory("drift");
         let outputs = build_outputs(&sample_input(), sample_environment()).expect("fixture builds");
@@ -2242,5 +3479,19 @@ mod tests {
             vec![PathBuf::from(ARTIFACT_PATH), PathBuf::from(HASH_EMBED_PATH)]
         );
         fs::remove_dir_all(workspace).expect("temporary workspace is removable");
+    }
+
+    #[test]
+    fn checked_in_artifact_matches_the_committed_soundness_source() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root resolves");
+        generate_from_json(
+            &workspace,
+            Path::new("artifacts/ts13-demo-v1/generation-input-v1.json"),
+            GenerationMode::Check,
+        )
+        .expect("committed TS13 artifact has no source, shape, or embedding drift");
     }
 }

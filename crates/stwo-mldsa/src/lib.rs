@@ -43,3 +43,6 @@ pub use reference::{verify, verify_internals, MlDsaError, RejectReason, VerifyTr
 pub use stwo_keccak;
 pub use types::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 pub use witness::{generate_witness, MlDsaWitness, WitnessError};
+
+#[doc(hidden)]
+pub const ATTACK_HOOKS_FEATURE_ENABLED: bool = cfg!(feature = "attack-hooks");

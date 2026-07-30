@@ -89,6 +89,9 @@ const RANGE_BITS: usize = 2 * MONTH_RANGE_BITS
     + SECOND_RANGE_BITS;
 const M31_MODULUS: u32 = 2_147_483_647;
 
+// Canonical CBOR prefix through the protected-header byte-string head for
+// `["Signature1", h'a1013830', h'', <payload bstr>]`.
+const ISSUER_SIGNATURE1_CONTEXT_PREFIX: &[u8] = b"\x84\x6aSignature1\x44";
 const VERSION_PREFIX: &[u8] = b"\x67version\x63";
 const DIGEST_ALGORITHM_RUN: &[u8] = b"\x6fdigestAlgorithm\x67SHA-256";
 const DOC_TYPE_KEY: &[u8] = b"\x67docType";
@@ -700,7 +703,9 @@ fn canonical_text_head(length: usize) -> Vec<u8> {
 }
 
 fn payload_anchor(mso_len: usize) -> Vec<u8> {
-    let mut anchor = vec![0x40]; // canonical empty external_aad bstr
+    let mut anchor = ISSUER_SIGNATURE1_CONTEXT_PREFIX.to_vec();
+    anchor.extend_from_slice(crate::mdoc::MLDSA_PROTECTED_HEADER);
+    anchor.push(0x40); // canonical empty external_aad bstr
     anchor.extend_from_slice(&canonical_bstr_head(mso_len));
     anchor
 }
@@ -3276,6 +3281,48 @@ mod tests {
     }
 
     #[test]
+    fn alternate_same_width_issuer_algorithm_is_rejected_by_the_production_air() {
+        let (spec, issuer_message, mso) = test_parts(true);
+        let mut witness = test_witness(&spec, issuer_message, &mso);
+        let algorithm_argument = PAYLOAD_OFFSET
+            + ISSUER_SIGNATURE1_CONTEXT_PREFIX.len()
+            + crate::mdoc::MLDSA_PROTECTED_HEADER.len()
+            - 1;
+        witness.issuer_message[algorithm_argument] = 0x31;
+        let alternate_issuer_message = witness.issuer_message.clone();
+        let mso_start = witness.mso_start(spec.mso_len).unwrap();
+
+        let issuer_handle = SharedFieldRelation::new();
+        let sha_handle = SharedFieldRelation::new();
+        let start_handle = SharedMdocMsoStartRelation::new();
+        let (mut binder, census) = MdocPrivateMsoBind::prover(
+            spec.clone(),
+            witness,
+            issuer_handle.clone(),
+            Some(sha_handle.clone()),
+            Some(start_handle.clone()),
+            None,
+            None,
+        )
+        .expect("test bypasses host extraction and reaches the production AIR");
+        let counter_rows =
+            honest_counter_rows(&spec, &alternate_issuer_message, mso_start, &census);
+        let mut counter =
+            TestRelationCounter::new(counter_rows, issuer_handle, sha_handle, start_handle);
+        let error = air_core::prove(
+            &mut [&mut counter, &mut binder],
+            crate::mdoc::mdoc_production_pcs_config(),
+        )
+        .expect_err(
+            "the canonical protected-header constraint must reject the alternate algorithm",
+        );
+        assert!(
+            matches!(error, stwo::prover::ProvingError::ConstraintsNotSatisfied),
+            "alternate algorithm failed with the wrong prover error: {error}"
+        );
+    }
+
+    #[test]
     fn minimum_blowup_proves_the_linearized_mso_degree_bound() {
         let fixture = prove_composed_mso(stwo::core::pcs::PcsConfig::default());
         verify_composed_mso(&fixture, fixture.counter_rows.clone())
@@ -3332,6 +3379,20 @@ mod tests {
     }
 
     #[test]
+    fn ts13_demo_payload_anchor_is_the_complete_canonical_signature1_prefix() {
+        let anchor = payload_anchor(crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES);
+        assert_eq!(
+            anchor,
+            b"\x84\x6aSignature1\x44\xa1\x01\x38\x30\x40\x59\x09\xd1"
+        );
+        assert_eq!(
+            anchor.len() + crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES,
+            crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES,
+            "the frozen issuer Sig_structure is exactly prefix || private MSO"
+        );
+    }
+
+    #[test]
     fn fixed_log9_full_profile_census_is_exact() {
         let (binder, census) = test_binder(true, true);
         assert_eq!(LEGACY_PREPROCESSED_COLS, 204);
@@ -3340,7 +3401,7 @@ mod tests {
         assert_eq!(binder.active_rows(), 201);
         assert_eq!(census.active_rows, 201);
         assert_eq!(census.blind_rows, 311);
-        assert_eq!(census.issuer_uses_total, 6_220);
+        assert_eq!(census.issuer_uses_total, 6_237);
         assert_eq!(census.sha_stream_uses, 4_160);
         assert_eq!(census.mso_start_uses, 1);
         assert_eq!(census.device_pk_start_uses, 0);
@@ -3361,7 +3422,7 @@ mod tests {
         let (without_sha, census) = test_binder(false, false);
         assert_eq!(without_sha.active_rows(), 71);
         assert_eq!(census.blind_rows, 441);
-        assert_eq!(census.issuer_uses_total, 2_124);
+        assert_eq!(census.issuer_uses_total, 2_141);
         assert_eq!(census.sha_stream_uses, 0);
         assert_eq!(census.mso_start_uses, 0);
         assert_eq!(census.device_pk_start_uses, 0);
@@ -3376,7 +3437,7 @@ mod tests {
         assert_eq!(binder.active_rows(), 140);
         assert_eq!(census.active_rows, 140);
         assert_eq!(census.blind_rows, 372);
-        assert_eq!(census.issuer_uses_total, 4_268);
+        assert_eq!(census.issuer_uses_total, 4_285);
         assert_eq!(census.sha_stream_uses, 4_160);
         assert_eq!(census.mso_start_uses, 1);
         assert_eq!(census.device_pk_start_uses, 1);
@@ -3399,7 +3460,7 @@ mod tests {
         let (without_sha, census, witness) = private_test_binder(false, false);
         assert_eq!(without_sha.active_rows(), 10);
         assert_eq!(census.blind_rows, 502);
-        assert_eq!(census.issuer_uses_total, 172);
+        assert_eq!(census.issuer_uses_total, 189);
         assert_eq!(census.sha_stream_uses, 0);
         let pk_start = witness.device_pk_start(&without_sha.spec).unwrap();
         assert!(
@@ -3637,6 +3698,12 @@ mod tests {
         let mut anchor = honest.clone();
         anchor.columns[TRACE_BYTE_START][0] += m31_u32(1);
         assert_row_rejects(&binder.spec, &binder.shape, &anchor, 0);
+
+        let mut protected_algorithm = honest.clone();
+        let protected_algorithm_byte =
+            ISSUER_SIGNATURE1_CONTEXT_PREFIX.len() + crate::mdoc::MLDSA_PROTECTED_HEADER.len() - 1;
+        protected_algorithm.columns[TRACE_BYTE_START + protected_algorithm_byte][0] += m31_u32(1);
+        assert_row_rejects(&binder.spec, &binder.shape, &protected_algorithm, 0);
 
         let mut payload_bits = honest.clone();
         payload_bits.columns[TRACE_PAYLOAD_OFFSET_BITS][0] =

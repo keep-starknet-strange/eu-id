@@ -136,6 +136,38 @@ pub struct T1Eval {
     pub relations: PrivateKeyEvalRelations,
 }
 
+fn add_scaling_constraints<E: EvalAtRow>(
+    eval: &mut E,
+    active: E::F,
+    lo9: E::F,
+    hi1: E::F,
+    digits: &[E::F; 3],
+    digit_adjustment: i64,
+) {
+    let one = E::F::one();
+    eval.add_constraint(active.clone() * hi1.clone() * (one - hi1.clone()));
+    let t1_value = lo9 + E::F::from(m31(512)) * hi1;
+    let scaled = E::F::from(m31(1 << D)) * t1_value;
+    let digit_value = digits[0].clone()
+        + E::F::from(m31(B as u32)) * digits[1].clone()
+        + E::F::from(m31((B * B) as u32)) * digits[2].clone();
+    eval.add_constraint(active * (scaled - digit_value + E::F::from(enc_signed(digit_adjustment))));
+}
+
+fn add_horner_constraint<E: EvalAtRow>(
+    eval: &mut E,
+    active: E::F,
+    eval_start: E::F,
+    acc_prev: E::EF,
+    acc_cur: E::EF,
+    digit_row: E::EF,
+    r: SecureField,
+) {
+    let expected_acc = E::EF::from(active)
+        * (E::EF::from(E::F::one() - eval_start) * acc_prev * E::EF::from(r) + digit_row);
+    eval.add_constraint(acc_cur - expected_acc);
+}
+
 impl FrameworkEval for T1Eval {
     fn log_size(&self) -> u32 {
         T1_LOG_SIZE
@@ -159,14 +191,14 @@ impl FrameworkEval for T1Eval {
         let acc_prev = E::combine_ef(acc_masks.each_ref().map(|mask| mask[0].clone()));
         let acc_cur = E::combine_ef(acc_masks.each_ref().map(|mask| mask[1].clone()));
 
-        let one = E::F::one();
-        eval.add_constraint(active.clone() * hi1.clone() * (one.clone() - hi1.clone()));
-        let t1_value = lo9.clone() + E::F::from(m31(512)) * hi1.clone();
-        let scaled = E::F::from(m31(1 << D)) * t1_value;
-        let digit_value = digits[0].clone()
-            + E::F::from(m31(B as u32)) * digits[1].clone()
-            + E::F::from(m31((B * B) as u32)) * digits[2].clone();
-        eval.add_constraint(active.clone() * (scaled - digit_value));
+        add_scaling_constraints(
+            &mut eval,
+            active.clone(),
+            lo9.clone(),
+            hi1.clone(),
+            &digits,
+            0,
+        );
 
         let mut s_power = SecureField::one();
         let mut digit_row = E::EF::zero();
@@ -174,9 +206,15 @@ impl FrameworkEval for T1Eval {
             digit_row += E::EF::from(digit.clone()) * E::EF::from(s_power);
             s_power *= self.s;
         }
-        let expected_acc = E::EF::from(active.clone())
-            * (E::EF::from(one - eval_start) * acc_prev * E::EF::from(self.r) + digit_row);
-        eval.add_constraint(acc_cur - expected_acc);
+        add_horner_constraint(
+            &mut eval,
+            active.clone(),
+            eval_start,
+            acc_prev,
+            acc_cur,
+            digit_row,
+            self.r,
+        );
 
         eval.add_to_relation(RelationEntry::base(
             &self.relations.t1,
@@ -293,6 +331,432 @@ pub fn gen_t1_interaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::private_key_eval::proof_test::{active_id as test_active_id, OneRowAir};
+    use air_core::{Air, AirProver, TreeLayout};
+    use stwo::core::air::Component;
+    use stwo::core::channel::Blake2sChannel;
+    use stwo::core::pcs::PcsConfig;
+    use stwo::prover::backend::simd::m31::LOG_N_LANES;
+    use stwo::prover::backend::simd::SimdBackend;
+    use stwo::prover::{ComponentProver, TreeBuilder};
+    use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
+
+    use crate::coeffs::relations::{RangeRelation, SharedRangeRelation};
+    use crate::coeffs::tables::SharedRangeTable;
+
+    fn proof_pcs_config() -> PcsConfig {
+        PcsConfig {
+            fri_config: stwo::core::fri::FriConfig::new(0, 2, 3, 1),
+            ..PcsConfig::default()
+        }
+    }
+
+    #[derive(Clone)]
+    struct ScalingFormulaEval {
+        digit_adjustment: i64,
+    }
+
+    impl FrameworkEval for ScalingFormulaEval {
+        fn log_size(&self) -> u32 {
+            LOG_N_LANES
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            LOG_N_LANES + 2
+        }
+
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let fixed_active = eval.get_preprocessed_column(test_active_id());
+            let active = eval.next_trace_mask();
+            let lo9 = eval.next_trace_mask();
+            let hi1 = eval.next_trace_mask();
+            let digits = core::array::from_fn(|_| eval.next_trace_mask());
+            eval.add_constraint(active.clone() - fixed_active);
+            add_scaling_constraints(&mut eval, active, lo9, hi1, &digits, self.digit_adjustment);
+            let dummy =
+                eval.next_interaction_mask(stwo_constraint_framework::INTERACTION_TRACE_IDX, [0]);
+            eval.add_constraint(dummy[0].clone());
+            eval
+        }
+    }
+
+    #[derive(Clone)]
+    struct HornerFormulaEval {
+        r: SecureField,
+        s: SecureField,
+    }
+
+    impl FrameworkEval for HornerFormulaEval {
+        fn log_size(&self) -> u32 {
+            LOG_N_LANES
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            LOG_N_LANES + 1
+        }
+
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let fixed_active = eval.get_preprocessed_column(test_active_id());
+            let active = eval.next_trace_mask();
+            let eval_start = eval.next_trace_mask();
+            let digits: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
+            let acc_prev = E::combine_ef(core::array::from_fn(|_| eval.next_trace_mask()));
+            let acc_cur = E::combine_ef(core::array::from_fn(|_| eval.next_trace_mask()));
+            eval.add_constraint(active.clone() - fixed_active);
+
+            let mut s_power = SecureField::one();
+            let mut digit_row = E::EF::zero();
+            for digit in digits {
+                digit_row += E::EF::from(digit) * E::EF::from(s_power);
+                s_power *= self.s;
+            }
+            add_horner_constraint(
+                &mut eval, active, eval_start, acc_prev, acc_cur, digit_row, self.r,
+            );
+            let dummy =
+                eval.next_interaction_mask(stwo_constraint_framework::INTERACTION_TRACE_IDX, [0]);
+            eval.add_constraint(dummy[0].clone());
+            eval
+        }
+    }
+
+    fn assert_boundary_scaling_rejected(label: &str, value: u32, digit_adjustment: i64) {
+        let (lo9, hi1) = split_t1(value);
+        let mut digits = scaled_digits(value);
+        digits[0] += digit_adjustment;
+        let trace = [
+            m31(1),
+            m31(lo9),
+            m31(hi1),
+            enc_signed(digits[0]),
+            enc_signed(digits[1]),
+            enc_signed(digits[2]),
+        ];
+        let forged = ScalingFormulaEval { digit_adjustment };
+        let exact = ScalingFormulaEval {
+            digit_adjustment: 0,
+        };
+        let mut prover = OneRowAir::new(forged.clone(), &trace);
+        let proof = air_core::prove(&mut [&mut prover], proof_pcs_config())
+            .unwrap_or_else(|error| panic!("{label}: forged proving failed: {error:?}"));
+        let mut forged_verifier = OneRowAir::new(forged, &trace);
+        air_core::verify(&mut [&mut forged_verifier], &proof)
+            .unwrap_or_else(|error| panic!("{label}: forged control failed: {error:?}"));
+        let mut exact_verifier = OneRowAir::new(exact, &trace);
+        assert!(
+            air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
+            "{label}: production scaling formula must reject"
+        );
+    }
+
+    #[derive(Clone)]
+    struct RangeAliasEval {
+        relation: RangeRelation,
+        require_alias_digit: bool,
+    }
+
+    impl FrameworkEval for RangeAliasEval {
+        fn log_size(&self) -> u32 {
+            LOG_N_LANES
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            LOG_N_LANES + 2
+        }
+
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let fixed_active = eval.get_preprocessed_column(test_active_id());
+            let active = eval.next_trace_mask();
+            let lo9 = eval.next_trace_mask();
+            let _hi1 = eval.next_trace_mask();
+            let digits: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
+            eval.add_constraint(active.clone() - fixed_active);
+            for (numerator, value) in [
+                (active.clone(), lo9),
+                (
+                    active.clone() * E::F::from(m31(u32::from(self.require_alias_digit))),
+                    digits[0].clone() + E::F::from(m31(256)),
+                ),
+                (active.clone(), digits[1].clone() + E::F::from(m31(256))),
+                (active, digits[2].clone() + E::F::from(m31(256))),
+            ] {
+                eval.add_to_relation(RelationEntry::base(
+                    &self.relation,
+                    numerator,
+                    &range_tuple::<E>(value, RcKind::Rc9),
+                ));
+            }
+            eval.finalize_logup_batched(4);
+            eval
+        }
+    }
+
+    struct RangeAliasAir {
+        handle: SharedRangeRelation,
+        relation: Option<RangeRelation>,
+        trace: Option<Vec<ColEval>>,
+        lookup_values: [u32; 4],
+        require_alias_digit: bool,
+        claimed_sum: SecureField,
+        component: Option<FrameworkComponent<RangeAliasEval>>,
+    }
+
+    impl RangeAliasAir {
+        fn prover(value: u32, handle: SharedRangeRelation) -> (Self, RcUses) {
+            let (lo9, hi1) = split_t1(value);
+            let mut digits = scaled_digits(value);
+            digits[0] += B as i64;
+            digits[1] -= 1;
+            assert_eq!(
+                digits[0] + 512 * digits[1] + 512 * 512 * digits[2],
+                (value as i64) << D,
+                "carry alias must preserve the exact scaled integer"
+            );
+            let trace_values = [
+                m31(1),
+                m31(lo9),
+                m31(hi1),
+                enc_signed(digits[0]),
+                enc_signed(digits[1]),
+                enc_signed(digits[2]),
+            ];
+            let trace = trace_values
+                .into_iter()
+                .map(|value| {
+                    let mut column = vec![m31(0); 1usize << LOG_N_LANES];
+                    column[0] = value;
+                    col_eval(LOG_N_LANES, column)
+                })
+                .collect();
+            let lookup_values = [
+                lo9,
+                (digits[0] + 256) as u32,
+                (digits[1] + 256) as u32,
+                (digits[2] + 256) as u32,
+            ];
+            let mut uses = RcUses::new();
+            uses.record(RcKind::Rc9, lookup_values[0]);
+            uses.record(RcKind::Rc9, lookup_values[2]);
+            uses.record(RcKind::Rc9, lookup_values[3]);
+            (
+                Self {
+                    handle,
+                    relation: None,
+                    trace: Some(trace),
+                    lookup_values,
+                    require_alias_digit: false,
+                    claimed_sum: SecureField::zero(),
+                    component: None,
+                },
+                uses,
+            )
+        }
+
+        fn verifier(
+            claimed_sum: SecureField,
+            handle: SharedRangeRelation,
+            lookup_values: [u32; 4],
+            require_alias_digit: bool,
+        ) -> Self {
+            Self {
+                handle,
+                relation: None,
+                trace: None,
+                lookup_values,
+                require_alias_digit,
+                claimed_sum,
+                component: None,
+            }
+        }
+
+        fn relation(&self) -> RangeRelation {
+            self.relation.clone().expect("range relation drawn")
+        }
+    }
+
+    impl Air for RangeAliasAir {
+        fn mix_public(&self, _channel: &mut Blake2sChannel) {}
+
+        fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {
+            self.relation = Some(self.handle.get());
+        }
+
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![LOG_N_LANES],
+                trace: vec![LOG_N_LANES; 6],
+                interaction: vec![LOG_N_LANES; SECURE_EXTENSION_DEGREE],
+            }
+        }
+
+        fn claimed_sums(&self) -> Vec<SecureField> {
+            vec![self.claimed_sum]
+        }
+
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![test_active_id()]
+        }
+
+        fn canonical_preprocessed_columns(
+            &mut self,
+        ) -> Result<Vec<ColEval>, stwo::core::verifier::VerificationError> {
+            let mut active = vec![m31(0); 1usize << LOG_N_LANES];
+            active[0] = m31(1);
+            Ok(vec![col_eval(LOG_N_LANES, active)])
+        }
+
+        fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+            self.component = Some(FrameworkComponent::new(
+                allocator,
+                RangeAliasEval {
+                    relation: self.relation(),
+                    require_alias_digit: self.require_alias_digit,
+                },
+                self.claimed_sum,
+            ));
+        }
+
+        fn components(&self) -> Vec<&dyn Component> {
+            vec![self.component.as_ref().expect("range alias component")]
+        }
+    }
+
+    impl AirProver for RangeAliasAir {
+        fn max_log_size(&self) -> u32 {
+            LOG_N_LANES
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            LOG_N_LANES + 2
+        }
+
+        fn store_polynomial_coefficients(&self) -> bool {
+            true
+        }
+
+        fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            tb.extend_evals(
+                self.canonical_preprocessed_columns()
+                    .expect("range alias preprocessed"),
+            );
+        }
+
+        fn preprocessed_column_fingerprints(
+            &mut self,
+        ) -> Vec<air_core::PreprocessedColumnFingerprint> {
+            let ids = self.preprocessed_column_ids();
+            let columns = self
+                .canonical_preprocessed_columns()
+                .expect("range alias preprocessed");
+            air_core::fingerprint_preprocessed_columns("private_t1_range_alias", &ids, &columns)
+        }
+
+        fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            tb.extend_evals(self.trace.take().expect("range alias trace"));
+        }
+
+        fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            let zero = SecureField::zero();
+            let one = SecureField::one();
+            let mut rows = vec![vec![(zero, one); 4]; 1usize << LOG_N_LANES];
+            rows[0] = self
+                .lookup_values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    (
+                        if index == 1 { zero } else { one },
+                        range_denominator(&self.relation(), value, RcKind::Rc9),
+                    )
+                })
+                .collect();
+            let (trace, claimed_sum) = gen_batched_logup(LOG_N_LANES, &rows, 4);
+            self.claimed_sum = claimed_sum;
+            tb.extend_evals(trace);
+        }
+
+        fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+            vec![self.component.as_ref().expect("range alias component")]
+        }
+    }
+
+    fn assert_true_carry_alias_rejected(value: u32) {
+        let handle = SharedRangeRelation::new();
+        let (mut consumer, uses) = RangeAliasAir::prover(value, handle.clone());
+        let lookup_values = consumer.lookup_values;
+        let mut table = SharedRangeTable::prover(&[uses], handle);
+        let prove_result = air_core::prove(&mut [&mut table, &mut consumer], proof_pcs_config());
+        assert_eq!(
+            table.claimed_sum() + consumer.claimed_sum,
+            SecureField::zero(),
+            "t1={value}: forged range claims must cancel"
+        );
+        let proof = prove_result
+            .unwrap_or_else(|error| panic!("t1={value}: alias proving failed: {error:?}"));
+
+        let handle = SharedRangeRelation::new();
+        let mut forged_table = SharedRangeTable::verifier(table.claimed_sum(), handle.clone());
+        let mut forged_consumer =
+            RangeAliasAir::verifier(consumer.claimed_sum, handle, lookup_values, false);
+        air_core::verify(&mut [&mut forged_table, &mut forged_consumer], &proof)
+            .unwrap_or_else(|error| panic!("t1={value}: forged range control failed: {error:?}"));
+
+        let handle = SharedRangeRelation::new();
+        let mut table_verifier = SharedRangeTable::verifier(table.claimed_sum(), handle.clone());
+        let mut exact_consumer =
+            RangeAliasAir::verifier(consumer.claimed_sum, handle, lookup_values, true);
+        assert!(
+            air_core::verify(&mut [&mut table_verifier, &mut exact_consumer], &proof).is_err(),
+            "t1={value}: signed Rc9 lookup must reject the carry alias"
+        );
+    }
+
+    #[test]
+    fn malformed_t1_boundary_rows_prove_only_under_forged_formulas() {
+        for value in [0, 1023] {
+            assert_boundary_scaling_rejected(&format!("t1={value} wrong scaling digit"), value, 1);
+            assert_true_carry_alias_rejected(value);
+        }
+    }
+
+    #[test]
+    fn self_consistent_wrong_t1_horner_evaluation_proves_only_under_forged_formula() {
+        let exact_r = SecureField::from(m31(17));
+        let forged_r = SecureField::from(m31(18));
+        let s = SecureField::from(m31(31));
+        let digits = [enc_signed(3), enc_signed(-2), enc_signed(1)];
+        let acc_prev = SecureField::from(m31(5));
+        let digit_row = SecureField::from(digits[0])
+            + s * SecureField::from(digits[1])
+            + s * s * SecureField::from(digits[2]);
+        let acc_cur = acc_prev * forged_r + digit_row;
+        assert_ne!(
+            acc_cur,
+            acc_prev * exact_r + digit_row,
+            "forged accumulator must violate the production recurrence"
+        );
+
+        let mut trace = vec![m31(1), m31(0)];
+        trace.extend(digits);
+        trace.extend(acc_prev.to_m31_array());
+        trace.extend(acc_cur.to_m31_array());
+
+        let forged = HornerFormulaEval { r: forged_r, s };
+        let exact = HornerFormulaEval { r: exact_r, s };
+        let mut prover = OneRowAir::new(forged.clone(), &trace);
+        let proof = air_core::prove(&mut [&mut prover], proof_pcs_config())
+            .expect("self-consistent forged Horner evaluation must prove under the forged formula");
+
+        let mut forged_verifier = OneRowAir::new(forged, &trace);
+        air_core::verify(&mut [&mut forged_verifier], &proof)
+            .expect("forged Horner formula control must verify");
+
+        let mut exact_verifier = OneRowAir::new(exact, &trace);
+        assert!(
+            air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
+            "production Horner formula must reject an accumulator built with the wrong r"
+        );
+    }
 
     #[test]
     fn every_canonical_t1_has_a_unique_exact_scaled_encoding() {

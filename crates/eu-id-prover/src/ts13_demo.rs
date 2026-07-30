@@ -1,9 +1,7 @@
 //! Frozen public-context primitives for the TS13 unlinkable age-over-18 demo.
 //!
-//! This module deliberately does not route the demo profile into the mdoc
-//! prover yet. It owns only the deterministic public derivation and the
-//! zero-column transcript component which the final composition will insert at
-//! frozen module slot 4.
+//! It owns the deterministic public derivation and the zero-column transcript
+//! component inserted into the frozen mdoc composition.
 
 use std::cmp::Ordering;
 
@@ -25,9 +23,11 @@ const DOCUMENT_TYPE: &str = "eu.europa.ec.eudi.pid.1";
 const NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const ELEMENT_IDENTIFIER: &str = "age_over_18";
 const EXPECTED_VALUE_CBOR: &[u8] = &[0xf5];
-const ML_DSA_65_PROTECTED_HEADER: &[u8] = &[0xa1, 0x01, 0x38, 0x30];
 const REQUEST_CONTEXT_CORPUS_LABEL: &str = "EUDI-TS13-REQUEST-CONTEXT-CORPUS-V1";
 const REQUEST_CONTEXT_CAPACITY_HEADROOM: usize = 128;
+const SECONDS_PER_DAY: i64 = 86_400;
+const TS13_DEMO_MIN_TIMESTAMP_SECONDS: i64 = 1_577_836_800;
+const TS13_DEMO_MAX_TIMESTAMP_SECONDS: i64 = 4_102_444_799;
 const OPENID4VP_CORPUS_LABEL: &str = "official-openid4vp-1.0";
 const ISO_QR_CORPUS_LABEL: &str = "iso18013-5-qr-ble-both-p256";
 const ISO_NFC_STATIC_CORPUS_LABEL: &str = "iso18013-5-nfc-static-ble-both-p256";
@@ -61,6 +61,8 @@ const OPENID4VP_HANDOVER_INFO_SHA256: [u8; 32] = [
 pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1_952;
 /// FIPS 204 ML-DSA-65 `sigEncode` byte length.
 pub const ML_DSA_65_SIGNATURE_BYTES: usize = stwo_mldsa::constants::SIG_BYTES;
+/// Byte length of canonical `YYYY-MM-DDTHH:MM:SSZ`.
+pub const TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES: usize = 20;
 
 /// Public values needed to derive the frozen TS13 request context.
 ///
@@ -87,6 +89,8 @@ pub struct Ts13DemoDerivedContext {
     pub canonical_session_transcript: Vec<u8>,
     pub device_authentication_bytes: Vec<u8>,
     pub device_cose_sig_structure: Vec<u8>,
+    pub verification_timestamp_rfc3339_utc:
+        [u8; TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES],
     pub canonical_context_cbor: Vec<u8>,
     pub request_context_digest: [u8; 32],
 }
@@ -486,6 +490,51 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+fn write_two_decimal_digits(output: &mut [u8], offset: usize, value: i64) {
+    debug_assert!((0..=99).contains(&value));
+    output[offset] = b'0' + (value / 10) as u8;
+    output[offset + 1] = b'0' + (value % 10) as u8;
+}
+
+/// Canonically render one supported verification second as UTC RFC 3339.
+pub(crate) fn verification_timestamp_rfc3339_utc(
+    timestamp_epoch_seconds: i64,
+) -> Result<[u8; TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES], Ts13DemoContextError> {
+    if !(TS13_DEMO_MIN_TIMESTAMP_SECONDS..=TS13_DEMO_MAX_TIMESTAMP_SECONDS)
+        .contains(&timestamp_epoch_seconds)
+    {
+        return Err(Ts13DemoContextError::InvalidPublicContext);
+    }
+
+    let unix_days = timestamp_epoch_seconds / SECONDS_PER_DAY;
+    // Howard Hinnant's civil-from-days transform, with day zero at 1970-01-01.
+    let z = unix_days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+
+    let seconds_of_day = timestamp_epoch_seconds % SECONDS_PER_DAY;
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    let mut rendered = *b"0000-00-00T00:00:00Z";
+    write_two_decimal_digits(&mut rendered, 0, year / 100);
+    write_two_decimal_digits(&mut rendered, 2, year % 100);
+    write_two_decimal_digits(&mut rendered, 5, month);
+    write_two_decimal_digits(&mut rendered, 8, day);
+    write_two_decimal_digits(&mut rendered, 11, hour);
+    write_two_decimal_digits(&mut rendered, 14, minute);
+    write_two_decimal_digits(&mut rendered, 17, second);
+    Ok(rendered)
+}
+
 fn p256_cose_key(x: &[u8; 32], y: &[u8; 32]) -> Result<Vec<u8>, Ts13DemoContextError> {
     canonical_cbor(&Value::Map(vec![
         (Value::Integer(1.into()), Value::Integer(2.into())),
@@ -660,7 +709,7 @@ pub fn derive_device_authentication(
     ))?;
     let device_cose_sig_structure = canonical_cbor(&Value::Array(vec![
         Value::Text("Signature1".to_string()),
-        Value::Bytes(ML_DSA_65_PROTECTED_HEADER.to_vec()),
+        Value::Bytes(crate::mdoc::MLDSA_PROTECTED_HEADER.to_vec()),
         Value::Bytes(Vec::new()),
         Value::Bytes(device_authentication_bytes.clone()),
     ]))?;
@@ -762,6 +811,8 @@ pub fn derive_public_context(
         return Err(Ts13DemoContextError::InvalidPublicContext);
     }
 
+    let verification_timestamp_rfc3339_utc =
+        verification_timestamp_rfc3339_utc(input.timestamp_epoch_seconds)?;
     let derived_device = derive_device_authentication(input.session_transcript)?;
     let canonical_session_transcript = derived_device.canonical_session_transcript;
     let device_authentication_bytes = derived_device.device_authentication_bytes;
@@ -789,6 +840,7 @@ pub fn derive_public_context(
         canonical_session_transcript,
         device_authentication_bytes,
         device_cose_sig_structure,
+        verification_timestamp_rfc3339_utc,
         canonical_context_cbor,
         request_context_digest,
     })
@@ -968,6 +1020,33 @@ mod tests {
     }
 
     #[test]
+    fn verification_timestamp_renderer_is_exact_at_range_and_leap_boundaries() {
+        for (timestamp, expected) in [
+            (1_577_836_800, "2020-01-01T00:00:00Z"),
+            (1_582_934_399, "2020-02-28T23:59:59Z"),
+            (1_582_934_400, "2020-02-29T00:00:00Z"),
+            (1_583_020_799, "2020-02-29T23:59:59Z"),
+            (1_583_020_800, "2020-03-01T00:00:00Z"),
+            (1_709_251_199, "2024-02-29T23:59:59Z"),
+            (4_102_444_799, "2099-12-31T23:59:59Z"),
+        ] {
+            assert_eq!(
+                verification_timestamp_rfc3339_utc(timestamp)
+                    .expect("timestamp is in the frozen range")
+                    .as_slice(),
+                expected.as_bytes(),
+                "{timestamp}"
+            );
+        }
+        for timestamp in [1_577_836_799, 4_102_444_800] {
+            assert_eq!(
+                verification_timestamp_rfc3339_utc(timestamp),
+                Err(Ts13DemoContextError::InvalidPublicContext)
+            );
+        }
+    }
+
+    #[test]
     fn exact_device_authentication_cose_and_context_are_stable() {
         let circuit_hash = [0x11; 32];
         let transcript = [0x83, 0xf6, 0xf6, 0x81, 0x01];
@@ -982,6 +1061,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(derived.canonical_session_transcript, transcript);
+        assert_eq!(
+            derived.verification_timestamp_rfc3339_utc,
+            *b"2025-01-01T00:00:00Z"
+        );
         assert_eq!(
             hex(&derived.device_authentication_bytes),
             "d8185837847444657669636541757468656e7469636174696f6e83f6f681017765752e6575726f70612e65632e657564692e7069642e31d81841a0"

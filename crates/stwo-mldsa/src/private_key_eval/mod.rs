@@ -451,6 +451,135 @@ pub(crate) fn gen_batched_logup(
 }
 
 #[cfg(test)]
+pub(crate) mod proof_test {
+    use stwo::core::air::Component;
+    use stwo::core::channel::Blake2sChannel;
+    use stwo::core::fields::m31::M31;
+    use stwo::core::fields::qm31::SecureField;
+    use stwo::prover::backend::simd::SimdBackend;
+    use stwo::prover::{ComponentProver, TreeBuilder};
+    use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
+    use stwo_constraint_framework::{FrameworkComponent, FrameworkEval, TraceLocationAllocator};
+
+    use air_core::{Air, AirProver, TreeLayout};
+
+    use crate::air_util::{col_eval, m31, ColEval};
+
+    pub(crate) fn active_id() -> PreProcessedColumnId {
+        PreProcessedColumnId {
+            id: "test_private_key_formula_active".to_string(),
+        }
+    }
+
+    pub(crate) struct OneRowAir<E: FrameworkEval + Clone + Sync> {
+        eval: E,
+        log_size: u32,
+        trace: Vec<ColEval>,
+        component: Option<FrameworkComponent<E>>,
+    }
+
+    impl<E: FrameworkEval + Clone + Sync> OneRowAir<E> {
+        pub(crate) fn new(eval: E, values: &[M31]) -> Self {
+            let log_size = eval.log_size();
+            let trace = values
+                .iter()
+                .map(|&value| {
+                    let mut column = vec![m31(0); 1usize << log_size];
+                    column[0] = value;
+                    col_eval(log_size, column)
+                })
+                .collect();
+            Self {
+                eval,
+                log_size,
+                trace,
+                component: None,
+            }
+        }
+    }
+
+    impl<E: FrameworkEval + Clone + Sync> Air for OneRowAir<E> {
+        fn mix_public(&self, _channel: &mut Blake2sChannel) {}
+
+        fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
+
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![self.log_size],
+                trace: vec![self.log_size; self.trace.len()],
+                interaction: vec![self.log_size],
+            }
+        }
+
+        fn claimed_sums(&self) -> Vec<SecureField> {
+            Vec::new()
+        }
+
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![active_id()]
+        }
+
+        fn canonical_preprocessed_columns(
+            &mut self,
+        ) -> Result<Vec<ColEval>, stwo::core::verifier::VerificationError> {
+            let mut active = vec![m31(0); 1usize << self.log_size];
+            active[0] = m31(1);
+            Ok(vec![col_eval(self.log_size, active)])
+        }
+
+        fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+            self.component = Some(FrameworkComponent::new(
+                allocator,
+                self.eval.clone(),
+                SecureField::default(),
+            ));
+        }
+
+        fn components(&self) -> Vec<&dyn Component> {
+            vec![self.component.as_ref().expect("test component")]
+        }
+    }
+
+    impl<E: FrameworkEval + Clone + Sync> AirProver for OneRowAir<E> {
+        fn max_log_size(&self) -> u32 {
+            self.log_size
+        }
+
+        fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            tb.extend_evals(
+                self.canonical_preprocessed_columns()
+                    .expect("test preprocessed column"),
+            );
+        }
+
+        fn preprocessed_column_fingerprints(
+            &mut self,
+        ) -> Vec<air_core::PreprocessedColumnFingerprint> {
+            let ids = self.preprocessed_column_ids();
+            let columns = self
+                .canonical_preprocessed_columns()
+                .expect("test preprocessed column");
+            air_core::fingerprint_preprocessed_columns("private_key_formula_test", &ids, &columns)
+        }
+
+        fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            tb.extend_evals(self.trace.clone());
+        }
+
+        fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            tb.extend_evals(vec![col_eval(
+                self.log_size,
+                vec![m31(0); 1usize << self.log_size],
+            )]);
+        }
+
+        fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+            vec![self.component.as_ref().expect("test component")]
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

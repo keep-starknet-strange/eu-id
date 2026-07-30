@@ -4,7 +4,8 @@ use bzip2::read::BzDecoder;
 use ciborium::value::Value;
 use euid_zk_sdk::{
     prove_identity, verify_identity, IssuerKey, NatMode, PredicateMode, ProductMdocWitnessV1,
-    ProductPublicStatementV1, TrustedIssuers, ZkMdocWitness, ZkPublicStatement, ZkVerifyResult,
+    ProductPublicStatementV1, TrustedIssuers, Ts13DemoPublicStatementV1, ZkError, ZkMdocWitness,
+    ZkPublicStatement, ZkVerifyResult,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -509,9 +510,22 @@ fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() 
     .collect::<Vec<_>>();
     let private_issuer_input = extracted.issuer_auth_input;
     let private_device_input = extracted.device_auth_input;
-    let statement = product_statement(session_transcript, &fixture.issuer_pk);
+    let statement = product_statement(session_transcript.clone(), &fixture.issuer_pk);
     let (revocation_pk, revocation_signature) = mldsa_fixture::mldsa_revocation_fixture(1, 2, 7);
     assert_eq!(revocation_pk, fixture.revocation_pk);
+    let ts13_statement = ZkPublicStatement::Ts13DemoV1(Ts13DemoPublicStatementV1 {
+        circuit_hash: eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH.to_vec(),
+        zk_system_id: "reverse-cross-profile-regression".to_string(),
+        document_type: PID_DOCTYPE.to_string(),
+        namespace: PID_NAMESPACE.to_string(),
+        element_identifier: "age_over_18".to_string(),
+        expected_value_cbor: vec![0xf5],
+        timestamp_epoch_seconds: i64::from(PRODUCT_EPOCH_DAY) * 86_400,
+        session_transcript,
+        trusted_issuer_public_key: fixture.issuer_pk.clone(),
+        revocation_public_key: revocation_pk.clone(),
+        revocation_epoch: 7,
+    });
     let issuer_signature = fixture.issuer_signature.clone();
     let device_signature = fixture.device_signature.clone();
     let witness = ZkMdocWitness::ProductV1(ProductMdocWitnessV1 {
@@ -531,6 +545,13 @@ fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() 
             .expect("product verification runs")
             .ok,
         "real product proof must verify"
+    );
+    assert!(
+        matches!(
+            verify_identity(ts13_statement, proof.clone()),
+            Err(ZkError::MalformedProofEnvelope)
+        ),
+        "the TS13 Demo V1 verifier must reject a real valid Product V7 proof"
     );
 
     // The age/nationality predicates prove facts ABOUT the birth date and

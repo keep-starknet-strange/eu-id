@@ -6,7 +6,7 @@
 //! age/nationality predicates in one verifier-facing proof. The legacy nonce
 //! module is not part of this path; the device-auth signature binds freshness.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Cursor;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -80,6 +80,7 @@ use crate::mdoc_cbor_stream::{MdocCborInputMode, MdocCborStream, MdocCborStreamI
 use crate::mdoc_country_code_table::{MdocCountryCodeTable, SharedMdocCountryCodeRelation};
 use crate::mdoc_private_device_key_bind::{
     MdocPrivateDeviceKeyBind, MdocPrivateDeviceKeyInteractionClaim,
+    MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS,
 };
 use crate::mdoc_private_item_bind::{
     MdocPrivateItemBind, MdocPrivateItemError, MdocPrivateItemFieldIds, MdocPrivateItemHandles,
@@ -106,7 +107,9 @@ use crate::mdoc_value_digests_scan::{
 };
 use crate::mdoc_window_bind::{MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow};
 use crate::policy::Policy;
-use crate::ts13_demo::Ts13PublicContextBindV1;
+use crate::ts13_demo::{
+    Ts13PublicContextBindV1, TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES,
+};
 use crate::Error;
 
 /// Legacy profile: `elementValue` packed as a fixed-width CBOR `bstr`.
@@ -118,7 +121,7 @@ const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 /// COSE protected header `{1: -49}` (ML-DSA-65,
 /// `stwo_mldsa::constants::COSE_ALG_ML_DSA_65`): CBOR `A1 01 38 30`.
-const MLDSA_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x38, 0x30];
+pub(crate) const MLDSA_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x38, 0x30];
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const CBOR_TAG_FULL_DATE: u64 = 1004;
 const MDOC_ATTRIBUTE_ELEMENT_ID_BASE: u32 = 16;
@@ -1404,6 +1407,7 @@ fn validate_mdoc_statement_shape<'a>(
     doctype: &str,
     policy: &Policy,
     lengths: MdocStatementResourceLengths,
+    max_device_message_bytes: usize,
     attribute_count: usize,
     attributes: impl Iterator<Item = (&'a str, &'a MdocDisclosureMode)>,
 ) -> Result<(), Error> {
@@ -1420,7 +1424,7 @@ fn validate_mdoc_statement_shape<'a>(
         (
             "device message",
             lengths.device_message_bytes,
-            crate::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES,
+            max_device_message_bytes,
         ),
         (
             "MSO payload",
@@ -1454,6 +1458,7 @@ fn validate_mdoc_statement_shape<'a>(
 fn validate_mdoc_circuit_statement_shape(
     statement: &MdocCircuitStatement,
     phase: &'static str,
+    is_ts13_demo: bool,
 ) -> Result<(), Error> {
     let lengths = mdoc_statement_resource_lengths(statement)
         .map_err(|error| mdoc_phase_error(phase, format!("mdoc public shape: {error:?}")))?;
@@ -1462,6 +1467,11 @@ fn validate_mdoc_circuit_statement_shape(
         &statement.doctype,
         &statement.policy,
         lengths,
+        if is_ts13_demo {
+            TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
+        } else {
+            crate::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
+        },
         statement.attributes.len(),
         statement
             .attributes
@@ -1495,6 +1505,7 @@ fn validate_mdoc_ts13_public_statement_shape(
         &statement.doctype,
         &statement.policy,
         lengths,
+        crate::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES,
         statement.attributes.len(),
         statement
             .attributes
@@ -2364,6 +2375,8 @@ pub struct MdocTs13DemoCircuitPublicInput {
     pub circuit_hash: [u8; 32],
     pub request_context_digest: [u8; 32],
     pub timestamp_epoch_seconds: i64,
+    pub verification_timestamp_rfc3339_utc:
+        [u8; TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES],
     pub trusted_issuer_public_key: Vec<u8>,
     pub device_cose_sig_structure: Vec<u8>,
     pub revocation: MdocRevocationPublicInputs,
@@ -2655,6 +2668,10 @@ pub struct MdocCircuitProof {
     /// Opaque post-interaction payloads; production carries the Keccak
     /// service's round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
+    /// Prover-side executable geometry for artifact drift tests. It is never
+    /// serialized into the proof and is absent after V4 decoding.
+    #[serde(skip, default)]
+    ts13_demo_circuit_geometry: Option<MdocTs13DemoCircuitGeometry>,
 }
 
 impl MdocCircuitProof {
@@ -2696,9 +2713,92 @@ impl MdocCircuitProof {
     }
 
     pub fn has_ts13_demo_shape(&self) -> bool {
-        self.mldsa
-            .as_ref()
-            .is_some_and(|claims| claims.has_expected_shape(false))
+        use crate::ts13_demo_artifact_constants::{
+            TS13_DEMO_FRI_FIRST_HASH_CAP, TS13_DEMO_FRI_FIRST_WITNESS_CAP,
+            TS13_DEMO_FRI_INNER_HASH_CAPS, TS13_DEMO_FRI_INNER_WITNESS_CAPS,
+            TS13_DEMO_FRI_LAST_LAYER_COEFFICIENT_COUNT, TS13_DEMO_POST_INTERACTION_PAYLOAD_COUNT,
+            TS13_DEMO_QUERY_COUNT, TS13_DEMO_SAMPLED_VALUE_LENGTH_HISTOGRAMS,
+            TS13_DEMO_TREE_COLUMN_COUNTS, TS13_DEMO_TREE_MERKLE_HASH_CAPS,
+        };
+
+        fn length_histogram_matches<T>(columns: &[Vec<T>], expected: &[(usize, usize)]) -> bool {
+            expected.iter().map(|(_, count)| count).sum::<usize>() == columns.len()
+                && expected.iter().all(|&(length, expected_count)| {
+                    columns
+                        .iter()
+                        .filter(|column| column.len() == length)
+                        .count()
+                        == expected_count
+                })
+        }
+
+        let stark = &self.stark_proof.0;
+        self.merged_sha_layout() == Some((8, 8))
+            && stark.config == mdoc_production_pcs_config()
+            && stark.commitments.len() == TS13_DEMO_TREE_COLUMN_COUNTS.len()
+            && stark.sampled_values.len() == TS13_DEMO_TREE_COLUMN_COUNTS.len()
+            && stark
+                .sampled_values
+                .iter()
+                .zip(TS13_DEMO_SAMPLED_VALUE_LENGTH_HISTOGRAMS)
+                .all(|(columns, histogram)| length_histogram_matches(columns, histogram))
+            && stark.decommitments.len() == TS13_DEMO_TREE_COLUMN_COUNTS.len()
+            && stark
+                .decommitments
+                .iter()
+                .zip(TS13_DEMO_TREE_MERKLE_HASH_CAPS)
+                .all(|(decommitment, cap)| decommitment.hash_witness.len() <= cap)
+            && stark.queried_values.len() == TS13_DEMO_TREE_COLUMN_COUNTS.len()
+            && stark
+                .queried_values
+                .iter()
+                .zip(TS13_DEMO_TREE_COLUMN_COUNTS)
+                .all(|(columns, count)| {
+                    columns.len() == count
+                        && columns
+                            .iter()
+                            .all(|values| values.len() == TS13_DEMO_QUERY_COUNT)
+                })
+            && stark.fri_proof.first_layer.fri_witness.len() <= TS13_DEMO_FRI_FIRST_WITNESS_CAP
+            && stark.fri_proof.first_layer.decommitment.hash_witness.len()
+                <= TS13_DEMO_FRI_FIRST_HASH_CAP
+            && stark.fri_proof.inner_layers.len() == TS13_DEMO_FRI_INNER_WITNESS_CAPS.len()
+            && stark
+                .fri_proof
+                .inner_layers
+                .iter()
+                .zip(TS13_DEMO_FRI_INNER_WITNESS_CAPS)
+                .zip(TS13_DEMO_FRI_INNER_HASH_CAPS)
+                .all(|((layer, witness_cap), hash_cap)| {
+                    layer.fri_witness.len() <= witness_cap
+                        && layer.decommitment.hash_witness.len() <= hash_cap
+                })
+            && stark.fri_proof.last_layer_poly.len() == TS13_DEMO_FRI_LAST_LAYER_COEFFICIENT_COUNT
+            && self.post_interaction_payloads.len() == TS13_DEMO_POST_INTERACTION_PAYLOAD_COUNT
+            && self
+                .post_interaction_payloads
+                .iter()
+                .enumerate()
+                .all(|(index, payload)| {
+                    if index == 2 {
+                        air_core::gkr::is_ts13_demo_gkr_batch_proof_wire(payload)
+                    } else {
+                        payload.is_empty()
+                    }
+                })
+            && self.sha_tables_interaction_claim.pairs.len() == 3
+            && self
+                .attribute_sha_interaction_claims
+                .iter()
+                .all(|claim| claim.range.is_empty())
+            && self
+                .mso_sha_interaction_claim
+                .as_ref()
+                .is_some_and(|claim| claim.range.is_empty())
+            && self
+                .mldsa
+                .as_ref()
+                .is_some_and(|claims| claims.has_expected_shape(false))
             && self.device_mldsa.as_ref().is_some_and(|claims| {
                 claims.group_evals.len() == stwo_mldsa::statement::n_private_key_group_evals()
                     && claims.claimed_sums.len()
@@ -2732,6 +2832,11 @@ impl MdocCircuitProof {
     }
 
     #[doc(hidden)]
+    pub fn ts13_demo_circuit_geometry(&self) -> Option<&MdocTs13DemoCircuitGeometry> {
+        self.ts13_demo_circuit_geometry.as_ref()
+    }
+
+    #[doc(hidden)]
     pub fn clear_mldsa_range_table_claimed_sum_for_test(&mut self) {
         self.mldsa_range_table_claimed_sum = None;
     }
@@ -2739,6 +2844,20 @@ impl MdocCircuitProof {
     #[doc(hidden)]
     pub fn mldsa_range_table_claimed_sum_mut_for_test(&mut self) -> Option<&mut QM31> {
         self.mldsa_range_table_claimed_sum.as_mut()
+    }
+
+    #[doc(hidden)]
+    pub fn ts13_expand_a_claim_mut_for_test(&mut self) -> Option<&mut ExpandAClaim> {
+        self.ts13_expand_a_claim.as_mut()
+    }
+
+    #[doc(hidden)]
+    pub fn tamper_ts13_device_key_bind_claimed_sum_for_test(&mut self) -> bool {
+        let Some(claim) = self.ts13_device_key_bind_interaction_claim.as_mut() else {
+            return false;
+        };
+        claim.claimed_sum += QM31::from(M31::from_u32_unchecked(1));
+        true
     }
 }
 
@@ -2986,6 +3105,249 @@ pub struct MdocStarkProofByteBreakdown {
     pub queried_values: usize,
     pub proof_of_work: usize,
     pub fri_proof: usize,
+}
+
+/// Executable serialization/claim geometry extracted from a real TS13 demo
+/// proof. The circuit-artifact drift test compares this view with the
+/// generated manifest; it is not part of the verifier's public statement.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocTs13DemoProofShape {
+    pub proof_bytes: usize,
+    pub stark_proof_bytes: usize,
+    pub outer_claims_and_framing_bytes: usize,
+    pub commitment_count: usize,
+    pub tree_zero_root: Option<[u8; 32]>,
+    pub sampled_values: Vec<Vec<usize>>,
+    pub decommitment_hash_counts: Vec<usize>,
+    pub queried_values: Vec<Vec<usize>>,
+    pub fri_first_layer_witness_count: usize,
+    pub fri_first_layer_hash_count: usize,
+    pub fri_inner_layers: Vec<MdocFriLayerShape>,
+    pub fri_last_layer_coefficient_count: usize,
+    pub post_interaction_payload_bytes: Vec<usize>,
+    pub sha_table_pair_claim_count: usize,
+    pub attribute_sha_range_claim_counts: Vec<usize>,
+    pub mso_sha_range_claim_count: Option<usize>,
+    pub issuer_mldsa_group_eval_count: Option<usize>,
+    pub issuer_mldsa_claimed_sum_count: Option<usize>,
+    pub device_mldsa_group_eval_count: Option<usize>,
+    pub device_mldsa_claimed_sum_count: Option<usize>,
+    pub revocation_mldsa_group_eval_count: Option<usize>,
+    pub revocation_mldsa_claimed_sum_count: Option<usize>,
+    pub keccak_service_claimed_sum_count: Option<usize>,
+    pub private_item_claim_count: usize,
+    pub cbor_parser_claim_count: usize,
+    pub merged_sha_layout: Option<(u32, u32)>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocFriLayerShape {
+    pub witness_count: usize,
+    pub hash_count: usize,
+}
+
+/// Exact prover-constructed Air/component geometry. This metadata is retained
+/// only in memory for circuit-artifact generation and drift tests.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocTs13DemoCircuitGeometry {
+    pub committed_preprocessed_ids: Vec<String>,
+    pub committed_preprocessed_log_sizes: Vec<u32>,
+    pub air_instances: Vec<MdocAirInstanceGeometry>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocAirInstanceGeometry {
+    pub preprocessed_log_sizes: Vec<u32>,
+    pub trace_log_sizes: Vec<u32>,
+    pub interaction_log_sizes: Vec<u32>,
+    pub post_interaction_log_sizes: Vec<u32>,
+    pub max_log_size: u32,
+    pub max_constraint_log_degree_bound: u32,
+    pub components: Vec<MdocComponentGeometry>,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MdocComponentGeometry {
+    pub trace_rows: u32,
+    pub active_rows: u32,
+    pub constraint_count: usize,
+    pub max_constraint_log_degree_bound: u32,
+    pub trace_log_degree_bounds: Vec<Vec<u32>>,
+}
+
+fn capture_ts13_demo_circuit_geometry(
+    modules: &[&mut dyn AirProver],
+) -> MdocTs13DemoCircuitGeometry {
+    const TS13_DEMO_U9_PHYSICAL_AIR_ORDINAL: usize = 15;
+    const TS13_DEMO_U9_MAIN_COMPONENT_ORDINAL: usize = 0;
+
+    let mut seen_preprocessed_ids = HashSet::new();
+    let mut committed_preprocessed_ids = Vec::new();
+    let mut committed_preprocessed_log_sizes = Vec::new();
+    for module in modules {
+        let ids = module.preprocessed_column_ids();
+        let log_sizes = module.layout().preprocessed;
+        assert_eq!(
+            ids.len(),
+            log_sizes.len(),
+            "preprocessed ids and layout differ during TS13 artifact capture"
+        );
+        for (id, log_size) in ids.into_iter().zip(log_sizes) {
+            let id_name = format!("{id:?}");
+            if seen_preprocessed_ids.insert(id) {
+                committed_preprocessed_ids.push(id_name);
+                committed_preprocessed_log_sizes.push(log_size);
+            }
+        }
+    }
+
+    MdocTs13DemoCircuitGeometry {
+        committed_preprocessed_ids,
+        committed_preprocessed_log_sizes,
+        air_instances: modules
+            .iter()
+            .enumerate()
+            .map(|(air_ordinal, module)| {
+                let layout = module.layout();
+                MdocAirInstanceGeometry {
+                    preprocessed_log_sizes: layout.preprocessed,
+                    trace_log_sizes: layout.trace,
+                    interaction_log_sizes: layout.interaction,
+                    post_interaction_log_sizes: module.post_interaction_log_sizes(),
+                    max_log_size: module.max_log_size(),
+                    max_constraint_log_degree_bound: module.max_constraint_log_degree_bound(),
+                    components: module
+                        .components()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(component_ordinal, component)| {
+                            let trace_log_degree_bounds = component
+                                .trace_log_degree_bounds()
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let trace_rows = trace_log_degree_bounds
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .max()
+                                .and_then(|log_size| 1_u32.checked_shl(log_size))
+                                .expect("TS13 component has a supported non-empty trace layout");
+                            MdocComponentGeometry {
+                                trace_rows,
+                                active_rows: if air_ordinal == TS13_DEMO_U9_PHYSICAL_AIR_ORDINAL
+                                    && component_ordinal == TS13_DEMO_U9_MAIN_COMPONENT_ORDINAL
+                                {
+                                    MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS as u32
+                                } else {
+                                    trace_rows
+                                },
+                                constraint_count: component.n_constraints(),
+                                max_constraint_log_degree_bound: component
+                                    .max_constraint_log_degree_bound(),
+                                trace_log_degree_bounds,
+                            }
+                        })
+                        .collect(),
+                }
+            })
+            .collect(),
+    }
+}
+
+impl MdocCircuitProof {
+    /// Return the live, proof-carried shape needed by the deterministic
+    /// artifact audit without exposing any private witness value.
+    #[doc(hidden)]
+    pub fn ts13_demo_proof_shape(&self) -> MdocTs13DemoProofShape {
+        let stark = &self.stark_proof.0;
+        let mldsa_shape = |claims: &Option<MdocMlDsaClaims>| {
+            claims
+                .as_ref()
+                .map(|claims| (claims.group_evals.len(), claims.claimed_sums.len()))
+        };
+        let issuer = mldsa_shape(&self.mldsa);
+        let device = mldsa_shape(&self.device_mldsa);
+        let revocation = mldsa_shape(&self.revocation_mldsa);
+        let proof_bytes = bincode_len(self);
+        let stark_proof_bytes = bincode_len(&self.stark_proof);
+        let post_interaction_payload_wire_bytes = 8
+            + self.post_interaction_payloads.len() * 8
+            + self
+                .post_interaction_payloads
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>();
+        MdocTs13DemoProofShape {
+            proof_bytes,
+            stark_proof_bytes,
+            outer_claims_and_framing_bytes: proof_bytes
+                .checked_sub(stark_proof_bytes + post_interaction_payload_wire_bytes)
+                .expect("post payloads are contained in the serialized proof"),
+            commitment_count: stark.commitments.len(),
+            tree_zero_root: stark.commitments.first().map(|root| root.0),
+            sampled_values: stark
+                .sampled_values
+                .iter()
+                .map(|columns| columns.iter().map(Vec::len).collect())
+                .collect(),
+            decommitment_hash_counts: stark
+                .decommitments
+                .iter()
+                .map(|decommitment| decommitment.hash_witness.len())
+                .collect(),
+            queried_values: stark
+                .queried_values
+                .iter()
+                .map(|columns| columns.iter().map(Vec::len).collect())
+                .collect(),
+            fri_first_layer_witness_count: stark.fri_proof.first_layer.fri_witness.len(),
+            fri_first_layer_hash_count: stark.fri_proof.first_layer.decommitment.hash_witness.len(),
+            fri_inner_layers: stark
+                .fri_proof
+                .inner_layers
+                .iter()
+                .map(|layer| MdocFriLayerShape {
+                    witness_count: layer.fri_witness.len(),
+                    hash_count: layer.decommitment.hash_witness.len(),
+                })
+                .collect(),
+            fri_last_layer_coefficient_count: stark.fri_proof.last_layer_poly.len(),
+            post_interaction_payload_bytes: self
+                .post_interaction_payloads
+                .iter()
+                .map(Vec::len)
+                .collect(),
+            sha_table_pair_claim_count: self.sha_tables_interaction_claim.pairs.len(),
+            attribute_sha_range_claim_counts: self
+                .attribute_sha_interaction_claims
+                .iter()
+                .map(|claim| claim.range.len())
+                .collect(),
+            mso_sha_range_claim_count: self
+                .mso_sha_interaction_claim
+                .as_ref()
+                .map(|claim| claim.range.len()),
+            issuer_mldsa_group_eval_count: issuer.map(|shape| shape.0),
+            issuer_mldsa_claimed_sum_count: issuer.map(|shape| shape.1),
+            device_mldsa_group_eval_count: device.map(|shape| shape.0),
+            device_mldsa_claimed_sum_count: device.map(|shape| shape.1),
+            revocation_mldsa_group_eval_count: revocation.map(|shape| shape.0),
+            revocation_mldsa_claimed_sum_count: revocation.map(|shape| shape.1),
+            keccak_service_claimed_sum_count: self
+                .keccak_service_claimed_sums
+                .as_ref()
+                .map(Vec::len),
+            private_item_claim_count: self.private_item_interaction_claims.len(),
+            cbor_parser_claim_count: self.mdoc_cbor_interaction_claims.len(),
+            merged_sha_layout: self.merged_sha_layout(),
+        }
+    }
 }
 
 pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreakdown {
@@ -3800,9 +4162,7 @@ fn validate_ts13_demo_proving_shape(
     public: &MdocTs13DemoCircuitPublicInput,
 ) -> Result<(), Error> {
     let [attribute] = statement.attributes.as_slice() else {
-        return Err(Error::Prove(
-            "TS13 demo requires exactly one attribute".to_string(),
-        ));
+        return Err(Error::UnsupportedDemoCredentialShape);
     };
     if statement.doctype != PID_DOCTYPE
         || statement.namespace != PID_NAMESPACE
@@ -3818,9 +4178,7 @@ fn validate_ts13_demo_proving_shape(
             .map(|item| stwo_sha256::native::pad_message(&item.item).len())
             != Some(usize::from(TS13_DEMO_ITEM_PADDED_BYTES))
     {
-        return Err(Error::Prove(
-            "TS13 demo credential does not match the fixed shape".to_string(),
-        ));
+        return Err(Error::UnsupportedDemoCredentialShape);
     }
     let issuer = statement
         .issuer_input
@@ -3852,7 +4210,7 @@ fn prove_mdoc_circuit_inner_impl(
     ts13_demo_public: Option<&MdocTs13DemoCircuitPublicInput>,
     #[cfg(feature = "unlink-spikes")] unlink_spike: MdocUnlinkSpikeConfig,
 ) -> Result<MdocCircuitProof, Error> {
-    validate_mdoc_circuit_statement_shape(statement, "prove")?;
+    validate_mdoc_circuit_statement_shape(statement, "prove", ts13_demo_public.is_some())?;
     validate_mldsa_public_keys(statement, "prove")?;
     let has_ts13_revocation = validate_ts13_revocation_shape(statement, true, "prove")?;
     let is_ts13_demo = ts13_demo_public.is_some();
@@ -4041,6 +4399,12 @@ fn prove_mdoc_circuit_inner_impl(
                 .expect("TS13 device-key start handle exists"),
         )
         .map_err(|error| Error::Prove(format!("TS13 private device-key bind: {error}")))?;
+        if !census.has_frozen_demo_shape() {
+            return Err(Error::Prove(
+                "TS13 private device-key binder geometry drifted from the frozen profile"
+                    .to_string(),
+            ));
+        }
         (Some(bind), Some(census))
     } else {
         (None, None)
@@ -4049,6 +4413,7 @@ fn prove_mdoc_circuit_inner_impl(
         let (validity, uses) = MdocPrivateMsoValidityV2::prover(
             MdocPrivateMsoValiditySpec {
                 timestamp_epoch_seconds: public.timestamp_epoch_seconds,
+                verification_timestamp_rfc3339_utc: public.verification_timestamp_rfc3339_utc,
             },
             private_validity_witness.expect("TS13 validity witness exists"),
             mldsa_range_handle.clone(),
@@ -4489,7 +4854,7 @@ fn prove_mdoc_circuit_inner_impl(
         )
     });
 
-    let (stark_proof, post_interaction_payloads) = {
+    let (stark_proof, post_interaction_payloads, ts13_demo_circuit_geometry) = {
         let mut modules: Vec<&mut dyn AirProver> = Vec::new();
         if is_ts13_demo {
             collect_ts13_demo_modules!(
@@ -4587,8 +4952,11 @@ fn prove_mdoc_circuit_inner_impl(
                 modules.push(revocation_public);
             }
         }
-        air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
-            .map_err(|e| Error::Prove(format!("{e:?}")))?
+        let (stark_proof, post_interaction_payloads) =
+            air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
+                .map_err(|e| Error::Prove(format!("{e:?}")))?;
+        let geometry = is_ts13_demo.then(|| capture_ts13_demo_circuit_geometry(&modules));
+        (stark_proof, post_interaction_payloads, geometry)
     };
     Ok(MdocCircuitProof {
         stark_proof,
@@ -4645,6 +5013,7 @@ fn prove_mdoc_circuit_inner_impl(
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
         post_interaction_payloads,
+        ts13_demo_circuit_geometry,
     })
 }
 
@@ -4770,7 +5139,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
 ) -> Result<MdocCircuitVerifyProfile, Error> {
     let total_start = Instant::now();
     let is_ts13_demo = ts13_demo_public.is_some();
-    validate_mdoc_circuit_statement_shape(statement, "verify")?;
+    validate_mdoc_circuit_statement_shape(statement, "verify", is_ts13_demo)?;
     validate_mldsa_public_keys(statement, "verify")?;
     validate_public_auth_projection(statement)?;
     let has_ts13_revocation = validate_ts13_revocation_shape(statement, false, "verify")?;
@@ -5255,6 +5624,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
             MdocPrivateMsoValidityV2::verifier(
                 MdocPrivateMsoValiditySpec {
                     timestamp_epoch_seconds: public.timestamp_epoch_seconds,
+                    verification_timestamp_rfc3339_utc: public.verification_timestamp_rfc3339_utc,
                 },
                 mldsa_range_handle.clone(),
                 validity_handle
@@ -6011,16 +6381,16 @@ mod auth_projection_serde_tests {
             }),
         ];
 
-        validate_mdoc_circuit_statement_shape(&shape_statement(), "prove")
+        validate_mdoc_circuit_statement_shape(&shape_statement(), "prove", false)
             .expect("control prove shape");
-        validate_mdoc_circuit_statement_shape(&shape_statement(), "verify")
+        validate_mdoc_circuit_statement_shape(&shape_statement(), "verify", false)
             .expect("control verify shape");
         for phase in ["prove", "verify"] {
             for (name, mutate) in cases {
                 let mut statement = shape_statement();
                 mutate(&mut statement);
                 let outcome = std::panic::catch_unwind(|| {
-                    validate_mdoc_circuit_statement_shape(&statement, phase)
+                    validate_mdoc_circuit_statement_shape(&statement, phase, false)
                 });
                 let error = outcome
                     .unwrap_or_else(|_| panic!("{phase} {name} shape panicked"))

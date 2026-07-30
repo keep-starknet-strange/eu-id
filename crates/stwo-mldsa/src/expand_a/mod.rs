@@ -1696,6 +1696,45 @@ mod tests {
     }
 
     #[test]
+    fn rejection_air_rejects_q_marked_accepted() {
+        let witness = derive_expand_a_witness([42u8; 32]).unwrap();
+        let mut rows = build_rejection_rows(&witness);
+        let row = rows.iter().position(|row| row.accept).unwrap();
+        rows[row].bytes = split_u23(Q);
+        rows[row].low7 = rows[row].bytes[2] & 0x7f;
+        rows[row].top = rows[row].bytes[2] >> 7;
+        rows[row].accept = true;
+        rows[row].accept_slack = [0; 3];
+
+        assert_eq!(
+            rejection_constraint_failures(&rows, None),
+            1,
+            "q must not satisfy the accepted-candidate comparison"
+        );
+    }
+
+    #[test]
+    fn rejection_air_rejects_q_minus_one_marked_rejected() {
+        let witness = derive_expand_a_witness([42u8; 32]).unwrap();
+        let mut rows = build_rejection_rows(&witness);
+        let row = rows
+            .iter()
+            .position(|row| row.sample && !row.accept)
+            .unwrap();
+        rows[row].bytes = split_u23(Q - 1);
+        rows[row].low7 = rows[row].bytes[2] & 0x7f;
+        rows[row].top = rows[row].bytes[2] >> 7;
+        rows[row].accept = false;
+        rows[row].reject_delta = 0;
+
+        assert_eq!(
+            rejection_constraint_failures(&rows, None),
+            1,
+            "q - 1 must not satisfy the rejected-candidate comparison"
+        );
+    }
+
+    #[test]
     fn fast_air_adversarial_matrix_rejects() {
         let witness = derive_expand_a_witness([42u8; 32]).unwrap();
         let rows = build_rejection_rows(&witness);

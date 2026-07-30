@@ -1200,6 +1200,14 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
     );
     let private_layout = hosted_private_key_layout(private.input().message.len());
     let public_layout = public.layout();
+    assert_eq!(private.max_log_size(), 15);
+    assert_eq!(private.max_constraint_log_degree_bound(), 17);
+    assert!(private_layout
+        .preprocessed
+        .iter()
+        .chain(&private_layout.trace)
+        .chain(&private_layout.interaction)
+        .all(|&log_size| log_size <= private.max_log_size()));
     assert_eq!(
         private_layout.preprocessed.len(),
         public_layout.preprocessed.len() + EXPECTED_EXTRA_PREPROCESSED_COLUMNS
@@ -1446,12 +1454,14 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
         "the public 00||00||M prefix must bind the µ job"
     );
 
-    let mut eval_tamper = proof.clone();
-    eval_tamper.group_evals[30] += SecureField::from(m31(1));
-    assert!(
-        verify_hosted_private_key(&eval_tamper).is_err(),
-        "tampering the first private A evaluation must reject"
-    );
+    for group_eval_index in 0..proof.group_evals.len() {
+        let mut eval_tamper = proof.clone();
+        eval_tamper.group_evals[group_eval_index] += SecureField::from(m31(1));
+        assert!(
+            verify_hosted_private_key(&eval_tamper).is_err(),
+            "tampering private group evaluation {group_eval_index} must reject"
+        );
+    }
 
     let mut source_tamper = proof.clone();
     source_tamper.private_key_source_claims[1] += SecureField::from(m31(1));
@@ -1460,11 +1470,24 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
         "tampering the packed-t1 source claim must reject"
     );
 
-    let mut fold_tamper = proof.clone();
-    fold_tamper.claimed_sums[22] += SecureField::from(m31(1));
+    for claimed_sum_index in 0..hosted_private_key_claimed_sums_len() {
+        let mut claimed_sum_tamper = proof.clone();
+        claimed_sum_tamper.claimed_sums[claimed_sum_index] += SecureField::from(m31(1));
+        assert!(
+            verify_hosted_private_key(&claimed_sum_tamper).is_err(),
+            "tampering private-device claimed sum {claimed_sum_index} must reject"
+        );
+    }
+
+    let mut reordered_evals = proof.clone();
+    assert_ne!(
+        reordered_evals.group_evals[30],
+        reordered_evals.group_evals[31]
+    );
+    reordered_evals.group_evals.swap(30, 31);
     assert!(
-        verify_hosted_private_key(&fold_tamper).is_err(),
-        "tampering the private fold claim must reject"
+        verify_hosted_private_key(&reordered_evals).is_err(),
+        "reordering two fixed-position private evaluations must reject"
     );
 
     let wrong_shapes = keccak_job_shapes(msg.len(), 0, true);

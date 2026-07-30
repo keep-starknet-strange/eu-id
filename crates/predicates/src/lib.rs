@@ -24,6 +24,9 @@ pub use predicate::{PredicateProver, PredicateVerifier};
 
 use strum::IntoEnumIterator;
 
+#[doc(hidden)]
+pub const STD_FEATURE_ENABLED: bool = cfg!(feature = "std");
+
 /// Every assigned ISO-3166-1 numeric code the nationality predicate accepts, in
 /// ascending order — the same domain [`nat::NationalityPredicate`] validates an
 /// acceptable set against.

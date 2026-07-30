@@ -11,14 +11,15 @@ mod mldsa_fixture;
 use std::time::Instant;
 
 use euid_zk_sdk::{
-    prove_identity, ts13_default_circuit_hash, verify_identity, Ts13DemoPublicStatementV1,
-    Ts13DemoWitnessV1, Ts13PresentationRequest, ZkMdocWitness, ZkPublicStatement,
+    prove_identity, ts13_demo_circuit_hash, verify_identity, Ts13DemoPublicStatementV1,
+    Ts13DemoWitnessV1, ZkMdocWitness, ZkPublicStatement,
 };
-use sha2::{Digest, Sha256};
 
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const DISTINCTIVE_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
+const VERIFICATION_TIMESTAMP_EPOCH_SECONDS: i64 = 20_637 * 86_400;
+const REVOCATION_EPOCH: u32 = 7;
 
 fn main() {
     let iterations = parse_iterations();
@@ -49,90 +50,23 @@ fn median(values: &mut [u128]) -> u128 {
     values[values.len() / 2]
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn ts13_request(
+fn identity_statement(
     session_transcript: Vec<u8>,
     issuer_public_key: &[u8],
     revocation_public_key: Vec<u8>,
-) -> Ts13PresentationRequest {
-    Ts13PresentationRequest {
-        credential_format: "mso_mdoc_zk".to_string(),
-        zk_system_id: "stwo-euid-v1".to_string(),
-        doctype: PID_DOCTYPE.to_string(),
-        namespace: PID_NAMESPACE.to_string(),
-        circuit_hash: ts13_default_circuit_hash(),
-        num_attributes: 1,
-        max_mso_payload_bytes: eu_id_prover::ts13::TS13_MAX_MSO_PAYLOAD_BYTES as u32,
-        max_attribute_bytes: 32,
-        max_attribute_item_bytes: eu_id_prover::ts13::TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32,
-        max_requested_digest_id: eu_id_prover::ts13::TS13_MAX_REQUESTED_DIGEST_ID,
-        value_digests_scan_log_size: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_LOG_SIZE,
-        value_digests_scan_max_items: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS,
-        value_digests_scan_preprocessed_cols:
-            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS,
-        value_digests_scan_trace_cols: eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_TRACE_COLS,
-        value_digests_scan_relation_sites:
-            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_RELATION_SITES,
-        value_digests_scan_interaction_cols:
-            eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS,
-        country_code_dataset: eu_id_prover::ts13::TS13_COUNTRY_CODE_DATASET.to_string(),
-        country_code_table_log_size: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_LOG_SIZE,
-        country_code_count: eu_id_prover::ts13::TS13_COUNTRY_CODE_COUNT,
-        country_code_table_preprocessed_cols:
-            eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS,
-        country_code_table_trace_cols: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_TRACE_COLS,
-        country_code_table_interaction_cols:
-            eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS,
-        country_code_table_sha256: eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_SHA256.to_vec(),
-        max_issuer_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
-            as u32,
-        max_device_mldsa_message_bytes: eu_id_prover::ts13::TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
-            as u32,
-        merged_sha_slot_log: eu_id_prover::ts13::TS13_MERGED_SHA_SLOT_LOG,
-        merged_sha_log_n_rows: eu_id_prover::ts13::TS13_MERGED_SHA_LOG_N_ROWS,
-        potential_issuers: 1,
-        revocation_enabled: true,
-        revocation_id_width_bytes: 8,
-        device_auth_profile: "iso18013-5".to_string(),
-        current_date_epoch_day: 20_637,
-        session_transcript,
-        trusted_issuer_hashes: vec![hex_sha256(issuer_public_key)],
-        revocation_public_key,
-        revocation_epoch: 7,
-    }
-}
-
-fn identity_statement(
-    request: Ts13PresentationRequest,
-    issuer_public_key: &[u8],
 ) -> ZkPublicStatement {
-    let circuit_hash = request
-        .circuit_hash
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let hex = std::str::from_utf8(pair).expect("ASCII circuit hash");
-            u8::from_str_radix(hex, 16).expect("hex circuit hash")
-        })
-        .collect();
     ZkPublicStatement::Ts13DemoV1(Ts13DemoPublicStatementV1 {
-        circuit_hash,
+        circuit_hash: ts13_demo_circuit_hash(),
         zk_system_id: "rp-local-perf-probe".to_string(),
-        document_type: request.doctype,
-        namespace: request.namespace,
+        document_type: PID_DOCTYPE.to_string(),
+        namespace: PID_NAMESPACE.to_string(),
         element_identifier: "age_over_18".to_string(),
         expected_value_cbor: vec![0xf5],
-        timestamp_epoch_seconds: i64::from(request.current_date_epoch_day) * 86_400,
-        session_transcript: request.session_transcript,
+        timestamp_epoch_seconds: VERIFICATION_TIMESTAMP_EPOCH_SECONDS,
+        session_transcript,
         trusted_issuer_public_key: issuer_public_key.to_vec(),
-        revocation_public_key: request.revocation_public_key,
-        revocation_epoch: request.revocation_epoch,
+        revocation_public_key,
+        revocation_epoch: REVOCATION_EPOCH,
     })
 }
 
@@ -163,13 +97,13 @@ fn run(iterations: usize) {
     let id_hi = id
         .checked_add(DISTINCTIVE_BOUND_OFFSET)
         .expect("fixture revocation id is below selected bound offset");
-    let (_, revocation_signature) = mldsa_fixture::mldsa_revocation_fixture(id_lo, id_hi, 7);
-    let request = ts13_request(
+    let (_, revocation_signature) =
+        mldsa_fixture::mldsa_revocation_fixture(id_lo, id_hi, REVOCATION_EPOCH);
+    let statement = identity_statement(
         session_transcript,
         &fixture.issuer_pk,
         fixture.revocation_pk.clone(),
     );
-    let statement = identity_statement(request, &fixture.issuer_pk);
     println!(
         "TS13_SDK_FIXTURE document_bytes={} issuer_sig_structure_bytes={} mso_payload_bytes={} device_sig_structure_bytes={} requested_item_bytes={}",
         fixture.document.len(),

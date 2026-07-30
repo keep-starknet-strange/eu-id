@@ -411,6 +411,12 @@ pub fn ts13_default_circuit_hash() -> String {
     eu_id_prover::ts13::ts13_default_circuit_hash()
 }
 
+/// Raw artifact-derived circuit hash required by `Ts13DemoPublicStatementV1`.
+#[uniffi::export]
+pub fn ts13_demo_circuit_hash() -> Vec<u8> {
+    eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH.to_vec()
+}
+
 fn ts13_tuple_is_supported(request: &Ts13PresentationRequest) -> bool {
     request.doctype == TS13_PID_DOCTYPE
         && request.namespace == TS13_PID_NAMESPACE
@@ -1044,7 +1050,7 @@ fn decode_mdoc_proof_envelope(proof: &[u8]) -> Result<MdocProofEnvelope, ZkError
     Ok(envelope)
 }
 
-const PROVER_STACK_SIZE: usize = 32 * 1024 * 1024;
+const PROVER_STACK_SIZE: usize = 64 * 1024 * 1024;
 
 fn on_large_stack<T, F>(work: F) -> Result<T, ZkError>
 where
@@ -1054,7 +1060,16 @@ where
     let handle = std::thread::Builder::new()
         .name("euid-prover".to_string())
         .stack_size(PROVER_STACK_SIZE)
-        .spawn(work)
+        .spawn(move || {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .stack_size(PROVER_STACK_SIZE)
+                .thread_name(|index| format!("euid-prover-worker-{index}"))
+                .build()
+                .map_err(|error| {
+                    ZkError::Prove(format!("failed to build prover worker pool: {error}"))
+                })?;
+            pool.install(work)
+        })
         .map_err(|error| ZkError::Prove(format!("failed to spawn prover thread: {error}")))?;
     handle
         .join()
@@ -1367,6 +1382,28 @@ mod mldsa_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_stack_wrapper_installs_named_rayon_pool() {
+        assert_eq!(PROVER_STACK_SIZE, 64 * 1024 * 1024);
+
+        let (worker_index, worker_name) = on_large_stack(|| {
+            let current_thread = std::thread::current();
+            Ok((
+                rayon::current_thread_index(),
+                current_thread.name().map(str::to_owned),
+            ))
+        })
+        .expect("large-stack wrapper should run work in its Rayon pool");
+
+        assert!(worker_index.is_some(), "work did not run on a Rayon worker");
+        assert!(
+            worker_name
+                .as_deref()
+                .is_some_and(|name| name.starts_with("euid-prover-worker-")),
+            "work ran on unexpected thread {worker_name:?}"
+        );
+    }
 
     const PRE_Q12_TS13_CIRCUIT_HASH: &str =
         "05505a1e08264a96a82848baffa8cca3a190c9540dd486834e13a590471b6438";

@@ -22,7 +22,13 @@ mod mdoc_value_digests_scan;
 mod mdoc_window_bind;
 pub mod policy;
 pub mod ts13;
+#[doc(hidden)]
+pub mod ts13_artifact;
 pub mod ts13_demo;
+#[doc(hidden)]
+pub mod ts13_demo_artifact_constants {
+    include!("generated/ts13_demo_artifact.rs");
+}
 
 use stwo::core::pcs::PcsConfig;
 
@@ -127,9 +133,7 @@ pub fn prove_mdoc_ts13_demo(
         ));
     }
     if document.len() > ts13::TS13_MAX_DOCUMENT_BYTES {
-        return Err(Error::Prove(
-            "TS13 demo document exceeds the fixed resource cap".to_string(),
-        ));
+        return Err(Error::UnsupportedDemoCredentialShape);
     }
     let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
     if extracted.device_sig_structure != public.device_cose_sig_structure {
@@ -172,6 +176,7 @@ pub enum Error {
     AuthInputMismatch,
     AgePolicyMismatch,
     NatPolicyMismatch,
+    UnsupportedDemoCredentialShape,
     WeakConfig {
         got: PcsConfig,
         expected: PcsConfig,

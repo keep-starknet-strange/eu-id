@@ -135,6 +135,21 @@ pub(crate) struct MdocPrivateDeviceKeyUseCensus {
     pub(crate) blind_rows: usize,
 }
 
+impl MdocPrivateDeviceKeyUseCensus {
+    pub(crate) fn has_frozen_demo_shape(&self) -> bool {
+        self.normalized_uses == PK_BYTES
+            && self.rho_uses == 32
+            && self.t1_uses == K * N
+            && self.device_pk_start_uses == 1
+            && self.active_rows == MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS
+            && self.blind_rows == MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS
+            && self.range_uses.rc8.iter().sum::<u32>()
+                == (MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS + K * 64) as u32
+            && self.range_uses.rc9.iter().sum::<u32>() == (K * N) as u32
+            && self.range_uses.rc7.iter().all(|&count| count == 0)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MdocPrivateDeviceKeyInteractionClaim {
     pub(crate) claimed_sum: QM31,
@@ -1368,6 +1383,609 @@ mod tests {
         );
         verifier.draw_relations(&mut channel);
         assert!(t1.is_set());
+    }
+
+    const TEST_COUNTER_DOMAIN: u64 = 0x5539_434f_554e_5445;
+    const TEST_SOURCE: usize = 0;
+    const TEST_NORMALIZED: usize = 1;
+    const TEST_RANGE: usize = 2;
+    const TEST_RHO: usize = 3;
+    const TEST_T1: usize = 4;
+    const TEST_START: usize = 5;
+    const TEST_SELECTOR_COUNT: usize = 6;
+    const TEST_VALUE_COUNT: usize = 4;
+    const TEST_COUNTER_COLS: usize = TEST_SELECTOR_COUNT + TEST_VALUE_COUNT;
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct TestCounterRow {
+        selectors: [u32; TEST_SELECTOR_COUNT],
+        values: [u32; TEST_VALUE_COUNT],
+    }
+
+    impl TestCounterRow {
+        fn new(selector: usize, values: [u32; TEST_VALUE_COUNT]) -> Self {
+            let mut selectors = [0; TEST_SELECTOR_COUNT];
+            selectors[selector] = 1;
+            Self { selectors, values }
+        }
+
+        fn selected(&self, selector: usize) -> bool {
+            self.selectors[selector] == 1
+        }
+    }
+
+    fn test_counter_log_size(rows: usize) -> u32 {
+        rows.next_power_of_two().ilog2().max(LOG_N_LANES)
+    }
+
+    fn test_counter_columns(rows: &[TestCounterRow], log_size: u32) -> Vec<Vec<M31>> {
+        let mut columns = vec![vec![m31(0); 1usize << log_size]; TEST_COUNTER_COLS];
+        for (row_index, row) in rows.iter().enumerate() {
+            for (column, value) in row.selectors.into_iter().chain(row.values).enumerate() {
+                columns[column][row_index] = m31(value);
+            }
+        }
+        columns
+    }
+
+    fn test_counter_evals(rows: &[TestCounterRow], log_size: u32) -> Vec<ColEval> {
+        test_counter_columns(rows, log_size)
+            .into_iter()
+            .map(|column| col_eval(log_size, column))
+            .collect()
+    }
+
+    #[derive(Clone)]
+    struct TestCounterEval {
+        log_size: u32,
+        issuer: FieldBytesRelation,
+        range: RangeRelation,
+        rho: RhoCellRelation,
+        t1: T1CellRelation,
+        start: MdocDevicePkStartRelation,
+    }
+
+    impl FrameworkEval for TestCounterEval {
+        fn log_size(&self) -> u32 {
+            self.log_size
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            self.log_size + 2
+        }
+
+        fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+            let selectors: [E::F; TEST_SELECTOR_COUNT] =
+                std::array::from_fn(|_| eval.next_trace_mask());
+            let values: [E::F; TEST_VALUE_COUNT] = std::array::from_fn(|_| eval.next_trace_mask());
+            let one = constant::<E>(1);
+            let active = selectors
+                .iter()
+                .cloned()
+                .fold(constant::<E>(0), |sum, selector| sum + selector);
+            for selector in &selectors {
+                add_boolean(&mut eval, selector.clone(), &one);
+            }
+            add_boolean(&mut eval, active, &one);
+
+            eval.add_to_relation(RelationEntry::new(
+                &self.issuer,
+                E::EF::from(selectors[TEST_NORMALIZED].clone() - selectors[TEST_SOURCE].clone()),
+                &[values[0].clone(), values[1].clone(), values[2].clone()],
+            ));
+            eval.add_to_relation(RelationEntry::new(
+                &self.range,
+                -E::EF::from(selectors[TEST_RANGE].clone()),
+                &[values[0].clone(), values[1].clone()],
+            ));
+            eval.add_to_relation(RelationEntry::new(
+                &self.rho,
+                E::EF::from(selectors[TEST_RHO].clone()),
+                &[values[0].clone(), values[1].clone()],
+            ));
+            eval.add_to_relation(RelationEntry::new(
+                &self.t1,
+                E::EF::from(selectors[TEST_T1].clone()),
+                &values,
+            ));
+            eval.add_to_relation(RelationEntry::new(
+                &self.start,
+                -E::EF::from(selectors[TEST_START].clone()),
+                &[values[0].clone()],
+            ));
+            eval.finalize_logup_in_pairs();
+            eval
+        }
+    }
+
+    fn test_counter_interaction(
+        rows: &[TestCounterRow],
+        log_size: u32,
+        issuer: &FieldBytesRelation,
+        range: &RangeRelation,
+        rho: &RhoCellRelation,
+        t1: &T1CellRelation,
+        start: &MdocDevicePkStartRelation,
+    ) -> (Vec<ColEval>, SecureField) {
+        let trace = test_counter_evals(rows, log_size);
+        let vec_rows = 1usize << (log_size - LOG_N_LANES);
+        let sites = [
+            (0..vec_rows)
+                .map(|row| {
+                    (
+                        PackedQM31::from(trace[TEST_NORMALIZED].data[row])
+                            - PackedQM31::from(trace[TEST_SOURCE].data[row]),
+                        issuer.combine(&[
+                            trace[TEST_SELECTOR_COUNT].data[row],
+                            trace[TEST_SELECTOR_COUNT + 1].data[row],
+                            trace[TEST_SELECTOR_COUNT + 2].data[row],
+                        ]),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            (0..vec_rows)
+                .map(|row| {
+                    (
+                        -PackedQM31::from(trace[TEST_RANGE].data[row]),
+                        range.combine(&[
+                            trace[TEST_SELECTOR_COUNT].data[row],
+                            trace[TEST_SELECTOR_COUNT + 1].data[row],
+                        ]),
+                    )
+                })
+                .collect(),
+            (0..vec_rows)
+                .map(|row| {
+                    (
+                        PackedQM31::from(trace[TEST_RHO].data[row]),
+                        rho.combine(&[
+                            trace[TEST_SELECTOR_COUNT].data[row],
+                            trace[TEST_SELECTOR_COUNT + 1].data[row],
+                        ]),
+                    )
+                })
+                .collect(),
+            (0..vec_rows)
+                .map(|row| {
+                    (
+                        PackedQM31::from(trace[TEST_T1].data[row]),
+                        t1.combine(&[
+                            trace[TEST_SELECTOR_COUNT].data[row],
+                            trace[TEST_SELECTOR_COUNT + 1].data[row],
+                            trace[TEST_SELECTOR_COUNT + 2].data[row],
+                            trace[TEST_SELECTOR_COUNT + 3].data[row],
+                        ]),
+                    )
+                })
+                .collect(),
+            (0..vec_rows)
+                .map(|row| {
+                    (
+                        -PackedQM31::from(trace[TEST_START].data[row]),
+                        start.combine(&[trace[TEST_SELECTOR_COUNT].data[row]]),
+                    )
+                })
+                .collect(),
+        ];
+
+        let mut logup = LogupTraceGenerator::new(log_size);
+        for pair in sites.chunks(2) {
+            if let [left, right] = pair {
+                logup.col_from_iter((0..vec_rows).map(|row| {
+                    let (left_num, left_den) = left[row];
+                    let (right_num, right_den) = right[row];
+                    (
+                        left_num * right_den + right_num * left_den,
+                        left_den * right_den,
+                    )
+                }));
+            } else {
+                logup.col_from_iter((0..vec_rows).map(|row| pair[0][row]));
+            }
+        }
+        logup.finalize_last()
+    }
+
+    struct TestRelationCounter {
+        rows: Vec<TestCounterRow>,
+        log_size: u32,
+        issuer_handle: SharedFieldRelation,
+        range_handle: SharedRangeRelation,
+        rho_handle: SharedRhoCellRelation,
+        t1_handle: SharedT1CellRelation,
+        start_handle: SharedMdocDevicePkStartRelation,
+        component: Option<FrameworkComponent<TestCounterEval>>,
+    }
+
+    impl TestRelationCounter {
+        fn new(
+            rows: Vec<TestCounterRow>,
+            issuer_handle: SharedFieldRelation,
+            range_handle: SharedRangeRelation,
+            rho_handle: SharedRhoCellRelation,
+            t1_handle: SharedT1CellRelation,
+            start_handle: SharedMdocDevicePkStartRelation,
+        ) -> Self {
+            Self {
+                log_size: test_counter_log_size(rows.len()),
+                rows,
+                issuer_handle,
+                range_handle,
+                rho_handle,
+                t1_handle,
+                start_handle,
+                component: None,
+            }
+        }
+
+        fn interaction(&self) -> (Vec<ColEval>, SecureField) {
+            test_counter_interaction(
+                &self.rows,
+                self.log_size,
+                &self.issuer_handle.get(),
+                &self.range_handle.get(),
+                &self.rho_handle.get(),
+                &self.t1_handle.get(),
+                &self.start_handle.get(),
+            )
+        }
+    }
+
+    impl Air for TestRelationCounter {
+        fn mix_public(&self, channel: &mut Blake2sChannel) {
+            channel.mix_u64(TEST_COUNTER_DOMAIN);
+            channel.mix_u64(self.log_size as u64);
+            channel.mix_u64(self.rows.len() as u64);
+        }
+
+        fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
+            assert!(!self.issuer_handle.is_set());
+            assert!(!self.range_handle.is_set());
+            assert!(!self.rho_handle.is_set());
+            assert!(!self.t1_handle.is_set());
+            assert!(!self.start_handle.is_set());
+            self.issuer_handle.set(FieldBytesRelation::draw(channel));
+            self.range_handle.set(RangeRelation::draw(channel));
+            self.rho_handle.set(RhoCellRelation::draw(channel));
+            self.start_handle
+                .set(MdocDevicePkStartRelation::draw(channel));
+        }
+
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: Vec::new(),
+                trace: vec![self.log_size; TEST_COUNTER_COLS],
+                interaction: vec![self.log_size; 3 * SECURE_EXTENSION_DEGREE],
+            }
+        }
+
+        fn claimed_sums(&self) -> Vec<QM31> {
+            vec![self.interaction().1]
+        }
+
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            Vec::new()
+        }
+
+        fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+            self.component = Some(FrameworkComponent::new(
+                allocator,
+                TestCounterEval {
+                    log_size: self.log_size,
+                    issuer: self.issuer_handle.get(),
+                    range: self.range_handle.get(),
+                    rho: self.rho_handle.get(),
+                    t1: self.t1_handle.get(),
+                    start: self.start_handle.get(),
+                },
+                self.interaction().1,
+            ));
+        }
+
+        fn components(&self) -> Vec<&dyn Component> {
+            vec![self
+                .component
+                .as_ref()
+                .expect("U9 test counter component is built")]
+        }
+    }
+
+    impl AirProver for TestRelationCounter {
+        fn max_log_size(&self) -> u32 {
+            self.log_size
+        }
+
+        fn max_constraint_log_degree_bound(&self) -> u32 {
+            self.log_size + 2
+        }
+
+        fn store_polynomial_coefficients(&self) -> bool {
+            true
+        }
+
+        fn write_preprocessed(&mut self, _tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {}
+
+        fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+            Vec::new()
+        }
+
+        fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            tb.extend_evals(test_counter_evals(&self.rows, self.log_size));
+        }
+
+        fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+            tb.extend_evals(self.interaction().0);
+        }
+
+        fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+            vec![self
+                .component
+                .as_ref()
+                .expect("U9 test counter component is built")]
+        }
+    }
+
+    fn counterpart_rows(
+        authenticated_pk: &[u8],
+        normalized_pk: &[u8],
+        device_pk_start: usize,
+    ) -> Vec<TestCounterRow> {
+        assert_eq!(authenticated_pk.len(), PK_BYTES);
+        assert_eq!(normalized_pk.len(), PK_BYTES);
+        let mut rows = Vec::new();
+        for (index, &byte) in authenticated_pk.iter().enumerate() {
+            rows.push(TestCounterRow::new(
+                TEST_SOURCE,
+                [
+                    HOSTED_MSG_FIELD_ID,
+                    (device_pk_start + index) as u32,
+                    u32::from(byte),
+                    0,
+                ],
+            ));
+        }
+        for (index, &byte) in normalized_pk.iter().enumerate() {
+            rows.push(TestCounterRow::new(
+                TEST_NORMALIZED,
+                [HOSTED_DEVICE_PK_FIELD_ID, index as u32, u32::from(byte), 0],
+            ));
+        }
+        for row in schedule() {
+            rows.push(TestCounterRow::new(
+                TEST_RANGE,
+                [
+                    u32::from(normalized_pk[row.byte_base]),
+                    RcKind::Rc8.bound_id(),
+                    0,
+                    0,
+                ],
+            ));
+            if row.rho {
+                rows.push(TestCounterRow::new(
+                    TEST_RHO,
+                    [
+                        row.byte_base as u32,
+                        u32::from(normalized_pk[row.byte_base]),
+                        0,
+                        0,
+                    ],
+                ));
+            } else {
+                let group = &normalized_pk[row.byte_base..row.byte_base + T1_GROUP_BYTES];
+                rows.push(TestCounterRow::new(
+                    TEST_RANGE,
+                    [u32::from(group[4]), RcKind::Rc8.bound_id(), 0, 0],
+                ));
+                for (lane, coefficient) in unpack_group(group).into_iter().enumerate() {
+                    let lo = coefficient & 0x1ff;
+                    let hi = coefficient >> 9;
+                    rows.push(TestCounterRow::new(
+                        TEST_RANGE,
+                        [lo, RcKind::Rc9.bound_id(), 0, 0],
+                    ));
+                    rows.push(TestCounterRow::new(
+                        TEST_T1,
+                        [
+                            row.poly as u32,
+                            (row.coefficient_base + lane) as u32,
+                            lo,
+                            hi,
+                        ],
+                    ));
+                }
+            }
+        }
+        rows.push(TestCounterRow::new(
+            TEST_START,
+            [device_pk_start as u32, 0, 0, 0],
+        ));
+        rows.push(TestCounterRow::default());
+        rows
+    }
+
+    struct TestComposedU9Proof {
+        stark: stwo::core::proof::StarkProof<air_core::Hasher>,
+        u9_claim: MdocPrivateDeviceKeyInteractionClaim,
+        rows: Vec<TestCounterRow>,
+        issuer_message_len: usize,
+    }
+
+    fn prove_composed_u9(authenticated_pk: &[u8], normalized_pk: Vec<u8>) -> TestComposedU9Proof {
+        let issuer_message_len = 4_096;
+        let device_pk_start = 64;
+        let issuer = SharedFieldRelation::new();
+        let range = SharedRangeRelation::new();
+        let rho = SharedRhoCellRelation::new();
+        let t1 = SharedT1CellRelation::new();
+        let start = SharedMdocDevicePkStartRelation::new();
+        let rows = counterpart_rows(authenticated_pk, &normalized_pk, device_pk_start);
+        let mut counter = TestRelationCounter::new(
+            rows.clone(),
+            issuer.clone(),
+            range.clone(),
+            rho.clone(),
+            t1.clone(),
+            start.clone(),
+        );
+        let (mut u9, _) = MdocPrivateDeviceKeyBind::prover(
+            normalized_pk,
+            device_pk_start,
+            issuer_message_len,
+            issuer,
+            range,
+            rho,
+            t1,
+            start,
+        )
+        .unwrap();
+        let stark = air_core::prove(
+            &mut [&mut counter, &mut u9],
+            crate::mdoc::mdoc_production_pcs_config(),
+        )
+        .expect("locally constrained U9 composition must produce a proof");
+        TestComposedU9Proof {
+            stark,
+            u9_claim: u9.interaction_claim().clone(),
+            rows,
+            issuer_message_len,
+        }
+    }
+
+    fn verify_composed_u9(
+        fixture: &TestComposedU9Proof,
+        rows: Vec<TestCounterRow>,
+    ) -> Result<(), air_core::VerifyError> {
+        let issuer = SharedFieldRelation::new();
+        let range = SharedRangeRelation::new();
+        let rho = SharedRhoCellRelation::new();
+        let t1 = SharedT1CellRelation::new();
+        let start = SharedMdocDevicePkStartRelation::new();
+        let mut counter = TestRelationCounter::new(
+            rows,
+            issuer.clone(),
+            range.clone(),
+            rho.clone(),
+            t1.clone(),
+            start.clone(),
+        );
+        let mut u9 = MdocPrivateDeviceKeyBind::verifier(
+            fixture.issuer_message_len,
+            issuer,
+            range,
+            rho,
+            t1,
+            start,
+            fixture.u9_claim.clone(),
+        )
+        .unwrap();
+        let expected_root = air_core::compute_canonical_preprocessed_root(
+            &mut [&mut counter, &mut u9],
+            fixture.stark.config,
+        )
+        .expect("canonical U9 preprocessing");
+        air_core::verify_with_expected_preprocessed_root(
+            &mut [&mut counter, &mut u9],
+            &fixture.stark,
+            Some(expected_root),
+        )
+    }
+
+    fn assert_logup_rejects(fixture: &TestComposedU9Proof, rows: Vec<TestCounterRow>, name: &str) {
+        match verify_composed_u9(fixture, rows)
+            .expect_err("mutated U9 relation counterpart must not verify")
+        {
+            air_core::VerifyError::Stark(
+                stwo::core::verifier::VerificationError::InvalidStructure(reason),
+            ) => assert_eq!(reason, "LogUp claimed sums do not cancel", "{name}"),
+            other => panic!("{name}: expected global LogUp rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composed_stark_rejects_every_u9_tuple_and_multiplicity_attack() {
+        let pk = test_pk(53);
+        let fixture = prove_composed_u9(&pk, pk.clone());
+        verify_composed_u9(&fixture, fixture.rows.clone())
+            .expect("honest U9 relation composition must verify");
+        assert!(
+            fixture
+                .rows
+                .last()
+                .is_some_and(|row| *row == TestCounterRow::default()),
+            "the final fixed-shape counter row is reserved for extra-use attacks"
+        );
+
+        for (name, selector, value_index) in [
+            ("authenticated field id", TEST_SOURCE, 0),
+            ("authenticated absolute byte position", TEST_SOURCE, 1),
+            ("normalized field id", TEST_NORMALIZED, 0),
+            ("normalized relative byte position", TEST_NORMALIZED, 1),
+            ("range value", TEST_RANGE, 0),
+            ("range bound id", TEST_RANGE, 1),
+            ("RhoCell byte index", TEST_RHO, 0),
+            ("RhoCell byte", TEST_RHO, 1),
+            ("T1Cell polynomial", TEST_T1, 0),
+            ("T1Cell coefficient index", TEST_T1, 1),
+            ("T1Cell lo9", TEST_T1, 2),
+            ("T1Cell hi1", TEST_T1, 3),
+            ("device-key start", TEST_START, 0),
+        ] {
+            let mut rows = fixture.rows.clone();
+            rows.iter_mut()
+                .find(|row| row.selected(selector))
+                .unwrap()
+                .values[value_index] ^= 1;
+            assert_logup_rejects(&fixture, rows, name);
+        }
+
+        for (name, selector) in [
+            ("authenticated source", TEST_SOURCE),
+            ("normalized byte", TEST_NORMALIZED),
+            ("range lookup", TEST_RANGE),
+            ("RhoCell", TEST_RHO),
+            ("T1Cell", TEST_T1),
+            ("device-key start", TEST_START),
+        ] {
+            let source = fixture
+                .rows
+                .iter()
+                .copied()
+                .find(|row| row.selected(selector))
+                .unwrap();
+
+            let mut missing = fixture.rows.clone();
+            missing
+                .iter_mut()
+                .find(|row| row.selected(selector))
+                .unwrap()
+                .selectors[selector] = 0;
+            assert_logup_rejects(&fixture, missing, &format!("missing {name} counterpart"));
+
+            let mut extra = fixture.rows.clone();
+            *extra.last_mut().unwrap() = source;
+            assert_logup_rejects(&fixture, extra, &format!("extra {name} counterpart"));
+        }
+    }
+
+    #[test]
+    fn composed_stark_rejects_self_consistent_alternate_byte_decomposition() {
+        let authenticated_pk = test_pk(71);
+        let mut alternate_pk = authenticated_pk.clone();
+        let byte_index = 33;
+        alternate_pk[byte_index] ^= 1;
+        let group_start = 32;
+        assert_ne!(
+            unpack_group(&authenticated_pk[group_start..group_start + T1_GROUP_BYTES]),
+            unpack_group(&alternate_pk[group_start..group_start + T1_GROUP_BYTES]),
+            "the alternate byte must induce a different canonical t1 fragment"
+        );
+
+        let forged = prove_composed_u9(&authenticated_pk, alternate_pk);
+        assert_logup_rejects(
+            &forged,
+            forged.rows.clone(),
+            "self-consistent alternate normalized byte/t1 decomposition",
+        );
     }
 
     #[test]

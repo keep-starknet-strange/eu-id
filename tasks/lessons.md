@@ -86,9 +86,16 @@ final verification evidence; keep perf probes release-built as well.
   Repeating debug proofs adds wall-clock cost without improving protocol
   diagnosis. If symbols are needed, add a release-optimized profile that keeps
   debug information instead of falling back to the dev profile.
+- On a 12-core demo workstation, serialize memory-heavy proof tests with
+  `--test-threads=1` but give each proof `RAYON_NUM_THREADS=12`; reserving a
+  one-worker rail for every correctness run needlessly wastes the available
+  cores. Keep the selected worker count explicit in every command and result.
 - Treat comments and campaign prose as hypotheses, not implementation
   evidence. Trace the executable prover/verifier path, relation signs, public
   serialization, and nonzero test results before reusing a branch.
 - Keep a core cryptographic proof contract independent of downstream wallet
   frameworks unless the user explicitly puts integration in scope. The core
   boundary ends at its exported prove/verify API and opaque proof bytes.
+- When a derived circuit value needs transcript binding, preserve any separate
+  module's exact normative mix order and bind the value in the AIR that consumes
+  it; “public transcript” does not authorize changing an unrelated frozen binder.

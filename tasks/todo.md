@@ -1078,7 +1078,7 @@ Normative specification:
 - [x] Import the frozen normative specification byte-for-byte into this clean
       branch and pin its SHA-256 as
       `b31fa7fbb86360bbc1e46b0194017aa116c0a689d074f77543549ca0916521eb`.
-- [ ] Freeze canonical A/B credentials and the supported request-context
+- [x] Freeze canonical A/B credentials and the supported request-context
       corpus; derive and commit `DEVICE_SIG_STRUCTURE_CAPACITY` from the
       measured maximum plus the specified margin.
 - [x] Capture three fresh, metadata-matched release baselines before changing
@@ -1087,36 +1087,36 @@ Normative specification:
 - [ ] Generate the deterministic circuit artifact, source-tree digest, circuit
       hash, fixed shape manifest, and proof-body capacity `P`; add CI drift
       checks and the closed recursive-exclusion allowlist.
-- [ ] Implement the fixed-capacity V4 `EUIDTS13` envelope with canonical proof
+- [x] Implement the fixed-capacity V4 `EUIDTS13` envelope with canonical proof
       prefix parsing, exact reserialization, zero-padding validation, circuit
       hash pinning, strict total length, and legacy-profile separation.
-- [ ] Replace mutable outer request binding with the in-circuit
+- [x] Replace mutable outer request binding with the in-circuit
       `Ts13PublicContextBindV1` commitment over the canonical session
       transcript, complete device COSE `Sig_structure`, RP-local identifier,
       exact verifier timestamp, policy inputs, profile, and circuit hash.
-- [ ] Integrate and re-review the Phase-1 private issuer/MSO/item/valueDigests/
+- [x] Integrate and re-review the Phase-1 private issuer/MSO/item/valueDigests/
       revocation chain; add `MdocPrivateMsoValidityV2` with exact RFC 3339 UTC
       parsing, Gregorian validation, Unix-second conversion, and strict
       nonzero validity slacks.
-- [ ] Integrate U5 private `ExpandA`, retain the six-block fixed cap, and rerun
+- [x] Integrate U5 private `ExpandA`, retain the six-block fixed cap, and rerun
       its full rejection-sampling, stream-domain, tree-zero, and service
       negatives in the composed proof.
-- [ ] Implement U9's canonical fixed-shape ML-DSA public-key decoder and bind
+- [x] Implement U9's canonical fixed-shape ML-DSA public-key decoder and bind
       the MSO device-key bytes to `RhoCell`, `T1Cell`, and the private MSO start
       relation with exact fragment ranges and decomposition negatives.
-- [ ] Implement one contiguous U6/U7 private-device ML-DSA AIR: inverse NTT and
+- [x] Implement one contiguous U6/U7 private-device ML-DSA AIR: inverse NTT and
       canonical reductions, exact `2^13*t1` digit scaling, A/t1 evaluations,
       complete signed integer-lift fold, private pk-to-tr, full-message
       tr-to-mu, c-tilde/w1/SampleInBall links, and frozen relation ownership.
-- [ ] Remove verifier-native device-key evaluation and every host-only
+- [x] Remove verifier-native device-key evaluation and every host-only
       security check superseded by U5/U6/U7/U9; prove a self-consistent K2
       device witness cannot authenticate an MSO carrying K1.
-- [ ] Replace the optional-field SDK record with tagged
+- [x] Replace the optional-field SDK record with tagged
       `ZkPublicStatement::{ProductV1, Ts13DemoV1}` and
       `ZkMdocWitness::{ProductV1, Ts13DemoV1}` variants; route both
       `proveIdentity` and `verifyIdentity` through the exact profile and return
       typed, privacy-safe errors.
-- [ ] Implement the complete acceptance matrix: A1/A2/B public-schema and
+- [x] Implement the complete acceptance matrix: A1/A2/B public-schema and
       equal-envelope checks, context relabeling, theorem mutations,
       U5/U6/U7/U9 adversarial cases, device-key substitution, malformed V4,
       cross-profile rejection, fixed-capacity boundary, and circuit-artifact

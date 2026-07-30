@@ -13,8 +13,6 @@ const V4_MAGIC: &[u8; 8] = b"EUIDTS13";
 const V4_VERSION: u16 = 4;
 const V4_HEADER_BYTES: usize = 46;
 const V4_CAPACITY_ALIGNMENT: u32 = 65_536;
-const TS13_DEMO_MIN_TIMESTAMP_SECONDS: i64 = 1_577_836_800;
-const TS13_DEMO_MAX_TIMESTAMP_SECONDS: i64 = 4_102_444_799;
 #[cfg(test)]
 const TS13_DEMO_PUBLIC_FIELD_NAMES: [&str; 11] = [
     "circuit_hash",
@@ -32,6 +30,91 @@ const TS13_DEMO_PUBLIC_FIELD_NAMES: [&str; 11] = [
 #[cfg(test)]
 const TS13_DEMO_V4_HEADER_FIELD_NAMES: [&str; 4] =
     ["magic", "envelope_version", "circuit_hash", "body_capacity"];
+#[cfg(test)]
+const TS13_DEMO_DERIVED_CONTEXT_STATE_FIELD_NAMES: [&str; 6] = [
+    "canonical_session_transcript",
+    "device_authentication_bytes",
+    "device_cose_sig_structure",
+    "verification_timestamp_rfc3339_utc",
+    "canonical_context_cbor",
+    "request_context_digest",
+];
+// Section 5.1's normative derived circuit values. The derived-context helper
+// above also retains deterministic construction intermediates, but those are
+// not additional verifier inputs or independent public circuit values.
+#[cfg(test)]
+const TS13_DEMO_DERIVED_CIRCUIT_VALUE_NAMES: [&str; 6] = [
+    "session_transcript_sha256",
+    "device_cose_sig_structure",
+    "device_cose_sig_structure_length",
+    "device_cose_sig_structure_sha256",
+    "verification_timestamp_rfc3339_utc",
+    "request_context_digest",
+];
+#[cfg(test)]
+const TS13_DEMO_CIRCUIT_PUBLIC_FIELD_NAMES: [&str; 7] = [
+    "circuit_hash",
+    "request_context_digest",
+    "timestamp_epoch_seconds",
+    "verification_timestamp_rfc3339_utc",
+    "trusted_issuer_public_key",
+    "device_cose_sig_structure",
+    "revocation",
+];
+#[cfg(test)]
+const TS13_DEMO_REVOCATION_PUBLIC_FIELD_NAMES: [&str; 2] = ["revocation_public_key", "epoch"];
+// Universal values are grouped by their normative role because the generated
+// artifact owns the exact per-column/per-relation constants within its shape,
+// geometry, and cryptographic-parameter manifests.
+#[cfg(test)]
+const TS13_DEMO_UNIVERSAL_CIRCUIT_CONSTANT_NAMES: [&str; 11] = [
+    "context_label",
+    "proof_system_name",
+    "public_context_transcript_domain",
+    "document_type",
+    "namespace",
+    "element_identifier",
+    "expected_value_cbor",
+    "credential_shape_manifest",
+    "trace_geometry",
+    "cryptographic_parameters",
+    "device_cose_sig_structure_capacity",
+];
+#[cfg(test)]
+const TS13_DEMO_COMPLETE_CLEAR_PUBLIC_SURFACE: [&str; 32] = [
+    "semantic.circuit_hash",
+    "semantic.zk_system_id",
+    "semantic.document_type",
+    "semantic.namespace",
+    "semantic.element_identifier",
+    "semantic.expected_value_cbor",
+    "semantic.timestamp_epoch_seconds",
+    "semantic.session_transcript",
+    "semantic.trusted_issuer_public_key",
+    "semantic.revocation_public_key",
+    "semantic.revocation_epoch",
+    "derived.session_transcript_sha256",
+    "derived.device_cose_sig_structure",
+    "derived.device_cose_sig_structure_length",
+    "derived.device_cose_sig_structure_sha256",
+    "derived.verification_timestamp_rfc3339_utc",
+    "derived.request_context_digest",
+    "v4_header.magic",
+    "v4_header.envelope_version",
+    "v4_header.circuit_hash",
+    "v4_header.body_capacity",
+    "universal.context_label",
+    "universal.proof_system_name",
+    "universal.public_context_transcript_domain",
+    "universal.document_type",
+    "universal.namespace",
+    "universal.element_identifier",
+    "universal.expected_value_cbor",
+    "universal.credential_shape_manifest",
+    "universal.trace_geometry",
+    "universal.cryptographic_parameters",
+    "universal.device_cose_sig_structure_capacity",
+];
 
 /// Existing product theorem, without any optional TS13 fields.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
@@ -366,15 +449,18 @@ pub(crate) trait Ts13DemoArtifactResolver {
 }
 
 /// Compile-time artifact resolver used by the public SDK route.
-///
-/// The generated artifact embedding has not landed yet, so the only safe
-/// implementation is to reject every hash. The generated module can replace
-/// this method body without changing `prove_identity` or `verify_identity`.
 pub(crate) struct CompiledTs13DemoArtifactResolver;
 
 impl Ts13DemoArtifactResolver for CompiledTs13DemoArtifactResolver {
-    fn resolve(&self, _circuit_hash: [u8; 32]) -> Result<Ts13DemoV4Parameters, Ts13DemoError> {
-        Err(Ts13DemoError::UnsupportedCircuitHash)
+    fn resolve(&self, circuit_hash: [u8; 32]) -> Result<Ts13DemoV4Parameters, Ts13DemoError> {
+        use eu_id_prover::ts13_demo_artifact_constants::{
+            TS13_DEMO_CIRCUIT_HASH, TS13_DEMO_PROOF_BODY_CAPACITY,
+        };
+
+        if circuit_hash != TS13_DEMO_CIRCUIT_HASH {
+            return Err(Ts13DemoError::UnsupportedCircuitHash);
+        }
+        Ts13DemoV4Parameters::new(TS13_DEMO_CIRCUIT_HASH, TS13_DEMO_PROOF_BODY_CAPACITY)
     }
 }
 
@@ -389,10 +475,8 @@ fn prepare_public_input<R: Ts13DemoArtifactResolver>(
     artifact_resolver: &R,
 ) -> Result<PreparedTs13DemoPublicInput, Ts13DemoError> {
     let (validated, derived) = ValidatedTs13DemoPublicStatementV1::from_public(statement)?;
-    if !(TS13_DEMO_MIN_TIMESTAMP_SECONDS..=TS13_DEMO_MAX_TIMESTAMP_SECONDS)
-        .contains(&validated.timestamp_epoch_seconds)
-        || derived.device_cose_sig_structure.len()
-            > eu_id_prover::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
+    if derived.device_cose_sig_structure.len()
+        > eu_id_prover::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
     {
         return Err(Ts13DemoError::InvalidPublicContext);
     }
@@ -422,6 +506,7 @@ fn prepare_public_input<R: Ts13DemoArtifactResolver>(
         circuit_hash: validated.circuit_hash,
         request_context_digest: derived.request_context_digest,
         timestamp_epoch_seconds: validated.timestamp_epoch_seconds,
+        verification_timestamp_rfc3339_utc: derived.verification_timestamp_rfc3339_utc,
         trusted_issuer_public_key: validated.trusted_issuer_public_key.to_vec(),
         device_cose_sig_structure: derived.device_cose_sig_structure,
         revocation: eu_id_prover::mdoc::MdocRevocationPublicInputs {
@@ -440,6 +525,9 @@ fn prepare_public_input<R: Ts13DemoArtifactResolver>(
 
 fn map_core_prove_error(error: eu_id_prover::Error) -> Ts13DemoError {
     match error {
+        eu_id_prover::Error::UnsupportedDemoCredentialShape => {
+            Ts13DemoError::UnsupportedDemoCredentialShape
+        }
         eu_id_prover::Error::Mdoc(_)
         | eu_id_prover::Error::AuthInputMismatch
         | eu_id_prover::Error::AgePolicyMismatch
@@ -526,6 +614,37 @@ mod tests {
         Ts13DemoV4Parameters::new([0x11; 32], CAPACITY).unwrap()
     }
 
+    #[test]
+    fn compiled_resolver_pins_generated_hash_and_capacity() {
+        use eu_id_prover::ts13_demo_artifact_constants::{
+            TS13_DEMO_CIRCUIT_HASH, TS13_DEMO_SHAPE_MANIFEST_SHA256,
+            TS13_DEMO_SOUNDNESS_SOURCE_TREE_SHA256,
+        };
+
+        let expected_hash = TS13_DEMO_CIRCUIT_HASH;
+        assert_ne!(
+            expected_hash, [0; 32],
+            "the compiled resolver must not accept the bootstrap placeholder"
+        );
+        assert_ne!(TS13_DEMO_SHAPE_MANIFEST_SHA256, [0; 32]);
+        assert_ne!(TS13_DEMO_SOUNDNESS_SOURCE_TREE_SHA256, [0; 32]);
+        let parameters = CompiledTs13DemoArtifactResolver
+            .resolve(expected_hash)
+            .expect("generated circuit is supported");
+        assert_eq!(parameters.circuit_hash(), expected_hash);
+        assert_eq!(
+            parameters.proof_body_capacity(),
+            eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_PROOF_BODY_CAPACITY
+        );
+
+        let mut unknown_hash = expected_hash;
+        unknown_hash[0] ^= 1;
+        assert_eq!(
+            CompiledTs13DemoArtifactResolver.resolve(unknown_hash),
+            Err(Ts13DemoError::UnsupportedCircuitHash)
+        );
+    }
+
     fn sample_ts13_statement() -> Ts13DemoPublicStatementV1 {
         Ts13DemoPublicStatementV1 {
             circuit_hash: vec![0x11; 32],
@@ -544,6 +663,8 @@ mod tests {
 
     #[test]
     fn ts13_public_schema_is_exact() {
+        use std::collections::BTreeSet;
+
         let statement = sample_ts13_statement();
         let Ts13DemoPublicStatementV1 {
             circuit_hash: _,
@@ -573,6 +694,33 @@ mod tests {
                 "revocation_public_key",
                 "revocation_epoch",
             ],
+        );
+
+        let qualified_names = [
+            ("semantic", TS13_DEMO_PUBLIC_FIELD_NAMES.as_slice()),
+            ("derived", TS13_DEMO_DERIVED_CIRCUIT_VALUE_NAMES.as_slice()),
+            ("v4_header", TS13_DEMO_V4_HEADER_FIELD_NAMES.as_slice()),
+            (
+                "universal",
+                TS13_DEMO_UNIVERSAL_CIRCUIT_CONSTANT_NAMES.as_slice(),
+            ),
+        ]
+        .into_iter()
+        .flat_map(|(surface, names)| names.iter().map(move |name| format!("{surface}.{name}")))
+        .collect::<Vec<_>>();
+        let complete_surface = qualified_names.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(
+            complete_surface.len(),
+            qualified_names.len(),
+            "the four normative public allowlists must be mutually disjoint"
+        );
+        assert_eq!(
+            complete_surface,
+            TS13_DEMO_COMPLETE_CLEAR_PUBLIC_SURFACE
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>(),
+            "the four normative allowlists must be the complete clear public surface"
         );
     }
 
@@ -637,6 +785,10 @@ mod tests {
     fn semantic_statement_derives_context_without_caller_supplied_echoes() {
         let derived = sample_ts13_statement().derive_public_context().unwrap();
         assert_eq!(
+            derived.verification_timestamp_rfc3339_utc,
+            *b"2025-01-01T00:00:00Z"
+        );
+        assert_eq!(
             derived.request_context_digest,
             [
                 0xc9, 0xec, 0x6e, 0xb1, 0x38, 0xda, 0x43, 0xf3, 0xf2, 0x78, 0x00, 0x0d, 0x9b, 0x8a,
@@ -650,6 +802,78 @@ mod tests {
         assert_eq!(
             malformed.derive_public_context(),
             Err(Ts13DemoError::MalformedSessionTranscript)
+        );
+    }
+
+    #[test]
+    fn ts13_derived_context_typed_state_is_exact() {
+        let derived = sample_ts13_statement().derive_public_context().unwrap();
+        let eu_id_prover::ts13_demo::Ts13DemoDerivedContext {
+            canonical_session_transcript: _,
+            device_authentication_bytes: _,
+            device_cose_sig_structure: _,
+            verification_timestamp_rfc3339_utc: _,
+            canonical_context_cbor: _,
+            request_context_digest: _,
+        } = derived;
+        assert_eq!(
+            TS13_DEMO_DERIVED_CONTEXT_STATE_FIELD_NAMES,
+            [
+                "canonical_session_transcript",
+                "device_authentication_bytes",
+                "device_cose_sig_structure",
+                "verification_timestamp_rfc3339_utc",
+                "canonical_context_cbor",
+                "request_context_digest",
+            ]
+        );
+    }
+
+    #[test]
+    fn ts13_circuit_public_schema_is_exact() {
+        let input = eu_id_prover::MdocTs13DemoCircuitPublicInput {
+            circuit_hash: [0x11; 32],
+            request_context_digest: [0x22; 32],
+            timestamp_epoch_seconds: 1_735_689_600,
+            verification_timestamp_rfc3339_utc: *b"2025-01-01T00:00:00Z",
+            trusted_issuer_public_key: vec![0x33; 1_952],
+            device_cose_sig_structure: vec![0x44; 64],
+            revocation: eu_id_prover::mdoc::MdocRevocationPublicInputs {
+                revocation_public_key: eu_id_prover::mdoc::MdocRevocationKey::MlDsa(vec![
+                    0x55;
+                    1_952
+                ]),
+                epoch: 7,
+            },
+        };
+        let eu_id_prover::MdocTs13DemoCircuitPublicInput {
+            circuit_hash: _,
+            request_context_digest: _,
+            timestamp_epoch_seconds: _,
+            verification_timestamp_rfc3339_utc: _,
+            trusted_issuer_public_key: _,
+            device_cose_sig_structure: _,
+            revocation,
+        } = input;
+        let eu_id_prover::mdoc::MdocRevocationPublicInputs {
+            revocation_public_key: _,
+            epoch: _,
+        } = revocation;
+        assert_eq!(
+            TS13_DEMO_CIRCUIT_PUBLIC_FIELD_NAMES,
+            [
+                "circuit_hash",
+                "request_context_digest",
+                "timestamp_epoch_seconds",
+                "verification_timestamp_rfc3339_utc",
+                "trusted_issuer_public_key",
+                "device_cose_sig_structure",
+                "revocation",
+            ]
+        );
+        assert_eq!(
+            TS13_DEMO_REVOCATION_PUBLIC_FIELD_NAMES,
+            ["revocation_public_key", "epoch"]
         );
     }
 
@@ -784,6 +1008,42 @@ mod tests {
     }
 
     #[test]
+    fn v4_body_codec_is_fixed_int_little_endian() {
+        let proof = DemoProof {
+            claims: vec![0x0102_0304],
+            transcript: vec![0xaa],
+        };
+        let envelope = encode_v4(parameters(), &proof).unwrap();
+        let expected_prefix = [
+            1, 0, 0, 0, 0, 0, 0, 0, // claims vector length (u64)
+            4, 3, 2, 1, // claims[0] (u32)
+            1, 0, 0, 0, 0, 0, 0, 0, // transcript vector length (u64)
+            0xaa,
+        ];
+        assert_eq!(
+            &envelope[V4_HEADER_BYTES..V4_HEADER_BYTES + expected_prefix.len()],
+            &expected_prefix
+        );
+        assert!(envelope[V4_HEADER_BYTES + expected_prefix.len()..]
+            .iter()
+            .all(|byte| *byte == 0));
+
+        let varint_prefix = bincode::DefaultOptions::new()
+            .with_varint_encoding()
+            .with_little_endian()
+            .serialize(&proof)
+            .unwrap();
+        let mut varint_envelope = vec![0; V4_HEADER_BYTES + CAPACITY as usize];
+        varint_envelope[..V4_HEADER_BYTES].copy_from_slice(&envelope[..V4_HEADER_BYTES]);
+        varint_envelope[V4_HEADER_BYTES..V4_HEADER_BYTES + varint_prefix.len()]
+            .copy_from_slice(&varint_prefix);
+        assert_eq!(
+            decode_v4(parameters(), &varint_envelope, |_: &DemoProof| true),
+            Err(Ts13DemoError::MalformedProofEnvelope)
+        );
+    }
+
+    #[test]
     fn v4_rejects_every_malformed_clear_surface_and_tail() {
         let proof = DemoProof {
             claims: vec![1, 2, 3],
@@ -911,5 +1171,13 @@ mod tests {
             let message = error.to_string();
             assert!(forbidden.iter().all(|sentinel| !message.contains(sentinel)));
         }
+    }
+
+    #[test]
+    fn fixed_credential_shape_error_survives_the_public_boundary() {
+        assert_eq!(
+            map_core_prove_error(eu_id_prover::Error::UnsupportedDemoCredentialShape),
+            Ts13DemoError::UnsupportedDemoCredentialShape
+        );
     }
 }

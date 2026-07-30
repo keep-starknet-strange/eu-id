@@ -48,7 +48,7 @@ bincode = "1"
 # compressing the inner bincode mdoc proof payload.
 bzip2 = "0.6"
 sha2 = "0.10"
-
+rayon = "1"
 
 [dev-dependencies]
 # The prover's own ML-DSA reference verifier — used only by the demo module's
@@ -58,7 +58,6 @@ stwo-sha256 = { path = "../stwo-sha256" }
 # Deterministic fully-PQ issuer/device/revocation fixture for the TS13
 # end-to-end envelope regression.
 ml-dsa = "0.1.1"
-rayon = "1"
 
 [[bin]]
 # Bundled binding generator. Run as:

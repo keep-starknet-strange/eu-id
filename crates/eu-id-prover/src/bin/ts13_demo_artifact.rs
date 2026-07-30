@@ -1,10 +1,7 @@
-#[path = "../ts13_artifact.rs"]
-mod ts13_artifact;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ts13_artifact::{generate_from_json, GenerationMode};
+use eu_id_prover::ts13_artifact::{generate_from_json, GenerationMode};
 
 const DEFAULT_INPUT: &str = "artifacts/ts13-demo-v1/generation-input-v1.json";
 

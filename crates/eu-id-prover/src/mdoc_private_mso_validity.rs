@@ -47,6 +47,9 @@ use crate::claimed_sum_blinder::{
     add_blinder_relation_entry, blinder_counter_interaction, blinder_denominator, random_qm31,
     ClaimedSumBlinderEval, ClaimedSumBlinderRelation,
 };
+use crate::ts13_demo::{
+    verification_timestamp_rfc3339_utc, TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES,
+};
 
 pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_ROWS: usize =
@@ -55,6 +58,10 @@ pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS: usize = 2;
 pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_BLIND_ROWS: usize =
     MDOC_PRIVATE_MSO_VALIDITY_ROWS - MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS;
 pub(crate) const MDOC_TDATE_BYTES: usize = 20;
+
+const _: () = assert!(MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS == 2);
+const _: () = assert!(MDOC_PRIVATE_MSO_VALIDITY_BLIND_ROWS >= 256);
+const _: () = assert!(MDOC_TDATE_BYTES == TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES);
 
 const VALIDITY_VERSION: u64 = 2;
 const VALIDITY_DOMAIN: u64 = 0x4d44_4f43_5641_4c32; // "MDOCVAL2"
@@ -116,6 +123,7 @@ type ValidityComponent = FrameworkComponent<MdocPrivateMsoValidityEval>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MdocPrivateMsoValiditySpec {
     pub(crate) timestamp_epoch_seconds: i64,
+    pub(crate) verification_timestamp_rfc3339_utc: [u8; MDOC_TDATE_BYTES],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,6 +145,7 @@ pub(crate) enum MdocPrivateMsoValidityError {
     TimestampOutOfRange {
         timestamp_epoch_seconds: i64,
     },
+    TimestampRenderingMismatch,
     MalformedTdate {
         field: &'static str,
     },
@@ -167,8 +176,14 @@ impl fmt::Display for MdocPrivateMsoValidityError {
                 timestamp_epoch_seconds,
             } => write!(
                 f,
-                "verification timestamp {timestamp_epoch_seconds} is outside the supported unsigned 32-bit demo range"
+                "verification timestamp {timestamp_epoch_seconds} is outside years 2020..=2099"
             ),
+            Self::TimestampRenderingMismatch => {
+                write!(
+                    f,
+                    "verification timestamp rendering does not match its Unix second"
+                )
+            }
             Self::MalformedTdate { field } => {
                 write!(f, "{field} is not canonical YYYY-MM-DDTHH:MM:SSZ")
             }
@@ -180,7 +195,10 @@ impl fmt::Display for MdocPrivateMsoValidityError {
                 year,
                 month,
                 day,
-            } => write!(f, "{field} is not a Gregorian date ({year:04}-{month:02}-{day:02})"),
+            } => write!(
+                f,
+                "{field} is not a Gregorian date ({year:04}-{month:02}-{day:02})"
+            ),
             Self::InvalidTime {
                 field,
                 hour,
@@ -447,11 +465,7 @@ fn build_rows(
     spec: MdocPrivateMsoValiditySpec,
     witness: &MdocPrivateMsoValidityWitness,
 ) -> Result<[ValidityRow; 2], MdocPrivateMsoValidityError> {
-    let timestamp = u32::try_from(spec.timestamp_epoch_seconds).map_err(|_| {
-        MdocPrivateMsoValidityError::TimestampOutOfRange {
-            timestamp_epoch_seconds: spec.timestamp_epoch_seconds,
-        }
-    })?;
+    let timestamp = validate_spec(spec)?;
     let valid_from = parse_tdate(witness.valid_from, "validFrom")?;
     let valid_until = parse_tdate(witness.valid_until, "validUntil")?;
     Ok([
@@ -461,6 +475,15 @@ fn build_rows(
 }
 
 fn validate_spec(spec: MdocPrivateMsoValiditySpec) -> Result<u32, MdocPrivateMsoValidityError> {
+    let rendered =
+        verification_timestamp_rfc3339_utc(spec.timestamp_epoch_seconds).map_err(|_| {
+            MdocPrivateMsoValidityError::TimestampOutOfRange {
+                timestamp_epoch_seconds: spec.timestamp_epoch_seconds,
+            }
+        })?;
+    if spec.verification_timestamp_rfc3339_utc != rendered {
+        return Err(MdocPrivateMsoValidityError::TimestampRenderingMismatch);
+    }
     u32::try_from(spec.timestamp_epoch_seconds).map_err(|_| {
         MdocPrivateMsoValidityError::TimestampOutOfRange {
             timestamp_epoch_seconds: spec.timestamp_epoch_seconds,
@@ -517,9 +540,8 @@ fn preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
 fn preprocessed_columns() -> Vec<ValidityColumnEval> {
     let mut active = vec![m31(0); MDOC_PRIVATE_MSO_VALIDITY_ROWS];
     let mut is_valid_until = vec![m31(0); MDOC_PRIVATE_MSO_VALIDITY_ROWS];
-    active[0] = m31(1);
-    active[1] = m31(1);
-    is_valid_until[1] = m31(1);
+    active[..MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS].fill(m31(1));
+    is_valid_until[MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS - 1] = m31(1);
     vec![column_eval(active), column_eval(is_valid_until)]
 }
 
@@ -954,6 +976,9 @@ impl Air for MdocPrivateMsoValidityV2 {
         channel.mix_u64(VALIDITY_DOMAIN);
         channel.mix_u64(VALIDITY_VERSION);
         channel.mix_u64(self.spec.timestamp_epoch_seconds as u64);
+        for byte in self.spec.verification_timestamp_rfc3339_utc {
+            channel.mix_u64(u64::from(byte));
+        }
         channel.mix_u64(PREPROCESSED_COLS as u64);
         channel.mix_u64(TRACE_COLS as u64);
         channel.mix_u64(self.interaction_columns() as u64);
@@ -1143,6 +1168,10 @@ mod tests {
     fn spec(timestamp_epoch_seconds: i64) -> MdocPrivateMsoValiditySpec {
         MdocPrivateMsoValiditySpec {
             timestamp_epoch_seconds,
+            verification_timestamp_rfc3339_utc: verification_timestamp_rfc3339_utc(
+                timestamp_epoch_seconds,
+            )
+            .expect("test timestamp is supported"),
         }
     }
 
@@ -1165,6 +1194,41 @@ mod tests {
             let parsed = parse_tdate(tdate(encoded), "test").unwrap();
             assert_eq!(unix_seconds(parsed), expected, "{encoded}");
         }
+    }
+
+    #[test]
+    fn verification_timestamp_rendering_is_derived_and_transcript_bound() {
+        let timestamp = 1_709_251_200;
+        let mut mismatched = spec(timestamp);
+        mismatched.verification_timestamp_rfc3339_utc[17] = b'1';
+        assert_eq!(
+            validate_spec(mismatched),
+            Err(MdocPrivateMsoValidityError::TimestampRenderingMismatch)
+        );
+        assert_eq!(
+            MdocPrivateMsoValidityV2::prover(
+                mismatched,
+                witness("2024-02-29T23:59:59Z", "2024-03-01T00:00:01Z"),
+                SharedRangeRelation::new(),
+                SharedMdocMsoValidityBytesRelation::new(),
+            )
+            .err(),
+            Some(MdocPrivateMsoValidityError::TimestampRenderingMismatch)
+        );
+
+        let (mut validity, _) = MdocPrivateMsoValidityV2::prover(
+            spec(timestamp),
+            witness("2024-02-29T23:59:59Z", "2024-03-01T00:00:01Z"),
+            SharedRangeRelation::new(),
+            SharedMdocMsoValidityBytesRelation::new(),
+        )
+        .unwrap();
+        let mut canonical_channel = Blake2sChannel::default();
+        validity.mix_public(&mut canonical_channel);
+        validity.spec.verification_timestamp_rfc3339_utc[17] = b'1';
+        let mut changed_channel = Blake2sChannel::default();
+        validity.mix_public(&mut changed_channel);
+        assert_ne!(canonical_channel.digest(), changed_channel.digest());
     }
 
     #[test]
@@ -1359,6 +1423,51 @@ mod tests {
             blinder_relation: ClaimedSumBlinderRelation::dummy(),
             blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
             blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
+        }
+    }
+
+    #[test]
+    fn strict_boundaries_are_enforced_by_the_air() {
+        let date = parse_tdate(tdate("2024-03-01T00:00:00Z"), "boundary").unwrap();
+        let boundary = unix_seconds(date);
+
+        for (is_valid_until, inside_timestamp) in [(false, boundary + 1), (true, boundary - 1)] {
+            let inside = row_for(date, inside_timestamp, is_valid_until).unwrap();
+            let evaluated =
+                test_eval(inside_timestamp).evaluate(RowEval::from_row(&inside, is_valid_until));
+            assert!(
+                evaluated.nonzero_constraints().is_empty(),
+                "one second inside must satisfy the AIR: {:?}",
+                evaluated.nonzero_constraints()
+            );
+
+            // Equality has only two possible boolean borrow witnesses.  With
+            // borrow=0, the low-limb equation requires a negative slack.  With
+            // borrow=1, its only range-valid low slack is 65535 and the
+            // high-limb equation then requires a negative slack.
+            for compare_borrow in 0..=1 {
+                let mut equality = inside.clone();
+                equality.cells[TRACE_COMPARE_BORROW] = compare_borrow;
+                equality.cells[TRACE_SLACK_LO_LO8..=TRACE_SLACK_HI_HI8].fill(0);
+                if compare_borrow == 1 {
+                    equality.cells[TRACE_SLACK_LO_LO8] = 0xff;
+                    equality.cells[TRACE_SLACK_LO_HI8] = 0xff;
+                }
+
+                let evaluated =
+                    test_eval(boundary).evaluate(RowEval::from_row(&equality, is_valid_until));
+                assert_eq!(
+                    evaluated.nonzero_constraints().len(),
+                    1,
+                    "{} equality with borrow={compare_borrow} must violate the AIR: {:?}",
+                    if is_valid_until {
+                        "validUntil"
+                    } else {
+                        "validFrom"
+                    },
+                    evaluated.nonzero_constraints()
+                );
+            }
         }
     }
 

@@ -60,3 +60,8 @@ pub mod tables_local;
 pub mod trace;
 pub mod types;
 pub mod witness;
+
+#[doc(hidden)]
+pub const PARALLEL_FEATURE_ENABLED: bool = cfg!(feature = "parallel");
+#[doc(hidden)]
+pub const STD_FEATURE_ENABLED: bool = cfg!(feature = "std");

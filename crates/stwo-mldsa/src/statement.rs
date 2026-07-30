@@ -1936,10 +1936,15 @@ impl Air for MlDsaProver {
 
 impl AirProver for MlDsaProver {
     fn max_log_size(&self) -> u32 {
-        coeffs_log_size()
+        let base_max = coeffs_log_size()
             .max(decomp_log_size())
             .max(sib_log_size())
-            .max(coeffs_tables::range_table_log_size())
+            .max(coeffs_tables::range_table_log_size());
+        if self.ctx.private_key {
+            base_max.max(private_key_eval::NTT_BUTTERFLY_LOG_SIZE)
+        } else {
+            base_max
+        }
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 2
