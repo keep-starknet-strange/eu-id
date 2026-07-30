@@ -563,7 +563,9 @@ mod quantum_only {
     #[test]
     fn parallel_witness_errors_keep_role_priority() {
         fn corrupt_commitment(input: &mut MdocAuthInput) {
-            let MdocAuthInput::MlDsa(input) = input;
+            let MdocAuthInput::MlDsa(input) = input else {
+                panic!("test fixture requires the public-key ML-DSA arm");
+            };
             input.c_tilde[0] ^= 1;
         }
 
@@ -793,7 +795,9 @@ mod quantum_only {
         // the transcript-mixed public key. Statement-side mutations reject.
         for tamper_t1 in [false, true] {
             let mut tampered = public_statement.clone();
-            let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.issuer_input;
+            let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.issuer_input else {
+                panic!("legacy issuer fixture must carry a public-key ML-DSA input");
+            };
             if tamper_t1 {
                 input.t1[0][0] ^= 1;
             } else {
@@ -803,7 +807,9 @@ mod quantum_only {
         }
         for tamper_t1 in [false, true] {
             let mut tampered = public_statement.clone();
-            let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.device_input;
+            let eu_id_prover::mdoc::MdocAuthInput::MlDsa(input) = &mut tampered.device_input else {
+                panic!("legacy device fixture must carry a public-key ML-DSA input");
+            };
             if tamper_t1 {
                 input.t1[0][0] ^= 1;
             } else {
@@ -872,7 +878,9 @@ mod quantum_only {
             .as_mldsa()
             .expect("issuer input is ML-DSA")
             .clone();
-        let MdocAuthInput::MlDsa(device) = &mut binding_tamper.device_input;
+        let MdocAuthInput::MlDsa(device) = &mut binding_tamper.device_input else {
+            panic!("public product statement requires the public-key ML-DSA arm");
+        };
         device.rho = issuer_key.rho;
         device.t1 = issuer_key.t1;
         verify_mdoc_circuit(&proof, &binding_tamper)
@@ -987,6 +995,9 @@ mod quantum_only {
         let mut issuer_tampered = statement.clone();
         match &mut issuer_tampered.issuer_input {
             MdocAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
+            MdocAuthInput::MlDsaPrivateKey(_) => {
+                panic!("legacy issuer fixture must carry a public-key ML-DSA input")
+            }
         }
         verify_mdoc_circuit(&proof, &issuer_tampered.into_public_view())
             .expect("private issuer bytes are absent from the verifier contract");
@@ -994,6 +1005,9 @@ mod quantum_only {
         let mut leaked_issuer_byte = public_statement.clone();
         match &mut leaked_issuer_byte.issuer_input {
             MdocAuthInput::MlDsa(input) => input.message[2] = 1,
+            MdocAuthInput::MlDsaPrivateKey(_) => {
+                panic!("legacy issuer fixture must carry a public-key ML-DSA input")
+            }
         }
         verify_mdoc_circuit(&proof, &leaked_issuer_byte)
             .expect_err("a nonzero private issuer byte must fail the public projection gate");
@@ -1001,6 +1015,9 @@ mod quantum_only {
         let mut device_tampered = public_statement;
         match &mut device_tampered.device_input {
             MdocAuthInput::MlDsa(input) => input.message[2] ^= 0x01,
+            MdocAuthInput::MlDsaPrivateKey(_) => {
+                panic!("legacy device fixture must carry a public-key ML-DSA input")
+            }
         }
         verify_mdoc_circuit(&proof, &device_tampered)
             .expect_err("tampered statement device M′ must reject");
@@ -1045,14 +1062,20 @@ mod quantum_only {
 
         let mut noncanonical_public_t1 = public_statement;
         let eu_id_prover::mdoc::IssuerAuthInput::MlDsa(input) =
-            &mut noncanonical_public_t1.issuer_input;
+            &mut noncanonical_public_t1.issuer_input
+        else {
+            panic!("legacy issuer fixture must carry a public-key ML-DSA input");
+        };
         input.t1[0][0] = stwo_mldsa::types::T1_COEFFICIENT_BOUND;
         verify_mdoc_circuit(&proof, &noncanonical_public_t1)
             .expect_err("a non-canonical public t1 must reject at verify entry");
 
         let mut noncanonical_private_t1 = statement;
         let eu_id_prover::mdoc::IssuerAuthInput::MlDsa(input) =
-            &mut noncanonical_private_t1.issuer_input;
+            &mut noncanonical_private_t1.issuer_input
+        else {
+            panic!("legacy issuer fixture must carry a public-key ML-DSA input");
+        };
         input.t1[0][0] = stwo_mldsa::types::T1_COEFFICIENT_BOUND;
         assert!(
             prove_mdoc_circuit(&extracted, &noncanonical_private_t1).is_err(),

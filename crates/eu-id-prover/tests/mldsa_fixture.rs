@@ -24,6 +24,8 @@ const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const MLDSA_ISSUER_SEED: [u8; 32] = [0x5au8; 32];
 /// Deterministic ML-DSA-65 device seed.
 const MLDSA_DEVICE_SEED: [u8; 32] = [0x6du8; 32];
+/// Independent deterministic device key for the unlinkability credential B.
+const MLDSA_DEVICE_B_SEED: [u8; 32] = [0x6eu8; 32];
 /// Deterministic ML-DSA-65 revocation-authority seed.
 const MLDSA_REVOCATION_SEED: [u8; 32] = [0x7eu8; 32];
 const HIGH_BIRTH_DATE_DIGEST_ID: u64 = 0x1234;
@@ -85,6 +87,7 @@ fn tdate(text: &str) -> Value {
 /// The issuer-signed pieces produced around a device-authentication arm.
 struct IssuerSignedDocument {
     document: Vec<u8>,
+    mso: Vec<u8>,
     issuer_pk: Vec<u8>,
     issuer_sig_structure: Vec<u8>,
     issuer_signature: Vec<u8>,
@@ -97,6 +100,9 @@ fn build_pid_document_with_attributes(
     device_key: Value,
     device_cose_sign1: Value,
     attributes: Vec<(u64, &str, Value, Vec<u8>)>,
+    signed: &str,
+    valid_from: &str,
+    valid_until: &str,
 ) -> IssuerSignedDocument {
     // Issuer ML-DSA-65 keypair (deterministic seed → reproducible fixture).
     let issuer_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_ISSUER_SEED.into());
@@ -150,9 +156,9 @@ fn build_pid_document_with_attributes(
         (
             "validityInfo".into(),
             Value::Map(vec![
-                ("signed".into(), tdate("2026-01-01T00:00:00Z")),
-                ("validFrom".into(), tdate("2026-01-01T00:00:00Z")),
-                ("validUntil".into(), tdate("2030-01-01T00:00:00Z")),
+                ("signed".into(), tdate(signed)),
+                ("validFrom".into(), tdate(valid_from)),
+                ("validUntil".into(), tdate(valid_until)),
             ]),
         ),
     ]));
@@ -194,6 +200,7 @@ fn build_pid_document_with_attributes(
 
     IssuerSignedDocument {
         document,
+        mso,
         issuer_pk,
         issuer_sig_structure: sig_struct,
         issuer_signature,
@@ -207,6 +214,8 @@ fn build_pid_document_with_attributes(
 pub struct MldsaFullPqFixture {
     /// Encoded PID mdoc document (top-level `Value::Map`).
     pub document: Vec<u8>,
+    /// Exact issuer-authenticated MobileSecurityObject payload.
+    pub mso: Vec<u8>,
     /// Issuer ML-DSA-65 public key, encoded (`PK_BYTES` = 1952 bytes).
     pub issuer_pk: Vec<u8>,
     /// The COSE `Sig_structure` the issuer signed (payload = MSO).
@@ -359,8 +368,9 @@ pub fn mldsa_full_pq_fixture_with_attribute(
 pub fn mldsa_realistic_pid_fixture_with_age_over_18(
     session_transcript: &[u8],
 ) -> MldsaFullPqFixture {
-    mldsa_full_pq_fixture_with_transcript_and_attributes(
+    mldsa_full_pq_fixture_with_profile(
         session_transcript,
+        MLDSA_DEVICE_SEED,
         vec![
             (
                 1,
@@ -395,6 +405,78 @@ pub fn mldsa_realistic_pid_fixture_with_age_over_18(
             ),
             (17, "age_over_18", Value::Bool(true), vec![17; 32]),
         ],
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+        "2030-01-01T00:00:00Z",
+    )
+}
+
+/// Credential A for the frozen A1/A2/B unlinkability acceptance set.
+///
+/// Calling this with two fresh transcripts changes only request-bound device
+/// authentication. The issuer-authenticated MSO and device key stay identical.
+#[allow(dead_code)]
+pub fn mldsa_ts13_unlinkable_credential_a_with_transcript(
+    session_transcript: &[u8],
+) -> MldsaFullPqFixture {
+    mldsa_realistic_pid_fixture_with_age_over_18(session_transcript)
+}
+
+/// Independently issued, shape-identical credential B for the frozen
+/// unlinkability acceptance set.
+///
+/// It deliberately changes every credential-stable private class: device key,
+/// MSO facts, item randomizers, digest identifiers, attribute data, validity
+/// times, and therefore issuer/device signatures and the derived revocation ID.
+#[allow(dead_code)]
+pub fn mldsa_ts13_unlinkable_credential_b_with_transcript(
+    session_transcript: &[u8],
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_profile(
+        session_transcript,
+        MLDSA_DEVICE_B_SEED,
+        vec![
+            (
+                7,
+                "given_name",
+                Value::Text("Alice".to_string()),
+                vec![0x81; 32],
+            ),
+            (
+                8,
+                "nationality",
+                Value::Text("FR".to_string()),
+                vec![0x82; 32],
+            ),
+            (
+                9,
+                "family_name",
+                Value::Text("Beispielxx".to_string()),
+                vec![0x83; 32],
+            ),
+            (
+                10,
+                "birth_date",
+                Value::Text("1988-08-08".to_string()),
+                vec![0x84; 32],
+            ),
+            (
+                11,
+                "issuance_date",
+                Value::Text("2025-06-01".to_string()),
+                vec![0x85; 32],
+            ),
+            (
+                12,
+                "expiry_date",
+                Value::Text("2029-12-31".to_string()),
+                vec![0x86; 32],
+            ),
+            (18, "age_over_18", Value::Bool(true), vec![0x92; 32]),
+        ],
+        "2025-06-01T00:00:00Z",
+        "2025-06-01T00:00:00Z",
+        "2029-12-31T00:00:00Z",
     )
 }
 
@@ -420,8 +502,26 @@ fn mldsa_full_pq_fixture_with_transcript_and_attributes(
     session_transcript: &[u8],
     attributes: Vec<(u64, &str, Value, Vec<u8>)>,
 ) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_profile(
+        session_transcript,
+        MLDSA_DEVICE_SEED,
+        attributes,
+        "2026-01-01T00:00:00Z",
+        "2026-01-01T00:00:00Z",
+        "2030-01-01T00:00:00Z",
+    )
+}
+
+fn mldsa_full_pq_fixture_with_profile(
+    session_transcript: &[u8],
+    device_seed: [u8; 32],
+    attributes: Vec<(u64, &str, Value, Vec<u8>)>,
+    signed: &str,
+    valid_from: &str,
+    valid_until: &str,
+) -> MldsaFullPqFixture {
     // Device ML-DSA-65 keypair (deterministic seed → reproducible fixture).
-    let device_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_DEVICE_SEED.into());
+    let device_sk = SigningKey::<MlDsa65>::from_seed(&device_seed.into());
     let device_pk_bytes: EncodedVerifyingKey<MlDsa65> = device_sk.verifying_key().encode();
     let device_pk = device_pk_bytes.to_vec();
 
@@ -445,12 +545,16 @@ fn mldsa_full_pq_fixture_with_transcript_and_attributes(
         mldsa_cose_key(&device_pk),
         device_cose_sign1,
         attributes,
+        signed,
+        valid_from,
+        valid_until,
     );
     let revocation_sk = SigningKey::<MlDsa65>::from_seed(&MLDSA_REVOCATION_SEED.into());
     let revocation_pk_bytes: EncodedVerifyingKey<MlDsa65> = revocation_sk.verifying_key().encode();
 
     MldsaFullPqFixture {
         document: built.document,
+        mso: built.mso,
         issuer_pk: built.issuer_pk,
         issuer_sig_structure: built.issuer_sig_structure,
         issuer_signature: built.issuer_signature,
@@ -489,6 +593,53 @@ fn rejects(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         Ok(trace) => !trace.accepted,
         Err(_) => true,
     }
+}
+
+#[test]
+fn unlinkability_credentials_change_private_facts_without_changing_shape() {
+    let transcript =
+        eu_id_prover::mdoc::openid4vp_session_transcript(b"ts13-unlinkable-shape-control");
+    let credential_a = mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript);
+    let credential_b = mldsa_ts13_unlinkable_credential_b_with_transcript(&transcript);
+
+    assert_eq!(credential_a.issuer_pk, credential_b.issuer_pk);
+    assert_eq!(credential_a.revocation_pk, credential_b.revocation_pk);
+    assert_ne!(credential_a.device_pk, credential_b.device_pk);
+    assert_ne!(credential_a.mso, credential_b.mso);
+    assert_ne!(credential_a.issuer_signature, credential_b.issuer_signature);
+    assert_ne!(credential_a.device_signature, credential_b.device_signature);
+    assert_ne!(
+        eu_id_prover::ts13::ts13_mso_derived_revocation_id(&credential_a.mso),
+        eu_id_prover::ts13::ts13_mso_derived_revocation_id(&credential_b.mso),
+    );
+
+    assert_eq!(credential_a.document.len(), credential_b.document.len());
+    assert_eq!(credential_a.mso.len(), credential_b.mso.len());
+    assert_eq!(
+        credential_a.issuer_sig_structure.len(),
+        credential_b.issuer_sig_structure.len()
+    );
+    assert_eq!(
+        credential_a.device_sig_structure.len(),
+        credential_b.device_sig_structure.len()
+    );
+    assert_eq!(credential_a.document.len(), 12_136);
+    assert_eq!(credential_a.mso.len(), 2_513);
+    assert_eq!(credential_a.issuer_sig_structure.len(), 2_534);
+    assert_eq!(credential_a.device_sig_structure.len(), 130);
+    let mut request = eu_id_prover::MdocPidRequest::eudi_pid(transcript);
+    request.attributes = vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+        element_identifier: "age_over_18".to_string(),
+        mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+    }];
+    request.trusted_mldsa_issuer_public_keys = vec![credential_a.issuer_pk.clone()];
+    let extracted = eu_id_prover::mdoc::extract_pid_mdoc(&credential_a.document, &request)
+        .expect("unlinkability fixture extracts");
+    assert_eq!(extracted.extracted_attributes[0].item.len(), 100);
+    assert_eq!(
+        stwo_sha256::native::pad_message(&extracted.extracted_attributes[0].item).len(),
+        128
+    );
 }
 
 #[test]

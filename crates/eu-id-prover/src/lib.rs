@@ -9,9 +9,11 @@ pub(crate) mod claimed_sum_blinder;
 pub mod mdoc;
 mod mdoc_cbor_stream;
 mod mdoc_country_code_table;
+mod mdoc_private_device_key_bind;
 mod mdoc_private_item_bind;
 mod mdoc_private_message;
 mod mdoc_private_mso_bind;
+mod mdoc_private_mso_validity;
 #[cfg(test)]
 mod mdoc_real_vectors;
 #[cfg(feature = "unlink-spikes")]
@@ -26,7 +28,7 @@ use stwo::core::pcs::PcsConfig;
 
 pub use mdoc::{
     MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
-    MdocTs13PublicStatement as MdocTs13Statement,
+    MdocTs13DemoCircuitPublicInput, MdocTs13PublicStatement as MdocTs13Statement,
 };
 pub use policy::{iso_alpha2_to_numeric, Policy};
 pub use predicates::{all_nationality_codes, Date};
@@ -96,6 +98,59 @@ pub fn prove_mdoc_with_ts13_revocation(
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
     let public_statement = mdoc::MdocTs13PublicStatement::from_circuit(&statement)?;
     Ok((proof, public_statement))
+}
+
+/// Prove the fixed unlinkable TS13 age-over-18 demo theorem.
+///
+/// The returned proof contains no serialized semantic statement. The SDK
+/// places it in the fixed-capacity V4 envelope.
+pub fn prove_mdoc_ts13_demo(
+    document: &[u8],
+    request: &MdocPidRequest,
+    public: &MdocTs13DemoCircuitPublicInput,
+    id_lo: u64,
+    id_hi: u64,
+    signature: mdoc::MdocRevocationSignature,
+) -> Result<MdocProof, Error> {
+    if request.doctype != "eu.europa.ec.eudi.pid.1"
+        || request.namespace != "eu.europa.ec.eudi.pid.1"
+        || request.attributes
+            != [mdoc::MdocRequestedAttribute {
+                element_identifier: "age_over_18".to_string(),
+                mode: mdoc::MdocDisclosureMode::ValueEquality(vec![0xf5]),
+            }]
+        || request.trusted_mldsa_issuer_public_keys != [public.trusted_issuer_public_key.clone()]
+        || request.device_authentication_profile != mdoc::MdocDeviceAuthenticationProfile::Iso180135
+    {
+        return Err(Error::Prove(
+            "TS13 demo request does not match the fixed profile".to_string(),
+        ));
+    }
+    if document.len() > ts13::TS13_MAX_DOCUMENT_BYTES {
+        return Err(Error::Prove(
+            "TS13 demo document exceeds the fixed resource cap".to_string(),
+        ));
+    }
+    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    if extracted.device_sig_structure != public.device_cose_sig_structure {
+        return Err(Error::Prove(
+            "TS13 device authentication does not match the public request".to_string(),
+        ));
+    }
+    let id = ts13::ts13_mso_derived_revocation_id(&extracted.mso);
+    let statement = mdoc::MdocCircuitStatement::from_extracted(&extracted, public.policy()?)
+        .map_err(Error::Mdoc)?
+        .with_ts13_revocation(public.revocation.clone())
+        .with_ts13_revocation_range(mdoc::MdocRevocationRangeWitness { id, id_lo, id_hi })
+        .with_ts13_revocation_signature(signature);
+    mdoc::prove_mdoc_ts13_demo_circuit(&extracted, &statement, public)
+}
+
+pub fn verify_mdoc_ts13_demo(
+    proof: &MdocProof,
+    public: &MdocTs13DemoCircuitPublicInput,
+) -> Result<(), Error> {
+    mdoc::verify_mdoc_ts13_demo_circuit(proof, public)
 }
 
 /// Verify a product mdoc proof against its public statement. Tree-0 is

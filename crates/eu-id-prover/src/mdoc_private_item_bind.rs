@@ -5,9 +5,10 @@
 //! checks the four `IssuerSignedItem` fields without public offsets or lengths,
 //! re-provides the semantic identifier/value windows on the existing
 //! per-attribute [`FieldBytesRelation`], and yields one private canonical
-//! digest-ID tuple for the MSO `valueDigests` scan. The frozen TS13 profile
-//! closes its semantic field lookups in this component against the exact
-//! `age_over_18 = true` request instead of adding another protocol module.
+//! digest-ID tuple for the MSO `valueDigests` scan. The frozen TS13 demo
+//! profile closes its semantic field lookups in this component against the
+//! exact `age_over_18 = true` request instead of adding another protocol
+//! module. The legacy TS13 profile retains its external semantic binder.
 
 use std::fmt;
 
@@ -120,8 +121,13 @@ pub(crate) enum MdocPrivateItemProfile {
     /// Product profile. The private MSO version selects legacy v1 versus
     /// canonical v2 key ordering without entering public shape or transcript.
     Product,
-    /// Dedicated TS13 canonical profile with its published `u16` digest cap.
+    /// Legacy TS13 canonical profile with its published `u16` digest cap.
+    ///
+    /// Its semantic field lookups are balanced by the external window binder.
     Ts13,
+    /// Frozen unlinkable-demo profile. It shares TS13's canonical item shape
+    /// and closes the fixed `age_over_18 = true` semantics internally.
+    Ts13Demo,
 }
 
 impl MdocPrivateItemProfile {
@@ -129,17 +135,26 @@ impl MdocPrivateItemProfile {
         match self {
             Self::Product => 0,
             Self::Ts13 => 1,
+            Self::Ts13Demo => 2,
         }
     }
 
+    fn is_ts13(self) -> bool {
+        matches!(self, Self::Ts13 | Self::Ts13Demo)
+    }
+
+    fn binds_demo_semantics(self) -> bool {
+        matches!(self, Self::Ts13Demo)
+    }
+
     fn canonical_key_order(self) -> bool {
-        matches!(self, Self::Ts13)
+        self.is_ts13()
     }
 
     fn digest_id_max(self) -> u32 {
         match self {
             Self::Product => MDOC_PRIVATE_ITEM_PRODUCT_DIGEST_ID_MAX,
-            Self::Ts13 => MDOC_PRIVATE_ITEM_TS13_DIGEST_ID_MAX,
+            Self::Ts13 | Self::Ts13Demo => MDOC_PRIVATE_ITEM_TS13_DIGEST_ID_MAX,
         }
     }
 }
@@ -838,9 +853,7 @@ fn analyze_inner(
     let identifier_content = inner
         .get(identifier_content_start..identifier_content_end)
         .ok_or(MdocPrivateItemError::InvalidElementIdentifier)?;
-    if matches!(profile, MdocPrivateItemProfile::Ts13)
-        && identifier_content != TS13_ELEMENT_IDENTIFIER
-    {
+    if profile.binds_demo_semantics() && identifier_content != TS13_ELEMENT_IDENTIFIER {
         return Err(MdocPrivateItemError::InvalidElementIdentifier);
     }
 
@@ -1013,9 +1026,7 @@ fn analyze_inner(
     if normalized_output_end >= inner.len() {
         return Err(MdocPrivateItemError::InvalidElementValue);
     }
-    if matches!(profile, MdocPrivateItemProfile::Ts13)
-        && normalized_output != TS13_CANONICAL_ELEMENT_VALUE
-    {
+    if profile.binds_demo_semantics() && normalized_output != TS13_CANONICAL_ELEMENT_VALUE {
         return Err(MdocPrivateItemError::InvalidElementValue);
     }
 
@@ -1958,7 +1969,7 @@ impl FrameworkEval for MdocPrivateItemEval {
                 }
             }
         }
-        if matches!(self.profile, MdocPrivateItemProfile::Ts13) {
+        if self.profile.is_ts13() {
             eval.add_constraint(digest_start_kind[3].clone());
             pin(&mut eval, digest_start.clone(), argument[1].clone(), 0);
         }
@@ -2465,7 +2476,7 @@ impl FrameworkEval for MdocPrivateItemEval {
                 output_byte,
             ],
         ));
-        if matches!(self.profile, MdocPrivateItemProfile::Ts13) {
+        if self.profile.binds_demo_semantics() {
             for (field_id, index, byte) in ts13_semantic_tuples(self.field_ids) {
                 eval.add_to_relation(RelationEntry::new(
                     &self.item_fields,
@@ -2685,7 +2696,7 @@ fn interaction_trace(
                 .collect(),
         );
     }
-    if matches!(profile, MdocPrivateItemProfile::Ts13) {
+    if profile.binds_demo_semantics() {
         for (field_id, index, byte) in ts13_semantic_tuples(field_ids) {
             sites.push(
                 (0..packed_rows)
@@ -2756,8 +2767,9 @@ fn interaction_trace(
 /// - `inner_raw`: negative provider for the raw inner parser;
 /// - `digest_id`: negative provider for the MSO `valueDigests` scan;
 /// - `item_fields`: negative provider of the identifier content plus either
-///   the full encoded `elementValue` or normalized predicate bytes. TS13 also
-///   provides the exact fixed positive counterparts inside this component.
+///   the full encoded `elementValue` or normalized predicate bytes. The TS13
+///   demo provides the exact fixed positive counterparts inside this
+///   component; legacy TS13 receives them from its external window binder.
 /// - `country_code`: one positive dummy/alpha-2 lookup for nationality only.
 ///
 /// The outer parser is itself fed by the SHA full-padded-stream relation.  Thus
@@ -2798,9 +2810,7 @@ impl MdocPrivateItemBind {
                 attribute_index,
             ));
         }
-        if matches!(profile, MdocPrivateItemProfile::Ts13)
-            && !matches!(request_mode, MdocPrivateItemRequestMode::ValueEquality)
-        {
+        if profile.is_ts13() && !matches!(request_mode, MdocPrivateItemRequestMode::ValueEquality) {
             return Err(MdocPrivateItemError::Ts13RequiresValueEquality);
         }
         let log_size = profile_log_size(bucket)?;
@@ -2845,9 +2855,7 @@ impl MdocPrivateItemBind {
                 attribute_index,
             ));
         }
-        if matches!(profile, MdocPrivateItemProfile::Ts13)
-            && !matches!(request_mode, MdocPrivateItemRequestMode::ValueEquality)
-        {
+        if profile.is_ts13() && !matches!(request_mode, MdocPrivateItemRequestMode::ValueEquality) {
             return Err(MdocPrivateItemError::Ts13RequiresValueEquality);
         }
         let log_size = profile_log_size(bucket)?;
@@ -2963,12 +2971,12 @@ impl MdocPrivateItemBind {
 
     fn main_interaction_sites(&self) -> usize {
         // Outer parsed, inner parsed, inner raw, key witness, 47 key constants,
-        // digest tuple, identifier field, value field, the TS13 fixed semantic
-        // counterparts, optional country lookup, and the final blinder.
+        // digest tuple, identifier field, value field, the TS13-demo fixed
+        // semantic counterparts, optional country lookup, and the final
+        // blinder.
         KEY_ENCODED_BYTES
             + 8
-            + usize::from(matches!(self.profile, MdocPrivateItemProfile::Ts13))
-                * TS13_SEMANTIC_TUPLES
+            + usize::from(self.profile.binds_demo_semantics()) * TS13_SEMANTIC_TUPLES
             + usize::from(matches!(
                 self.request_mode,
                 MdocPrivateItemRequestMode::Nationality
@@ -4061,6 +4069,10 @@ mod tests {
 
     #[test]
     fn constructors_enforce_public_shape_and_profile_order() {
+        assert_eq!(MdocPrivateItemProfile::Product.transcript_tag(), 0);
+        assert_eq!(MdocPrivateItemProfile::Ts13.transcript_tag(), 1);
+        assert_eq!(MdocPrivateItemProfile::Ts13Demo.transcript_tag(), 2);
+
         let canonical = test_bind(MdocPrivateItemProfile::Product, 7).unwrap();
         assert_eq!(canonical.attribute_index(), 0);
         assert_eq!(canonical.padded_bucket(), 128);
@@ -4090,6 +4102,15 @@ mod tests {
             .err(),
             Some(MdocPrivateItemError::InvalidCanonicalKeyOrder)
         );
+        for profile in [
+            MdocPrivateItemProfile::Ts13,
+            MdocPrivateItemProfile::Ts13Demo,
+        ] {
+            assert_eq!(
+                test_bind_with(profile, LEGACY_ORDER, 16, 7, TEST_IDENTIFIER, TEST_VALUE,).err(),
+                Some(MdocPrivateItemError::InvalidCanonicalKeyOrder)
+            );
+        }
 
         let handles = MdocPrivateItemHandles::fresh(
             SharedFieldRelation::new(),
@@ -4155,17 +4176,23 @@ mod tests {
             test_bind(MdocPrivateItemProfile::Product, digest_id)
                 .unwrap_or_else(|error| panic!("product digest ID {digest_id} failed: {error}"));
         }
-        for digest_id in [0, 23, 24, 255, 256, u16::MAX as u32] {
-            test_bind(MdocPrivateItemProfile::Ts13, digest_id)
-                .unwrap_or_else(|error| panic!("TS13 digest ID {digest_id} failed: {error}"));
+        for profile in [
+            MdocPrivateItemProfile::Ts13,
+            MdocPrivateItemProfile::Ts13Demo,
+        ] {
+            for digest_id in [0, 23, 24, 255, 256, u16::MAX as u32] {
+                test_bind(profile, digest_id).unwrap_or_else(|error| {
+                    panic!("{profile:?} digest ID {digest_id} failed: {error}")
+                });
+            }
+            assert_eq!(
+                test_bind(profile, u16::MAX as u32 + 1).err(),
+                Some(MdocPrivateItemError::DigestIdOutOfRange {
+                    value: u16::MAX as u64 + 1,
+                    max: u16::MAX as u32,
+                })
+            );
         }
-        assert_eq!(
-            test_bind(MdocPrivateItemProfile::Ts13, u16::MAX as u32 + 1).err(),
-            Some(MdocPrivateItemError::DigestIdOutOfRange {
-                value: u16::MAX as u64 + 1,
-                max: u16::MAX as u32,
-            })
-        );
 
         let inner = inner_item_with_digest_encoding(
             CANONICAL_ORDER,
@@ -4577,27 +4604,48 @@ mod tests {
     #[test]
     fn ts13_rejects_predicate_requests_and_keeps_value_equality() {
         let padded = padded_item(CANONICAL_ORDER, 16, 7, TEST_IDENTIFIER, &[0x42, b'D', b'E']);
-        assert_eq!(
-            MdocPrivateItemBind::new(
-                0,
+        for profile in [
+            MdocPrivateItemProfile::Ts13,
+            MdocPrivateItemProfile::Ts13Demo,
+        ] {
+            assert_eq!(
+                MdocPrivateItemBind::new(
+                    0,
+                    profile,
+                    MdocPrivateMsoVersion::V2,
+                    MdocPrivateItemRequestMode::Nationality,
+                    padded.len(),
+                    MdocPrivateItemPrivateInput::new(padded.clone()),
+                    field_ids(),
+                    MdocPrivateItemHandles::fresh(
+                        SharedFieldRelation::new(),
+                        SharedMdocCountryCodeRelation::new(),
+                    ),
+                )
+                .err(),
+                Some(MdocPrivateItemError::Ts13RequiresValueEquality)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_ts13_delegates_semantics_to_the_external_binder() {
+        assert!(
+            test_bind_with(
                 MdocPrivateItemProfile::Ts13,
-                MdocPrivateMsoVersion::V2,
-                MdocPrivateItemRequestMode::Nationality,
-                padded.len(),
-                MdocPrivateItemPrivateInput::new(padded),
-                field_ids(),
-                MdocPrivateItemHandles::fresh(
-                    SharedFieldRelation::new(),
-                    SharedMdocCountryCodeRelation::new(),
-                ),
+                CANONICAL_ORDER,
+                16,
+                7,
+                b"legacy_field",
+                &[0xf4],
             )
-            .err(),
-            Some(MdocPrivateItemError::Ts13RequiresValueEquality)
+            .is_ok(),
+            "legacy TS13 must not acquire the demo's fixed private semantics"
         );
     }
 
     #[test]
-    fn ts13_host_analysis_accepts_only_the_frozen_identifier_and_canonical_true() {
+    fn ts13_demo_host_analysis_accepts_only_the_frozen_identifier_and_canonical_true() {
         for (name, identifier) in [
             ("wrong byte", b"age_over_19".as_slice()),
             ("short identifier", b"age_over_1".as_slice()),
@@ -4605,7 +4653,7 @@ mod tests {
         ] {
             assert_eq!(
                 test_bind_with(
-                    MdocPrivateItemProfile::Ts13,
+                    MdocPrivateItemProfile::Ts13Demo,
                     CANONICAL_ORDER,
                     16,
                     7,
@@ -4620,7 +4668,7 @@ mod tests {
 
         assert_eq!(
             test_bind_with(
-                MdocPrivateItemProfile::Ts13,
+                MdocPrivateItemProfile::Ts13Demo,
                 CANONICAL_ORDER,
                 16,
                 7,
@@ -4633,7 +4681,7 @@ mod tests {
         );
         assert_eq!(
             test_bind_with(
-                MdocPrivateItemProfile::Ts13,
+                MdocPrivateItemProfile::Ts13Demo,
                 CANONICAL_ORDER,
                 16,
                 7,
@@ -4650,7 +4698,7 @@ mod tests {
         ] {
             assert!(
                 test_bind_with(
-                    MdocPrivateItemProfile::Ts13,
+                    MdocPrivateItemProfile::Ts13Demo,
                     CANONICAL_ORDER,
                     16,
                     7,
@@ -4663,8 +4711,8 @@ mod tests {
         }
 
         assert!(
-            test_bind(MdocPrivateItemProfile::Ts13, 7).is_ok(),
-            "the exact frozen TS13 semantic pair must remain accepted"
+            test_bind(MdocPrivateItemProfile::Ts13Demo, 7).is_ok(),
+            "the exact frozen TS13-demo semantic pair must remain accepted"
         );
     }
 
@@ -5180,7 +5228,7 @@ mod tests {
                 values[digest_id_tuple::IS_V2] = witness.columns[trace_col::IS_V2][row];
                 rows.push(TestCounterRow::new(TEST_DIGEST_ID, &values));
             }
-            if matches!(bind.profile, MdocPrivateItemProfile::Product) {
+            if !bind.profile.binds_demo_semantics() {
                 for (selector, field_id, index_column, byte_column) in [
                     (
                         trace_col::IDENTIFIER_CONTENT_ACTIVE,
@@ -5714,20 +5762,35 @@ mod tests {
     }
 
     #[test]
-    fn ts13_semantics_balance_inside_the_item_slot_and_reject_forged_private_values() {
-        let mut honest = test_bind(MdocPrivateItemProfile::Ts13, 7).unwrap();
+    fn legacy_ts13_balances_semantics_through_an_external_counterpart() {
+        let mut legacy = test_bind(MdocPrivateItemProfile::Ts13, 7).unwrap();
+        let fixture = prove_composed_bind(&mut legacy, None);
+        assert!(
+            fixture
+                .counter_rows
+                .iter()
+                .any(|row| row.kind == TEST_ITEM_FIELDS),
+            "legacy TS13 must retain its external semantic counterpart"
+        );
+        verify_composed_item(&fixture, fixture.counter_rows.clone())
+            .expect("legacy TS13 semantics balance through the external binder");
+    }
+
+    #[test]
+    fn ts13_demo_semantics_balance_inside_the_item_slot_and_reject_forged_private_values() {
+        let mut honest = test_bind(MdocPrivateItemProfile::Ts13Demo, 7).unwrap();
         let fixture = prove_composed_bind(&mut honest, None);
         assert!(
             fixture
                 .counter_rows
                 .iter()
                 .all(|row| row.kind != TEST_ITEM_FIELDS),
-            "TS13 must not rely on an external semantic window counterpart"
+            "TS13 demo must not rely on an external semantic window counterpart"
         );
         verify_composed_item(&fixture, fixture.counter_rows.clone())
-            .expect("exact TS13 semantics balance within the item-binder slot");
+            .expect("exact TS13-demo semantics balance within the item-binder slot");
 
-        let mut false_trace = test_bind(MdocPrivateItemProfile::Ts13, 7).unwrap();
+        let mut false_trace = test_bind(MdocPrivateItemProfile::Ts13Demo, 7).unwrap();
         {
             let witness = false_trace.witness.as_mut().unwrap();
             let row = witness.columns[trace_col::VALUE_ACTIVE]
@@ -5757,8 +5820,8 @@ mod tests {
             ("tagged true", TS13_ELEMENT_IDENTIFIER, &[0xc0, 0xf5]),
         ] {
             // Construct under the generic product profile to model a malicious
-            // prover bypassing TS13's host-side witness validation, then prove
-            // the same trace under the TS13 AIR and transcript.
+            // prover bypassing the TS13 demo's host-side witness validation,
+            // then prove the same trace under the demo AIR and transcript.
             let mut forged = test_bind_with(
                 MdocPrivateItemProfile::Product,
                 CANONICAL_ORDER,
@@ -5768,7 +5831,7 @@ mod tests {
                 value,
             )
             .unwrap_or_else(|error| panic!("{name} fixture is not structurally valid: {error}"));
-            forged.profile = MdocPrivateItemProfile::Ts13;
+            forged.profile = MdocPrivateItemProfile::Ts13Demo;
             let forged_fixture = prove_composed_bind(&mut forged, None);
             assert!(
                 forged_fixture
@@ -5836,7 +5899,7 @@ mod tests {
         assert_eq!(nationality_layout.preprocessed, layout.preprocessed);
         assert_eq!(nationality_layout.trace, layout.trace);
         assert_eq!(nationality_layout.interaction, layout.interaction);
-        let ts13 = MdocPrivateItemBind::verifier(
+        let legacy_ts13 = MdocPrivateItemBind::verifier(
             0,
             MdocPrivateItemProfile::Ts13,
             MdocPrivateItemRequestMode::ValueEquality,
@@ -5849,9 +5912,27 @@ mod tests {
             test_claim(),
         )
         .unwrap();
-        assert_eq!(ts13.main_interaction_sites(), 67);
+        assert_eq!(legacy_ts13.main_interaction_sites(), 55);
         assert_eq!(
-            ts13.layout().interaction,
+            legacy_ts13.layout().interaction,
+            vec![9; 29 * SECURE_EXTENSION_DEGREE]
+        );
+        let ts13_demo = MdocPrivateItemBind::verifier(
+            0,
+            MdocPrivateItemProfile::Ts13Demo,
+            MdocPrivateItemRequestMode::ValueEquality,
+            128,
+            field_ids(),
+            MdocPrivateItemHandles::fresh(
+                SharedFieldRelation::new(),
+                SharedMdocCountryCodeRelation::new(),
+            ),
+            test_claim(),
+        )
+        .unwrap();
+        assert_eq!(ts13_demo.main_interaction_sites(), 67);
+        assert_eq!(
+            ts13_demo.layout().interaction,
             vec![9; 35 * SECURE_EXTENSION_DEGREE]
         );
         assert_eq!(trace_col::VALUE_OUTPUT_BYTE, 110);

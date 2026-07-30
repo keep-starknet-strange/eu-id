@@ -47,15 +47,20 @@ use stwo_constraint_framework::{
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
+use stwo_mldsa::binding::SharedT1CellRelation;
 use stwo_mldsa::coeffs::relations::SharedRangeRelation;
 use stwo_mldsa::coeffs::tables::SharedRangeTable;
+use stwo_mldsa::expand_a::{
+    derive_expand_a_witness, ExpandABindings, ExpandAClaim, ExpandAProver, ExpandAVerifier,
+};
+use stwo_mldsa::private_key_eval::PrivateKeyEvalBindings;
 use stwo_mldsa::statement::HOSTED_MSG_FIELD_ID;
 use stwo_mldsa::statement::{
     keccak_job_shapes, MlDsaProver as MlDsaStatementProver, MlDsaVerifier as MlDsaStatementVerifier,
 };
 use stwo_mldsa::stwo_keccak::relations::SharedKeccakRelations;
 use stwo_mldsa::stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
-use stwo_mldsa::types::MlDsaVerifyInput;
+use stwo_mldsa::types::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
@@ -73,6 +78,9 @@ use crate::claimed_sum_blinder::{
 };
 use crate::mdoc_cbor_stream::{MdocCborInputMode, MdocCborStream, MdocCborStreamInteractionClaim};
 use crate::mdoc_country_code_table::{MdocCountryCodeTable, SharedMdocCountryCodeRelation};
+use crate::mdoc_private_device_key_bind::{
+    MdocPrivateDeviceKeyBind, MdocPrivateDeviceKeyInteractionClaim,
+};
 use crate::mdoc_private_item_bind::{
     MdocPrivateItemBind, MdocPrivateItemError, MdocPrivateItemFieldIds, MdocPrivateItemHandles,
     MdocPrivateItemInteractionClaim, MdocPrivateItemPrivateInput, MdocPrivateItemProfile,
@@ -81,8 +89,12 @@ use crate::mdoc_private_item_bind::{
 use crate::mdoc_private_message::{MdocPrivateMessageInteractionClaim, MdocPrivateMessageProvider};
 use crate::mdoc_private_mso_bind::{
     MdocPrivateMsoBind, MdocPrivateMsoBindSpec, MdocPrivateMsoBindWitness,
-    MdocPrivateMsoInteractionClaim, MdocPrivateMsoShaStreamSpec, MdocPrivateMsoVersion,
-    SharedMdocMsoStartRelation,
+    MdocPrivateMsoDeviceKeyMode, MdocPrivateMsoInteractionClaim, MdocPrivateMsoShaStreamSpec,
+    MdocPrivateMsoVersion, SharedMdocDevicePkStartRelation, SharedMdocMsoStartRelation,
+};
+use crate::mdoc_private_mso_validity::{
+    MdocPrivateMsoValidityInteractionClaim, MdocPrivateMsoValiditySpec, MdocPrivateMsoValidityV2,
+    SharedMdocMsoValidityBytesRelation,
 };
 #[cfg(feature = "unlink-spikes")]
 use crate::mdoc_unlink_spike::{append_dummy_jobs, append_dummy_shapes, MdocUnlinkSpikeIo};
@@ -94,6 +106,7 @@ use crate::mdoc_value_digests_scan::{
 };
 use crate::mdoc_window_bind::{MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow};
 use crate::policy::Policy;
+use crate::ts13_demo::Ts13PublicContextBindV1;
 use crate::Error;
 
 /// Legacy profile: `elementValue` packed as a fixed-width CBOR `bstr`.
@@ -131,6 +144,7 @@ const MDOC_TREE0_ROOT_CACHE_CAPACITY: usize = 16;
 /// instances cannot alias each other's SIB schedules under tree-0 dedup).
 const MDOC_ISSUER_MLDSA_NAMESPACE: &str = "mdoc/issuer";
 const MDOC_DEVICE_MLDSA_NAMESPACE: &str = "mdoc/device";
+const MDOC_DEVICE_EXPAND_A_NAMESPACE: &str = "mdoc/ts13/device-expand-a";
 const MDOC_REVOCATION_MLDSA_NAMESPACE: &str = "mdoc/ts13/revocation";
 /// Per-role HashIo stream-id bases for hosted ML-DSA modules (S1): every
 /// instance shares the ONE keccak-service relation set, so stream ids must be
@@ -140,12 +154,67 @@ const MDOC_REVOCATION_MLDSA_NAMESPACE: &str = "mdoc/ts13/revocation";
 const MDOC_ISSUER_MLDSA_STREAM_BASE: u32 = 0x100;
 const MDOC_DEVICE_MLDSA_STREAM_BASE: u32 = 0x200;
 const MDOC_REVOCATION_MLDSA_STREAM_BASE: u32 = 0x300;
+const MDOC_DEVICE_EXPAND_A_STREAM_BASE: u32 = 0x400;
 const _: () = assert!(
     MDOC_ISSUER_MLDSA_STREAM_BASE.is_multiple_of(stwo_mldsa::statement::STREAM_BASE_STRIDE)
         && MDOC_DEVICE_MLDSA_STREAM_BASE.is_multiple_of(stwo_mldsa::statement::STREAM_BASE_STRIDE)
         && MDOC_REVOCATION_MLDSA_STREAM_BASE
             .is_multiple_of(stwo_mldsa::statement::STREAM_BASE_STRIDE)
 );
+
+/// The frozen TS13 module order lives here once and is expanded for both the
+/// prover and verifier. The invocation supplies role-equivalent modules; it
+/// does not get to choose their ordering.
+macro_rules! collect_ts13_demo_modules {
+    (
+        $modules:ident;
+        sha_tables = $sha_tables:expr,
+        range_tables = $range_tables:expr,
+        keccak_service = $keccak_service:expr,
+        public_context = $public_context:expr,
+        issuer_message = $issuer_message:expr,
+        issuer_mldsa = $issuer_mldsa:expr,
+        item_shas = $item_shas:expr,
+        mso_sha = $mso_sha:expr,
+        item_parsers = $item_parsers:expr,
+        item_binders = $item_binders:expr,
+        mso_binder = $mso_binder:expr,
+        mso_validity = $mso_validity:expr,
+        value_digests = $value_digests:expr,
+        expand_a = $expand_a:expr,
+        device_key = $device_key:expr,
+        device_mldsa = $device_mldsa:expr,
+        revocation_range = $revocation_range:expr,
+        revocation_mldsa = $revocation_mldsa:expr,
+        revocation_public = $revocation_public:expr $(,)?
+    ) => {{
+        $modules.push($sha_tables); // 1
+        $modules.push($range_tables); // 2
+        $modules.push($keccak_service); // 3
+        $modules.push($public_context); // 4
+        $modules.push($issuer_message); // 5
+        $modules.push($issuer_mldsa); // 6
+        for module in $item_shas {
+            $modules.push(module); // 7
+        }
+        $modules.push($mso_sha); // 8
+        for module in $item_parsers {
+            $modules.push(module); // 9
+        }
+        for module in $item_binders {
+            $modules.push(module); // 10
+        }
+        $modules.push($mso_binder); // 11
+        $modules.push($mso_validity); // 12
+        $modules.push($value_digests); // 13
+        $modules.push($expand_a); // 14
+        $modules.push($device_key); // 15
+        $modules.push($device_mldsa); // 16
+        $modules.push($revocation_range); // 17
+        $modules.push($revocation_mldsa); // 18
+        $modules.push($revocation_public); // 19
+    }};
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -300,6 +369,10 @@ fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Resul
 pub enum MdocAuthInput {
     /// Boxed because an `MlDsaVerifyInput` is roughly 20 KiB inline.
     MlDsa(Box<MlDsaVerifyInput>),
+    /// Verifier-side TS13 device input. The device public key and signature
+    /// are existential circuit witnesses; only the request-derived message is
+    /// verifier input.
+    MlDsaPrivateKey(MlDsaPrivateKeyPublicInput),
 }
 
 /// The issuer-role view of [`MdocAuthInput`] (historical name, kept as alias).
@@ -311,6 +384,21 @@ impl MdocAuthInput {
     pub fn as_mldsa(&self) -> Option<&MlDsaVerifyInput> {
         match self {
             Self::MlDsa(input) => Some(input.as_ref()),
+            Self::MlDsaPrivateKey(_) => None,
+        }
+    }
+
+    fn private_key_public_input(&self) -> Option<&MlDsaPrivateKeyPublicInput> {
+        match self {
+            Self::MlDsa(_) => None,
+            Self::MlDsaPrivateKey(input) => Some(input),
+        }
+    }
+
+    fn message(&self) -> &[u8] {
+        match self {
+            Self::MlDsa(input) => &input.message,
+            Self::MlDsaPrivateKey(input) => &input.message,
         }
     }
 
@@ -341,9 +429,9 @@ pub struct MdocMlDsaPublicAuthInput {
 
 impl MdocMlDsaPublicAuthInput {
     fn from_circuit(input: &MdocAuthInput, include_message: bool) -> Result<Self, String> {
-        let input = input
-            .as_mldsa()
-            .expect("the quantum-safe mdoc statement is always ML-DSA");
+        let input = input.as_mldsa().ok_or_else(|| {
+            "private-key device input cannot be serialized as a public key".to_string()
+        })?;
         let message_len = u16::try_from(input.message.len()).map_err(|_| {
             format!(
                 "ML-DSA public message length {} exceeds the wire shape",
@@ -434,6 +522,8 @@ where
 fn auth_inputs_equal(left: &MdocAuthInput, right: &MdocAuthInput) -> bool {
     match (left, right) {
         (MdocAuthInput::MlDsa(l), MdocAuthInput::MlDsa(r)) => l == r,
+        (MdocAuthInput::MlDsaPrivateKey(l), MdocAuthInput::MlDsaPrivateKey(r)) => l == r,
+        _ => false,
     }
 }
 
@@ -1418,10 +1508,6 @@ fn validate_public_auth_projection(statement: &MdocCircuitStatement) -> Result<(
         .issuer_input
         .as_mldsa()
         .ok_or_else(|| Error::Verify("mdoc issuer input is not ML-DSA".to_string()))?;
-    let device = statement
-        .device_input
-        .as_mldsa()
-        .ok_or_else(|| Error::Verify("mdoc device input is not ML-DSA".to_string()))?;
     let signature_witness_is_zero = |input: &MlDsaVerifyInput| {
         input.tr.iter().all(|&byte| byte == 0)
             && input.c_tilde.iter().all(|&byte| byte == 0)
@@ -1432,8 +1518,13 @@ fn validate_public_auth_projection(statement: &MdocCircuitStatement) -> Result<(
                 .all(|&coefficient| coefficient == 0)
             && input.hint.iter().flatten().all(|&bit| bit == 0)
     };
+    let device_is_publicly_projected = statement
+        .device_input
+        .as_mldsa()
+        .is_some_and(signature_witness_is_zero)
+        || statement.device_input.private_key_public_input().is_some();
     if !signature_witness_is_zero(issuer)
-        || !signature_witness_is_zero(device)
+        || !device_is_publicly_projected
         || issuer.message.iter().any(|&byte| byte != 0)
     {
         return Err(Error::Verify(
@@ -1578,14 +1669,10 @@ pub fn mdoc_statement_resource_lengths(
         .issuer_input
         .as_mldsa()
         .ok_or_else(|| Error::Verify("mdoc statement issuer input is not ML-DSA".to_string()))?;
-    let device = statement
-        .device_input
-        .as_mldsa()
-        .ok_or_else(|| Error::Verify("mdoc statement device input is not ML-DSA".to_string()))?;
     Ok(MdocStatementResourceLengths {
         issuer_message_bytes: issuer.message.len(),
         issuer_mso_payload_bytes: statement.mso_payload_len,
-        device_message_bytes: device.message.len(),
+        device_message_bytes: statement.device_input.message().len(),
     })
 }
 
@@ -2263,6 +2350,107 @@ impl MdocTs13PublicStatement {
     }
 }
 
+pub const TS13_DEMO_ISSUER_MESSAGE_BYTES: usize = 2_534;
+pub const TS13_DEMO_MSO_PAYLOAD_BYTES: usize = 2_513;
+pub const TS13_DEMO_ITEM_PADDED_BYTES: u16 = 128;
+pub const TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY: usize =
+    stwo_mldsa::statement::DEVICE_SIG_STRUCTURE_CAPACITY;
+
+/// Verifier-authoritative circuit inputs for the unlinkable TS13 demo.
+///
+/// Credential-selected lengths and the device key are intentionally absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdocTs13DemoCircuitPublicInput {
+    pub circuit_hash: [u8; 32],
+    pub request_context_digest: [u8; 32],
+    pub timestamp_epoch_seconds: i64,
+    pub trusted_issuer_public_key: Vec<u8>,
+    pub device_cose_sig_structure: Vec<u8>,
+    pub revocation: MdocRevocationPublicInputs,
+}
+
+impl MdocTs13DemoCircuitPublicInput {
+    fn context_bind(&self) -> Ts13PublicContextBindV1 {
+        Ts13PublicContextBindV1::new(self.request_context_digest, self.circuit_hash)
+    }
+
+    pub(crate) fn policy(&self) -> Result<Policy, Error> {
+        Ok(Policy {
+            current_date: utc_date_from_epoch_seconds(self.timestamp_epoch_seconds)?,
+            min_age_years: 18,
+            accepted_nationalities: Vec::new(),
+        })
+    }
+
+    fn verifier_statement(&self) -> Result<MdocCircuitStatement, Error> {
+        if self.trusted_issuer_public_key.len() != stwo_mldsa::constants::PK_BYTES {
+            return Err(Error::Verify(
+                "TS13 trusted issuer public key has the wrong length".to_string(),
+            ));
+        }
+        if self.device_cose_sig_structure.len() > TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY {
+            return Err(Error::Verify(
+                "TS13 device Sig_structure exceeds the fixed capacity".to_string(),
+            ));
+        }
+        let issuer = MdocMlDsaPublicAuthInput {
+            public_key: self.trusted_issuer_public_key.clone(),
+            message_len: TS13_DEMO_ISSUER_MESSAGE_BYTES as u16,
+            message: Vec::new(),
+        }
+        .verifier_input("issuer", false)?;
+        Ok(MdocCircuitStatement {
+            doctype: PID_DOCTYPE.to_string(),
+            namespace: PID_NAMESPACE.to_string(),
+            issuer_input: issuer,
+            device_input: MdocAuthInput::MlDsaPrivateKey(MlDsaPrivateKeyPublicInput {
+                message: self.device_cose_sig_structure.clone(),
+            }),
+            ts13_revocation: Some(self.revocation.clone()),
+            ts13_revocation_range: None,
+            ts13_revocation_signature: None,
+            attributes: vec![MdocStatementAttribute {
+                element_identifier: "age_over_18".to_string(),
+                mode: MdocDisclosureMode::ValueEquality(vec![0xf5]),
+                item_padded_len: TS13_DEMO_ITEM_PADDED_BYTES,
+            }],
+            mso_payload_len: TS13_DEMO_MSO_PAYLOAD_BYTES,
+            policy: self.policy()?,
+        })
+    }
+}
+
+fn utc_date_from_epoch_seconds(timestamp: i64) -> Result<predicates::Date, Error> {
+    if timestamp < 0 {
+        return Err(Error::Verify(
+            "TS13 verification timestamp is outside the supported range".to_string(),
+        ));
+    }
+    let days = timestamp / 86_400;
+    // Howard Hinnant's civil-from-days transform, with day zero at 1970-01-01.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    if !(2020..=2099).contains(&year) {
+        return Err(Error::Verify(
+            "TS13 verification timestamp is outside years 2020..=2099".to_string(),
+        ));
+    }
+    Ok(predicates::Date {
+        year: year as u32,
+        month: month as u32,
+        day: day as u32,
+    })
+}
+
 impl MdocCircuitStatement {
     /// Position of the age predicate in the ordered public attribute modes.
     pub fn age_attribute_index(&self) -> Option<usize> {
@@ -2299,13 +2487,14 @@ impl MdocCircuitStatement {
     /// absent from the statement type itself.
     pub fn into_public_view(mut self) -> Self {
         let scrub_signature_witness = |input: &mut MdocAuthInput, private_message: bool| {
-            let MdocAuthInput::MlDsa(input) = input;
-            input.tr = [0; 64];
-            input.c_tilde = [0; stwo_mldsa::constants::C_TILDE_BYTES];
-            input.z = [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::L];
-            input.hint = [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::K];
-            if private_message {
-                input.message.fill(0);
+            if let MdocAuthInput::MlDsa(input) = input {
+                input.tr = [0; 64];
+                input.c_tilde = [0; stwo_mldsa::constants::C_TILDE_BYTES];
+                input.z = [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::L];
+                input.hint = [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::K];
+                if private_message {
+                    input.message.fill(0);
+                }
             }
         };
         // The issuer Sig_structure is a Phase-1 private-message witness.
@@ -2453,8 +2642,11 @@ pub struct MdocCircuitProof {
     country_code_table_claimed_sum: Option<QM31>,
     private_item_interaction_claims: Vec<MdocPrivateItemInteractionClaim>,
     value_digests_scan_interaction_claim: MdocValueDigestsInteractionClaim,
-    mdoc_window_bind_interaction_claim: MdocWindowBindInteractionClaim,
+    mdoc_window_bind_interaction_claim: Option<MdocWindowBindInteractionClaim>,
     mdoc_cbor_interaction_claims: Vec<MdocCborStreamInteractionClaim>,
+    ts13_expand_a_claim: Option<ExpandAClaim>,
+    ts13_device_key_bind_interaction_claim: Option<MdocPrivateDeviceKeyInteractionClaim>,
+    ts13_mso_validity_interaction_claim: Option<MdocPrivateMsoValidityInteractionClaim>,
     ts13_revocation_range_interaction_claim: Option<MdocRevocationRangeInteractionClaim>,
     age_public: Option<predicates::PublicInput>,
     age_claimed_sums: Option<Vec<QM31>>,
@@ -2494,6 +2686,42 @@ impl MdocCircuitProof {
             && self.attribute_sha_interaction_claims.len() == 1
             && self.private_item_interaction_claims.len() == 1
             && self.mdoc_cbor_interaction_claims.len() == 2
+            && self.mldsa_range_table_claimed_sum.is_some()
+            && self
+                .keccak_service_claimed_sums
+                .as_ref()
+                .is_some_and(|sums| {
+                    sums.len() == stwo_mldsa::stwo_keccak::service::service_claimed_sums_len()
+                })
+    }
+
+    pub fn has_ts13_demo_shape(&self) -> bool {
+        self.mldsa
+            .as_ref()
+            .is_some_and(|claims| claims.has_expected_shape(false))
+            && self.device_mldsa.as_ref().is_some_and(|claims| {
+                claims.group_evals.len() == stwo_mldsa::statement::n_private_key_group_evals()
+                    && claims.claimed_sums.len()
+                        == stwo_mldsa::statement::hosted_private_key_claimed_sums_len()
+            })
+            && self
+                .revocation_mldsa
+                .as_ref()
+                .is_some_and(|claims| claims.has_expected_shape(false))
+            && self.ts13_expand_a_claim.is_some()
+            && self.ts13_device_key_bind_interaction_claim.is_some()
+            && self.ts13_mso_validity_interaction_claim.is_some()
+            && self.ts13_revocation_range_interaction_claim.is_some()
+            && self.mso_sha_interaction_claim.is_some()
+            && self.country_code_table_claimed_sum.is_none()
+            && self.attribute_sha_interaction_claims.len() == 1
+            && self.private_item_interaction_claims.len() == 1
+            && self.mdoc_cbor_interaction_claims.len() == 2
+            && self.mdoc_window_bind_interaction_claim.is_none()
+            && self.age_public.is_none()
+            && self.age_claimed_sums.is_none()
+            && self.nat_public.is_none()
+            && self.nat_claimed_sums.is_none()
             && self.mldsa_range_table_claimed_sum.is_some()
             && self
                 .keccak_service_claimed_sums
@@ -2643,14 +2871,12 @@ fn mdoc_tree0_cache_key(
         })?
         .message
         .len();
-    let device_mldsa_message_bytes = statement
-        .device_input
-        .as_mldsa()
-        .ok_or_else(|| {
-            Error::Verify("mdoc tree-0 cache key device input is not ML-DSA".to_string())
-        })?
-        .message
-        .len();
+    let private_device_key = statement.device_input.private_key_public_input().is_some();
+    let device_mldsa_message_bytes = if private_device_key {
+        TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
+    } else {
+        statement.device_input.message().len()
+    };
     let attributes = statement
         .attributes
         .iter()
@@ -2669,7 +2895,7 @@ fn mdoc_tree0_cache_key(
         })
         .collect();
     let material = MdocTree0CacheKeyMaterial {
-        version: 5,
+        version: if private_device_key { 6 } else { 5 },
         pcs_log_blowup_factor: expected_pcs_config.fri_config.log_blowup_factor,
         merged_sha_slot_log: proof
             .merged_sha_slot_log
@@ -2809,6 +3035,7 @@ fn checked_sha256_padded_len(message_len: usize) -> Option<usize> {
 fn private_mso_bind_spec(
     statement: &MdocCircuitStatement,
     mso_sha_padded_len: Option<usize>,
+    private_device_key: bool,
     phase: &'static str,
 ) -> Result<MdocPrivateMsoBindSpec, Error> {
     let fail = |message: String| {
@@ -2822,15 +3049,20 @@ fn private_mso_bind_spec(
         .issuer_input
         .as_mldsa()
         .ok_or_else(|| fail("private MSO binder issuer input is not ML-DSA".to_string()))?;
-    let device = statement
-        .device_input
-        .as_mldsa()
-        .ok_or_else(|| fail("private MSO binder device input is not ML-DSA".to_string()))?;
+    let device_key_mode = if private_device_key {
+        MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart
+    } else {
+        let device = statement
+            .device_input
+            .as_mldsa()
+            .ok_or_else(|| fail("private MSO binder device input is not ML-DSA".to_string()))?;
+        MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(device.encode_pk())
+    };
     Ok(MdocPrivateMsoBindSpec {
         issuer_message_len: issuer.message.len(),
         mso_len: statement.mso_payload_len,
         doc_type: statement.doctype.clone(),
-        device_public_key: device.encode_pk(),
+        device_key_mode,
         policy_date: statement.policy.current_date,
         sha_stream: mso_sha_padded_len.map(|padded_len| MdocPrivateMsoShaStreamSpec {
             field_id: MDOC_MSO_SHA_STREAM_FIELD_ID,
@@ -3505,6 +3737,22 @@ fn prove_mdoc_circuit_inner(
         extracted,
         statement,
         config,
+        None,
+        #[cfg(feature = "unlink-spikes")]
+        MdocUnlinkSpikeConfig::default(),
+    )
+}
+
+pub fn prove_mdoc_ts13_demo_circuit(
+    extracted: &ExtractedPidMdoc,
+    statement: &MdocCircuitStatement,
+    public: &MdocTs13DemoCircuitPublicInput,
+) -> Result<MdocCircuitProof, Error> {
+    prove_mdoc_circuit_inner_impl(
+        extracted,
+        statement,
+        mdoc_production_pcs_config(),
+        Some(public),
         #[cfg(feature = "unlink-spikes")]
         MdocUnlinkSpikeConfig::default(),
     )
@@ -3524,6 +3772,7 @@ pub fn prove_mdoc_circuit_keccak_scale_spike(
         extracted,
         statement,
         mdoc_production_pcs_config(),
+        None,
         MdocUnlinkSpikeConfig { dummy_keccak_jobs },
     )
 }
@@ -3545,15 +3794,74 @@ fn prepare_mldsa_role(
     Ok((witness, input))
 }
 
+fn validate_ts13_demo_proving_shape(
+    extracted: &ExtractedPidMdoc,
+    statement: &MdocCircuitStatement,
+    public: &MdocTs13DemoCircuitPublicInput,
+) -> Result<(), Error> {
+    let [attribute] = statement.attributes.as_slice() else {
+        return Err(Error::Prove(
+            "TS13 demo requires exactly one attribute".to_string(),
+        ));
+    };
+    if statement.doctype != PID_DOCTYPE
+        || statement.namespace != PID_NAMESPACE
+        || attribute.element_identifier != "age_over_18"
+        || attribute.mode != MdocDisclosureMode::ValueEquality(vec![0xf5])
+        || attribute.item_padded_len != TS13_DEMO_ITEM_PADDED_BYTES
+        || statement.mso_payload_len != TS13_DEMO_MSO_PAYLOAD_BYTES
+        || extracted.issuer_sig_structure.len() != TS13_DEMO_ISSUER_MESSAGE_BYTES
+        || extracted.mso.len() != TS13_DEMO_MSO_PAYLOAD_BYTES
+        || extracted
+            .extracted_attributes
+            .first()
+            .map(|item| stwo_sha256::native::pad_message(&item.item).len())
+            != Some(usize::from(TS13_DEMO_ITEM_PADDED_BYTES))
+    {
+        return Err(Error::Prove(
+            "TS13 demo credential does not match the fixed shape".to_string(),
+        ));
+    }
+    let issuer = statement
+        .issuer_input
+        .as_mldsa()
+        .ok_or_else(|| Error::Prove("TS13 issuer input is not ML-DSA".to_string()))?;
+    let device = statement
+        .device_input
+        .as_mldsa()
+        .ok_or_else(|| Error::Prove("TS13 device witness is not ML-DSA".to_string()))?;
+    if issuer.encode_pk() != public.trusted_issuer_public_key
+        || device.message != public.device_cose_sig_structure
+        || statement.ts13_revocation.as_ref() != Some(&public.revocation)
+        || statement.policy.current_date
+            != utc_date_from_epoch_seconds(public.timestamp_epoch_seconds)
+                .map_err(|error| Error::Prove(format!("{error:?}")))?
+        || public.device_cose_sig_structure.len() > TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
+    {
+        return Err(Error::Prove(
+            "TS13 demo private witness does not match the public theorem".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn prove_mdoc_circuit_inner_impl(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
     config: PcsConfig,
+    ts13_demo_public: Option<&MdocTs13DemoCircuitPublicInput>,
     #[cfg(feature = "unlink-spikes")] unlink_spike: MdocUnlinkSpikeConfig,
 ) -> Result<MdocCircuitProof, Error> {
     validate_mdoc_circuit_statement_shape(statement, "prove")?;
     validate_mldsa_public_keys(statement, "prove")?;
     let has_ts13_revocation = validate_ts13_revocation_shape(statement, true, "prove")?;
+    let is_ts13_demo = ts13_demo_public.is_some();
+    if let Some(public) = ts13_demo_public {
+        validate_ts13_demo_proving_shape(extracted, statement, public)?;
+        if !has_ts13_revocation {
+            return Err(Error::Prove("TS13 demo requires revocation".to_string()));
+        }
+    }
     if !auth_inputs_equal(&statement.issuer_input, &extracted.issuer_auth_input)
         || !auth_inputs_equal(&statement.device_input, &extracted.device_auth_input)
     {
@@ -3602,6 +3910,10 @@ fn prove_mdoc_circuit_inner_impl(
     let mso_digest = has_ts13_revocation.then(SharedDigestRelation::new);
     let mso_stream_field = has_ts13_revocation.then(SharedFieldRelation::new);
     let mso_start_handle = SharedMdocMsoStartRelation::new();
+    let device_pk_start_handle = is_ts13_demo.then(SharedMdocDevicePkStartRelation::new);
+    let validity_handle = is_ts13_demo.then(SharedMdocMsoValidityBytesRelation::new);
+    let expand_a_bindings = is_ts13_demo.then(ExpandABindings::new);
+    let t1_handle = is_ts13_demo.then(SharedT1CellRelation::new);
     let country_code_handle = SharedMdocCountryCodeRelation::new();
     // The proof-wide keccak service's relations handle (S1): drawn ONCE by the
     // service module, consumed by every hosted ML-DSA instance.
@@ -3635,12 +3947,14 @@ fn prove_mdoc_circuit_inner_impl(
     // Witness preparation is pure and Send. Keep the non-Send shared relation
     // handles and MlDsaProver construction on this thread, in fixed role order.
     let issuer_input = statement.issuer_input.as_mldsa().cloned();
+    let device_input = statement.device_input.as_mldsa().cloned();
     let issuer_message = issuer_input
         .as_ref()
         .ok_or_else(|| Error::Prove("mdoc issuer input is not ML-DSA".to_string()))?
         .message
         .clone();
-    let private_mso_spec = private_mso_bind_spec(statement, mso_sha_padded_len, "prove")?;
+    let private_mso_spec =
+        private_mso_bind_spec(statement, mso_sha_padded_len, is_ts13_demo, "prove")?;
     let private_mso_version = match parse_mso(&extracted.mso, &statement.namespace)
         .map_err(Error::Mdoc)?
         .version
@@ -3664,16 +3978,93 @@ fn prove_mdoc_circuit_inner_impl(
     let private_mso_start = private_mso_witness
         .mso_start(extracted.mso.len())
         .map_err(|error| Error::Prove(format!("private MSO start: {error}")))?;
+    let private_device_pk_start = is_ts13_demo
+        .then(|| private_mso_witness.device_pk_start(&private_mso_spec))
+        .transpose()
+        .map_err(|error| Error::Prove(format!("private device-key start: {error}")))?;
+    let private_validity_witness = is_ts13_demo
+        .then(|| private_mso_witness.validity_witness(&private_mso_spec))
+        .transpose()
+        .map_err(|error| Error::Prove(format!("private MSO validity: {error}")))?;
     let (mut private_mso_bind, private_mso_census) = MdocPrivateMsoBind::prover(
         private_mso_spec,
         private_mso_witness,
         issuer_message_field.clone(),
         mso_stream_field.clone(),
         Some(mso_start_handle.clone()),
+        device_pk_start_handle.clone(),
+        validity_handle.clone(),
     )
     .map_err(|error| Error::Prove(format!("private MSO binder: {error}")))?;
+    let mut ts13_public_context =
+        ts13_demo_public.map(MdocTs13DemoCircuitPublicInput::context_bind);
+    let mut ts13_expand_a = if is_ts13_demo {
+        let device = device_input
+            .as_ref()
+            .expect("TS13 demo shape requires a private device witness");
+        let witness = derive_expand_a_witness(device.rho)
+            .map_err(|error| Error::Prove(format!("TS13 private ExpandA: {error}")))?;
+        Some(
+            ExpandAProver::new(
+                witness,
+                MDOC_DEVICE_EXPAND_A_NAMESPACE,
+                MDOC_DEVICE_EXPAND_A_STREAM_BASE,
+                mldsa_range_handle.clone(),
+                mldsa_keccak_handle.clone(),
+                expand_a_bindings
+                    .clone()
+                    .expect("TS13 ExpandA bindings exist"),
+            )
+            .map_err(|error| Error::Prove(format!("TS13 private ExpandA: {error}")))?,
+        )
+    } else {
+        None
+    };
+    let (mut ts13_device_key_bind, ts13_device_key_census) = if is_ts13_demo {
+        let device = device_input
+            .as_ref()
+            .expect("TS13 demo shape requires a private device witness");
+        let (bind, census) = MdocPrivateDeviceKeyBind::prover(
+            device.encode_pk(),
+            private_device_pk_start.expect("TS13 private device-key start exists"),
+            issuer_message.len(),
+            issuer_message_field.clone(),
+            mldsa_range_handle.clone(),
+            expand_a_bindings
+                .as_ref()
+                .expect("TS13 ExpandA bindings exist")
+                .rho
+                .clone(),
+            t1_handle.clone().expect("TS13 T1 handle exists"),
+            device_pk_start_handle
+                .clone()
+                .expect("TS13 device-key start handle exists"),
+        )
+        .map_err(|error| Error::Prove(format!("TS13 private device-key bind: {error}")))?;
+        (Some(bind), Some(census))
+    } else {
+        (None, None)
+    };
+    let (mut ts13_mso_validity, ts13_validity_range_uses) = if let Some(public) = ts13_demo_public {
+        let (validity, uses) = MdocPrivateMsoValidityV2::prover(
+            MdocPrivateMsoValiditySpec {
+                timestamp_epoch_seconds: public.timestamp_epoch_seconds,
+            },
+            private_validity_witness.expect("TS13 validity witness exists"),
+            mldsa_range_handle.clone(),
+            validity_handle
+                .clone()
+                .expect("TS13 validity relation exists"),
+        )
+        .map_err(|error| Error::Prove(format!("TS13 private MSO validity: {error}")))?;
+        (Some(validity), Some(uses))
+    } else {
+        (None, None)
+    };
 
-    let private_item_profile = if has_ts13_revocation {
+    let private_item_profile = if is_ts13_demo {
+        MdocPrivateItemProfile::Ts13Demo
+    } else if has_ts13_revocation {
         MdocPrivateItemProfile::Ts13
     } else {
         MdocPrivateItemProfile::Product
@@ -3807,22 +4198,37 @@ fn prove_mdoc_circuit_inner_impl(
             .map_err(map_value_digests_prove_error)?;
     if private_mso_census.issuer_position_uses.len()
         != value_digests_census.issuer_position_uses.len()
+        || ts13_device_key_census.as_ref().is_some_and(|census| {
+            census.issuer_position_uses.len() != private_mso_census.issuer_position_uses.len()
+        })
     {
         return Err(Error::Prove(
             "private issuer-message census lengths disagree".to_string(),
         ));
     }
+    let ts13_device_key_uses = ts13_device_key_census
+        .as_ref()
+        .map(|census| census.issuer_position_uses.as_slice());
     let issuer_position_uses: Vec<u32> = private_mso_census
         .issuer_position_uses
         .into_iter()
         .zip(value_digests_census.issuer_position_uses)
         .enumerate()
         .map(|(index, (mso_uses, scan_uses))| {
-            mso_uses.checked_add(scan_uses).ok_or_else(|| {
-                Error::Prove(format!(
-                    "private issuer message use count overflows at byte {index}"
-                ))
-            })
+            mso_uses
+                .checked_add(scan_uses)
+                .and_then(|uses| {
+                    uses.checked_add(
+                        ts13_device_key_uses
+                            .map(|counts| counts[index])
+                            .unwrap_or(0),
+                    )
+                })
+                .ok_or_else(|| {
+                    Error::Prove(format!(
+                        "private issuer message use count overflows at byte {index}"
+                    ))
+                })
         })
         .collect::<Result<_, _>>()?;
     let mut issuer_message_provider = MdocPrivateMessageProvider::new(
@@ -3831,7 +4237,6 @@ fn prove_mdoc_circuit_inner_impl(
         issuer_message_field.clone(),
     )
     .map_err(|error| Error::Prove(format!("private issuer message provider: {error}")))?;
-    let device_input = statement.device_input.as_mldsa().cloned();
     let revocation_input = revocation_message
         .as_ref()
         .map(|message| ts13_revocation_mldsa_input(statement, message.to_vec()))
@@ -3882,16 +4287,40 @@ fn prove_mdoc_circuit_inner_impl(
         .with_private_message()
     });
     // Hosted in-circuit ML-DSA device statement, public-message mode (S4).
-    let mut device_mldsa = device_prepared.map(|(witness, input)| {
-        MlDsaStatementProver::hosted_public(
-            witness,
-            input,
-            mldsa_range_handle.clone(),
-            mldsa_keccak_handle.clone(),
-        )
-        .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
-        .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE)
-    });
+    let mut device_mldsa = device_prepared
+        .map(|(witness, input)| {
+            let prover = if is_ts13_demo {
+                MlDsaStatementProver::hosted_private_key(
+                    witness,
+                    input,
+                    issuer_message_field.clone(),
+                    mldsa_range_handle.clone(),
+                    mldsa_keccak_handle.clone(),
+                    PrivateKeyEvalBindings::new(
+                        expand_a_bindings
+                            .as_ref()
+                            .expect("TS13 ExpandA bindings exist")
+                            .ntt
+                            .clone(),
+                        t1_handle.clone().expect("TS13 T1 handle exists"),
+                    ),
+                )
+                .map_err(|error| Error::Prove(format!("TS13 private device ML-DSA: {error}")))?
+            } else {
+                MlDsaStatementProver::hosted_public(
+                    witness,
+                    input,
+                    mldsa_range_handle.clone(),
+                    mldsa_keccak_handle.clone(),
+                )
+            };
+            Ok::<_, Error>(
+                prover
+                    .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+                    .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
+            )
+        })
+        .transpose()?;
     // Hosted in-circuit ML-DSA revocation statement, private-message mode: the
     // prover's input carries the REAL 20-byte message (from the private range
     // witness); only its LENGTH is mixed into the transcript.
@@ -3909,11 +4338,20 @@ fn prove_mdoc_circuit_inner_impl(
         .with_stream_base(MDOC_REVOCATION_MLDSA_STREAM_BASE)
         .with_private_message()
     });
-    let range_uses: Vec<_> = [&issuer_mldsa, &device_mldsa, &revocation_mldsa]
+    let mut range_uses: Vec<_> = [&issuer_mldsa, &device_mldsa, &revocation_mldsa]
         .into_iter()
         .flatten()
         .map(|prover| prover.range_uses().clone())
         .collect();
+    if let Some(expand_a) = ts13_expand_a.as_ref() {
+        range_uses.push(expand_a.range_uses().clone());
+    }
+    if let Some(device_key) = ts13_device_key_bind.as_ref() {
+        range_uses.push(device_key.range_uses().clone());
+    }
+    if let Some(validity_uses) = ts13_validity_range_uses.as_ref() {
+        range_uses.push(validity_uses.clone());
+    }
     let mut mldsa_range_table = (!range_uses.is_empty())
         .then(|| SharedRangeTable::prover(&range_uses, mldsa_range_handle.clone()));
     // The ONE proof-wide keccak service (S1): built from the concatenated
@@ -3925,10 +4363,19 @@ fn prove_mdoc_circuit_inner_impl(
     let mut mldsa_keccak_service = {
         let mut shapes = Vec::new();
         let mut streams = Vec::new();
-        for prover in [&issuer_mldsa, &device_mldsa, &revocation_mldsa]
-            .into_iter()
-            .flatten()
-        {
+        if let Some(prover) = issuer_mldsa.as_ref() {
+            let (job_shapes, job_streams) = prover.keccak_jobs();
+            shapes.extend(job_shapes);
+            streams.extend(job_streams);
+        }
+        if let Some(expand_a) = ts13_expand_a.as_ref() {
+            let (job_shapes, job_streams) = expand_a
+                .keccak_jobs()
+                .map_err(|error| Error::Prove(format!("TS13 private ExpandA jobs: {error}")))?;
+            shapes.extend(job_shapes);
+            streams.extend(job_streams);
+        }
+        for prover in [&device_mldsa, &revocation_mldsa].into_iter().flatten() {
             let (job_shapes, job_streams) = prover.keccak_jobs();
             shapes.extend(job_shapes);
             streams.extend(job_streams);
@@ -4043,62 +4490,102 @@ fn prove_mdoc_circuit_inner_impl(
     });
 
     let (stark_proof, post_interaction_payloads) = {
-        // The range table and keccak service draw their shared relations before
-        // every hosted ML-DSA consumer. The revocation range AIR publishes the
-        // private revocation message before its verifier consumes it.
-        let mut modules: Vec<&mut dyn AirProver> = vec![&mut sha_tables];
-        if let Some(range_table) = mldsa_range_table.as_mut() {
-            modules.push(range_table);
-        }
-        if let Some(country_table) = country_code_table.as_mut() {
-            modules.push(country_table);
-        }
-        if let Some(service) = mldsa_keccak_service.as_mut() {
-            modules.push(service);
-        }
-        modules.push(&mut issuer_message_provider);
-        #[cfg(feature = "unlink-spikes")]
-        if let Some(spike_io) = unlink_spike_io.as_mut() {
-            modules.push(spike_io);
-        }
-        if let Some(issuer) = issuer_mldsa.as_mut() {
-            modules.push(issuer);
-        }
-        if let Some(device) = device_mldsa.as_mut() {
-            modules.push(device);
-        }
-        for attribute_sha in &mut attribute_shas {
-            modules.push(attribute_sha);
-        }
-        if let Some(mso_sha) = mso_sha.as_mut() {
-            modules.push(mso_sha);
-        }
-        for parser in &mut mdoc_cbor_streams {
-            modules.push(parser);
-        }
-        for item_bind in &mut private_item_binds {
-            modules.push(item_bind);
-        }
-        modules.push(&mut private_mso_bind);
-        modules.push(&mut value_digests_scan);
-        // Quantum revocation: the range AIR owns and publishes the private
-        // message relation, so it must draw that handle before the hosted
-        // ML-DSA bridge reads it.
-        if let Some(revocation_range) = ts13_revocation_range.as_mut() {
-            modules.push(revocation_range);
-        }
-        if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
-            modules.push(revocation_mldsa);
-        }
-        modules.push(&mut mdoc_window_bind);
-        if let Some(age) = age.as_mut() {
-            modules.push(age);
-        }
-        if let Some(nat) = nat.as_mut() {
-            modules.push(nat);
-        }
-        if let Some(revocation_public) = ts13_revocation_public.as_mut() {
-            modules.push(revocation_public);
+        let mut modules: Vec<&mut dyn AirProver> = Vec::new();
+        if is_ts13_demo {
+            collect_ts13_demo_modules!(
+                modules;
+                sha_tables = &mut sha_tables,
+                range_tables = mldsa_range_table
+                    .as_mut()
+                    .expect("TS13 shared range table exists"),
+                keccak_service = mldsa_keccak_service
+                    .as_mut()
+                    .expect("TS13 Keccak service exists"),
+                public_context = ts13_public_context
+                    .as_mut()
+                    .expect("TS13 public context exists"),
+                issuer_message = &mut issuer_message_provider,
+                issuer_mldsa = issuer_mldsa.as_mut().expect("TS13 issuer ML-DSA exists"),
+                item_shas = &mut attribute_shas,
+                mso_sha = mso_sha.as_mut().expect("TS13 MSO SHA exists"),
+                item_parsers = &mut mdoc_cbor_streams,
+                item_binders = &mut private_item_binds,
+                mso_binder = &mut private_mso_bind,
+                mso_validity = ts13_mso_validity
+                    .as_mut()
+                    .expect("TS13 exact validity exists"),
+                value_digests = &mut value_digests_scan,
+                expand_a = ts13_expand_a
+                    .as_mut()
+                    .expect("TS13 private ExpandA exists"),
+                device_key = ts13_device_key_bind
+                    .as_mut()
+                    .expect("TS13 private device-key binder exists"),
+                device_mldsa = device_mldsa
+                    .as_mut()
+                    .expect("TS13 private device ML-DSA exists"),
+                revocation_range = ts13_revocation_range
+                    .as_mut()
+                    .expect("TS13 revocation range exists"),
+                revocation_mldsa = revocation_mldsa
+                    .as_mut()
+                    .expect("TS13 revocation ML-DSA exists"),
+                revocation_public = ts13_revocation_public
+                    .as_mut()
+                    .expect("TS13 revocation public bind exists"),
+            );
+        } else {
+            modules.push(&mut sha_tables);
+            if let Some(range_table) = mldsa_range_table.as_mut() {
+                modules.push(range_table);
+            }
+            if let Some(country_table) = country_code_table.as_mut() {
+                modules.push(country_table);
+            }
+            if let Some(service) = mldsa_keccak_service.as_mut() {
+                modules.push(service);
+            }
+            modules.push(&mut issuer_message_provider);
+            #[cfg(feature = "unlink-spikes")]
+            if let Some(spike_io) = unlink_spike_io.as_mut() {
+                modules.push(spike_io);
+            }
+            if let Some(issuer) = issuer_mldsa.as_mut() {
+                modules.push(issuer);
+            }
+            if let Some(device) = device_mldsa.as_mut() {
+                modules.push(device);
+            }
+            for attribute_sha in &mut attribute_shas {
+                modules.push(attribute_sha);
+            }
+            if let Some(mso_sha) = mso_sha.as_mut() {
+                modules.push(mso_sha);
+            }
+            for parser in &mut mdoc_cbor_streams {
+                modules.push(parser);
+            }
+            for item_bind in &mut private_item_binds {
+                modules.push(item_bind);
+            }
+            modules.push(&mut private_mso_bind);
+            modules.push(&mut value_digests_scan);
+            if let Some(revocation_range) = ts13_revocation_range.as_mut() {
+                modules.push(revocation_range);
+            }
+            if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
+                modules.push(revocation_mldsa);
+            }
+            modules.push(&mut mdoc_window_bind);
+            if let Some(age) = age.as_mut() {
+                modules.push(age);
+            }
+            if let Some(nat) = nat.as_mut() {
+                modules.push(nat);
+            }
+            if let Some(revocation_public) = ts13_revocation_public.as_mut() {
+                modules.push(revocation_public);
+            }
         }
         air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
             .map_err(|e| Error::Prove(format!("{e:?}")))?
@@ -4132,11 +4619,19 @@ fn prove_mdoc_circuit_inner_impl(
             .map(|bind| bind.claim().clone())
             .collect(),
         value_digests_scan_interaction_claim: value_digests_scan.claim().clone(),
-        mdoc_window_bind_interaction_claim: mdoc_window_bind.interaction_claim().clone(),
+        mdoc_window_bind_interaction_claim: (!is_ts13_demo)
+            .then(|| mdoc_window_bind.interaction_claim().clone()),
         mdoc_cbor_interaction_claims: mdoc_cbor_streams
             .iter()
             .map(|parser| parser.interaction_claim().clone())
             .collect(),
+        ts13_expand_a_claim: ts13_expand_a.as_ref().map(ExpandAProver::claim),
+        ts13_device_key_bind_interaction_claim: ts13_device_key_bind
+            .as_ref()
+            .map(|bind| bind.interaction_claim().clone()),
+        ts13_mso_validity_interaction_claim: ts13_mso_validity
+            .as_ref()
+            .map(|validity| validity.interaction_claim().clone()),
         ts13_revocation_range_interaction_claim: ts13_revocation_range
             .as_ref()
             .map(|range| range.interaction_claim().clone()),
@@ -4166,6 +4661,23 @@ pub fn verify_mdoc_ts13_public_statement(
 ) -> Result<(), Error> {
     let verifier_statement = statement.verifier_circuit_statement()?;
     verify_mdoc_circuit(proof, &verifier_statement)
+}
+
+pub fn verify_mdoc_ts13_demo_circuit(
+    proof: &MdocCircuitProof,
+    public: &MdocTs13DemoCircuitPublicInput,
+) -> Result<(), Error> {
+    let statement = public.verifier_statement()?;
+    verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
+        proof,
+        &statement,
+        mdoc_production_pcs_config(),
+        MdocTree0RootMode::Memoized,
+        Some(public),
+        #[cfg(feature = "unlink-spikes")]
+        MdocUnlinkSpikeConfig::default(),
+    )
+    .map(|_| ())
 }
 
 pub fn verify_mdoc_circuit_with_pcs_config(
@@ -4220,6 +4732,7 @@ pub fn verify_mdoc_circuit_keccak_scale_spike_fresh(
         statement,
         mdoc_production_pcs_config(),
         MdocTree0RootMode::FreshAudit,
+        None,
         MdocUnlinkSpikeConfig { dummy_keccak_jobs },
     )
 }
@@ -4241,6 +4754,7 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         statement,
         expected_pcs_config,
         tree0_root_mode,
+        None,
         #[cfg(feature = "unlink-spikes")]
         MdocUnlinkSpikeConfig::default(),
     )
@@ -4251,13 +4765,20 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
     tree0_root_mode: MdocTree0RootMode,
+    ts13_demo_public: Option<&MdocTs13DemoCircuitPublicInput>,
     #[cfg(feature = "unlink-spikes")] unlink_spike: MdocUnlinkSpikeConfig,
 ) -> Result<MdocCircuitVerifyProfile, Error> {
     let total_start = Instant::now();
+    let is_ts13_demo = ts13_demo_public.is_some();
     validate_mdoc_circuit_statement_shape(statement, "verify")?;
     validate_mldsa_public_keys(statement, "verify")?;
     validate_public_auth_projection(statement)?;
     let has_ts13_revocation = validate_ts13_revocation_shape(statement, false, "verify")?;
+    if is_ts13_demo && !has_ts13_revocation {
+        return Err(Error::Verify(
+            "TS13 demo proof is missing revocation".to_string(),
+        ));
+    }
     let issuer_public_message = false;
     match &proof.mldsa {
         Some(claims) if claims.has_expected_shape(issuer_public_message) => {}
@@ -4268,12 +4789,38 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
         }
     }
     match &proof.device_mldsa {
-        Some(claims) if claims.has_expected_shape(true) => {}
+        Some(claims)
+            if if is_ts13_demo {
+                claims.group_evals.len() == stwo_mldsa::statement::n_private_key_group_evals()
+                    && claims.claimed_sums.len()
+                        == stwo_mldsa::statement::hosted_private_key_claimed_sums_len()
+            } else {
+                claims.has_expected_shape(true)
+            } => {}
         _ => {
             return Err(Error::Verify(
                 "mdoc proof ML-DSA device claim tree has the wrong shape".to_string(),
             ))
         }
+    }
+    if is_ts13_demo {
+        if proof.ts13_expand_a_claim.is_none()
+            || proof.ts13_device_key_bind_interaction_claim.is_none()
+            || proof.ts13_mso_validity_interaction_claim.is_none()
+            || proof.mdoc_window_bind_interaction_claim.is_some()
+        {
+            return Err(Error::Verify(
+                "TS13 demo proof has the wrong private-device claim shape".to_string(),
+            ));
+        }
+    } else if proof.ts13_expand_a_claim.is_some()
+        || proof.ts13_device_key_bind_interaction_claim.is_some()
+        || proof.ts13_mso_validity_interaction_claim.is_some()
+        || proof.mdoc_window_bind_interaction_claim.is_none()
+    {
+        return Err(Error::Verify(
+            "mdoc proof carries claims from a different profile".to_string(),
+        ));
     }
     if proof.age_public
         != statement
@@ -4396,6 +4943,10 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
     let mso_digest = has_ts13_revocation.then(SharedDigestRelation::new);
     let mso_stream_field = has_ts13_revocation.then(SharedFieldRelation::new);
     let mso_start_handle = SharedMdocMsoStartRelation::new();
+    let device_pk_start_handle = is_ts13_demo.then(SharedMdocDevicePkStartRelation::new);
+    let validity_handle = is_ts13_demo.then(SharedMdocMsoValidityBytesRelation::new);
+    let expand_a_bindings = is_ts13_demo.then(ExpandABindings::new);
+    let t1_handle = is_ts13_demo.then(SharedT1CellRelation::new);
     let country_code_handle = SharedMdocCountryCodeRelation::new();
     // The proof-wide keccak service's relations handle (mirror of the prover).
     let mldsa_keccak_handle = SharedKeccakRelations::new();
@@ -4463,23 +5014,56 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
     };
     // Hosted ML-DSA device verifier, public-message mode (S4): rebuilt from
     // the statement's public input + the proof's claim tree.
-    let mut device_mldsa = match (statement.device_input.as_mldsa(), &proof.device_mldsa) {
-        (Some(input), Some(claims)) => {
-            let mut input = input.clone();
-            input.tr = stwo_mldsa::statement::native_tr(&input);
-            Some(
-                MlDsaStatementVerifier::hosted_public(
-                    input,
-                    claims.group_evals.clone(),
-                    claims.claimed_sums.clone(),
-                    mldsa_range_handle.clone(),
-                    mldsa_keccak_handle.clone(),
-                )
-                .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
-                .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
+    let mut device_mldsa = if is_ts13_demo {
+        let input = statement
+            .device_input
+            .private_key_public_input()
+            .ok_or_else(|| Error::Verify("TS13 verifier received a device public key".to_string()))?
+            .clone();
+        let claims = proof
+            .device_mldsa
+            .as_ref()
+            .expect("TS13 device claim shape was checked");
+        Some(
+            MlDsaStatementVerifier::hosted_private_key(
+                input,
+                claims.group_evals.clone(),
+                claims.claimed_sums.clone(),
+                issuer_message_field.clone(),
+                mldsa_range_handle.clone(),
+                mldsa_keccak_handle.clone(),
+                PrivateKeyEvalBindings::new(
+                    expand_a_bindings
+                        .as_ref()
+                        .expect("TS13 ExpandA bindings exist")
+                        .ntt
+                        .clone(),
+                    t1_handle.clone().expect("TS13 T1 handle exists"),
+                ),
             )
+            .map_err(|error| Error::Verify(format!("TS13 private device ML-DSA: {error}")))?
+            .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+            .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
+        )
+    } else {
+        match (statement.device_input.as_mldsa(), &proof.device_mldsa) {
+            (Some(input), Some(claims)) => {
+                let mut input = input.clone();
+                input.tr = stwo_mldsa::statement::native_tr(&input);
+                Some(
+                    MlDsaStatementVerifier::hosted_public(
+                        input,
+                        claims.group_evals.clone(),
+                        claims.claimed_sums.clone(),
+                        mldsa_range_handle.clone(),
+                        mldsa_keccak_handle.clone(),
+                    )
+                    .with_instance_namespace(MDOC_DEVICE_MLDSA_NAMESPACE)
+                    .with_stream_base(MDOC_DEVICE_MLDSA_STREAM_BASE),
+                )
+            }
+            _ => None,
         }
-        _ => None,
     };
     // Hosted ML-DSA revocation verifier, private-message mode: the input is
     // rebuilt from the statement's PUBLIC key/signature bytes with 20 ZEROED
@@ -4524,7 +5108,16 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
                 issuer_public_message,
             ));
         }
-        if let Some(input) = statement.device_input.as_mldsa() {
+        if is_ts13_demo {
+            shapes.extend(
+                stwo_mldsa::expand_a::shake128_job_shapes(MDOC_DEVICE_EXPAND_A_STREAM_BASE)
+                    .expect("frozen TS13 ExpandA stream base is valid"),
+            );
+            shapes.extend(stwo_mldsa::statement::hosted_private_key_keccak_job_shapes(
+                statement.device_input.message().len(),
+                MDOC_DEVICE_MLDSA_STREAM_BASE,
+            ));
+        } else if let Some(input) = statement.device_input.as_mldsa() {
             shapes.extend(keccak_job_shapes(
                 input.message.len(),
                 MDOC_DEVICE_MLDSA_STREAM_BASE,
@@ -4598,17 +5191,89 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
         )
         .with_shared_tables(sha_table_relations.clone())
     });
-    let private_mso_spec = private_mso_bind_spec(statement, mso_sha_padded_len, "verify")?;
+    let private_mso_spec =
+        private_mso_bind_spec(statement, mso_sha_padded_len, is_ts13_demo, "verify")?;
     let mut private_mso_bind = MdocPrivateMsoBind::verifier(
         private_mso_spec,
         issuer_message_field.clone(),
         mso_stream_field.clone(),
         Some(mso_start_handle.clone()),
+        device_pk_start_handle.clone(),
+        validity_handle.clone(),
         proof.private_mso_bind_interaction_claim.clone(),
     )
     .map_err(|error| Error::Verify(format!("TS13 private MSO bind: {error}")))?;
+    let mut ts13_public_context =
+        ts13_demo_public.map(MdocTs13DemoCircuitPublicInput::context_bind);
+    let mut ts13_expand_a = if is_ts13_demo {
+        Some(
+            ExpandAVerifier::new(
+                proof
+                    .ts13_expand_a_claim
+                    .clone()
+                    .expect("TS13 ExpandA claim shape was checked"),
+                MDOC_DEVICE_EXPAND_A_NAMESPACE,
+                MDOC_DEVICE_EXPAND_A_STREAM_BASE,
+                mldsa_range_handle.clone(),
+                mldsa_keccak_handle.clone(),
+                expand_a_bindings
+                    .clone()
+                    .expect("TS13 ExpandA bindings exist"),
+            )
+            .map_err(|error| Error::Verify(format!("TS13 private ExpandA: {error}")))?,
+        )
+    } else {
+        None
+    };
+    let mut ts13_device_key_bind = if is_ts13_demo {
+        Some(
+            MdocPrivateDeviceKeyBind::verifier(
+                issuer_message_len,
+                issuer_message_field.clone(),
+                mldsa_range_handle.clone(),
+                expand_a_bindings
+                    .as_ref()
+                    .expect("TS13 ExpandA bindings exist")
+                    .rho
+                    .clone(),
+                t1_handle.clone().expect("TS13 T1 handle exists"),
+                device_pk_start_handle
+                    .clone()
+                    .expect("TS13 device-key start relation exists"),
+                proof
+                    .ts13_device_key_bind_interaction_claim
+                    .clone()
+                    .expect("TS13 device-key claim shape was checked"),
+            )
+            .map_err(|error| Error::Verify(format!("TS13 private device-key bind: {error}")))?,
+        )
+    } else {
+        None
+    };
+    let mut ts13_mso_validity = if let Some(public) = ts13_demo_public {
+        Some(
+            MdocPrivateMsoValidityV2::verifier(
+                MdocPrivateMsoValiditySpec {
+                    timestamp_epoch_seconds: public.timestamp_epoch_seconds,
+                },
+                mldsa_range_handle.clone(),
+                validity_handle
+                    .clone()
+                    .expect("TS13 validity relation exists"),
+                proof
+                    .ts13_mso_validity_interaction_claim
+                    .clone()
+                    .expect("TS13 validity claim shape was checked"),
+            )
+            .map_err(|error| Error::Verify(format!("TS13 private MSO validity: {error}")))?,
+        )
+    } else {
+        None
+    };
 
-    let private_item_profile = if has_ts13_revocation {
+    let private_item_profile = if is_ts13_demo {
+        MdocPrivateItemProfile::Ts13Demo
+    } else if has_ts13_revocation {
         MdocPrivateItemProfile::Ts13
     } else {
         MdocPrivateItemProfile::Product
@@ -4708,11 +5373,20 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
     let mut country_code_table = proof
         .country_code_table_claimed_sum
         .map(|sum| MdocCountryCodeTable::verifier(sum, country_code_handle.clone()));
-    let mut mdoc_window_bind = MdocWindowBind::verifier_for_attributes(
-        mdoc_window_bind_rows_from(statement),
-        attribute_fields.clone(),
-        proof.mdoc_window_bind_interaction_claim.clone(),
-    );
+    let mut mdoc_window_bind = if is_ts13_demo {
+        None
+    } else {
+        Some(MdocWindowBind::verifier_for_attributes(
+            mdoc_window_bind_rows_from(statement),
+            attribute_fields.clone(),
+            proof
+                .mdoc_window_bind_interaction_claim
+                .clone()
+                .ok_or_else(|| {
+                    Error::Verify("mdoc proof is missing the semantic window claim".to_string())
+                })?,
+        ))
+    };
     let mut age = if let Some(index) = statement.age_attribute_index() {
         let public = proof.age_public.as_ref().ok_or(Error::AgePolicyMismatch)?;
         let claimed_sums = proof
@@ -4769,57 +5443,106 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl_core(
         )
     });
 
-    // Mirror the prover's module order exactly (transcript identity).
-    let mut modules: Vec<&mut dyn Air> = vec![&mut sha_tables];
-    if let Some(range_table) = mldsa_range_table.as_mut() {
-        modules.push(range_table);
-    }
-    if let Some(country_table) = country_code_table.as_mut() {
-        modules.push(country_table);
-    }
-    if let Some(service) = mldsa_keccak_service.as_mut() {
-        modules.push(service);
-    }
-    modules.push(&mut issuer_message_provider);
-    #[cfg(feature = "unlink-spikes")]
-    if let Some(spike_io) = unlink_spike_io.as_mut() {
-        modules.push(spike_io);
-    }
-    if let Some(issuer) = issuer_mldsa.as_mut() {
-        modules.push(issuer);
-    }
-    if let Some(device) = device_mldsa.as_mut() {
-        modules.push(device);
-    }
-    for attribute_sha in &mut attribute_shas {
-        modules.push(attribute_sha);
-    }
-    if let Some(mso_sha) = mso_sha.as_mut() {
-        modules.push(mso_sha);
-    }
-    for parser in &mut mdoc_cbor_streams {
-        modules.push(parser);
-    }
-    for item_bind in &mut private_item_binds {
-        modules.push(item_bind);
-    }
-    modules.push(&mut private_mso_bind);
-    modules.push(&mut value_digests_scan);
-    if let Some(revocation_range) = ts13_revocation_range.as_mut() {
-        modules.push(revocation_range);
-    }
-    if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
-        modules.push(revocation_mldsa);
-    }
-    modules.push(&mut mdoc_window_bind);
-    if let Some(age) = age.as_mut() {
-        modules.push(age);
-    }
-    if let Some(nat) = nat.as_mut() {
-        modules.push(nat);
-    }
-    if let Some(revocation_public) = ts13_revocation_public.as_mut() {
-        modules.push(revocation_public);
+    let mut modules: Vec<&mut dyn Air> = Vec::new();
+    if is_ts13_demo {
+        collect_ts13_demo_modules!(
+            modules;
+            sha_tables = &mut sha_tables,
+            range_tables = mldsa_range_table
+                .as_mut()
+                .expect("TS13 shared range table exists"),
+            keccak_service = mldsa_keccak_service
+                .as_mut()
+                .expect("TS13 Keccak service exists"),
+            public_context = ts13_public_context
+                .as_mut()
+                .expect("TS13 public context exists"),
+            issuer_message = &mut issuer_message_provider,
+            issuer_mldsa = issuer_mldsa.as_mut().expect("TS13 issuer ML-DSA exists"),
+            item_shas = &mut attribute_shas,
+            mso_sha = mso_sha.as_mut().expect("TS13 MSO SHA exists"),
+            item_parsers = &mut mdoc_cbor_streams,
+            item_binders = &mut private_item_binds,
+            mso_binder = &mut private_mso_bind,
+            mso_validity = ts13_mso_validity
+                .as_mut()
+                .expect("TS13 exact validity exists"),
+            value_digests = &mut value_digests_scan,
+            expand_a = ts13_expand_a
+                .as_mut()
+                .expect("TS13 private ExpandA exists"),
+            device_key = ts13_device_key_bind
+                .as_mut()
+                .expect("TS13 private device-key binder exists"),
+            device_mldsa = device_mldsa
+                .as_mut()
+                .expect("TS13 private device ML-DSA exists"),
+            revocation_range = ts13_revocation_range
+                .as_mut()
+                .expect("TS13 revocation range exists"),
+            revocation_mldsa = revocation_mldsa
+                .as_mut()
+                .expect("TS13 revocation ML-DSA exists"),
+            revocation_public = ts13_revocation_public
+                .as_mut()
+                .expect("TS13 revocation public bind exists"),
+        );
+    } else {
+        modules.push(&mut sha_tables);
+        if let Some(range_table) = mldsa_range_table.as_mut() {
+            modules.push(range_table);
+        }
+        if let Some(country_table) = country_code_table.as_mut() {
+            modules.push(country_table);
+        }
+        if let Some(service) = mldsa_keccak_service.as_mut() {
+            modules.push(service);
+        }
+        modules.push(&mut issuer_message_provider);
+        #[cfg(feature = "unlink-spikes")]
+        if let Some(spike_io) = unlink_spike_io.as_mut() {
+            modules.push(spike_io);
+        }
+        if let Some(issuer) = issuer_mldsa.as_mut() {
+            modules.push(issuer);
+        }
+        if let Some(device) = device_mldsa.as_mut() {
+            modules.push(device);
+        }
+        for attribute_sha in &mut attribute_shas {
+            modules.push(attribute_sha);
+        }
+        if let Some(mso_sha) = mso_sha.as_mut() {
+            modules.push(mso_sha);
+        }
+        for parser in &mut mdoc_cbor_streams {
+            modules.push(parser);
+        }
+        for item_bind in &mut private_item_binds {
+            modules.push(item_bind);
+        }
+        modules.push(&mut private_mso_bind);
+        modules.push(&mut value_digests_scan);
+        if let Some(revocation_range) = ts13_revocation_range.as_mut() {
+            modules.push(revocation_range);
+        }
+        if let Some(revocation_mldsa) = revocation_mldsa.as_mut() {
+            modules.push(revocation_mldsa);
+        }
+        modules.push(
+            mdoc_window_bind
+                .as_mut()
+                .expect("product semantic window exists"),
+        );
+        if let Some(age) = age.as_mut() {
+            modules.push(age);
+        }
+        if let Some(nat) = nat.as_mut() {
+            modules.push(nat);
+        }
+        if let Some(revocation_public) = ts13_revocation_public.as_mut() {
+            modules.push(revocation_public);
+        }
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let tree0_start = Instant::now();
@@ -5204,7 +5927,9 @@ mod auth_projection_serde_tests {
     }
 
     fn set_message_len(input: &mut MdocAuthInput, len: usize) {
-        let MdocAuthInput::MlDsa(input) = input;
+        let MdocAuthInput::MlDsa(input) = input else {
+            panic!("shape-test helper requires the public-key ML-DSA arm");
+        };
         input.message = vec![0; len];
     }
 
