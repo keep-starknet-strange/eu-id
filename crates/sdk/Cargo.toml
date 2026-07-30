@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 # The EU-ID ZK SDK: the single source of truth for the prover/verifier data
-# contract. It owns the contract types, the deterministic-CBOR statement
-# encoding (`encode_statement`), and the product `prove_identity` /
+# contract. It owns the tagged Product/TS13 contract types, Product's
+# deterministic-CBOR statement encoding, and the shared `prove_identity` /
 # `verify_identity` entry points.
 #
 # The mdoc PID bodies run the real STWO prover/verifier behind the UniFFI
@@ -54,6 +54,7 @@ sha2 = "0.10"
 # The prover's own ML-DSA reference verifier — used only by the demo module's
 # tests to confirm the minted issuer / assembled device signatures verify.
 stwo-mldsa = { path = "../stwo-mldsa" }
+stwo-sha256 = { path = "../stwo-sha256" }
 # Deterministic fully-PQ issuer/device/revocation fixture for the TS13
 # end-to-end envelope regression.
 ml-dsa = "0.1.1"

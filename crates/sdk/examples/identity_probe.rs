@@ -11,8 +11,8 @@ mod mldsa_fixture;
 use std::time::Instant;
 
 use euid_zk_sdk::{
-    prove_identity, verify_identity, IssuerKey, NatMode, PredicateMode, TrustedIssuers,
-    ZkMdocWitness, ZkPublicStatement,
+    prove_identity, verify_identity, IssuerKey, NatMode, PredicateMode, ProductMdocWitnessV1,
+    ProductPublicStatementV1, TrustedIssuers, ZkMdocWitness, ZkPublicStatement,
 };
 use sha2::{Digest, Sha256};
 
@@ -21,7 +21,7 @@ fn fixture() -> (ZkPublicStatement, ZkMdocWitness) {
         eu_id_prover::mdoc::openid4vp_session_transcript(b"session-transcript-123");
     let fixture = mldsa_fixture::mldsa_full_pq_fixture_with_transcript(&session_transcript);
     (
-        ZkPublicStatement {
+        ZkPublicStatement::ProductV1(ProductPublicStatementV1 {
             spec_id: "stwo-euid-pid-v1".to_string(),
             version: 1,
             doctype: "eu.europa.ec.eudi.pid.1".to_string(),
@@ -35,16 +35,11 @@ fn fixture() -> (ZkPublicStatement, ZkMdocWitness) {
             age_threshold_years: Some(18),
             accepted_numeric_countries: Some(vec![250, 276]),
             nat_mode: NatMode::Any,
-            ts13_request: None,
-        },
-        ZkMdocWitness {
+        }),
+        ZkMdocWitness::ProductV1(ProductMdocWitnessV1 {
             document: fixture.document,
             trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk]),
-            ts13_trusted_issuer_public_keys: None,
-            ts13_revocation_id_lo: None,
-            ts13_revocation_id_hi: None,
-            ts13_revocation_signature: None,
-        },
+        }),
     )
 }
 

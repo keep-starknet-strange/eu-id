@@ -7,8 +7,8 @@
 
 use euid_zk_sdk::{
     prove_identity, ts13_default_circuit_hash, ts13_prove_zk_document, ts13_verify_zk_document,
-    verify_identity, IssuerKey, NatMode, PredicateMode, TrustedIssuers, Ts13MdocWitness,
-    Ts13PresentationRequest, ZkMdocWitness, ZkPublicStatement,
+    Ts13DemoPublicStatementV1, Ts13DemoWitnessV1, Ts13MdocWitness, Ts13PresentationRequest,
+    ZkError, ZkMdocWitness, ZkPublicStatement,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,12 +30,6 @@ struct Ts13ProofEnvelopeForTest {
     request_binding_hash: String,
     mdoc_statement: eu_id_prover::MdocTs13Statement,
     stark_proof: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct IdentityTs13ProofEnvelopeForTest {
-    envelope_format: u16,
-    document: Vec<u8>,
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -101,22 +95,28 @@ fn identity_statement(
     request: Ts13PresentationRequest,
     issuer_public_key: &[u8],
 ) -> ZkPublicStatement {
-    ZkPublicStatement {
-        spec_id: "stwo-euid-pid-v1".to_string(),
-        version: 1,
-        doctype: request.doctype.clone(),
-        namespace: request.namespace.clone(),
-        issuer_key: IssuerKey::MlDsa {
-            pk_hash: Sha256::digest(issuer_public_key).to_vec(),
-        },
-        today_epoch_day: request.current_date_epoch_day,
-        nonce: request.session_transcript.clone(),
-        predicate_mode: PredicateMode::Age,
-        age_threshold_years: Some(18),
-        accepted_numeric_countries: None,
-        nat_mode: NatMode::Any,
-        ts13_request: Some(request),
-    }
+    let circuit_hash = request
+        .circuit_hash
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let hex = std::str::from_utf8(pair).expect("ASCII circuit hash");
+            u8::from_str_radix(hex, 16).expect("hex circuit hash")
+        })
+        .collect();
+    ZkPublicStatement::Ts13DemoV1(Ts13DemoPublicStatementV1 {
+        circuit_hash,
+        zk_system_id: "rp-local-ts13-legacy-regression".to_string(),
+        document_type: request.doctype,
+        namespace: request.namespace,
+        element_identifier: "age_over_18".to_string(),
+        expected_value_cbor: vec![0xf5],
+        timestamp_epoch_seconds: i64::from(request.current_date_epoch_day) * 86_400,
+        session_transcript: request.session_transcript,
+        trusted_issuer_public_key: issuer_public_key.to_vec(),
+        revocation_public_key: request.revocation_public_key,
+        revocation_epoch: request.revocation_epoch,
+    })
 }
 
 fn distinctive_revocation_bounds(id: u64) -> (u64, u64) {
@@ -365,88 +365,16 @@ fn ts13_equality_envelope_proves_and_verifies_with_public_only_envelope() {
     }
 
     let identity_statement = identity_statement(request.clone(), &fixture.issuer_pk);
-    let identity_witness = ZkMdocWitness {
+    let identity_witness = ZkMdocWitness::Ts13DemoV1(Ts13DemoWitnessV1 {
         document: fixture.document.clone(),
-        trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk.clone()]),
-        ts13_trusted_issuer_public_keys: Some(vec![fixture.issuer_pk.clone()]),
-        ts13_revocation_id_lo: Some(id_lo),
-        ts13_revocation_id_hi: Some(id_hi),
-        ts13_revocation_signature: Some(revocation_signature.clone()),
-    };
-    let mut incomplete_witness = identity_witness.clone();
-    incomplete_witness.ts13_revocation_id_hi = None;
-    assert!(
-        prove_identity(identity_statement.clone(), incomplete_witness).is_err(),
-        "partial TS13 witness fields must fail closed"
-    );
-
-    let identity_proof =
-        prove_identity(identity_statement.clone(), identity_witness).expect("identity TS13 proves");
-    assert!(
-        verify_identity(identity_statement.clone(), identity_proof.clone())
-            .expect("identity TS13 verification runs")
-            .ok,
-        "identity TS13 proof verifies"
-    );
-    let identity_envelope: IdentityTs13ProofEnvelopeForTest =
-        bincode::deserialize(&identity_proof).expect("identity TS13 envelope decodes");
-    assert_eq!(identity_envelope.envelope_format, 8);
-    let routed_document: euid_zk_sdk::Ts13ZkDocument =
-        bincode::deserialize(&identity_envelope.document).expect("routed TS13 document decodes");
-    let routed_inner: Ts13ProofEnvelopeForTest =
-        bincode::deserialize(&routed_document.proof).expect("routed TS13 proof decodes");
-    assert_eq!(routed_inner.envelope_format, TS13_ENVELOPE_FORMAT_V3);
-
-    for (name, private_marker) in &signature_witness_markers {
-        assert!(
-            !identity_proof
-                .windows(private_marker.len())
-                .any(|window| window == private_marker.as_slice()),
-            "identity TS13 envelope must not contain {name}"
-        );
-    }
-    for (name, private_marker) in [
-        (
-            "revocation signature",
-            revocation_signature_marker.as_slice(),
-        ),
-        ("id_lo", id_lo_bytes.as_slice()),
-        ("id_hi", id_hi_bytes.as_slice()),
-    ] {
-        assert!(
-            !identity_proof
-                .windows(private_marker.len())
-                .any(|window| window == private_marker),
-            "identity TS13 envelope must not contain {name}"
-        );
-    }
-
-    let mut product_statement = identity_statement.clone();
-    product_statement.ts13_request = None;
-    assert!(
-        !verify_identity(product_statement, identity_proof.clone())
-            .expect("product statement cross-rejection runs")
-            .ok,
-        "TS13 envelope must not reach the product verifier"
-    );
-    let mut product_tag: IdentityTs13ProofEnvelopeForTest =
-        bincode::deserialize(&identity_proof).expect("identity TS13 envelope re-decodes");
-    product_tag.envelope_format = 7;
-    let product_tag = bincode::serialize(&product_tag).expect("product-tag tamper serializes");
-    assert!(
-        !verify_identity(identity_statement.clone(), product_tag)
-            .expect("TS13 statement product-tag rejection runs")
-            .ok,
-        "product envelope tag must not reach the TS13 verifier"
-    );
-
-    let mut unknown_tag = identity_envelope;
-    unknown_tag.envelope_format = 0xffff;
-    let unknown_tag = bincode::serialize(&unknown_tag).expect("unknown-tag envelope serializes");
-    assert!(
-        verify_identity(identity_statement, unknown_tag).is_err(),
-        "unknown identity envelope tags must reject"
-    );
+        revocation_id_lo: id_lo,
+        revocation_id_hi: id_hi,
+        revocation_signature,
+    });
+    assert!(matches!(
+        prove_identity(identity_statement, identity_witness),
+        Err(ZkError::UnsupportedCircuitHash)
+    ));
 }
 
 #[test]

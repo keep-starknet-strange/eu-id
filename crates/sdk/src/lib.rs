@@ -1,8 +1,8 @@
 //! ML-DSA EU-ID ZK SDK, exposed to Kotlin and Swift through UniFFI.
 //!
-//! [`prove_identity`] accepts a CBOR PID mdoc plus ML-DSA issuer trust pins and
-//! returns a compressed proof envelope. [`verify_identity`] binds that envelope
-//! to the verifier's request and verifies the same mdoc proof.
+//! [`prove_identity`] accepts one tagged Product V1 or TS13 demo theorem and
+//! returns its opaque proof bytes. Product keeps the compressed V7 envelope;
+//! TS13 uses the uncompressed, fixed-capacity V4 envelope.
 
 use std::io::{Read, Write};
 
@@ -20,6 +20,10 @@ uniffi::setup_scaffolding!();
 mod demo;
 mod mapping;
 pub mod ts13_demo;
+pub use ts13_demo::{
+    ProductMdocWitnessV1, ProductPublicStatementV1, Ts13DemoPublicStatementV1, Ts13DemoWitnessV1,
+    ZkMdocWitness, ZkPublicStatement,
+};
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PredicateMode {
@@ -137,9 +141,6 @@ const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1_952;
 /// verifier never accepts a ProductDefault proof as an equality+revocation
 /// presentation, or vice versa.
 const TS13_ENVELOPE_FORMAT_V3: u16 = 3;
-/// Temporary unified identity-envelope tag for a serialized
-/// [`Ts13ZkDocument`]. The frozen TS13 demo V4 envelope replaces this wrapper.
-const TS13_IDENTITY_ENVELOPE_FORMAT_V8: u16 = 8;
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ts13DisclosureKind {
@@ -850,40 +851,6 @@ pub enum TrustedIssuers {
     PublicKeys(Vec<Vec<u8>>),
 }
 
-#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct ZkPublicStatement {
-    pub spec_id: String,
-    pub version: u32,
-    pub doctype: String,
-    pub namespace: String,
-    /// Issuer trust anchor (P-256 coordinates or ML-DSA `pkEncode` hash).
-    pub issuer_key: IssuerKey,
-    pub today_epoch_day: i32,
-    pub nonce: Vec<u8>,
-    pub predicate_mode: PredicateMode,
-    pub age_threshold_years: Option<u32>,
-    pub accepted_numeric_countries: Option<Vec<u32>>,
-    pub nat_mode: NatMode,
-    /// Presence selects the TS13 equality-and-revocation profile.
-    #[uniffi(default = None)]
-    pub ts13_request: Option<Ts13PresentationRequest>,
-}
-
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct ZkMdocWitness {
-    pub document: Vec<u8>,
-    /// Trusted issuers (x5chain certs for P-256, pinned `pkEncode`s for ML-DSA).
-    pub trusted_issuers: TrustedIssuers,
-    #[uniffi(default = None)]
-    pub ts13_trusted_issuer_public_keys: Option<Vec<Vec<u8>>>,
-    #[uniffi(default = None)]
-    pub ts13_revocation_id_lo: Option<u64>,
-    #[uniffi(default = None)]
-    pub ts13_revocation_id_hi: Option<u64>,
-    #[uniffi(default = None)]
-    pub ts13_revocation_signature: Option<Vec<u8>>,
-}
-
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct ZkVerifyResult {
     pub ok: bool,
@@ -897,9 +864,55 @@ pub enum ZkError {
     Prove(String),
     #[error("verification failed: {0}")]
     Verify(String),
+    #[error("unsupported proof system")]
+    UnsupportedProofSystem,
+    #[error("unsupported circuit hash")]
+    UnsupportedCircuitHash,
+    #[error("unsupported demo credential shape")]
+    UnsupportedDemoCredentialShape,
+    #[error("malformed session transcript")]
+    MalformedSessionTranscript,
+    #[error("invalid public context")]
+    InvalidPublicContext,
+    #[error("invalid private credential")]
+    InvalidPrivateCredential,
+    #[error("invalid revocation witness")]
+    InvalidRevocationWitness,
+    #[error("proof generation failed")]
+    ProofGenerationFailed,
+    #[error("malformed proof envelope")]
+    MalformedProofEnvelope,
+    #[error("proof context mismatch")]
+    ProofContextMismatch,
+    #[error("proof verification failed")]
+    ProofVerificationFailed,
 }
 
-fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<(), ZkError> {
+impl From<ts13_demo::Ts13DemoError> for ZkError {
+    fn from(error: ts13_demo::Ts13DemoError) -> Self {
+        match error {
+            ts13_demo::Ts13DemoError::UnsupportedProofSystem => Self::UnsupportedProofSystem,
+            ts13_demo::Ts13DemoError::UnsupportedCircuitHash => Self::UnsupportedCircuitHash,
+            ts13_demo::Ts13DemoError::UnsupportedDemoCredentialShape => {
+                Self::UnsupportedDemoCredentialShape
+            }
+            ts13_demo::Ts13DemoError::MalformedSessionTranscript => {
+                Self::MalformedSessionTranscript
+            }
+            ts13_demo::Ts13DemoError::InvalidPublicContext => Self::InvalidPublicContext,
+            ts13_demo::Ts13DemoError::InvalidPrivateCredential => Self::InvalidPrivateCredential,
+            ts13_demo::Ts13DemoError::InvalidRevocationWitness => Self::InvalidRevocationWitness,
+            ts13_demo::Ts13DemoError::ProofGenerationFailed => Self::ProofGenerationFailed,
+            ts13_demo::Ts13DemoError::MalformedProofEnvelope => Self::MalformedProofEnvelope,
+            ts13_demo::Ts13DemoError::ProofContextMismatch => Self::ProofContextMismatch,
+            ts13_demo::Ts13DemoError::ProofVerificationFailed => Self::ProofVerificationFailed,
+        }
+    }
+}
+
+fn validate_product_statement_contract(
+    statement: &ProductPublicStatementV1,
+) -> Result<(), ZkError> {
     let contract = zk_contract_v1();
     if statement.spec_id != contract.spec_id_pid
         || statement.version != 1
@@ -929,69 +942,7 @@ fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<
     Ok(())
 }
 
-fn validate_ts13_identity_statement(
-    statement: &ZkPublicStatement,
-    request: &Ts13PresentationRequest,
-) -> Result<(), ZkError> {
-    validate_product_statement_contract(statement)?;
-    ts13_validate_presentation_request(request)?;
-    let IssuerKey::MlDsa { pk_hash } = &statement.issuer_key else {
-        return Err(ZkError::InvalidInput(
-            "TS13 identity statement needs an ML-DSA issuer key hash".to_string(),
-        ));
-    };
-    let issuer_hash = pk_hash
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if statement.doctype != request.doctype
-        || statement.namespace != request.namespace
-        || statement.today_epoch_day != request.current_date_epoch_day
-        || statement.nonce != request.session_transcript
-        || statement.predicate_mode != PredicateMode::Age
-        || statement.age_threshold_years != Some(18)
-        || statement.accepted_numeric_countries.is_some()
-        || request.trusted_issuer_hashes.as_slice() != [issuer_hash]
-    {
-        return Err(ZkError::InvalidInput(
-            "TS13 identity fields do not match the presentation request".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn identity_ts13_witness(witness: &ZkMdocWitness) -> Result<Option<Ts13MdocWitness>, ZkError> {
-    match (
-        &witness.ts13_trusted_issuer_public_keys,
-        witness.ts13_revocation_id_lo,
-        witness.ts13_revocation_id_hi,
-        &witness.ts13_revocation_signature,
-    ) {
-        (None, None, None, None) => Ok(None),
-        (Some(keys), Some(revocation_id_lo), Some(revocation_id_hi), Some(signature)) => {
-            match &witness.trusted_issuers {
-                TrustedIssuers::PublicKeys(product_keys) if product_keys == keys => {}
-                _ => {
-                    return Err(ZkError::InvalidInput(
-                        "TS13 issuer keys must match trusted_issuers".to_string(),
-                    ))
-                }
-            }
-            Ok(Some(Ts13MdocWitness {
-                document: witness.document.clone(),
-                trusted_issuer_public_keys: keys.clone(),
-                revocation_id_lo,
-                revocation_id_hi,
-                revocation_signature: signature.clone(),
-            }))
-        }
-        _ => Err(ZkError::InvalidInput(
-            "TS13 identity witness fields must be all present or all absent".to_string(),
-        )),
-    }
-}
-
-fn encode_statement(statement: &ZkPublicStatement) -> Vec<u8> {
+fn encode_statement(statement: &ProductPublicStatementV1) -> Vec<u8> {
     let mut entries: Vec<(Value, Value)> = vec![
         ("v".into(), Value::from(statement.version)),
         ("spec_id".into(), statement.spec_id.as_str().into()),
@@ -1047,12 +998,6 @@ struct MdocProofEnvelope {
     stark_proof: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct Ts13IdentityProofEnvelope {
-    envelope_format: u16,
-    document: Vec<u8>,
-}
-
 const MDOC_ENVELOPE_FORMAT_V7: u16 = 7;
 /// The mobile transport rail is under 1 MiB; this leaves bounded headroom for
 /// the public statement and future format framing while rejecting oversized
@@ -1067,52 +1012,6 @@ fn bounded_bincode_options(limit: usize) -> impl Options {
     bincode::DefaultOptions::new()
         .with_fixint_encoding()
         .with_limit(limit as u64)
-}
-
-fn peek_identity_envelope_format(proof: &[u8]) -> Result<u16, ZkError> {
-    if proof.len() > MAX_MDOC_ENVELOPE_BYTES {
-        return Err(ZkError::Verify(
-            "proof envelope exceeds size limit".to_string(),
-        ));
-    }
-    bounded_bincode_options(MAX_MDOC_ENVELOPE_BYTES)
-        .allow_trailing_bytes()
-        .deserialize(proof)
-        .map_err(|_| ZkError::Verify("unsupported envelope format".to_string()))
-}
-
-fn encode_ts13_identity_envelope(document: &Ts13ZkDocument) -> Result<Vec<u8>, ZkError> {
-    let document = bincode::serialize(document)
-        .map_err(|error| ZkError::Prove(format!("failed to serialize TS13 document: {error}")))?;
-    let envelope = bincode::serialize(&Ts13IdentityProofEnvelope {
-        envelope_format: TS13_IDENTITY_ENVELOPE_FORMAT_V8,
-        document,
-    })
-    .map_err(|error| {
-        ZkError::Prove(format!(
-            "failed to serialize TS13 identity envelope: {error}"
-        ))
-    })?;
-    if envelope.len() > MAX_MDOC_ENVELOPE_BYTES {
-        return Err(ZkError::Prove(
-            "TS13 identity envelope exceeds size limit".to_string(),
-        ));
-    }
-    Ok(envelope)
-}
-
-fn decode_ts13_identity_envelope(proof: &[u8]) -> Result<Ts13ZkDocument, ZkError> {
-    let envelope: Ts13IdentityProofEnvelope = bounded_bincode_options(MAX_MDOC_ENVELOPE_BYTES)
-        .reject_trailing_bytes()
-        .deserialize(proof)
-        .map_err(|error| ZkError::Verify(format!("invalid TS13 identity envelope: {error}")))?;
-    if envelope.envelope_format != TS13_IDENTITY_ENVELOPE_FORMAT_V8 {
-        return Err(ZkError::Verify("unsupported envelope format".to_string()));
-    }
-    bounded_bincode_options(MAX_MDOC_ENVELOPE_BYTES)
-        .reject_trailing_bytes()
-        .deserialize(&envelope.document)
-        .map_err(|error| ZkError::Verify(format!("invalid TS13 document: {error}")))
 }
 
 fn decode_mdoc_proof_envelope(proof: &[u8]) -> Result<MdocProofEnvelope, ZkError> {
@@ -1245,8 +1144,8 @@ fn expected_mdoc_attributes_for_profile(
 }
 
 fn mdoc_request(
-    statement: &ZkPublicStatement,
-    witness: &ZkMdocWitness,
+    statement: &ProductPublicStatementV1,
+    witness: &ProductMdocWitnessV1,
 ) -> Result<eu_id_prover::MdocPidRequest, ZkError> {
     let trusted_mldsa_issuer_public_keys = match &witness.trusted_issuers {
         TrustedIssuers::PublicKeys(keys) => keys.clone(),
@@ -1272,7 +1171,7 @@ fn mdoc_request(
 
 fn mdoc_statement_matches_public_statement(
     mdoc_statement: &eu_id_prover::MdocStatement,
-    statement: &ZkPublicStatement,
+    statement: &ProductPublicStatementV1,
 ) -> Result<bool, ZkError> {
     if mdoc_statement.ts13_revocation.is_some()
         || mdoc_statement.ts13_revocation_range.is_some()
@@ -1336,95 +1235,115 @@ fn mdoc_disclosed_set_matches(
         })
 }
 
-/// Prove either the product predicate profile or TS13 through one byte API.
-///
-/// TS13 mode proves the issuer-signed `age_over_18 == true` equality, not a
-/// date-of-birth predicate, and every TS13 presentation includes revocation.
+fn prove_product_identity(
+    statement: ProductPublicStatementV1,
+    witness: ProductMdocWitnessV1,
+) -> Result<Vec<u8>, ZkError> {
+    validate_product_statement_contract(&statement)?;
+    let policy = mapping::to_policy(&statement)?;
+    let request = mdoc_request(&statement, &witness)?;
+    let (proof, mdoc_statement) =
+        eu_id_prover::prove_mdoc(&witness.document, &request, policy).map_err(map_prover_error)?;
+    let stark_proof = bincode::serialize(&proof)
+        .map_err(|error| ZkError::Prove(format!("failed to serialize mdoc proof: {error}")))
+        .and_then(|bytes| compress_stark_proof_for_ffi(&bytes))?;
+    bincode::serialize(&MdocProofEnvelope {
+        envelope_format: MDOC_ENVELOPE_FORMAT_V7,
+        statement_bytes: encode_statement(&statement),
+        mdoc_statement,
+        stark_proof,
+    })
+    .map_err(|error| ZkError::Prove(format!("failed to serialize proof envelope: {error}")))
+}
+
+fn prove_identity_on_current_stack<R>(
+    statement: ZkPublicStatement,
+    witness: ZkMdocWitness,
+    artifact_resolver: &R,
+) -> Result<Vec<u8>, ZkError>
+where
+    R: ts13_demo::Ts13DemoArtifactResolver,
+{
+    match (statement, witness) {
+        (ZkPublicStatement::ProductV1(statement), ZkMdocWitness::ProductV1(witness)) => {
+            prove_product_identity(statement, witness)
+        }
+        (ZkPublicStatement::Ts13DemoV1(statement), ZkMdocWitness::Ts13DemoV1(witness)) => {
+            ts13_demo::prove_ts13_demo_identity(&statement, &witness, artifact_resolver)
+                .map_err(Into::into)
+        }
+        _ => Err(ZkError::UnsupportedProofSystem),
+    }
+}
+
+/// Prove either the Product V1 theorem or the unlinkable TS13 demo theorem.
 #[uniffi::export]
 pub fn prove_identity(
     statement: ZkPublicStatement,
     witness: ZkMdocWitness,
 ) -> Result<Vec<u8>, ZkError> {
     on_large_stack(move || {
-        let ts13_witness = identity_ts13_witness(&witness)?;
-        match (statement.ts13_request.clone(), ts13_witness) {
-            (None, None) => {
-                validate_product_statement_contract(&statement)?;
-                let policy = mapping::to_policy(&statement)?;
-                let request = mdoc_request(&statement, &witness)?;
-                let (proof, mdoc_statement) =
-                    eu_id_prover::prove_mdoc(&witness.document, &request, policy)
-                        .map_err(map_prover_error)?;
-                let stark_proof = bincode::serialize(&proof)
-                    .map_err(|error| {
-                        ZkError::Prove(format!("failed to serialize mdoc proof: {error}"))
-                    })
-                    .and_then(|bytes| compress_stark_proof_for_ffi(&bytes))?;
-                bincode::serialize(&MdocProofEnvelope {
-                    envelope_format: MDOC_ENVELOPE_FORMAT_V7,
-                    statement_bytes: encode_statement(&statement),
-                    mdoc_statement,
-                    stark_proof,
-                })
-                .map_err(|error| {
-                    ZkError::Prove(format!("failed to serialize proof envelope: {error}"))
-                })
-            }
-            (Some(request), Some(witness)) => {
-                validate_ts13_identity_statement(&statement, &request)?;
-                let document = ts13_prove_zk_document_on_current_stack(request, witness)?;
-                encode_ts13_identity_envelope(&document)
-            }
-            _ => Err(ZkError::InvalidInput(
-                "TS13 request and witness fields must be present together".to_string(),
-            )),
-        }
+        prove_identity_on_current_stack(
+            statement,
+            witness,
+            &ts13_demo::CompiledTs13DemoArtifactResolver,
+        )
     })
 }
 
-/// Verify either identity profile, selected by the proof envelope tag.
-///
-/// TS13 mode proves the issuer-signed `age_over_18 == true` equality, not a
-/// date-of-birth predicate, and every TS13 presentation includes revocation.
+fn verify_product_identity(
+    statement: &ProductPublicStatementV1,
+    proof: &[u8],
+) -> Result<ZkVerifyResult, ZkError> {
+    validate_product_statement_contract(statement)?;
+    let envelope = decode_mdoc_proof_envelope(proof)?;
+    if envelope.statement_bytes != encode_statement(statement)
+        || !mdoc_statement_matches_public_statement(&envelope.mdoc_statement, statement)?
+    {
+        return Ok(ZkVerifyResult { ok: false });
+    }
+    let stark_proof = match decompress_stark_proof_from_ffi(&envelope.stark_proof)
+        .ok()
+        .and_then(|bytes| decode_stark_proof(&bytes))
+    {
+        Some(proof) => proof,
+        None => return Ok(ZkVerifyResult { ok: false }),
+    };
+    Ok(ZkVerifyResult {
+        ok: eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok(),
+    })
+}
+
+fn verify_identity_on_current_stack<R>(
+    statement: ZkPublicStatement,
+    proof: &[u8],
+    artifact_resolver: &R,
+) -> Result<ZkVerifyResult, ZkError>
+where
+    R: ts13_demo::Ts13DemoArtifactResolver,
+{
+    match statement {
+        ZkPublicStatement::ProductV1(statement) => verify_product_identity(&statement, proof),
+        ZkPublicStatement::Ts13DemoV1(statement) => {
+            ts13_demo::verify_ts13_demo_identity(&statement, proof, artifact_resolver)
+                .map(|()| ZkVerifyResult { ok: true })
+                .map_err(Into::into)
+        }
+    }
+}
+
+/// Verify the theorem selected by the tagged public statement.
 #[uniffi::export]
 pub fn verify_identity(
     statement: ZkPublicStatement,
     proof: Vec<u8>,
 ) -> Result<ZkVerifyResult, ZkError> {
-    on_large_stack(move || match peek_identity_envelope_format(&proof)? {
-        MDOC_ENVELOPE_FORMAT_V7 => {
-            if statement.ts13_request.is_some() {
-                return Ok(ZkVerifyResult { ok: false });
-            }
-            validate_product_statement_contract(&statement)?;
-            let envelope = decode_mdoc_proof_envelope(&proof)?;
-            if envelope.statement_bytes != encode_statement(&statement)
-                || !mdoc_statement_matches_public_statement(&envelope.mdoc_statement, &statement)?
-            {
-                return Ok(ZkVerifyResult { ok: false });
-            }
-            let stark_proof = match decompress_stark_proof_from_ffi(&envelope.stark_proof)
-                .ok()
-                .and_then(|bytes| decode_stark_proof(&bytes))
-            {
-                Some(proof) => proof,
-                None => return Ok(ZkVerifyResult { ok: false }),
-            };
-            Ok(ZkVerifyResult {
-                ok: eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok(),
-            })
-        }
-        TS13_IDENTITY_ENVELOPE_FORMAT_V8 => {
-            let Some(request) = statement.ts13_request.as_ref() else {
-                return Ok(ZkVerifyResult { ok: false });
-            };
-            validate_ts13_identity_statement(&statement, request)?;
-            let document = decode_ts13_identity_envelope(&proof)?;
-            Ok(ZkVerifyResult {
-                ok: ts13_verify_zk_document_on_current_stack(request, &document)?,
-            })
-        }
-        _ => Err(ZkError::Verify("unsupported envelope format".to_string())),
+    on_large_stack(move || {
+        verify_identity_on_current_stack(
+            statement,
+            &proof,
+            &ts13_demo::CompiledTs13DemoArtifactResolver,
+        )
     })
 }
 
@@ -1439,6 +1358,11 @@ pub fn zk_system() -> ZkSystemKind {
         eu_id_prover::ZkSystemKind::MlDsa => ZkSystemKind::MlDsa,
     }
 }
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../eu-id-prover/tests/mldsa_fixture.rs"]
+mod mldsa_fixture;
 
 #[cfg(test)]
 mod tests {
@@ -1457,8 +1381,8 @@ mod tests {
     const PRE_UNLINKABILITY_MDOC_ENVELOPE_FORMAT_V6: u16 = 6;
     const PRE_UNLINKABILITY_TS13_ENVELOPE_FORMAT_V2: u16 = 2;
 
-    fn sample_statement() -> ZkPublicStatement {
-        ZkPublicStatement {
+    fn sample_product_statement() -> ProductPublicStatementV1 {
+        ProductPublicStatementV1 {
             spec_id: "stwo-euid-pid-v1".to_string(),
             version: 1,
             doctype: TS13_PID_DOCTYPE.to_string(),
@@ -1472,8 +1396,202 @@ mod tests {
             age_threshold_years: Some(18),
             accepted_numeric_countries: Some(vec![276, 250]),
             nat_mode: NatMode::Any,
-            ts13_request: None,
         }
+    }
+
+    fn sample_statement() -> ZkPublicStatement {
+        ZkPublicStatement::ProductV1(sample_product_statement())
+    }
+
+    #[derive(Clone, Copy)]
+    struct FixedTs13ArtifactResolver(ts13_demo::Ts13DemoV4Parameters);
+
+    impl ts13_demo::Ts13DemoArtifactResolver for FixedTs13ArtifactResolver {
+        fn resolve(
+            &self,
+            circuit_hash: [u8; 32],
+        ) -> Result<ts13_demo::Ts13DemoV4Parameters, ts13_demo::Ts13DemoError> {
+            if circuit_hash == self.0.circuit_hash() {
+                Ok(self.0)
+            } else {
+                Err(ts13_demo::Ts13DemoError::UnsupportedCircuitHash)
+            }
+        }
+    }
+
+    #[test]
+    fn ts13_identity_injected_artifact_routes_core_and_v4() {
+        std::thread::Builder::new()
+            .name("sdk-ts13-identity-route".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .stack_size(64 * 1024 * 1024)
+                    .build()
+                    .unwrap()
+                    .install(|| {
+                const VERIFY_AT: i64 = 1_798_761_600;
+                const REVOCATION_EPOCH: u32 = 17;
+                const TEST_V4_BODY_CAPACITY: u32 = 16 * 1024 * 1024;
+                let circuit_hash = [0x42; 32];
+                let resolver = FixedTs13ArtifactResolver(
+                    ts13_demo::Ts13DemoV4Parameters::new(
+                        circuit_hash,
+                        TEST_V4_BODY_CAPACITY,
+                    )
+                    .unwrap(),
+                );
+                let transcript = eu_id_prover::mdoc::openid4vp_session_transcript(
+                    b"sdk-ts13-identity-route",
+                );
+                let fixture =
+                    mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript);
+                let id = eu_id_prover::ts13::ts13_mso_derived_revocation_id(&fixture.mso);
+                let id_lo = id.checked_sub(1).unwrap();
+                let id_hi = id.checked_add(1).unwrap();
+                let (_, revocation_signature) = mldsa_fixture::mldsa_revocation_fixture(
+                    id_lo,
+                    id_hi,
+                    REVOCATION_EPOCH,
+                );
+                let semantic_statement = Ts13DemoPublicStatementV1 {
+                    circuit_hash: circuit_hash.to_vec(),
+                    zk_system_id: "rp-local-sdk-route".to_string(),
+                    document_type: TS13_PID_DOCTYPE.to_string(),
+                    namespace: TS13_PID_NAMESPACE.to_string(),
+                    element_identifier: "age_over_18".to_string(),
+                    expected_value_cbor: vec![0xf5],
+                    timestamp_epoch_seconds: VERIFY_AT,
+                    session_transcript: transcript,
+                    trusted_issuer_public_key: fixture.issuer_pk.clone(),
+                    revocation_public_key: fixture.revocation_pk.clone(),
+                    revocation_epoch: REVOCATION_EPOCH,
+                };
+                let witness = ZkMdocWitness::Ts13DemoV1(Ts13DemoWitnessV1 {
+                    document: fixture.document,
+                    revocation_id_lo: id_lo,
+                    revocation_id_hi: id_hi,
+                    revocation_signature,
+                });
+
+                assert!(matches!(
+                    prove_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(semantic_statement.clone()),
+                        witness.clone(),
+                        &ts13_demo::CompiledTs13DemoArtifactResolver,
+                    ),
+                    Err(ZkError::UnsupportedCircuitHash)
+                ));
+                assert!(matches!(
+                    prove_identity_on_current_stack(
+                        sample_statement(),
+                        witness.clone(),
+                        &resolver,
+                    ),
+                    Err(ZkError::UnsupportedProofSystem)
+                ));
+
+                let proof = prove_identity_on_current_stack(
+                    ZkPublicStatement::Ts13DemoV1(semantic_statement.clone()),
+                    witness,
+                    &resolver,
+                )
+                .expect("injected TS13 artifact routes to the core prover");
+                assert_eq!(proof.len(), 46 + TEST_V4_BODY_CAPACITY as usize);
+                assert_eq!(&proof[..8], b"EUIDTS13");
+                assert_eq!(&proof[8..10], &4u16.to_le_bytes());
+                assert_eq!(&proof[10..42], &circuit_hash);
+                assert_eq!(
+                    &proof[42..46],
+                    &TEST_V4_BODY_CAPACITY.to_le_bytes()
+                );
+                assert!(
+                    verify_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(semantic_statement.clone()),
+                        &proof,
+                        &resolver,
+                    )
+                    .expect("injected TS13 artifact routes to the core verifier")
+                    .ok
+                );
+
+                let mut relabelled = semantic_statement.clone();
+                relabelled.zk_system_id.push_str("-other");
+                assert!(matches!(
+                    verify_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(relabelled),
+                        &proof,
+                        &resolver,
+                    ),
+                    Err(ZkError::ProofVerificationFailed)
+                ));
+                let mut relabelled = semantic_statement.clone();
+                relabelled.timestamp_epoch_seconds += 1;
+                assert!(matches!(
+                    verify_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(relabelled),
+                        &proof,
+                        &resolver,
+                    ),
+                    Err(ZkError::ProofVerificationFailed)
+                ));
+                let mut relabelled = semantic_statement.clone();
+                relabelled.session_transcript =
+                    eu_id_prover::mdoc::openid4vp_session_transcript(
+                        b"sdk-ts13-identity-route-other-session",
+                    );
+                assert!(matches!(
+                    verify_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(relabelled),
+                        &proof,
+                        &resolver,
+                    ),
+                    Err(ZkError::ProofVerificationFailed)
+                ));
+                let mut relabelled = semantic_statement.clone();
+                relabelled.trusted_issuer_public_key[0] ^= 1;
+                assert!(matches!(
+                    verify_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(relabelled),
+                        &proof,
+                        &resolver,
+                    ),
+                    Err(ZkError::ProofVerificationFailed)
+                ));
+                let mut relabelled = semantic_statement.clone();
+                relabelled.revocation_epoch += 1;
+                assert!(matches!(
+                    verify_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(relabelled),
+                        &proof,
+                        &resolver,
+                    ),
+                    Err(ZkError::ProofVerificationFailed)
+                ));
+
+                let mut nonzero_padding = proof.clone();
+                *nonzero_padding.last_mut().unwrap() = 1;
+                assert!(matches!(
+                    verify_identity_on_current_stack(
+                        ZkPublicStatement::Ts13DemoV1(semantic_statement.clone()),
+                        &nonzero_padding,
+                        &resolver,
+                    ),
+                    Err(ZkError::MalformedProofEnvelope)
+                ));
+                assert!(matches!(
+                    verify_identity_on_current_stack(
+                        sample_statement(),
+                        &proof,
+                        &resolver,
+                    ),
+                    Err(ZkError::Verify(_))
+                ));
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     fn ts13_request() -> Ts13PresentationRequest {
@@ -1711,15 +1829,11 @@ mod tests {
     #[test]
     fn mdoc_request_forwards_mldsa_trust_pins() {
         let pins = vec![vec![9; ML_DSA_65_PUBLIC_KEY_BYTES]];
-        let witness = ZkMdocWitness {
+        let witness = ProductMdocWitnessV1 {
             document: vec![0xa0],
             trusted_issuers: TrustedIssuers::PublicKeys(pins.clone()),
-            ts13_trusted_issuer_public_keys: None,
-            ts13_revocation_id_lo: None,
-            ts13_revocation_id_hi: None,
-            ts13_revocation_signature: None,
         };
-        let request = mdoc_request(&sample_statement(), &witness).unwrap();
+        let request = mdoc_request(&sample_product_statement(), &witness).unwrap();
         assert_eq!(request.trusted_mldsa_issuer_public_keys, pins);
     }
 
@@ -1775,14 +1889,10 @@ mod tests {
 
     #[test]
     fn identity_public_api_rejects_malformed_mdoc() {
-        let witness = ZkMdocWitness {
+        let witness = ZkMdocWitness::ProductV1(ProductMdocWitnessV1 {
             document: Vec::new(),
             trusted_issuers: TrustedIssuers::PublicKeys(Vec::new()),
-            ts13_trusted_issuer_public_keys: None,
-            ts13_revocation_id_lo: None,
-            ts13_revocation_id_hi: None,
-            ts13_revocation_signature: None,
-        };
+        });
         assert!(matches!(
             prove_identity(sample_statement(), witness),
             Err(ZkError::Prove(_))
@@ -1884,7 +1994,7 @@ mod tests {
 
     #[test]
     fn statement_encoding_is_deterministic_and_mldsa_tagged() {
-        let statement = sample_statement();
+        let statement = sample_product_statement();
         let encoded = encode_statement(&statement);
         assert_eq!(encoded, encode_statement(&statement));
         assert!(encoded

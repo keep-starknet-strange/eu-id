@@ -59,6 +59,8 @@ const OPENID4VP_HANDOVER_INFO_SHA256: [u8; 32] = [
 
 /// FIPS 204 ML-DSA-65 `pkEncode` byte length.
 pub const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1_952;
+/// FIPS 204 ML-DSA-65 `sigEncode` byte length.
+pub const ML_DSA_65_SIGNATURE_BYTES: usize = stwo_mldsa::constants::SIG_BYTES;
 
 /// Public values needed to derive the frozen TS13 request context.
 ///

@@ -1,8 +1,5 @@
-//! Frozen native API and V4 envelope primitives for the unlinkable TS13 demo.
-//!
-//! The live `prove_identity` dispatch intentionally does not use these types
-//! yet. They are kept in a separate module so the tagged contract and proof
-//! format can be tested without publishing an incomplete proof system.
+//! Frozen native API, core routing, and V4 proof envelope for the unlinkable
+//! TS13 demo.
 
 use std::io::Cursor;
 
@@ -16,6 +13,8 @@ const V4_MAGIC: &[u8; 8] = b"EUIDTS13";
 const V4_VERSION: u16 = 4;
 const V4_HEADER_BYTES: usize = 46;
 const V4_CAPACITY_ALIGNMENT: u32 = 65_536;
+const TS13_DEMO_MIN_TIMESTAMP_SECONDS: i64 = 1_577_836_800;
+const TS13_DEMO_MAX_TIMESTAMP_SECONDS: i64 = 4_102_444_799;
 #[cfg(test)]
 const TS13_DEMO_PUBLIC_FIELD_NAMES: [&str; 11] = [
     "circuit_hash",
@@ -357,6 +356,134 @@ where
         return Err(Ts13DemoError::MalformedProofEnvelope);
     }
     Ok(proof)
+}
+
+/// Resolves verifier-authoritative circuit parameters from a generated
+/// artifact embedding. Implementations must never derive either value from
+/// prover-controlled proof bytes.
+pub(crate) trait Ts13DemoArtifactResolver {
+    fn resolve(&self, circuit_hash: [u8; 32]) -> Result<Ts13DemoV4Parameters, Ts13DemoError>;
+}
+
+/// Compile-time artifact resolver used by the public SDK route.
+///
+/// The generated artifact embedding has not landed yet, so the only safe
+/// implementation is to reject every hash. The generated module can replace
+/// this method body without changing `prove_identity` or `verify_identity`.
+pub(crate) struct CompiledTs13DemoArtifactResolver;
+
+impl Ts13DemoArtifactResolver for CompiledTs13DemoArtifactResolver {
+    fn resolve(&self, _circuit_hash: [u8; 32]) -> Result<Ts13DemoV4Parameters, Ts13DemoError> {
+        Err(Ts13DemoError::UnsupportedCircuitHash)
+    }
+}
+
+struct PreparedTs13DemoPublicInput {
+    parameters: Ts13DemoV4Parameters,
+    request: eu_id_prover::MdocPidRequest,
+    circuit: eu_id_prover::MdocTs13DemoCircuitPublicInput,
+}
+
+fn prepare_public_input<R: Ts13DemoArtifactResolver>(
+    statement: &Ts13DemoPublicStatementV1,
+    artifact_resolver: &R,
+) -> Result<PreparedTs13DemoPublicInput, Ts13DemoError> {
+    let (validated, derived) = ValidatedTs13DemoPublicStatementV1::from_public(statement)?;
+    if !(TS13_DEMO_MIN_TIMESTAMP_SECONDS..=TS13_DEMO_MAX_TIMESTAMP_SECONDS)
+        .contains(&validated.timestamp_epoch_seconds)
+        || derived.device_cose_sig_structure.len()
+            > eu_id_prover::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
+    {
+        return Err(Ts13DemoError::InvalidPublicContext);
+    }
+
+    let parameters = artifact_resolver.resolve(validated.circuit_hash)?;
+    if parameters.circuit_hash() != validated.circuit_hash {
+        return Err(Ts13DemoError::UnsupportedCircuitHash);
+    }
+
+    let request = eu_id_prover::MdocPidRequest {
+        doctype: validated.document_type,
+        namespace: validated.namespace,
+        attributes: vec![eu_id_prover::mdoc::MdocRequestedAttribute {
+            element_identifier: validated.element_identifier,
+            mode: eu_id_prover::mdoc::MdocDisclosureMode::ValueEquality(
+                validated.expected_value_cbor,
+            ),
+        }],
+        birth_date_element: "birth_date".to_string(),
+        nationality_element: "nationality".to_string(),
+        session_transcript: derived.canonical_session_transcript,
+        trusted_mldsa_issuer_public_keys: vec![validated.trusted_issuer_public_key.to_vec()],
+        device_authentication_profile:
+            eu_id_prover::mdoc::MdocDeviceAuthenticationProfile::Iso180135,
+    };
+    let circuit = eu_id_prover::MdocTs13DemoCircuitPublicInput {
+        circuit_hash: validated.circuit_hash,
+        request_context_digest: derived.request_context_digest,
+        timestamp_epoch_seconds: validated.timestamp_epoch_seconds,
+        trusted_issuer_public_key: validated.trusted_issuer_public_key.to_vec(),
+        device_cose_sig_structure: derived.device_cose_sig_structure,
+        revocation: eu_id_prover::mdoc::MdocRevocationPublicInputs {
+            revocation_public_key: eu_id_prover::mdoc::MdocRevocationKey::MlDsa(
+                validated.revocation_public_key.to_vec(),
+            ),
+            epoch: validated.revocation_epoch,
+        },
+    };
+    Ok(PreparedTs13DemoPublicInput {
+        parameters,
+        request,
+        circuit,
+    })
+}
+
+fn map_core_prove_error(error: eu_id_prover::Error) -> Ts13DemoError {
+    match error {
+        eu_id_prover::Error::Mdoc(_)
+        | eu_id_prover::Error::AuthInputMismatch
+        | eu_id_prover::Error::AgePolicyMismatch
+        | eu_id_prover::Error::NatPolicyMismatch => Ts13DemoError::InvalidPrivateCredential,
+        _ => Ts13DemoError::ProofGenerationFailed,
+    }
+}
+
+pub(crate) fn prove_ts13_demo_identity<R: Ts13DemoArtifactResolver>(
+    statement: &Ts13DemoPublicStatementV1,
+    witness: &Ts13DemoWitnessV1,
+    artifact_resolver: &R,
+) -> Result<Vec<u8>, Ts13DemoError> {
+    let prepared = prepare_public_input(statement, artifact_resolver)?;
+    if witness.revocation_id_lo >= witness.revocation_id_hi
+        || witness.revocation_signature.len() != eu_id_prover::ts13_demo::ML_DSA_65_SIGNATURE_BYTES
+    {
+        return Err(Ts13DemoError::InvalidRevocationWitness);
+    }
+    let proof = eu_id_prover::prove_mdoc_ts13_demo(
+        &witness.document,
+        &prepared.request,
+        &prepared.circuit,
+        witness.revocation_id_lo,
+        witness.revocation_id_hi,
+        eu_id_prover::mdoc::MdocRevocationSignature::MlDsa(witness.revocation_signature.clone()),
+    )
+    .map_err(map_core_prove_error)?;
+    encode_v4(prepared.parameters, &proof)
+}
+
+pub(crate) fn verify_ts13_demo_identity<R: Ts13DemoArtifactResolver>(
+    statement: &Ts13DemoPublicStatementV1,
+    envelope: &[u8],
+    artifact_resolver: &R,
+) -> Result<(), Ts13DemoError> {
+    let prepared = prepare_public_input(statement, artifact_resolver)?;
+    let proof: eu_id_prover::MdocProof = decode_v4(
+        prepared.parameters,
+        envelope,
+        |proof: &eu_id_prover::MdocProof| proof.has_ts13_demo_shape(),
+    )?;
+    eu_id_prover::verify_mdoc_ts13_demo(&proof, &prepared.circuit)
+        .map_err(|_| Ts13DemoError::ProofVerificationFailed)
 }
 
 #[cfg(test)]

@@ -3,8 +3,8 @@
 use bzip2::read::BzDecoder;
 use ciborium::value::Value;
 use euid_zk_sdk::{
-    prove_identity, verify_identity, IssuerKey, NatMode, PredicateMode, TrustedIssuers,
-    ZkMdocWitness, ZkPublicStatement, ZkVerifyResult,
+    prove_identity, verify_identity, IssuerKey, NatMode, PredicateMode, ProductMdocWitnessV1,
+    ProductPublicStatementV1, TrustedIssuers, ZkMdocWitness, ZkPublicStatement, ZkVerifyResult,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -379,7 +379,7 @@ fn assert_private_markers_absent(
 }
 
 fn product_statement(session_transcript: Vec<u8>, issuer_pk: &[u8]) -> ZkPublicStatement {
-    ZkPublicStatement {
+    ZkPublicStatement::ProductV1(ProductPublicStatementV1 {
         spec_id: PRODUCT_SPEC_ID.to_string(),
         version: 1,
         doctype: PID_DOCTYPE.to_string(),
@@ -393,8 +393,14 @@ fn product_statement(session_transcript: Vec<u8>, issuer_pk: &[u8]) -> ZkPublicS
         age_threshold_years: Some(18),
         accepted_numeric_countries: Some(vec![276, 250]),
         nat_mode: NatMode::Any,
-        ts13_request: None,
-    }
+    })
+}
+
+fn product_statement_mut(statement: &mut ZkPublicStatement) -> &mut ProductPublicStatementV1 {
+    let ZkPublicStatement::ProductV1(statement) = statement else {
+        unreachable!("product test constructs ProductV1")
+    };
+    statement
 }
 
 fn tamper_product_stark_proof(proof: &[u8]) -> Vec<u8> {
@@ -508,14 +514,10 @@ fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() 
     assert_eq!(revocation_pk, fixture.revocation_pk);
     let issuer_signature = fixture.issuer_signature.clone();
     let device_signature = fixture.device_signature.clone();
-    let witness = ZkMdocWitness {
+    let witness = ZkMdocWitness::ProductV1(ProductMdocWitnessV1 {
         document: fixture.document,
         trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk]),
-        ts13_trusted_issuer_public_keys: None,
-        ts13_revocation_id_lo: None,
-        ts13_revocation_id_hi: None,
-        ts13_revocation_signature: None,
-    };
+    });
 
     let proof = prove_identity(statement.clone(), witness).expect("product proof builds");
     let product_envelope: ProductProofEnvelopeForTest =
@@ -614,21 +616,25 @@ fn product_identity_real_proof_verifies_and_rejects_relabels_and_stark_tamper() 
     );
 
     let mut relabeled = statement.clone();
-    relabeled.spec_id.push_str("-relabeled");
+    product_statement_mut(&mut relabeled)
+        .spec_id
+        .push_str("-relabeled");
     assert_rejects(
         verify_identity(relabeled, proof.clone()),
         "relabeled spec_id must reject",
     );
 
     let mut relabeled = statement.clone();
-    relabeled.version += 1;
+    product_statement_mut(&mut relabeled).version += 1;
     assert_rejects(
         verify_identity(relabeled, proof.clone()),
         "relabeled version must reject",
     );
 
     let mut relabeled = statement.clone();
-    relabeled.namespace.push_str(".relabeled");
+    product_statement_mut(&mut relabeled)
+        .namespace
+        .push_str(".relabeled");
     assert_rejects(
         verify_identity(relabeled, proof.clone()),
         "relabeled namespace must reject",
@@ -660,14 +666,10 @@ fn product_phase2_u9_device_key_whitelist_is_empty_and_envelope_has_no_stable_ru
     let device_public_key = fixture.device_pk.clone();
     let proof = prove_identity(
         statement,
-        ZkMdocWitness {
+        ZkMdocWitness::ProductV1(ProductMdocWitnessV1 {
             document: fixture.document,
             trusted_issuers: TrustedIssuers::PublicKeys(vec![fixture.issuer_pk]),
-            ts13_trusted_issuer_public_keys: None,
-            ts13_revocation_id_lo: None,
-            ts13_revocation_id_hi: None,
-            ts13_revocation_signature: None,
-        },
+        }),
     )
     .expect("U9 product gate proof builds");
 

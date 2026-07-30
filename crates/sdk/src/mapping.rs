@@ -4,14 +4,14 @@ use std::collections::HashSet;
 
 use eu_id_prover::{all_nationality_codes, Date, Policy};
 
-use crate::{PredicateMode, ZkError, ZkPublicStatement};
+use crate::{PredicateMode, ProductPublicStatementV1, ZkError};
 
 fn invalid(msg: impl Into<String>) -> ZkError {
     ZkError::InvalidInput(msg.into())
 }
 
 /// Map the verifier's public request to the policy bound by the mdoc proof.
-pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError> {
+pub(crate) fn to_policy(statement: &ProductPublicStatementV1) -> Result<Policy, ZkError> {
     let mode = statement.predicate_mode;
     if matches!(mode, PredicateMode::Or) {
         return Err(invalid(
@@ -129,8 +129,8 @@ mod tests {
         Date { year, month, day }
     }
 
-    fn statement_with(mode: PredicateMode) -> ZkPublicStatement {
-        ZkPublicStatement {
+    fn statement_with(mode: PredicateMode) -> ProductPublicStatementV1 {
+        ProductPublicStatementV1 {
             spec_id: "stwo-euid-pid-v1".to_string(),
             version: 1,
             doctype: "eu.europa.ec.eudi.pid.1".to_string(),
@@ -144,7 +144,6 @@ mod tests {
             age_threshold_years: Some(18),
             accepted_numeric_countries: Some(vec![276, 250]),
             nat_mode: NatMode::Any,
-            ts13_request: None,
         }
     }
 

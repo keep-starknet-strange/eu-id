@@ -1749,6 +1749,7 @@ dependencies = [
  "serde",
  "sha2",
  "stwo-mldsa",
+ "stwo-sha256",
  "thiserror 2.0.18",
  "uniffi",
 ]
