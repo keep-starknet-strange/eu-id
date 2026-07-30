@@ -123,6 +123,14 @@ pub const STREAM_BASE_STRIDE: u32 = 128;
 /// SHAKE-256 rate in bytes (block length of a squeeze).
 const RATE: usize = 136;
 
+/// Frozen maximum byte length of the request-derived device COSE
+/// `Sig_structure` in the TS13 demo profile.
+///
+/// The measured request corpus selects 1024 bytes. Hosted-private-key proofs
+/// allocate this entire window so request length cannot change their tree
+/// layout, preprocessed root, or Keccak permutation schedule.
+pub const DEVICE_SIG_STRUCTURE_CAPACITY: usize = 1_024;
+
 /// The `field_id` the HOST yields the whole ML-DSA message (Sig_structure)
 /// window under, on the shared [`FieldBytesRelation`], in hosted mode. The mdoc
 /// issuer SHA pass exposes the µ-absorb message bytes under this id; the mldsa
@@ -216,6 +224,16 @@ struct Shapes {
     sib: Shape,
 }
 
+fn validate_device_message_capacity(message_len: usize) -> Result<(), PrivateKeyEvalError> {
+    if message_len > DEVICE_SIG_STRUCTURE_CAPACITY {
+        return Err(PrivateKeyEvalError::MessageExceedsCapacity {
+            message_len,
+            message_capacity: DEVICE_SIG_STRUCTURE_CAPACITY,
+        });
+    }
+    Ok(())
+}
+
 /// The instance's SHAKE256 signature-job shapes, stream ids offset by
 /// `stream_base`. `native_mu` omits the private µ job.
 /// Perm-id bases stay 0 — the proof-wide [`stwo_keccak::sponge_v::JobList`]
@@ -225,7 +243,20 @@ fn shapes(message_len: usize, stream_base: u32, native_mu: bool, private_key: bo
     let b = stream_base;
     let tr = private_key
         .then(|| Shape::new(crate::constants::PK_BYTES, 1, b + TR_ABSORB, b + TR_SQUEEZE));
-    let mu = (!native_mu).then(|| Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE));
+    let mu = (!native_mu).then(|| {
+        if private_key {
+            Shape::with_message_capacity(
+                66 + message_len,
+                66 + DEVICE_SIG_STRUCTURE_CAPACITY,
+                1,
+                b + MU_ABSORB,
+                b + MU_SQUEEZE,
+            )
+            .expect("hosted-private-key message capacity was validated")
+        } else {
+            Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE)
+        }
+    });
     let ct = Shape::new(64 + 768, 1, b + CT_ABSORB, b + CT_SQUEEZE);
     let sib = Shape::new(
         48,
@@ -251,12 +282,24 @@ pub fn keccak_job_shapes(message_len: usize, stream_base: u32, native_mu: bool) 
 /// Sponge jobs for a hosted public-message statement whose public key is
 /// private: in-circuit `tr`, then in-circuit µ, c̃, and SIB.
 pub fn hosted_private_key_keccak_job_shapes(message_len: usize, stream_base: u32) -> Vec<Shape> {
+    try_hosted_private_key_keccak_job_shapes(message_len, stream_base)
+        .expect("hosted-private-key message exceeds DEVICE_SIG_STRUCTURE_CAPACITY")
+}
+
+/// Checked form of [`hosted_private_key_keccak_job_shapes`], for public
+/// request validation before a prover or verifier is constructed.
+pub fn try_hosted_private_key_keccak_job_shapes(
+    message_len: usize,
+    stream_base: u32,
+) -> Result<Vec<Shape>, PrivateKeyEvalError> {
+    validate_device_message_capacity(message_len)?;
     let sh = shapes(message_len, stream_base, false, true);
-    sh.tr
+    Ok(sh
+        .tr
         .into_iter()
         .chain(sh.mu)
         .chain([sh.ct, sh.sib])
-        .collect()
+        .collect())
 }
 
 // =============================================================================
@@ -474,6 +517,11 @@ fn prefix_eval(
     PublicPrefixEval {
         dst_stream,
         dst_off,
+        entry_capacity: if private_key {
+            2 + DEVICE_SIG_STRUCTURE_CAPACITY
+        } else {
+            bytes.len()
+        },
         bytes,
         yield_positive: true,
         hash_io: hash_io.clone(),
@@ -1676,6 +1724,7 @@ impl MlDsaProver {
         keccak_handle: SharedKeccakRelations,
         bindings: PrivateKeyEvalBindings,
     ) -> Result<Self, PrivateKeyEvalError> {
+        validate_device_message_capacity(input.message.len())?;
         let private_key_witness = PrivateKeyEvalWitness::from_input(&input)?;
         let private_key_base = private_key_eval::gen_private_key_base(&private_key_witness);
         let mut prover = Self::build(
@@ -2450,6 +2499,9 @@ impl MlDsaVerifier {
         keccak_handle: SharedKeccakRelations,
         bindings: PrivateKeyEvalBindings,
     ) -> Result<Self, VerificationError> {
+        validate_device_message_capacity(input.message.len()).map_err(|error| {
+            VerificationError::InvalidStructure(format!("ML-DSA hosted private key: {error}"))
+        })?;
         if group_evals.len() != n_private_key_group_evals() {
             return Err(VerificationError::InvalidStructure(format!(
                 "ML-DSA hosted private key: expected {} group evaluations, got {}",
@@ -2629,8 +2681,17 @@ pub fn debug_layout(input: &MlDsaVerifyInput) -> TreeLayout {
 /// [`hosted_private_key_claimed_sums_len`] to validate proof structure before
 /// constructing [`MlDsaVerifier`].
 pub fn hosted_private_key_layout(message_len: usize) -> TreeLayout {
+    try_hosted_private_key_layout(message_len)
+        .expect("hosted-private-key message exceeds DEVICE_SIG_STRUCTURE_CAPACITY")
+}
+
+/// Checked layout probe for untrusted public request lengths.
+pub fn try_hosted_private_key_layout(
+    message_len: usize,
+) -> Result<TreeLayout, PrivateKeyEvalError> {
+    validate_device_message_capacity(message_len)?;
     let ctx = LayoutCtx::new(message_len, true, true, true);
-    layout_for(&ctx)
+    Ok(layout_for(&ctx))
 }
 
 /// Number of coefficient-group evaluations in public-key modes.

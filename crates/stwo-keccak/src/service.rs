@@ -246,7 +246,7 @@ fn preprocessed_sizes(jobs: &JobList) -> Vec<u32> {
     let keccak_claim = keccak::Claim {
         n_perms: jobs.n_perms_total(),
     };
-    let mut sizes = vec![jobs.log_size(); sponge_v::N_SCHEDULE_COLS];
+    let mut sizes = vec![jobs.log_size(); jobs.n_schedule_cols()];
     sizes.extend(vec![keccak_claim.log_size(); keccak::N_SCHEDULE_COLS]);
     sizes.extend(tables_air::all_preprocessed_log_sizes());
     sizes
@@ -267,7 +267,7 @@ fn layout_for(jobs: &JobList) -> TreeLayout {
         log_size: round_log_size(n),
     };
 
-    let mut trace = vec![ls; sponge_v::N_BASE_COLS];
+    let mut trace = vec![ls; jobs.n_base_cols()];
     trace.extend(keccak_claim.log_sizes()[1].clone());
     trace.extend(round_claim.log_sizes()[1].clone());
     for kind in TableKind::ALL {
@@ -279,7 +279,7 @@ fn layout_for(jobs: &JobList) -> TreeLayout {
     // The round's LogUp is GKR-offloaded: NO round interaction columns; its
     // tie-back trace lives in the post-interaction tree instead.
     let _ = &round_claim;
-    let mut interaction = vec![ls; sponge_v::N_INTERACTION_COLS];
+    let mut interaction = vec![ls; sponge_v::n_interaction_cols(jobs)];
     interaction.extend(keccak_claim.log_sizes()[2].clone());
     for kind in TableKind::ALL {
         for _ in 0..stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE {

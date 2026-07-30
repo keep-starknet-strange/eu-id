@@ -51,6 +51,11 @@ pub struct PublicPrefixEval {
     pub dst_stream: u32,
     pub dst_off: u32,
     pub bytes: Vec<u8>,
+    /// Number of relation entries compiled into the component. It equals
+    /// `bytes.len()` for legacy fixed inputs and the profile capacity for the
+    /// variable public device message. Inactive entries use zero numerator and
+    /// a canonical zero byte.
+    pub entry_capacity: usize,
     pub yield_positive: bool,
     pub hash_io: HashIoRelation,
 }
@@ -77,17 +82,26 @@ impl PublicPrefixEval {
         vec![col_eval(LINK_LOG_SIZE, enabler)]
     }
     pub fn gen_interaction(&self) -> (Vec<ColEval>, SecureField) {
-        let entries: Vec<(bool, SecureField)> = self
-            .bytes
-            .iter()
-            .enumerate()
-            .map(|(i, &b)| {
+        assert!(
+            self.bytes.len() <= self.entry_capacity,
+            "public prefix exceeds its fixed entry capacity"
+        );
+        let one = SecureField::one();
+        let zero = SecureField::from(m31(0));
+        let signed = if self.yield_positive { one } else { -one };
+        let entries: Vec<(SecureField, SecureField)> = (0..self.entry_capacity)
+            .map(|i| {
+                let active = i < self.bytes.len();
+                let b = self.bytes.get(i).copied().unwrap_or(0);
                 let tuple = [
                     m31(self.dst_stream),
                     m31(self.dst_off + i as u32),
                     m31(b as u32),
                 ];
-                (self.yield_positive, self.hash_io.combine(&tuple))
+                (
+                    if active { signed } else { zero },
+                    self.hash_io.combine(&tuple),
+                )
             })
             .collect();
         gen_lane0_fracs(&entries)
@@ -102,15 +116,21 @@ impl FrameworkEval for PublicPrefixEval {
         LINK_LOG_SIZE + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        assert!(
+            self.bytes.len() <= self.entry_capacity,
+            "public prefix exceeds its fixed entry capacity"
+        );
         let enabler = eval.next_trace_mask();
         let one = E::F::from(M31::one());
         eval.add_constraint(enabler.clone() * (one - enabler.clone()));
         let en = E::EF::from(enabler);
-        let numerator = if self.yield_positive { en } else { -en };
-        for (i, &b) in self.bytes.iter().enumerate() {
+        let signed_en = if self.yield_positive { en } else { -en };
+        for i in 0..self.entry_capacity {
+            let active = E::EF::from(E::F::from(m31(u32::from(i < self.bytes.len()))));
+            let b = self.bytes.get(i).copied().unwrap_or(0);
             eval.add_to_relation(RelationEntry::new(
                 &self.hash_io,
-                numerator.clone(),
+                signed_en.clone() * active,
                 &[
                     E::F::from(m31(self.dst_stream)),
                     E::F::from(m31(self.dst_off + i as u32)),
@@ -120,25 +140,21 @@ impl FrameworkEval for PublicPrefixEval {
         }
         // Batch ALL entries into one accumulator column (see
         // `n_interaction_cols` for the degree argument).
-        eval.finalize_logup_batched(self.bytes.len());
+        eval.finalize_logup_batched(self.entry_capacity);
         eval
     }
 }
 
-/// All-batched lane-0 fraction column builder (`(is_yield, denom)` per entry):
+/// All-batched lane-0 fraction column builder (`(numerator, denom)` per entry):
 /// folds the whole entry list into ONE column, exactly like
 /// `finalize_logup_batched(entries.len())` — start from the first fraction,
 /// then `num = d·num + n·den, den = den·d`.
-fn gen_lane0_fracs(entries: &[(bool, SecureField)]) -> (Vec<ColEval>, SecureField) {
+fn gen_lane0_fracs(entries: &[(SecureField, SecureField)]) -> (Vec<ColEval>, SecureField) {
     let zero = SecureField::from(m31(0));
     let one = SecureField::one();
     let mut gen = LogupTraceGenerator::new(LINK_LOG_SIZE);
-    let fracs: Vec<(SecureField, SecureField)> = entries
-        .iter()
-        .map(|&(pos, d)| (if pos { one } else { -one }, d))
-        .collect();
-    let (mut num, mut den) = fracs[0];
-    for &(n, d) in &fracs[1..] {
+    let (mut num, mut den) = entries[0];
+    for &(n, d) in &entries[1..] {
         num = d * num + n * den;
         den *= d;
     }

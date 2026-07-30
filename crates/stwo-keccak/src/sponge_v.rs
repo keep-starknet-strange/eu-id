@@ -70,9 +70,19 @@ pub const MAX_RATE: usize = N_BYTES_IN_SHAKE128_RATE;
 /// new_rate[MAX_RATE] | post[200] | squeeze_byte[MAX_RATE]`.
 pub const N_BASE_COLS: usize = 3 * MAX_RATE + N_BYTES_IN_STATE + MAX_RATE;
 
+/// Capacity-mode-only base columns: the actual absorb selector, the actual
+/// squeeze selector, and the verifier-length-derived pad suffix mask.
+pub const N_CAPACITY_BASE_COLS: usize = 2 + MAX_RATE;
+
 /// Schedule (preprocessed) columns: 10 scalars + `rate_gate[MAX_RATE]` +
 /// `pad_gate[MAX_RATE]` + `pad_val[MAX_RATE]`.
 pub const N_SCHEDULE_COLS: usize = 10 + 3 * MAX_RATE;
+
+/// Capacity-mode schedule columns shared across all capacity jobs. One
+/// additional one-hot column is appended per capacity job so the AIR can
+/// select that job's transcript-bound actual length without putting it in
+/// tree zero.
+pub const N_CAPACITY_SCHEDULE_COLS: usize = 2;
 
 /// Logup entries per row: five MAX_RATE byte families plus six state entries
 /// (mode-gated first/absorb inputs, squeeze input, and output).
@@ -86,6 +96,14 @@ pub const LOGUP_BATCH: usize = 4;
 /// Interaction columns (batch-4 QM31 fractions, pre-expanded to M31).
 pub const N_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE * N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
+
+fn n_logup_entries(jobs: &JobList) -> usize {
+    N_LOGUP_ENTRIES + usize::from(jobs.has_message_capacity())
+}
+
+pub fn n_interaction_cols(jobs: &JobList) -> usize {
+    SECURE_EXTENSION_DEGREE * n_logup_entries(jobs).div_ceil(LOGUP_BATCH)
+}
 
 // =============================================================================
 // Job list.
@@ -106,6 +124,26 @@ impl JobList {
         let mut jobs = Vec::new();
         let mut base = 0usize;
         for shape in shapes {
+            assert_eq!(
+                shape.n_absorb,
+                (shape.geometry_message_len() + 1).div_ceil(shape.rate()),
+                "shape n_absorb must match its fixed geometry"
+            );
+            if let Some(capacity) = shape.message_capacity {
+                assert!(
+                    shape.message_len <= capacity,
+                    "capacity-shaped message exceeds its fixed capacity"
+                );
+                assert_eq!(
+                    shape.n_squeeze, 1,
+                    "capacity-shaped jobs require one squeeze block"
+                );
+                assert_eq!(
+                    shape.xof_mode,
+                    XofMode::Shake256,
+                    "capacity-shaped jobs currently support SHAKE-256 only"
+                );
+            }
             let stamped = shape.with_rebased_perm_ids(base);
             base += stamped.n_perms();
             jobs.push(stamped);
@@ -116,6 +154,27 @@ impl JobList {
 
     pub fn n_perms_total(&self) -> usize {
         self.jobs.iter().map(Shape::n_perms).sum()
+    }
+
+    pub fn has_message_capacity(&self) -> bool {
+        self.jobs.iter().any(Shape::has_message_capacity)
+    }
+
+    pub fn capacity_job_count(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|shape| shape.has_message_capacity())
+            .count()
+    }
+
+    pub fn n_schedule_cols(&self) -> usize {
+        N_SCHEDULE_COLS
+            + usize::from(self.has_message_capacity()) * N_CAPACITY_SCHEDULE_COLS
+            + self.capacity_job_count()
+    }
+
+    pub fn n_base_cols(&self) -> usize {
+        N_BASE_COLS + usize::from(self.has_message_capacity()) * N_CAPACITY_BASE_COLS
     }
 
     pub fn log_size(&self) -> u32 {
@@ -140,7 +199,14 @@ impl JobList {
         for s in &self.jobs {
             mix(s.xof_mode.transcript_tag());
             mix(s.rate() as u64);
-            mix(s.message_len as u64);
+            if let Some(capacity) = s.message_capacity {
+                // Capacity schedules must collide across actual request
+                // lengths, but never with a historical fixed-length shape.
+                mix(0x4341_5041_4349_5459);
+                mix(capacity as u64);
+            } else {
+                mix(s.message_len as u64);
+            }
             mix(s.n_squeeze as u64);
             mix(s.absorb_stream_id as u64);
             mix(s.squeeze_stream_id as u64);
@@ -161,6 +227,10 @@ impl JobList {
             channel.mix_u64(s.absorb_stream_id as u64);
             channel.mix_u64(s.squeeze_stream_id as u64);
             channel.mix_u64(s.perm_id_base as u64);
+            if let Some(capacity) = s.message_capacity {
+                channel.mix_u64(0x4341_5041_4349_5459);
+                channel.mix_u64(capacity as u64);
+            }
         }
     }
 }
@@ -181,6 +251,9 @@ struct RowSched {
     squeeze_stream: u32,
     absorb_pos_base: u32,
     squeeze_pos_base: u32,
+    capacity_mode: bool,
+    capacity_last: bool,
+    capacity_job: Option<usize>,
     /// `pad_gate[j] = 1` iff byte `j` of this row's block is a pad10*1 constant.
     rate_gate: [u8; MAX_RATE],
     pad_gate: [u8; MAX_RATE],
@@ -191,9 +264,15 @@ struct RowSched {
 /// Build the per-row schedule for the whole job list (active rows only).
 fn build_schedule(jobs: &JobList) -> Vec<RowSched> {
     let mut rows = Vec::with_capacity(jobs.n_perms_total());
+    let mut next_capacity_job = 0usize;
     for shape in &jobs.jobs {
+        let capacity_job = shape.has_message_capacity().then(|| {
+            let job = next_capacity_job;
+            next_capacity_job += 1;
+            job
+        });
         let rate = shape.rate();
-        let f = shape.message_len % rate;
+        let f = shape.geometry_message_len() % rate;
         for r in 0..shape.n_perms() {
             let absorb = r < shape.n_absorb;
             let last_absorb = r + 1 == shape.n_absorb;
@@ -229,6 +308,9 @@ fn build_schedule(jobs: &JobList) -> Vec<RowSched> {
                 } else {
                     0
                 },
+                capacity_mode: shape.has_message_capacity(),
+                capacity_last: shape.has_message_capacity() && last_absorb,
+                capacity_job,
                 rate_gate,
                 pad_gate,
                 pad_val,
@@ -273,6 +355,13 @@ pub fn schedule_ids(jobs: &JobList) -> Vec<PreProcessedColumnId> {
     for j in 0..MAX_RATE {
         ids.push(schedule_id(&d, &format!("pad_val_{j}")));
     }
+    if jobs.has_message_capacity() {
+        ids.push(schedule_id(&d, "capacity_mode"));
+        ids.push(schedule_id(&d, "capacity_last"));
+        for job in 0..jobs.capacity_job_count() {
+            ids.push(schedule_id(&d, &format!("capacity_job_{job}")));
+        }
+    }
     ids
 }
 
@@ -312,7 +401,14 @@ pub fn gen_schedule_preprocessed(jobs: &JobList) -> Vec<ColEval> {
     for j in 0..MAX_RATE {
         cols.push(scalar(&move |s| s.pad_val[j] as u32));
     }
-    debug_assert_eq!(cols.len(), N_SCHEDULE_COLS);
+    if jobs.has_message_capacity() {
+        cols.push(scalar(&|s| s.capacity_mode as u32));
+        cols.push(scalar(&|s| s.capacity_last as u32));
+        for job in 0..jobs.capacity_job_count() {
+            cols.push(scalar(&move |s| (s.capacity_job == Some(job)) as u32));
+        }
+    }
+    debug_assert_eq!(cols.len(), jobs.n_schedule_cols());
     cols.into_iter().map(|c| col_eval(log_size, c)).collect()
 }
 
@@ -324,6 +420,15 @@ pub fn gen_schedule_preprocessed(jobs: &JobList) -> Vec<ColEval> {
 /// not use stay 0 — the constraint side gates them out with zero multiplicity.
 #[derive(Clone)]
 pub struct RowData {
+    /// Actual absorb activity. For fixed shapes this mirrors the preprocessed
+    /// schedule; for capacity shapes it is a committed monotone prefix.
+    pub absorb_active: bool,
+    /// Actual squeeze-output row. In capacity mode this selects the last
+    /// actual absorb row, not the last allocated row.
+    pub squeeze_active: bool,
+    /// Dynamic pad suffix for capacity mode (and the mirrored static pad mask
+    /// for fixed mode when a mixed job list carries these columns).
+    pub pad_gate: [u8; MAX_RATE],
     pub block_byte: [u8; MAX_RATE],
     pub new_rate: [u8; MAX_RATE],
     pub prev_post: [u8; N_BYTES_IN_STATE],
@@ -334,6 +439,9 @@ pub struct RowData {
 impl Default for RowData {
     fn default() -> Self {
         Self {
+            absorb_active: false,
+            squeeze_active: false,
+            pad_gate: [0; MAX_RATE],
             block_byte: [0; MAX_RATE],
             new_rate: [0; MAX_RATE],
             prev_post: [0; N_BYTES_IN_STATE],
@@ -379,25 +487,42 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
         assert_eq!(message.len(), shape.message_len, "message length mismatch");
         let rate = shape.rate();
         let f = shape.message_len % rate;
+        let actual_n_absorb = shape.actual_n_absorb();
 
         // Padded absorb blocks.
-        let mut blocks = vec![[0u8; MAX_RATE]; shape.n_absorb];
+        let mut blocks = vec![[0u8; MAX_RATE]; actual_n_absorb];
         for (i, &b) in message.iter().enumerate() {
             blocks[i / rate][i % rate] = b;
         }
-        blocks[shape.n_absorb - 1][f] ^= DELIMITED_SUFFIX;
-        blocks[shape.n_absorb - 1][rate - 1] ^= FINAL_BIT;
+        blocks[actual_n_absorb - 1][f] ^= DELIMITED_SUFFIX;
+        blocks[actual_n_absorb - 1][rate - 1] ^= FINAL_BIT;
 
         let mut state = [0u8; N_BYTES_IN_STATE];
         let mut output = Vec::with_capacity(shape.output_len());
 
         for r in 0..shape.n_perms() {
+            let absorb_active = if shape.has_message_capacity() {
+                r < actual_n_absorb
+            } else {
+                r < shape.n_absorb
+            };
+            let squeeze_active = if shape.has_message_capacity() {
+                r + 1 == actual_n_absorb
+            } else {
+                r + 1 >= shape.n_absorb
+            };
+            let unused_capacity_row = shape.has_message_capacity() && !absorb_active;
             let mut row = RowData {
+                absorb_active,
+                squeeze_active,
                 prev_post: state,
                 ..RowData::default()
             };
-            if r < shape.n_absorb {
+            if absorb_active {
                 row.block_byte = blocks[r];
+                if r + 1 == actual_n_absorb {
+                    row.pad_gate[f..rate].fill(1);
+                }
                 for j in 0..rate {
                     conv.push([splat(blocks[r][j] as u32), spread_splat(blocks[r][j])]);
                 }
@@ -417,22 +542,30 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
                     xor.push(uses);
                 }
             }
+            let mut permutation_state = if unused_capacity_row {
+                [0u8; N_BYTES_IN_STATE]
+            } else {
+                state
+            };
             // Pre-permutation state → perm input (spread, lane-0 splat).
             let mut prow = [PackedM31::zero(); N_BYTES_IN_STATE + 1];
             for i in 0..N_BYTES_IN_STATE {
-                prow[i] = spread_splat(state[i]);
+                prow[i] = spread_splat(permutation_state[i]);
             }
             prow[N_BYTES_IN_STATE] = splat((shape.perm_id_base + r) as u32);
             perm_inputs.push(prow);
 
-            crate::sponge::native_keccak_f_bytes(&mut state);
-            row.post = state;
+            crate::sponge::native_keccak_f_bytes(&mut permutation_state);
+            row.post = permutation_state;
+            if !unused_capacity_row {
+                state = permutation_state;
+            }
 
-            if r + 1 >= shape.n_absorb {
-                row.squeeze_byte[..rate].copy_from_slice(&state[..rate]);
-                output.extend_from_slice(&state[..rate]);
+            if squeeze_active {
+                row.squeeze_byte[..rate].copy_from_slice(&row.post[..rate]);
+                output.extend_from_slice(&row.post[..rate]);
                 for j in 0..rate {
-                    conv.push([splat(state[j] as u32), spread_splat(state[j])]);
+                    conv.push([splat(row.post[j] as u32), spread_splat(row.post[j])]);
                 }
             }
             rows.push(row);
@@ -456,7 +589,7 @@ pub fn generate_base_trace(run: &SpongeVRun) -> Vec<ColEval> {
     let log_size = run.jobs.log_size();
     let rows = 1usize << log_size;
     let m = M31::from_u32_unchecked;
-    let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; N_BASE_COLS];
+    let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; run.jobs.n_base_cols()];
     for (r, row) in run.rows.iter().enumerate() {
         let mut c = 0usize;
         for j in 0..MAX_RATE {
@@ -478,7 +611,18 @@ pub fn generate_base_trace(run: &SpongeVRun) -> Vec<ColEval> {
         for j in 0..MAX_RATE {
             cols[c + j][r] = m(row.squeeze_byte[j] as u32);
         }
-        debug_assert_eq!(c + MAX_RATE, N_BASE_COLS);
+        c += MAX_RATE;
+        if run.jobs.has_message_capacity() {
+            cols[c][r] = m(row.absorb_active as u32);
+            c += 1;
+            cols[c][r] = m(row.squeeze_active as u32);
+            c += 1;
+            for j in 0..MAX_RATE {
+                cols[c + j][r] = m(row.pad_gate[j] as u32);
+            }
+            c += MAX_RATE;
+        }
+        debug_assert_eq!(c, run.jobs.n_base_cols());
     }
     cols.into_iter().map(|c| col_eval(log_size, c)).collect()
 }
@@ -496,9 +640,9 @@ impl Claim {
     pub fn log_sizes(&self) -> TreeVec<Vec<u32>> {
         let ls = self.jobs.log_size();
         TreeVec::new(vec![
-            vec![ls; N_SCHEDULE_COLS],
-            vec![ls; N_BASE_COLS],
-            vec![ls; N_INTERACTION_COLS],
+            vec![ls; self.jobs.n_schedule_cols()],
+            vec![ls; self.jobs.n_base_cols()],
+            vec![ls; n_interaction_cols(&self.jobs)],
         ])
     }
 }
@@ -543,12 +687,42 @@ impl FrameworkEval for Eval {
         let rate_gate: Vec<E::F> = (0..MAX_RATE)
             .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("rate_gate_{j}"))))
             .collect();
-        let pad_gate: Vec<E::F> = (0..MAX_RATE)
+        let scheduled_pad_gate: Vec<E::F> = (0..MAX_RATE)
             .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("pad_gate_{j}"))))
             .collect();
         let pad_val: Vec<E::F> = (0..MAX_RATE)
             .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("pad_val_{j}"))))
             .collect();
+        let capacity_mode = if self.jobs.has_message_capacity() {
+            eval.get_preprocessed_column(schedule_id(&d, "capacity_mode"))
+        } else {
+            E::F::zero()
+        };
+        let capacity_last = if self.jobs.has_message_capacity() {
+            eval.get_preprocessed_column(schedule_id(&d, "capacity_last"))
+        } else {
+            E::F::zero()
+        };
+        // Select the public actual length with capacity-only one-hot schedule
+        // columns. The selected constants affect constraints and transcript,
+        // never the preprocessed column bytes or ids.
+        let mut actual_message_len = E::F::zero();
+        if self.jobs.has_message_capacity() {
+            for (capacity_job, shape) in self
+                .jobs
+                .jobs
+                .iter()
+                .filter(|shape| shape.has_message_capacity())
+                .enumerate()
+            {
+                let selector = eval.get_preprocessed_column(schedule_id(
+                    &d,
+                    &format!("capacity_job_{capacity_job}"),
+                ));
+                actual_message_len +=
+                    selector * E::F::from(BaseField::from(shape.message_len as u32));
+            }
+        }
 
         // Base columns (commit order).
         let block_byte: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
@@ -561,28 +735,150 @@ impl FrameworkEval for Eval {
         let post_prev = |i: usize| post_masks[i][0].clone();
         let post = |i: usize| post_masks[i][1].clone();
         let squeeze_byte: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
+        let (absorb_active, absorb_next, squeeze_active, pad_gate) =
+            if self.jobs.has_message_capacity() {
+                let absorb_masks = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
+                let squeeze_active = eval.next_trace_mask();
+                let pad_gate = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
+                (
+                    absorb_masks[0].clone(),
+                    absorb_masks[1].clone(),
+                    squeeze_active,
+                    pad_gate,
+                )
+            } else {
+                (
+                    is_absorb.clone(),
+                    E::F::zero(),
+                    is_squeeze_out.clone(),
+                    scheduled_pad_gate.clone(),
+                )
+            };
+        let one = E::F::one();
+        let fixed_mode = one.clone() - capacity_mode.clone();
 
-        // pad10*1: gated positions of an absorb row's block are pinned to the
-        // preprocessed pad constant (degree 2; gate + value both preprocessed).
+        if self.jobs.has_message_capacity() {
+            // The actual absorb rows are a non-empty monotone prefix of the
+            // fixed capacity rows. `squeeze_active` is exactly its final row.
+            eval.add_constraint(absorb_active.clone() * (one.clone() - absorb_active.clone()));
+            eval.add_constraint(squeeze_active.clone() * (one.clone() - squeeze_active.clone()));
+            eval.add_constraint(fixed_mode.clone() * (absorb_active.clone() - is_absorb.clone()));
+            eval.add_constraint(
+                fixed_mode.clone() * (squeeze_active.clone() - is_squeeze_out.clone()),
+            );
+            eval.add_constraint(
+                capacity_mode.clone() * is_first.clone() * (absorb_active.clone() - one.clone()),
+            );
+            eval.add_constraint(
+                capacity_mode.clone()
+                    * (one.clone() - capacity_last.clone())
+                    * absorb_next.clone()
+                    * (one.clone() - absorb_active.clone()),
+            );
+            eval.add_constraint(
+                capacity_mode.clone()
+                    * (squeeze_active.clone() - absorb_active.clone()
+                        + (one.clone() - capacity_last.clone()) * absorb_next.clone()),
+            );
+        }
+
+        // Fixed jobs retain their historical preprocessed pad. Capacity jobs
+        // commit the pad suffix and pin its unique rising edge to the public
+        // actual length. The last rate byte is always in the suffix.
         for j in 0..MAX_RATE {
-            eval.add_constraint(pad_gate[j].clone() * (block_byte[j].clone() - pad_val[j].clone()));
+            if self.jobs.has_message_capacity() {
+                eval.add_constraint(
+                    fixed_mode.clone() * (pad_gate[j].clone() - scheduled_pad_gate[j].clone()),
+                );
+                eval.add_constraint(pad_gate[j].clone() * (one.clone() - pad_gate[j].clone()));
+                eval.add_constraint(
+                    capacity_mode.clone()
+                        * pad_gate[j].clone()
+                        * (one.clone() - squeeze_active.clone()),
+                );
+                eval.add_constraint(
+                    capacity_mode.clone()
+                        * (one.clone() - rate_gate[j].clone())
+                        * pad_gate[j].clone(),
+                );
+                let previous_pad = if j == 0 {
+                    E::F::zero()
+                } else {
+                    pad_gate[j - 1].clone()
+                };
+                let pad_start = pad_gate[j].clone() - previous_pad.clone();
+                if j < N_BYTES_IN_RATE {
+                    eval.add_constraint(
+                        capacity_mode.clone() * previous_pad * (one.clone() - pad_gate[j].clone()),
+                    );
+                    let position = absorb_pos_base.clone() + E::F::from(BaseField::from(j as u32));
+                    eval.add_constraint(
+                        capacity_mode.clone()
+                            * pad_start.clone()
+                            * (position - actual_message_len.clone()),
+                    );
+                }
+                let expected_pad = pad_start * E::F::from(BaseField::from(DELIMITED_SUFFIX as u32))
+                    + if j == N_BYTES_IN_RATE - 1 {
+                        squeeze_active.clone() * E::F::from(BaseField::from(FINAL_BIT as u32))
+                    } else {
+                        E::F::zero()
+                    };
+                eval.add_constraint(
+                    capacity_mode.clone()
+                        * pad_gate[j].clone()
+                        * (block_byte[j].clone() - expected_pad),
+                );
+            }
+            eval.add_constraint(
+                fixed_mode.clone()
+                    * scheduled_pad_gate[j].clone()
+                    * (block_byte[j].clone() - pad_val[j].clone()),
+            );
+        }
+        if self.jobs.has_message_capacity() {
+            eval.add_constraint(
+                capacity_mode.clone()
+                    * (pad_gate[N_BYTES_IN_RATE - 1].clone() - squeeze_active.clone()),
+            );
+            let inactive_capacity = capacity_mode.clone() * (one.clone() - absorb_active.clone());
+            for j in 0..MAX_RATE {
+                // Every cell unused by the fixed-capacity message is
+                // canonical. The unused permutation itself is tied to the
+                // zero Keccak input below, which uniquely fixes `post`.
+                eval.add_constraint(inactive_capacity.clone() * block_byte[j].clone());
+                eval.add_constraint(inactive_capacity.clone() * block_spread[j].clone());
+                eval.add_constraint(inactive_capacity.clone() * new_rate[j].clone());
+                let outside_rate =
+                    capacity_mode.clone() * (one.clone() - rate_gate[j].clone());
+                eval.add_constraint(outside_rate.clone() * block_byte[j].clone());
+                eval.add_constraint(outside_rate.clone() * block_spread[j].clone());
+                eval.add_constraint(outside_rate.clone() * new_rate[j].clone());
+                eval.add_constraint(outside_rate * squeeze_byte[j].clone());
+                eval.add_constraint(
+                    capacity_mode.clone()
+                        * (one.clone() - squeeze_active.clone())
+                        * squeeze_byte[j].clone(),
+                );
+                eval.add_constraint(capacity_mode.clone() * is_first.clone() * new_rate[j].clone());
+            }
         }
 
         // 1. conv: bind every absorb-row block byte to its spread limb (+).
         for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.conv,
-                is_absorb.clone() * rate_gate[j].clone(),
+                absorb_active.clone() * rate_gate[j].clone(),
                 &[block_byte[j].clone(), block_spread[j].clone()],
             ));
         }
         // 2. HashIo: consume the real message bytes (−). The message gate is
-        // `is_absorb·rate_gate[j] − pad_gate[j]` (1 on message positions).
+        // `absorb_active·rate_gate[j] − pad_gate[j]` (1 on message positions).
         for j in 0..MAX_RATE {
             let jf = E::F::from(BaseField::from(j as u32));
             eval.add_to_relation(RelationEntry::base(
                 &rel.hash_io,
-                -(is_absorb.clone() * rate_gate[j].clone() - pad_gate[j].clone()),
+                -(absorb_active.clone() * rate_gate[j].clone() - pad_gate[j].clone()),
                 &[
                     absorb_stream.clone(),
                     absorb_pos_base.clone() + jf,
@@ -596,7 +892,7 @@ impl FrameworkEval for Eval {
         for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.xor3,
-                (is_absorb.clone() - is_first.clone()) * rate_gate[j].clone(),
+                (absorb_active.clone() - is_first.clone()) * rate_gate[j].clone(),
                 &[post_prev(j) + block_spread[j].clone(), new_rate[j].clone()],
             ));
         }
@@ -640,7 +936,7 @@ impl FrameworkEval for Eval {
         let in_absorb_256 = mk_state(N_BYTES_IN_RATE, &|j| new_rate[j].clone(), &post_prev);
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_state,
-            (is_absorb.clone() - is_first.clone()) * shake256,
+            (absorb_active.clone() - is_first.clone()) * shake256,
             &in_absorb_256,
         ));
         let in_absorb_128 = mk_state(
@@ -650,7 +946,7 @@ impl FrameworkEval for Eval {
         );
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_state,
-            (is_absorb.clone() - is_first.clone()) * is_shake128,
+            (absorb_active.clone() - is_first.clone()) * is_shake128,
             &in_absorb_128,
         ));
         // extra squeeze perms: the whole pre-state chains from prev post.
@@ -660,6 +956,17 @@ impl FrameworkEval for Eval {
             is_active.clone() - is_absorb.clone(),
             &in_squeeze,
         ));
+        if self.jobs.has_message_capacity() {
+            // Allocated-but-unused rows prove one canonical independent
+            // Keccak-f(0) invocation. They cannot carry a hidden chain or
+            // unconstrained state even though they do not absorb/squeeze.
+            let in_unused = mk_state(MAX_RATE, &|_| E::F::zero(), &|_| E::F::zero());
+            eval.add_to_relation(RelationEntry::base(
+                &rel.keccak_state,
+                capacity_mode.clone() * (one.clone() - absorb_active.clone()),
+                &in_unused,
+            ));
+        }
         // OUT: require the witnessed post state from the keccak component (−).
         let mut out_tuple: Vec<E::F> = Vec::with_capacity(KECCAK_STATE_ARITY);
         out_tuple.push(perm_id.clone());
@@ -676,7 +983,7 @@ impl FrameworkEval for Eval {
         for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.conv,
-                is_squeeze_out.clone() * rate_gate[j].clone(),
+                squeeze_active.clone() * rate_gate[j].clone(),
                 &[squeeze_byte[j].clone(), post(j)],
             ));
         }
@@ -685,7 +992,7 @@ impl FrameworkEval for Eval {
             let jf = E::F::from(BaseField::from(j as u32));
             eval.add_to_relation(RelationEntry::base(
                 &rel.hash_io,
-                is_squeeze_out.clone() * rate_gate[j].clone(),
+                squeeze_active.clone() * rate_gate[j].clone(),
                 &[
                     squeeze_stream.clone(),
                     squeeze_pos_base.clone() + jf,
@@ -724,12 +1031,14 @@ fn row_fracs(
     rel: &KeccakRelations,
     sched: &RowSched,
     row: &RowData,
+    has_message_capacity: bool,
 ) -> Vec<(SecureField, SecureField)> {
     let zero = SecureField::zero();
     let one = SecureField::one();
     let m = M31::from_u32_unchecked;
     let sp = |b: u8| m(spread_u32(b as u32));
-    let mut out: Vec<(SecureField, SecureField)> = Vec::with_capacity(N_LOGUP_ENTRIES);
+    let mut out: Vec<(SecureField, SecureField)> =
+        Vec::with_capacity(N_LOGUP_ENTRIES + usize::from(has_message_capacity));
 
     let rate = if sched.shake128 {
         N_BYTES_IN_SHAKE128_RATE
@@ -739,7 +1048,7 @@ fn row_fracs(
 
     // 1. conv block (+is_absorb·rate_gate).
     for j in 0..MAX_RATE {
-        if sched.absorb && sched.rate_gate[j] != 0 {
+        if row.absorb_active && sched.rate_gate[j] != 0 {
             let den: SecureField = rel
                 .conv
                 .combine(&[m(row.block_byte[j] as u32), sp(row.block_byte[j])]);
@@ -750,7 +1059,7 @@ fn row_fracs(
     }
     // 2. io absorb consume (−(is_absorb·rate_gate − pad_gate)).
     for j in 0..MAX_RATE {
-        if sched.absorb && sched.rate_gate[j] != 0 && sched.pad_gate[j] == 0 {
+        if row.absorb_active && sched.rate_gate[j] != 0 && row.pad_gate[j] == 0 {
             let den: SecureField = rel.hash_io.combine(&[
                 m(sched.absorb_stream),
                 m(sched.absorb_pos_base + j as u32),
@@ -763,7 +1072,7 @@ fn row_fracs(
     }
     // 3. xor3 (+(is_absorb − is_first)·rate_gate).
     for j in 0..MAX_RATE {
-        if sched.absorb && !sched.first && sched.rate_gate[j] != 0 {
+        if row.absorb_active && !sched.first && sched.rate_gate[j] != 0 {
             let key = sp(row.prev_post[j]) + sp(row.block_byte[j]);
             let den: SecureField = rel.xor3.combine(&[key, sp(row.new_rate[j])]);
             out.push((one, den));
@@ -806,7 +1115,7 @@ fn row_fracs(
     } else {
         out.push((zero, one));
     }
-    if sched.absorb && !sched.first && !sched.shake128 {
+    if row.absorb_active && !sched.first && !sched.shake128 {
         let t = state_tuple(0, N_BYTES_IN_RATE, &|j| sp(row.new_rate[j]), &|i| {
             sp(row.prev_post[i])
         });
@@ -814,7 +1123,7 @@ fn row_fracs(
     } else {
         out.push((zero, one));
     }
-    if sched.absorb && !sched.first && sched.shake128 {
+    if row.absorb_active && !sched.first && sched.shake128 {
         let t = state_tuple(
             0,
             N_BYTES_IN_SHAKE128_RATE,
@@ -833,13 +1142,21 @@ fn row_fracs(
     } else {
         out.push((zero, one));
     }
+    if has_message_capacity {
+        if sched.capacity_mode && !row.absorb_active {
+            let t = state_tuple(0, MAX_RATE, &|_| M31::zero(), &|_| M31::zero());
+            out.push((one, rel.keccak_state.combine(&t)));
+        } else {
+            out.push((zero, one));
+        }
+    }
     {
         let t = state_tuple(1, MAX_RATE, &|j| sp(row.post[j]), &|i| sp(row.post[i]));
         out.push((-one, rel.keccak_state.combine(&t)));
     }
     // 5. conv squeeze (+is_squeeze_out).
     for j in 0..MAX_RATE {
-        if sched.squeeze_out && j < rate {
+        if row.squeeze_active && j < rate {
             let den: SecureField = rel
                 .conv
                 .combine(&[m(row.squeeze_byte[j] as u32), sp(row.squeeze_byte[j])]);
@@ -850,7 +1167,7 @@ fn row_fracs(
     }
     // 6. io squeeze yield (+is_squeeze_out).
     for j in 0..MAX_RATE {
-        if sched.squeeze_out && j < rate {
+        if row.squeeze_active && j < rate {
             let den: SecureField = rel.hash_io.combine(&[
                 m(sched.squeeze_stream),
                 m(sched.squeeze_pos_base + j as u32),
@@ -861,7 +1178,10 @@ fn row_fracs(
             out.push((zero, one));
         }
     }
-    debug_assert_eq!(out.len(), N_LOGUP_ENTRIES);
+    debug_assert_eq!(
+        out.len(),
+        N_LOGUP_ENTRIES + usize::from(has_message_capacity)
+    );
     out
 }
 
@@ -880,7 +1200,7 @@ pub fn generate_interaction_trace(
     let fracs: Vec<Vec<(SecureField, SecureField)>> = sched
         .iter()
         .zip(&run.rows)
-        .map(|(s, r)| row_fracs(rel, s, r))
+        .map(|(s, r)| row_fracs(rel, s, r, run.jobs.has_message_capacity()))
         .collect();
     let zero = SecureField::zero();
     let one = SecureField::one();
@@ -897,9 +1217,10 @@ pub fn generate_interaction_trace(
     let mut gen = LogupTraceGenerator::new(log_size);
     // Fold each chunk exactly like `finalize_logup_batched`: start from the
     // first fraction, then num = d·num + n·den, den = den·d.
-    for k in 0..N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH) {
+    let n_entries = n_logup_entries(&run.jobs);
+    for k in 0..n_entries.div_ceil(LOGUP_BATCH) {
         let lo = k * LOGUP_BATCH;
-        let hi = (lo + LOGUP_BATCH).min(N_LOGUP_ENTRIES);
+        let hi = (lo + LOGUP_BATCH).min(n_entries);
         let mut col = gen.new_col();
         for vr in 0..n_vec_rows {
             let mut num = [zero; N_LANES];

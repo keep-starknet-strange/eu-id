@@ -38,7 +38,9 @@ use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 
 use stwo_keccak::relations::SharedKeccakRelations;
-use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
+use stwo_keccak::service::{service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier};
+use stwo_keccak::sponge::{Shape, XofMode};
+use stwo_keccak::sponge_v::{generate_jobs, JobList};
 use stwo_mldsa::air_util::{col_eval, m31, ColEval};
 use stwo_mldsa::binding::{
     RhoCellRelation, SharedRhoCellRelation, SharedT1CellRelation, T1CellRelation,
@@ -56,9 +58,11 @@ use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
     hosted_claimed_sums_len, hosted_private_key_claimed_sums_len,
     hosted_private_key_keccak_job_shapes, hosted_private_key_layout,
-    hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProver, MlDsaVerifier, CT_ABSORB,
-    CT_SQUEEZE, HOSTED_DEVICE_PK_FIELD_ID, HOSTED_MSG_FIELD_ID, MU_ABSORB, MU_SQUEEZE, SIB_ABSORB,
-    STREAM_BASE_STRIDE, TR_ABSORB, TR_SQUEEZE,
+    hosted_public_claimed_sums_len, keccak_job_shapes, n_private_key_group_evals,
+    try_hosted_private_key_keccak_job_shapes, try_hosted_private_key_layout, MlDsaProver,
+    MlDsaVerifier, CT_ABSORB, CT_SQUEEZE, DEVICE_SIG_STRUCTURE_CAPACITY, HOSTED_DEVICE_PK_FIELD_ID,
+    HOSTED_MSG_FIELD_ID, MU_ABSORB, MU_SQUEEZE, SIB_ABSORB, STREAM_BASE_STRIDE, TR_ABSORB,
+    TR_SQUEEZE,
 };
 use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
@@ -1158,7 +1162,14 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
 
     let mu = job_shapes[1];
     assert_eq!(mu.message_len, 66 + msg.len());
-    assert_eq!(mu.n_absorb, (67 + msg.len()).div_ceil(136));
+    assert_eq!(
+        mu.message_capacity,
+        Some(66 + DEVICE_SIG_STRUCTURE_CAPACITY)
+    );
+    assert_eq!(
+        mu.n_absorb,
+        (67 + DEVICE_SIG_STRUCTURE_CAPACITY).div_ceil(136)
+    );
     assert_eq!(mu.n_squeeze, 1);
     assert_eq!(mu.absorb_stream_id, MU_ABSORB);
     assert_eq!(mu.squeeze_stream_id, MU_SQUEEZE);
@@ -1237,6 +1248,146 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
             .expect("public preprocessed columns")
             .len()
     );
+}
+
+#[test]
+fn hosted_private_key_capacity_fixes_composed_layout_and_tree_zero() {
+    const LENGTHS: [usize; 4] = [130, 303, 456, DEVICE_SIG_STRUCTURE_CAPACITY];
+
+    let public_shape = |message_len: usize| {
+        let message = (0..message_len)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(5))
+            .collect::<Vec<_>>();
+        let keccak_handle = SharedKeccakRelations::new();
+        let range_handle = SharedRangeRelation::new();
+        let field_handle = SharedFieldRelation::new();
+        let expand_bindings = ExpandABindings::new();
+        let mut service_shapes =
+            shake128_job_shapes(EXPAND_A_STREAM_BASE).expect("ExpandA service shapes");
+        service_shapes.extend(hosted_private_key_keccak_job_shapes(message_len, 0));
+        let mut service = KeccakServiceVerifier::new(
+            service_shapes,
+            vec![SecureField::zero(); service_claimed_sums_len()],
+            keccak_handle.clone(),
+        );
+        let mut mldsa = MlDsaVerifier::hosted_private_key(
+            MlDsaPrivateKeyPublicInput { message },
+            vec![SecureField::zero(); n_private_key_group_evals()],
+            vec![SecureField::zero(); hosted_private_key_claimed_sums_len()],
+            field_handle,
+            range_handle,
+            keccak_handle,
+            PrivateKeyEvalBindings::new(expand_bindings.ntt, SharedT1CellRelation::new()),
+        )
+        .expect("capacity-valid verifier");
+
+        let service_layout = service.layout();
+        let mldsa_layout = mldsa.layout();
+        let public_shape = (
+            service_layout.preprocessed,
+            service_layout.trace,
+            service_layout.interaction,
+            service.preprocessed_column_ids(),
+            mldsa_layout.preprocessed,
+            mldsa_layout.trace,
+            mldsa_layout.interaction,
+            mldsa.preprocessed_column_ids(),
+        );
+        let root = air_core::compute_canonical_preprocessed_root(
+            &mut [&mut service, &mut mldsa],
+            pcs_config(),
+        )
+        .expect("canonical service + ML-DSA root");
+        (public_shape, root)
+    };
+
+    let baseline = public_shape(LENGTHS[0]);
+    for len in LENGTHS {
+        let current = public_shape(len);
+        assert_eq!(
+            current.0, baseline.0,
+            "device message length {len} changed the composed public shape"
+        );
+        assert_eq!(
+            current.1, baseline.1,
+            "device message length {len} changed the composed tree-zero root"
+        );
+
+        let shape = hosted_private_key_keccak_job_shapes(len, 0)[1];
+        let preimage = (0..shape.message_len)
+            .map(|i| (i as u8).wrapping_mul(13).wrapping_add(11))
+            .collect::<Vec<_>>();
+        let run = generate_jobs(&JobList::new([shape]), std::slice::from_ref(&preimage));
+        assert_eq!(
+            run.outputs[0],
+            shake256(&[&preimage], 136).0,
+            "capacity µ output must hash only the actual prefix at length {len}"
+        );
+    }
+}
+
+#[test]
+fn hosted_private_key_over_capacity_is_a_checked_error() {
+    let over = DEVICE_SIG_STRUCTURE_CAPACITY + 1;
+    assert!(try_hosted_private_key_keccak_job_shapes(over, 0).is_err());
+    assert!(try_hosted_private_key_layout(over).is_err());
+
+    let result = MlDsaVerifier::hosted_private_key(
+        MlDsaPrivateKeyPublicInput {
+            message: vec![0; over],
+        },
+        vec![SecureField::zero(); n_private_key_group_evals()],
+        vec![SecureField::zero(); hosted_private_key_claimed_sums_len()],
+        SharedFieldRelation::new(),
+        SharedRangeRelation::new(),
+        SharedKeccakRelations::new(),
+        PrivateKeyEvalBindings::new(ExpandABindings::new().ntt, SharedT1CellRelation::new()),
+    );
+    assert!(matches!(
+        result,
+        Err(stwo::core::verifier::VerificationError::InvalidStructure(_))
+    ));
+}
+
+#[test]
+fn capacity_shape_serialization_fails_closed_without_changing_fixed_wire_format() {
+    #[derive(serde::Serialize)]
+    struct FixedShapeWire {
+        xof_mode: XofMode,
+        message_len: usize,
+        n_absorb: usize,
+        n_squeeze: usize,
+        absorb_stream_id: u32,
+        squeeze_stream_id: u32,
+        perm_id_base: usize,
+    }
+
+    let fixed = Shape::with_perm_id_base(303, 2, 11, 12, 73);
+    let expected_wire = FixedShapeWire {
+        xof_mode: fixed.xof_mode,
+        message_len: fixed.message_len,
+        n_absorb: fixed.n_absorb,
+        n_squeeze: fixed.n_squeeze,
+        absorb_stream_id: fixed.absorb_stream_id,
+        squeeze_stream_id: fixed.squeeze_stream_id,
+        perm_id_base: fixed.perm_id_base,
+    };
+    let encoded = bincode::serialize(&fixed).expect("fixed shape remains serializable");
+    assert_eq!(
+        encoded,
+        bincode::serialize(&expected_wire).expect("historical fixed wire fixture")
+    );
+    assert_eq!(
+        bincode::deserialize::<Shape>(&encoded).expect("fixed shape round trip"),
+        fixed
+    );
+
+    let capacity = Shape::with_message_capacity(303, DEVICE_SIG_STRUCTURE_CAPACITY + 66, 1, 11, 12)
+        .expect("capacity shape");
+    let error = bincode::serialize(&capacity).expect_err("capacity must not silently downgrade");
+    assert!(error
+        .to_string()
+        .contains("must be reconstructed from the verifier profile"));
 }
 
 #[test]
@@ -1324,6 +1475,16 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
         matches!(wrong_shape_result, Ok(Err(_))),
         "omitting the tr and µ service jobs must return an error, not panic"
     );
+}
+
+#[test]
+fn hosted_private_key_capacity_crosses_mu_rate_boundary() {
+    let msg = (0..130u32)
+        .map(|i| i.wrapping_mul(23).wrapping_add(17) as u8)
+        .collect::<Vec<_>>();
+    let proof = prove_hosted_private_key(4_264, &msg);
+    verify_hosted_private_key(&proof)
+        .expect("130-byte device message must cancel every composed HashIo claim");
 }
 
 #[test]

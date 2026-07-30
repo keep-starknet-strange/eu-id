@@ -16,22 +16,29 @@ use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{SecureField, QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
+use stwo::core::pcs::TreeVec;
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::backend::Column;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    TraceLocationAllocator,
+    assert_constraints_on_trace, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator,
+    Relation, RelationEntry, TraceLocationAllocator,
 };
 
 use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 
 use stwo_keccak::relations::{HashIoRelation, KeccakRelations, SharedKeccakRelations};
-use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier, PermWitness};
+use stwo_keccak::service::{
+    service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier, PermWitness,
+};
 use stwo_keccak::sponge::Shape;
-use stwo_keccak::sponge_v::{JobList, SpongeVRun};
+use stwo_keccak::sponge_v::{
+    gen_schedule_preprocessed, generate_base_trace, generate_interaction_trace, generate_jobs,
+    schedule_ids, Eval as SpongeEval, JobList, SpongeVRun,
+};
 use stwo_keccak::tables::{build_conv_table, build_dense_table};
 use stwo_keccak::utils::{col_eval, ColEval};
 use stwo_keccak::utils::{spread_u32, SPREAD_MAX};
@@ -417,6 +424,248 @@ fn single_job_proves_and_matches_sha3() {
         "rotated sponge output != sha3"
     );
     verify_jobs(&p, &p.messages.clone()).expect("single-job verify");
+}
+
+#[test]
+fn fixed_capacity_geometry_and_tree_zero_ignore_actual_length() {
+    const CAPACITY: usize = 1_024;
+    const LENGTHS: [usize; 4] = [130, 303, 456, CAPACITY];
+
+    let shape = |len| Shape::with_message_capacity(len, CAPACITY, 1, 10, 11).unwrap();
+    let assert_columns_equal = |actual: &[ColEval], expected: &[ColEval], label: &str| {
+        assert_eq!(actual.len(), expected.len(), "{label}: column count");
+        for (column_index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            assert_eq!(
+                actual.domain.log_size(),
+                expected.domain.log_size(),
+                "{label}: column {column_index} log size"
+            );
+            assert_eq!(
+                actual.values.len(),
+                expected.values.len(),
+                "{label}: column {column_index} row count"
+            );
+            for row in 0..actual.values.len() {
+                assert_eq!(
+                    actual.values.at(row),
+                    expected.values.at(row),
+                    "{label}: column {column_index}, row {row}"
+                );
+            }
+        }
+    };
+    let baseline_jobs = JobList::new([shape(LENGTHS[0])]);
+    let baseline_layout = {
+        let mut verifier = KeccakServiceVerifier::new(
+            vec![shape(LENGTHS[0])],
+            vec![SecureField::zero(); service_claimed_sums_len()],
+            SharedKeccakRelations::new(),
+        );
+        (
+            verifier.layout(),
+            verifier.preprocessed_column_ids(),
+            verifier
+                .canonical_preprocessed_columns()
+                .expect("baseline canonical preprocessed columns"),
+            air_core::compute_canonical_preprocessed_root(&mut [&mut verifier], pcs_config())
+                .expect("baseline canonical preprocessed root"),
+        )
+    };
+
+    for len in LENGTHS {
+        let jobs = JobList::new([shape(len)]);
+        assert_eq!(jobs.shape_digest(), baseline_jobs.shape_digest());
+        assert_eq!(jobs.n_perms_total(), baseline_jobs.n_perms_total());
+        assert_eq!(schedule_ids(&jobs), schedule_ids(&baseline_jobs));
+        assert_columns_equal(
+            &gen_schedule_preprocessed(&jobs),
+            &gen_schedule_preprocessed(&baseline_jobs),
+            &format!("actual length {len} changed capacity-only schedule bytes"),
+        );
+
+        let mut verifier = KeccakServiceVerifier::new(
+            vec![shape(len)],
+            vec![SecureField::zero(); service_claimed_sums_len()],
+            SharedKeccakRelations::new(),
+        );
+        let layout = verifier.layout();
+        assert_eq!(layout.preprocessed, baseline_layout.0.preprocessed);
+        assert_eq!(layout.trace, baseline_layout.0.trace);
+        assert_eq!(layout.interaction, baseline_layout.0.interaction);
+        assert_eq!(verifier.preprocessed_column_ids(), baseline_layout.1);
+        assert_columns_equal(
+            &verifier
+                .canonical_preprocessed_columns()
+                .expect("canonical preprocessed columns"),
+            &baseline_layout.2,
+            &format!("actual length {len} changed canonical preprocessed bytes"),
+        );
+        assert_eq!(
+            air_core::compute_canonical_preprocessed_root(&mut [&mut verifier], pcs_config())
+                .expect("canonical preprocessed root"),
+            baseline_layout.3,
+            "actual length {len} changed tree zero"
+        );
+    }
+
+    let mut short_channel = Blake2sChannel::default();
+    let mut long_channel = Blake2sChannel::default();
+    JobList::new([shape(130)]).mix_into(&mut short_channel);
+    JobList::new([shape(456)]).mix_into(&mut long_channel);
+    assert_ne!(
+        short_channel.draw_secure_felt(),
+        long_channel.draw_secure_felt(),
+        "actual public length must remain transcript-bound"
+    );
+}
+
+#[test]
+fn fixed_capacity_hashes_actual_prefix_and_canonicalizes_unused_rows() {
+    const CAPACITY: usize = 1_024;
+    let mut canonical_unused_post = None;
+
+    for len in [130usize, 303, 456, CAPACITY] {
+        let message = (0..len)
+            .map(|i| (i as u8).wrapping_mul(29).wrapping_add(7))
+            .collect::<Vec<_>>();
+        let jobs = JobList::new([Shape::with_message_capacity(len, CAPACITY, 1, 10, 11).unwrap()]);
+        let run = generate_jobs(&jobs, std::slice::from_ref(&message));
+        assert_eq!(run.outputs[0], shake256_ref(&message, 136));
+        assert_eq!(run.rows.len(), (CAPACITY + 1).div_ceil(136));
+
+        let actual_rows = (len + 1).div_ceil(136);
+        assert!(run.rows[..actual_rows].iter().all(|row| row.absorb_active));
+        assert!(run.rows[actual_rows - 1].squeeze_active);
+        for (row_index, row) in run.rows.iter().enumerate().skip(actual_rows) {
+            assert!(!row.absorb_active);
+            assert!(!row.squeeze_active);
+            assert_eq!(row.block_byte, [0; stwo_keccak::sponge_v::MAX_RATE]);
+            assert_eq!(row.new_rate, [0; stwo_keccak::sponge_v::MAX_RATE]);
+            assert_eq!(row.squeeze_byte, [0; stwo_keccak::sponge_v::MAX_RATE]);
+            let expected = canonical_unused_post.get_or_insert(row.post);
+            assert_eq!(&row.post, expected, "unused row must prove Keccak-f(0)");
+            assert!(run.perm_inputs[row_index][..200]
+                .iter()
+                .all(|value| value.to_array().iter().all(|lane| *lane == M31::zero())));
+        }
+    }
+}
+
+#[test]
+fn fixed_capacity_job_proves_and_over_capacity_rejects() {
+    const CAPACITY: usize = 1_024;
+    let message = (0..303u32)
+        .map(|i| i.wrapping_mul(17).wrapping_add(9) as u8)
+        .collect::<Vec<_>>();
+    let shape = Shape::with_message_capacity(message.len(), CAPACITY, 1, 10, 11).unwrap();
+    let fixed_before = vec![0x31; 50];
+    let fixed_after = vec![0x72; 200];
+    let shapes = vec![
+        Shape::new(fixed_before.len(), 1, 8, 9),
+        shape,
+        Shape::new(fixed_after.len(), 2, 12, 13),
+    ];
+    let messages = vec![fixed_before, message.clone(), fixed_after];
+    let jobs = JobList::new(shapes.clone());
+    let mut run = generate_jobs(&jobs, &messages);
+    let relations = KeccakRelations::dummy();
+    let (interaction_claim, interaction) = generate_interaction_trace(&relations, &run);
+    let trace = TreeVec::new(vec![
+        gen_schedule_preprocessed(&jobs),
+        generate_base_trace(&run),
+        interaction,
+    ]);
+    let trace = trace.as_ref().map_cols(|column| column.to_cpu().values);
+    let trace = trace.as_cols_ref();
+    let eval = SpongeEval {
+        jobs: jobs.clone(),
+        relations: relations.clone(),
+    };
+    assert_constraints_on_trace(
+        &trace,
+        eval.log_size(),
+        |row| {
+            eval.evaluate(row);
+        },
+        interaction_claim.claimed_sum,
+    );
+
+    let tamper_rejects = |run: &SpongeVRun| {
+        let tampered_relations = relations.clone();
+        let (tampered_claim, tampered_interaction) =
+            generate_interaction_trace(&tampered_relations, run);
+        let tampered_trace = TreeVec::new(vec![
+            gen_schedule_preprocessed(&jobs),
+            generate_base_trace(run),
+            tampered_interaction,
+        ]);
+        let tampered_trace = tampered_trace
+            .as_ref()
+            .map_cols(|column| column.to_cpu().values);
+        let tampered_trace = tampered_trace.as_cols_ref();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let eval = SpongeEval {
+                jobs: jobs.clone(),
+                relations: tampered_relations,
+            };
+            assert_constraints_on_trace(
+                &tampered_trace,
+                eval.log_size(),
+                |row| {
+                    eval.evaluate(row);
+                },
+                tampered_claim.claimed_sum,
+            );
+        }))
+        .is_err()
+    };
+
+    let capacity_start = shapes[0].n_perms();
+    let first_unused = capacity_start + shape.actual_n_absorb();
+    run.rows[first_unused].block_byte[0] = 1;
+    assert!(
+        tamper_rejects(&run),
+        "a nonzero inactive capacity byte must violate the canonical-zero constraint"
+    );
+    run.rows[first_unused].block_byte[0] = 0;
+    run.rows[capacity_start].block_byte[stwo_keccak::constants::N_BYTES_IN_RATE] = 1;
+    assert!(
+        tamper_rejects(&run),
+        "a nonzero byte outside the SHAKE-256 rate must violate canonical zero"
+    );
+    run.rows[capacity_start].block_byte[stwo_keccak::constants::N_BYTES_IN_RATE] = 0;
+    run.rows[capacity_start].absorb_active = false;
+    assert!(
+        tamper_rejects(&run),
+        "the first allocated row must remain in the actual absorb prefix"
+    );
+    run.rows[capacity_start].absorb_active = true;
+    run.rows[capacity_start].squeeze_active = true;
+    assert!(
+        tamper_rejects(&run),
+        "the squeeze selector must identify only the final actual absorb row"
+    );
+    run.rows[capacity_start].squeeze_active = false;
+    let pad_row = capacity_start + shape.actual_n_absorb() - 1;
+    let pad_start = shape.message_len % stwo_keccak::constants::N_BYTES_IN_RATE;
+    run.rows[pad_row].pad_gate[pad_start] = 0;
+    assert!(
+        tamper_rejects(&run),
+        "the committed pad suffix must start at the public actual length"
+    );
+
+    let proof = prove_shapes_full(shapes, messages.clone(), None, None, pcs_config());
+    assert_eq!(proof.outputs[1], shake256_ref(&message, 136));
+    verify_jobs(&proof, &messages).expect("fixed-capacity service verify");
+
+    assert!(matches!(
+        Shape::with_message_capacity(CAPACITY + 1, CAPACITY, 1, 10, 11),
+        Err(stwo_keccak::sponge::ShapeError::MessageExceedsCapacity { .. })
+    ));
+    assert!(matches!(
+        Shape::with_message_capacity(1, CAPACITY, 2, 10, 11),
+        Err(stwo_keccak::sponge::ShapeError::CapacityModeRequiresOneSqueeze { .. })
+    ));
 }
 
 #[test]

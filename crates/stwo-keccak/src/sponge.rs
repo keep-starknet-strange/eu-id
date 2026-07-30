@@ -4,7 +4,9 @@
 //! intentionally keeps only the public shape/XOF surface and the native
 //! Keccak-f byte permutation used to build service witnesses.
 
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::Error as DeError, ser::Error as SerError, Deserialize, Deserializer, Serialize, Serializer,
+};
 
 use crate::constants::{N_BYTES_IN_RATE, N_BYTES_IN_STATE, N_BYTES_IN_U64};
 
@@ -43,15 +45,97 @@ impl XofMode {
 }
 
 /// Static shape of a sponge job.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Shape {
     pub xof_mode: XofMode,
+    /// Public byte length that is absorbed by this job.
     pub message_len: usize,
+    /// Fixed allocation bound for a capacity-shaped job. `None` preserves the
+    /// historical fixed-length geometry where `message_len` is also the shape.
+    ///
+    /// Capacity-shaped jobs still bind `message_len` into the public
+    /// transcript, but derive their row count and preprocessed schedule from
+    /// this value. They are intentionally limited to one squeeze block: this
+    /// is the request-sized ML-DSA µ job, whose final absorb permutation is
+    /// also its only squeeze row.
+    /// This profile parameter is deliberately not proof-serialized. A service
+    /// verifier must reconstruct the bounded shape from its semantic public
+    /// message and circuit artifact; serializing a capacity-shaped `Shape`
+    /// fails instead of silently downgrading it to historical fixed geometry.
+    pub message_capacity: Option<usize>,
     pub n_absorb: usize,
     pub n_squeeze: usize,
     pub absorb_stream_id: u32,
     pub squeeze_stream_id: u32,
     pub perm_id_base: usize,
+}
+
+/// Historical fixed-shape wire format. Keeping this helper field-for-field
+/// preserves existing encodings while the manual implementation below rejects
+/// capacity shapes, which must be reconstructed from the verifier's profile.
+#[derive(Serialize, Deserialize)]
+struct FixedShapeWire {
+    xof_mode: XofMode,
+    message_len: usize,
+    n_absorb: usize,
+    n_squeeze: usize,
+    absorb_stream_id: u32,
+    squeeze_stream_id: u32,
+    perm_id_base: usize,
+}
+
+impl Serialize for Shape {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.message_capacity.is_some() {
+            return Err(S::Error::custom(
+                "capacity-shaped sponge jobs must be reconstructed from the verifier profile",
+            ));
+        }
+        FixedShapeWire {
+            xof_mode: self.xof_mode,
+            message_len: self.message_len,
+            n_absorb: self.n_absorb,
+            n_squeeze: self.n_squeeze,
+            absorb_stream_id: self.absorb_stream_id,
+            squeeze_stream_id: self.squeeze_stream_id,
+            perm_id_base: self.perm_id_base,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Shape {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = FixedShapeWire::deserialize(deserializer)?;
+        if wire.n_squeeze == 0 {
+            return Err(D::Error::custom(
+                "sponge shape must contain at least one squeeze block",
+            ));
+        }
+        let expected_n_absorb = (wire.message_len + 1).div_ceil(wire.xof_mode.rate());
+        if wire.n_absorb != expected_n_absorb {
+            return Err(D::Error::custom(format_args!(
+                "invalid fixed sponge geometry: encoded {} absorb rows, expected {expected_n_absorb}",
+                wire.n_absorb
+            )));
+        }
+        Ok(Self {
+            xof_mode: wire.xof_mode,
+            message_len: wire.message_len,
+            message_capacity: None,
+            n_absorb: wire.n_absorb,
+            n_squeeze: wire.n_squeeze,
+            absorb_stream_id: wire.absorb_stream_id,
+            squeeze_stream_id: wire.squeeze_stream_id,
+            perm_id_base: wire.perm_id_base,
+        })
+    }
 }
 
 impl Shape {
@@ -64,6 +148,7 @@ impl Shape {
         Self::with_mode_and_perm_id_base(
             XofMode::Shake256,
             message_len,
+            None,
             n_squeeze,
             absorb_stream_id,
             squeeze_stream_id,
@@ -81,6 +166,7 @@ impl Shape {
         Self::with_mode_and_perm_id_base(
             XofMode::Shake128,
             message_len,
+            None,
             n_squeeze,
             absorb_stream_id,
             squeeze_stream_id,
@@ -99,6 +185,7 @@ impl Shape {
         Self::with_mode_and_perm_id_base(
             XofMode::Shake256,
             message_len,
+            None,
             n_squeeze,
             absorb_stream_id,
             squeeze_stream_id,
@@ -106,19 +193,56 @@ impl Shape {
         )
     }
 
+    /// A SHAKE-256 job whose proof geometry is fixed by `message_capacity`
+    /// while its SHAKE padding and transcript use the public `message_len`.
+    ///
+    /// The one-squeeze restriction keeps the allocated maximum absorb rows
+    /// contiguous: the actual final absorb row is also the output row, and
+    /// every later allocated row is a canonical independent zero-state
+    /// permutation.
+    pub fn with_message_capacity(
+        message_len: usize,
+        message_capacity: usize,
+        n_squeeze: usize,
+        absorb_stream_id: u32,
+        squeeze_stream_id: u32,
+    ) -> Result<Self, ShapeError> {
+        if message_len > message_capacity {
+            return Err(ShapeError::MessageExceedsCapacity {
+                message_len,
+                message_capacity,
+            });
+        }
+        if n_squeeze != 1 {
+            return Err(ShapeError::CapacityModeRequiresOneSqueeze { n_squeeze });
+        }
+        Ok(Self::with_mode_and_perm_id_base(
+            XofMode::Shake256,
+            message_len,
+            Some(message_capacity),
+            n_squeeze,
+            absorb_stream_id,
+            squeeze_stream_id,
+            0,
+        ))
+    }
+
     fn with_mode_and_perm_id_base(
         xof_mode: XofMode,
         message_len: usize,
+        message_capacity: Option<usize>,
         n_squeeze: usize,
         absorb_stream_id: u32,
         squeeze_stream_id: u32,
         perm_id_base: usize,
     ) -> Self {
         assert!(n_squeeze >= 1, "at least one squeeze block");
+        let geometry_message_len = message_capacity.unwrap_or(message_len);
         Self {
             xof_mode,
             message_len,
-            n_absorb: (message_len + 1).div_ceil(xof_mode.rate()),
+            message_capacity,
+            n_absorb: (geometry_message_len + 1).div_ceil(xof_mode.rate()),
             n_squeeze,
             absorb_stream_id,
             squeeze_stream_id,
@@ -127,14 +251,27 @@ impl Shape {
     }
 
     pub(crate) fn with_rebased_perm_ids(self, perm_id_base: usize) -> Self {
-        Self::with_mode_and_perm_id_base(
-            self.xof_mode,
-            self.message_len,
-            self.n_squeeze,
-            self.absorb_stream_id,
-            self.squeeze_stream_id,
+        Self {
             perm_id_base,
-        )
+            ..self
+        }
+    }
+
+    /// Length from which the allocation and schedule are derived.
+    pub const fn geometry_message_len(&self) -> usize {
+        match self.message_capacity {
+            Some(capacity) => capacity,
+            None => self.message_len,
+        }
+    }
+
+    pub const fn has_message_capacity(&self) -> bool {
+        self.message_capacity.is_some()
+    }
+
+    /// Actual absorb rows, including the row containing SHAKE padding.
+    pub const fn actual_n_absorb(&self) -> usize {
+        (self.message_len + 1).div_ceil(self.rate())
     }
 
     pub const fn rate(&self) -> usize {
@@ -149,6 +286,37 @@ impl Shape {
         self.n_squeeze * self.rate()
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShapeError {
+    MessageExceedsCapacity {
+        message_len: usize,
+        message_capacity: usize,
+    },
+    CapacityModeRequiresOneSqueeze {
+        n_squeeze: usize,
+    },
+}
+
+impl core::fmt::Display for ShapeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::MessageExceedsCapacity {
+                message_len,
+                message_capacity,
+            } => write!(
+                f,
+                "message length {message_len} exceeds fixed capacity {message_capacity}"
+            ),
+            Self::CapacityModeRequiresOneSqueeze { n_squeeze } => write!(
+                f,
+                "fixed-capacity sponge jobs require one squeeze block, got {n_squeeze}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ShapeError {}
 
 /// Native Keccak-f on a byte-state, via the u64 path.
 pub(crate) fn native_keccak_f_bytes(state: &mut [u8; N_BYTES_IN_STATE]) {

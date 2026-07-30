@@ -125,13 +125,27 @@ impl PrivateKeyEvalWitness {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrivateKeyEvalError {
     InvalidPublicKey(&'static str),
-    WrongEvalCount { expected: usize, actual: usize },
+    MessageExceedsCapacity {
+        message_len: usize,
+        message_capacity: usize,
+    },
+    WrongEvalCount {
+        expected: usize,
+        actual: usize,
+    },
 }
 
 impl core::fmt::Display for PrivateKeyEvalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::InvalidPublicKey(message) => f.write_str(message),
+            Self::MessageExceedsCapacity {
+                message_len,
+                message_capacity,
+            } => write!(
+                f,
+                "device message length {message_len} exceeds fixed capacity {message_capacity}"
+            ),
             Self::WrongEvalCount { expected, actual } => {
                 write!(
                     f,
