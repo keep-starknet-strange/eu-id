@@ -31,9 +31,9 @@ rand = "0.8"
 rayon = "1"
 ciborium = "0.2.2"
 celes = "=2.8.2"
+serde_json = "1"
 
 [dev-dependencies]
-serde_json = "1"
 bzip2 = "0.6"
 # ML-DSA-65 mdoc fixture (M1): the RustCrypto `ml-dsa` oracle signs the issuer
 # `Sig_structure`; `stwo-mldsa` (now a main dependency) natively verifies it.
