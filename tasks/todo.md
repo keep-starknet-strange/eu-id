@@ -1196,8 +1196,23 @@ Normative specification:
       fallback.
 - [x] Inventory the existing Android benchmark harness and reachable physical
       or remote devices before adding any benchmark code.
-- [ ] Run the frozen A1 fixture in an optimized mobile build on the available
+- [x] Run the frozen A1 fixture in an optimized mobile build on the available
       target, recording hardware, worker count, prove/verify latency, envelope
       size, and peak memory where the platform exposes it.
-- [ ] Record the exact demo-readiness verdict and any external integration
+- [x] Record the exact demo-readiness verdict and any external integration
       blocker.
+
+### Review
+
+- Firebase Test Lab matrix `matrix-9779illjtcvba` passed the exact tagged
+  `proveIdentity(Ts13DemoV1)` and `verifyIdentity` test on the Android 14
+  Galaxy S24 Ultra, Pixel 8, and Galaxy A54 axes.
+- One cold-process sample per device measured prove/verify latency of
+  4,081/214 ms, 7,892/257 ms, and 11,601/333 ms respectively. Every device
+  emitted the frozen 1,769,518-byte V4 envelope. Peak process resident memory
+  was 2,015,544--2,094,228 KiB.
+- The isolated core SDK is viable for a controlled demo, with an explicit
+  progress UI and a device with roughly 2 GiB of process headroom. The
+  official wallet adapter remains a separate integration blocker because its
+  current Kotlin mapping still constructs the obsolete product statement and
+  does not select `Ts13DemoV1`.
