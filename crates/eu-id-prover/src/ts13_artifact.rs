@@ -2565,7 +2565,7 @@ fn build_outputs(
 
 fn render_digest_array(output: &mut String, name: &str, digest: Digest32) {
     writeln!(output, "pub const {name}: [u8; 32] = [").expect("writing to String cannot fail");
-    for chunk in digest.0.chunks(8) {
+    for chunk in digest.0.chunks(16) {
         output.push_str("    ");
         for (index, byte) in chunk.iter().enumerate() {
             if index != 0 {
@@ -2574,6 +2574,23 @@ fn render_digest_array(output: &mut String, name: &str, digest: Digest32) {
             write!(output, "0x{byte:02x},").expect("writing to String cannot fail");
         }
         output.push('\n');
+    }
+    output.push_str("];\n");
+}
+
+fn render_usize_array(
+    output: &mut String,
+    name: &str,
+    length: usize,
+    values: impl IntoIterator<Item = u64>,
+) {
+    write!(output, "pub const {name}: [usize; {length}] = [")
+        .expect("writing to String cannot fail");
+    for (index, value) in values.into_iter().enumerate() {
+        if index != 0 {
+            output.push(' ');
+        }
+        write!(output, "{value},").expect("writing to String cannot fail");
     }
     output.push_str("];\n");
 }
@@ -2614,35 +2631,50 @@ fn render_hash_embedding(
     )
     .expect("writing to String cannot fail");
 
-    output.push_str("pub const TS13_DEMO_TREE_COLUMN_COUNTS: [usize; 5] = [\n");
-    for tree in &input.proof_system.merkle_trees {
-        writeln!(output, "    {},", tree.maximum_opened_columns)
-            .expect("writing to String cannot fail");
-    }
-    output.push_str("];\n");
-
-    output.push_str("pub const TS13_DEMO_TREE_MERKLE_HASH_CAPS: [usize; 5] = [\n");
-    for tree in &input.proof_system.merkle_trees {
-        writeln!(
-            output,
-            "    {},",
-            u64::from(input.proof_system.fri_query_count) * u64::from(tree.depth)
-        )
-        .expect("writing to String cannot fail");
-    }
-    output.push_str("];\n");
+    render_usize_array(
+        &mut output,
+        "TS13_DEMO_TREE_COLUMN_COUNTS",
+        5,
+        input
+            .proof_system
+            .merkle_trees
+            .iter()
+            .map(|tree| u64::from(tree.maximum_opened_columns)),
+    );
+    render_usize_array(
+        &mut output,
+        "TS13_DEMO_TREE_MERKLE_HASH_CAPS",
+        5,
+        input
+            .proof_system
+            .merkle_trees
+            .iter()
+            .map(|tree| u64::from(input.proof_system.fri_query_count) * u64::from(tree.depth)),
+    );
 
     output.push_str(
         "pub const TS13_DEMO_SAMPLED_VALUE_LENGTH_HISTOGRAMS: \
          [&[(usize, usize)]; 5] = [\n",
     );
     for tree in &input.proof_system.merkle_trees {
-        output.push_str("    &[\n");
-        for entry in &tree.sampled_value_length_histogram {
-            writeln!(output, "        ({}, {}),", entry.value, entry.count)
-                .expect("writing to String cannot fail");
+        if tree.sampled_value_length_histogram.len() <= 2 {
+            output.push_str("    &[");
+            for (index, entry) in tree.sampled_value_length_histogram.iter().enumerate() {
+                if index != 0 {
+                    output.push(' ');
+                }
+                write!(output, "({}, {}),", entry.value, entry.count)
+                    .expect("writing to String cannot fail");
+            }
+            output.push_str("],\n");
+        } else {
+            output.push_str("    &[\n");
+            for entry in &tree.sampled_value_length_histogram {
+                writeln!(output, "        ({}, {}),", entry.value, entry.count)
+                    .expect("writing to String cannot fail");
+            }
+            output.push_str("    ],\n");
         }
-        output.push_str("    ],\n");
     }
     output.push_str("];\n");
 
@@ -2659,22 +2691,22 @@ fn render_hash_embedding(
         u64::from(input.proof_system.fri_query_count) * u64::from(first_fri_layer.merkle_depth)
     )
     .expect("writing to String cannot fail");
-    output.push_str("pub const TS13_DEMO_FRI_INNER_WITNESS_CAPS: [usize; 7] = [\n");
-    for layer in &input.proof_system.fri_layers[1..] {
-        writeln!(output, "    {},", layer.maximum_opened_values)
-            .expect("writing to String cannot fail");
-    }
-    output.push_str("];\n");
-    output.push_str("pub const TS13_DEMO_FRI_INNER_HASH_CAPS: [usize; 7] = [\n");
-    for layer in &input.proof_system.fri_layers[1..] {
-        writeln!(
-            output,
-            "    {},",
+    render_usize_array(
+        &mut output,
+        "TS13_DEMO_FRI_INNER_WITNESS_CAPS",
+        7,
+        input.proof_system.fri_layers[1..]
+            .iter()
+            .map(|layer| u64::from(layer.maximum_opened_values)),
+    );
+    render_usize_array(
+        &mut output,
+        "TS13_DEMO_FRI_INNER_HASH_CAPS",
+        7,
+        input.proof_system.fri_layers[1..].iter().map(|layer| {
             u64::from(input.proof_system.fri_query_count) * u64::from(layer.merkle_depth)
-        )
-        .expect("writing to String cannot fail");
-    }
-    output.push_str("];\n");
+        }),
+    );
     writeln!(
         output,
         "pub const TS13_DEMO_FRI_LAST_LAYER_COEFFICIENT_COUNT: usize = {};",
