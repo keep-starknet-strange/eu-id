@@ -1084,7 +1084,7 @@ Normative specification:
 - [x] Capture three fresh, metadata-matched release baselines before changing
       the profile; record proof bytes, peak memory, thread count, hardware,
       operating system, PCS configuration, features, commit, and fixture.
-- [ ] Generate the deterministic circuit artifact, source-tree digest, circuit
+- [x] Generate the deterministic circuit artifact, source-tree digest, circuit
       hash, fixed shape manifest, and proof-body capacity `P`; add CI drift
       checks and the closed recursive-exclusion allowlist.
 - [x] Implement the fixed-capacity V4 `EUIDTS13` envelope with canonical proof
@@ -1121,7 +1121,7 @@ Normative specification:
       U5/U6/U7/U9 adversarial cases, device-key substitution, malformed V4,
       cross-profile rejection, fixed-capacity boundary, and circuit-artifact
       drift.
-- [ ] Run release formatting, check, Clippy, focused and full tests, then three
+- [x] Run release formatting, check, Clippy, focused and full tests, then three
       fresh matched performance processes. Record results without changing an
       acceptance threshold after measurement; treat 2 s prove and 250 ms
       verify as aspirational until supported by those measurements.
@@ -1149,5 +1149,42 @@ Normative specification:
       prove 756 ms, forced-fresh verify 44 ms, raw proof 1,556,499 bytes,
       Bzip2 wire 1,217,883 bytes, and peak RSS 924.16 MiB with twelve Rayon
       workers on the seven-attribute fixture.
-- [ ] Record the final public allowlist, circuit artifact/hash, V4 capacity,
+- [x] Record the final public allowlist, circuit artifact/hash, V4 capacity,
       release test matrix, A1/A2/B evidence, and matched performance results.
+- The generated artifact pins circuit hash
+  `fe00ac0fe17f146e5f79220d30df84768c8d8a6d8d7b778a248303f5be8b36ab`,
+  shape-manifest hash
+  `f63aaccdc696e241a4e41e2e7a53ec621557942c50f12e6841ab542e936fdfde`,
+  generation-input hash
+  `53662d86fec1e29fdbb281b1440a5d81ab9a68a7d5d8c87938e3c9b4e16d9ed5`,
+  and soundness-source-tree hash
+  `db9dc765aa44d89d8916818559909c5f86cdff0280f75b08b075fd639827b525`.
+  Its 20 AIRs use 947 preprocessed columns, tree-column counts
+  `[947, 5000, 2416, 8, 32]`, 36 queries, a 1,769,472-byte proof-body
+  capacity, and an exact 1,769,518-byte V4 envelope.
+- The closed public allowlist contains only the semantic policy/session/key/
+  revocation inputs, their canonical derived request/COSE/time commitments,
+  the V4 header, and universal circuit/profile/shape/cryptographic constants.
+  Private credential bytes, the MSO, digest identifier, device key, issuer and
+  holder signatures, revocation endpoints, and credential-specific lengths
+  are absent. Marker scans, equal-length A1/A2/B envelopes, and the
+  decompressed-proof allowlist all pass.
+- Final release verification passes the full workspace suite and the focused
+  validity, protected-header, U5 boundary, U6 all-66-group/all-23-sum and
+  Horner, U9 production-PCS, revocation-ID, V4/cross-profile, context,
+  theorem-mutation, and A1/A2/B tests. The two expensive composed U5 tests
+  also pass explicitly. Artifact regeneration with `--check`, touched-file
+  rustfmt, whitespace checks, workspace all-target check, and default
+  workspace Clippy pass; warnings-denied Clippy remains blocked only by
+  pre-existing repository warnings.
+- Three fresh 12-Rayon-worker release processes measure median prove
+  1,321 ms, forced-fresh verify 44 ms, and peak RSS 2,204,975,104 bytes
+  (2,102.83 MiB). The individual prove/verify samples are 1,321/44,
+  1,325/47, and 1,313/43 ms. This clears the unchanged aspirational
+  2 s/250 ms demo targets; memory, at about 2.28 times the frozen baseline,
+  is the principal cost of the complete unlinkability composition.
+- Core implementation is complete for the frozen demo claim
+  `public-input unlinkable; transcript zero knowledge pending`. STWO
+  transcript masking remains intentionally deferred. An Android/Kotlin
+  binding smoke test is optional downstream integration work and is not a
+  missing core proof or API requirement.
