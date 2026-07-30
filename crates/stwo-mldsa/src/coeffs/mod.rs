@@ -15,8 +15,10 @@
 //!   * runs the bivariate Horner accumulator (interaction tree) at the drawn
 //!     `(r,s)`, emitting `P̂(r,s)` at each group end into [`EvalAtRsRelation`].
 //!
-//! The verifier-native fold ([`crate::verifier_native`]) consumes those claimed
-//! evaluations and checks the folded identity `(‡)` against public `Â, t̂1, q̂`.
+//! Public-key mode closes those evaluations with [`crate::verifier_native`].
+//! Hosted private-key mode joins them to the proven `A` / scaled-`t1`
+//! evaluations and closes the same complete identity in
+//! [`crate::private_key_eval`].
 //!
 //! ## Base column layout (uniform over all `2^log_size` rows)
 //!
@@ -798,6 +800,26 @@ impl RcUses {
             RcKind::Ternary => &self.ternary,
         }
     }
+
+    /// Merge another component's uses into this proof-wide table census.
+    pub fn add_assign(&mut self, other: &Self) {
+        for kind in RcKind::ALL {
+            let lhs = match kind {
+                RcKind::Rc9 => &mut self.rc9,
+                RcKind::Rc13 => &mut self.rc13,
+                RcKind::Rc8 => &mut self.rc8,
+                RcKind::Rc7 => &mut self.rc7,
+                RcKind::Ternary => &mut self.ternary,
+            };
+            let rhs = other.for_kind(kind);
+            assert_eq!(lhs.len(), rhs.len(), "range census shape mismatch");
+            for (count, &extra) in lhs.iter_mut().zip(rhs) {
+                *count = count
+                    .checked_add(extra)
+                    .expect("ML-DSA range multiplicity overflow");
+            }
+        }
+    }
 }
 
 impl Default for RcUses {
@@ -1150,5 +1172,21 @@ mod packed_tests {
         assert_eq!(COL_NORM2_A_HI, carry_end);
         assert_eq!(COL_NORM2_B_HI, carry_end + 1);
         assert_eq!(N_BASE_COLS, carry_end + 2);
+    }
+
+    #[test]
+    fn range_censuses_merge_per_kind_without_cross_talk() {
+        let mut left = RcUses::new();
+        let mut right = RcUses::new();
+        left.record(RcKind::Rc8, 17);
+        right.record(RcKind::Rc8, 17);
+        right.record(RcKind::Rc9, 17);
+        right.record(RcKind::Ternary, 2);
+        left.add_assign(&right);
+        assert_eq!(left.for_kind(RcKind::Rc8)[17], 2);
+        assert_eq!(left.for_kind(RcKind::Rc9)[17], 1);
+        assert_eq!(left.for_kind(RcKind::Ternary)[2], 1);
+        assert_eq!(left.for_kind(RcKind::Rc13).iter().sum::<u32>(), 0);
+        assert_eq!(left.for_kind(RcKind::Rc7).iter().sum::<u32>(), 0);
     }
 }

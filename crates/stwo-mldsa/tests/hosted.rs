@@ -17,7 +17,7 @@ mod common;
 use common::{composed_pcs_config as pcs_config, oracle_input};
 
 use stwo::core::air::Component;
-use stwo::core::channel::Blake2sChannel;
+use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::qm31::SecureField;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::{ComponentProver, TreeBuilder};
@@ -27,10 +27,12 @@ use stwo_constraint_framework::{
     TraceLocationAllocator,
 };
 
-use num_traits::Zero;
+use num_traits::{One, Zero};
 
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
-use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
+use air_core::{
+    fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
+};
 
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
@@ -38,10 +40,18 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_mldsa::air_util::{col_eval, m31, ColEval};
-use stwo_mldsa::binding::STREAM_ID_SIB_SQUEEZE;
+use stwo_mldsa::binding::{
+    RhoCellRelation, SharedRhoCellRelation, SharedT1CellRelation, T1CellRelation,
+    STREAM_ID_SIB_SQUEEZE,
+};
 use stwo_mldsa::coeffs::relations::SharedRangeRelation;
 use stwo_mldsa::coeffs::tables::SharedRangeTable;
-use stwo_mldsa::constants::PK_BYTES;
+use stwo_mldsa::constants::{K, N, PK_BYTES};
+use stwo_mldsa::expand_a::{
+    derive_expand_a_witness, shake128_job_shapes, ExpandABindings, ExpandAClaim, ExpandAProver,
+    ExpandAVerifier,
+};
+use stwo_mldsa::private_key_eval::PrivateKeyEvalBindings;
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
     hosted_claimed_sums_len, hosted_private_key_claimed_sums_len,
@@ -51,7 +61,7 @@ use stwo_mldsa::statement::{
     STREAM_BASE_STRIDE, TR_ABSORB, TR_SQUEEZE,
 };
 use stwo_mldsa::witness::generate_witness;
-use stwo_mldsa::MlDsaVerifyInput;
+use stwo_mldsa::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 
 // =====================================================================
 // Throwaway host module: a FieldExposure-style producer yielding the whole
@@ -250,6 +260,523 @@ impl AirProver for FieldProducer {
 }
 
 // =====================================================================
+// Focused private-key source for U6.
+//
+// Its private bit trace proves the FIPS-204 5-byte -> 4x10-bit t1 packing,
+// publishes the exact normalized
+// pkEncode bytes, and binds the same rho bytes to real ExpandA. The verifier
+// receives only its two LogUp claims.
+// =====================================================================
+
+const PRIVATE_KEY_BINDER_TAG: u64 = 0x504b_4249_4e44_0001;
+const EXPAND_A_NAMESPACE: &str = "hosted-private-key-expand-a";
+const EXPAND_A_STREAM_BASE: u32 = 256;
+const RHO_BIND_LOG_SIZE: u32 = 5;
+const T1_BIND_LOG_SIZE: u32 = 9;
+const T1_GROUP_BYTES: usize = 5;
+const T1_GROUP_COEFFS: usize = 4;
+const T1_GROUPS_PER_POLY: usize = N / T1_GROUP_COEFFS;
+const T1_ACTIVE_ROWS: usize = K * T1_GROUPS_PER_POLY;
+const RHO_TRACE_COLS: usize = 8;
+const T1_TRACE_COLS: usize = T1_GROUP_BYTES * 8;
+const RHO_LOGUP_ENTRIES: usize = 2;
+const T1_LOGUP_ENTRIES: usize = T1_GROUP_BYTES + T1_GROUP_COEFFS;
+const RHO_INTERACTION_COLS: usize = stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
+const T1_INTERACTION_COLS: usize =
+    stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE * T1_LOGUP_ENTRIES.div_ceil(4);
+
+fn rho_index_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "hosted_private_key_rho_index".to_string(),
+    }
+}
+
+fn t1_active_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "hosted_private_key_t1_active".to_string(),
+    }
+}
+
+fn t1_poly_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "hosted_private_key_t1_poly".to_string(),
+    }
+}
+
+fn t1_group_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "hosted_private_key_t1_group".to_string(),
+    }
+}
+
+fn private_key_source_preprocessed_ids() -> Vec<PreProcessedColumnId> {
+    vec![rho_index_id(), t1_active_id(), t1_poly_id(), t1_group_id()]
+}
+
+fn private_key_source_preprocessed() -> Vec<ColEval> {
+    let rho_index = (0..(1usize << RHO_BIND_LOG_SIZE))
+        .map(|index| m31(index as u32))
+        .collect();
+    let mut active = vec![m31(0); 1usize << T1_BIND_LOG_SIZE];
+    let mut poly = vec![m31(0); 1usize << T1_BIND_LOG_SIZE];
+    let mut group = vec![m31(0); 1usize << T1_BIND_LOG_SIZE];
+    for row in 0..T1_ACTIVE_ROWS {
+        active[row] = m31(1);
+        poly[row] = m31((row / T1_GROUPS_PER_POLY) as u32);
+        group[row] = m31((row % T1_GROUPS_PER_POLY) as u32);
+    }
+    vec![
+        col_eval(RHO_BIND_LOG_SIZE, rho_index),
+        col_eval(T1_BIND_LOG_SIZE, active),
+        col_eval(T1_BIND_LOG_SIZE, poly),
+        col_eval(T1_BIND_LOG_SIZE, group),
+    ]
+}
+
+#[derive(Clone)]
+struct PrivateKeySourceRelations {
+    field: FieldBytesRelation,
+    rho: RhoCellRelation,
+    t1: T1CellRelation,
+}
+
+#[derive(Clone)]
+struct PrivateRhoEval {
+    relations: PrivateKeySourceRelations,
+}
+
+impl FrameworkEval for PrivateRhoEval {
+    fn log_size(&self) -> u32 {
+        RHO_BIND_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size() + 1
+    }
+
+    #[allow(clippy::assign_op_pattern)]
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let index = eval.get_preprocessed_column(rho_index_id());
+        let bits: Vec<_> = (0..8).map(|_| eval.next_trace_mask()).collect();
+        let one = E::F::from(m31(1));
+        let mut byte = E::F::zero();
+        for (bit_index, bit) in bits.into_iter().enumerate() {
+            eval.add_constraint(bit.clone() * (one.clone() - bit.clone()));
+            byte = byte + E::F::from(m31(1 << bit_index)) * bit;
+        }
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.field,
+            -one.clone(),
+            &[
+                E::F::from(m31(HOSTED_DEVICE_PK_FIELD_ID)),
+                index.clone(),
+                byte.clone(),
+            ],
+        ));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.rho,
+            -one,
+            &[index, byte],
+        ));
+        eval.finalize_logup_batched(4);
+        eval
+    }
+}
+
+#[derive(Clone)]
+struct PrivateT1Eval {
+    relations: PrivateKeySourceRelations,
+}
+
+impl FrameworkEval for PrivateT1Eval {
+    fn log_size(&self) -> u32 {
+        T1_BIND_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        self.log_size() + 1
+    }
+
+    #[allow(clippy::assign_op_pattern)]
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let active = eval.get_preprocessed_column(t1_active_id());
+        let poly = eval.get_preprocessed_column(t1_poly_id());
+        let group = eval.get_preprocessed_column(t1_group_id());
+        let bits: Vec<_> = (0..T1_TRACE_COLS).map(|_| eval.next_trace_mask()).collect();
+        let one = E::F::from(m31(1));
+        for bit in &bits {
+            eval.add_constraint(bit.clone() * (one.clone() - bit.clone()));
+            eval.add_constraint((one.clone() - active.clone()) * bit.clone());
+        }
+        for byte_index in 0..T1_GROUP_BYTES {
+            let mut byte = E::F::zero();
+            for bit_index in 0..8 {
+                byte = byte
+                    + E::F::from(m31(1 << bit_index)) * bits[byte_index * 8 + bit_index].clone();
+            }
+            let position = E::F::from(m31((32 + byte_index) as u32))
+                + E::F::from(m31(320)) * poly.clone()
+                + E::F::from(m31(T1_GROUP_BYTES as u32)) * group.clone();
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.field,
+                -active.clone(),
+                &[E::F::from(m31(HOSTED_DEVICE_PK_FIELD_ID)), position, byte],
+            ));
+        }
+        for coefficient in 0..T1_GROUP_COEFFS {
+            let bit_base = coefficient * 10;
+            let mut lo9 = E::F::zero();
+            for bit_index in 0..9 {
+                lo9 = lo9 + E::F::from(m31(1 << bit_index)) * bits[bit_base + bit_index].clone();
+            }
+            let coefficient_index = E::F::from(m31(T1_GROUP_COEFFS as u32)) * group.clone()
+                + E::F::from(m31(coefficient as u32));
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.t1,
+                -active.clone(),
+                &[
+                    poly.clone(),
+                    coefficient_index,
+                    lo9,
+                    bits[bit_base + 9].clone(),
+                ],
+            ));
+        }
+        eval.finalize_logup_batched(4);
+        eval
+    }
+}
+
+fn private_key_source_trace(pk_encode: &[u8]) -> Vec<ColEval> {
+    assert_eq!(pk_encode.len(), PK_BYTES);
+    let mut rho_columns = vec![vec![m31(0); 1usize << RHO_BIND_LOG_SIZE]; RHO_TRACE_COLS];
+    for (row, &byte) in pk_encode[..32].iter().enumerate() {
+        for (bit, column) in rho_columns.iter_mut().enumerate() {
+            column[row] = m31(((byte >> bit) & 1) as u32);
+        }
+    }
+    let mut t1_columns = vec![vec![m31(0); 1usize << T1_BIND_LOG_SIZE]; T1_TRACE_COLS];
+    for row in 0..T1_ACTIVE_ROWS {
+        let bytes = &pk_encode[32 + row * T1_GROUP_BYTES..32 + (row + 1) * T1_GROUP_BYTES];
+        for (byte_index, &byte) in bytes.iter().enumerate() {
+            for bit in 0..8 {
+                t1_columns[byte_index * 8 + bit][row] = m31(((byte >> bit) & 1) as u32);
+            }
+        }
+    }
+    rho_columns
+        .into_iter()
+        .map(|column| col_eval(RHO_BIND_LOG_SIZE, column))
+        .chain(
+            t1_columns
+                .into_iter()
+                .map(|column| col_eval(T1_BIND_LOG_SIZE, column)),
+        )
+        .collect()
+}
+
+fn combine_logup_batch(entries: &[(SecureField, SecureField)]) -> (SecureField, SecureField) {
+    let denominator = entries
+        .iter()
+        .fold(SecureField::one(), |acc, (_, denominator)| {
+            acc * *denominator
+        });
+    let numerator =
+        entries
+            .iter()
+            .enumerate()
+            .fold(SecureField::zero(), |acc, (index, (numerator, _))| {
+                let other_denominators = entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .fold(SecureField::one(), |product, (_, (_, denominator))| {
+                        product * *denominator
+                    });
+                acc + *numerator * other_denominators
+            });
+    (numerator, denominator)
+}
+
+fn private_key_source_logup(
+    log_size: u32,
+    rows: &[Vec<(SecureField, SecureField)>],
+    entries_per_row: usize,
+) -> (Vec<ColEval>, SecureField) {
+    let circle_to_coset = stwo_mldsa::air_util::circle_row_to_coset(log_size);
+    let mut logup = LogupTraceGenerator::new(log_size);
+    for start in (0..entries_per_row).step_by(4) {
+        let end = (start + 4).min(entries_per_row);
+        logup.col_from_fn(|vec_row| {
+            let mut numerators = [SecureField::zero(); N_LANES];
+            let mut denominators = [SecureField::zero(); N_LANES];
+            for lane in 0..N_LANES {
+                let circle_row = vec_row * N_LANES + lane;
+                let coset_row = circle_to_coset[circle_row];
+                let (numerator, denominator) = combine_logup_batch(&rows[coset_row][start..end]);
+                numerators[lane] = numerator;
+                denominators[lane] = denominator;
+            }
+            (
+                PackedQM31::from_array(numerators),
+                PackedQM31::from_array(denominators),
+            )
+        });
+    }
+    logup.finalize_last()
+}
+
+fn private_key_source_interaction(
+    pk_encode: &[u8],
+    relations: &PrivateKeySourceRelations,
+) -> ([Vec<ColEval>; 2], [SecureField; 2]) {
+    assert_eq!(pk_encode.len(), PK_BYTES);
+    let minus_one = -SecureField::one();
+    let one = SecureField::one();
+    let rho_rows: Vec<_> = pk_encode[..32]
+        .iter()
+        .enumerate()
+        .map(|(index, &byte)| {
+            vec![
+                (
+                    minus_one,
+                    relations.field.combine(&[
+                        m31(HOSTED_DEVICE_PK_FIELD_ID),
+                        m31(index as u32),
+                        m31(byte as u32),
+                    ]),
+                ),
+                (
+                    minus_one,
+                    relations
+                        .rho
+                        .combine(&[m31(index as u32), m31(byte as u32)]),
+                ),
+            ]
+        })
+        .collect();
+    let (rho_trace, rho_claim) =
+        private_key_source_logup(RHO_BIND_LOG_SIZE, &rho_rows, RHO_LOGUP_ENTRIES);
+
+    let mut t1_rows =
+        vec![vec![(SecureField::zero(), one); T1_LOGUP_ENTRIES]; 1usize << T1_BIND_LOG_SIZE];
+    for (row, entries) in t1_rows.iter_mut().enumerate().take(T1_ACTIVE_ROWS) {
+        let poly = row / T1_GROUPS_PER_POLY;
+        let group = row % T1_GROUPS_PER_POLY;
+        let byte_start = 32 + row * T1_GROUP_BYTES;
+        let bytes = &pk_encode[byte_start..byte_start + T1_GROUP_BYTES];
+        let packed = bytes
+            .iter()
+            .enumerate()
+            .fold(0u64, |value, (index, &byte)| {
+                value | ((byte as u64) << (8 * index))
+            });
+        let mut row_entries = Vec::with_capacity(T1_LOGUP_ENTRIES);
+        for (byte_index, &byte) in bytes.iter().enumerate() {
+            row_entries.push((
+                minus_one,
+                relations.field.combine(&[
+                    m31(HOSTED_DEVICE_PK_FIELD_ID),
+                    m31((byte_start + byte_index) as u32),
+                    m31(byte as u32),
+                ]),
+            ));
+        }
+        for coefficient in 0..T1_GROUP_COEFFS {
+            let value = ((packed >> (10 * coefficient)) & 0x3ff) as u32;
+            row_entries.push((
+                minus_one,
+                relations.t1.combine(&[
+                    m31(poly as u32),
+                    m31((group * T1_GROUP_COEFFS + coefficient) as u32),
+                    m31(value & 0x1ff),
+                    m31(value >> 9),
+                ]),
+            ));
+        }
+        *entries = row_entries;
+    }
+    let (t1_trace, t1_claim) =
+        private_key_source_logup(T1_BIND_LOG_SIZE, &t1_rows, T1_LOGUP_ENTRIES);
+    ([rho_trace, t1_trace], [rho_claim, t1_claim])
+}
+
+struct PrivateKeySource {
+    pk_encode: Option<Vec<u8>>,
+    field_handle: SharedFieldRelation,
+    rho_handle: SharedRhoCellRelation,
+    t1_handle: SharedT1CellRelation,
+    relations: Option<PrivateKeySourceRelations>,
+    claims: [SecureField; 2],
+    rho_component: Option<FrameworkComponent<PrivateRhoEval>>,
+    t1_component: Option<FrameworkComponent<PrivateT1Eval>>,
+}
+
+impl PrivateKeySource {
+    fn prover(
+        pk_encode: Vec<u8>,
+        field_handle: SharedFieldRelation,
+        rho_handle: SharedRhoCellRelation,
+        t1_handle: SharedT1CellRelation,
+    ) -> Self {
+        assert_eq!(pk_encode.len(), PK_BYTES);
+        Self {
+            pk_encode: Some(pk_encode),
+            field_handle,
+            rho_handle,
+            t1_handle,
+            relations: None,
+            claims: [SecureField::zero(); 2],
+            rho_component: None,
+            t1_component: None,
+        }
+    }
+
+    fn verifier(
+        claims: [SecureField; 2],
+        field_handle: SharedFieldRelation,
+        rho_handle: SharedRhoCellRelation,
+        t1_handle: SharedT1CellRelation,
+    ) -> Self {
+        Self {
+            pk_encode: None,
+            field_handle,
+            rho_handle,
+            t1_handle,
+            relations: None,
+            claims,
+            rho_component: None,
+            t1_component: None,
+        }
+    }
+
+    fn relations(&self) -> &PrivateKeySourceRelations {
+        self.relations
+            .as_ref()
+            .expect("private-key source relations")
+    }
+}
+
+impl Air for PrivateKeySource {
+    fn mix_public(&self, channel: &mut Blake2sChannel) {
+        channel.mix_u64(PRIVATE_KEY_BINDER_TAG);
+        channel.mix_u64(PK_BYTES as u64);
+    }
+
+    fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
+        let field = FieldBytesRelation::draw(channel);
+        self.field_handle.set(field.clone());
+        let t1 = T1CellRelation::draw(channel);
+        self.t1_handle.set(t1.clone());
+        self.relations = Some(PrivateKeySourceRelations {
+            field,
+            rho: self.rho_handle.get(),
+            t1,
+        });
+    }
+
+    fn layout(&self) -> TreeLayout {
+        TreeLayout {
+            preprocessed: vec![
+                RHO_BIND_LOG_SIZE,
+                T1_BIND_LOG_SIZE,
+                T1_BIND_LOG_SIZE,
+                T1_BIND_LOG_SIZE,
+            ],
+            trace: [vec![RHO_BIND_LOG_SIZE; RHO_TRACE_COLS], {
+                vec![T1_BIND_LOG_SIZE; T1_TRACE_COLS]
+            }]
+            .concat(),
+            interaction: [
+                vec![RHO_BIND_LOG_SIZE; RHO_INTERACTION_COLS],
+                vec![T1_BIND_LOG_SIZE; T1_INTERACTION_COLS],
+            ]
+            .concat(),
+        }
+    }
+
+    fn claimed_sums(&self) -> Vec<SecureField> {
+        self.claims.to_vec()
+    }
+
+    fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+        private_key_source_preprocessed_ids()
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(private_key_source_preprocessed())
+    }
+
+    fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
+        let relations = self.relations().clone();
+        self.rho_component = Some(FrameworkComponent::new(
+            allocator,
+            PrivateRhoEval {
+                relations: relations.clone(),
+            },
+            self.claims[0],
+        ));
+        self.t1_component = Some(FrameworkComponent::new(
+            allocator,
+            PrivateT1Eval { relations },
+            self.claims[1],
+        ));
+    }
+
+    fn components(&self) -> Vec<&dyn Component> {
+        vec![
+            self.rho_component.as_ref().expect("rho component"),
+            self.t1_component.as_ref().expect("t1 component"),
+        ]
+    }
+}
+
+impl AirProver for PrivateKeySource {
+    fn max_log_size(&self) -> u32 {
+        T1_BIND_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        T1_BIND_LOG_SIZE + 1
+    }
+
+    fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+        tb.extend_evals(private_key_source_preprocessed());
+    }
+
+    fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
+        let ids = private_key_source_preprocessed_ids();
+        let columns = private_key_source_preprocessed();
+        fingerprint_preprocessed_columns("hosted_private_key_source", &ids, &columns)
+    }
+
+    fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+        tb.extend_evals(private_key_source_trace(
+            self.pk_encode.as_ref().expect("prover pkEncode"),
+        ));
+    }
+
+    fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
+        let (traces, claims) = private_key_source_interaction(
+            self.pk_encode.as_ref().expect("prover pkEncode"),
+            self.relations(),
+        );
+        self.claims = claims;
+        tb.extend_evals(traces.into_iter().flatten().collect());
+    }
+
+    fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        vec![
+            self.rho_component.as_ref().expect("rho component"),
+            self.t1_component.as_ref().expect("t1 component"),
+        ]
+    }
+}
+
+// =====================================================================
 // Fixture (model: composed.rs).
 // =====================================================================
 
@@ -405,10 +932,23 @@ fn verify_hosted_public(
     })
 }
 
-/// Prove the hosted public-message/private-public-key statement:
-/// `[range_table, keccak_service(tr, µ, c̃, SIB),
-/// field_producer(field_id=1, pkEncode), hosted_mldsa]`.
-fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedProof {
+#[derive(Clone)]
+struct HostedPrivateKeyProof {
+    public_input: MlDsaPrivateKeyPublicInput,
+    group_evals: Vec<SecureField>,
+    claimed_sums: Vec<SecureField>,
+    expand_a_claim: ExpandAClaim,
+    private_key_source_claims: [SecureField; 2],
+    range_table_claimed_sum: SecureField,
+    service_claimed_sums: Vec<SecureField>,
+    post_interaction_payloads: Vec<Vec<u8>>,
+    stark_proof: stwo::core::proof::StarkProof<air_core::Hasher>,
+}
+
+/// Compose the exact private-key seams:
+/// `[range, keccak, ExpandA(rho -> NttCell), packed-key source
+/// (pkEncode -> FieldBytes + rho + T1Cell), U6-hosted ML-DSA]`.
+fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedPrivateKeyProof {
     let input = oracle_input(seed, msg);
     let witness = generate_witness(&input).expect("witness");
     let pk_bytes = input.encode_pk();
@@ -416,33 +956,66 @@ fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedProof {
     let field_handle = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
     let range_handle = SharedRangeRelation::new();
-    let mut producer =
-        FieldProducer::for_field(HOSTED_DEVICE_PK_FIELD_ID, pk_bytes, field_handle.clone());
+    let expand_bindings = ExpandABindings::new();
+    let t1_handle = SharedT1CellRelation::new();
+    let private_key_bindings =
+        PrivateKeyEvalBindings::new(expand_bindings.ntt.clone(), t1_handle.clone());
+    let mut expand_a = ExpandAProver::new(
+        derive_expand_a_witness(input.rho).expect("ExpandA witness"),
+        EXPAND_A_NAMESPACE,
+        EXPAND_A_STREAM_BASE,
+        range_handle.clone(),
+        keccak_handle.clone(),
+        expand_bindings.clone(),
+    )
+    .expect("ExpandA prover");
+    let mut private_key_source = PrivateKeySource::prover(
+        pk_bytes,
+        field_handle.clone(),
+        expand_bindings.rho.clone(),
+        t1_handle,
+    );
     let mut mldsa = MlDsaProver::hosted_private_key(
         witness,
         input,
         field_handle,
         range_handle.clone(),
         keccak_handle.clone(),
+        private_key_bindings,
+    )
+    .expect("private-key ML-DSA prover");
+    let mut range_table = SharedRangeTable::prover(
+        &[expand_a.range_uses().clone(), mldsa.range_uses().clone()],
+        range_handle,
     );
-    let mut range_table = SharedRangeTable::prover(&[mldsa.range_uses().clone()], range_handle);
-    let (job_shapes, job_streams) = mldsa.keccak_jobs();
+    let (mut job_shapes, mut job_streams) = expand_a.keccak_jobs().expect("ExpandA Keccak jobs");
+    let (mldsa_shapes, mldsa_streams) = mldsa.keccak_jobs();
     assert_eq!(
-        job_shapes,
+        mldsa_shapes,
         hosted_private_key_keccak_job_shapes(mldsa.input().message.len(), 0)
     );
+    job_shapes.extend(mldsa_shapes);
+    job_streams.extend(mldsa_streams);
     let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
     let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
-        &mut [&mut range_table, &mut service, &mut producer, &mut mldsa],
+        &mut [
+            &mut range_table,
+            &mut service,
+            &mut expand_a,
+            &mut private_key_source,
+            &mut mldsa,
+        ],
         pcs_config(),
     )
     .expect("hosted-private-key prove");
     let claimed_sums = mldsa.claimed_sums();
     assert_eq!(claimed_sums.len(), hosted_private_key_claimed_sums_len());
-    HostedProof {
-        input: mldsa.input().clone(),
+    HostedPrivateKeyProof {
+        public_input: mldsa.private_key_public_input(),
         group_evals: mldsa.group_evals().to_vec(),
         claimed_sums,
+        expand_a_claim: expand_a.claim(),
+        private_key_source_claims: private_key_source.claims,
         range_table_claimed_sum: range_table.claimed_sum(),
         service_claimed_sums: service.claimed_sums(),
         post_interaction_payloads,
@@ -451,16 +1024,19 @@ fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedProof {
 }
 
 fn verify_hosted_private_key_with_shapes(
-    proof: &HostedProof,
-    producer_field_id: u32,
-    producer_bytes: Vec<u8>,
-    job_shapes: Vec<stwo_keccak::sponge::Shape>,
+    proof: &HostedPrivateKeyProof,
+    mldsa_job_shapes: Vec<stwo_keccak::sponge::Shape>,
 ) -> Result<(), stwo::core::verifier::VerificationError> {
     let field_handle = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
     let range_handle = SharedRangeRelation::new();
-    let mut producer =
-        FieldProducer::for_field(producer_field_id, producer_bytes, field_handle.clone());
+    let expand_bindings = ExpandABindings::new();
+    let t1_handle = SharedT1CellRelation::new();
+    let private_key_bindings =
+        PrivateKeyEvalBindings::new(expand_bindings.ntt.clone(), t1_handle.clone());
+    let mut job_shapes =
+        shake128_job_shapes(EXPAND_A_STREAM_BASE).expect("valid ExpandA service shapes");
+    job_shapes.extend(mldsa_job_shapes);
     let mut service = KeccakServiceVerifier::new(
         job_shapes,
         proof.service_claimed_sums.clone(),
@@ -468,16 +1044,38 @@ fn verify_hosted_private_key_with_shapes(
     );
     let mut range_table =
         SharedRangeTable::verifier(proof.range_table_claimed_sum, range_handle.clone());
+    let mut expand_a = ExpandAVerifier::new(
+        proof.expand_a_claim.clone(),
+        EXPAND_A_NAMESPACE,
+        EXPAND_A_STREAM_BASE,
+        range_handle.clone(),
+        keccak_handle.clone(),
+        expand_bindings.clone(),
+    )
+    .expect("ExpandA verifier");
+    let mut private_key_source = PrivateKeySource::verifier(
+        proof.private_key_source_claims,
+        field_handle.clone(),
+        expand_bindings.rho,
+        t1_handle,
+    );
     let mut mldsa = MlDsaVerifier::hosted_private_key(
-        proof.input.clone(),
+        proof.public_input.clone(),
         proof.group_evals.clone(),
         proof.claimed_sums.clone(),
         field_handle,
         range_handle,
         keccak_handle,
+        private_key_bindings,
     )?;
     air_core::verify_with_expected_preprocessed_root_and_payloads(
-        &mut [&mut range_table, &mut service, &mut producer, &mut mldsa],
+        &mut [
+            &mut range_table,
+            &mut service,
+            &mut expand_a,
+            &mut private_key_source,
+            &mut mldsa,
+        ],
         &proof.stark_proof,
         None,
         &proof.post_interaction_payloads,
@@ -489,25 +1087,17 @@ fn verify_hosted_private_key_with_shapes(
 }
 
 fn verify_hosted_private_key(
-    proof: &HostedProof,
-    producer_bytes: Vec<u8>,
+    proof: &HostedPrivateKeyProof,
 ) -> Result<(), stwo::core::verifier::VerificationError> {
     verify_hosted_private_key_with_shapes(
         proof,
-        HOSTED_DEVICE_PK_FIELD_ID,
-        producer_bytes,
-        hosted_private_key_keccak_job_shapes(proof.input.message.len(), 0),
+        hosted_private_key_keccak_job_shapes(proof.public_input.message.len(), 0),
     )
 }
 
 // =====================================================================
 // Tests.
 // =====================================================================
-
-const FIRST_PRIVATE_BRIDGE_CLAIM_INDEX: usize = 11;
-const LAST_PRIVATE_BRIDGE_CLAIM_INDEX: usize = 15;
-const FIRST_PRIVATE_SINK_CLAIM_INDEX: usize = 16;
-const LAST_PRIVATE_SINK_CLAIM_INDEX: usize = 18;
 
 #[test]
 fn hosted_proves_and_verifies() {
@@ -525,12 +1115,12 @@ fn hosted_public_native_mu_proves_and_verifies() {
 
 #[test]
 fn hosted_private_key_shapes_kat_and_layout_are_exact() {
-    const EXPECTED_EXTRA_PREPROCESSED_COLUMNS: usize = 10;
-    const EXPECTED_EXTRA_TRACE_COLUMNS: usize = 10;
-    const EXPECTED_EXTRA_INTERACTION_COLUMNS: usize = 32;
-    const EXPECTED_EXTRA_PREPROCESSED_CELLS: usize = 4_864;
-    const EXPECTED_EXTRA_TRACE_CELLS: usize = 4_864;
-    const EXPECTED_EXTRA_INTERACTION_M31_CELLS: usize = 18_432;
+    const EXPECTED_EXTRA_PREPROCESSED_COLUMNS: usize = 29;
+    const EXPECTED_EXTRA_TRACE_COLUMNS: usize = 72;
+    const EXPECTED_EXTRA_INTERACTION_COLUMNS: usize = 172;
+    const EXPECTED_EXTRA_PREPROCESSED_CELLS: usize = 318_224;
+    const EXPECTED_EXTRA_TRACE_CELLS: usize = 1_374_960;
+    const EXPECTED_EXTRA_INTERACTION_M31_CELLS: usize = 1_322_048;
 
     let msg = b"private device key tr reference vector".to_vec();
     let input = oracle_input(4_260, &msg);
@@ -538,13 +1128,16 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
     let pk_bytes = input.encode_pk();
     assert_eq!(pk_bytes.len(), PK_BYTES);
 
+    let expand_bindings = ExpandABindings::new();
     let mut private = MlDsaProver::hosted_private_key(
         witness.clone(),
         input.clone(),
         SharedFieldRelation::new(),
         SharedRangeRelation::new(),
         SharedKeccakRelations::new(),
-    );
+        PrivateKeyEvalBindings::new(expand_bindings.ntt, SharedT1CellRelation::new()),
+    )
+    .expect("private-key prover");
     let (job_shapes, job_streams) = private.keccak_jobs();
     assert_eq!(job_shapes.len(), 4);
     assert_eq!(job_streams.len(), 4);
@@ -594,7 +1187,7 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
         SharedRangeRelation::new(),
         SharedKeccakRelations::new(),
     );
-    let private_layout = hosted_private_key_layout(private.input());
+    let private_layout = hosted_private_key_layout(private.input().message.len());
     let public_layout = public.layout();
     assert_eq!(
         private_layout.preprocessed.len(),
@@ -626,7 +1219,7 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
         cells(&private_layout.interaction) - cells(&public_layout.interaction),
         EXPECTED_EXTRA_INTERACTION_M31_CELLS
     );
-    assert_eq!(hosted_private_key_claimed_sums_len(), 20);
+    assert_eq!(hosted_private_key_claimed_sums_len(), 23);
 
     // Exercise canonical tree-0 generation too: ids and columns must agree
     // before relations are drawn.
@@ -654,20 +1247,26 @@ fn hosted_private_key_public_mix_is_key_independent() {
     assert_ne!(input_a.rho, input_b.rho);
     let witness_a = generate_witness(&input_a).expect("witness a");
     let witness_b = generate_witness(&input_b).expect("witness b");
+    let bindings_a = ExpandABindings::new();
+    let bindings_b = ExpandABindings::new();
     let first = MlDsaProver::hosted_private_key(
         witness_a,
         input_a,
         SharedFieldRelation::new(),
         SharedRangeRelation::new(),
         SharedKeccakRelations::new(),
-    );
+        PrivateKeyEvalBindings::new(bindings_a.ntt, SharedT1CellRelation::new()),
+    )
+    .expect("first private-key prover");
     let second = MlDsaProver::hosted_private_key(
         witness_b,
         input_b,
         SharedFieldRelation::new(),
         SharedRangeRelation::new(),
         SharedKeccakRelations::new(),
-    );
+        PrivateKeyEvalBindings::new(bindings_b.ntt, SharedT1CellRelation::new()),
+    )
+    .expect("second private-key prover");
 
     let mut first_channel = Blake2sChannel::default();
     let mut second_channel = Blake2sChannel::default();
@@ -684,66 +1283,42 @@ fn hosted_private_key_public_mix_is_key_independent() {
 fn hosted_private_key_proves_and_adversarial_bindings_reject() {
     let msg = b"device authentication with a private ML-DSA public key".to_vec();
     let proof = prove_hosted_private_key(4_263, &msg);
-    let pk_bytes = proof.input.encode_pk();
-    assert_eq!(proof.input.tr, [0; 64]);
-    verify_hosted_private_key(&proof, pk_bytes.clone()).expect("hosted-private-key verify");
-
-    let replacement_input = oracle_input(4_264, &msg);
-    let substituted_pk = replacement_input.encode_pk();
-    assert_ne!(substituted_pk, pk_bytes);
-    assert!(
-        verify_hosted_private_key(&proof, substituted_pk.clone()).is_err(),
-        "substituting the normalized field-id-1 public key must reject"
-    );
-
-    // U7 compatibility boundary: until U6 replaces native rho/t1 evaluation,
-    // even a self-consistent substitution of both retained compatibility
-    // fields and their normalized field-id-1 encoding must reject.
-    let mut compatibility_key_tamper = proof.clone();
-    compatibility_key_tamper.input.rho = replacement_input.rho;
-    compatibility_key_tamper.input.t1 = replacement_input.t1;
-    assert_eq!(compatibility_key_tamper.input.encode_pk(), substituted_pk);
-    assert!(
-        verify_hosted_private_key(&compatibility_key_tamper, substituted_pk).is_err(),
-        "self-consistent compatibility-key substitution must reject"
-    );
-    assert!(
-        verify_hosted_private_key_with_shapes(
-            &proof,
-            HOSTED_MSG_FIELD_ID,
-            pk_bytes.clone(),
-            hosted_private_key_keccak_job_shapes(msg.len(), 0),
-        )
-        .is_err(),
-        "publishing the same bytes under field id 0 must not satisfy id 1"
-    );
+    assert_eq!(proof.public_input.message, msg);
+    assert_eq!(proof.group_evals.len(), 66);
+    assert_eq!(proof.claimed_sums.len(), 23);
+    verify_hosted_private_key(&proof).expect("hosted-private-key verify");
 
     let mut message_tamper = proof.clone();
-    message_tamper.input.message[0] ^= 1;
+    message_tamper.public_input.message[0] ^= 1;
     assert!(
-        verify_hosted_private_key(&message_tamper, pk_bytes.clone()).is_err(),
+        verify_hosted_private_key(&message_tamper).is_err(),
         "the public 00||00||M prefix must bind the µ job"
     );
 
-    for claim_index in (FIRST_PRIVATE_BRIDGE_CLAIM_INDEX..=LAST_PRIVATE_BRIDGE_CLAIM_INDEX)
-        .chain(FIRST_PRIVATE_SINK_CLAIM_INDEX..=LAST_PRIVATE_SINK_CLAIM_INDEX)
-    {
-        let mut claim_tamper = proof.clone();
-        claim_tamper.claimed_sums[claim_index] += SecureField::from(m31(1));
-        assert!(
-            verify_hosted_private_key(&claim_tamper, pk_bytes.clone()).is_err(),
-            "tampering private bridge/sink claim {claim_index} must reject"
-        );
-    }
+    let mut eval_tamper = proof.clone();
+    eval_tamper.group_evals[30] += SecureField::from(m31(1));
+    assert!(
+        verify_hosted_private_key(&eval_tamper).is_err(),
+        "tampering the first private A evaluation must reject"
+    );
+
+    let mut source_tamper = proof.clone();
+    source_tamper.private_key_source_claims[1] += SecureField::from(m31(1));
+    assert!(
+        verify_hosted_private_key(&source_tamper).is_err(),
+        "tampering the packed-t1 source claim must reject"
+    );
+
+    let mut fold_tamper = proof.clone();
+    fold_tamper.claimed_sums[22] += SecureField::from(m31(1));
+    assert!(
+        verify_hosted_private_key(&fold_tamper).is_err(),
+        "tampering the private fold claim must reject"
+    );
 
     let wrong_shapes = keccak_job_shapes(msg.len(), 0, true);
     let wrong_shape_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        verify_hosted_private_key_with_shapes(
-            &proof,
-            HOSTED_DEVICE_PK_FIELD_ID,
-            pk_bytes,
-            wrong_shapes,
-        )
+        verify_hosted_private_key_with_shapes(&proof, wrong_shapes)
     }));
     assert!(
         matches!(wrong_shape_result, Ok(Err(_))),
@@ -753,12 +1328,21 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
 
 #[test]
 fn hosted_private_key_malformed_claim_shapes_return_error_not_panic() {
-    let msg = b"malformed hosted private-key claim vectors".to_vec();
-    let proof = prove_hosted_private_key(4_265, &msg);
-    let pk_bytes = proof.input.encode_pk();
-    let assert_rejected = |label: &str, malformed: HostedProof| {
+    let public_input = MlDsaPrivateKeyPublicInput {
+        message: b"malformed hosted private-key claim vectors".to_vec(),
+    };
+    let assert_rejected = |label: &str, group_evals: Vec<_>, claimed_sums: Vec<_>| {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            verify_hosted_private_key(&malformed, pk_bytes.clone())
+            let expand_bindings = ExpandABindings::new();
+            MlDsaVerifier::hosted_private_key(
+                public_input.clone(),
+                group_evals,
+                claimed_sums,
+                SharedFieldRelation::new(),
+                SharedRangeRelation::new(),
+                SharedKeccakRelations::new(),
+                PrivateKeyEvalBindings::new(expand_bindings.ntt, SharedT1CellRelation::new()),
+            )
         }));
         assert!(
             matches!(
@@ -771,39 +1355,26 @@ fn hosted_private_key_malformed_claim_shapes_return_error_not_panic() {
         );
     };
 
-    let mut short_groups = proof.clone();
-    short_groups
-        .group_evals
-        .pop()
-        .expect("non-empty group vector");
-    assert_rejected("short group vector", short_groups);
-
-    let mut long_groups = proof.clone();
-    long_groups.group_evals.push(SecureField::zero());
-    assert_rejected("long group vector", long_groups);
-
-    let mut short_claims = proof.clone();
-    short_claims
-        .claimed_sums
-        .pop()
-        .expect("non-empty claimed-sum vector");
-    assert_rejected("short claimed-sum vector", short_claims);
-
-    let mut long_claims = proof.clone();
-    long_claims.claimed_sums.push(SecureField::zero());
-    assert_rejected("long claimed-sum vector", long_claims);
-
-    let mut swapped_claims = proof.clone();
-    let swap_with = (FIRST_PRIVATE_BRIDGE_CLAIM_INDEX + 1..=LAST_PRIVATE_SINK_CLAIM_INDEX)
-        .find(|&index| {
-            swapped_claims.claimed_sums[index]
-                != swapped_claims.claimed_sums[FIRST_PRIVATE_BRIDGE_CLAIM_INDEX]
-        })
-        .expect("private bridge/sink claims are not all identical");
-    swapped_claims
-        .claimed_sums
-        .swap(FIRST_PRIVATE_BRIDGE_CLAIM_INDEX, swap_with);
-    assert_rejected("swapped claimed-sum vector", swapped_claims);
+    assert_rejected(
+        "short group vector",
+        vec![SecureField::zero(); 65],
+        vec![SecureField::zero(); 23],
+    );
+    assert_rejected(
+        "long group vector",
+        vec![SecureField::zero(); 67],
+        vec![SecureField::zero(); 23],
+    );
+    assert_rejected(
+        "short claimed-sum vector",
+        vec![SecureField::zero(); 66],
+        vec![SecureField::zero(); 22],
+    );
+    assert_rejected(
+        "long claimed-sum vector",
+        vec![SecureField::zero(); 66],
+        vec![SecureField::zero(); 24],
+    );
 }
 
 #[test]
@@ -890,7 +1461,7 @@ fn hosted_tampered_message_byte_rejects() {
 
 #[test]
 fn hosted_carried_tr_is_overwritten_before_use() {
-    let msg = b"hosted carried tr is compatibility data only".to_vec();
+    let msg = b"hosted carried tr is untrusted input".to_vec();
     let mut proof = prove_hosted(4243, &msg, msg.clone());
     proof.input.tr[0] ^= 1;
     verify_hosted(&proof, msg).expect("carried tr must not influence verification");

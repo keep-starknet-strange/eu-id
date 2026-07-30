@@ -1,27 +1,23 @@
 //! Serializable public/private inputs to in-circuit ML-DSA-65 verification.
 //!
-//! A single `#[derive(Serialize, Deserialize)]` struct carries the
-//! semantically-decoded verification inputs (not raw wire bytes), so callers can
-//! construct one by name and both the witness generator and AIR consume typed
-//! values directly.
+//! [`MlDsaVerifyInput`] carries the semantically decoded values the prover and
+//! native verifier need. [`MlDsaPrivateKeyPublicInput`] is the deliberately
+//! smaller verifier envelope for hosted private-key proofs.
 //!
 //! ## What is public vs private
 //!
-//! Public (enters the transcript via public-input mixing — S5 [BIND], I-4):
-//! `rho`, `t1`, `tr`, `message`. Private (the signature, kept off the public
-//! transcript for unlinkability): `c_tilde`, `z`, `hint`. All are carried in
-//! one struct because the *prover* needs every field to build the witness; the
-//! public/private split is a property of how each field is later bound, not of
-//! this container.
+//! Public-key modes mix `rho`, decoded `t1`, recomputed `tr`, and `message`.
+//! Hosted private-key mode mixes only `message`: `rho`, `t1`, `tr`, and the
+//! signature stay in the proof witness and are bound through the packed-key,
+//! NTT, evaluation, and Keccak relations. The private-key verifier therefore
+//! accepts [`MlDsaPrivateKeyPublicInput`] and cannot receive stable key data.
 //!
 //! ## `t1` form (M4 consumption)
 //!
 //! `t1` is stored **decoded** (`[[u32; N]; K]`, coefficients in `[0, 2^10)`) —
-//! the form the S5a integer-lift identity needs: the verifier evaluates the
-//! public term `c·t1_i·2^d` natively from these coefficients (worksheet §3.2),
-//! so M4 wants decoded `u32` coefficients, not the packed 10-bit encoding. The
-//! `rho` and `tr` are byte arrays because they are only ever hashed / mixed,
-//! never arithmetized.
+//! the form witness generation needs. Public-key mode evaluates
+//! `c·t1_i·2^d` natively; private-key mode proves the 10-bit packed-key split
+//! and evaluates `2^d·t1_i` inside the AIR.
 
 use serde::{Deserialize, Serialize};
 
@@ -41,12 +37,22 @@ pub const T1_COEFFICIENT_BOUND: u32 = 1 << 10;
 /// A hint polynomial: one bit per coefficient (`{0, 1}`).
 pub type HintPoly = [u8; N];
 
+/// Public verifier input for a hosted device statement whose ML-DSA public key
+/// and signature remain private. The request-bound device message is the only
+/// ML-DSA value the verifier needs outside the proof.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MlDsaPrivateKeyPublicInput {
+    pub message: Vec<u8>,
+}
+
 /// Every input needed to (a) verify an ML-DSA-65 signature with the M1 reference
 /// and (b) generate the proving witness (M2).
 ///
 /// Field-by-field mapping to FIPS 204 notation and the S5a worksheet:
-/// - `rho`   — matrix seed `ρ`; `Â = ExpandA(ρ)` is verifier-computable.
-/// - `t1`    — public key vector `t1` (decoded); `t1_i·2^d` is a public term.
+/// - `rho`   — matrix seed `ρ`; public mode computes `Â = ExpandA(ρ)`
+///   natively, private-key mode proves it through `NttCell`.
+/// - `t1`    — public key vector `t1` (decoded); public mode treats
+///   `t1_i·2^d` as a public term, private-key mode proves its packed binding.
 /// - `tr`    — `tr = H(pk, 512)`; absorbed into `µ`. Carried so the witness
 ///   generator need not re-decode/re-hash the public key to obtain it.
 /// - `message` — the full COSE `Sig_structure` (pure mode, empty context); the

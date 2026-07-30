@@ -4,9 +4,10 @@
 //! [`MlDsaVerifier`] impl `Air`) proves the entire ML-DSA-65 verification via a
 //! single [`air_core::prove`] / [`air_core::verify`] call. It stitches together:
 //!
-//!   * verifier-native `ExpandA(ρ)` — deterministic from the public key and
-//!     consumed directly by the folded identity. Hosted-private-key mode keeps
-//!     this as an explicitly temporary U6 compatibility dependency.
+//!   * public-key modes evaluate `ExpandA(ρ)` verifier-natively. Hosted
+//!     private-key mode instead consumes private `NttCell` / `T1Cell` bindings,
+//!     proves the inverse NTT and all 36 public-key polynomial evaluations,
+//!     then closes the complete 66-term folded identity in the AIR.
 //!   * `coeffs` — the tall bivariate-Horner integer-lift component (yields the
 //!     W-cell / C-cell bindings + constrained public fold).
 //!   * `decomp` — [DECOMP]+[HINT]; consumes W-cells, yields the 768 `w1Encode`
@@ -65,11 +66,15 @@ use crate::binding::{
 };
 use crate::constants::{K, N};
 use crate::msglink::{self, MsgLinkEval, MSG_FIELD_ID};
+use crate::private_key_eval::{
+    self, PrivateDeviceEvals, PrivateKeyBase, PrivateKeyEvalBindings, PrivateKeyEvalClaims,
+    PrivateKeyEvalError, PrivateKeyEvalRelations, PrivateKeyEvalWitness, PrivateKeyTraceComponents,
+};
 use crate::sponge_link::{
     BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation, BRIDGE_BASE_COLS,
     BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, SINK_BASE_COLS, SINK_INTERACTION_COLS,
 };
-use crate::types::MlDsaVerifyInput;
+use crate::types::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
 use crate::witness::MlDsaWitness;
 
@@ -285,6 +290,7 @@ struct Relations {
     /// (`None` in standalone mode, where the self-drawn `msglink` producer is used).
     shared_field: Option<FieldBytesRelation>,
     coeffs: CoeffsRelations,
+    private_key: Option<PrivateKeyEvalRelations>,
     decomp: DecompRelations,
     sib: SibRelations,
 }
@@ -300,6 +306,7 @@ fn draw_relations_common(
     hosted_field: Option<&SharedFieldRelation>,
     shared_range: Option<&SharedRangeRelation>,
     keccak_handle: &SharedKeccakRelations,
+    private_key_bindings: Option<&PrivateKeyEvalBindings>,
 ) -> Relations {
     let rho_rlc = channel.draw_secure_felt();
     let r = channel.draw_secure_felt();
@@ -323,6 +330,9 @@ fn draw_relations_common(
         }
         None => CoeffsRelations::draw_with(channel, wcell.clone(), ccell.clone()),
     };
+    let private_key = private_key_bindings.map(|bindings| {
+        PrivateKeyEvalRelations::from_bindings(bindings, coeffs.eval.clone(), coeffs.range.clone())
+    });
     let decomp = DecompRelations::draw_with(channel, wcell, keccak.hash_io.clone());
     let sib = SibRelations::draw_with(channel, ccell, keccak.hash_io.clone());
 
@@ -334,6 +344,7 @@ fn draw_relations_common(
         msglink,
         shared_field,
         coeffs,
+        private_key,
         decomp,
         sib,
     }
@@ -345,7 +356,8 @@ fn draw_relations_common(
 
 fn mix_public(
     channel: &mut Blake2sChannel,
-    input: &MlDsaVerifyInput,
+    input: Option<&MlDsaVerifyInput>,
+    message: &[u8],
     namespace: &str,
     private_message: bool,
     private_key: bool,
@@ -361,6 +373,7 @@ fn mix_public(
     if private_key {
         channel.mix_u64(HOSTED_PRIVATE_KEY_MODE_TAG);
     } else {
+        let input = input.expect("public-key statement requires the public key");
         // ρ bytes.
         for b in &input.rho {
             channel.mix_u64(*b as u64);
@@ -381,9 +394,9 @@ fn mix_public(
     // bytes never appear in the statement and flow exclusively through the
     // host's FieldBytesRelation into the in-circuit µ absorption, exactly like
     // the already-private c̃/µ streams below.
-    channel.mix_u64(input.message.len() as u64);
+    channel.mix_u64(message.len() as u64);
     if !private_message {
-        for b in &input.message {
+        for b in message {
             channel.mix_u64(*b as u64);
         }
     }
@@ -405,10 +418,10 @@ fn bridge_log_size(len: usize) -> u32 {
 
 /// Verifier-native `tr = SHAKE256(pkEncode(ρ,t1), 64)`.
 ///
-/// Public-key constructors overwrite the compatibility field `input.tr` with
-/// this value before mixing or building any component. Hosted-private-key mode
-/// computes `tr` only as a private service witness and retains a zero
-/// placeholder in its statement input.
+/// Public-key constructors overwrite the carried `input.tr` field with this
+/// value before mixing or building any component. Hosted-private-key mode
+/// computes `tr` only as a private service witness; its verifier input contains
+/// only the public message.
 pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
     let bytes = full_squeeze(&input.encode_pk(), 1);
     let mut tr = [0u8; 64];
@@ -436,20 +449,23 @@ pub fn native_public_mu(input: &MlDsaVerifyInput) -> [u8; 64] {
 /// - private-key mode: public `0x00 ‖ 0x00 ‖ M` into µ-absorb@64; the
 ///   in-circuit tr→µ bridge supplies positions 0..64.
 fn prefix_eval(
-    input: &MlDsaVerifyInput,
+    input: Option<&MlDsaVerifyInput>,
+    message: &[u8],
     stream_base: u32,
     native_mu: bool,
     private_key: bool,
     hash_io: &HashIoRelation,
 ) -> PublicPrefixEval {
     let (dst_stream, dst_off, bytes) = if private_key {
-        let mut bytes = Vec::with_capacity(2 + input.message.len());
+        let mut bytes = Vec::with_capacity(2 + message.len());
         bytes.extend_from_slice(&[0x00, 0x00]);
-        bytes.extend_from_slice(&input.message);
+        bytes.extend_from_slice(message);
         (stream_base + MU_ABSORB, 64, bytes)
     } else if native_mu {
+        let input = input.expect("native µ requires the public key");
         (stream_base + CT_ABSORB, 0, native_public_mu(input).to_vec())
     } else {
+        let input = input.expect("private-message prefix requires the public key");
         let mut bytes = Vec::with_capacity(66);
         bytes.extend_from_slice(&input.tr);
         bytes.extend_from_slice(&[0x00, 0x00]);
@@ -640,7 +656,7 @@ fn sink_evals(
 /// never the stream ids, so `stream_base = 0` here is shape-neutral).
 fn all_preprocessed_ids(
     ns: &str,
-    input: &MlDsaVerifyInput,
+    message_len: usize,
     hosted: bool,
     public_message: bool,
     private_key: bool,
@@ -656,6 +672,9 @@ fn all_preprocessed_ids(
     if !hosted {
         ids.extend(coeffs_tables::range_table_preprocessed_ids());
     }
+    if private_key {
+        ids.extend(private_key_eval::preprocessed_ids());
+    }
     // decomp (+ its rc kinds).
     ids.extend(decomp::decomp_preprocessed_ids());
     for kind in decomp_tables::RcKind::ALL {
@@ -669,21 +688,20 @@ fn all_preprocessed_ids(
     // Private message bridge, remaining fixed bridges, and sinks.
     if !public_message {
         ids.extend(
-            msg_bridge_eval(ns, input.message.len(), 0, &msglink, None, &hash_io)
-                .preprocessed_ids(),
+            msg_bridge_eval(ns, message_len, 0, &msglink, None, &hash_io).preprocessed_ids(),
         );
     }
     for b in bridge_evals(ns, 0, native_mu, private_key, field.as_ref(), &hash_io) {
         ids.extend(b.preprocessed_ids());
     }
-    for s in sink_evals(ns, input.message.len(), 0, native_mu, private_key, &hash_io) {
+    for s in sink_evals(ns, message_len, 0, native_mu, private_key, &hash_io) {
         ids.extend(s.preprocessed_ids());
     }
     ids
 }
 
 fn all_preprocessed_log_sizes(
-    input: &MlDsaVerifyInput,
+    message_len: usize,
     hosted: bool,
     public_message: bool,
     private_key: bool,
@@ -698,6 +716,9 @@ fn all_preprocessed_log_sizes(
             coeffs_tables::range_table_preprocessed_ids().len()
         ]);
     }
+    if private_key {
+        sizes.extend(private_key_eval::preprocessed_log_sizes());
+    }
     let dls = decomp_log_size();
     sizes.extend(vec![dls; decomp::decomp_preprocessed_ids().len()]);
     for kind in decomp_tables::RcKind::ALL {
@@ -709,12 +730,12 @@ fn all_preprocessed_log_sizes(
         sizes.push(kind.log_size());
     }
     if !public_message {
-        sizes.extend(vec![bridge_log_size(input.message.len()); 2]);
+        sizes.extend(vec![bridge_log_size(message_len); 2]);
     }
     for len in bridge_lens(native_mu, private_key) {
         sizes.extend(vec![bridge_log_size(len); 2]);
     }
-    for len in sink_lens(input.message.len(), native_mu, private_key) {
+    for len in sink_lens(message_len, native_mu, private_key) {
         sizes.extend(vec![bridge_log_size(len); 2]);
     }
     sizes
@@ -746,7 +767,7 @@ fn sink_lens(message_len: usize, native_mu: bool, private_key: bool) -> Vec<usiz
 /// The SIB schedule is fixed at the five-block resource cap; no signature
 /// witness enters tree 0.
 fn gen_all_preprocessed(
-    input: &MlDsaVerifyInput,
+    message_len: usize,
     hosted: bool,
     public_message: bool,
     private_key: bool,
@@ -761,6 +782,9 @@ fn gen_all_preprocessed(
     if !hosted {
         cols.extend(coeffs_tables::gen_range_table_preprocessed());
     }
+    if private_key {
+        cols.extend(private_key_eval::gen_preprocessed());
+    }
     let dls = decomp_log_size();
     cols.extend(decomp::gen_decomp_preprocessed(dls));
     for kind in decomp_tables::RcKind::ALL {
@@ -773,14 +797,13 @@ fn gen_all_preprocessed(
     }
     if !public_message {
         cols.extend(
-            msg_bridge_eval("", input.message.len(), 0, &msglink, None, &hash_io)
-                .gen_preprocessed(),
+            msg_bridge_eval("", message_len, 0, &msglink, None, &hash_io).gen_preprocessed(),
         );
     }
     for b in bridge_evals("", 0, native_mu, private_key, field.as_ref(), &hash_io) {
         cols.extend(b.gen_preprocessed());
     }
-    for s in sink_evals("", input.message.len(), 0, native_mu, private_key, &hash_io) {
+    for s in sink_evals("", message_len, 0, native_mu, private_key, &hash_io) {
         cols.extend(s.gen_preprocessed());
     }
     cols
@@ -818,8 +841,9 @@ impl FrameworkEval for PublicFoldEval {
 }
 
 struct Built {
-    public_fold: FrameworkComponent<PublicFoldEval>,
+    public_fold: Option<FrameworkComponent<PublicFoldEval>>,
     coeffs: FrameworkComponent<CoeffsEval>,
+    private_key: Option<PrivateKeyTraceComponents>,
     /// Standalone-only range provider; hosted instances consume the proof-wide
     /// shared table instead.
     coeffs_rc: Option<FrameworkComponent<coeffs_tables::RangeTableEval>>,
@@ -835,12 +859,19 @@ struct Built {
     msg: Option<FrameworkComponent<BridgeEval>>,
     bridges: Vec<FrameworkComponent<BridgeEval>>,
     sinks: Vec<FrameworkComponent<SqueezeSinkEval>>,
+    private_fold: Option<FrameworkComponent<private_key_eval::PrivateFoldEval>>,
 }
 
 impl Built {
     fn ordered(&self) -> Vec<&dyn Component> {
-        let mut out: Vec<&dyn Component> = vec![&self.public_fold];
+        let mut out: Vec<&dyn Component> = Vec::new();
+        if let Some(public_fold) = &self.public_fold {
+            out.push(public_fold);
+        }
         out.push(&self.coeffs);
+        if let Some(private_key) = &self.private_key {
+            out.extend(private_key.trace_components());
+        }
         if let Some(component) = &self.coeffs_rc {
             out.push(component);
         }
@@ -857,11 +888,20 @@ impl Built {
         }
         out.extend(self.bridges.iter().map(|c| c as &dyn Component));
         out.extend(self.sinks.iter().map(|c| c as &dyn Component));
+        if let Some(private_fold) = &self.private_fold {
+            out.push(private_fold);
+        }
         out
     }
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.public_fold];
+        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
+        if let Some(public_fold) = &self.public_fold {
+            out.push(public_fold);
+        }
         out.push(&self.coeffs);
+        if let Some(private_key) = &self.private_key {
+            out.extend(private_key.trace_prover_components());
+        }
         if let Some(component) = &self.coeffs_rc {
             out.push(component);
         }
@@ -894,17 +934,21 @@ impl Built {
                 .iter()
                 .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
+        if let Some(private_fold) = &self.private_fold {
+            out.push(private_fold);
+        }
         out
     }
 }
 
-/// The claimed sums bag, in commit order (rc tables individually), then
-/// `native_use_sum` appended LAST.
+/// The claimed-sum bag in component order. The final entry is the private
+/// fold claim in private-key mode and `native_use_sum` otherwise.
 #[derive(Clone, Default)]
 struct Claims {
     /// Hosted mode drops the `msglink` claim from `ordered()` / `from_flat()`.
     hosted: bool,
     coeffs: SecureField,
+    private_key: Option<PrivateKeyEvalClaims>,
     coeffs_rc: Vec<SecureField>,
     decomp: SecureField,
     decomp_rc: Vec<SecureField>,
@@ -920,6 +964,13 @@ struct Claims {
 impl Claims {
     fn ordered(&self) -> Vec<SecureField> {
         let mut v = vec![self.coeffs];
+        if let Some(private_key) = &self.private_key {
+            v.extend([
+                private_key.ntt.butterfly,
+                private_key.ntt.scaling,
+                private_key.t1,
+            ]);
+        }
         v.extend(self.coeffs_rc.iter().copied());
         v.push(self.decomp);
         v.extend(self.decomp_rc.iter().copied());
@@ -931,7 +982,11 @@ impl Claims {
         v.push(self.prefix);
         v.extend(self.bridges.iter().copied());
         v.extend(self.sinks.iter().copied());
-        v.push(self.native_use);
+        if let Some(private_key) = &self.private_key {
+            v.push(private_key.fold);
+        } else {
+            v.push(self.native_use);
+        }
         v
     }
 
@@ -941,6 +996,14 @@ impl Claims {
         let mut it = flat.iter().copied();
         let mut next = || it.next().expect("claimed sums length mismatch");
         let coeffs = next();
+        let private_key = ctx.private_key.then(|| PrivateKeyEvalClaims {
+            ntt: private_key_eval::NttClaims {
+                butterfly: next(),
+                scaling: next(),
+            },
+            t1: next(),
+            fold: SecureField::zero(),
+        });
         let coeffs_rc = if ctx.hosted { Vec::new() } else { vec![next()] };
         let decomp = next();
         let decomp_rc = (0..decomp_tables::RcKind::ALL.len())
@@ -956,11 +1019,18 @@ impl Claims {
         let prefix = next();
         let bridges = (0..ctx.bridge_claims_len()).map(|_| next()).collect();
         let sinks = (0..ctx.sink_claims_len()).map(|_| next()).collect();
-        let native_use = next();
+        let (private_key, native_use) = match private_key {
+            Some(mut private_key) => {
+                private_key.fold = next();
+                (Some(private_key), SecureField::zero())
+            }
+            None => (None, next()),
+        };
         assert!(it.next().is_none(), "claimed sums length mismatch");
         Self {
             hosted: ctx.hosted,
             coeffs,
+            private_key,
             coeffs_rc,
             decomp,
             decomp_rc,
@@ -992,17 +1062,12 @@ struct LayoutCtx {
 }
 
 impl LayoutCtx {
-    fn new(
-        input: &MlDsaVerifyInput,
-        hosted: bool,
-        public_message: bool,
-        private_key: bool,
-    ) -> Self {
+    fn new(message_len: usize, hosted: bool, public_message: bool, private_key: bool) -> Self {
         Self {
             hosted,
             public_message,
             private_key,
-            message_len: input.message.len(),
+            message_len,
         }
     }
 
@@ -1020,10 +1085,18 @@ impl LayoutCtx {
 }
 
 fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
-    // Public folded-identity component marker (pinned to zero).
-    let mut t = vec![LOG_N_LANES];
+    // Public mode has a folded-identity marker; private-key mode proves the
+    // device evaluations and closes the fold without a base column.
+    let mut t = if ctx.private_key {
+        Vec::new()
+    } else {
+        vec![LOG_N_LANES]
+    };
     // 1. coeffs + 2. unified range table (standalone only).
     t.extend(vec![coeffs_log_size(); coeffs::N_BASE_COLS]);
+    if ctx.private_key {
+        t.extend(private_key_eval::trace_layout());
+    }
     if !ctx.hosted {
         t.push(coeffs_tables::range_table_log_size());
     }
@@ -1063,6 +1136,9 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
     let mut i = Vec::new();
     // 1. coeffs + 2. unified range table (standalone only).
     i.extend(vec![coeffs_log_size(); coeffs::N_INTERACTION_COLS]);
+    if ctx.private_key {
+        i.extend(private_key_eval::interaction_layout());
+    }
     if !ctx.hosted {
         i.extend(vec![
             coeffs_tables::range_table_log_size();
@@ -1110,6 +1186,9 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; SINK_INTERACTION_COLS]);
     }
+    if ctx.private_key {
+        i.extend(private_key_eval::fold_interaction_layout());
+    }
     i
 }
 
@@ -1119,10 +1198,10 @@ fn prefix_n_interaction() -> usize {
     stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE
 }
 
-fn layout_for(ctx: &LayoutCtx, input: &MlDsaVerifyInput) -> TreeLayout {
+fn layout_for(ctx: &LayoutCtx) -> TreeLayout {
     TreeLayout {
         preprocessed: all_preprocessed_log_sizes(
-            input,
+            ctx.message_len,
             ctx.hosted,
             ctx.public_message,
             ctx.private_key,
@@ -1175,26 +1254,34 @@ fn build_components(
     ns: &str,
     stream_base: u32,
     ctx: &LayoutCtx,
-    input: &MlDsaVerifyInput,
+    input: Option<&MlDsaVerifyInput>,
+    message: &[u8],
     group_evals: &[SecureField],
     rel: &Relations,
     claims: &Claims,
 ) -> Built {
-    let public_evals = compute_public_evals(input, rel.r, rel.s);
-    let public_fold_value = folded_check(
-        &public_evals,
-        &ClaimedEvals(group_evals),
-        rel.rho_rlc,
-        rel.r,
-        rel.s,
-    );
-    let public_fold = FrameworkComponent::new(
-        allocator,
-        PublicFoldEval {
-            value: public_fold_value,
-        },
-        SecureField::zero(),
-    );
+    let private_device_evals = ctx.private_key.then(|| {
+        PrivateDeviceEvals::try_from_slice(group_evals)
+            .expect("private-key group evaluations were shape-checked")
+    });
+    let public_fold = (!ctx.private_key).then(|| {
+        let input = input.expect("public folded identity requires the public key");
+        let public_evals = compute_public_evals(input, rel.r, rel.s);
+        let public_fold_value = folded_check(
+            &public_evals,
+            &ClaimedEvals(group_evals),
+            rel.rho_rlc,
+            rel.r,
+            rel.s,
+        );
+        FrameworkComponent::new(
+            allocator,
+            PublicFoldEval {
+                value: public_fold_value,
+            },
+            SecureField::zero(),
+        )
+    });
     // 1. coeffs.
     let coeffs = FrameworkComponent::new(
         allocator,
@@ -1206,6 +1293,20 @@ fn build_components(
         },
         claims.coeffs,
     );
+    let private_key = ctx.private_key.then(|| {
+        PrivateKeyTraceComponents::new(
+            allocator,
+            rel.r,
+            rel.s,
+            rel.private_key
+                .clone()
+                .expect("private-key relations were drawn"),
+            claims
+                .private_key
+                .as_ref()
+                .expect("private-key claims were parsed"),
+        )
+    });
     // 2. unified coeffs range table (standalone only).
     let coeffs_rc = (!ctx.hosted).then(|| {
         FrameworkComponent::new(
@@ -1269,6 +1370,7 @@ fn build_components(
         .collect();
     // 7. msglink (standalone only; hosted mode drops it).
     let msglink = (!claims.hosted).then(|| {
+        let input = input.expect("standalone message link requires the public input");
         FrameworkComponent::new(
             allocator,
             MsgLinkEval {
@@ -1283,6 +1385,7 @@ fn build_components(
         allocator,
         prefix_eval(
             input,
+            message,
             stream_base,
             ctx.native_mu(),
             ctx.private_key,
@@ -1295,7 +1398,7 @@ fn build_components(
             allocator,
             msg_bridge_eval(
                 ns,
-                input.message.len(),
+                message.len(),
                 stream_base,
                 &rel.msglink,
                 rel.shared_field.as_ref(),
@@ -1322,7 +1425,7 @@ fn build_components(
         .collect();
     let sink_descs = sink_evals(
         ns,
-        input.message.len(),
+        message.len(),
         stream_base,
         ctx.native_mu(),
         ctx.private_key,
@@ -1333,10 +1436,28 @@ fn build_components(
         .enumerate()
         .map(|(idx, s)| FrameworkComponent::new(allocator, s, claims.sinks[idx]))
         .collect();
+    let private_fold = ctx.private_key.then(|| {
+        private_key_eval::build_fold_component(
+            allocator,
+            rel.rho_rlc,
+            rel.r,
+            rel.s,
+            rel.private_key
+                .clone()
+                .expect("private-key relations were drawn"),
+            private_device_evals.expect("private-key evaluations were parsed"),
+            claims
+                .private_key
+                .as_ref()
+                .expect("private-key claims were parsed")
+                .fold,
+        )
+    });
 
     Built {
         public_fold,
         coeffs,
+        private_key,
         coeffs_rc,
         decomp,
         decomp_rc,
@@ -1347,6 +1468,7 @@ fn build_components(
         msg,
         bridges,
         sinks,
+        private_fold,
     }
 }
 
@@ -1401,6 +1523,10 @@ pub struct MlDsaProver {
     /// Private-message mode: mix only `message.len()` into the transcript; the
     /// bytes flow exclusively through the host's FieldBytesRelation.
     private_message: bool,
+    private_key_bindings: Option<PrivateKeyEvalBindings>,
+    private_key_witness: Option<PrivateKeyEvalWitness>,
+    private_key_base: Option<PrivateKeyBase>,
+    private_device_evals: Option<PrivateDeviceEvals>,
     relations: Option<Relations>,
     // rc multiplicity columns stashed between write_trace and write_interaction.
     coeffs_rc_mult: Vec<ColEval>,
@@ -1458,7 +1584,7 @@ impl MlDsaProver {
             native_tr(&input)
         };
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(&input, hosted, public_message, private_key);
+        let ctx = LayoutCtx::new(input.message.len(), hosted, public_message, private_key);
         let coeffs_rc_uses = coeffs::gen_coeffs_rc_uses(&witness);
         let sponge_outputs = sponge_outputs(&witness, &input, ctx.native_mu(), private_key);
         let claims = Claims {
@@ -1476,6 +1602,10 @@ impl MlDsaProver {
             namespace: String::new(),
             stream_base: 0,
             private_message: false,
+            private_key_bindings: None,
+            private_key_witness: None,
+            private_key_base: None,
+            private_device_evals: None,
             relations: None,
             coeffs_rc_mult: Vec::new(),
             coeffs_rc_uses,
@@ -1534,19 +1664,21 @@ impl MlDsaProver {
     ///
     /// The normalized encoded public key is consumed from shared
     /// [`FieldBytesRelation`] field id [`HOSTED_DEVICE_PK_FIELD_ID`], and both
-    /// `tr` and µ are constrained as proof-wide Keccak service jobs. The
-    /// current folded ML-DSA identity still reads `rho` and `t1` from `input`
-    /// until the native public-key evaluation is replaced by the U6 packed-key
-    /// lookup; private-key mode deliberately excludes those compatibility
-    /// fields (and the derived `tr`) from [`Air::mix_public`].
+    /// `tr` and µ are constrained as proof-wide Keccak service jobs. The NTT
+    /// and packed-`t1` bindings feed the private-key evaluation AIR, so neither
+    /// `rho`, `t1`, nor derived `tr` enters [`Air::mix_public`] or the verifier
+    /// API.
     pub fn hosted_private_key(
         witness: MlDsaWitness,
         input: MlDsaVerifyInput,
         shared_field: SharedFieldRelation,
         shared_range: SharedRangeRelation,
         keccak_handle: SharedKeccakRelations,
-    ) -> Self {
-        Self::build(
+        bindings: PrivateKeyEvalBindings,
+    ) -> Result<Self, PrivateKeyEvalError> {
+        let private_key_witness = PrivateKeyEvalWitness::from_input(&input)?;
+        let private_key_base = private_key_eval::gen_private_key_base(&private_key_witness);
+        let mut prover = Self::build(
             witness,
             input,
             Some(shared_field),
@@ -1554,7 +1686,14 @@ impl MlDsaProver {
             true,
             Some(shared_range),
             keccak_handle,
-        )
+        );
+        prover
+            .coeffs_rc_uses
+            .add_assign(&private_key_base.range_uses);
+        prover.private_key_bindings = Some(bindings);
+        prover.private_key_witness = Some(private_key_witness);
+        prover.private_key_base = Some(private_key_base);
+        Ok(prover)
     }
 
     /// Range-use multiplicities contributed by this instance to the shared
@@ -1621,7 +1760,8 @@ impl MlDsaProver {
 
     // ---- getters the host stores in its proof struct + uses to reconstruct ----
 
-    /// The 30 claimed `P̂(r,s)` group evaluations (available after proving).
+    /// Claimed evaluations after proving: 30 in public-key modes, 66 in
+    /// private-key mode.
     pub fn group_evals(&self) -> &[SecureField] {
         &self.group_evals
     }
@@ -1629,11 +1769,19 @@ impl MlDsaProver {
     pub fn claimed_sums(&self) -> Vec<SecureField> {
         self.claims.ordered()
     }
-    /// The statement input. In hosted-private-key mode, `rho`/`t1` are
-    /// temporary U6 compatibility data and must remain internal to the host;
-    /// `tr` is retained only as a zero placeholder.
+    /// Prover-side decoded input. In hosted-private-key mode this is private
+    /// witness material and must not be copied into the proof envelope; use
+    /// [`Self::private_key_public_input`] for the verifier-visible statement.
     pub fn input(&self) -> &MlDsaVerifyInput {
         &self.input
+    }
+
+    /// The verifier-visible statement for private-key mode.
+    pub fn private_key_public_input(&self) -> MlDsaPrivateKeyPublicInput {
+        assert!(self.ctx.private_key, "not a private-key statement");
+        MlDsaPrivateKeyPublicInput {
+            message: self.input.message.clone(),
+        }
     }
 }
 
@@ -1672,7 +1820,8 @@ impl Air for MlDsaProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         mix_public(
             channel,
-            &self.input,
+            Some(&self.input),
+            &self.input.message,
             &self.namespace,
             self.private_message,
             self.ctx.private_key,
@@ -1685,10 +1834,11 @@ impl Air for MlDsaProver {
             self.shared_field.as_ref(),
             self.shared_range.as_ref(),
             &self.keccak_handle,
+            self.private_key_bindings.as_ref(),
         ));
     }
     fn layout(&self) -> TreeLayout {
-        layout_for(&self.ctx, &self.input)
+        layout_for(&self.ctx)
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
         self.claims.ordered()
@@ -1700,7 +1850,7 @@ impl Air for MlDsaProver {
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids(
             &self.namespace,
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
@@ -1710,7 +1860,7 @@ impl Air for MlDsaProver {
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
         Ok(gen_all_preprocessed(
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
@@ -1723,7 +1873,8 @@ impl Air for MlDsaProver {
             &self.namespace,
             self.stream_base,
             &self.ctx,
-            &self.input,
+            Some(&self.input),
+            &self.input.message,
             &self.group_evals,
             &rel,
             &self.claims,
@@ -1746,7 +1897,7 @@ impl AirProver for MlDsaProver {
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         tb.extend_evals(gen_all_preprocessed(
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
@@ -1765,13 +1916,13 @@ impl AirProver for MlDsaProver {
     ) {
         let ids = all_preprocessed_ids(
             &self.namespace,
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
         );
         let cols = gen_all_preprocessed(
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
@@ -1799,13 +1950,13 @@ impl AirProver for MlDsaProver {
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         let ids = all_preprocessed_ids(
             &self.namespace,
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
         );
         let cols = gen_all_preprocessed(
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
@@ -1813,11 +1964,23 @@ impl AirProver for MlDsaProver {
         fingerprint_preprocessed_columns("mldsa_statement", &ids, &cols)
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let mut evals = vec![col_eval(LOG_N_LANES, vec![m31(0); 1usize << LOG_N_LANES])];
+        let mut evals = if self.ctx.private_key {
+            Vec::new()
+        } else {
+            vec![col_eval(LOG_N_LANES, vec![m31(0); 1usize << LOG_N_LANES])]
+        };
 
         // 1. coeffs base + 2. unified range multiplicity (standalone only).
         let cls = coeffs_log_size();
         evals.extend(coeffs::gen_coeffs_base_trace(&self.witness, cls));
+        if self.ctx.private_key {
+            evals.extend(
+                self.private_key_base
+                    .take()
+                    .expect("private-key base trace was prepared")
+                    .trace,
+            );
+        }
         self.coeffs_rc_mult.clear();
         if !self.ctx.hosted {
             self.coeffs_rc_mult = vec![coeffs_tables::gen_range_table_multiplicities([
@@ -1869,7 +2032,8 @@ impl AirProver for MlDsaProver {
         let dummy_msglink = MsgLinkRelation::dummy();
         evals.extend(
             prefix_eval(
-                &self.input,
+                Some(&self.input),
+                &self.input.message,
                 self.stream_base,
                 self.ctx.native_mu(),
                 self.ctx.private_key,
@@ -1949,8 +2113,35 @@ impl AirProver for MlDsaProver {
         let coeffs_int =
             coeffs::gen_coeffs_interaction(&self.witness, cls, rel.r, rel.s, &rel.coeffs);
         self.claims.coeffs = coeffs_int.claimed_sum;
-        self.group_evals = coeffs_int.group_evals.clone();
         evals.extend(coeffs_int.trace);
+        if self.ctx.private_key {
+            let private_key = private_key_eval::gen_private_key_interaction(
+                self.private_key_witness
+                    .as_ref()
+                    .expect("private-key witness was prepared"),
+                rel.r,
+                rel.s,
+                rel.private_key
+                    .as_ref()
+                    .expect("private-key relations were drawn"),
+            );
+            let private_device_evals = PrivateDeviceEvals::from_parts(
+                &coeffs_int.group_evals,
+                &private_key.a_evals,
+                &private_key.t1_evals,
+            )
+            .expect("private-key evaluation groups have fixed lengths");
+            self.claims.private_key = Some(PrivateKeyEvalClaims {
+                ntt: private_key.ntt_claims,
+                t1: private_key.t1_claim,
+                fold: SecureField::zero(),
+            });
+            self.group_evals = private_device_evals.clone().into_vec();
+            self.private_device_evals = Some(private_device_evals);
+            evals.extend(private_key.trace);
+        } else {
+            self.group_evals = coeffs_int.group_evals;
+        }
         // 2. unified coeffs range table (standalone only).
         self.claims.coeffs_rc.clear();
         if !self.ctx.hosted {
@@ -2016,7 +2207,8 @@ impl AirProver for MlDsaProver {
         }
 
         let (prefix_tr, prefix_sum) = prefix_eval(
-            &self.input,
+            Some(&self.input),
+            &self.input.message,
             self.stream_base,
             self.ctx.native_mu(),
             self.ctx.private_key,
@@ -2073,10 +2265,25 @@ impl AirProver for MlDsaProver {
             evals.extend(tr);
         }
 
-        tb.extend_evals(evals);
+        if self.ctx.private_key {
+            let (fold_trace, fold_sum) = private_key_eval::gen_fold_interaction(
+                self.private_device_evals
+                    .as_ref()
+                    .expect("private-key evaluations were generated"),
+                &rel.coeffs.eval,
+            );
+            self.claims
+                .private_key
+                .as_mut()
+                .expect("private-key claims were generated")
+                .fold = fold_sum;
+            evals.extend(fold_trace);
+        } else {
+            // The public native-use term closes the coeff-evaluation lookup.
+            self.claims.native_use = crate::proof::native_use_sum(&self.group_evals, &rel.coeffs);
+        }
 
-        // native_use_sum (folded verifier term) appended LAST.
-        self.claims.native_use = crate::proof::native_use_sum(&self.group_evals, &rel.coeffs);
+        tb.extend_evals(evals);
     }
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         self.built.as_ref().expect("built").ordered_prover()
@@ -2087,8 +2294,29 @@ impl AirProver for MlDsaProver {
 // Verifier.
 // =============================================================================
 
+enum VerifierStatementInput {
+    Public(Box<MlDsaVerifyInput>),
+    PrivateKey(MlDsaPrivateKeyPublicInput),
+}
+
+impl VerifierStatementInput {
+    fn public_key(&self) -> Option<&MlDsaVerifyInput> {
+        match self {
+            Self::Public(input) => Some(input.as_ref()),
+            Self::PrivateKey(_) => None,
+        }
+    }
+
+    fn message(&self) -> &[u8] {
+        match self {
+            Self::Public(input) => &input.message,
+            Self::PrivateKey(input) => &input.message,
+        }
+    }
+}
+
 pub struct MlDsaVerifier {
-    input: MlDsaVerifyInput,
+    input: VerifierStatementInput,
     ctx: LayoutCtx,
     /// Hosted mode: the host's shared message-source relation handle.
     shared_field: Option<SharedFieldRelation>,
@@ -2103,6 +2331,7 @@ pub struct MlDsaVerifier {
     stream_base: u32,
     /// Private-message mode (must match the prover's per role).
     private_message: bool,
+    private_key_bindings: Option<PrivateKeyEvalBindings>,
     group_evals: Vec<SecureField>,
     claims: Claims,
     relations: Option<Relations>,
@@ -2134,7 +2363,6 @@ impl MlDsaVerifier {
             claimed_sums,
             shared_field,
             false,
-            false,
             None,
             keccak_handle,
         )
@@ -2147,20 +2375,15 @@ impl MlDsaVerifier {
         claimed_sums: Vec<SecureField>,
         shared_field: Option<SharedFieldRelation>,
         public_message: bool,
-        private_key: bool,
         shared_range: Option<SharedRangeRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        input.tr = if private_key {
-            [0; 64]
-        } else {
-            native_tr(&input)
-        };
+        input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(&input, hosted, public_message, private_key);
+        let ctx = LayoutCtx::new(input.message.len(), hosted, public_message, false);
         let claims = Claims::from_flat(&claimed_sums, &ctx);
         Self {
-            input,
+            input: VerifierStatementInput::Public(Box::new(input)),
             ctx,
             shared_field,
             keccak_handle,
@@ -2168,6 +2391,7 @@ impl MlDsaVerifier {
             namespace: String::new(),
             stream_base: 0,
             private_message: false,
+            private_key_bindings: None,
             group_evals,
             claims,
             relations: None,
@@ -2190,7 +2414,6 @@ impl MlDsaVerifier {
             claimed_sums,
             Some(shared_field),
             false,
-            false,
             Some(shared_range),
             keccak_handle,
         )
@@ -2211,7 +2434,6 @@ impl MlDsaVerifier {
             claimed_sums,
             None,
             true,
-            false,
             Some(shared_range),
             keccak_handle,
         )
@@ -2220,17 +2442,18 @@ impl MlDsaVerifier {
     /// Hosted private-public-key mirror of
     /// [`MlDsaProver::hosted_private_key`].
     pub fn hosted_private_key(
-        input: MlDsaVerifyInput,
+        input: MlDsaPrivateKeyPublicInput,
         group_evals: Vec<SecureField>,
         claimed_sums: Vec<SecureField>,
         shared_field: SharedFieldRelation,
         shared_range: SharedRangeRelation,
         keccak_handle: SharedKeccakRelations,
+        bindings: PrivateKeyEvalBindings,
     ) -> Result<Self, VerificationError> {
-        if group_evals.len() != n_group_evals() {
+        if group_evals.len() != n_private_key_group_evals() {
             return Err(VerificationError::InvalidStructure(format!(
                 "ML-DSA hosted private key: expected {} group evaluations, got {}",
-                n_group_evals(),
+                n_private_key_group_evals(),
                 group_evals.len()
             )));
         }
@@ -2241,16 +2464,26 @@ impl MlDsaVerifier {
                 claimed_sums.len()
             )));
         }
-        Ok(Self::build(
-            input,
-            group_evals,
-            claimed_sums,
-            Some(shared_field),
-            true,
-            true,
-            Some(shared_range),
+        PrivateDeviceEvals::try_from_slice(&group_evals).map_err(|error| {
+            VerificationError::InvalidStructure(format!("ML-DSA hosted private key: {error}"))
+        })?;
+        let ctx = LayoutCtx::new(input.message.len(), true, true, true);
+        let claims = Claims::from_flat(&claimed_sums, &ctx);
+        Ok(Self {
+            input: VerifierStatementInput::PrivateKey(input),
+            ctx,
+            shared_field: Some(shared_field),
             keccak_handle,
-        ))
+            shared_range: Some(shared_range),
+            namespace: String::new(),
+            stream_base: 0,
+            private_message: false,
+            private_key_bindings: Some(bindings),
+            group_evals,
+            claims,
+            relations: None,
+            built: None,
+        })
     }
 
     /// Set the instance namespace (must match the prover's per role).
@@ -2280,7 +2513,8 @@ impl Air for MlDsaVerifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         mix_public(
             channel,
-            &self.input,
+            self.input.public_key(),
+            self.input.message(),
             &self.namespace,
             self.private_message,
             self.ctx.private_key,
@@ -2293,12 +2527,15 @@ impl Air for MlDsaVerifier {
             self.shared_field.as_ref(),
             self.shared_range.as_ref(),
             &self.keccak_handle,
+            self.private_key_bindings.as_ref(),
         );
-        self.claims.native_use = crate::proof::native_use_sum(&self.group_evals, &rel.coeffs);
+        if !self.ctx.private_key {
+            self.claims.native_use = crate::proof::native_use_sum(&self.group_evals, &rel.coeffs);
+        }
         self.relations = Some(rel);
     }
     fn layout(&self) -> TreeLayout {
-        layout_for(&self.ctx, &self.input)
+        layout_for(&self.ctx)
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
         self.claims.ordered()
@@ -2310,7 +2547,7 @@ impl Air for MlDsaVerifier {
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids(
             &self.namespace,
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
@@ -2320,7 +2557,7 @@ impl Air for MlDsaVerifier {
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
         Ok(gen_all_preprocessed(
-            &self.input,
+            self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
             self.ctx.private_key,
@@ -2333,7 +2570,8 @@ impl Air for MlDsaVerifier {
             &self.namespace,
             self.stream_base,
             &self.ctx,
-            &self.input,
+            self.input.public_key(),
+            self.input.message(),
             &self.group_evals,
             &rel,
             &self.claims,
@@ -2382,23 +2620,28 @@ pub fn prove_mldsa(
 /// the total committed M31-cell count; interaction QM31 columns are
 /// pre-expanded to 4 M31 columns in the layout.
 pub fn debug_layout(input: &MlDsaVerifyInput) -> TreeLayout {
-    let ctx = LayoutCtx::new(input, false, false, false);
-    layout_for(&ctx, input)
+    let ctx = LayoutCtx::new(input.message.len(), false, false, false);
+    layout_for(&ctx)
 }
 
 /// Exact committed column layout for hosted public-message/private-public-key
 /// mode. Hosts can use this together with
 /// [`hosted_private_key_claimed_sums_len`] to validate proof structure before
 /// constructing [`MlDsaVerifier`].
-pub fn hosted_private_key_layout(input: &MlDsaVerifyInput) -> TreeLayout {
-    let ctx = LayoutCtx::new(input, true, true, true);
-    layout_for(&ctx, input)
+pub fn hosted_private_key_layout(message_len: usize) -> TreeLayout {
+    let ctx = LayoutCtx::new(message_len, true, true, true);
+    layout_for(&ctx)
 }
 
-/// The number of group evaluations every proof carries (the 30 coeffs poly
-/// groups). Hosts gate `group_evals.len()` on this before construction.
+/// Number of coefficient-group evaluations in public-key modes.
 pub fn n_group_evals() -> usize {
     coeffs::layout::N_GROUPS
+}
+
+/// Number of evaluations in private-key mode: 30 coefficient groups,
+/// 30 matrix-polynomial evaluations, and six scaled-`t1` evaluations.
+pub fn n_private_key_group_evals() -> usize {
+    private_key_eval::PRIVATE_EVAL_COUNT
 }
 
 fn claimed_sums_len(hosted: bool, public_message: bool, private_key: bool) -> usize {
@@ -2413,7 +2656,13 @@ fn claimed_sums_len(hosted: bool, public_message: bool, private_key: bool) -> us
         + usize::from(!public_message)
         + bridge_lens(native_mu, private_key).len()
         + sink_lens(0, native_mu, private_key).len()
-        + 1 // coeffs native use
+        + if private_key {
+            // NTT butterfly, NTT scaling, t1, and the final fold replace the
+            // public native-use claim.
+            4
+        } else {
+            1
+        }
 }
 
 /// Exact claimed-sum length for hosted private-message/revocation mode.

@@ -8,9 +8,11 @@
 //! - [`constants`]: FIPS 204 ML-DSA-65 parameters, pinned with citations.
 //! - [`reference`]: from-scratch ML-DSA-65 verification with exposed internals,
 //!   cross-checked against RustCrypto and NIST ACVP vectors.
-//! - [`types`]: [`types::MlDsaVerifyInput`], the serializable verification input.
+//! - [`types`]: full prover/native input plus the keyless hosted verifier input.
 //! - [`witness`]: [`witness::generate_witness`], which materializes the values
 //!   committed by the integer-lift, decomp/hint, SampleInBall, and SHAKE glue.
+//! - [`private_key_eval`]: inverse-NTT, packed-`t1`, and complete private-key
+//!   folded-identity AIR.
 //! - [`coeffs`], [`decomp`], [`sampleinball`], [`sponge_link`], [`msglink`],
 //!   and [`statement`]: the composed AIR/proof surface used by the host circuit.
 
@@ -22,6 +24,7 @@ pub mod constants;
 pub mod decomp;
 pub mod expand_a;
 pub mod msglink;
+pub mod private_key_eval;
 pub mod proof;
 pub mod reference;
 pub mod sampleinball;
@@ -38,5 +41,5 @@ pub use reference::{verify, verify_internals, MlDsaError, RejectReason, VerifyTr
 /// proof-wide `KeccakServiceProver`/`Verifier`), so hosts get the exact same
 /// crate version without a separate dependency edge.
 pub use stwo_keccak;
-pub use types::MlDsaVerifyInput;
+pub use types::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 pub use witness::{generate_witness, MlDsaWitness, WitnessError};
