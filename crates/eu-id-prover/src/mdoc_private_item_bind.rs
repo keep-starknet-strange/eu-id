@@ -5,7 +5,9 @@
 //! checks the four `IssuerSignedItem` fields without public offsets or lengths,
 //! re-provides the semantic identifier/value windows on the existing
 //! per-attribute [`FieldBytesRelation`], and yields one private canonical
-//! digest-ID tuple for the MSO `valueDigests` scan.
+//! digest-ID tuple for the MSO `valueDigests` scan. The frozen TS13 profile
+//! closes its semantic field lookups in this component against the exact
+//! `age_over_18 = true` request instead of adding another protocol module.
 
 use std::fmt;
 
@@ -87,6 +89,10 @@ const KEY_LABELS: [&[u8]; KEY_COUNT] = [
 ];
 const KEY_CANONICAL_CHILD_ORDINALS: [u32; KEY_COUNT] = [0, 2, 4, 6];
 const KEY_ENCODED_BYTES: usize = (1 + 6) + (1 + 8) + (1 + 12) + (1 + 17);
+const TS13_ELEMENT_IDENTIFIER: &[u8] = b"age_over_18";
+const TS13_CANONICAL_ELEMENT_VALUE: &[u8] = &[0xf5];
+const TS13_SEMANTIC_TUPLES: usize =
+    TS13_ELEMENT_IDENTIFIER.len() + TS13_CANONICAL_ELEMENT_VALUE.len();
 
 /// One private canonical digest-ID handoff:
 /// `(encoding_len, b0, b1, b2, b3, b4, value_lo16, value_hi16, is_v2)`.
@@ -607,6 +613,23 @@ fn bit_values(value: usize, count: usize) -> impl Iterator<Item = M31> {
     (0..count).map(move |bit| m31(((value >> bit) & 1) as u32))
 }
 
+fn ts13_semantic_tuples(
+    field_ids: MdocPrivateItemFieldIds,
+) -> impl Iterator<Item = (u32, usize, u8)> {
+    TS13_ELEMENT_IDENTIFIER
+        .iter()
+        .copied()
+        .enumerate()
+        .map(move |(index, byte)| (field_ids.element_identifier, index, byte))
+        .chain(
+            TS13_CANONICAL_ELEMENT_VALUE
+                .iter()
+                .copied()
+                .enumerate()
+                .map(move |(index, byte)| (field_ids.element_value, index, byte)),
+        )
+}
+
 #[derive(Clone, Copy)]
 struct KeySpan {
     start: usize,
@@ -809,6 +832,17 @@ fn analyze_inner(
     }
     let identifier_head_len = usize::from(identifier_len >= 24) + 1;
     let identifier_content_start = identifier.byte_index as usize + identifier_head_len;
+    let identifier_content_end = identifier_content_start
+        .checked_add(identifier_len)
+        .ok_or(MdocPrivateItemError::InvalidElementIdentifier)?;
+    let identifier_content = inner
+        .get(identifier_content_start..identifier_content_end)
+        .ok_or(MdocPrivateItemError::InvalidElementIdentifier)?;
+    if matches!(profile, MdocPrivateItemProfile::Ts13)
+        && identifier_content != TS13_ELEMENT_IDENTIFIER
+    {
+        return Err(MdocPrivateItemError::InvalidElementIdentifier);
+    }
 
     let value_root = key_spans[KEY_ELEMENT_VALUE].value_start;
     let next_key = key_spans
@@ -977,6 +1011,11 @@ fn analyze_inner(
         .and_then(|end| end.checked_sub(1))
         .ok_or(MdocPrivateItemError::InvalidElementValue)?;
     if normalized_output_end >= inner.len() {
+        return Err(MdocPrivateItemError::InvalidElementValue);
+    }
+    if matches!(profile, MdocPrivateItemProfile::Ts13)
+        && normalized_output != TS13_CANONICAL_ELEMENT_VALUE
+    {
         return Err(MdocPrivateItemError::InvalidElementValue);
     }
 
@@ -2426,6 +2465,19 @@ impl FrameworkEval for MdocPrivateItemEval {
                 output_byte,
             ],
         ));
+        if matches!(self.profile, MdocPrivateItemProfile::Ts13) {
+            for (field_id, index, byte) in ts13_semantic_tuples(self.field_ids) {
+                eval.add_to_relation(RelationEntry::new(
+                    &self.item_fields,
+                    E::EF::from(first.clone()),
+                    &[
+                        m31_const::<E>(field_id),
+                        m31_const::<E>(index as u32),
+                        m31_const::<E>(u32::from(byte)),
+                    ],
+                ));
+            }
+        }
         if matches!(self.request_mode, MdocPrivateItemRequestMode::Nationality) {
             eval.add_to_relation(RelationEntry::new(
                 &self.country_code,
@@ -2481,6 +2533,7 @@ fn packed_parsed_denominator(
 fn interaction_trace(
     witness: &MdocPrivateItemWitness,
     log_size: u32,
+    profile: MdocPrivateItemProfile,
     request_mode: MdocPrivateItemRequestMode,
     field_ids: MdocPrivateItemFieldIds,
     item_fields: &FieldBytesRelation,
@@ -2497,7 +2550,8 @@ fn interaction_trace(
     let base = witness.trace(log_size);
     let preprocessed = preprocessed_columns(log_size);
     let packed_rows = 1usize << (log_size - LOG_N_LANES);
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(KEY_ENCODED_BYTES + 9);
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> =
+        Vec::with_capacity(KEY_ENCODED_BYTES + 9 + TS13_SEMANTIC_TUPLES);
     sites.push(
         (0..packed_rows)
             .map(|row| {
@@ -2631,6 +2685,24 @@ fn interaction_trace(
                 .collect(),
         );
     }
+    if matches!(profile, MdocPrivateItemProfile::Ts13) {
+        for (field_id, index, byte) in ts13_semantic_tuples(field_ids) {
+            sites.push(
+                (0..packed_rows)
+                    .map(|row| {
+                        (
+                            PackedQM31::from(preprocessed[0].data[row]),
+                            item_fields.combine(&[
+                                PackedM31::broadcast(m31(field_id)),
+                                PackedM31::broadcast(m31(index as u32)),
+                                PackedM31::broadcast(m31(u32::from(byte))),
+                            ]),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+    }
     if matches!(request_mode, MdocPrivateItemRequestMode::Nationality) {
         let country_code = country_code.get();
         sites.push(
@@ -2684,7 +2756,8 @@ fn interaction_trace(
 /// - `inner_raw`: negative provider for the raw inner parser;
 /// - `digest_id`: negative provider for the MSO `valueDigests` scan;
 /// - `item_fields`: negative provider of the identifier content plus either
-///   the full encoded `elementValue` or normalized predicate bytes.
+///   the full encoded `elementValue` or normalized predicate bytes. TS13 also
+///   provides the exact fixed positive counterparts inside this component.
 /// - `country_code`: one positive dummy/alpha-2 lookup for nationality only.
 ///
 /// The outer parser is itself fed by the SHA full-padded-stream relation.  Thus
@@ -2890,10 +2963,12 @@ impl MdocPrivateItemBind {
 
     fn main_interaction_sites(&self) -> usize {
         // Outer parsed, inner parsed, inner raw, key witness, 47 key constants,
-        // digest tuple, identifier field, value field, optional country
-        // lookup, and the final blinder.
+        // digest tuple, identifier field, value field, the TS13 fixed semantic
+        // counterparts, optional country lookup, and the final blinder.
         KEY_ENCODED_BYTES
             + 8
+            + usize::from(matches!(self.profile, MdocPrivateItemProfile::Ts13))
+                * TS13_SEMANTIC_TUPLES
             + usize::from(matches!(
                 self.request_mode,
                 MdocPrivateItemRequestMode::Nationality
@@ -3103,6 +3178,7 @@ impl AirProver for MdocPrivateItemBind {
                 .as_ref()
                 .expect("private item prover has a witness"),
             self.log_size,
+            self.profile,
             self.request_mode,
             self.field_ids,
             &self.item_fields(),
@@ -3161,8 +3237,8 @@ mod tests {
         KEY_ELEMENT_VALUE,
         KEY_DIGEST_ID,
     ];
-    const TEST_IDENTIFIER: &[u8] = b"age_over_18";
-    const TEST_VALUE: &[u8] = &[0xf5];
+    const TEST_IDENTIFIER: &[u8] = TS13_ELEMENT_IDENTIFIER;
+    const TEST_VALUE: &[u8] = TS13_CANONICAL_ELEMENT_VALUE;
 
     fn qm31(value: u32) -> QM31 {
         QM31::from(m31(value))
@@ -4521,6 +4597,78 @@ mod tests {
     }
 
     #[test]
+    fn ts13_host_analysis_accepts_only_the_frozen_identifier_and_canonical_true() {
+        for (name, identifier) in [
+            ("wrong byte", b"age_over_19".as_slice()),
+            ("short identifier", b"age_over_1".as_slice()),
+            ("long identifier", b"age_over_18x".as_slice()),
+        ] {
+            assert_eq!(
+                test_bind_with(
+                    MdocPrivateItemProfile::Ts13,
+                    CANONICAL_ORDER,
+                    16,
+                    7,
+                    identifier,
+                    TS13_CANONICAL_ELEMENT_VALUE,
+                )
+                .err(),
+                Some(MdocPrivateItemError::InvalidElementIdentifier),
+                "{name}"
+            );
+        }
+
+        assert_eq!(
+            test_bind_with(
+                MdocPrivateItemProfile::Ts13,
+                CANONICAL_ORDER,
+                16,
+                7,
+                TS13_ELEMENT_IDENTIFIER,
+                &[0xf4],
+            )
+            .err(),
+            Some(MdocPrivateItemError::InvalidElementValue),
+            "false"
+        );
+        assert_eq!(
+            test_bind_with(
+                MdocPrivateItemProfile::Ts13,
+                CANONICAL_ORDER,
+                16,
+                7,
+                TS13_ELEMENT_IDENTIFIER,
+                &[0xc0, 0xf5],
+            )
+            .err(),
+            Some(MdocPrivateItemError::InvalidElementValue),
+            "tagged true"
+        );
+        for (name, value) in [
+            ("noncanonical true", [0xf8, 0x15]),
+            ("trailing value", [0xf5, 0x00]),
+        ] {
+            assert!(
+                test_bind_with(
+                    MdocPrivateItemProfile::Ts13,
+                    CANONICAL_ORDER,
+                    16,
+                    7,
+                    TS13_ELEMENT_IDENTIFIER,
+                    &value,
+                )
+                .is_err(),
+                "{name} unexpectedly passed host analysis"
+            );
+        }
+
+        assert!(
+            test_bind(MdocPrivateItemProfile::Ts13, 7).is_ok(),
+            "the exact frozen TS13 semantic pair must remain accepted"
+        );
+    }
+
+    #[test]
     fn digest_tuple_copies_canonical_cells_and_rejects_wrong_or_shifted_witnesses() {
         let bind = test_bind(MdocPrivateItemProfile::Product, 65_536).unwrap();
         let witness = bind.witness.as_ref().unwrap();
@@ -4577,6 +4725,7 @@ mod tests {
             interaction_trace(
                 witness,
                 bind.log_size,
+                bind.profile,
                 bind.request_mode,
                 bind.field_ids,
                 &item_fields,
@@ -5031,29 +5180,31 @@ mod tests {
                 values[digest_id_tuple::IS_V2] = witness.columns[trace_col::IS_V2][row];
                 rows.push(TestCounterRow::new(TEST_DIGEST_ID, &values));
             }
-            for (selector, field_id, index_column, byte_column) in [
-                (
-                    trace_col::IDENTIFIER_CONTENT_ACTIVE,
-                    bind.field_ids.element_identifier,
-                    trace_col::IDENTIFIER_CONTENT_INDEX,
-                    trace_col::BYTE,
-                ),
-                (
-                    trace_col::VALUE_ACTIVE,
-                    bind.field_ids.element_value,
-                    trace_col::VALUE_INDEX,
-                    trace_col::VALUE_OUTPUT_BYTE,
-                ),
-            ] {
-                if witness.columns[selector][row] == m31(1) {
-                    rows.push(TestCounterRow::new(
-                        TEST_ITEM_FIELDS,
-                        &[
-                            m31(field_id),
-                            witness.columns[index_column][row],
-                            witness.columns[byte_column][row],
-                        ],
-                    ));
+            if matches!(bind.profile, MdocPrivateItemProfile::Product) {
+                for (selector, field_id, index_column, byte_column) in [
+                    (
+                        trace_col::IDENTIFIER_CONTENT_ACTIVE,
+                        bind.field_ids.element_identifier,
+                        trace_col::IDENTIFIER_CONTENT_INDEX,
+                        trace_col::BYTE,
+                    ),
+                    (
+                        trace_col::VALUE_ACTIVE,
+                        bind.field_ids.element_value,
+                        trace_col::VALUE_INDEX,
+                        trace_col::VALUE_OUTPUT_BYTE,
+                    ),
+                ] {
+                    if witness.columns[selector][row] == m31(1) {
+                        rows.push(TestCounterRow::new(
+                            TEST_ITEM_FIELDS,
+                            &[
+                                m31(field_id),
+                                witness.columns[index_column][row],
+                                witness.columns[byte_column][row],
+                            ],
+                        ));
+                    }
                 }
             }
         }
@@ -5202,6 +5353,17 @@ mod tests {
             verify_composed_item(fixture, fixture.counter_rows.clone()).is_err(),
             "{name} unexpectedly verified"
         );
+    }
+
+    fn assert_composed_logup_rejects(fixture: &TestComposedItemProof, name: &str) {
+        match verify_composed_item(fixture, fixture.counter_rows.clone())
+            .expect_err("mismatched composed lookup must not verify")
+        {
+            air_core::VerifyError::Stark(
+                stwo::core::verifier::VerificationError::InvalidStructure(reason),
+            ) => assert_eq!(reason, "LogUp claimed sums do not cancel", "{name}"),
+            other => panic!("{name}: expected global LogUp rejection, got {other:?}"),
+        }
     }
 
     fn predicate_bind(
@@ -5552,6 +5714,74 @@ mod tests {
     }
 
     #[test]
+    fn ts13_semantics_balance_inside_the_item_slot_and_reject_forged_private_values() {
+        let mut honest = test_bind(MdocPrivateItemProfile::Ts13, 7).unwrap();
+        let fixture = prove_composed_bind(&mut honest, None);
+        assert!(
+            fixture
+                .counter_rows
+                .iter()
+                .all(|row| row.kind != TEST_ITEM_FIELDS),
+            "TS13 must not rely on an external semantic window counterpart"
+        );
+        verify_composed_item(&fixture, fixture.counter_rows.clone())
+            .expect("exact TS13 semantics balance within the item-binder slot");
+
+        let mut false_trace = test_bind(MdocPrivateItemProfile::Ts13, 7).unwrap();
+        {
+            let witness = false_trace.witness.as_mut().unwrap();
+            let row = witness.columns[trace_col::VALUE_ACTIVE]
+                .iter()
+                .position(|value| *value == m31(1))
+                .expect("TS13 fixture has one active value byte");
+            witness.columns[trace_col::BYTE][row] = m31(0xf4);
+            witness.columns[trace_col::ARGUMENT][row] = m31(20);
+            witness.columns[trace_col::VALUE_OUTPUT_BYTE][row] = m31(0xf4);
+        }
+        assert_witness_satisfies_air(&false_trace);
+        let false_fixture = prove_composed_bind(&mut false_trace, None);
+        assert_composed_logup_rejects(&false_fixture, "AIR-level true-to-false mutation");
+
+        for (name, identifier, value) in [
+            (
+                "wrong identifier byte",
+                b"age_over_19".as_slice(),
+                TS13_CANONICAL_ELEMENT_VALUE,
+            ),
+            (
+                "wrong identifier length",
+                b"age_over_1".as_slice(),
+                TS13_CANONICAL_ELEMENT_VALUE,
+            ),
+            ("false", TS13_ELEMENT_IDENTIFIER, &[0xf4]),
+            ("tagged true", TS13_ELEMENT_IDENTIFIER, &[0xc0, 0xf5]),
+        ] {
+            // Construct under the generic product profile to model a malicious
+            // prover bypassing TS13's host-side witness validation, then prove
+            // the same trace under the TS13 AIR and transcript.
+            let mut forged = test_bind_with(
+                MdocPrivateItemProfile::Product,
+                CANONICAL_ORDER,
+                16,
+                7,
+                identifier,
+                value,
+            )
+            .unwrap_or_else(|error| panic!("{name} fixture is not structurally valid: {error}"));
+            forged.profile = MdocPrivateItemProfile::Ts13;
+            let forged_fixture = prove_composed_bind(&mut forged, None);
+            assert!(
+                forged_fixture
+                    .counter_rows
+                    .iter()
+                    .all(|row| row.kind != TEST_ITEM_FIELDS),
+                "{name}: forged proof unexpectedly gained an external semantic counterpart"
+            );
+            assert_composed_logup_rejects(&forged_fixture, name);
+        }
+    }
+
+    #[test]
     fn layout_claim_components_and_degree_budget_are_fixed() {
         let expected_claim = test_claim();
         let encoded = bincode::serialize(&expected_claim).unwrap();
@@ -5606,6 +5836,24 @@ mod tests {
         assert_eq!(nationality_layout.preprocessed, layout.preprocessed);
         assert_eq!(nationality_layout.trace, layout.trace);
         assert_eq!(nationality_layout.interaction, layout.interaction);
+        let ts13 = MdocPrivateItemBind::verifier(
+            0,
+            MdocPrivateItemProfile::Ts13,
+            MdocPrivateItemRequestMode::ValueEquality,
+            128,
+            field_ids(),
+            MdocPrivateItemHandles::fresh(
+                SharedFieldRelation::new(),
+                SharedMdocCountryCodeRelation::new(),
+            ),
+            test_claim(),
+        )
+        .unwrap();
+        assert_eq!(ts13.main_interaction_sites(), 67);
+        assert_eq!(
+            ts13.layout().interaction,
+            vec![9; 35 * SECURE_EXTENSION_DEGREE]
+        );
         assert_eq!(trace_col::VALUE_OUTPUT_BYTE, 110);
         assert_eq!(trace_col::COUNTRY_LOOKUP_UPPER_1, 153);
         assert_eq!((trace_col::COUNT - 110) * (1usize << 9), 22_528);
