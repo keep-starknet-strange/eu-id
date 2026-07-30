@@ -20,6 +20,7 @@ mod mdoc_value_digests_scan;
 mod mdoc_window_bind;
 pub mod policy;
 pub mod ts13;
+pub mod ts13_demo;
 
 use stwo::core::pcs::PcsConfig;
 

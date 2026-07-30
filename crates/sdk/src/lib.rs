@@ -19,6 +19,7 @@ uniffi::setup_scaffolding!();
 #[cfg(feature = "demo")]
 mod demo;
 mod mapping;
+pub mod ts13_demo;
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PredicateMode {
