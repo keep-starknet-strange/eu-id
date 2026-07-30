@@ -82,7 +82,11 @@ static TWIDDLE_CACHE: OnceLock<Mutex<HashMap<u32, &'static TwiddleTree<SimdBacke
 
 fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     let cache = TWIDDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().expect("twiddle cache poisoned");
+    // The map is left consistent between operations, so a panic while holding
+    // the lock must not make every later prove/verify fail permanently.
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(twiddles) = cache.get(&twiddle_log_size) {
         return twiddles;
     }
@@ -721,6 +725,34 @@ pub fn compute_preprocessed_root_uncached(
     commitment_scheme.roots()[0]
 }
 
+/// Defense-in-depth ceiling for canonical verifier-side tree-0 reconstruction.
+///
+/// Honest product and TS13 modules remain well below this: their largest fixed
+/// tables have log-size 18. This seven-bit margin rejects prover-carried shapes
+/// before they can trigger a leaked, multi-gigabyte twiddle allocation.
+pub const MAX_CANONICAL_PREPROCESSED_LOG_SIZE: u32 = 25;
+
+fn canonical_preprocessed_twiddle_log_size(
+    max_preprocessed_log_size: u32,
+    log_blowup_factor: u32,
+) -> Result<u32, VerificationError> {
+    if max_preprocessed_log_size > MAX_CANONICAL_PREPROCESSED_LOG_SIZE {
+        return Err(VerificationError::InvalidStructure(format!(
+            "preprocessed log size {max_preprocessed_log_size} exceeds the canonical maximum \
+             {MAX_CANONICAL_PREPROCESSED_LOG_SIZE}"
+        )));
+    }
+
+    max_preprocessed_log_size
+        .checked_add(log_blowup_factor)
+        .ok_or_else(|| {
+            VerificationError::InvalidStructure(format!(
+                "canonical preprocessed twiddle log size overflows: \
+                 {max_preprocessed_log_size} + {log_blowup_factor}"
+            ))
+        })
+}
+
 /// Reconstruct and commit tree 0 from verifier-side canonical module data.
 /// Columns are deduplicated with the exact first-writer-wins ordering used by
 /// [`prove`]. No witness values or prover-supplied root enter this path.
@@ -733,7 +765,13 @@ pub fn compute_canonical_preprocessed_root(
         .flat_map(|module| module.layout().preprocessed)
         .max()
         .unwrap_or(0);
-    let twiddles = cached_twiddles(max_preprocessed_log_size + config.fri_config.log_blowup_factor);
+    // Validate cheap layout metadata before allocating or leaking twiddle/LDE
+    // storage. The blow-up addition is checked for malformed configurations.
+    let twiddle_log_size = canonical_preprocessed_twiddle_log_size(
+        max_preprocessed_log_size,
+        config.fri_config.log_blowup_factor,
+    )?;
+    let twiddles = cached_twiddles(twiddle_log_size);
     let channel = &mut Ch::default();
     config.mix_into(channel);
     let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, twiddles);
@@ -1122,6 +1160,109 @@ mod tests {
         assert!(message.contains("shared"));
         assert!(message.contains("first"));
         assert!(message.contains("second"));
+    }
+
+    /// Reports only cheap layout metadata. If a resource-limit test reaches
+    /// canonical column reconstruction or twiddle allocation, it has failed.
+    struct ShapeOnlyModule {
+        preprocessed_log_size: u32,
+    }
+
+    impl Air for ShapeOnlyModule {
+        fn mix_public(&self, _channel: &mut Ch) {}
+
+        fn draw_relations(&mut self, _channel: &mut Ch) {}
+
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![self.preprocessed_log_size],
+                trace: Vec::new(),
+                interaction: Vec::new(),
+            }
+        }
+
+        fn claimed_sums(&self) -> Vec<QM31> {
+            Vec::new()
+        }
+
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![PreProcessedColumnId {
+                id: "shape_only".to_string(),
+            }]
+        }
+
+        fn canonical_preprocessed_columns(
+            &mut self,
+        ) -> Result<Vec<PreprocessedColumnEval>, VerificationError> {
+            panic!("resource-limit validation must run before reconstruction")
+        }
+
+        fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+
+        fn components(&self) -> Vec<&dyn Component> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn canonical_preprocessed_log_size_boundary_is_accepted_without_allocating() {
+        let blowup = PcsConfig::default().fri_config.log_blowup_factor;
+        assert_eq!(
+            canonical_preprocessed_twiddle_log_size(MAX_CANONICAL_PREPROCESSED_LOG_SIZE, blowup)
+                .expect("the canonical boundary must be accepted"),
+            MAX_CANONICAL_PREPROCESSED_LOG_SIZE + blowup
+        );
+    }
+
+    #[test]
+    fn canonical_root_rejects_oversized_preprocessed_shape_before_allocating() {
+        let mut module = ShapeOnlyModule {
+            preprocessed_log_size: MAX_CANONICAL_PREPROCESSED_LOG_SIZE + 1,
+        };
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], PcsConfig::default())
+            .expect_err("an oversized canonical shape must be rejected");
+
+        match error {
+            VerificationError::InvalidStructure(message) => {
+                assert!(
+                    message.contains("exceeds the canonical maximum"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected InvalidStructure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_root_rejects_blowup_addition_overflow_before_allocating() {
+        let mut module = ShapeOnlyModule {
+            preprocessed_log_size: 1,
+        };
+        let mut config = PcsConfig::default();
+        config.fri_config.log_blowup_factor = u32::MAX;
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], config)
+            .expect_err("canonical twiddle log-size overflow must be rejected");
+
+        match error {
+            VerificationError::InvalidStructure(message) => {
+                assert!(message.contains("twiddle log size overflows"), "{message}");
+            }
+            other => panic!("expected InvalidStructure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cached_twiddles_recovers_from_a_poisoned_cache() {
+        let cache = TWIDDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let panic = std::panic::catch_unwind(|| {
+            let _guard = cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            panic!("poison the cache for the recovery check");
+        });
+        assert!(panic.is_err());
+
+        let _ = cached_twiddles(4);
     }
 
     use stwo::prover::backend::simd::qm31::PackedQM31;
