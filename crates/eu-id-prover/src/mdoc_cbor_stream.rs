@@ -10,9 +10,6 @@
 
 use std::fmt;
 
-use air_core::claim_mask::{
-    add_claim_mask_fraction, ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS,
-};
 use air_core::relations::{FieldBytesRelation, SharedFieldRelation, SharedRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
@@ -47,27 +44,7 @@ const MDOC_CBOR_BLIND_ROWS: usize = 256;
 const SHA_BLOCK_BYTES: usize = 64;
 const SHA_LENGTH_BYTES: usize = 8;
 
-/// Tuple layout for [`ParsedCborByteRelation`].
-pub(crate) mod parsed_cbor_tuple {
-    pub(crate) const BYTE_INDEX: usize = 1;
-    pub(crate) const BYTE: usize = 2;
-    pub(crate) const HEADER: usize = 3;
-    pub(crate) const MAJOR: usize = 4;
-    pub(crate) const ARG_LO16: usize = 5;
-    pub(crate) const ARG_16_31: usize = 6;
-    pub(crate) const ARG_32_47: usize = 7;
-    pub(crate) const ARG_HI16: usize = 8;
-    pub(crate) const CONTENT_LEN: usize = 9;
-    pub(crate) const DEPTH: usize = 10;
-    pub(crate) const PARENT_HEADER_INDEX: usize = 11;
-    pub(crate) const CHILD_ORDINAL: usize = 12;
-    pub(crate) const MAP_KEY: usize = 13;
-    pub(crate) const MAP_VALUE: usize = 14;
-    pub(crate) const ARITY: usize = 15;
-}
-
 relation!(ParsedCborByteRelation, 15);
-const _: () = assert!(parsed_cbor_tuple::ARITY == 15);
 
 /// One parser-instance output channel. The parser draws and sets this relation;
 /// a semantic component reads the same handle and consumes every parsed row.
@@ -226,10 +203,6 @@ impl MdocCborWitnessRow {
 
 #[derive(Clone, Debug)]
 pub(crate) struct MdocCborWitness {
-    #[cfg(test)]
-    pub(crate) mode: MdocCborInputMode,
-    #[cfg(test)]
-    pub(crate) message_len: usize,
     pub(crate) rows: Vec<MdocCborWitnessRow>,
     pub(crate) log_size: u32,
 }
@@ -262,14 +235,7 @@ impl MdocCborWitness {
         }
         debug_assert_eq!(rows.len(), bytes.len());
 
-        Ok(Self {
-            #[cfg(test)]
-            mode,
-            #[cfg(test)]
-            message_len,
-            rows,
-            log_size,
-        })
+        Ok(Self { rows, log_size })
     }
 }
 
@@ -797,7 +763,6 @@ struct MdocCborStreamEval {
     stream_id: u32,
     input_relation: FieldBytesRelation,
     parsed_relation: Option<ParsedCborByteRelation>,
-    claim_mask_beta: Option<QM31>,
 }
 
 impl FrameworkEval for MdocCborStreamEval {
@@ -1282,9 +1247,6 @@ impl FrameworkEval for MdocCborStreamEval {
             ];
             eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(cbor), &tuple));
         }
-        if let Some(beta) = self.claim_mask_beta {
-            add_claim_mask_fraction(&mut eval, beta);
-        }
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -1303,12 +1265,6 @@ mod trace_col {
     pub(super) const ORDINAL: usize = 39;
     pub(super) const MAP_KEY: usize = 40;
     pub(super) const MAP_VALUE: usize = 41;
-    #[cfg(test)]
-    pub(super) const SHORT_SLACK: usize = 51;
-    #[cfg(test)]
-    pub(super) const PAD_SLACK: usize = 63;
-    #[cfg(test)]
-    pub(super) const COUNTERS: usize = 69;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1323,8 +1279,6 @@ pub(crate) struct MdocCborStream {
     witness: Option<MdocCborWitness>,
     input_handle: SharedFieldRelation,
     parsed_handle: Option<SharedParsedCborByteRelation>,
-    claim_mask_trace: Option<ClaimMaskTrace>,
-    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocCborStreamInteractionClaim>,
     component: Option<MdocCborComponent>,
 }
@@ -1345,8 +1299,6 @@ impl MdocCborStream {
             witness: Some(witness),
             input_handle: input,
             parsed_handle: parsed,
-            claim_mask_trace: None,
-            claim_mask_challenge: None,
             interaction_claim: None,
             component: None,
         })
@@ -1373,43 +1325,12 @@ impl MdocCborStream {
             witness: None,
             input_handle: input,
             parsed_handle: parsed,
-            claim_mask_trace: None,
-            claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             component: None,
         })
     }
 
-    pub(crate) fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
-        vec![self.log_size]
-    }
-
-    pub(crate) fn with_claim_mask(
-        mut self,
-        trace: ClaimMaskTrace,
-        challenge: SharedClaimMaskChallenge,
-    ) -> Self {
-        assert_eq!(
-            trace.log_size(),
-            self.log_size,
-            "mdoc CBOR claim-mask log size mismatch"
-        );
-        self.claim_mask_trace = Some(trace);
-        self.claim_mask_challenge = Some(challenge);
-        self
-    }
-
-    pub(crate) fn with_claim_mask_verifier(mut self, challenge: SharedClaimMaskChallenge) -> Self {
-        self.claim_mask_challenge = Some(challenge);
-        self
-    }
-
-    fn claim_mask_beta(&self) -> Option<QM31> {
-        self.claim_mask_challenge
-            .as_ref()
-            .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
-    }
-
+    #[cfg(test)]
     pub(crate) fn log_size(&self) -> u32 {
         self.log_size
     }
@@ -1429,10 +1350,8 @@ impl MdocCborStream {
     }
 
     fn n_main_lookups(&self) -> usize {
-        // Full input consume, optional parsed-byte yield, optional private
-        // claimed-sum mask.
+        // Full input consume plus the optional parsed-byte yield.
         1 + usize::from(self.parsed_handle.is_some())
-            + usize::from(self.claim_mask_challenge.is_some())
     }
 }
 
@@ -1441,7 +1360,6 @@ fn mdoc_cbor_interaction_trace(
     stream_id: u32,
     input_relation: &FieldBytesRelation,
     parsed_relation: Option<&ParsedCborByteRelation>,
-    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
 ) -> (Vec<MdocCborColumnEval>, QM31) {
     let base = mdoc_cbor_base_trace(witness);
     let preprocessed = mdoc_cbor_preprocessed_columns(witness.log_size);
@@ -1491,15 +1409,6 @@ fn mdoc_cbor_interaction_trace(
         );
     }
 
-    if let Some((mask, beta)) = claim_mask {
-        assert_eq!(mask.packed_rows(), n_vec_rows);
-        sites.push(
-            (0..n_vec_rows)
-                .map(|vec_row| mask.packed_fraction_at(vec_row, beta))
-                .collect(),
-        );
-    }
-
     let mut logup = LogupTraceGenerator::new(witness.log_size);
     let mut site = 0;
     while site + 1 < sites.len() {
@@ -1540,12 +1449,7 @@ impl Air for MdocCborStream {
     fn layout(&self) -> TreeLayout {
         TreeLayout {
             preprocessed: vec![self.log_size; MDOC_CBOR_PREPROCESSED_COLS],
-            trace: vec![
-                self.log_size;
-                MDOC_CBOR_TRACE_COLS
-                    + usize::from(self.claim_mask_challenge.is_some())
-                        * CLAIM_MASK_TRACE_COLUMNS
-            ],
+            trace: vec![self.log_size; MDOC_CBOR_TRACE_COLS],
             interaction: vec![
                 self.log_size;
                 self.n_main_lookups().div_ceil(2) * SECURE_EXTENSION_DEGREE
@@ -1578,7 +1482,6 @@ impl Air for MdocCborStream {
                 stream_id: self.stream_id,
                 input_relation: self.input_relation(),
                 parsed_relation: self.parsed_relation(),
-                claim_mask_beta: self.claim_mask_beta(),
             },
             claim.claimed_sum,
         ));
@@ -1609,6 +1512,10 @@ impl AirProver for MdocCborStream {
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.log_size + 3
+    }
+
+    fn store_polynomial_coefficients(&self) -> bool {
+        true
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -1649,9 +1556,6 @@ impl AirProver for MdocCborStream {
             .as_ref()
             .expect("mdoc CBOR prover has a witness");
         tb.extend_evals(mdoc_cbor_base_trace(witness));
-        if let Some(mask) = &self.claim_mask_trace {
-            tb.extend_evals(mask.columns().to_vec());
-        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -1659,13 +1563,11 @@ impl AirProver for MdocCborStream {
             .witness
             .as_ref()
             .expect("mdoc CBOR prover has a witness");
-        let claim_mask = self.claim_mask_trace.as_ref().zip(self.claim_mask_beta());
         let (trace, claimed_sum) = mdoc_cbor_interaction_trace(
             witness,
             self.stream_id,
             &self.input_relation(),
             self.parsed_relation().as_ref(),
-            claim_mask,
         );
         tb.extend_evals(trace);
         self.interaction_claim = Some(MdocCborStreamInteractionClaim { claimed_sum });
@@ -1676,5 +1578,56 @@ impl AirProver for MdocCborStream {
             .component
             .as_ref()
             .expect("mdoc CBOR component is built")]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mdoc_private_message::MdocPrivateMessageProvider;
+    use stwo::core::pcs::PcsConfig;
+    use stwo_mldsa::statement::HOSTED_MSG_FIELD_ID;
+
+    #[test]
+    fn default_pcs_proves_the_cbor_degree_bound() {
+        let bytes = vec![0x82, 0x01, 0x02];
+        let handle = SharedFieldRelation::new();
+        let mut provider =
+            MdocPrivateMessageProvider::new(bytes.clone(), vec![0; bytes.len()], handle.clone())
+                .unwrap();
+        let mut parser = MdocCborStream::new(
+            bytes.clone(),
+            MdocCborInputMode::Raw,
+            HOSTED_MSG_FIELD_ID,
+            handle,
+            None,
+        )
+        .unwrap();
+        assert!(parser.store_polynomial_coefficients());
+
+        let proof = air_core::prove(&mut [&mut provider, &mut parser], PcsConfig::default())
+            .expect("default PCS must prove the degree-eight CBOR AIR");
+        let provider_claim = provider.claim().clone();
+        let parser_claim = parser.interaction_claim().clone();
+
+        let handle = SharedFieldRelation::new();
+        let mut provider =
+            MdocPrivateMessageProvider::verifier(bytes.len(), handle.clone(), provider_claim)
+                .unwrap();
+        let mut parser = MdocCborStream::verifier(
+            MdocCborInputMode::Raw,
+            HOSTED_MSG_FIELD_ID,
+            parser.log_size(),
+            handle,
+            None,
+            parser_claim,
+        )
+        .unwrap();
+        air_core::verify_with_expected_preprocessed_root(
+            &mut [&mut provider, &mut parser],
+            &proof,
+            None,
+        )
+        .expect("default-PCS CBOR proof must verify");
     }
 }

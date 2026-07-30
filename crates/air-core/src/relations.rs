@@ -194,7 +194,9 @@ mod tests {
     #[test]
     fn credential_field_ids_are_distinct() {
         assert_ne!(field_id::DOB, field_id::NATIONALITY);
-        assert!(field_id::DOB < 2);
-        assert!(field_id::NATIONALITY < 2);
+        const {
+            assert!(field_id::DOB < 2);
+            assert!(field_id::NATIONALITY < 2);
+        }
     }
 }

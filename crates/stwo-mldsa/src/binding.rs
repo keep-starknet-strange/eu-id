@@ -54,6 +54,24 @@ relation!(WCellRelation, WCELL_ARITY);
 pub const CCELL_ARITY: usize = 2;
 relation!(CCellRelation, CCELL_ARITY);
 
+/// `(rho_byte_index, byte)` — the private `rho` cells committed by ExpandA
+/// and consumed by the eventual private public-key binding.
+pub const RHO_CELL_ARITY: usize = 2;
+relation!(RhoCellRelation, RHO_CELL_ARITY);
+
+/// `(matrix_poly, ntt_stage, coefficient_index, limb0, limb1, limb2)`.
+///
+/// ExpandA yields accepted coefficients at stage zero. The inverse-NTT
+/// component consumes those cells and reuses the same tuple shape for later
+/// stages.
+pub const NTT_CELL_ARITY: usize = 6;
+relation!(NttCellRelation, NTT_CELL_ARITY);
+
+/// Shared handles published by ExpandA for the later public-key and inverse-NTT
+/// components.
+pub type SharedRhoCellRelation = air_core::relations::SharedRelation<RhoCellRelation>;
+pub type SharedNttCellRelation = air_core::relations::SharedRelation<NttCellRelation>;
+
 /// `(field_id, byte_index, byte)` — the message-byte relation for `M`'s bytes.
 ///
 /// REUSE NOTE (M6 decision): stwo-sha256's `FieldExposure` producer

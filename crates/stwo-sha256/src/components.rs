@@ -52,6 +52,24 @@ fn id(name: &str) -> PreProcessedColumnId {
     }
 }
 
+fn consumer_id(instance_namespace: &str, name: &str) -> PreProcessedColumnId {
+    if instance_namespace.is_empty() {
+        return id(name);
+    }
+    let mut encoded_namespace = String::new();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for &byte in instance_namespace.as_bytes() {
+        encoded_namespace.push(HEX[usize::from(byte >> 4)] as char);
+        encoded_namespace.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    id(&format!(
+        "instance_{}_{}_{}",
+        instance_namespace.len(),
+        encoded_namespace,
+        name
+    ))
+}
+
 fn shared_id(name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("{SHARED_ID_PREFIX}{name}"),
@@ -146,7 +164,11 @@ pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessed
 /// and pins `is_first_block ≡ is_first_row`, anchoring the §10.3 chain
 /// on block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 pub fn is_first_row_column_id() -> PreProcessedColumnId {
-    id("is_first_row")
+    is_first_row_column_id_ns("")
+}
+
+pub(crate) fn is_first_row_column_id_ns(instance_namespace: &str) -> PreProcessedColumnId {
+    consumer_id(instance_namespace, "is_first_row")
 }
 
 /// Preprocessed-column ID of the multi-slot `slot_starts` selector — the
@@ -181,10 +203,12 @@ pub fn slot_sel_column_id(
 /// Preprocessed IDs of a multi-slot shared-tables consumer, in commit
 /// order: `slot_starts`, the 9 round-cyclic columns, then one `slot_sel`
 /// per slot. Multi-slot consumers exist only in shared-tables mode, so
-/// there is no producer-table prefix. The plain round-cyclic IDs are
+/// there is no producer-table prefix. The default round-cyclic IDs are
 /// log-content-dependent but id-shared — safe here because a composition
-/// mixing SHA consumers at different `log_n_rows` trips air-core's
-/// preprocessed id-content invariant (fail closed at prove time).
+/// mixing default SHA consumers at different `log_n_rows` trips air-core's
+/// preprocessed id-content invariant (fail closed at prove time). A standalone
+/// consumer that must compose at a different size can opt into disjoint
+/// consumer IDs with `Sha256{Prover,Verifier}::with_instance_namespace`.
 pub fn multi_consumer_preprocessed_column_ids(
     log_n_rows: u32,
     slot_log: u32,
@@ -208,16 +232,20 @@ pub fn multi_consumer_preprocessed_column_ids(
 /// gate). Emission order here matches
 /// `crate::preprocessed::generate_preprocessed_trace`.
 pub fn round_cyclic_column_ids() -> [PreProcessedColumnId; 9] {
+    round_cyclic_column_ids_ns("")
+}
+
+pub(crate) fn round_cyclic_column_ids_ns(instance_namespace: &str) -> [PreProcessedColumnId; 9] {
     [
-        id("k_lo"),
-        id("k_hi"),
-        id("is_round_0"),
-        id("is_round_1"),
-        id("is_round_2"),
-        id("is_round_3"),
-        id("is_round_15"),
-        id("is_round_63"),
-        id("is_schedule"),
+        consumer_id(instance_namespace, "k_lo"),
+        consumer_id(instance_namespace, "k_hi"),
+        consumer_id(instance_namespace, "is_round_0"),
+        consumer_id(instance_namespace, "is_round_1"),
+        consumer_id(instance_namespace, "is_round_2"),
+        consumer_id(instance_namespace, "is_round_3"),
+        consumer_id(instance_namespace, "is_round_15"),
+        consumer_id(instance_namespace, "is_round_63"),
+        consumer_id(instance_namespace, "is_schedule"),
     ]
 }
 
@@ -470,6 +498,12 @@ pub type SharedProducerPairComponent = FrameworkComponent<SharedProducerPairEval
 /// `*_column_ids` getters concatenated in **table-major** order — keep
 /// both sides in sync or the verifier will read the wrong column.
 pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+    all_preprocessed_column_ids_ns("")
+}
+
+pub(crate) fn all_preprocessed_column_ids_ns(
+    instance_namespace: &str,
+) -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
     // 4 range tables, in `RANGE_TABLES` order.
     for &kind in RANGE_TABLES {
@@ -479,18 +513,24 @@ pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     // by the consumer eval via `get_preprocessed_column` (not by any
     // producer component), so it lives at the tail of the ID list and is
     // not allocated to a producer component.
-    out.push(is_first_row_column_id());
+    out.push(is_first_row_column_id_ns(instance_namespace));
     // 9 round-cyclic columns of the rotated layout (K limbs + round
     // indicators + schedule gate), also consumer-read via
     // `get_preprocessed_column` and sized to the main trace.
-    out.extend(round_cyclic_column_ids());
+    out.extend(round_cyclic_column_ids_ns(instance_namespace));
     out
 }
 
 pub fn consumer_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+    consumer_preprocessed_column_ids_ns("")
+}
+
+pub(crate) fn consumer_preprocessed_column_ids_ns(
+    instance_namespace: &str,
+) -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
-    out.push(is_first_row_column_id());
-    out.extend(round_cyclic_column_ids());
+    out.push(is_first_row_column_id_ns(instance_namespace));
+    out.extend(round_cyclic_column_ids_ns(instance_namespace));
     out
 }
 
@@ -518,3 +558,64 @@ pub const RANGE_TABLES: &[RangeKind] = &[
     RangeKind::Range5,
     RangeKind::Range8,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_instance_namespace_preserves_exact_legacy_ids() {
+        let expected = [
+            "sha256_range_2",
+            "sha256_range_4",
+            "sha256_range_5",
+            "sha256_range_8",
+            "sha256_is_first_row",
+            "sha256_k_lo",
+            "sha256_k_hi",
+            "sha256_is_round_0",
+            "sha256_is_round_1",
+            "sha256_is_round_2",
+            "sha256_is_round_3",
+            "sha256_is_round_15",
+            "sha256_is_round_63",
+            "sha256_is_schedule",
+        ];
+        assert_eq!(
+            all_preprocessed_column_ids_ns("")
+                .iter()
+                .map(|id| id.id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            all_preprocessed_column_ids_ns(""),
+            all_preprocessed_column_ids()
+        );
+        assert_eq!(
+            consumer_preprocessed_column_ids_ns(""),
+            consumer_preprocessed_column_ids()
+        );
+        assert_eq!(round_cyclic_column_ids_ns(""), round_cyclic_column_ids());
+        assert_eq!(is_first_row_column_id_ns(""), is_first_row_column_id());
+    }
+
+    #[test]
+    fn instance_namespace_id_encoding_is_injective_and_consumer_only() {
+        let namespaced = all_preprocessed_column_ids_ns("A/\0");
+        let other = all_preprocessed_column_ids_ns("A_/\0");
+        assert_ne!(namespaced, other);
+        assert_eq!(namespaced[4].id, "sha256_instance_3_412f00_is_first_row");
+        assert_eq!(namespaced[5].id, "sha256_instance_3_412f00_k_lo");
+
+        let legacy = all_preprocessed_column_ids();
+        assert_eq!(
+            &namespaced[..RANGE_TABLES.len()],
+            &legacy[..RANGE_TABLES.len()],
+            "standalone table-provider IDs stay globally deduplicable"
+        );
+        assert!(shared_table_preprocessed_column_ids()
+            .iter()
+            .all(|id| id.id.starts_with(SHARED_ID_PREFIX) && !id.id.contains("412f00")));
+    }
+}

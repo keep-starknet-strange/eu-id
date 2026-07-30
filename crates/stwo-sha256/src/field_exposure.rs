@@ -37,6 +37,14 @@
 
 use crate::constants::{BLOCK_BYTES, N_INPUT_WORDS, WORD_BYTES};
 
+/// Fixed number of field-relation sites emitted by a full padded-stream
+/// exposure on each enabled block's `t = 15` row.
+pub const FULL_PADDED_STREAM_SITES_PER_ROW: usize = BLOCK_BYTES;
+
+/// M31's modulus. Stream byte indices must stay below it so
+/// `block_counter * 64 + byte_in_block` cannot alias after field conversion.
+const M31_MODULUS: usize = (1usize << 31) - 1;
+
 /// One credential byte to yield across the field relation.
 ///
 /// `(field_id, byte_index)` is the cross-module key the consumer pins; the value
@@ -60,10 +68,10 @@ pub struct FieldByteYield {
 /// The set of credential-field bytes a SHA-256 proof exposes.
 ///
 /// An **empty** exposure means the provider is off — the proof commits no field
-/// byte columns and yields nothing (a standalone SHA proof, or the combined
-/// proof before the predicate consumers are wired). A non-empty exposure adds
-/// `4 ×` (distinct words) byte columns to the trace and yields one tuple per
-/// [`FieldByteYield`].
+/// columns and yields nothing. Window exposures add `4 ×` (distinct words)
+/// byte columns and yield one tuple per [`FieldByteYield`]. Full padded-stream
+/// exposure instead adds only one block counter and derives 64 bytes per block
+/// from the existing boolean schedule-word columns.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldExposure {
     yields: Vec<FieldByteYield>,
@@ -74,6 +82,7 @@ pub struct FieldExposure {
     decomposed_words: Vec<usize>,
     target_blocks: Vec<usize>,
     full_padded_message: bool,
+    full_padded_stream: Option<(u32, usize)>,
 }
 
 impl FieldExposure {
@@ -150,6 +159,7 @@ impl FieldExposure {
             decomposed_words,
             target_blocks,
             full_padded_message: false,
+            full_padded_stream: None,
         }
     }
 
@@ -169,14 +179,52 @@ impl FieldExposure {
         exposure
     }
 
+    /// Expose every byte of one complete, canonically padded SHA-256 stream.
+    ///
+    /// This single-message-only mode has constant width regardless of
+    /// `padded_len`: it adds one block-counter column and emits 64 field
+    /// relation tuples on every enabled block's `t = 15` row. The byte index
+    /// is `block_counter * 64 + byte_in_block`; bytes are derived directly
+    /// from the already boolean-constrained `W` bits, so no byte columns,
+    /// block selectors, or duplicate `Range8` checks are needed.
+    ///
+    /// # Panics
+    ///
+    /// If `padded_len` is zero, is not a whole number of SHA-256 blocks, or
+    /// would make byte indices wrap in M31. Also rejects a `field_id` that is
+    /// not canonically representable in M31.
+    pub fn from_full_padded_stream(field_id: u32, padded_len: usize) -> Self {
+        assert!(
+            padded_len != 0 && padded_len.is_multiple_of(BLOCK_BYTES),
+            "full padded SHA stream must contain whole non-empty blocks"
+        );
+        assert!(
+            padded_len <= M31_MODULUS,
+            "full padded SHA stream byte indices must fit canonically in M31"
+        );
+        assert!(
+            (field_id as usize) < M31_MODULUS,
+            "full padded SHA stream field_id must fit canonically in M31"
+        );
+        Self {
+            full_padded_stream: Some((field_id, padded_len)),
+            ..Self::default()
+        }
+    }
+
     /// Whether the provider is off (no field columns, no yields).
     pub fn is_empty(&self) -> bool {
-        self.yields.is_empty()
+        self.yields.is_empty() && self.full_padded_stream.is_none()
     }
 
     /// Whether this exposure covers the exact complete padded message.
     pub fn binds_full_padded_message(&self) -> bool {
-        self.full_padded_message
+        self.full_padded_message || self.full_padded_stream.is_some()
+    }
+
+    /// `(field_id, padded_len)` for constant-width full-stream mode.
+    pub fn full_padded_stream(&self) -> Option<(u32, usize)> {
+        self.full_padded_stream
     }
 
     /// The yields, in the fixed order the trace, constraints, and interaction
@@ -185,27 +233,33 @@ impl FieldExposure {
         &self.yields
     }
 
-    /// Number of cross-module yields (one LogUp lookup each when exposed).
+    /// Number of fixed cross-module yield sites per row. For window mode this
+    /// is the number of configured bytes; for full padded-stream mode it is 64
+    /// (one site per byte of whichever block occupies the row).
     pub fn n_yields(&self) -> usize {
-        self.yields.len()
+        if self.full_padded_stream.is_some() {
+            FULL_PADDED_STREAM_SITES_PER_ROW
+        } else {
+            self.yields.len()
+        }
     }
 
     /// The distinct message-word indices that must be byte-decomposed, sorted
-    /// ascending. Each contributes `WORD_BYTES` byte columns; a yield's column
-    /// is found by this word's position here plus its `byte_in_word`.
+    /// ascending. Empty in full padded-stream mode because that mode derives
+    /// bytes from the existing boolean W columns.
     pub fn decomposed_words(&self) -> &[usize] {
         &self.decomposed_words
     }
 
-    /// The distinct SHA block indices that contain at least one yielded field
-    /// byte, sorted ascending. The SHA AIR uses this to allocate one fixed
-    /// block selector per target block.
+    /// The distinct SHA block indices that contain at least one window yield,
+    /// sorted ascending. Empty in full padded-stream mode, which emits on every
+    /// enabled block and needs no per-block selectors.
     pub fn target_blocks(&self) -> &[usize] {
         &self.target_blocks
     }
 
     /// Number of trace byte columns in the exposure (`WORD_BYTES` per distinct
-    /// decomposed word).
+    /// decomposed word; zero in full padded-stream mode).
     pub fn n_byte_columns(&self) -> usize {
         self.decomposed_words().len() * WORD_BYTES
     }
@@ -214,7 +268,7 @@ impl FieldExposure {
     /// block-0 path keeps its original shape: only byte columns, no block
     /// counter and no per-yield selectors.
     pub fn needs_block_witness(&self) -> bool {
-        self.yields.iter().any(|y| y.block_idx != 0)
+        self.full_padded_stream.is_some() || self.yields.iter().any(|y| y.block_idx != 0)
     }
 
     /// Column slot of the optional block counter within the dynamic field tail.
@@ -225,6 +279,9 @@ impl FieldExposure {
     /// Column slot of the selector shared by every yield in `block_idx`, if
     /// the multi-block witness tail is enabled.
     pub fn selector_column_slot_for_block(&self, block_idx: usize) -> Option<usize> {
+        if self.full_padded_stream.is_some() {
+            return None;
+        }
         self.needs_block_witness().then(|| {
             let block_slot = self
                 .target_blocks
@@ -244,9 +301,13 @@ impl FieldExposure {
     }
 
     /// Number of dynamic trace columns the exposure adds. Block-0 legacy
-    /// exposure adds only byte columns; multi-block exposure adds byte columns,
-    /// one block counter, and one selector per distinct target block.
+    /// exposure adds only byte columns; multi-block windows add byte columns,
+    /// one block counter, and one selector per distinct target block. Full
+    /// padded-stream mode adds exactly the counter.
     pub fn n_columns(&self) -> usize {
+        if self.full_padded_stream.is_some() {
+            return 1;
+        }
         self.n_byte_columns()
             + if self.needs_block_witness() {
                 1 + self.target_blocks().len()
@@ -313,6 +374,49 @@ mod tests {
         assert_eq!(exposure.target_blocks(), &[0, 1]);
         assert_eq!(exposure.yields().first().unwrap().byte_index, 0);
         assert_eq!(exposure.yields().last().unwrap().byte_index, 127);
+    }
+
+    #[test]
+    fn full_padded_stream_has_one_counter_and_fixed_relation_width() {
+        for padded_len in [BLOCK_BYTES, 2 * BLOCK_BYTES, 65 * BLOCK_BYTES] {
+            let exposure = FieldExposure::from_full_padded_stream(77, padded_len);
+            assert_eq!(exposure.full_padded_stream(), Some((77, padded_len)));
+            assert!(exposure.binds_full_padded_message());
+            assert!(!exposure.is_empty());
+            assert!(exposure.needs_block_witness());
+            assert_eq!(exposure.n_columns(), 1);
+            assert_eq!(exposure.n_byte_columns(), 0);
+            assert_eq!(exposure.block_counter_column_slot(), Some(0));
+            assert!(exposure.target_blocks().is_empty());
+            assert!(exposure.decomposed_words().is_empty());
+            assert!(exposure.yields().is_empty());
+            assert_eq!(exposure.n_yields(), FULL_PADDED_STREAM_SITES_PER_ROW);
+            assert_eq!(exposure.selector_column_slot_for_block(0), None);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "whole non-empty blocks")]
+    fn full_padded_stream_rejects_empty_length() {
+        let _ = FieldExposure::from_full_padded_stream(77, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "whole non-empty blocks")]
+    fn full_padded_stream_rejects_partial_block() {
+        let _ = FieldExposure::from_full_padded_stream(77, BLOCK_BYTES + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "byte indices must fit canonically in M31")]
+    fn full_padded_stream_rejects_wrapping_byte_indices() {
+        let _ = FieldExposure::from_full_padded_stream(77, M31_MODULUS + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "field_id must fit canonically in M31")]
+    fn full_padded_stream_rejects_noncanonical_field_id() {
+        let _ = FieldExposure::from_full_padded_stream(M31_MODULUS as u32, BLOCK_BYTES);
     }
 
     #[test]

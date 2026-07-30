@@ -38,11 +38,17 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_mldsa::air_util::{col_eval, m31, ColEval};
+use stwo_mldsa::binding::STREAM_ID_SIB_SQUEEZE;
 use stwo_mldsa::coeffs::relations::SharedRangeRelation;
 use stwo_mldsa::coeffs::tables::SharedRangeTable;
+use stwo_mldsa::constants::PK_BYTES;
+use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
-    hosted_claimed_sums_len, hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProver,
-    MlDsaVerifier, HOSTED_MSG_FIELD_ID, STREAM_BASE_STRIDE,
+    hosted_claimed_sums_len, hosted_private_key_claimed_sums_len,
+    hosted_private_key_keccak_job_shapes, hosted_private_key_layout,
+    hosted_public_claimed_sums_len, keccak_job_shapes, MlDsaProver, MlDsaVerifier, CT_ABSORB,
+    CT_SQUEEZE, HOSTED_DEVICE_PK_FIELD_ID, HOSTED_MSG_FIELD_ID, MU_ABSORB, MU_SQUEEZE, SIB_ABSORB,
+    STREAM_BASE_STRIDE, TR_ABSORB, TR_SQUEEZE,
 };
 use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::MlDsaVerifyInput;
@@ -58,6 +64,7 @@ use stwo_mldsa::MlDsaVerifyInput;
 #[derive(Clone)]
 struct FieldProducerEval {
     bytes: Vec<u8>,
+    field_id: u32,
     field: FieldBytesRelation,
 }
 
@@ -80,7 +87,7 @@ impl FrameworkEval for FieldProducerEval {
                 &self.field,
                 en.clone(),
                 &[
-                    E::F::from(m31(HOSTED_MSG_FIELD_ID)),
+                    E::F::from(m31(self.field_id)),
                     E::F::from(m31(i as u32)),
                     E::F::from(m31(b as u32)),
                 ],
@@ -96,6 +103,7 @@ impl FrameworkEval for FieldProducerEval {
 /// before the hosted mldsa module reads it.
 struct FieldProducer {
     bytes: Vec<u8>,
+    field_id: u32,
     handle: SharedFieldRelation,
     field: Option<FieldBytesRelation>,
     claimed_sum: SecureField,
@@ -104,8 +112,13 @@ struct FieldProducer {
 
 impl FieldProducer {
     fn new(bytes: Vec<u8>, handle: SharedFieldRelation) -> Self {
+        Self::for_field(HOSTED_MSG_FIELD_ID, bytes, handle)
+    }
+
+    fn for_field(field_id: u32, bytes: Vec<u8>, handle: SharedFieldRelation) -> Self {
         Self {
             bytes,
+            field_id,
             handle,
             field: None,
             claimed_sum: SecureField::zero(),
@@ -126,7 +139,11 @@ fn producer_base_trace() -> Vec<ColEval> {
 
 /// One `−enabler / combine(tuple)` fraction per byte, paired two-per-column
 /// (msglink pattern, sign flipped to the stwo-sha256 provider convention).
-fn producer_interaction(bytes: &[u8], field: &FieldBytesRelation) -> (Vec<ColEval>, SecureField) {
+fn producer_interaction(
+    field_id: u32,
+    bytes: &[u8],
+    field: &FieldBytesRelation,
+) -> (Vec<ColEval>, SecureField) {
     use stwo::prover::backend::simd::m31::PackedM31;
     let mut gen = LogupTraceGenerator::new(LOG_N_LANES);
     let mut en_lanes = [m31(0); N_LANES];
@@ -137,7 +154,7 @@ fn producer_interaction(bytes: &[u8], field: &FieldBytesRelation) -> (Vec<ColEva
         .enumerate()
         .map(|(i, &b)| {
             let tuple = [
-                PackedM31::from(m31(HOSTED_MSG_FIELD_ID)),
+                PackedM31::from(m31(field_id)),
                 PackedM31::from(m31(i as u32)),
                 PackedM31::from(m31(b as u32)),
             ];
@@ -175,7 +192,7 @@ impl Air for FieldProducer {
         // Compute the claimed sum now (both prove and verify run draw_relations
         // identically), so the verifier reconstructs the same value with no
         // witness beyond the public producer bytes.
-        let (_, sum) = producer_interaction(&self.bytes, &field);
+        let (_, sum) = producer_interaction(self.field_id, &self.bytes, &field);
         self.claimed_sum = sum;
         self.field = Some(field);
     }
@@ -197,6 +214,7 @@ impl Air for FieldProducer {
             allocator,
             FieldProducerEval {
                 bytes: self.bytes.clone(),
+                field_id: self.field_id,
                 field: self.field(),
             },
             self.claimed_sum,
@@ -219,7 +237,7 @@ impl AirProver for FieldProducer {
         tb.extend_evals(producer_base_trace());
     }
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let (trace, sum) = producer_interaction(&self.bytes, &self.field());
+        let (trace, sum) = producer_interaction(self.field_id, &self.bytes, &self.field());
         debug_assert_eq!(
             sum, self.claimed_sum,
             "producer sum drifted from draw_relations"
@@ -387,9 +405,109 @@ fn verify_hosted_public(
     })
 }
 
+/// Prove the hosted public-message/private-public-key statement:
+/// `[range_table, keccak_service(tr, µ, c̃, SIB),
+/// field_producer(field_id=1, pkEncode), hosted_mldsa]`.
+fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedProof {
+    let input = oracle_input(seed, msg);
+    let witness = generate_witness(&input).expect("witness");
+    let pk_bytes = input.encode_pk();
+
+    let field_handle = SharedFieldRelation::new();
+    let keccak_handle = SharedKeccakRelations::new();
+    let range_handle = SharedRangeRelation::new();
+    let mut producer =
+        FieldProducer::for_field(HOSTED_DEVICE_PK_FIELD_ID, pk_bytes, field_handle.clone());
+    let mut mldsa = MlDsaProver::hosted_private_key(
+        witness,
+        input,
+        field_handle,
+        range_handle.clone(),
+        keccak_handle.clone(),
+    );
+    let mut range_table = SharedRangeTable::prover(&[mldsa.range_uses().clone()], range_handle);
+    let (job_shapes, job_streams) = mldsa.keccak_jobs();
+    assert_eq!(
+        job_shapes,
+        hosted_private_key_keccak_job_shapes(mldsa.input().message.len(), 0)
+    );
+    let mut service = KeccakServiceProver::new(job_shapes, job_streams, keccak_handle);
+    let (stark_proof, post_interaction_payloads) = air_core::prove_with_post_interaction(
+        &mut [&mut range_table, &mut service, &mut producer, &mut mldsa],
+        pcs_config(),
+    )
+    .expect("hosted-private-key prove");
+    let claimed_sums = mldsa.claimed_sums();
+    assert_eq!(claimed_sums.len(), hosted_private_key_claimed_sums_len());
+    HostedProof {
+        input: mldsa.input().clone(),
+        group_evals: mldsa.group_evals().to_vec(),
+        claimed_sums,
+        range_table_claimed_sum: range_table.claimed_sum(),
+        service_claimed_sums: service.claimed_sums(),
+        post_interaction_payloads,
+        stark_proof,
+    }
+}
+
+fn verify_hosted_private_key_with_shapes(
+    proof: &HostedProof,
+    producer_field_id: u32,
+    producer_bytes: Vec<u8>,
+    job_shapes: Vec<stwo_keccak::sponge::Shape>,
+) -> Result<(), stwo::core::verifier::VerificationError> {
+    let field_handle = SharedFieldRelation::new();
+    let keccak_handle = SharedKeccakRelations::new();
+    let range_handle = SharedRangeRelation::new();
+    let mut producer =
+        FieldProducer::for_field(producer_field_id, producer_bytes, field_handle.clone());
+    let mut service = KeccakServiceVerifier::new(
+        job_shapes,
+        proof.service_claimed_sums.clone(),
+        keccak_handle.clone(),
+    );
+    let mut range_table =
+        SharedRangeTable::verifier(proof.range_table_claimed_sum, range_handle.clone());
+    let mut mldsa = MlDsaVerifier::hosted_private_key(
+        proof.input.clone(),
+        proof.group_evals.clone(),
+        proof.claimed_sums.clone(),
+        field_handle,
+        range_handle,
+        keccak_handle,
+    )?;
+    air_core::verify_with_expected_preprocessed_root_and_payloads(
+        &mut [&mut range_table, &mut service, &mut producer, &mut mldsa],
+        &proof.stark_proof,
+        None,
+        &proof.post_interaction_payloads,
+    )
+    .map_err(|error| match error {
+        air_core::VerifyError::Stark(error) => error,
+        air_core::VerifyError::PreprocessedRootMismatch { .. } => unreachable!("no root pinned"),
+    })
+}
+
+fn verify_hosted_private_key(
+    proof: &HostedProof,
+    producer_bytes: Vec<u8>,
+) -> Result<(), stwo::core::verifier::VerificationError> {
+    verify_hosted_private_key_with_shapes(
+        proof,
+        HOSTED_DEVICE_PK_FIELD_ID,
+        producer_bytes,
+        hosted_private_key_keccak_job_shapes(proof.input.message.len(), 0),
+    )
+}
+
 // =====================================================================
 // Tests.
 // =====================================================================
+
+const FIRST_PRIVATE_BRIDGE_CLAIM_INDEX: usize = 11;
+const LAST_PRIVATE_BRIDGE_CLAIM_INDEX: usize = 15;
+const FIRST_PRIVATE_SINK_CLAIM_INDEX: usize = 16;
+const LAST_PRIVATE_SINK_CLAIM_INDEX: usize = 18;
 
 #[test]
 fn hosted_proves_and_verifies() {
@@ -403,6 +521,289 @@ fn hosted_public_native_mu_proves_and_verifies() {
     let msg = b"issuer/device public message uses verifier-native mu".to_vec();
     let proof = prove_hosted_public(4244, &msg);
     verify_hosted_public(&proof).expect("hosted-public verify");
+}
+
+#[test]
+fn hosted_private_key_shapes_kat_and_layout_are_exact() {
+    const EXPECTED_EXTRA_PREPROCESSED_COLUMNS: usize = 10;
+    const EXPECTED_EXTRA_TRACE_COLUMNS: usize = 10;
+    const EXPECTED_EXTRA_INTERACTION_COLUMNS: usize = 32;
+    const EXPECTED_EXTRA_PREPROCESSED_CELLS: usize = 4_864;
+    const EXPECTED_EXTRA_TRACE_CELLS: usize = 4_864;
+    const EXPECTED_EXTRA_INTERACTION_M31_CELLS: usize = 18_432;
+
+    let msg = b"private device key tr reference vector".to_vec();
+    let input = oracle_input(4_260, &msg);
+    let witness = generate_witness(&input).expect("witness");
+    let pk_bytes = input.encode_pk();
+    assert_eq!(pk_bytes.len(), PK_BYTES);
+
+    let mut private = MlDsaProver::hosted_private_key(
+        witness.clone(),
+        input.clone(),
+        SharedFieldRelation::new(),
+        SharedRangeRelation::new(),
+        SharedKeccakRelations::new(),
+    );
+    let (job_shapes, job_streams) = private.keccak_jobs();
+    assert_eq!(job_shapes.len(), 4);
+    assert_eq!(job_streams.len(), 4);
+    assert_eq!(job_streams[0], pk_bytes);
+    assert_eq!(job_streams[1], witness.sponge.mu_absorbed);
+    assert_eq!(
+        private.input().tr,
+        [0; 64],
+        "hosted-private-key mode must not retain native tr"
+    );
+
+    let tr = job_shapes[0];
+    assert_eq!(tr.message_len, PK_BYTES);
+    assert_eq!(tr.n_absorb, 15);
+    assert_eq!(tr.n_squeeze, 1);
+    assert_eq!(tr.absorb_stream_id, TR_ABSORB);
+    assert_eq!(tr.squeeze_stream_id, TR_SQUEEZE);
+
+    let mu = job_shapes[1];
+    assert_eq!(mu.message_len, 66 + msg.len());
+    assert_eq!(mu.n_absorb, (67 + msg.len()).div_ceil(136));
+    assert_eq!(mu.n_squeeze, 1);
+    assert_eq!(mu.absorb_stream_id, MU_ABSORB);
+    assert_eq!(mu.squeeze_stream_id, MU_SQUEEZE);
+
+    let ct = job_shapes[2];
+    assert_eq!(ct.message_len, 64 + 768);
+    assert_eq!(ct.absorb_stream_id, CT_ABSORB);
+    assert_eq!(ct.squeeze_stream_id, CT_SQUEEZE);
+
+    let sib = job_shapes[3];
+    assert_eq!(sib.message_len, 48);
+    assert_eq!(sib.n_squeeze, 5);
+    assert_eq!(sib.absorb_stream_id, SIB_ABSORB);
+    assert_eq!(sib.squeeze_stream_id, STREAM_ID_SIB_SQUEEZE);
+
+    let (reference_tr, _) = shake256(&[&job_streams[0]], 136);
+    assert_eq!(
+        reference_tr[..64],
+        job_streams[1][..64],
+        "the in-service tr KAT must feed the µ preimage exactly"
+    );
+
+    let mut public = MlDsaProver::hosted_public(
+        witness,
+        input,
+        SharedRangeRelation::new(),
+        SharedKeccakRelations::new(),
+    );
+    let private_layout = hosted_private_key_layout(private.input());
+    let public_layout = public.layout();
+    assert_eq!(
+        private_layout.preprocessed.len(),
+        public_layout.preprocessed.len() + EXPECTED_EXTRA_PREPROCESSED_COLUMNS
+    );
+    assert_eq!(
+        private_layout.trace.len(),
+        public_layout.trace.len() + EXPECTED_EXTRA_TRACE_COLUMNS
+    );
+    assert_eq!(
+        private_layout.interaction.len(),
+        public_layout.interaction.len() + EXPECTED_EXTRA_INTERACTION_COLUMNS
+    );
+    let cells = |log_sizes: &[u32]| {
+        log_sizes
+            .iter()
+            .map(|&log_size| 1usize << log_size)
+            .sum::<usize>()
+    };
+    assert_eq!(
+        cells(&private_layout.preprocessed) - cells(&public_layout.preprocessed),
+        EXPECTED_EXTRA_PREPROCESSED_CELLS
+    );
+    assert_eq!(
+        cells(&private_layout.trace) - cells(&public_layout.trace),
+        EXPECTED_EXTRA_TRACE_CELLS
+    );
+    assert_eq!(
+        cells(&private_layout.interaction) - cells(&public_layout.interaction),
+        EXPECTED_EXTRA_INTERACTION_M31_CELLS
+    );
+    assert_eq!(hosted_private_key_claimed_sums_len(), 20);
+
+    // Exercise canonical tree-0 generation too: ids and columns must agree
+    // before relations are drawn.
+    assert_eq!(
+        private.preprocessed_column_ids().len(),
+        private
+            .canonical_preprocessed_columns()
+            .expect("private-key preprocessed columns")
+            .len()
+    );
+    assert_eq!(
+        public.preprocessed_column_ids().len(),
+        public
+            .canonical_preprocessed_columns()
+            .expect("public preprocessed columns")
+            .len()
+    );
+}
+
+#[test]
+fn hosted_private_key_public_mix_is_key_independent() {
+    let msg = b"the public transcript exposes no stable device key".to_vec();
+    let input_a = oracle_input(4_261, &msg);
+    let input_b = oracle_input(4_262, &msg);
+    assert_ne!(input_a.rho, input_b.rho);
+    let witness_a = generate_witness(&input_a).expect("witness a");
+    let witness_b = generate_witness(&input_b).expect("witness b");
+    let first = MlDsaProver::hosted_private_key(
+        witness_a,
+        input_a,
+        SharedFieldRelation::new(),
+        SharedRangeRelation::new(),
+        SharedKeccakRelations::new(),
+    );
+    let second = MlDsaProver::hosted_private_key(
+        witness_b,
+        input_b,
+        SharedFieldRelation::new(),
+        SharedRangeRelation::new(),
+        SharedKeccakRelations::new(),
+    );
+
+    let mut first_channel = Blake2sChannel::default();
+    let mut second_channel = Blake2sChannel::default();
+    first.mix_public(&mut first_channel);
+    second.mix_public(&mut second_channel);
+    assert_eq!(
+        FieldBytesRelation::draw(&mut first_channel),
+        FieldBytesRelation::draw(&mut second_channel),
+        "rho, t1, and derived tr must not enter the private-key public mix"
+    );
+}
+
+#[test]
+fn hosted_private_key_proves_and_adversarial_bindings_reject() {
+    let msg = b"device authentication with a private ML-DSA public key".to_vec();
+    let proof = prove_hosted_private_key(4_263, &msg);
+    let pk_bytes = proof.input.encode_pk();
+    assert_eq!(proof.input.tr, [0; 64]);
+    verify_hosted_private_key(&proof, pk_bytes.clone()).expect("hosted-private-key verify");
+
+    let replacement_input = oracle_input(4_264, &msg);
+    let substituted_pk = replacement_input.encode_pk();
+    assert_ne!(substituted_pk, pk_bytes);
+    assert!(
+        verify_hosted_private_key(&proof, substituted_pk.clone()).is_err(),
+        "substituting the normalized field-id-1 public key must reject"
+    );
+
+    // U7 compatibility boundary: until U6 replaces native rho/t1 evaluation,
+    // even a self-consistent substitution of both retained compatibility
+    // fields and their normalized field-id-1 encoding must reject.
+    let mut compatibility_key_tamper = proof.clone();
+    compatibility_key_tamper.input.rho = replacement_input.rho;
+    compatibility_key_tamper.input.t1 = replacement_input.t1;
+    assert_eq!(compatibility_key_tamper.input.encode_pk(), substituted_pk);
+    assert!(
+        verify_hosted_private_key(&compatibility_key_tamper, substituted_pk).is_err(),
+        "self-consistent compatibility-key substitution must reject"
+    );
+    assert!(
+        verify_hosted_private_key_with_shapes(
+            &proof,
+            HOSTED_MSG_FIELD_ID,
+            pk_bytes.clone(),
+            hosted_private_key_keccak_job_shapes(msg.len(), 0),
+        )
+        .is_err(),
+        "publishing the same bytes under field id 0 must not satisfy id 1"
+    );
+
+    let mut message_tamper = proof.clone();
+    message_tamper.input.message[0] ^= 1;
+    assert!(
+        verify_hosted_private_key(&message_tamper, pk_bytes.clone()).is_err(),
+        "the public 00||00||M prefix must bind the µ job"
+    );
+
+    for claim_index in (FIRST_PRIVATE_BRIDGE_CLAIM_INDEX..=LAST_PRIVATE_BRIDGE_CLAIM_INDEX)
+        .chain(FIRST_PRIVATE_SINK_CLAIM_INDEX..=LAST_PRIVATE_SINK_CLAIM_INDEX)
+    {
+        let mut claim_tamper = proof.clone();
+        claim_tamper.claimed_sums[claim_index] += SecureField::from(m31(1));
+        assert!(
+            verify_hosted_private_key(&claim_tamper, pk_bytes.clone()).is_err(),
+            "tampering private bridge/sink claim {claim_index} must reject"
+        );
+    }
+
+    let wrong_shapes = keccak_job_shapes(msg.len(), 0, true);
+    let wrong_shape_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_hosted_private_key_with_shapes(
+            &proof,
+            HOSTED_DEVICE_PK_FIELD_ID,
+            pk_bytes,
+            wrong_shapes,
+        )
+    }));
+    assert!(
+        matches!(wrong_shape_result, Ok(Err(_))),
+        "omitting the tr and µ service jobs must return an error, not panic"
+    );
+}
+
+#[test]
+fn hosted_private_key_malformed_claim_shapes_return_error_not_panic() {
+    let msg = b"malformed hosted private-key claim vectors".to_vec();
+    let proof = prove_hosted_private_key(4_265, &msg);
+    let pk_bytes = proof.input.encode_pk();
+    let assert_rejected = |label: &str, malformed: HostedProof| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_hosted_private_key(&malformed, pk_bytes.clone())
+        }));
+        assert!(
+            matches!(
+                result,
+                Ok(Err(
+                    stwo::core::verifier::VerificationError::InvalidStructure(_)
+                ))
+            ),
+            "{label} must return InvalidStructure without panicking"
+        );
+    };
+
+    let mut short_groups = proof.clone();
+    short_groups
+        .group_evals
+        .pop()
+        .expect("non-empty group vector");
+    assert_rejected("short group vector", short_groups);
+
+    let mut long_groups = proof.clone();
+    long_groups.group_evals.push(SecureField::zero());
+    assert_rejected("long group vector", long_groups);
+
+    let mut short_claims = proof.clone();
+    short_claims
+        .claimed_sums
+        .pop()
+        .expect("non-empty claimed-sum vector");
+    assert_rejected("short claimed-sum vector", short_claims);
+
+    let mut long_claims = proof.clone();
+    long_claims.claimed_sums.push(SecureField::zero());
+    assert_rejected("long claimed-sum vector", long_claims);
+
+    let mut swapped_claims = proof.clone();
+    let swap_with = (FIRST_PRIVATE_BRIDGE_CLAIM_INDEX + 1..=LAST_PRIVATE_SINK_CLAIM_INDEX)
+        .find(|&index| {
+            swapped_claims.claimed_sums[index]
+                != swapped_claims.claimed_sums[FIRST_PRIVATE_BRIDGE_CLAIM_INDEX]
+        })
+        .expect("private bridge/sink claims are not all identical");
+    swapped_claims
+        .claimed_sums
+        .swap(FIRST_PRIVATE_BRIDGE_CLAIM_INDEX, swap_with);
+    assert_rejected("swapped claimed-sum vector", swapped_claims);
 }
 
 #[test]

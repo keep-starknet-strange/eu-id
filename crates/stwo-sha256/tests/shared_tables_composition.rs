@@ -8,11 +8,12 @@ use air_core::{Air, AirProver};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::PcsConfig;
-use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+use stwo_sha256::air::{Sha256MultiProver, Sha256MultiVerifier, Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::partitions::MAX_ROUND_GROUP_BITS;
 use stwo_sha256::relations::SharedShaTableRelations;
 use stwo_sha256::shared_tables::{ShaTableMultiplicities, ShaTablesProver, ShaTablesVerifier};
+use stwo_sha256::slots::{MultiSlotConfig, SlotSpec};
 use stwo_sha256::stark::{prove_sha256, ProverConfig};
 use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
@@ -34,6 +35,106 @@ fn witnesses() -> Vec<stwo_sha256::types::Sha256Witness> {
         .into_iter()
         .map(compute_sha256_witness)
         .collect()
+}
+
+fn one_plain_slot() -> MultiSlotConfig {
+    MultiSlotConfig::new(
+        7,
+        vec![SlotSpec {
+            expose_digest: false,
+            field_exposure: FieldExposure::empty(),
+        }],
+    )
+}
+
+#[test]
+fn namespaced_standalone_and_different_log_multi_consumer_compose() {
+    let merged_witness = compute_sha256_witness(b"merged");
+    let standalone_witness = compute_sha256_witness(b"standalone");
+    let merged_config = one_plain_slot();
+    let merged_log = merged_config.min_log_n_rows();
+    let standalone_log = merged_log + 1;
+    let consumers = [
+        (&merged_witness, FieldExposure::empty()),
+        (&standalone_witness, FieldExposure::empty()),
+    ];
+
+    let shared = SharedShaTableRelations::new();
+    let mut tables = ShaTablesProver::new(
+        ShaTableMultiplicities::from_consumers(&consumers),
+        shared.clone(),
+    );
+    let mut merged = Sha256MultiProver::new(
+        vec![&merged_witness],
+        merged_log,
+        merged_config.clone(),
+        shared.clone(),
+    );
+    let mut standalone =
+        Sha256Prover::new(&standalone_witness, standalone_log, MAX_ROUND_GROUP_BITS)
+            .with_shared_tables(shared.clone())
+            .with_instance_namespace("test/standalone");
+    let mut provers: [&mut dyn AirProver; 3] = [&mut tables, &mut merged, &mut standalone];
+    let proof = air_core::prove(&mut provers, pcs_config())
+        .expect("namespaced different-log SHA consumers compose");
+
+    let shared = SharedShaTableRelations::new();
+    let mut tables_verifier =
+        ShaTablesVerifier::new(tables.interaction_claim().clone(), shared.clone());
+    let mut merged_verifier = Sha256MultiVerifier::new(
+        merged_log,
+        merged_config,
+        shared.clone(),
+        merged.interaction_claim().clone(),
+    );
+    let mut standalone_verifier = Sha256Verifier::new(
+        standalone_log,
+        MAX_ROUND_GROUP_BITS,
+        standalone.interaction_claim().clone(),
+    )
+    .with_shared_tables(shared)
+    .with_instance_namespace("test/standalone");
+    let mut verifiers: [&mut dyn Air; 3] = [
+        &mut tables_verifier,
+        &mut merged_verifier,
+        &mut standalone_verifier,
+    ];
+    let expected_root = air_core::compute_canonical_preprocessed_root(&mut verifiers, pcs_config())
+        .expect("verifier reconstructs namespaced tree zero without a witness");
+    air_core::verify_with_expected_preprocessed_root(&mut verifiers, &proof, Some(expected_root))
+        .expect("namespaced different-log SHA composition verifies against canonical tree zero");
+}
+
+#[test]
+fn default_different_log_consumers_keep_failing_closed_on_shared_ids() {
+    let merged_witness = compute_sha256_witness(b"merged");
+    let standalone_witness = compute_sha256_witness(b"standalone");
+    let merged_config = one_plain_slot();
+    let merged_log = merged_config.min_log_n_rows();
+    let shared = SharedShaTableRelations::new();
+    let mut merged = Sha256MultiProver::new(
+        vec![&merged_witness],
+        merged_log,
+        merged_config,
+        shared.clone(),
+    );
+    let mut standalone =
+        Sha256Prover::new(&standalone_witness, merged_log + 1, MAX_ROUND_GROUP_BITS)
+            .with_shared_tables(shared);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut provers: [&mut dyn AirProver; 2] = [&mut merged, &mut standalone];
+        let _ = air_core::prove(&mut provers, pcs_config());
+    }))
+    .expect_err("default consumers with incompatible shared IDs must fail closed");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .expect("preprocessed invariant panic has a message");
+    assert!(
+        message.contains("sha256_k_lo") && message.contains("different content"),
+        "unexpected invariant panic: {message}"
+    );
 }
 
 #[ignore = "slow: proves a five-module shared SHA composition"]

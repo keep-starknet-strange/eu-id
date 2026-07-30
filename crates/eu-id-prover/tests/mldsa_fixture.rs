@@ -14,6 +14,9 @@ use stwo_mldsa::reference::verify::verify_internals;
 
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
+const EXTRA_VALUE_DIGESTS_NAMESPACE: &str = "org.example.issuer.metadata";
+const EXTRA_VALUE_DIGESTS_ID: u64 = 0;
+const EXTRA_VALUE_DIGEST: [u8; 32] = [0xa5; 32];
 const MDOC_PROFILE_VERSION: &str = "2.0";
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 
@@ -23,6 +26,8 @@ const MLDSA_ISSUER_SEED: [u8; 32] = [0x5au8; 32];
 const MLDSA_DEVICE_SEED: [u8; 32] = [0x6du8; 32];
 /// Deterministic ML-DSA-65 revocation-authority seed.
 const MLDSA_REVOCATION_SEED: [u8; 32] = [0x7eu8; 32];
+const HIGH_BIRTH_DATE_DIGEST_ID: u64 = 0x1234;
+const HIGH_NATIONALITY_DIGEST_ID: u64 = 0x4321;
 
 fn encode_value(value: Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -126,7 +131,17 @@ fn build_pid_document_with_attributes(
         ("digestAlgorithm".into(), "SHA-256".into()),
         (
             "valueDigests".into(),
-            Value::Map(vec![(PID_NAMESPACE.into(), Value::Map(value_digests))]),
+            Value::Map(vec![
+                // Keep the demo on the accepted multi-namespace profile.
+                (
+                    EXTRA_VALUE_DIGESTS_NAMESPACE.into(),
+                    Value::Map(vec![(
+                        Value::from(EXTRA_VALUE_DIGESTS_ID),
+                        Value::Bytes(EXTRA_VALUE_DIGEST.to_vec()),
+                    )]),
+                ),
+                (PID_NAMESPACE.into(), Value::Map(value_digests)),
+            ]),
         ),
         (
             "deviceKeyInfo".into(),
@@ -230,6 +245,79 @@ pub fn mldsa_full_pq_fixture_with_transcript(session_transcript: &[u8]) -> Mldsa
     )
 }
 
+/// A second credential with the same keys and public resource shape as
+/// [`mldsa_full_pq_fixture_with_transcript`], but different issuer-private
+/// attribute values and randomizers.
+pub fn mldsa_full_pq_fixture_variant_with_transcript(
+    session_transcript: &[u8],
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_attributes(
+        session_transcript,
+        vec![
+            (
+                7,
+                "birth_date",
+                Value::Text("1988-08-08".to_string()),
+                vec![0x27; 16],
+            ),
+            (
+                9,
+                "nationality",
+                Value::Text("FR".to_string()),
+                vec![0x29; 16],
+            ),
+        ],
+    )
+}
+
+/// High-digest-ID product credential for fingerprint-leak regressions.
+pub fn mldsa_high_digest_id_fixture_with_transcript(
+    session_transcript: &[u8],
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_attributes(
+        session_transcript,
+        vec![
+            (
+                HIGH_BIRTH_DATE_DIGEST_ID,
+                "birth_date",
+                Value::Text("1990-07-15".to_string()),
+                vec![7; 16],
+            ),
+            (
+                HIGH_NATIONALITY_DIGEST_ID,
+                "nationality",
+                Value::Text("DE".to_string()),
+                vec![9; 16],
+            ),
+        ],
+    )
+}
+
+/// Same public resource shape and high digest IDs as
+/// [`mldsa_high_digest_id_fixture_with_transcript`], with different private
+/// facts/randomizers while retaining the same issuer and device keys.
+pub fn mldsa_high_digest_id_variant_with_transcript(
+    session_transcript: &[u8],
+) -> MldsaFullPqFixture {
+    mldsa_full_pq_fixture_with_transcript_and_attributes(
+        session_transcript,
+        vec![
+            (
+                HIGH_BIRTH_DATE_DIGEST_ID,
+                "birth_date",
+                Value::Text("1988-08-08".to_string()),
+                vec![0x27; 16],
+            ),
+            (
+                HIGH_NATIONALITY_DIGEST_ID,
+                "nationality",
+                Value::Text("FR".to_string()),
+                vec![0x29; 16],
+            ),
+        ],
+    )
+}
+
 /// Fixture variant with a definite, canonical nationality array.  Its first
 /// member is intentionally not policy-accepted, exercising the selected-index
 /// stride rather than just a one-member array.
@@ -258,12 +346,16 @@ pub fn mldsa_full_pq_fixture_with_attribute(
     )
 }
 
-/// A realistic seven-attribute PID envelope for performance measurements.
+/// A realistic seven-attribute PID envelope for TS13 performance and
+/// stable-region tests.
 ///
 /// There is no deployed ML-DSA PID issuer vector yet, so this keeps the
 /// deterministic RustCrypto keys while matching the field count and 32-byte
 /// per-item randoms of a normal issuer document. The TS13 request still proves
 /// only the `age_over_18` equality item.
+// This path-shared fixture is consumed by SDK tests/examples, but not by the
+// eu-id-prover integration target that also imports this module.
+#[allow(dead_code)]
 pub fn mldsa_realistic_pid_fixture_with_age_over_18(
     session_transcript: &[u8],
 ) -> MldsaFullPqFixture {

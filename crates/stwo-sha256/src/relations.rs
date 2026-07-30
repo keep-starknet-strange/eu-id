@@ -340,6 +340,11 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 /// byte). With both bytes of every touched limb pinned, each yielded
 /// byte is exactly the signed preimage byte — the binding holds without trusting
 /// the consumer to range-check anything.
+///
+/// Full padded-stream exposure is the constant-width exception: it derives
+/// each byte linearly from the already boolean-constrained `W` bits and emits
+/// `(field_id, block_counter·64 + byte_in_block, value)` on every enabled
+/// block, so it needs neither byte columns nor duplicate `Range8` checks.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldRelation {
     pub field: Sha256Field,

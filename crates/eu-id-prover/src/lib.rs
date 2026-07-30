@@ -8,10 +8,17 @@
 pub(crate) mod claimed_sum_blinder;
 pub mod mdoc;
 mod mdoc_cbor_stream;
-mod mdoc_equality_scope;
+mod mdoc_country_code_table;
+mod mdoc_private_item_bind;
+mod mdoc_private_message;
+mod mdoc_private_mso_bind;
+#[cfg(test)]
+mod mdoc_real_vectors;
+#[cfg(feature = "unlink-spikes")]
+mod mdoc_unlink_spike;
+mod mdoc_value_digests_scan;
 mod mdoc_window_bind;
 pub mod policy;
-mod public_digest_bind;
 pub mod ts13;
 
 use stwo::core::pcs::PcsConfig;
@@ -20,7 +27,7 @@ pub use mdoc::{
     MdocCircuitProof as MdocProof, MdocCircuitStatement as MdocStatement, MdocPidRequest,
     MdocTs13PublicStatement as MdocTs13Statement,
 };
-pub use policy::Policy;
+pub use policy::{iso_alpha2_to_numeric, Policy};
 pub use predicates::{all_nationality_codes, Date};
 
 /// Which ZK identity system a prover build implements. Both variants exist on
@@ -51,15 +58,16 @@ pub fn prove_mdoc(
     let statement =
         mdoc::MdocCircuitStatement::from_extracted(&extracted, policy).map_err(Error::Mdoc)?;
     let proof = mdoc::prove_mdoc_circuit(&extracted, &statement)?;
-    // Never hand the prover's statement to a verifier: it carries the
-    // credential's real birth_date and nationality values.
+    // Never hand the prover's statement to a verifier: `into_public_view`
+    // scrubs private issuer/authentication and revocation witnesses while
+    // retaining only verifier-known shape and policy.
     Ok((proof, statement.into_public_view()))
 }
 
 /// Prove the TS13 profile with a private revocation range witness.  The range
 /// never leaves this proving call: `MdocCircuitStatement` skips it during
 /// serialization and the verifier reconstructs the active layout from the
-/// public revocation key/epoch and signature.
+/// public revocation key/epoch plus the proof's fixed claim shape.
 pub fn prove_mdoc_with_ts13_revocation(
     document: &[u8],
     request: &MdocPidRequest,
@@ -91,6 +99,8 @@ pub fn prove_mdoc_with_ts13_revocation(
 
 /// Verify a product mdoc proof against its public statement. Tree-0 is
 /// reconstructed canonically inside the verifier; no artifact root is trusted.
+/// Success proves that the private credential validity window contained the
+/// verifier-supplied policy date; no separate validity output is serialized.
 pub fn verify_mdoc(proof: &MdocProof, statement: &MdocStatement) -> Result<(), Error> {
     mdoc::verify_mdoc_circuit(proof, statement)
 }

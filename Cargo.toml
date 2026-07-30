@@ -25,10 +25,10 @@ lto = "fat"
 codegen-units = 1
 
 [workspace.dependencies]
-stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3", features = ["prover"] }
-stwo-constraint-framework = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3", features = ["prover"] }
-stwo-air-utils = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3" }
-stwo-air-utils-derive = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f877db2a7601efda8215267bd71d18958ad3fe3" }
+stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f39939eacd0c5efc8ee157e4215a250ca29168f", features = ["prover"] }
+stwo-constraint-framework = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f39939eacd0c5efc8ee157e4215a250ca29168f", features = ["prover"] }
+stwo-air-utils = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f39939eacd0c5efc8ee157e4215a250ca29168f" }
+stwo-air-utils-derive = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f39939eacd0c5efc8ee157e4215a250ca29168f" }
 serde = { version = "1", features = ["derive"] }
 num-traits = "0.2"
 mimalloc = "0.1"

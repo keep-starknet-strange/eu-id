@@ -305,6 +305,7 @@ fn collect_constraint_residuals_with_fields(
         // off to mirror the standalone (self-balancing) AIR.
         expose_digest: false,
         field_exposure,
+        instance_namespace: String::new(),
         multi: None,
         claim_mask_beta: None,
     };
@@ -510,6 +511,40 @@ fn rejects_cleared_full_padded_final_block_selector() {
     assert!(
         !residuals.is_empty(),
         "AIR must reject clearing a required complete-message selector",
+    );
+}
+
+#[test]
+fn honest_full_padded_stream_trace_has_no_linear_residuals() {
+    let message = [0xABu8; 130];
+    let witness = compute_sha256_witness(&message);
+    assert_eq!(witness.padding.padded.len(), 192);
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_full_padded_stream(77, witness.padding.padded.len());
+    let trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        residuals.is_empty(),
+        "honest full padded stream produced {} residuals: {:?}",
+        residuals.len(),
+        residuals.first(),
+    );
+}
+
+#[test]
+fn rejects_full_padded_stream_with_wrong_block_total() {
+    let message = [0xABu8; 130];
+    let witness = compute_sha256_witness(&message);
+    assert_eq!(witness.padding.padded.len(), 192);
+    let log_size = min_log_size(witness.blocks.len());
+    let exposure = FieldExposure::from_full_padded_stream(77, 128);
+    let trace = generate_trace_with_fields(&witness, log_size, &exposure);
+
+    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
+    assert!(
+        !residuals.is_empty(),
+        "configured padded length must bind the final block counter",
     );
 }
 
@@ -965,6 +1000,7 @@ fn collect_multi_constraint_residuals(
         relations: Sha256Relations::dummy(),
         expose_digest: false,
         field_exposure: FieldExposure::empty(),
+        instance_namespace: String::new(),
         multi: Some(MultiSlotEval {
             config: config.clone(),
             relations: SlotIoRelations::dummy_per_slot(config.n_slots()),

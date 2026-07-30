@@ -34,8 +34,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use crate::components::{
-    all_preprocessed_column_ids, consumer_preprocessed_column_ids, range_log_size, RangeKEval,
-    Sha256Relations, RANGE_TABLES,
+    all_preprocessed_column_ids_ns, consumer_preprocessed_column_ids_ns, range_log_size,
+    RangeKEval, Sha256Relations, RANGE_TABLES,
 };
 use crate::constraints::{Sha256Eval, LOGUP_BATCH};
 use crate::field_exposure::FieldExposure;
@@ -96,6 +96,7 @@ pub struct Sha256Prover<'a> {
     witness: &'a Sha256Witness,
     log_n_rows: u32,
     group_width: u32,
+    instance_namespace: String,
     expose_digest: bool,
     digest_handle: Option<air_core::relations::SharedDigestRelation>,
     field_exposure: FieldExposure,
@@ -114,6 +115,7 @@ impl<'a> Sha256Prover<'a> {
             witness,
             log_n_rows,
             group_width,
+            instance_namespace: String::new(),
             expose_digest: false,
             digest_handle: None,
             field_exposure: FieldExposure::empty(),
@@ -182,6 +184,14 @@ impl<'a> Sha256Prover<'a> {
         self
     }
 
+    /// Namespace this standalone consumer's witness-independent preprocessed
+    /// IDs and public transcript. Empty preserves every legacy ID and
+    /// transcript mix exactly. Prover and verifier must use the same value.
+    pub fn with_instance_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.instance_namespace = namespace.into();
+        self
+    }
+
     fn uses_shared_tables(&self) -> bool {
         self.shared_tables.is_some()
     }
@@ -218,6 +228,7 @@ impl Air for Sha256Prover<'_> {
             self.uses_shared_tables(),
         )
         .mix_into(channel);
+        mix_instance_namespace(channel, &self.instance_namespace);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
@@ -253,10 +264,21 @@ impl Air for Sha256Prover<'_> {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         if self.uses_shared_tables() {
-            consumer_preprocessed_column_ids()
+            consumer_preprocessed_column_ids_ns(&self.instance_namespace)
         } else {
-            all_preprocessed_column_ids()
+            all_preprocessed_column_ids_ns(&self.instance_namespace)
         }
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(generated_preprocessed_for_ids(
+            self.group_width,
+            self.log_n_rows,
+            &self.instance_namespace,
+            &self.preprocessed_column_ids(),
+        ))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -269,6 +291,7 @@ impl Air for Sha256Prover<'_> {
             self.expose_digest,
             &self.field_exposure,
             !self.uses_shared_tables(),
+            &self.instance_namespace,
             &None,
             None,
         ));
@@ -304,7 +327,7 @@ impl AirProver for Sha256Prover<'_> {
         let preprocessed = match self.preprocessed.take() {
             Some(evals) if !self.uses_shared_tables() => evals,
             Some(evals) => {
-                let full_ids = all_preprocessed_column_ids();
+                let full_ids = all_preprocessed_column_ids_ns(&self.instance_namespace);
                 ids.iter()
                     .map(|selected_id| {
                         full_ids
@@ -320,7 +343,12 @@ impl AirProver for Sha256Prover<'_> {
                     })
                     .collect()
             }
-            None => generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids),
+            None => generated_preprocessed_for_ids(
+                self.group_width,
+                self.log_n_rows,
+                &self.instance_namespace,
+                &ids,
+            ),
         };
         tb.extend_evals(preprocessed);
     }
@@ -335,7 +363,7 @@ impl AirProver for Sha256Prover<'_> {
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, evals)
             }
             Some(evals) => {
-                let full_ids = all_preprocessed_column_ids();
+                let full_ids = all_preprocessed_column_ids_ns(&self.instance_namespace);
                 let selected: Vec<_> = ids
                     .iter()
                     .map(|selected_id| {
@@ -354,7 +382,12 @@ impl AirProver for Sha256Prover<'_> {
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &selected)
             }
             None => {
-                let evals = generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids);
+                let evals = generated_preprocessed_for_ids(
+                    self.group_width,
+                    self.log_n_rows,
+                    &self.instance_namespace,
+                    &ids,
+                );
                 fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
             }
         }
@@ -373,7 +406,7 @@ impl AirProver for Sha256Prover<'_> {
         let preprocessed = match self.preprocessed.take() {
             Some(evals) if !self.uses_shared_tables() => evals,
             Some(evals) => {
-                let full_ids = all_preprocessed_column_ids();
+                let full_ids = all_preprocessed_column_ids_ns(&self.instance_namespace);
                 ids.iter()
                     .map(|selected_id| {
                         full_ids
@@ -389,7 +422,12 @@ impl AirProver for Sha256Prover<'_> {
                     })
                     .collect()
             }
-            None => generated_preprocessed_for_ids(self.group_width, self.log_n_rows, &ids),
+            None => generated_preprocessed_for_ids(
+                self.group_width,
+                self.log_n_rows,
+                &self.instance_namespace,
+                &ids,
+            ),
         };
         if selected_ids == ids.as_slice() {
             tb.extend_evals(preprocessed);
@@ -459,6 +497,7 @@ impl AirProver for Sha256Prover<'_> {
 pub struct Sha256Verifier {
     log_n_rows: u32,
     group_width: u32,
+    instance_namespace: String,
     expose_digest: bool,
     digest_handle: Option<air_core::relations::SharedDigestRelation>,
     field_exposure: FieldExposure,
@@ -474,6 +513,7 @@ impl Sha256Verifier {
         Self {
             log_n_rows,
             group_width,
+            instance_namespace: String::new(),
             expose_digest: false,
             digest_handle: None,
             field_exposure: FieldExposure::empty(),
@@ -528,6 +568,13 @@ impl Sha256Verifier {
         self
     }
 
+    /// Match [`Sha256Prover::with_instance_namespace`]. Empty is the exact
+    /// legacy/default instance.
+    pub fn with_instance_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.instance_namespace = namespace.into();
+        self
+    }
+
     fn uses_shared_tables(&self) -> bool {
         self.shared_tables.is_some()
     }
@@ -555,6 +602,7 @@ impl Air for Sha256Verifier {
             self.uses_shared_tables(),
         )
         .mix_into(channel);
+        mix_instance_namespace(channel, &self.instance_namespace);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
@@ -588,10 +636,21 @@ impl Air for Sha256Verifier {
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         if self.uses_shared_tables() {
-            consumer_preprocessed_column_ids()
+            consumer_preprocessed_column_ids_ns(&self.instance_namespace)
         } else {
-            all_preprocessed_column_ids()
+            all_preprocessed_column_ids_ns(&self.instance_namespace)
         }
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
+        Ok(generated_preprocessed_for_ids(
+            self.group_width,
+            self.log_n_rows,
+            &self.instance_namespace,
+            &self.preprocessed_column_ids(),
+        ))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -604,6 +663,7 @@ impl Air for Sha256Verifier {
             self.expose_digest,
             &self.field_exposure,
             !self.uses_shared_tables(),
+            &self.instance_namespace,
             &None,
             None,
         ));
@@ -620,6 +680,20 @@ impl Air for Sha256Verifier {
 
 /// Per-proof "statement 0": fixes the component log-size surface so the
 /// channel state agrees on both sides.
+const FULL_PADDED_STREAM_TRANSCRIPT_TAG: u64 = 0x5348_4153_5452_4541; // "SHASTREA"
+const INSTANCE_NAMESPACE_TRANSCRIPT_TAG: u64 = 0x5348_4149_4e53_544e; // "SHAINSTN"
+
+fn mix_instance_namespace(channel: &mut Blake2sChannel, instance_namespace: &str) {
+    if instance_namespace.is_empty() {
+        return;
+    }
+    channel.mix_u64(INSTANCE_NAMESPACE_TRANSCRIPT_TAG);
+    channel.mix_u64(instance_namespace.len() as u64);
+    for &byte in instance_namespace.as_bytes() {
+        channel.mix_u64(u64::from(byte));
+    }
+}
+
 struct Stmt0 {
     log_n_rows: u32,
     group_width: u32,
@@ -636,6 +710,9 @@ struct Stmt0 {
     n_field_columns: u32,
     n_field_yields: u32,
     binds_full_padded_message: bool,
+    /// Present only for the constant-width full padded-stream mode. Keeping
+    /// this optional preserves every legacy transcript byte-for-byte.
+    full_padded_stream: Option<(u32, u64)>,
     /// Whether fixed SHA table providers are supplied by a sibling module.
     /// Only the enabled case is mixed so the legacy standalone transcript
     /// remains byte-identical.
@@ -656,6 +733,9 @@ impl Stmt0 {
             n_field_columns: field_exposure.n_columns() as u32,
             n_field_yields: field_exposure.n_yields() as u32,
             binds_full_padded_message: field_exposure.binds_full_padded_message(),
+            full_padded_stream: field_exposure
+                .full_padded_stream()
+                .map(|(field_id, padded_len)| (field_id, padded_len as u64)),
             shared_tables,
         }
     }
@@ -667,6 +747,11 @@ impl Stmt0 {
         channel.mix_u64(u64::from(self.n_field_columns));
         channel.mix_u64(u64::from(self.n_field_yields));
         channel.mix_u64(u64::from(self.binds_full_padded_message));
+        if let Some((field_id, padded_len)) = self.full_padded_stream {
+            channel.mix_u64(FULL_PADDED_STREAM_TRANSCRIPT_TAG);
+            channel.mix_u64(field_id as u64);
+            channel.mix_u64(padded_len);
+        }
         if self.shared_tables {
             channel.mix_u64(1);
         }
@@ -796,9 +881,11 @@ fn consumer_preprocessed_log_sizes(log_n_rows: u32) -> Vec<u32> {
 fn generated_preprocessed_for_ids(
     group_width: u32,
     log_n_rows: u32,
+    instance_namespace: &str,
     selected_ids: &[PreProcessedColumnId],
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-    let (evals, ids, _log_sizes) = generate_preprocessed_trace(group_width, log_n_rows);
+    let (evals, _legacy_ids, _log_sizes) = generate_preprocessed_trace(group_width, log_n_rows);
+    let ids = all_preprocessed_column_ids_ns(instance_namespace);
     selected_ids
         .iter()
         .map(|selected_id| {
@@ -839,6 +926,7 @@ impl Sha256Components {
         expose_digest: bool,
         field_exposure: &FieldExposure,
         include_table_providers: bool,
+        instance_namespace: &str,
         multi: &Option<crate::constraints::MultiSlotEval>,
         claim_mask_beta: Option<QM31>,
     ) -> Self {
@@ -853,6 +941,7 @@ impl Sha256Components {
                 relations: relations.clone(),
                 expose_digest,
                 field_exposure: field_exposure.clone(),
+                instance_namespace: instance_namespace.to_string(),
                 multi: multi.clone(),
                 claim_mask_beta,
             },
@@ -1164,6 +1253,7 @@ impl Air for Sha256MultiProver<'_> {
             false,
             &FieldExposure::empty(),
             false,
+            "",
             &multi,
             self.claim_mask_beta(),
         ));
@@ -1456,6 +1546,7 @@ impl Air for Sha256MultiVerifier {
             false,
             &FieldExposure::empty(),
             false,
+            "",
             &multi,
             self.claim_mask_beta(),
         ));
@@ -1463,5 +1554,154 @@ impl Air for Sha256MultiVerifier {
 
     fn components(&self) -> Vec<&dyn Component> {
         self.built_components().components()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transcript_relations_ns(
+        exposure: &FieldExposure,
+        instance_namespace: &str,
+    ) -> Sha256Relations {
+        let mut channel = Blake2sChannel::default();
+        Stmt0::new(
+            13,
+            crate::partitions::MAX_ROUND_GROUP_BITS,
+            false,
+            exposure,
+            false,
+        )
+        .mix_into(&mut channel);
+        mix_instance_namespace(&mut channel, instance_namespace);
+        Sha256Relations::draw(&mut channel)
+    }
+
+    fn transcript_relations(exposure: &FieldExposure) -> Sha256Relations {
+        transcript_relations_ns(exposure, "")
+    }
+
+    #[test]
+    fn full_padded_stream_layout_is_fixed_across_padded_lengths() {
+        let one_block = FieldExposure::from_full_padded_stream(77, 64);
+        let sixty_five_blocks = FieldExposure::from_full_padded_stream(77, 65 * 64);
+        let first = layout(
+            13,
+            crate::partitions::MAX_ROUND_GROUP_BITS,
+            false,
+            &one_block,
+            false,
+        );
+        let second = layout(
+            13,
+            crate::partitions::MAX_ROUND_GROUP_BITS,
+            false,
+            &sixty_five_blocks,
+            false,
+        );
+
+        assert_eq!(first.preprocessed, second.preprocessed);
+        assert_eq!(first.trace, second.trace);
+        assert_eq!(first.interaction, second.interaction);
+        assert_eq!(
+            first.trace.len(),
+            Layout::TOTAL_COLS + 1 + crate::components::RANGE_TABLES.len()
+        );
+        assert_eq!(
+            crate::interaction::sha_lookups_per_row(false, &one_block),
+            crate::interaction::SHA_LOOKUPS_PER_ROW_BASE
+                + crate::field_exposure::FULL_PADDED_STREAM_SITES_PER_ROW,
+        );
+    }
+
+    #[test]
+    fn full_padded_stream_transcript_binds_mode_field_and_length() {
+        let base = FieldExposure::from_full_padded_stream(77, 64);
+        let same = FieldExposure::from_full_padded_stream(77, 64);
+        let different_field = FieldExposure::from_full_padded_stream(78, 64);
+        let different_length = FieldExposure::from_full_padded_stream(77, 128);
+
+        assert_eq!(transcript_relations(&base), transcript_relations(&same));
+        assert_ne!(
+            transcript_relations(&base),
+            transcript_relations(&different_field)
+        );
+        assert_ne!(
+            transcript_relations(&base),
+            transcript_relations(&different_length)
+        );
+
+        let stmt = Stmt0::new(
+            13,
+            crate::partitions::MAX_ROUND_GROUP_BITS,
+            false,
+            &base,
+            false,
+        );
+        assert_eq!(stmt.full_padded_stream, Some((77, 64)));
+    }
+
+    #[test]
+    fn empty_instance_namespace_preserves_legacy_transcript_challenge() {
+        let exposure = FieldExposure::empty();
+        let mut legacy_channel = Blake2sChannel::default();
+        legacy_channel.mix_u64(13);
+        legacy_channel.mix_u64(u64::from(crate::partitions::MAX_ROUND_GROUP_BITS));
+        legacy_channel.mix_u64(0);
+        legacy_channel.mix_u64(0);
+        legacy_channel.mix_u64(0);
+        legacy_channel.mix_u64(0);
+        let legacy_relations = Sha256Relations::draw(&mut legacy_channel);
+
+        let witness = crate::witness::compute_sha256_witness(b"legacy-default");
+        let prover = Sha256Prover::new(&witness, 13, crate::partitions::MAX_ROUND_GROUP_BITS);
+        let mut default_channel = Blake2sChannel::default();
+        prover.mix_public(&mut default_channel);
+        assert_eq!(
+            Sha256Relations::draw(&mut default_channel),
+            legacy_relations,
+            "default namespace must not add a transcript element"
+        );
+        assert_eq!(
+            prover.preprocessed_column_ids(),
+            crate::components::all_preprocessed_column_ids(),
+            "default constructor must preserve the exact legacy ID vector"
+        );
+        assert_ne!(
+            transcript_relations_ns(&exposure, "mdoc/mso-sha"),
+            legacy_relations
+        );
+        assert_ne!(
+            transcript_relations_ns(&exposure, "mdoc/mso-sha"),
+            transcript_relations_ns(&exposure, "mdoc/mso-sha-2")
+        );
+    }
+
+    #[test]
+    fn namespaced_preprocessed_columns_are_witness_independent() {
+        let first_witness = crate::witness::compute_sha256_witness(b"credential-a");
+        let second_witness = crate::witness::compute_sha256_witness(b"credential-b");
+        let exposure = FieldExposure::from_full_padded_stream(77, 64);
+        let mut first =
+            Sha256Prover::new(&first_witness, 13, crate::partitions::MAX_ROUND_GROUP_BITS)
+                .with_field_provider(exposure.clone())
+                .with_instance_namespace("mdoc/mso-sha");
+        let mut second =
+            Sha256Prover::new(&second_witness, 13, crate::partitions::MAX_ROUND_GROUP_BITS)
+                .with_field_provider(exposure)
+                .with_instance_namespace("mdoc/mso-sha");
+
+        assert_eq!(
+            first.preprocessed_column_fingerprints(),
+            second.preprocessed_column_fingerprints()
+        );
+        assert_eq!(
+            first
+                .canonical_preprocessed_columns()
+                .expect("first canonical tree-zero columns")
+                .len(),
+            first.preprocessed_column_ids().len()
+        );
     }
 }

@@ -100,6 +100,27 @@ const TS13_NUM_ATTRIBUTES: u32 = 1;
 const TS13_MAX_ATTRIBUTE_BYTES: u32 = 32;
 const TS13_MAX_ATTRIBUTE_ITEM_BYTES: u32 = eu_id_prover::ts13::TS13_MAX_ATTRIBUTE_ITEM_BYTES as u32;
 const TS13_MAX_REQUESTED_DIGEST_ID: u32 = eu_id_prover::ts13::TS13_MAX_REQUESTED_DIGEST_ID;
+const TS13_VALUE_DIGESTS_SCAN_LOG_SIZE: u32 = eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_LOG_SIZE;
+const TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS: u32 =
+    eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS;
+const TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS: u32 =
+    eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS;
+const TS13_VALUE_DIGESTS_SCAN_TRACE_COLS: u32 =
+    eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_TRACE_COLS;
+const TS13_VALUE_DIGESTS_SCAN_RELATION_SITES: u32 =
+    eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_RELATION_SITES;
+const TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS: u32 =
+    eu_id_prover::ts13::TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS;
+const TS13_COUNTRY_CODE_DATASET: &str = eu_id_prover::ts13::TS13_COUNTRY_CODE_DATASET;
+const TS13_COUNTRY_CODE_TABLE_LOG_SIZE: u32 = eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_LOG_SIZE;
+const TS13_COUNTRY_CODE_COUNT: u32 = eu_id_prover::ts13::TS13_COUNTRY_CODE_COUNT;
+const TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS: u32 =
+    eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS;
+const TS13_COUNTRY_CODE_TABLE_TRACE_COLS: u32 =
+    eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_TRACE_COLS;
+const TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS: u32 =
+    eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS;
+const TS13_COUNTRY_CODE_TABLE_SHA256: [u8; 32] = eu_id_prover::ts13::TS13_COUNTRY_CODE_TABLE_SHA256;
 const TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES: u32 =
     eu_id_prover::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES as u32;
 const TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES: u32 =
@@ -114,9 +135,10 @@ const ML_DSA_65_PUBLIC_KEY_BYTES: usize = 1_952;
 /// Deliberately independent from the product SDK envelope versions. A TS13
 /// verifier never accepts a ProductDefault proof as an equality+revocation
 /// presentation, or vice versa.
-const TS13_ENVELOPE_FORMAT_V2: u16 = 2;
-/// Unified identity-envelope tag for a serialized [`Ts13ZkDocument`].
-const TS13_IDENTITY_ENVELOPE_FORMAT_V7: u16 = 7;
+const TS13_ENVELOPE_FORMAT_V3: u16 = 3;
+/// Temporary unified identity-envelope tag for a serialized
+/// [`Ts13ZkDocument`]. The frozen TS13 demo V4 envelope replaces this wrapper.
+const TS13_IDENTITY_ENVELOPE_FORMAT_V8: u16 = 8;
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ts13DisclosureKind {
@@ -136,6 +158,19 @@ pub struct Ts13PresentationRequest {
     pub max_attribute_bytes: u32,
     pub max_attribute_item_bytes: u32,
     pub max_requested_digest_id: u32,
+    pub value_digests_scan_log_size: u32,
+    pub value_digests_scan_max_items: u32,
+    pub value_digests_scan_preprocessed_cols: u32,
+    pub value_digests_scan_trace_cols: u32,
+    pub value_digests_scan_relation_sites: u32,
+    pub value_digests_scan_interaction_cols: u32,
+    pub country_code_dataset: String,
+    pub country_code_table_log_size: u32,
+    pub country_code_count: u32,
+    pub country_code_table_preprocessed_cols: u32,
+    pub country_code_table_trace_cols: u32,
+    pub country_code_table_interaction_cols: u32,
+    pub country_code_table_sha256: Vec<u8>,
     pub max_issuer_mldsa_message_bytes: u32,
     pub max_device_mldsa_message_bytes: u32,
     pub merged_sha_slot_log: u32,
@@ -249,6 +284,58 @@ fn ts13_tuple_value(request: &Ts13PresentationRequest) -> Value {
             Value::from(request.max_requested_digest_id),
         ),
         (
+            "value_digests_scan_log_size".into(),
+            Value::from(request.value_digests_scan_log_size),
+        ),
+        (
+            "value_digests_scan_max_items".into(),
+            Value::from(request.value_digests_scan_max_items),
+        ),
+        (
+            "value_digests_scan_preprocessed_cols".into(),
+            Value::from(request.value_digests_scan_preprocessed_cols),
+        ),
+        (
+            "value_digests_scan_trace_cols".into(),
+            Value::from(request.value_digests_scan_trace_cols),
+        ),
+        (
+            "value_digests_scan_relation_sites".into(),
+            Value::from(request.value_digests_scan_relation_sites),
+        ),
+        (
+            "value_digests_scan_interaction_cols".into(),
+            Value::from(request.value_digests_scan_interaction_cols),
+        ),
+        (
+            "country_code_dataset".into(),
+            request.country_code_dataset.as_str().into(),
+        ),
+        (
+            "country_code_table_log_size".into(),
+            Value::from(request.country_code_table_log_size),
+        ),
+        (
+            "country_code_count".into(),
+            Value::from(request.country_code_count),
+        ),
+        (
+            "country_code_table_preprocessed_cols".into(),
+            Value::from(request.country_code_table_preprocessed_cols),
+        ),
+        (
+            "country_code_table_trace_cols".into(),
+            Value::from(request.country_code_table_trace_cols),
+        ),
+        (
+            "country_code_table_interaction_cols".into(),
+            Value::from(request.country_code_table_interaction_cols),
+        ),
+        (
+            "country_code_table_sha256".into(),
+            Value::Bytes(request.country_code_table_sha256.clone()),
+        ),
+        (
             "max_issuer_mldsa_message_bytes".into(),
             Value::from(request.max_issuer_mldsa_message_bytes),
         ),
@@ -330,6 +417,19 @@ fn ts13_tuple_is_supported(request: &Ts13PresentationRequest) -> bool {
         && request.max_attribute_bytes == TS13_MAX_ATTRIBUTE_BYTES
         && request.max_attribute_item_bytes == TS13_MAX_ATTRIBUTE_ITEM_BYTES
         && request.max_requested_digest_id == TS13_MAX_REQUESTED_DIGEST_ID
+        && request.value_digests_scan_log_size == TS13_VALUE_DIGESTS_SCAN_LOG_SIZE
+        && request.value_digests_scan_max_items == TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS
+        && request.value_digests_scan_preprocessed_cols == TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS
+        && request.value_digests_scan_trace_cols == TS13_VALUE_DIGESTS_SCAN_TRACE_COLS
+        && request.value_digests_scan_relation_sites == TS13_VALUE_DIGESTS_SCAN_RELATION_SITES
+        && request.value_digests_scan_interaction_cols == TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS
+        && request.country_code_dataset == TS13_COUNTRY_CODE_DATASET
+        && request.country_code_table_log_size == TS13_COUNTRY_CODE_TABLE_LOG_SIZE
+        && request.country_code_count == TS13_COUNTRY_CODE_COUNT
+        && request.country_code_table_preprocessed_cols == TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS
+        && request.country_code_table_trace_cols == TS13_COUNTRY_CODE_TABLE_TRACE_COLS
+        && request.country_code_table_interaction_cols == TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS
+        && request.country_code_table_sha256.as_slice() == TS13_COUNTRY_CODE_TABLE_SHA256
         && request.max_issuer_mldsa_message_bytes == TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES
         && request.max_device_mldsa_message_bytes == TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES
         && request.merged_sha_slot_log == TS13_MERGED_SHA_SLOT_LOG
@@ -443,7 +543,6 @@ fn ts13_policy(request: &Ts13PresentationRequest) -> Result<eu_id_prover::Policy
         current_date: mapping::epoch_day_to_date(request.current_date_epoch_day)?,
         min_age_years: 0,
         accepted_nationalities: Vec::new(),
-        accepted_nationalities_alpha2: Vec::new(),
     })
 }
 
@@ -477,7 +576,7 @@ fn decode_ts13_proof_envelope(proof: &[u8]) -> Result<Ts13ProofEnvelope, ZkError
         .allow_trailing_bytes()
         .deserialize(proof)
         .map_err(|_| ZkError::Verify("unsupported TS13 envelope format".to_string()))?;
-    if envelope_format != TS13_ENVELOPE_FORMAT_V2 {
+    if envelope_format != TS13_ENVELOPE_FORMAT_V3 {
         return Err(ZkError::Verify(
             "unsupported TS13 envelope format".to_string(),
         ));
@@ -503,7 +602,6 @@ fn ts13_mdoc_statement_matches(
     if statement.doctype != request.doctype
         || statement.namespace != request.namespace
         || statement.policy != ts13_policy(request)?
-        || statement.requested_digest_id > TS13_MAX_REQUESTED_DIGEST_ID
         || !eu_id_prover::ts13::ts13_requested_item_padded_len_is_supported(
             statement.requested_item_padded_len,
         )
@@ -587,7 +685,7 @@ fn ts13_prove_zk_document_on_current_stack(
         .and_then(|bytes| compress_stark_proof_for_ffi(&bytes))?;
     let request_binding_hash = ts13_request_binding_hash(&request);
     let proof = bincode::serialize(&Ts13ProofEnvelope {
-        envelope_format: TS13_ENVELOPE_FORMAT_V2,
+        envelope_format: TS13_ENVELOPE_FORMAT_V3,
         request_binding_hash: request_binding_hash.clone(),
         mdoc_statement,
         stark_proof,
@@ -722,9 +820,7 @@ pub fn nat_mode_token(mode: NatMode) -> String {
 
 #[uniffi::export]
 pub fn iso_alpha2_to_numeric(alpha2: String) -> Option<u32> {
-    celes::Country::from_alpha2(alpha2)
-        .ok()
-        .map(|country| country.value as u32)
+    eu_id_prover::iso_alpha2_to_numeric(&alpha2)
 }
 
 /// Which ZK identity system this SDK build implements. Mirrors the linked prover
@@ -956,7 +1052,7 @@ struct Ts13IdentityProofEnvelope {
     document: Vec<u8>,
 }
 
-const MDOC_ENVELOPE_FORMAT_V6: u16 = 6;
+const MDOC_ENVELOPE_FORMAT_V7: u16 = 7;
 /// The mobile transport rail is under 1 MiB; this leaves bounded headroom for
 /// the public statement and future format framing while rejecting oversized
 /// inputs before bincode can allocate from an attacker-controlled length.
@@ -988,7 +1084,7 @@ fn encode_ts13_identity_envelope(document: &Ts13ZkDocument) -> Result<Vec<u8>, Z
     let document = bincode::serialize(document)
         .map_err(|error| ZkError::Prove(format!("failed to serialize TS13 document: {error}")))?;
     let envelope = bincode::serialize(&Ts13IdentityProofEnvelope {
-        envelope_format: TS13_IDENTITY_ENVELOPE_FORMAT_V7,
+        envelope_format: TS13_IDENTITY_ENVELOPE_FORMAT_V8,
         document,
     })
     .map_err(|error| {
@@ -1009,7 +1105,7 @@ fn decode_ts13_identity_envelope(proof: &[u8]) -> Result<Ts13ZkDocument, ZkError
         .reject_trailing_bytes()
         .deserialize(proof)
         .map_err(|error| ZkError::Verify(format!("invalid TS13 identity envelope: {error}")))?;
-    if envelope.envelope_format != TS13_IDENTITY_ENVELOPE_FORMAT_V7 {
+    if envelope.envelope_format != TS13_IDENTITY_ENVELOPE_FORMAT_V8 {
         return Err(ZkError::Verify("unsupported envelope format".to_string()));
     }
     bounded_bincode_options(MAX_MDOC_ENVELOPE_BYTES)
@@ -1032,7 +1128,7 @@ fn decode_mdoc_proof_envelope(proof: &[u8]) -> Result<MdocProofEnvelope, ZkError
         .allow_trailing_bytes()
         .deserialize(proof)
         .map_err(|_| unsupported())?;
-    if envelope_format != MDOC_ENVELOPE_FORMAT_V6 {
+    if envelope_format != MDOC_ENVELOPE_FORMAT_V7 {
         return Err(unsupported());
     }
     let envelope: MdocProofEnvelope = bounded_bincode_options(MAX_MDOC_ENVELOPE_BYTES)
@@ -1225,39 +1321,18 @@ fn mdoc_statement_matches_public_statement(
     Ok(mdoc_disclosed_set_matches(
         statement.predicate_mode,
         &mdoc_statement.attributes,
-        mdoc_statement.age_attribute_index,
-        mdoc_statement.nationality_attribute_index,
     ))
 }
 
 fn mdoc_disclosed_set_matches(
     mode: PredicateMode,
     attributes: &[eu_id_prover::mdoc::MdocStatementAttribute],
-    age_attribute_index: Option<usize>,
-    nationality_attribute_index: Option<usize>,
 ) -> bool {
     let expected = expected_mdoc_attributes(mode);
-    if attributes.len() != expected.len()
-        || attributes.iter().zip(&expected).any(|(got, want)| {
-            got.element_identifier != want.element_identifier || got.mode != want.mode
+    attributes.len() == expected.len()
+        && attributes.iter().zip(&expected).all(|(got, want)| {
+            got.element_identifier == want.element_identifier && got.mode == want.mode
         })
-    {
-        return false;
-    }
-    age_attribute_index
-        == expected.iter().position(|attribute| {
-            matches!(
-                attribute.mode,
-                eu_id_prover::mdoc::MdocDisclosureMode::AgeOver
-            )
-        })
-        && nationality_attribute_index
-            == expected.iter().position(|attribute| {
-                matches!(
-                    attribute.mode,
-                    eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set
-                )
-            })
 }
 
 /// Prove either the product predicate profile or TS13 through one byte API.
@@ -1285,7 +1360,7 @@ pub fn prove_identity(
                     })
                     .and_then(|bytes| compress_stark_proof_for_ffi(&bytes))?;
                 bincode::serialize(&MdocProofEnvelope {
-                    envelope_format: MDOC_ENVELOPE_FORMAT_V6,
+                    envelope_format: MDOC_ENVELOPE_FORMAT_V7,
                     statement_bytes: encode_statement(&statement),
                     mdoc_statement,
                     stark_proof,
@@ -1316,7 +1391,7 @@ pub fn verify_identity(
     proof: Vec<u8>,
 ) -> Result<ZkVerifyResult, ZkError> {
     on_large_stack(move || match peek_identity_envelope_format(&proof)? {
-        MDOC_ENVELOPE_FORMAT_V6 => {
+        MDOC_ENVELOPE_FORMAT_V7 => {
             if statement.ts13_request.is_some() {
                 return Ok(ZkVerifyResult { ok: false });
             }
@@ -1338,7 +1413,7 @@ pub fn verify_identity(
                 ok: eu_id_prover::verify_mdoc(&stark_proof, &envelope.mdoc_statement).is_ok(),
             })
         }
-        TS13_IDENTITY_ENVELOPE_FORMAT_V7 => {
+        TS13_IDENTITY_ENVELOPE_FORMAT_V8 => {
             let Some(request) = statement.ts13_request.as_ref() else {
                 return Ok(ZkVerifyResult { ok: false });
             };
@@ -1378,6 +1453,8 @@ mod tests {
     const PRE_Q13_MDOC_ENVELOPE_FORMAT_V3: u16 = 3;
     const PRE_Q14_MDOC_ENVELOPE_FORMAT_V4: u16 = 4;
     const PRE_S1_MDOC_ENVELOPE_FORMAT_V5: u16 = 5;
+    const PRE_UNLINKABILITY_MDOC_ENVELOPE_FORMAT_V6: u16 = 6;
+    const PRE_UNLINKABILITY_TS13_ENVELOPE_FORMAT_V2: u16 = 2;
 
     fn sample_statement() -> ZkPublicStatement {
         ZkPublicStatement {
@@ -1410,6 +1487,19 @@ mod tests {
             max_attribute_bytes: TS13_MAX_ATTRIBUTE_BYTES,
             max_attribute_item_bytes: TS13_MAX_ATTRIBUTE_ITEM_BYTES,
             max_requested_digest_id: TS13_MAX_REQUESTED_DIGEST_ID,
+            value_digests_scan_log_size: TS13_VALUE_DIGESTS_SCAN_LOG_SIZE,
+            value_digests_scan_max_items: TS13_VALUE_DIGESTS_SCAN_MAX_ITEMS,
+            value_digests_scan_preprocessed_cols: TS13_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS,
+            value_digests_scan_trace_cols: TS13_VALUE_DIGESTS_SCAN_TRACE_COLS,
+            value_digests_scan_relation_sites: TS13_VALUE_DIGESTS_SCAN_RELATION_SITES,
+            value_digests_scan_interaction_cols: TS13_VALUE_DIGESTS_SCAN_INTERACTION_COLS,
+            country_code_dataset: TS13_COUNTRY_CODE_DATASET.to_string(),
+            country_code_table_log_size: TS13_COUNTRY_CODE_TABLE_LOG_SIZE,
+            country_code_count: TS13_COUNTRY_CODE_COUNT,
+            country_code_table_preprocessed_cols: TS13_COUNTRY_CODE_TABLE_PREPROCESSED_COLS,
+            country_code_table_trace_cols: TS13_COUNTRY_CODE_TABLE_TRACE_COLS,
+            country_code_table_interaction_cols: TS13_COUNTRY_CODE_TABLE_INTERACTION_COLS,
+            country_code_table_sha256: TS13_COUNTRY_CODE_TABLE_SHA256.to_vec(),
             max_issuer_mldsa_message_bytes: TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES,
             max_device_mldsa_message_bytes: TS13_MAX_DEVICE_MLDSA_MESSAGE_BYTES,
             merged_sha_slot_log: TS13_MERGED_SHA_SLOT_LOG,
@@ -1426,6 +1516,19 @@ mod tests {
         }
     }
 
+    fn assert_ts13_tuple_drift_is_bound_and_rejected(request: Ts13PresentationRequest) {
+        assert_ne!(
+            ts13_request_binding_hash(&request),
+            ts13_request_binding_hash(&ts13_request()),
+            "every published tuple determinant must affect the request binding"
+        );
+        assert!(matches!(
+            ts13_validate_presentation_request(&request),
+            Err(ZkError::InvalidInput(message))
+                if message == "unsupported TS13 tuple; no circuit_hash lookup entry"
+        ));
+    }
+
     fn statement_attribute(
         element_identifier: &str,
         mode: eu_id_prover::mdoc::MdocDisclosureMode,
@@ -1433,18 +1536,7 @@ mod tests {
         eu_id_prover::mdoc::MdocStatementAttribute {
             element_identifier: element_identifier.to_string(),
             mode,
-            element_identifier_offset: 0,
-            element_identifier_anchor_offset: 0,
-            element_identifier_anchor: Vec::new(),
-            element_value_anchor_offset: 0,
-            element_value_anchor: Vec::new(),
-            value_offset: 0,
-            value: Vec::new(),
-            value_head: Vec::new(),
-            digest_id: 0,
-            mso_digest_offset: 0,
-            mso_digest_anchor_offset: 0,
-            mso_digest_anchor: Vec::new(),
+            item_padded_len: 64,
         }
     }
 
@@ -1461,6 +1553,24 @@ mod tests {
     }
 
     #[test]
+    fn pre_unlinkability_ts13_v2_envelope_rejects_before_body_decode() {
+        let legacy = bincode::serialize(&PRE_UNLINKABILITY_TS13_ENVELOPE_FORMAT_V2).unwrap();
+        assert!(matches!(
+            decode_ts13_proof_envelope(&legacy),
+            Err(ZkError::Verify(message)) if message == "unsupported TS13 envelope format"
+        ));
+    }
+
+    #[test]
+    fn ts13_v3_envelope_discriminator_reaches_body_decode() {
+        let incomplete = bincode::serialize(&TS13_ENVELOPE_FORMAT_V3).unwrap();
+        assert!(matches!(
+            decode_ts13_proof_envelope(&incomplete),
+            Err(ZkError::Verify(message)) if message == "invalid TS13 proof envelope"
+        ));
+    }
+
+    #[test]
     fn ts13_rejects_non_mldsa_revocation_key_shape() {
         let mut request = ts13_request();
         request.revocation_public_key = vec![0; 64];
@@ -1472,29 +1582,74 @@ mod tests {
 
     #[test]
     fn ts13_rejects_resource_tuple_drift() {
-        let mut request = ts13_request();
-        request.max_mso_payload_bytes += 1;
-        assert!(matches!(
-            ts13_validate_presentation_request(&request),
-            Err(ZkError::InvalidInput(message))
-                if message == "unsupported TS13 tuple; no circuit_hash lookup entry"
-        ));
+        macro_rules! reject_numeric_drift {
+            ($($field:ident),+ $(,)?) => {
+                $(
+                    let mut request = ts13_request();
+                    request.$field += 1;
+                    assert_ts13_tuple_drift_is_bound_and_rejected(request);
+                )+
+            };
+        }
+        reject_numeric_drift!(
+            max_mso_payload_bytes,
+            max_requested_digest_id,
+            value_digests_scan_log_size,
+            value_digests_scan_max_items,
+            value_digests_scan_preprocessed_cols,
+            value_digests_scan_trace_cols,
+            value_digests_scan_relation_sites,
+            value_digests_scan_interaction_cols,
+            country_code_table_log_size,
+            country_code_count,
+            country_code_table_preprocessed_cols,
+            country_code_table_trace_cols,
+            country_code_table_interaction_cols,
+            merged_sha_slot_log,
+        );
 
         let mut request = ts13_request();
-        request.merged_sha_slot_log += 1;
-        assert!(matches!(
-            ts13_validate_presentation_request(&request),
-            Err(ZkError::InvalidInput(message))
-                if message == "unsupported TS13 tuple; no circuit_hash lookup entry"
-        ));
+        request.country_code_dataset.push_str("-changed");
+        assert_ts13_tuple_drift_is_bound_and_rejected(request);
 
         let mut request = ts13_request();
-        request.max_requested_digest_id += 1;
-        assert!(matches!(
-            ts13_validate_presentation_request(&request),
-            Err(ZkError::InvalidInput(message))
-                if message == "unsupported TS13 tuple; no circuit_hash lookup entry"
-        ));
+        request.country_code_table_sha256[0] ^= 1;
+        assert_ts13_tuple_drift_is_bound_and_rejected(request);
+    }
+
+    #[test]
+    fn ts13_v10_scanner_and_country_geometry_is_published_verbatim() {
+        let request = ts13_request();
+        assert_eq!(
+            (
+                request.value_digests_scan_log_size,
+                request.value_digests_scan_max_items,
+                request.value_digests_scan_preprocessed_cols,
+                request.value_digests_scan_trace_cols,
+                request.value_digests_scan_relation_sites,
+                request.value_digests_scan_interaction_cols,
+            ),
+            (9, 255, 4, 324, 51, 108)
+        );
+        assert_eq!(request.country_code_dataset, "celes-2.8.2");
+        assert_eq!(
+            (
+                request.country_code_table_log_size,
+                request.country_code_count,
+                request.country_code_table_preprocessed_cols,
+                request.country_code_table_trace_cols,
+                request.country_code_table_interaction_cols,
+            ),
+            (9, 250, 6, 1, 4)
+        );
+        assert_eq!(
+            request
+                .country_code_table_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "6be2e9a82ae33f26fc75e1f1a7f0d7cd080a5c341e7ba4cea6411239698a8007"
+        );
     }
 
     #[test]
@@ -1579,54 +1734,26 @@ mod tests {
                 eu_id_prover::mdoc::MdocDisclosureMode::Alpha2Set,
             ),
         ];
-        assert!(mdoc_disclosed_set_matches(
-            PredicateMode::And,
-            &attributes,
-            Some(0),
-            Some(1)
-        ));
-        assert!(!mdoc_disclosed_set_matches(
-            PredicateMode::And,
-            &attributes,
-            None,
-            Some(1)
-        ));
+        assert!(mdoc_disclosed_set_matches(PredicateMode::And, &attributes));
 
         let mut substituted = attributes.clone();
         substituted[0].element_identifier = "issue_date".to_string();
         assert!(!mdoc_disclosed_set_matches(
             PredicateMode::And,
-            &substituted,
-            Some(0),
-            Some(1)
+            &substituted
         ));
 
-        // Age-only: exactly the birth_date attribute, no nationality index.
+        // Age-only: exactly the birth_date attribute and its ordered mode.
         let age_only = vec![statement_attribute(
             "birth_date",
             eu_id_prover::mdoc::MdocDisclosureMode::AgeOver,
         )];
-        assert!(mdoc_disclosed_set_matches(
-            PredicateMode::Age,
-            &age_only,
-            Some(0),
-            None
-        ));
+        assert!(mdoc_disclosed_set_matches(PredicateMode::Age, &age_only));
         // Cross-mode confusion stays fail-closed: an age-only statement must
         // not accept a two-attribute proof, nor an And statement a one-attribute
         // proof.
-        assert!(!mdoc_disclosed_set_matches(
-            PredicateMode::Age,
-            &attributes,
-            Some(0),
-            Some(1)
-        ));
-        assert!(!mdoc_disclosed_set_matches(
-            PredicateMode::And,
-            &age_only,
-            Some(0),
-            None
-        ));
+        assert!(!mdoc_disclosed_set_matches(PredicateMode::Age, &attributes));
+        assert!(!mdoc_disclosed_set_matches(PredicateMode::And, &age_only));
     }
 
     #[test]
@@ -1673,8 +1800,8 @@ mod tests {
     fn pre_q11_envelope_without_discriminator_rejects_typed() {
         // The old envelope started with `statement_bytes: Vec<u8>`, whose
         // bincode length prefix is deliberately not the supported format
-        // (9 != MDOC_ENVELOPE_FORMAT_V6; a length equal to the current format
-        // would instead reject at body decode, which the v6 test covers).
+        // (9 != MDOC_ENVELOPE_FORMAT_V7; a length equal to the current format
+        // would instead reject at body decode, which the v7 test covers).
         let legacy = bincode::serialize(&(vec![0u8; 9], vec![0u8; 1], vec![0u8; 1])).unwrap();
         assert!(matches!(
             verify_identity(sample_statement(), legacy),
@@ -1710,8 +1837,17 @@ mod tests {
     }
 
     #[test]
-    fn v6_envelope_discriminator_reaches_body_decode() {
-        let incomplete = bincode::serialize(&MDOC_ENVELOPE_FORMAT_V6).unwrap();
+    fn pre_unlinkability_v6_envelope_rejects_typed_before_body_decode() {
+        let legacy = bincode::serialize(&PRE_UNLINKABILITY_MDOC_ENVELOPE_FORMAT_V6).unwrap();
+        assert!(matches!(
+            verify_identity(sample_statement(), legacy),
+            Err(ZkError::Verify(message)) if message == "unsupported envelope format"
+        ));
+    }
+
+    #[test]
+    fn v7_envelope_discriminator_reaches_body_decode() {
+        let incomplete = bincode::serialize(&MDOC_ENVELOPE_FORMAT_V7).unwrap();
         assert!(matches!(
             verify_identity(sample_statement(), incomplete),
             Err(ZkError::Verify(message)) if message.starts_with("invalid proof envelope:")

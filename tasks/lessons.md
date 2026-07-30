@@ -55,7 +55,6 @@
   interaction generation, prover workers, and verifier reconstruction all exercise the same attack.
 - A malformed optional-arm regression must first build a fixture that actually contains that arm.
   Prove the three-role control fixture before shortening or extending revocation claim vectors.
-
 ## 2026-07-29 — Treat a work-order exclusion as an immediate scope override
 
 Pattern: the demo-prep document listed D5 alongside the requested implementation, but the user
@@ -71,3 +70,25 @@ the substantially faster optimized test binaries throughout.
 
 Rule: add `--release` to every remaining Cargo test run and report only release-suite results as
 final verification evidence; keep perf probes release-built as well.
+
+- Before reporting a repository-required file as absent, search hidden tracked
+  paths too (`rg --files -uu` or `git ls-tree -r HEAD`); ordinary file
+  discovery can omit `.agents` and turn a search mistake into a false
+  protocol-escalation premise.
+- An exact Cargo test filter is not evidence unless the result reports at
+  least one executed test. Confirm the fully qualified module path and the
+  nonzero `passed` count; a green `0 passed` run is only a filter typo.
+- Hold every verifier-preprocessing determinant fixed in cross-credential
+  privacy-region comparisons, especially the public device key. Otherwise a
+  legitimate tree-zero change is indistinguishable from a private-witness
+  leak; test the known public key exposure in a separate exact-whitelist gate.
+- Run every Cargo gate for this proof system with release optimizations.
+  Repeating debug proofs adds wall-clock cost without improving protocol
+  diagnosis. If symbols are needed, add a release-optimized profile that keeps
+  debug information instead of falling back to the dev profile.
+- Treat comments and campaign prose as hypotheses, not implementation
+  evidence. Trace the executable prover/verifier path, relation signs, public
+  serialization, and nonzero test results before reusing a branch.
+- Keep a core cryptographic proof contract independent of downstream wallet
+  frameworks unless the user explicitly puts integration in scope. The core
+  boundary ends at its exported prove/verify API and opaque proof bytes.

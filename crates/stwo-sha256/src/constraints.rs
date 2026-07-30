@@ -39,10 +39,11 @@ use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX};
 
 use crate::components::{
-    is_first_row_column_id, round_cyclic_column_ids, slot_sel_column_id, slot_starts_column_id,
+    is_first_row_column_id_ns, round_cyclic_column_ids_ns, slot_sel_column_id,
+    slot_starts_column_id,
 };
 use crate::constants::{DIGEST_BYTES, IV, N_STATE_WORDS};
-use crate::field_exposure::FieldExposure;
+use crate::field_exposure::{FieldExposure, FULL_PADDED_STREAM_SITES_PER_ROW};
 use crate::relations::{Sha256Relations, SlotIoRelations};
 use crate::slots::MultiSlotConfig;
 use crate::trace::WORD_BIT_COLS;
@@ -90,6 +91,10 @@ pub struct Sha256Eval {
     /// constraints exist iff the exposure is non-empty; the cross-module yield
     /// is what binds.
     pub field_exposure: FieldExposure,
+    /// Standalone-instance namespace for consumer-only preprocessed columns.
+    /// Empty preserves the legacy IDs exactly; multi-slot consumers keep this
+    /// empty and use their schedule-encoded IDs.
+    pub instance_namespace: String,
     /// Multi-message (slot-scheduled) mode — S8, see
     /// `tasks/sha-multimessage-design.md`. `None` (every legacy constructor)
     /// takes exactly the single-message code paths above. `Some` replaces
@@ -119,10 +124,10 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Plain constraints here are degree ≤ 3: a degree-2 boundary gate
-        // (`enabler · is_round_k`, with the indicator preprocessed) times a
-        // linear identity, or `enabler` times a degree-2 boundary-select
-        // expression. The binding term is the batch-4 LogUp finalizer
+        // Legacy plain constraints are degree ≤ 3. Full padded-stream mode
+        // adds one degree-4 final-counter identity
+        // (`gate_r15 · (1-enabler_after_block) · (counter-expected)`).
+        // The binding term is the batch-4 LogUp finalizer
         // (`finalize_logup_batched(LOGUP_BATCH)`): four degree-1 denominators
         // and degree-≤ 2 numerators fold to a degree-5 constraint (see
         // [`LOGUP_BATCH`]), so the budget is `log_size + 2` (D ≤ 5).
@@ -135,7 +140,7 @@ impl FrameworkEval for Sha256Eval {
         // All functions of `t = natural_row mod 64` alone, committed once
         // per circuit (see `crate::preprocessed`): the round constant
         // `K[t]`'s limbs, the boundary indicators, and the schedule gate.
-        let cyclic = round_cyclic_column_ids();
+        let cyclic = round_cyclic_column_ids_ns(&self.instance_namespace);
         let k_lo = eval.get_preprocessed_column(cyclic[0].clone());
         let k_hi = eval.get_preprocessed_column(cyclic[1].clone());
         let r0 = eval.get_preprocessed_column(cyclic[2].clone());
@@ -156,7 +161,9 @@ impl FrameworkEval for Sha256Eval {
                 multi.config.slot_log,
                 multi.config.n_slots(),
             )),
-            None => eval.get_preprocessed_column(is_first_row_column_id()),
+            None => {
+                eval.get_preprocessed_column(is_first_row_column_id_ns(&self.instance_namespace))
+            }
         };
         let slot_sel: Vec<E::F> = match &self.multi {
             Some(multi) => (0..multi.config.n_slots())
@@ -206,8 +213,29 @@ impl FrameworkEval for Sha256Eval {
             ],
         );
         let w: [(E::F, E::F); 17] = std::array::from_fn(|k| (w_lo[k].clone(), w_hi[k].clone()));
-        let w_bits_m: [[E::F; 3]; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15]));
+        // Full padded-stream exposure needs all 16 input words on the
+        // block's t=15 row. Reuse the existing boolean W-bit columns with a
+        // wider mask only in that transcript-distinct mode; every legacy mode
+        // keeps its original [0, -2, -15] mask shape.
+        let stream_w_bits_m: Option<[[E::F; WORDS_PER_BLOCK]; WORD_BIT_COLS]> =
+            self.field_exposure.full_padded_stream().map(|_| {
+                std::array::from_fn(|_| {
+                    eval.next_interaction_mask(
+                        ORIGINAL_TRACE_IDX,
+                        [
+                            0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15,
+                        ],
+                    )
+                })
+            });
+        let w_bits_m: [[E::F; 3]; WORD_BIT_COLS] = match &stream_w_bits_m {
+            Some(bits) => std::array::from_fn(|i| {
+                [bits[i][0].clone(), bits[i][2].clone(), bits[i][15].clone()]
+            }),
+            None => std::array::from_fn(|_| {
+                eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15])
+            }),
+        };
         let w_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bits_m[i][0].clone());
 
         // ---- round family: outputs, carries, Σ-decodes, packed groups ----
@@ -774,6 +802,15 @@ impl FrameworkEval for Sha256Eval {
         // block counter plus one selector per yielded byte; preprocessing stays
         // independent of message length and offsets.
         if let Some(multi) = &self.multi {
+            assert!(
+                self.field_exposure.full_padded_stream().is_none()
+                    && multi
+                        .config
+                        .slots
+                        .iter()
+                        .all(|slot| slot.field_exposure.full_padded_stream().is_none()),
+                "full padded stream exposure is unsupported in multi-slot SHA"
+            );
             // Multi-slot field providers: each slot's exposure keeps the
             // single-instance tail layout at its own column offset (mask
             // reads below happen in trace column order: per slot, bytes →
@@ -930,6 +967,54 @@ impl FrameworkEval for Sha256Eval {
                         &tuple,
                     ));
                 }
+            }
+        } else if let Some((field_id, padded_len)) = self.field_exposure.full_padded_stream() {
+            // Constant-width full-stream mode: the dynamic tail is exactly
+            // one block counter. Its progression proves the block order, and
+            // the expected final counter binds the configured padded length.
+            let [block_counter, block_counter_prev] =
+                eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+            eval.add_constraint(is_first_block.clone() * block_counter.clone());
+            eval.add_constraint(
+                enabler.clone()
+                    * (E::F::one() - r0.clone())
+                    * (block_counter.clone() - block_counter_prev.clone()),
+            );
+            eval.add_constraint(
+                chain_gate.clone() * (block_counter.clone() - block_counter_prev - E::F::one()),
+            );
+            let expected_last_block = padded_len / crate::constants::BLOCK_BYTES - 1;
+            eval.add_constraint(
+                gate_r15.clone()
+                    * (E::F::one() - enabler_after_block.clone())
+                    * (block_counter.clone() - E::F::from(M31::from(expected_last_block as u32))),
+            );
+
+            // At t=15, mask slot `15-word_idx` is W[word_idx]. W bits are
+            // LSB-first; canonical SHA bytes are big-endian within each word,
+            // so byte 0 uses bits 24..31 and byte 3 uses bits 0..7.
+            let stream_bits = stream_w_bits_m
+                .as_ref()
+                .expect("full padded stream mode reads all input-word bits");
+            for byte_in_block in 0..FULL_PADDED_STREAM_SITES_PER_ROW {
+                let word_idx = byte_in_block / BYTES_PER_WORD;
+                let byte_in_word = byte_in_block % BYTES_PER_WORD;
+                let first_bit = (BYTES_PER_WORD - 1 - byte_in_word) * 8;
+                let word_mask_slot = WORDS_PER_BLOCK - 1 - word_idx;
+                let mut byte = E::F::zero();
+                for bit in 0..8 {
+                    byte += E::F::from(M31::from(1u32 << bit))
+                        * stream_bits[first_bit + bit][word_mask_slot].clone();
+                }
+                let byte_index = block_counter.clone()
+                    * E::F::from(M31::from(FULL_PADDED_STREAM_SITES_PER_ROW as u32))
+                    + E::F::from(M31::from(byte_in_block as u32));
+                let tuple = [E::F::from(M31::from(field_id)), byte_index, byte];
+                eval.add_to_relation(RelationEntry::base(
+                    &self.relations.field.field,
+                    -gate_r15.clone(),
+                    &tuple,
+                ));
             }
         } else if !self.field_exposure.is_empty() {
             let field_bytes: Vec<E::F> = (0..self.field_exposure.n_byte_columns())

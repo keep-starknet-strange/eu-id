@@ -504,7 +504,6 @@ fn run_full_pq_bench(threading: BenchmarkThreading) -> EuIdFullPqBench {
         },
         min_age_years: 18,
         accepted_nationalities: vec![276, 250],
-        accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
     };
     let statement = match MdocCircuitStatement::from_extracted(&extracted, policy) {
         Ok(statement) => statement,

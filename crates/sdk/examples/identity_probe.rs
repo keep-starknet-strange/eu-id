@@ -103,24 +103,20 @@ fn main() {
             },
             min_age_years: 18,
             accepted_nationalities: vec![250, 276],
-            accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
         };
         let (_, mdoc_statement) =
             eu_id_prover::prove_mdoc(&fx.document, &request, policy).expect("proves");
-        println!(
-            "LEAK_CHECK birth_date_binding={:?} nationality_binding={:?}",
-            mdoc_statement.birth_date_binding, mdoc_statement.nationality_binding
-        );
+        println!("LEAK_CHECK private_predicate_bindings=absent");
         for attribute in &mdoc_statement.attributes {
             println!(
-                "LEAK_CHECK attribute id={:?} value={:?}",
-                attribute.element_identifier, attribute.value
+                "LEAK_CHECK attribute id={:?} mode={:?} item_padded_len={}",
+                attribute.element_identifier, attribute.mode, attribute.item_padded_len
             );
         }
     }
 
     println!(
-        "{{\"api\":\"prove_identity/verify_identity (ML-DSA)\",\"rayon_num_threads\":{:?},\"iters\":{iters},\"envelope_bytes\":{},\"prove_ms_all\":{prove_ms:?},\"verify_ms_all\":{verify_ms:?}}}",
+        "{{\"api\":\"prove_identity/verify_identity (ML-DSA)\",\"rayon_num_threads\":{:?},\"iters\":{iters},\"phase1_envelope_bytes\":{},\"prove_ms_all\":{prove_ms:?},\"verify_ms_all\":{verify_ms:?}}}",
         std::env::var("RAYON_NUM_THREADS").ok(),
         proof.len(),
     );

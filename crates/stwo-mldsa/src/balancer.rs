@@ -18,7 +18,9 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, m31, ColEval};
-use crate::binding::{CCellRelation, HashIoRelation, WCellRelation};
+use crate::binding::{
+    CCellRelation, HashIoRelation, NttCellRelation, RhoCellRelation, WCellRelation,
+};
 
 /// The relations a balancer can target (the cross-component bindings).
 #[derive(Clone)]
@@ -26,6 +28,8 @@ pub enum BalancerRelation {
     WCell(WCellRelation),
     CCell(CCellRelation),
     HashIo(HashIoRelation),
+    RhoCell(RhoCellRelation),
+    NttCell(NttCellRelation),
 }
 
 impl BalancerRelation {
@@ -34,6 +38,8 @@ impl BalancerRelation {
             BalancerRelation::WCell(r) => r.combine(values),
             BalancerRelation::CCell(r) => r.combine(values),
             BalancerRelation::HashIo(r) => r.combine(values),
+            BalancerRelation::RhoCell(r) => r.combine(values),
+            BalancerRelation::NttCell(r) => r.combine(values),
         }
     }
     fn add_entry<E: EvalAtRow>(&self, eval: &mut E, num: E::EF, values: &[E::F]) {
@@ -41,6 +47,12 @@ impl BalancerRelation {
             BalancerRelation::WCell(r) => eval.add_to_relation(RelationEntry::new(r, num, values)),
             BalancerRelation::CCell(r) => eval.add_to_relation(RelationEntry::new(r, num, values)),
             BalancerRelation::HashIo(r) => eval.add_to_relation(RelationEntry::new(r, num, values)),
+            BalancerRelation::RhoCell(r) => {
+                eval.add_to_relation(RelationEntry::new(r, num, values))
+            }
+            BalancerRelation::NttCell(r) => {
+                eval.add_to_relation(RelationEntry::new(r, num, values))
+            }
         }
     }
 }
