@@ -2567,8 +2567,11 @@ fn render_digest_array(output: &mut String, name: &str, digest: Digest32) {
     writeln!(output, "pub const {name}: [u8; 32] = [").expect("writing to String cannot fail");
     for chunk in digest.0.chunks(8) {
         output.push_str("    ");
-        for byte in chunk {
-            write!(output, "0x{byte:02x}, ").expect("writing to String cannot fail");
+        for (index, byte) in chunk.iter().enumerate() {
+            if index != 0 {
+                output.push(' ');
+            }
+            write!(output, "0x{byte:02x},").expect("writing to String cannot fail");
         }
         output.push('\n');
     }
@@ -3302,6 +3305,12 @@ mod tests {
         assert_eq!(first.shape_manifest, second.shape_manifest);
         assert_eq!(first.artifact, second.artifact);
         assert_eq!(first.hash_embedding, second.hash_embedding);
+        let hash_embedding =
+            std::str::from_utf8(&first.hash_embedding).expect("generated Rust is UTF-8");
+        assert!(
+            hash_embedding.lines().all(|line| !line.ends_with(' ')),
+            "generated Rust must not contain trailing whitespace"
+        );
         assert_eq!(first.circuit_hash, second.circuit_hash);
         assert_eq!(
             deterministic_proof_bound(&ts13_demo_proof_bound_terms()).unwrap(),
