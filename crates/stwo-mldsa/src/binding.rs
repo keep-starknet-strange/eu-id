@@ -59,6 +59,14 @@ relation!(CCellRelation, CCELL_ARITY);
 pub const RHO_CELL_ARITY: usize = 2;
 relation!(RhoCellRelation, RHO_CELL_ARITY);
 
+/// `(poly, coefficient_index, lo9, hi1)` — one private `t1` coefficient.
+///
+/// The public-key encoder splits each canonical ten-bit ML-DSA `t1`
+/// coefficient as `coefficient = lo9 + 2^9 * hi1`. It yields the tuple and
+/// the private-key evaluation component consumes it.
+pub const T1_CELL_ARITY: usize = 4;
+relation!(T1CellRelation, T1_CELL_ARITY);
+
 /// `(matrix_poly, ntt_stage, coefficient_index, limb0, limb1, limb2)`.
 ///
 /// ExpandA yields accepted coefficients at stage zero. The inverse-NTT
@@ -70,6 +78,7 @@ relation!(NttCellRelation, NTT_CELL_ARITY);
 /// Shared handles published by ExpandA for the later public-key and inverse-NTT
 /// components.
 pub type SharedRhoCellRelation = air_core::relations::SharedRelation<RhoCellRelation>;
+pub type SharedT1CellRelation = air_core::relations::SharedRelation<T1CellRelation>;
 pub type SharedNttCellRelation = air_core::relations::SharedRelation<NttCellRelation>;
 
 /// `(field_id, byte_index, byte)` — the message-byte relation for `M`'s bytes.
