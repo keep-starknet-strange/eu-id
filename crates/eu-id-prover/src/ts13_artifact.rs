@@ -2586,11 +2586,12 @@ fn render_usize_array(
 ) {
     write!(output, "pub const {name}: [usize; {length}] = [")
         .expect("writing to String cannot fail");
-    for (index, value) in values.into_iter().enumerate() {
+    let values = values.into_iter().collect::<Vec<_>>();
+    for (index, value) in values.iter().enumerate() {
         if index != 0 {
-            output.push(' ');
+            output.push_str(", ");
         }
-        write!(output, "{value},").expect("writing to String cannot fail");
+        write!(output, "{value}").expect("writing to String cannot fail");
     }
     output.push_str("];\n");
 }
@@ -2661,9 +2662,9 @@ fn render_hash_embedding(
             output.push_str("    &[");
             for (index, entry) in tree.sampled_value_length_histogram.iter().enumerate() {
                 if index != 0 {
-                    output.push(' ');
+                    output.push_str(", ");
                 }
-                write!(output, "({}, {}),", entry.value, entry.count)
+                write!(output, "({}, {})", entry.value, entry.count)
                     .expect("writing to String cannot fail");
             }
             output.push_str("],\n");
