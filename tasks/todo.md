@@ -1188,3 +1188,16 @@ Normative specification:
   transcript masking remains intentionally deferred. An Android/Kotlin
   binding smoke test is optional downstream integration work and is not a
   missing core proof or API requirement.
+
+## Mobile demo-readiness verification (2026-07-30)
+
+- [x] Trace the exported `proveIdentity` call through UniFFI and prove that it
+      reaches the frozen TS13 V1 composition without a product or legacy
+      fallback.
+- [x] Inventory the existing Android benchmark harness and reachable physical
+      or remote devices before adding any benchmark code.
+- [ ] Run the frozen A1 fixture in an optimized mobile build on the available
+      target, recording hardware, worker count, prove/verify latency, envelope
+      size, and peak memory where the platform exposes it.
+- [ ] Record the exact demo-readiness verdict and any external integration
+      blocker.

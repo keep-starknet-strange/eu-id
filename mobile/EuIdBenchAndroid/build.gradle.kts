@@ -5,8 +5,23 @@ plugins {
     id("com.android.application") version "9.2.1"
 }
 
+val ts13SdkAar = providers.gradleProperty("ts13SdkAar").orNull?.let { path ->
+    file(path).also { aar ->
+        require(aar.isFile) {
+            "ts13SdkAar must point to the current eu-id-zk-sdk AAR: ${aar.absolutePath}"
+        }
+    }
+}
+
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    ts13SdkAar?.let { aar ->
+        implementation(files(aar))
+        // A flat-file AAR has no transitive dependency metadata.
+        implementation("net.java.dev.jna:jna:5.19.1@aar")
+    }
 }
 
 val workspaceRoot = file("$projectDir/../..")
@@ -113,6 +128,7 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         ndk {
             abiFilters += "arm64-v8a"
@@ -183,5 +199,7 @@ val stageMldsaBenchManifests by tasks.registering(Sync::class) {
 }
 
 tasks.named("preBuild") {
-    dependsOn(stageMldsaBenchLibraries, stageMldsaBenchManifests)
+    if (ts13SdkAar == null) {
+        dependsOn(stageMldsaBenchLibraries, stageMldsaBenchManifests)
+    }
 }

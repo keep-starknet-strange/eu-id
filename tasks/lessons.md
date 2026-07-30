@@ -96,6 +96,11 @@ final verification evidence; keep perf probes release-built as well.
 - Keep a core cryptographic proof contract independent of downstream wallet
   frameworks unless the user explicitly puts integration in scope. The core
   boundary ends at its exported prove/verify API and opaque proof bytes.
+- Before treating mobile benchmarking as new infrastructure, inspect the
+  repository's existing Firebase Game Loop APK, JNI entrypoint, provenance
+  manifests, and prior device matrix. Reuse that delivery path, but trace the
+  measured function: a historical `fullPq` benchmark is not evidence for a new
+  `proveIdentity` profile merely because both mention TS13.
 - When a derived circuit value needs transcript binding, preserve any separate
   module's exact normative mix order and bind the value in the AIR that consumes
   it; “public transcript” does not authorize changing an unrelated frozen binder.
