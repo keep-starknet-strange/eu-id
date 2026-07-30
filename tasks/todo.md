@@ -1081,7 +1081,7 @@ Normative specification:
 - [ ] Freeze canonical A/B credentials and the supported request-context
       corpus; derive and commit `DEVICE_SIG_STRUCTURE_CAPACITY` from the
       measured maximum plus the specified margin.
-- [ ] Capture three fresh, metadata-matched release baselines before changing
+- [x] Capture three fresh, metadata-matched release baselines before changing
       the profile; record proof bytes, peak memory, thread count, hardware,
       operating system, PCS configuration, features, commit, and fixture.
 - [ ] Generate the deterministic circuit artifact, source-tree digest, circuit
@@ -1144,5 +1144,10 @@ Normative specification:
       `codex/ts13-demo-unlinkable@d4b7ab0e`; the latter already contains the
       reviewed Phase-1 work and byte-identical U5/U7 parked prototypes, so no
       older unlinkability branch is merged again.
+- [x] Preserve the matched pre-change release baseline under
+      `tasks/bench-results/ts13-unlinkable-baseline-20260730/`: median
+      prove 756 ms, forced-fresh verify 44 ms, raw proof 1,556,499 bytes,
+      Bzip2 wire 1,217,883 bytes, and peak RSS 924.16 MiB with twelve Rayon
+      workers on the seven-attribute fixture.
 - [ ] Record the final public allowlist, circuit artifact/hash, V4 capacity,
       release test matrix, A1/A2/B evidence, and matched performance results.
