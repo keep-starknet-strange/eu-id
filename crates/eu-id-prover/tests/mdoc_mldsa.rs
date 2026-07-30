@@ -722,7 +722,8 @@ mod quantum_only {
             prove_mdoc_circuit(&extracted, &statement).expect("boundary fully-PQ mdoc proves");
         let prove_time = prove_start.elapsed();
         let verify_start = Instant::now();
-        verify_mdoc_circuit(&proof, &statement).expect("boundary fully-PQ mdoc verifies");
+        verify_mdoc_circuit(&proof, &public_view(&statement))
+            .expect("boundary fully-PQ mdoc verifies");
         println!(
             "FIPS decompose boundary: coefficients = {boundary_count}, \
              prove = {prove_time:?}, verify = {:?}",
