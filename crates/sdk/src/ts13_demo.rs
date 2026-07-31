@@ -17,6 +17,10 @@ const _: () = assert!(
     PROOF_BODY_CAPACITY != 0 && PROOF_BODY_CAPACITY.is_multiple_of(ENVELOPE_CAPACITY_ALIGNMENT)
 );
 
+fn report_prove_timing(phase: &str, elapsed: std::time::Duration) {
+    eu_id_prover::report_prove_timing("sdk", phase, elapsed);
+}
+
 /// Public values for the TS13 identity proof.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct IdentityStatement {
@@ -288,12 +292,16 @@ pub(crate) fn prove_identity_inner(
     statement: &IdentityStatement,
     witness: &IdentityWitness,
 ) -> Result<Vec<u8>, IdentityError> {
+    let total_start = std::time::Instant::now();
+    let public_input_start = std::time::Instant::now();
     let prepared = prepare_public_input(statement)?;
+    report_prove_timing("public_input_prepare", public_input_start.elapsed());
     if witness.revocation_id_lo >= witness.revocation_id_hi
         || witness.revocation_signature.len() != eu_id_prover::ts13_demo::ML_DSA_65_SIGNATURE_BYTES
     {
         return Err(IdentityError::InvalidRevocationWitness);
     }
+    let core_start = std::time::Instant::now();
     let proof = eu_id_prover::prove_mdoc_ts13_demo(
         &witness.document,
         &prepared.request,
@@ -303,7 +311,12 @@ pub(crate) fn prove_identity_inner(
         eu_id_prover::mdoc::MdocRevocationSignature(witness.revocation_signature.clone()),
     )
     .map_err(map_core_prove_error)?;
-    encode_envelope(&proof)
+    report_prove_timing("core_prove", core_start.elapsed());
+    let envelope_start = std::time::Instant::now();
+    let envelope = encode_envelope(&proof)?;
+    report_prove_timing("envelope_encode", envelope_start.elapsed());
+    report_prove_timing("total", total_start.elapsed());
+    Ok(envelope)
 }
 
 pub(crate) fn verify_identity_inner(

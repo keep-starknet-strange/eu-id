@@ -18,7 +18,7 @@ use stwo::core::fields::qm31::{SecureField, QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::pcs::TreeVec;
-use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
+use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::Column;
@@ -31,7 +31,18 @@ use stwo_constraint_framework::{
 
 use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 
-use stwo_keccak::relations::{HashIoRelation, KeccakRelations, SharedKeccakRelations};
+use stwo_keccak::constants::{
+    IOTA_RC, IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS,
+};
+use stwo_keccak::keccak;
+use stwo_keccak::keccak_round::{
+    self, round_output_trace_index, N_XOR3_C, N_XOR3_THETA_APPLY, ROUND_CONSTANT_TRACE_START,
+};
+use stwo_keccak::relations::{
+    direction, HashIoRelation, KeccakRelations, SharedKeccakRelations, KECCAK_ROUND_ARITY,
+    KECCAK_ROUND_DIRECTION_INDEX, KECCAK_ROUND_INDEX_INDEX, KECCAK_ROUND_PERM_ID_INDEX,
+    KECCAK_ROUND_RC_START, KECCAK_ROUND_STATE_START,
+};
 use stwo_keccak::service::{
     service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier, PermWitness,
 };
@@ -41,8 +52,8 @@ use stwo_keccak::sponge_v::{
     schedule_ids, Eval as SpongeEval, JobList, SpongeVRun,
 };
 use stwo_keccak::tables::{build_conv_table, build_dense_table};
-use stwo_keccak::utils::{col_eval, ColEval};
-use stwo_keccak::utils::{spread_u32, SPREAD_MAX};
+use stwo_keccak::tables_air::TableMultiplicities;
+use stwo_keccak::utils::{col_eval, spread_u32, unspread_u32, ColEval, SPREAD_MAX};
 
 // =====================================================================
 // Test io-closer module: yields every job's absorb bytes (+) and requires
@@ -231,6 +242,302 @@ impl AirProver for IoCloser {
 // =====================================================================
 // Fixture helpers.
 // =====================================================================
+
+const ALTERNATE_IOTA_ROUND: usize = 1;
+const ALTERNATE_IOTA_RC: u64 = 0;
+fn set_packed_lane(cell: &mut PackedM31, lane: usize, value: M31) {
+    let mut values = cell.to_array();
+    values[lane] = value;
+    *cell = PackedM31::from_array(values);
+}
+
+fn packed_lane(cell: PackedM31, lane: usize) -> M31 {
+    cell.to_array()[lane]
+}
+
+fn round_state(
+    input: &[u8; N_BYTES_IN_STATE],
+    round: usize,
+    round_constant: u64,
+) -> [u8; N_BYTES_IN_STATE] {
+    let mut packed: [PackedM31; N_BYTES_IN_STATE] =
+        std::array::from_fn(|i| PackedM31::from(M31::from(input[i] as u32)));
+    stwo_keccak::utils::keccak_f1600_round(&mut packed, round);
+    let mut output = std::array::from_fn(|i| packed[i].to_array()[0].0 as u8);
+    let delta = IOTA_RC[round] ^ round_constant;
+    for (byte, delta_byte) in output[..N_BYTES_IN_U64].iter_mut().zip(delta.to_le_bytes()) {
+        *byte ^= delta_byte;
+    }
+    output
+}
+
+fn pack_round_instances(
+    instances: &[([u8; N_BYTES_IN_STATE], u32, u32)],
+) -> Vec<[PackedM31; N_BYTES_IN_STATE + 2]> {
+    let mut rows = Vec::with_capacity(instances.len().div_ceil(N_LANES));
+    for chunk in instances.chunks(N_LANES) {
+        let mut row = [PackedM31::zero(); N_BYTES_IN_STATE + 2];
+        for (lane, (state, round, perm_id)) in chunk.iter().enumerate() {
+            for (column, byte) in row[..N_BYTES_IN_STATE].iter_mut().zip(state) {
+                set_packed_lane(column, lane, M31::from(spread_u32(*byte as u32)));
+            }
+            set_packed_lane(&mut row[N_BYTES_IN_STATE], lane, M31::from(*round));
+            set_packed_lane(&mut row[N_BYTES_IN_STATE + 1], lane, M31::from(*perm_id));
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+/// Build a complete one-permutation witness that uses one wrong intermediate
+/// Iota constant. All sponge, wrapper, round, table, and output data agree with
+/// that permutation. Only the verifier-pinned round schedule disagrees.
+fn install_alternate_iota_witness(run: &mut SpongeVRun) -> PermWitness {
+    assert_eq!(run.jobs.jobs.len(), 1);
+    assert_eq!(run.jobs.n_perms_total(), 1);
+    assert_eq!(run.rows.len(), 1);
+    assert!(run.xor.is_empty());
+
+    let shape = &run.jobs.jobs[0];
+    assert_eq!(shape.n_absorb, 1);
+    assert_eq!(shape.n_squeeze, 1);
+    let rate = shape.rate();
+    let perm_id = run.perm_inputs[0][N_BYTES_IN_STATE].to_array()[0].0;
+    let mut state =
+        std::array::from_fn(|i| unspread_u32(run.perm_inputs[0][i].to_array()[0].0) as u8);
+    let mut boundaries = Vec::with_capacity(N_ROUNDS + 1);
+    let mut instances = Vec::with_capacity(N_ROUNDS);
+    let mut official_changed_output = None;
+    boundaries.push(state);
+    for (round, official_rc) in IOTA_RC.iter().copied().enumerate().take(N_ROUNDS) {
+        instances.push((state, round as u32, perm_id));
+        if round == ALTERNATE_IOTA_ROUND {
+            official_changed_output = Some(round_state(&state, round, official_rc));
+            state = round_state(&state, round, ALTERNATE_IOTA_RC);
+        } else {
+            state = round_state(&state, round, official_rc);
+        }
+        boundaries.push(state);
+    }
+
+    run.rows[0].post = state;
+    run.rows[0].squeeze_byte.fill(0);
+    run.rows[0].squeeze_byte[..rate].copy_from_slice(&state[..rate]);
+    run.outputs[0] = state[..rate].to_vec();
+    run.conv.truncate(rate);
+    run.conv.extend(state[..rate].iter().map(|byte| {
+        [
+            PackedM31::from(M31::from(*byte as u32)),
+            PackedM31::from(M31::from(spread_u32(*byte as u32))),
+        ]
+    }));
+
+    let keccak_claim = keccak::Claim { n_perms: 1 };
+    let keccak_log_size = keccak_claim.log_size();
+    let mut keccak_columns =
+        vec![vec![M31::zero(); 1usize << keccak_log_size]; 1 + N_BYTES_IN_STATE];
+    let mut keccak_rows = Vec::with_capacity(boundaries.len());
+    for (row_index, boundary) in boundaries.iter().enumerate() {
+        let spread_state = std::array::from_fn(|i| M31::from(spread_u32(boundary[i] as u32)));
+        keccak_columns[0][row_index] = M31::from(perm_id);
+        for i in 0..N_BYTES_IN_STATE {
+            keccak_columns[1 + i][row_index] = spread_state[i];
+        }
+        keccak_rows.push(keccak::RowLook {
+            perm_id: M31::from(perm_id),
+            state: spread_state,
+        });
+    }
+    let keccak_trace = keccak_columns
+        .into_iter()
+        .map(|column| col_eval(keccak_log_size, column))
+        .collect();
+    let (round_claim, mut round_trace, mut round_data) =
+        keccak_round::Claim::generate_trace(pack_round_instances(&instances), N_ROUNDS);
+    let round_row = ALTERNATE_IOTA_ROUND;
+    let vector_row = round_row / N_LANES;
+    let lane = round_row % N_LANES;
+    let official_output = official_changed_output.expect("changed round output");
+    let alternate_output = boundaries[round_row + 1];
+    let trace_row = round_trace
+        .iter_mut()
+        .nth(vector_row)
+        .expect("changed round trace row");
+
+    for (slot, byte_index) in IOTA_RC_BYTE_INDICES.iter().copied().enumerate() {
+        let alternate_rc = ALTERNATE_IOTA_RC.to_le_bytes()[byte_index];
+        let value = M31::from(spread_u32(alternate_rc as u32));
+        set_packed_lane(
+            &mut *trace_row[ROUND_CONSTANT_TRACE_START + slot],
+            lane,
+            value,
+        );
+        set_packed_lane(
+            &mut round_data.lookup_data.keccak_round[0][vector_row][KECCAK_ROUND_RC_START + slot],
+            lane,
+            value,
+        );
+    }
+
+    let closing_lookup_start = N_XOR3_C + N_XOR3_THETA_APPLY;
+    for byte_index in 0..N_BYTES_IN_U64 {
+        let official_rc = IOTA_RC[round_row].to_le_bytes()[byte_index];
+        let alternate_rc = ALTERNATE_IOTA_RC.to_le_bytes()[byte_index];
+        let official_rc = M31::from(spread_u32(official_rc as u32));
+        let alternate_rc = M31::from(spread_u32(alternate_rc as u32));
+        let alternate_state = M31::from(spread_u32(alternate_output[byte_index] as u32));
+        let key =
+            &mut round_data.lookup_data.xor3[closing_lookup_start + byte_index][vector_row][0];
+        let alternate_key = packed_lane(*key, lane) - official_rc + alternate_rc;
+        set_packed_lane(key, lane, alternate_key);
+        set_packed_lane(
+            &mut round_data.lookup_data.xor3[closing_lookup_start + byte_index][vector_row][1],
+            lane,
+            alternate_state,
+        );
+        set_packed_lane(
+            &mut *trace_row[round_output_trace_index(byte_index)],
+            lane,
+            alternate_state,
+        );
+    }
+    for (byte_index, byte) in alternate_output.iter().copied().enumerate() {
+        set_packed_lane(
+            &mut round_data.lookup_data.keccak_round[1][vector_row]
+                [KECCAK_ROUND_STATE_START + byte_index],
+            lane,
+            M31::from(spread_u32(byte as u32)),
+        );
+    }
+
+    assert_ne!(official_output, alternate_output);
+    for (slot, byte_index) in IOTA_RC_BYTE_INDICES.iter().copied().enumerate() {
+        let expected = M31::from(spread_u32(
+            ALTERNATE_IOTA_RC.to_le_bytes()[byte_index] as u32,
+        ));
+        assert_eq!(
+            packed_lane(*trace_row[ROUND_CONSTANT_TRACE_START + slot], lane),
+            expected,
+            "alternate Iota trace byte {byte_index}"
+        );
+    }
+    for (byte_index, byte) in alternate_output.iter().copied().enumerate() {
+        assert_eq!(
+            packed_lane(*trace_row[round_output_trace_index(byte_index)], lane),
+            M31::from(spread_u32(byte as u32)),
+            "alternate round-output trace byte {byte_index}"
+        );
+    }
+    assert_eq!(
+        round_data.lookup_data.keccak_round[0][0].len(),
+        KECCAK_ROUND_ARITY
+    );
+
+    drop(trace_row);
+    let keccak_data = keccak::InteractionClaimData {
+        n_perms: 1,
+        rows: keccak_rows,
+    };
+    for (boundary_index, (row, boundary)) in
+        keccak_data.rows.iter().zip(boundaries.iter()).enumerate()
+    {
+        assert_eq!(row.perm_id, M31::from(perm_id));
+        for (byte_index, byte) in boundary.iter().copied().enumerate() {
+            let expected = M31::from(spread_u32(byte as u32));
+            assert_eq!(
+                row.state[byte_index], expected,
+                "wrapper boundary {boundary_index}, byte {byte_index}"
+            );
+            if boundary_index == 0 {
+                assert_eq!(
+                    packed_lane(run.perm_inputs[0][byte_index], 0),
+                    expected,
+                    "sponge input byte {byte_index}"
+                );
+            }
+        }
+    }
+    for (round, official_rc) in IOTA_RC.iter().copied().enumerate().take(N_ROUNDS) {
+        let vector_row = round / N_LANES;
+        let lane = round % N_LANES;
+        let input = &round_data.lookup_data.keccak_round[0][vector_row];
+        let output = &round_data.lookup_data.keccak_round[1][vector_row];
+        let expected_rc = if round == ALTERNATE_IOTA_ROUND {
+            ALTERNATE_IOTA_RC
+        } else {
+            official_rc
+        };
+        assert_eq!(
+            packed_lane(input[KECCAK_ROUND_PERM_ID_INDEX], lane),
+            M31::from(perm_id)
+        );
+        assert_eq!(
+            packed_lane(input[KECCAK_ROUND_DIRECTION_INDEX], lane),
+            M31::from(direction::IN)
+        );
+        assert_eq!(
+            packed_lane(input[KECCAK_ROUND_INDEX_INDEX], lane),
+            M31::from(round as u32)
+        );
+        assert_eq!(
+            packed_lane(output[KECCAK_ROUND_PERM_ID_INDEX], lane),
+            M31::from(perm_id)
+        );
+        assert_eq!(
+            packed_lane(output[KECCAK_ROUND_DIRECTION_INDEX], lane),
+            M31::from(direction::OUT)
+        );
+        assert_eq!(
+            packed_lane(output[KECCAK_ROUND_INDEX_INDEX], lane),
+            M31::from((round + 1) as u32)
+        );
+        for (slot, byte_index) in IOTA_RC_BYTE_INDICES.iter().copied().enumerate() {
+            assert_eq!(
+                packed_lane(input[KECCAK_ROUND_RC_START + slot], lane),
+                M31::from(spread_u32(expected_rc.to_le_bytes()[byte_index] as u32)),
+                "round {round} input Iota byte {byte_index}"
+            );
+            assert_eq!(
+                packed_lane(output[KECCAK_ROUND_RC_START + slot], lane),
+                M31::zero(),
+                "round {round} output Iota byte {byte_index}"
+            );
+        }
+        for byte_index in 0..N_BYTES_IN_STATE {
+            assert_eq!(
+                packed_lane(input[KECCAK_ROUND_STATE_START + byte_index], lane),
+                keccak_data.rows[round].state[byte_index],
+                "round {round} input state byte {byte_index}"
+            );
+            assert_eq!(
+                packed_lane(output[KECCAK_ROUND_STATE_START + byte_index], lane),
+                keccak_data.rows[round + 1].state[byte_index],
+                "round {round} output state byte {byte_index}"
+            );
+        }
+    }
+    for (byte_index, byte) in run.rows[0].post.iter().copied().enumerate() {
+        assert_eq!(
+            keccak_data.rows[N_ROUNDS].state[byte_index],
+            M31::from(spread_u32(byte as u32)),
+            "sponge output state byte {byte_index}"
+        );
+    }
+    assert_eq!(run.outputs[0], run.rows[0].post[..rate]);
+
+    let round_trace: Vec<_> = round_trace.to_evals().into_iter().collect();
+    let mut table_mult = TableMultiplicities::from_round(&round_data);
+    table_mult.add_sponge(&run.xor, &run.conv);
+    PermWitness {
+        keccak_claim,
+        keccak_trace,
+        keccak_data,
+        round_claim,
+        round_trace,
+        round_data,
+        table_mult,
+    }
+}
 
 fn shapes_for(messages: &[Vec<u8>], n_squeezes: &[usize]) -> Vec<Shape> {
     messages
@@ -903,6 +1210,45 @@ fn wrong_conv_at_hashio_boundary_has_no_conv_row() {
 // Adversarial tests for the round LogUp-to-GKR path.
 // =====================================================================
 
+/// A complete service witness for a nonstandard intermediate Iota constant
+/// must fail against the verifier-pinned FIPS 202 schedule. The sponge output,
+/// all 25 wrapper boundaries, all 24 round rows, table multiplicities, and the
+/// output closer use the same nonstandard permutation.
+#[test]
+fn coherent_alternate_iota_schedule_rejects() {
+    let message = vec![0x5au8; 32];
+    let shapes = shapes_for(std::slice::from_ref(&message), &[1]);
+    let handle = SharedKeccakRelations::new();
+    let mut service =
+        KeccakServiceProver::new(shapes.clone(), vec![message.clone()], handle.clone());
+    let official_output = service.job_outputs()[0].clone();
+    let alternate_perm = install_alternate_iota_witness(service.run_mut());
+    *service.perm_mut() = alternate_perm;
+    let outputs = service.job_outputs().to_vec();
+    assert_ne!(outputs[0], official_output);
+    assert_ne!(outputs[0], shake256_ref(&message, outputs[0].len()));
+
+    let mut closer = IoCloser::new(
+        closer_entries(&shapes, std::slice::from_ref(&message), &outputs),
+        handle,
+    );
+    let (proof, payloads) =
+        air_core::prove_with_post_interaction(&mut [&mut service, &mut closer], pcs_config())
+            .expect("coherent alternate-Iota witness should reach verification");
+    let proved = ProvedJobs {
+        shapes,
+        messages: vec![message.clone()],
+        outputs,
+        service_claims: service.claimed_sums(),
+        proof,
+        payloads,
+    };
+    assert!(
+        verify_jobs(&proved, &[message]).is_err(),
+        "the fixed round schedule must reject a coherent alternate-Iota witness"
+    );
+}
+
 /// Skip the prover-side coeff-poly-vs-oracle completeness self-check so the
 /// adversarial provers below can produce their desynchronized proofs; the
 /// verifier must then reject them independently.
@@ -1009,11 +1355,11 @@ fn cross_permutation_round_output_swap_rejects() {
         let (vr_a, lane_a) = (first / N_LANES, first % N_LANES);
         let (vr_b, lane_b) = (second / N_LANES, second % N_LANES);
         let links = &mut perm.round_data.lookup_data.keccak_round[1];
-        let mut a = links[vr_a][0].to_array(); // tuple[0] = perm_id
-        let mut b = links[vr_b][0].to_array();
+        let mut a = links[vr_a][KECCAK_ROUND_PERM_ID_INDEX].to_array();
+        let mut b = links[vr_b][KECCAK_ROUND_PERM_ID_INDEX].to_array();
         std::mem::swap(&mut a[lane_a], &mut b[lane_b]);
-        links[vr_a][0] = stwo::prover::backend::simd::m31::PackedM31::from_array(a);
-        links[vr_b][0] = stwo::prover::backend::simd::m31::PackedM31::from_array(b);
+        links[vr_a][KECCAK_ROUND_PERM_ID_INDEX] = PackedM31::from_array(a);
+        links[vr_b][KECCAK_ROUND_PERM_ID_INDEX] = PackedM31::from_array(b);
     }));
 }
 
@@ -1026,9 +1372,9 @@ fn reordered_round_outputs_reject() {
     let msg = vec![0x40u8; 300];
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
         let links = &mut perm.round_data.lookup_data.keccak_round[1];
-        let mut round_ids = links[0][1].to_array(); // tuple[1] = outgoing round index
+        let mut round_ids = links[0][KECCAK_ROUND_INDEX_INDEX].to_array();
         round_ids.swap(0, 1); // rounds 0 and 1 are lanes 0 and 1
-        links[0][1] = stwo::prover::backend::simd::m31::PackedM31::from_array(round_ids);
+        links[0][KECCAK_ROUND_INDEX_INDEX] = PackedM31::from_array(round_ids);
     }));
 }
 
@@ -1043,9 +1389,8 @@ fn tampered_round_link_tuple_rejects() {
         vec![1],
         None,
         Some(&|perm| {
-            use stwo::prover::backend::simd::m31::PackedM31;
             let out_link = &mut perm.round_data.lookup_data.keccak_round[1][0];
-            out_link[10] += PackedM31::broadcast(M31::one());
+            out_link[KECCAK_ROUND_STATE_START] += PackedM31::broadcast(M31::one());
         }),
         pcs_config(),
     );

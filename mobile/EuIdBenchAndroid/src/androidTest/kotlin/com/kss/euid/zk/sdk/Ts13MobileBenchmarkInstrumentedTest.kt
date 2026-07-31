@@ -3,6 +3,7 @@ package com.kss.euid.zk.sdk
 // Firebase Test Lab runs one host APK and one test APK.
 import android.os.Build
 import android.os.SystemClock
+import android.system.Os
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -63,9 +64,45 @@ class Ts13MobileBenchmarkInstrumentedTest {
                 witnessFixture.getString("revocationSignature").decodeHex(),
         )
 
+        val timingFile = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            PROVE_TIMING_FILE,
+        )
+        assertTrue(!timingFile.exists() || timingFile.delete())
+        Os.setenv(PROVE_TIMING_ENV, "1", true)
+        Os.setenv(PROVE_TIMING_FILE_ENV, timingFile.absolutePath, true)
         val proveStarted = SystemClock.elapsedRealtimeNanos()
-        val proof = proveIdentity(statement, witness)
+        val proof = try {
+            proveIdentity(statement, witness)
+        } finally {
+            Os.unsetenv(PROVE_TIMING_ENV)
+            Os.unsetenv(PROVE_TIMING_FILE_ENV)
+        }
         val proveMs = elapsedMilliseconds(proveStarted)
+        val phaseTimings = timingFile.useLines { lines ->
+            lines
+                .filter { it.isNotBlank() }
+                .map { line ->
+                    require(line.startsWith(PROVE_TIMING_PREFIX))
+                    JSONObject(line.removePrefix(PROVE_TIMING_PREFIX))
+                }.toList()
+        }
+        assertTrue(
+            phaseTimings.any {
+                it.getString("scope") == "sdk" && it.getString("phase") == "total"
+            },
+        )
+        assertTrue(
+            phaseTimings.any {
+                it.getString("scope") == "eu_id_prover" &&
+                    it.getString("phase") == "witness_generation"
+            },
+        )
+        assertTrue(
+            phaseTimings.any {
+                it.getString("scope") == "air_core" && it.getString("phase") == "total"
+            },
+        )
 
         assertTrue(proof.size >= ENVELOPE_HEADER_BYTES)
         assertArrayEquals(ENVELOPE_MAGIC, proof.copyOfRange(0, ENVELOPE_MAGIC.size))
@@ -90,9 +127,12 @@ class Ts13MobileBenchmarkInstrumentedTest {
             append(",\"verify_ms\":").append(verifyMs)
             append(",\"envelope_bytes\":").append(proof.size)
             append(",\"vm_hwm_kib\":").append(vmHwmKib)
+            append(",\"phase_timings\":")
+            append(phaseTimings.joinToString(prefix = "[", postfix = "]"))
             append('}')
         }
         Log.i(LOG_TAG, result)
+        assertTrue(timingFile.delete())
     }
 
     private fun String.decodeHex(): ByteArray {
@@ -129,6 +169,10 @@ class Ts13MobileBenchmarkInstrumentedTest {
         const val FIXTURE_ASSET = "ts13_mobile_benchmark_fixture_v1.json"
         const val FIXTURE_SCHEMA = "euid-ts13-mobile-fixture-v1"
         const val LOG_TAG = "Ts13MobileBenchmark"
+        const val PROVE_TIMING_ENV = "EUID_PROVE_TIMING"
+        const val PROVE_TIMING_FILE_ENV = "EUID_PROVE_TIMING_FILE"
+        const val PROVE_TIMING_FILE = "ts13-prove-timing.jsonl"
+        const val PROVE_TIMING_PREFIX = "EUID_PROVE_TIMING "
         const val PRIVACY_CLAIM =
             "public-input unlinkable; transcript zero knowledge pending"
         const val TS13_PROFILE = "ts13-pid-age-over-18-unlinkable-demo-v1"

@@ -21,8 +21,7 @@ pub const DELIMITED_SUFFIX: u8 = 0x1F;
 /// Final padding bit OR-ed into the last rate byte (`0x80`).
 pub const FINAL_BIT: u8 = 0x80;
 
-/// Iota round constants (FIPS 202), one per round, plus a trailing dummy `0`
-/// used as the "next" round-constant marker for the last round's chain link.
+/// Iota round constants from FIPS 202, plus zero for boundary row 24.
 pub const IOTA_RC: [u64; N_ROUNDS + 1] = [
     0x0000_0000_0000_0001,
     0x0000_0000_0000_8082,
@@ -48,10 +47,14 @@ pub const IOTA_RC: [u64; N_ROUNDS + 1] = [
     0x8000_0000_0000_8080,
     0x0000_0000_8000_0001,
     0x8000_0000_8000_8008,
-    0x0000_0000_0000_0000, // dummy "next RC" for the final chain link
+    0x0000_0000_0000_0000, // fixed value for boundary row 24
 ];
 
-/// The 24 real iota round constants (drops the trailing dummy from `IOTA_RC`).
+/// Little-endian byte positions that vary in the Keccak Iota constants.
+/// Bytes 2, 4, 5, and 6 are zero in every round and are inlined as zero.
+pub const IOTA_RC_BYTE_INDICES: [usize; 4] = [0, 1, 3, 7];
+
+/// Return the 24 Iota constants without the boundary-row-24 zero.
 pub const fn iota_rc_rounds() -> [u64; N_ROUNDS] {
     let mut out = [0u64; N_ROUNDS];
     let mut i = 0;

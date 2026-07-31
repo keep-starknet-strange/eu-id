@@ -53,20 +53,21 @@ const DEVICE_KEY_BIND_DOMAIN: u64 = 0x4d44_4f43_504b_5539;
 const DEVICE_KEY_BIND_VERSION: u64 = 1;
 const T1_GROUP_BYTES: usize = 5;
 const T1_COEFFICIENTS_PER_GROUP: usize = 4;
-const PREPROCESSED_COLS: usize = 12;
+const T1_BYTES_PER_POLYNOMIAL: u32 = 64 * T1_GROUP_BYTES as u32;
+/// `4 / 5` in M31. This converts a five-byte group offset to its first
+/// coefficient index.
+const COEFFICIENT_BASE_SCALE: u32 = 1_288_490_189;
+const PREPROCESSED_COLS: usize = 5;
 const TRACE_COLS: usize = 34;
 const MAIN_LOGUP_SITES: usize = 23;
 const MAIN_INTERACTION_COLS: usize = MAIN_LOGUP_SITES.div_ceil(2) * SECURE_EXTENSION_DEGREE;
 const BLINDER_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 
 const PP_ACTIVE: usize = 0;
-const PP_RHO_ROW: usize = 1;
-const PP_T1_ROW: usize = 2;
-const PP_FIRST: usize = 3;
-const PP_BYTE_BASE: usize = 4;
-const PP_POLY: usize = 5;
-const PP_COEFF_BASE: usize = 6;
-const PP_LANE_ACTIVE_START: usize = 7;
+const PP_T1_ROW: usize = 1;
+const PP_FIRST: usize = 2;
+const PP_BYTE_BASE: usize = 3;
+const PP_POLY: usize = 4;
 
 const COL_DEVICE_PK_START: usize = 0;
 const COL_BYTE_START: usize = 1;
@@ -161,38 +162,51 @@ pub(crate) struct MdocPrivateDeviceKeyInteractionClaim {
 
 #[derive(Clone, Copy)]
 struct Row {
-    rho: bool,
-    t1: bool,
-    first: bool,
     byte_base: usize,
     poly: usize,
-    coefficient_base: usize,
-    lane_active: [bool; T1_GROUP_BYTES],
+}
+
+impl Row {
+    fn is_rho(self) -> bool {
+        self.byte_base < 32
+    }
+
+    fn is_t1(self) -> bool {
+        !self.is_rho()
+    }
+
+    fn is_first(self) -> bool {
+        self.byte_base == 0
+    }
+
+    fn lane_active(self, lane: usize) -> bool {
+        lane == 0 || self.is_t1()
+    }
+
+    #[cfg(test)]
+    fn coefficient_base(self) -> usize {
+        if self.is_t1() {
+            let group_byte = self.byte_base - 32 - self.poly * T1_BYTES_PER_POLYNOMIAL as usize;
+            group_byte / T1_GROUP_BYTES * T1_COEFFICIENTS_PER_GROUP
+        } else {
+            0
+        }
+    }
 }
 
 fn schedule() -> Vec<Row> {
     let mut rows = Vec::with_capacity(MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS);
     for byte_index in 0..32 {
         rows.push(Row {
-            rho: true,
-            t1: false,
-            first: byte_index == 0,
             byte_base: byte_index,
             poly: 0,
-            coefficient_base: 0,
-            lane_active: [true, false, false, false, false],
         });
     }
     for poly in 0..K {
         for group in 0..64 {
             rows.push(Row {
-                rho: false,
-                t1: true,
-                first: false,
                 byte_base: 32 + (poly * 64 + group) * T1_GROUP_BYTES,
                 poly,
-                coefficient_base: group * T1_COEFFICIENTS_PER_GROUP,
-                lane_active: [true; T1_GROUP_BYTES],
             });
         }
     }
@@ -207,19 +221,10 @@ fn col_id(name: &str) -> PreProcessedColumnId {
 }
 
 fn preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    let mut ids = [
-        "active",
-        "rho_row",
-        "t1_row",
-        "first",
-        "byte_base",
-        "poly",
-        "coefficient_base",
-    ]
-    .into_iter()
-    .map(col_id)
-    .collect::<Vec<_>>();
-    ids.extend((0..T1_GROUP_BYTES).map(|lane| col_id(&format!("lane_active_{lane}"))));
+    let ids = ["active", "t1_row", "first", "byte_base", "poly"]
+        .into_iter()
+        .map(col_id)
+        .collect::<Vec<_>>();
     debug_assert_eq!(ids.len(), PREPROCESSED_COLS);
     ids
 }
@@ -228,15 +233,10 @@ fn preprocessed_columns() -> Vec<ColEval> {
     let mut columns = vec![vec![m31(0); MDOC_PRIVATE_DEVICE_KEY_ROWS]; PREPROCESSED_COLS];
     for (row_index, row) in schedule().iter().enumerate() {
         columns[PP_ACTIVE][row_index] = m31(1);
-        columns[PP_RHO_ROW][row_index] = m31(row.rho as u32);
-        columns[PP_T1_ROW][row_index] = m31(row.t1 as u32);
-        columns[PP_FIRST][row_index] = m31(row.first as u32);
+        columns[PP_T1_ROW][row_index] = m31(row.is_t1() as u32);
+        columns[PP_FIRST][row_index] = m31(row.is_first() as u32);
         columns[PP_BYTE_BASE][row_index] = m31(row.byte_base as u32);
         columns[PP_POLY][row_index] = m31(row.poly as u32);
-        columns[PP_COEFF_BASE][row_index] = m31(row.coefficient_base as u32);
-        for (lane, &active) in row.lane_active.iter().enumerate() {
-            columns[PP_LANE_ACTIVE_START + lane][row_index] = m31(active as u32);
-        }
     }
     columns
         .into_iter()
@@ -358,7 +358,7 @@ fn build_trace(
     for (row_index, row) in schedule().iter().enumerate() {
         columns[COL_DEVICE_PK_START][row_index] = m31(device_pk_start as u32);
         for lane in 0..T1_GROUP_BYTES {
-            if row.lane_active[lane] {
+            if row.lane_active(lane) {
                 let relative = row.byte_base + lane;
                 let byte = pk_encode[relative];
                 columns[COL_BYTE_START + lane][row_index] = m31(u32::from(byte));
@@ -367,7 +367,7 @@ fn build_trace(
         }
         let b0 = pk_encode[row.byte_base];
         range_uses.record(RcKind::Rc8, u32::from(b0));
-        if row.t1 {
+        if row.is_t1() {
             let group = &pk_encode[row.byte_base..row.byte_base + T1_GROUP_BYTES];
             set_bits(&mut columns, COL_B1_BITS, row_index, group[1]);
             set_bits(&mut columns, COL_B2_BITS, row_index, group[2]);
@@ -440,14 +440,21 @@ impl FrameworkEval for MdocPrivateDeviceKeyEval {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let active = eval.get_preprocessed_column(col_id("active"));
-        let rho_row = eval.get_preprocessed_column(col_id("rho_row"));
         let t1_row = eval.get_preprocessed_column(col_id("t1_row"));
         let first = eval.get_preprocessed_column(col_id("first"));
         let byte_base = eval.get_preprocessed_column(col_id("byte_base"));
         let poly = eval.get_preprocessed_column(col_id("poly"));
-        let coefficient_base = eval.get_preprocessed_column(col_id("coefficient_base"));
+        let rho_row = active.clone() - t1_row.clone();
+        let coefficient_base = constant::<E>(COEFFICIENT_BASE_SCALE)
+            * (byte_base.clone()
+                - constant::<E>(32) * t1_row.clone()
+                - constant::<E>(T1_BYTES_PER_POLYNOMIAL) * poly.clone());
         let lane_active: [E::F; T1_GROUP_BYTES] = std::array::from_fn(|lane| {
-            eval.get_preprocessed_column(col_id(&format!("lane_active_{lane}")))
+            if lane == 0 {
+                active.clone()
+            } else {
+                t1_row.clone()
+            }
         });
 
         let [device_pk_start, device_pk_start_prev] =
@@ -460,22 +467,8 @@ impl FrameworkEval for MdocPrivateDeviceKeyEval {
             std::array::from_fn(|_| eval.next_trace_mask());
 
         let one = constant::<E>(1);
-        for selector in [
-            active.clone(),
-            rho_row.clone(),
-            t1_row.clone(),
-            first.clone(),
-        ]
-        .into_iter()
-        .chain(lane_active.iter().cloned())
-        {
+        for selector in [active.clone(), t1_row.clone(), first.clone()] {
             add_boolean(&mut eval, selector, &one);
-        }
-        eval.add_constraint(rho_row.clone() + t1_row.clone() - active.clone());
-        eval.add_constraint(first.clone() * (rho_row.clone() - one.clone()));
-        eval.add_constraint(lane_active[0].clone() - active.clone());
-        for selector in lane_active.iter().skip(1) {
-            eval.add_constraint(selector.clone() - t1_row.clone());
         }
         eval.add_constraint(
             (active.clone() - first.clone()) * (device_pk_start.clone() - device_pk_start_prev),
@@ -630,8 +623,13 @@ fn interaction_trace(
                 .map(|row| {
                     let relative = preprocessed[PP_BYTE_BASE].data[row]
                         + PackedM31::broadcast(m31(lane as u32));
+                    let lane_active = if lane == 0 {
+                        preprocessed[PP_ACTIVE].data[row]
+                    } else {
+                        preprocessed[PP_T1_ROW].data[row]
+                    };
                     (
-                        PackedQM31::from(preprocessed[PP_LANE_ACTIVE_START + lane].data[row]),
+                        PackedQM31::from(lane_active),
                         relations.issuer.combine(&[
                             PackedM31::broadcast(m31(HOSTED_MSG_FIELD_ID)),
                             trace[COL_DEVICE_PK_START].data[row] + relative,
@@ -646,8 +644,13 @@ fn interaction_trace(
         sites.push(
             (0..vec_rows)
                 .map(|row| {
+                    let lane_active = if lane == 0 {
+                        preprocessed[PP_ACTIVE].data[row]
+                    } else {
+                        preprocessed[PP_T1_ROW].data[row]
+                    };
                     (
-                        -PackedQM31::from(preprocessed[PP_LANE_ACTIVE_START + lane].data[row]),
+                        -PackedQM31::from(lane_active),
                         relations.issuer.combine(&[
                             PackedM31::broadcast(m31(HOSTED_DEVICE_PK_FIELD_ID)),
                             preprocessed[PP_BYTE_BASE].data[row]
@@ -727,12 +730,16 @@ fn interaction_trace(
                     };
                     let hi = trace[COL_T1_HI_START + lane].data[row];
                     let lo = value - PackedM31::broadcast(m31(512)) * hi;
+                    let coefficient_base = PackedM31::broadcast(m31(COEFFICIENT_BASE_SCALE))
+                        * (preprocessed[PP_BYTE_BASE].data[row]
+                            - PackedM31::broadcast(m31(32)) * preprocessed[PP_T1_ROW].data[row]
+                            - PackedM31::broadcast(m31(T1_BYTES_PER_POLYNOMIAL))
+                                * preprocessed[PP_POLY].data[row]);
                     (
                         -PackedQM31::from(preprocessed[PP_T1_ROW].data[row]),
                         relations.t1.combine(&[
                             preprocessed[PP_POLY].data[row],
-                            preprocessed[PP_COEFF_BASE].data[row]
-                                + PackedM31::broadcast(m31(lane as u32)),
+                            coefficient_base + PackedM31::broadcast(m31(lane as u32)),
                             lo,
                             hi,
                         ]),
@@ -744,8 +751,9 @@ fn interaction_trace(
     sites.push(
         (0..vec_rows)
             .map(|row| {
+                let rho_row = preprocessed[PP_ACTIVE].data[row] - preprocessed[PP_T1_ROW].data[row];
                 (
-                    -PackedQM31::from(preprocessed[PP_RHO_ROW].data[row]),
+                    -PackedQM31::from(rho_row),
                     relations.rho.combine(&[
                         preprocessed[PP_BYTE_BASE].data[row],
                         trace[COL_BYTE_START].data[row],
@@ -1184,11 +1192,32 @@ mod tests {
     }
 
     #[test]
+    fn compact_schedule_derives_row_roles_lanes_and_coefficient_keys() {
+        assert_eq!(m31(COEFFICIENT_BASE_SCALE) * m31(5), m31(4));
+        for row in schedule() {
+            let active = m31(1);
+            let t1 = m31(row.is_t1() as u32);
+            assert_eq!(active - t1, m31(row.is_rho() as u32));
+            assert_eq!(row.is_first(), row.byte_base == 0);
+            for lane in 0..T1_GROUP_BYTES {
+                assert_eq!(row.lane_active(lane), lane == 0 || row.is_t1());
+            }
+            let derived = m31(COEFFICIENT_BASE_SCALE)
+                * (m31(row.byte_base as u32)
+                    - m31(32) * t1
+                    - m31(T1_BYTES_PER_POLYNOMIAL) * m31(row.poly as u32));
+            if row.is_t1() {
+                assert_eq!(derived, m31(row.coefficient_base() as u32));
+            }
+        }
+    }
+
+    #[test]
     fn fixed_geometry_and_range_census_are_exact() {
         let start = 100;
         let pk = test_pk(29);
         let (_, census) = build_trace(&pk, start, 4_096).unwrap();
-        assert_eq!(PREPROCESSED_COLS, 12);
+        assert_eq!(PREPROCESSED_COLS, 5);
         assert_eq!(TRACE_COLS, 34);
         assert_eq!(MAIN_INTERACTION_COLS + BLINDER_INTERACTION_COLS, 52);
         assert_eq!(census.active_rows, 416);
@@ -1767,7 +1796,7 @@ mod tests {
                     0,
                 ],
             ));
-            if row.rho {
+            if row.is_rho() {
                 rows.push(TestCounterRow::new(
                     TEST_RHO,
                     [
@@ -1794,7 +1823,7 @@ mod tests {
                         TEST_T1,
                         [
                             row.poly as u32,
-                            (row.coefficient_base + lane) as u32,
+                            (row.coefficient_base() + lane) as u32,
                             lo,
                             hi,
                         ],

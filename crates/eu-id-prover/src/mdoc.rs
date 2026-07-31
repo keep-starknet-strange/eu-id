@@ -2458,6 +2458,7 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     revocation_range: MdocRevocationRangeWitness,
     revocation_signature: MdocRevocationSignature,
 ) -> Result<MdocProof, Error> {
+    let witness_start = std::time::Instant::now();
     let config = mdoc_ts13_pcs_config();
     let verification_date = validate_public_input_shape(public, "prove")?;
     validate_extracted_profile(extracted, public, &verification_date)?;
@@ -2757,6 +2758,12 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
         mso_digest.clone(),
         public.revocation.epoch,
         revocation_message_field.clone(),
+    );
+
+    crate::report_prove_timing(
+        "eu_id_prover",
+        "witness_generation",
+        witness_start.elapsed(),
     );
 
     let (stark_proof, post_interaction_payloads, ts13_demo_circuit_geometry) = {

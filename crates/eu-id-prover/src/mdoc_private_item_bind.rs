@@ -56,7 +56,8 @@ const MDOC_PRIVATE_ITEM_TRANSCRIPT_TAG: u64 = 2;
 const MDOC_PRIVATE_ITEM_BLIND_ROWS: usize = 256;
 const MDOC_PRIVATE_ITEM_MAX_INNER_BYTES: usize = 192;
 const OUTER_PREFIX_BYTES: usize = 4;
-const PREPROCESSED_COLS: usize = 6;
+const PREPROCESSED_COLS: usize = 5;
+const PP_OUTER_PREFIX_START: usize = 1;
 const KEY_COUNT: usize = 4;
 const DIGEST_COPY_BYTES: usize = 5;
 const RANDOM_BOUND_BITS: usize = 8;
@@ -365,10 +366,7 @@ fn preprocessed_id(log_size: u32, name: &str) -> PreProcessedColumnId {
 }
 
 fn preprocessed_ids(log_size: u32) -> Vec<PreProcessedColumnId> {
-    let mut ids = vec![
-        preprocessed_id(log_size, "first"),
-        preprocessed_id(log_size, "last"),
-    ];
+    let mut ids = vec![preprocessed_id(log_size, "last")];
     ids.extend(
         (0..OUTER_PREFIX_BYTES)
             .map(|index| preprocessed_id(log_size, &format!("outer_prefix_{index}"))),
@@ -379,10 +377,9 @@ fn preprocessed_ids(log_size: u32) -> Vec<PreProcessedColumnId> {
 fn preprocessed_columns(log_size: u32) -> Vec<Column> {
     let rows = 1usize << log_size;
     let mut values = vec![vec![m31(0); rows]; PREPROCESSED_COLS];
-    values[0][0] = m31(1);
-    values[1][rows - 1] = m31(1);
+    values[0][rows - 1] = m31(1);
     for index in 0..OUTER_PREFIX_BYTES {
-        values[2 + index][index] = m31(1);
+        values[PP_OUTER_PREFIX_START + index][index] = m31(1);
     }
     values
         .into_iter()
@@ -938,7 +935,6 @@ impl FrameworkEval for MdocPrivateItemEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let first = eval.get_preprocessed_column(preprocessed_id(self.log_size, "first"));
         let last = eval.get_preprocessed_column(preprocessed_id(self.log_size, "last"));
         let prefix: [E::F; OUTER_PREFIX_BYTES] = std::array::from_fn(|index| {
             eval.get_preprocessed_column(preprocessed_id(
@@ -946,6 +942,7 @@ impl FrameworkEval for MdocPrivateItemEval {
                 &format!("outer_prefix_{index}"),
             ))
         });
+        let first = prefix[0].clone();
         let prefix_sum = prefix
             .iter()
             .cloned()
@@ -1550,7 +1547,7 @@ fn interaction_trace(
                 (0..packed_rows)
                     .map(|row| {
                         (
-                            -PackedQM31::from(preprocessed[0].data[row]),
+                            -PackedQM31::from(preprocessed[PP_OUTER_PREFIX_START].data[row]),
                             key_relation.combine(&[
                                 PackedM31::broadcast(m31((kind + 1) as u32)),
                                 PackedM31::broadcast(m31(index as u32)),
@@ -1625,7 +1622,7 @@ fn interaction_trace(
             (0..packed_rows)
                 .map(|row| {
                     (
-                        PackedQM31::from(preprocessed[0].data[row]),
+                        PackedQM31::from(preprocessed[PP_OUTER_PREFIX_START].data[row]),
                         item_fields.combine(&[
                             PackedM31::broadcast(m31(field_id)),
                             PackedM31::broadcast(m31(index as u32)),

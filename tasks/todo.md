@@ -58,9 +58,24 @@ Privacy claim:
 
 - [x] Make the exported invalid-witness matrix assert exact host rejection.
 - [x] Add a proof-level negative for revocation endpoint equality.
-- [x] Remove or derive unnecessary preprocessed columns.
+- [x] Bind every Keccak round to its official index and Iota constant.
+- [x] Add an adversarial test for the Keccak round-schedule binding.
+- [x] Audit every preprocessed column and remove the approved exact redundancies.
+- [x] Remove semantically dead committed trace columns.
 - [ ] Regenerate the circuit artifact and update its geometry records.
 - [ ] Run the complete release verification after the audit fixes.
+
+## Performance campaign
+
+- [x] P0: Add or verify phase timing and peak-memory measurements.
+- [ ] P0: Run the current canonical `proveIdentity` Firebase baseline.
+- [ ] P1: Measure canonical-path overhead against the proof core.
+- [ ] P2: Measure Keccak cell and prover-cost reductions.
+- [ ] P3: Profile SHA and record redesign candidates without weakening the theorem.
+- [ ] P4: Sweep safe FRI configurations within the proof-envelope limit.
+- [ ] P5: Measure mobile worker counts, CPU selection, SIMD use, and peak RSS.
+- [ ] P6: Run only if the primary-device target still needs another architectural change.
+- [ ] Record cold and warm latency, proof size, peak RSS, source revision, and device metadata.
 
 ## Invariants
 
@@ -69,49 +84,12 @@ Privacy claim:
 - Keep one ISO MSO 1.0 circuit path.
 - Accept valid `IssuerSignedItem` map-key permutations.
 - Keep `proveIdentity` and `verifyIdentity` as the only application API.
-- Do not add STWO masking or performance work in this cleanup.
+- Do not add STWO transcript masking in this campaign.
+- Benchmark only the final soundness-checked artifact and canonical `proveIdentity` path.
 - Regenerate the circuit hash after all source cleanup.
 
 ## Review
 
-The final source-bound artifact check passed after all generated build files moved out of the
-soundness source roots.
-
-- Soundness source commit: `2d46ab7072d3f1ccbeba1d94d2bf867632e1c06a`.
-- Soundness source-tree SHA-256: `374693d509c77303a3d3913394aae900262fb833886b5ea46f1d56d2792a666c`.
-- Normative specification SHA-256: `01606b356cad9101da23a71fd8de537c5616f9430b856d09aa3101da81916060`.
-- `Cargo.lock` SHA-256: `9c4615255aa28e4d2dd46263a6cf1b2c4f2b82129453d955ae871bc8d8c529fb`.
-- Rust toolchain: `rustc 1.94.0-nightly (86a49fd71 2026-01-14)`.
-- Circuit SHA-256: `4134801384833ac572475617ce6f05637f0d7f5b5d1fb868d9b3df9b653342d1`.
-- Shape-manifest SHA-256: `bf67ed51c1bcde99811b13d72fdf8ea260b01f5f318f39adbe00c57f936241aa`.
-- Merkle-tree column counts: `[946, 4906, 2400, 8, 32]`.
-- Query count: `36`.
-- Sampled secure fields: `10,709`.
-- Serialized non-STARK claims: `24,136` bytes.
-- Outer claims and framing: `3,840` bytes.
-- Deterministic maximum proof body: `1,734,952` bytes.
-- Pinned proof-body capacity: `1,769,472` bytes.
-- Fixed envelope size: `1,769,518` bytes.
-
-Release verification used `RAYON_NUM_THREADS=12`, `RUST_MIN_STACK=536870912`, 12 Cargo jobs,
-and one test-harness thread.
-
-- The all-target workspace check passed.
-- Clippy passed for all release targets with warnings denied.
-- The main workspace run passed 467 tests and left 18 ignored tests.
-- The ignored-test run passed all 18 tests.
-- The complete composed proof and all three TS13 integration tests passed.
-- The SDK identity-envelope and unlinkability tests passed.
-- `cargo fmt --all -- --check` and `git diff --check` passed.
-- The artifact drift check passed with the circuit hash above.
-
-The Android release build completed for `arm64-v8a` and `x86_64`. The demo release APK and its
-release instrumentation APK also compiled. No device benchmark ran because performance work is
-deferred.
-
-- SDK AAR SHA-256: `ef0204fe0ca350f46a8e2c9e45c11490f0c61f7704fd284b5e19c6ef72ab575a`.
-- Demo APK SHA-256: `4905cb677e74795a293b7fc47b565fabba15a84eaece06df792558c770c6b484`.
-- Instrumentation APK SHA-256: `981e146e5e50aa1e0b0e81f2aeec8a46249d8c0d140593bb0036561907eea3eb`.
-
-The demo provides public-input unlinkability. STWO transcript zero knowledge is pending and is not
-part of this implementation.
+The source audit is complete. The final artifact, release matrix, and benchmark evidence are in
+progress. This implementation provides public-input unlinkability. STWO transcript zero knowledge
+is pending and is not part of this campaign.

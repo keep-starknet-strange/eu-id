@@ -16,15 +16,15 @@
 //!   served by the sponge's yield.
 //! - `r == 24`: *yield* (+) `KeccakStateRelation(perm_id, OUT, state_24)`,
 //!   consumed by the sponge's require.
-//! - `r == 0`: *yield* (+) the first round input link
-//!   `KeccakRound(perm_id | 0 | rc_0 | state_0)`.
-//! - `r == 24`: *require* (−) the last round output link
-//!   `KeccakRound(perm_id | 24 | rc_24 | state_24)`.
+//! - `r < 24`: *yield* (+) the round input link
+//!   `KeccakRound(perm_id | IN | r | rc_r | state_r)`.
+//! - `r > 0`: *require* (−) the previous round output link
+//!   `KeccakRound(perm_id | OUT | r | 0 | state_r)`.
 //!
-//! The `keccak_round` component cancels adjacent output and input tuples. The
-//! wrapper supplies its first input and consumes its last output. All gates are
-//! preprocessed schedule flags, so padding rows emit nothing and no trace
-//! enabler (or cross-row mask) is needed.
+//! The direction tag stops an input tuple from canceling an output tuple. The
+//! wrapper therefore pins every round index, Iota constant, and boundary state
+//! to its fixed schedule. All gates are preprocessed schedule flags, so padding
+//! rows emit nothing and no trace enabler or cross-row mask is needed.
 
 #![allow(non_snake_case)]
 
@@ -41,7 +41,7 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
-use crate::constants::{IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS};
+use crate::constants::{IOTA_RC, IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE, N_ROUNDS};
 use crate::relations::{direction, KeccakRelations, KECCAK_ROUND_ARITY, KECCAK_STATE_ARITY};
 use crate::utils::{circle_row_to_coset, col_eval, spread_u32, unspread_u32, ColEval};
 
@@ -49,8 +49,8 @@ use crate::utils::{circle_row_to_coset, col_eval, spread_u32, unspread_u32, ColE
 pub const ROWS_PER_PERM: usize = N_ROUNDS + 1;
 
 /// Schedule (preprocessed) columns:
-/// `is_first | is_last | round_idx | rc[8]`.
-pub const N_SCHEDULE_COLS: usize = 3 + N_BYTES_IN_U64;
+/// `is_active | is_first | is_last | round_idx | rc[0,1,3,7]`.
+pub const N_SCHEDULE_COLS: usize = 4 + IOTA_RC_BYTE_INDICES.len();
 
 /// Trace columns: `perm_id | state[200]` (state in spread form).
 pub const N_COLUMNS: usize = 1 + N_BYTES_IN_STATE;
@@ -78,11 +78,12 @@ fn schedule_id(n_perms: usize, name: &str) -> PreProcessedColumnId {
 /// The schedule preprocessed column ids, in commit order.
 pub fn schedule_ids(n_perms: usize) -> Vec<PreProcessedColumnId> {
     let mut ids = vec![
+        schedule_id(n_perms, "is_active"),
         schedule_id(n_perms, "is_first"),
         schedule_id(n_perms, "is_last"),
         schedule_id(n_perms, "round_idx"),
     ];
-    for j in 0..N_BYTES_IN_U64 {
+    for j in IOTA_RC_BYTE_INDICES {
         ids.push(schedule_id(n_perms, &format!("rc_{j}")));
     }
     ids
@@ -105,11 +106,12 @@ pub fn gen_schedule_preprocessed(n_perms: usize) -> Vec<ColEval> {
     };
 
     let mut cols: Vec<Vec<M31>> = vec![
+        scalar(&|_| 1),
         scalar(&|r| (r == 0) as u32),
         scalar(&|r| (r == N_ROUNDS) as u32),
         scalar(&|r| r as u32),
     ];
-    for j in 0..N_BYTES_IN_U64 {
+    for j in IOTA_RC_BYTE_INDICES {
         cols.push(scalar(&move |r| {
             spread_u32(IOTA_RC[r].to_le_bytes()[j] as u32)
         }));
@@ -238,10 +240,12 @@ impl FrameworkEval for Eval {
         let n = self.claim.n_perms;
 
         // The tree-0 root pins the preprocessed schedule.
+        let is_active = eval.get_preprocessed_column(schedule_id(n, "is_active"));
         let is_first = eval.get_preprocessed_column(schedule_id(n, "is_first"));
         let is_last = eval.get_preprocessed_column(schedule_id(n, "is_last"));
         let round_idx = eval.get_preprocessed_column(schedule_id(n, "round_idx"));
-        let rc: Vec<E::F> = (0..N_BYTES_IN_U64)
+        let rc: Vec<E::F> = IOTA_RC_BYTE_INDICES
+            .iter()
             .map(|j| eval.get_preprocessed_column(schedule_id(n, &format!("rc_{j}"))))
             .collect();
 
@@ -250,25 +254,35 @@ impl FrameworkEval for Eval {
             .map(|_| eval.next_trace_mask())
             .collect();
 
-        // Round link tuple `(perm_id | r | rc_r[8] | state_r)`: round r's
-        // input link AND round r−1's output link are the SAME tuple. Identity
-        // fields prevent multiset cancellation across permutations or rounds.
-        let mut link: Vec<E::F> = vec![perm_id.clone(), round_idx];
-        link.extend(rc);
-        link.extend(state.iter().cloned());
-        debug_assert_eq!(link.len(), KECCAK_ROUND_ARITY);
-        // The round component cancels adjacent output/input tuples internally.
-        // The wrapper supplies only the first input and consumes only the last
-        // output. Both entries use the same denominator, as before.
+        // Use distinct direction tags so every round input and output must
+        // match this fixed schedule. Without the tags, the two entries at an
+        // intermediate boundary would cancel and leave its Iota constant free.
+        let mut input_link: Vec<E::F> = vec![
+            perm_id.clone(),
+            E::F::from(BaseField::from(direction::IN)),
+            round_idx.clone(),
+        ];
+        input_link.extend(rc.iter().cloned());
+        input_link.extend(state.iter().cloned());
+        debug_assert_eq!(input_link.len(), KECCAK_ROUND_ARITY);
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_round,
-            -is_last.clone(),
-            &link,
+            is_active.clone() - is_last.clone(),
+            &input_link,
         ));
+
+        let mut output_link: Vec<E::F> = vec![
+            perm_id.clone(),
+            E::F::from(BaseField::from(direction::OUT)),
+            round_idx,
+        ];
+        output_link.extend((0..IOTA_RC_BYTE_INDICES.len()).map(|_| E::F::zero()));
+        output_link.extend(state.iter().cloned());
+        debug_assert_eq!(output_link.len(), KECCAK_ROUND_ARITY);
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_round,
-            is_first.clone(),
-            &link,
+            -is_active + is_first.clone(),
+            &output_link,
         ));
 
         // require (perm_id, IN, state_0) on r == 0.
@@ -310,21 +324,29 @@ fn row_fracs(rel: &KeccakRelations, r: usize, row: &RowLook) -> [(SecureField, S
     let zero = SecureField::zero();
     let one = SecureField::from(M31::from(1u32));
 
-    let mut link = [M31::zero(); KECCAK_ROUND_ARITY];
-    link[0] = row.perm_id;
-    link[1] = M31::from(r as u32);
-    for (j, b) in IOTA_RC[r].to_le_bytes().iter().enumerate() {
-        link[2 + j] = M31::from(spread_u32(*b as u32));
-    }
-    link[2 + N_BYTES_IN_U64..].copy_from_slice(&row.state);
-    let d_link: SecureField = rel.keccak_round.combine(&link);
+    let round_link = |direction_tag: u32| {
+        let mut link = [M31::zero(); KECCAK_ROUND_ARITY];
+        link[0] = row.perm_id;
+        link[1] = M31::from(direction_tag);
+        link[2] = M31::from(r as u32);
+        if direction_tag == direction::IN {
+            for (slot, byte_index) in IOTA_RC_BYTE_INDICES.iter().enumerate() {
+                link[3 + slot] =
+                    M31::from(spread_u32(IOTA_RC[r].to_le_bytes()[*byte_index] as u32));
+            }
+        }
+        link[3 + IOTA_RC_BYTE_INDICES.len()..].copy_from_slice(&row.state);
+        link
+    };
+    let d_input: SecureField = rel.keccak_round.combine(&round_link(direction::IN));
+    let d_output: SecureField = rel.keccak_round.combine(&round_link(direction::OUT));
 
-    let f_require = if r == N_ROUNDS {
-        (-one, d_link)
+    let f_input = if r < N_ROUNDS {
+        (one, d_input)
     } else {
         (zero, one)
     };
-    let f_yield = if r == 0 { (one, d_link) } else { (zero, one) };
+    let f_output = if r > 0 { (-one, d_output) } else { (zero, one) };
 
     let state_tuple = |dir: u32| {
         let mut t = [M31::zero(); KECCAK_STATE_ARITY];
@@ -344,7 +366,7 @@ fn row_fracs(rel: &KeccakRelations, r: usize, row: &RowLook) -> [(SecureField, S
         (zero, one)
     };
 
-    [f_require, f_yield, f_in, f_out]
+    [f_input, f_output, f_in, f_out]
 }
 
 /// Build the interaction trace: pair-batched columns matching
@@ -400,14 +422,68 @@ pub fn generate_interaction_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_traits::One;
+
+    use crate::relations::{
+        KECCAK_ROUND_DIRECTION_INDEX, KECCAK_ROUND_INDEX_INDEX, KECCAK_ROUND_PERM_ID_INDEX,
+        KECCAK_ROUND_RC_START, KECCAK_ROUND_STATE_START,
+    };
 
     #[test]
-    fn schedule_contains_only_live_boundary_columns() {
+    fn schedule_contains_the_live_round_binding_columns() {
         let ids = schedule_ids(3);
         assert_eq!(ids.len(), N_SCHEDULE_COLS);
         assert_eq!(gen_schedule_preprocessed(3).len(), N_SCHEDULE_COLS);
-        assert!(ids.iter().all(|id| !id.id.ends_with("/is_active")));
+        assert!(ids.iter().any(|id| id.id.ends_with("/is_active")));
         assert!(ids.iter().any(|id| id.id.ends_with("/is_first")));
         assert!(ids.iter().any(|id| id.id.ends_with("/is_last")));
+    }
+
+    #[test]
+    fn changed_intermediate_iota_constant_breaks_round_balance() {
+        let relations = KeccakRelations::dummy();
+        let row = RowLook {
+            perm_id: M31::from(7_u32),
+            state: [M31::zero(); N_BYTES_IN_STATE],
+        };
+        let round = 1;
+        let [fixed_input, fixed_output, _, _] = row_fracs(&relations, round, &row);
+        assert_eq!(fixed_input.0, SecureField::one());
+        assert_eq!(fixed_output.0, -SecureField::one());
+
+        let mut official_input = [M31::zero(); KECCAK_ROUND_ARITY];
+        official_input[KECCAK_ROUND_PERM_ID_INDEX] = row.perm_id;
+        official_input[KECCAK_ROUND_DIRECTION_INDEX] = M31::from(direction::IN);
+        official_input[KECCAK_ROUND_INDEX_INDEX] = M31::from(round as u32);
+        for (slot, byte_index) in IOTA_RC_BYTE_INDICES.iter().copied().enumerate() {
+            official_input[KECCAK_ROUND_RC_START + slot] =
+                M31::from(spread_u32(IOTA_RC[round].to_le_bytes()[byte_index] as u32));
+        }
+        official_input[KECCAK_ROUND_STATE_START..].copy_from_slice(&row.state);
+        let official_denominator: SecureField = relations.keccak_round.combine(&official_input);
+        assert_eq!(official_denominator, fixed_input.1);
+
+        for slot in 0..IOTA_RC_BYTE_INDICES.len() {
+            let mut changed_input = official_input;
+            changed_input[KECCAK_ROUND_RC_START + slot] += M31::one();
+            let changed_denominator: SecureField = relations.keccak_round.combine(&changed_input);
+            let imbalance =
+                fixed_input.0 / fixed_input.1 - SecureField::one() / changed_denominator;
+            assert_ne!(
+                imbalance,
+                SecureField::zero(),
+                "Iota byte slot {slot} must be bound"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_iota_byte_lanes_are_always_zero() {
+        for round_constant in IOTA_RC {
+            let bytes = round_constant.to_le_bytes();
+            for byte_index in [2, 4, 5, 6] {
+                assert_eq!(bytes[byte_index], 0);
+            }
+        }
     }
 }

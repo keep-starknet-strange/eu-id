@@ -582,11 +582,84 @@ impl PublicRow {
 struct PublicShape {
     payload_anchor: Vec<u8>,
     rows: Vec<PublicRow>,
+    byte_active_masks: ByteMaskAliases,
+    issuer_active_masks: ByteMaskAliases,
+    expected_active_masks: ByteMaskAliases,
 }
 
 impl PublicShape {
     fn preprocessed_cols(&self) -> usize {
-        PREPROCESSED_COLS
+        self.device_pk_start_row_column() + 1
+    }
+
+    fn byte_active_column(&self, byte_index: usize) -> usize {
+        PP_BYTE_ACTIVE_START + self.byte_active_masks.aliases[byte_index]
+    }
+
+    fn issuer_active_start(&self) -> usize {
+        PP_BYTE_ACTIVE_START + self.byte_active_masks.representatives.len()
+    }
+
+    fn issuer_active_column(&self, byte_index: usize) -> usize {
+        self.issuer_active_start() + self.issuer_active_masks.aliases[byte_index]
+    }
+
+    fn expected_active_start(&self) -> usize {
+        self.issuer_active_start() + self.issuer_active_masks.representatives.len()
+    }
+
+    fn expected_active_column(&self, byte_index: usize) -> usize {
+        self.expected_active_start() + self.expected_active_masks.aliases[byte_index]
+    }
+
+    fn expected_start(&self) -> usize {
+        self.expected_active_start() + self.expected_active_masks.representatives.len()
+    }
+
+    fn expected_column(&self, byte_index: usize) -> usize {
+        self.expected_start() + byte_index
+    }
+
+    fn doc_type_chunk_start(&self) -> usize {
+        self.expected_start() + CHUNK_BYTES
+    }
+
+    fn device_pk_start_row_column(&self) -> usize {
+        self.doc_type_chunk_start() + DOC_TYPE_CHUNKS
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ByteMaskAliases {
+    representatives: Vec<usize>,
+    aliases: [usize; CHUNK_BYTES],
+}
+
+impl ByteMaskAliases {
+    fn from_rows(rows: &[PublicRow], value: fn(&PublicRow, usize) -> bool) -> Self {
+        let mut representatives = Vec::new();
+        let mut aliases = [0; CHUNK_BYTES];
+        for (byte_index, alias) in aliases.iter_mut().enumerate() {
+            *alias = representatives
+                .iter()
+                .position(|&representative| {
+                    rows.iter()
+                        .all(|row| value(row, byte_index) == value(row, representative))
+                })
+                .unwrap_or_else(|| {
+                    representatives.push(byte_index);
+                    representatives.len() - 1
+                });
+        }
+        Self {
+            representatives,
+            aliases,
+        }
+    }
+
+    #[cfg(test)]
+    fn representative(&self, byte_index: usize) -> usize {
+        self.representatives[self.aliases[byte_index]]
     }
 }
 
@@ -817,9 +890,17 @@ fn validate_spec(spec: &MdocPrivateMsoBindSpec) -> Result<PublicShape, MdocPriva
         });
     }
     debug_assert!(MDOC_PRIVATE_MSO_BIND_ROWS - rows.len() >= MDOC_PRIVATE_MSO_MIN_BLIND_ROWS);
+    let byte_active_masks = ByteMaskAliases::from_rows(&rows, |row, index| index < row.byte_len);
+    let issuer_active_masks =
+        ByteMaskAliases::from_rows(&rows, |row, index| row.issuer_active[index]);
+    let expected_active_masks =
+        ByteMaskAliases::from_rows(&rows, |row, index| row.expected_active[index]);
     Ok(PublicShape {
         payload_anchor,
         rows,
+        byte_active_masks,
+        issuer_active_masks,
+        expected_active_masks,
     })
 }
 
@@ -835,12 +916,6 @@ const PP_MIRROR_ROW: usize = 8;
 const PP_ANCHOR_ROW: usize = 9;
 const PP_SAME_PAYLOAD_PREV: usize = 10;
 const PP_BYTE_ACTIVE_START: usize = 11;
-const PP_ISSUER_ACTIVE_START: usize = PP_BYTE_ACTIVE_START + CHUNK_BYTES;
-const PP_EXPECTED_ACTIVE_START: usize = PP_ISSUER_ACTIVE_START + CHUNK_BYTES;
-const PP_EXPECTED_START: usize = PP_EXPECTED_ACTIVE_START + CHUNK_BYTES;
-const PP_DOC_TYPE_CHUNK_START: usize = PP_EXPECTED_START + CHUNK_BYTES;
-const PP_DEVICE_PK_START_ROW: usize = PP_DOC_TYPE_CHUNK_START + DOC_TYPE_CHUNKS;
-const PREPROCESSED_COLS: usize = PP_DEVICE_PK_START_ROW + 1;
 
 const TRACE_BYTE_START: usize = 0;
 const TRACE_PAYLOAD_OFFSET: usize = TRACE_BYTE_START + CHUNK_BYTES;
@@ -920,9 +995,27 @@ fn preprocessed_column_ids(shape: &PublicShape) -> Vec<PreProcessedColumnId> {
         col_id("anchor_row"),
         col_id("same_payload_prev"),
     ];
-    ids.extend((0..CHUNK_BYTES).map(|index| col_id(&format!("byte_active_{index}"))));
-    ids.extend((0..CHUNK_BYTES).map(|index| col_id(&format!("issuer_active_{index}"))));
-    ids.extend((0..CHUNK_BYTES).map(|index| col_id(&format!("expected_active_{index}"))));
+    ids.extend(
+        shape
+            .byte_active_masks
+            .representatives
+            .iter()
+            .map(|index| col_id(&format!("byte_active_{index}"))),
+    );
+    ids.extend(
+        shape
+            .issuer_active_masks
+            .representatives
+            .iter()
+            .map(|index| col_id(&format!("issuer_active_{index}"))),
+    );
+    ids.extend(
+        shape
+            .expected_active_masks
+            .representatives
+            .iter()
+            .map(|index| col_id(&format!("expected_active_{index}"))),
+    );
     ids.extend((0..CHUNK_BYTES).map(|index| col_id(&format!("expected_{index}"))));
     ids.extend((0..DOC_TYPE_CHUNKS).map(|index| col_id(&format!("doc_type_chunk_{index}"))));
     ids.push(col_id("device_pk_start_row"));
@@ -950,19 +1043,20 @@ fn preprocessed_columns(shape: &PublicShape) -> Vec<MdocPrivateMsoColumnEval> {
             m31_u32(u32::from(row.kind == WindowKind::PayloadAnchor));
         columns[PP_SAME_PAYLOAD_PREV][row_index] = m31_u32(u32::from(row_index != 0));
         for byte_index in 0..CHUNK_BYTES {
-            columns[PP_BYTE_ACTIVE_START + byte_index][row_index] =
+            columns[shape.byte_active_column(byte_index)][row_index] =
                 m31_u32(u32::from(byte_index < row.byte_len));
-            columns[PP_ISSUER_ACTIVE_START + byte_index][row_index] =
+            columns[shape.issuer_active_column(byte_index)][row_index] =
                 m31_u32(u32::from(row.issuer_active[byte_index]));
-            columns[PP_EXPECTED_ACTIVE_START + byte_index][row_index] =
+            columns[shape.expected_active_column(byte_index)][row_index] =
                 m31_u32(u32::from(row.expected_active[byte_index]));
-            columns[PP_EXPECTED_START + byte_index][row_index] =
+            columns[shape.expected_column(byte_index)][row_index] =
                 m31_u32(u32::from(row.expected[byte_index]));
         }
         if let Some(chunk_index) = row.doc_type_chunk {
-            columns[PP_DOC_TYPE_CHUNK_START + chunk_index][row_index] = m31_u32(1);
+            columns[shape.doc_type_chunk_start() + chunk_index][row_index] = m31_u32(1);
         }
-        columns[PP_DEVICE_PK_START_ROW][row_index] = m31_u32(u32::from(row.device_pk_start_row));
+        columns[shape.device_pk_start_row_column()][row_index] =
+            m31_u32(u32::from(row.device_pk_start_row));
     }
     columns.into_iter().map(column_eval).collect()
 }
@@ -1331,6 +1425,9 @@ fn private_trace(
 struct MdocPrivateMsoEval {
     spec: MdocPrivateMsoBindSpec,
     payload_anchor_len: usize,
+    byte_active_masks: ByteMaskAliases,
+    issuer_active_masks: ByteMaskAliases,
+    expected_active_masks: ByteMaskAliases,
     issuer_relation: FieldBytesRelation,
     sha_relation: FieldBytesRelation,
     mso_start_relation: MdocMsoStartRelation,
@@ -1398,8 +1495,9 @@ fn private_mso_interaction_trace(
         sites.push(
             (0..n_vec_rows)
                 .map(|vec_row| {
-                    let numerator =
-                        PackedQM31::from(public[PP_ISSUER_ACTIVE_START + byte_index].data[vec_row]);
+                    let numerator = PackedQM31::from(
+                        public[shape.issuer_active_column(byte_index)].data[vec_row],
+                    );
                     let absolute_index = issuer_absolute_index(
                         private[TRACE_PAYLOAD_OFFSET].data[vec_row],
                         public[PP_CHUNK_RELATIVE].data[vec_row],
@@ -1426,7 +1524,7 @@ fn private_mso_interaction_trace(
                 .map(|vec_row| {
                     let numerator = PackedQM31::from(
                         public[PP_MIRROR_ROW].data[vec_row]
-                            * public[PP_BYTE_ACTIVE_START + byte_index].data[vec_row],
+                            * public[shape.byte_active_column(byte_index)].data[vec_row],
                     );
                     let denominator = inputs.sha_relation.combine(&[
                         PackedM31::broadcast(m31_u32(spec.sha_stream.field_id)),
@@ -1458,7 +1556,8 @@ fn private_mso_interaction_trace(
     sites.push(
         (0..n_vec_rows)
             .map(|vec_row| {
-                let numerator = -PackedQM31::from(public[PP_DEVICE_PK_START_ROW].data[vec_row]);
+                let numerator =
+                    -PackedQM31::from(public[shape.device_pk_start_row_column()].data[vec_row]);
                 let start = private[TRACE_PAYLOAD_OFFSET].data[vec_row]
                     + PackedM31::broadcast(m31(shape.payload_anchor.len()))
                     + private[TRACE_WINDOW_OFFSET].data[vec_row]
@@ -1544,14 +1643,32 @@ impl FrameworkEval for MdocPrivateMsoEval {
         let mirror_row = eval.get_preprocessed_column(col_id("mirror_row"));
         let anchor_row = eval.get_preprocessed_column(col_id("anchor_row"));
         let same_payload_prev = eval.get_preprocessed_column(col_id("same_payload_prev"));
+        let byte_active_masks: Vec<E::F> = self
+            .byte_active_masks
+            .representatives
+            .iter()
+            .map(|index| eval.get_preprocessed_column(col_id(&format!("byte_active_{index}"))))
+            .collect();
         let byte_active: [E::F; CHUNK_BYTES] = std::array::from_fn(|index| {
-            eval.get_preprocessed_column(col_id(&format!("byte_active_{index}")))
+            byte_active_masks[self.byte_active_masks.aliases[index]].clone()
         });
+        let issuer_active_masks: Vec<E::F> = self
+            .issuer_active_masks
+            .representatives
+            .iter()
+            .map(|index| eval.get_preprocessed_column(col_id(&format!("issuer_active_{index}"))))
+            .collect();
         let issuer_active: [E::F; CHUNK_BYTES] = std::array::from_fn(|index| {
-            eval.get_preprocessed_column(col_id(&format!("issuer_active_{index}")))
+            issuer_active_masks[self.issuer_active_masks.aliases[index]].clone()
         });
+        let expected_active_masks: Vec<E::F> = self
+            .expected_active_masks
+            .representatives
+            .iter()
+            .map(|index| eval.get_preprocessed_column(col_id(&format!("expected_active_{index}"))))
+            .collect();
         let expected_active: [E::F; CHUNK_BYTES] = std::array::from_fn(|index| {
-            eval.get_preprocessed_column(col_id(&format!("expected_active_{index}")))
+            expected_active_masks[self.expected_active_masks.aliases[index]].clone()
         });
         let expected: [E::F; CHUNK_BYTES] = std::array::from_fn(|index| {
             eval.get_preprocessed_column(col_id(&format!("expected_{index}")))
@@ -2023,6 +2140,9 @@ impl Air for MdocPrivateMsoBind {
             MdocPrivateMsoEval {
                 spec: self.spec.clone(),
                 payload_anchor_len: self.shape.payload_anchor.len(),
+                byte_active_masks: self.shape.byte_active_masks.clone(),
+                issuer_active_masks: self.shape.issuer_active_masks.clone(),
+                expected_active_masks: self.shape.expected_active_masks.clone(),
                 issuer_relation: self.issuer_relation(),
                 sha_relation: self.sha_relation(),
                 mso_start_relation: self.mso_start_handle.get(),
@@ -2188,6 +2308,8 @@ mod tests {
     const DEVICE_KEY_OFFSET: usize = 128;
     const VALID_FROM_OFFSET: usize = 2_200;
     const VALID_UNTIL_OFFSET: usize = 2_300;
+    const TS13_DEMO_PREPROCESSED_COLS: usize = 67;
+    const MAX_PROFILE_PREPROCESSED_COLS: usize = 65;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     struct PolynomialDegree(u32);
@@ -2331,6 +2453,35 @@ mod tests {
             MDOC_PRIVATE_MSO_BIND_LOG_SIZE,
         );
         column.values.at(row)
+    }
+
+    fn assert_mask_aliases_match(
+        name: &str,
+        rows: &[PublicRow],
+        aliases: &ByteMaskAliases,
+        value: fn(&PublicRow, usize) -> bool,
+    ) {
+        for byte_index in 0..CHUNK_BYTES {
+            let representative = aliases.representative(byte_index);
+            assert!(
+                rows.iter()
+                    .all(|row| value(row, byte_index) == value(row, representative)),
+                "{name} byte {byte_index} differs from representative {representative}"
+            );
+        }
+        for (index, &representative) in aliases.representatives.iter().enumerate() {
+            assert!(
+                rows.iter().any(|row| value(row, representative)),
+                "{name} representative {representative} is dead"
+            );
+            for &previous in &aliases.representatives[..index] {
+                assert!(
+                    rows.iter()
+                        .any(|row| value(row, representative) != value(row, previous)),
+                    "{name} representatives {previous} and {representative} are duplicates"
+                );
+            }
+        }
     }
 
     #[derive(Clone, Copy)]
@@ -2810,6 +2961,9 @@ mod tests {
         MdocPrivateMsoEval {
             spec: spec.clone(),
             payload_anchor_len: shape.payload_anchor.len(),
+            byte_active_masks: shape.byte_active_masks.clone(),
+            issuer_active_masks: shape.issuer_active_masks.clone(),
+            expected_active_masks: shape.expected_active_masks.clone(),
             issuer_relation: FieldBytesRelation::dummy(),
             sha_relation: FieldBytesRelation::dummy(),
             mso_start_relation: MdocMsoStartRelation::dummy(),
@@ -3173,9 +3327,11 @@ mod tests {
     #[test]
     fn canonical_shape_census_and_witness_handoffs_are_exact() {
         let (binder, census, witness) = test_binder_with_witness();
-        assert_eq!(PREPROCESSED_COLS, 141);
         assert_eq!(TRACE_COLS, 202);
-        assert_eq!(binder.shape.preprocessed_cols(), 141);
+        assert_eq!(
+            binder.shape.preprocessed_cols(),
+            MAX_PROFILE_PREPROCESSED_COLS
+        );
         assert_eq!(binder.active_rows(), 140);
         assert_eq!(census.active_rows, 140);
         assert_eq!(census.blind_rows, 372);
@@ -3198,6 +3354,86 @@ mod tests {
         let validity = witness.validity_witness(&binder.spec).unwrap();
         assert_eq!(validity.valid_from, *b"2020-01-01T00:00:00Z");
         assert_eq!(validity.valid_until, *b"2030-12-31T23:59:59Z");
+    }
+
+    #[test]
+    fn ts13_demo_mask_aliases_preserve_every_logical_selector() {
+        let spec = MdocPrivateMsoBindSpec {
+            issuer_message_len: crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES,
+            mso_len: crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES,
+            doc_type: PID.to_string(),
+            policy_date: Date {
+                year: 2026,
+                month: 7,
+                day: 29,
+            },
+            sha_stream: MdocPrivateMsoShaStreamSpec {
+                field_id: 91,
+                padded_len: checked_sha_padded_len(crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES)
+                    .unwrap(),
+            },
+        };
+        let shape = validate_spec(&spec).unwrap();
+        assert_eq!(shape.byte_active_masks.representatives.len(), 7);
+        assert_eq!(shape.issuer_active_masks.representatives.len(), 8);
+        assert_eq!(shape.expected_active_masks.representatives.len(), 7);
+        assert_eq!(shape.preprocessed_cols(), TS13_DEMO_PREPROCESSED_COLS);
+
+        let ids = preprocessed_column_ids(&shape);
+        assert_eq!(ids.len(), TS13_DEMO_PREPROCESSED_COLS);
+        for (index, id) in ids.iter().enumerate() {
+            assert!(
+                ids[..index].iter().all(|previous| previous != id),
+                "duplicate physical preprocessed id: {id:?}"
+            );
+        }
+
+        let columns = preprocessed_columns(&shape);
+        for row_index in 0..MDOC_PRIVATE_MSO_BIND_ROWS {
+            let row = shape.rows.get(row_index);
+            for byte_index in 0..CHUNK_BYTES {
+                let byte_active = row.is_some_and(|row| byte_index < row.byte_len);
+                let issuer_active = row.is_some_and(|row| row.issuer_active[byte_index]);
+                let expected_active = row.is_some_and(|row| row.expected_active[byte_index]);
+                assert_eq!(
+                    logical_value(&columns[shape.byte_active_column(byte_index)], row_index),
+                    m31_u32(u32::from(byte_active)),
+                    "byte-active alias mismatch at row {row_index}, byte {byte_index}"
+                );
+                assert_eq!(
+                    logical_value(&columns[shape.issuer_active_column(byte_index)], row_index),
+                    m31_u32(u32::from(issuer_active)),
+                    "issuer-active alias mismatch at row {row_index}, byte {byte_index}"
+                );
+                assert_eq!(
+                    logical_value(
+                        &columns[shape.expected_active_column(byte_index)],
+                        row_index,
+                    ),
+                    m31_u32(u32::from(expected_active)),
+                    "expected-active alias mismatch at row {row_index}, byte {byte_index}"
+                );
+            }
+        }
+
+        assert_mask_aliases_match(
+            "byte-active",
+            &shape.rows,
+            &shape.byte_active_masks,
+            |row, index| index < row.byte_len,
+        );
+        assert_mask_aliases_match(
+            "issuer-active",
+            &shape.rows,
+            &shape.issuer_active_masks,
+            |row, index| row.issuer_active[index],
+        );
+        assert_mask_aliases_match(
+            "expected-active",
+            &shape.rows,
+            &shape.expected_active_masks,
+            |row, index| row.expected_active[index],
+        );
     }
 
     #[test]
@@ -3703,7 +3939,7 @@ mod tests {
         assert_eq!(verifier.n_main_sites(), 69);
         assert_eq!(
             verifier.layout().preprocessed,
-            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; PREPROCESSED_COLS]
+            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; MAX_PROFILE_PREPROCESSED_COLS]
         );
         assert_eq!(
             verifier.layout().trace,

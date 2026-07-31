@@ -39,7 +39,7 @@
 //! Each constraint has degree 2 or less.
 //! | site | expr | degree |
 //! |------|------|--------|
-//! | boolean `x(1−x)` (enabler, hint, wrap_k, s0) | | 2 |
+//! | boolean `x(1−x)` (hint, wrap_k, s0) | | 2 |
 //! | boundary zero test `b + v·v_inv − 1` | `v·v_inv` | 2 |
 //! | boundary selector `b·v` | product of cells | 2 |
 //! | FIPS boundary gate `b·w1` | product of cells | 2 |
@@ -106,14 +106,13 @@ const L_SIGN_VAL: usize = 10;
 /// 7-bit hi of `sign_val` (13+7 split).
 const L_SIGN_HI: usize = 11;
 
-const COL_ENABLER: usize = 0;
-const COL_LANE0: usize = 1; // lane 0 occupies columns 1..=12
-const COL_LANE1: usize = COL_LANE0 + PER_LANE; // lane 1 occupies columns 13..=24
-const COL_HINT_ACC: usize = COL_LANE1 + PER_LANE; // column 25
+const COL_LANE0: usize = 0; // lane 0 occupies columns 0..=11
+const COL_LANE1: usize = COL_LANE0 + PER_LANE; // lane 1 occupies columns 12..=23
+const COL_HINT_ACC: usize = COL_LANE1 + PER_LANE; // column 24
 const COL_V_ZERO: [usize; 2] = [COL_HINT_ACC + 1, COL_HINT_ACC + 3];
 const COL_V_INV: [usize; 2] = [COL_HINT_ACC + 2, COL_HINT_ACC + 4];
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_V_INV[1] + 1; // 30
+pub const N_BASE_COLS: usize = COL_V_INV[1] + 1; // 29
 
 /// Logup entries per row (batched [`LOGUP_BATCH`] per interaction column): 2 lanes
 /// × (rc4 w1, rc13 a_lo, rc13 b_lo, rc7 a_hi, rc7 b_hi, rc13 sign_lo, rc7 sign_hi,
@@ -136,8 +135,6 @@ pub fn decomp_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     vec![
         pre_id("enabler_pre"),
         pre_id("start"),
-        pre_id("w_bind_id_lo"),
-        pre_id("w_bind_id_hi"),
         pre_id("byte_pos"),
         pre_id("is_last"),
     ]
@@ -164,17 +161,11 @@ pub fn gen_decomp_preprocessed(log_size: u32) -> Vec<ColEval> {
 
     let mut enabler = vec![m31(0); rows];
     let mut start = vec![m31(0); rows];
-    let mut wbid_lo = vec![m31(0); rows];
-    let mut wbid_hi = vec![m31(0); rows];
     let mut byte_pos = vec![m31(0); rows];
     let mut is_last = vec![m31(0); rows];
 
-    for (row, &(i, p)) in sched.iter().enumerate() {
+    for (row, _) in sched.iter().enumerate() {
         enabler[row] = m31(1);
-        let m_lo = 2 * p;
-        let m_hi = 2 * p + 1;
-        wbid_lo[row] = m31((i * N + m_lo) as u32);
-        wbid_hi[row] = m31((i * N + m_hi) as u32);
         byte_pos[row] = m31(row as u32);
     }
     start[0] = m31(1); // coset row 0 zeroes the accumulator's wraparound acc_prev.
@@ -182,10 +173,25 @@ pub fn gen_decomp_preprocessed(log_size: u32) -> Vec<ColEval> {
         is_last[sched.len() - 1] = m31(1);
     }
 
-    vec![enabler, start, wbid_lo, wbid_hi, byte_pos, is_last]
+    vec![enabler, start, byte_pos, is_last]
         .into_iter()
         .map(|v| col_eval(log_size, v))
         .collect()
+}
+
+#[cfg(test)]
+mod schedule_tests {
+    use super::*;
+
+    #[test]
+    fn byte_position_derives_both_wcell_keys() {
+        assert_eq!(decomp_preprocessed_ids().len(), 4);
+        for (row, (i, p)) in row_schedule().into_iter().enumerate() {
+            let byte_pos = row as u32;
+            assert_eq!(2 * byte_pos, (i * N + 2 * p) as u32);
+            assert_eq!(2 * byte_pos + 1, (i * N + 2 * p + 1) as u32);
+        }
+    }
 }
 
 // =============================================================================
@@ -349,7 +355,6 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
     }
     let mut hint_acc = 0i64;
     for (row, &(i, p)) in sched.iter().enumerate() {
-        cols[COL_ENABLER][row] = m31(1);
         for (lane, &m) in [2 * p, 2 * p + 1].iter().enumerate() {
             let base = COL_LANE0 + lane * PER_LANE;
             let v = lane_vals(witness, i, m);
@@ -416,14 +421,11 @@ impl FrameworkEval for DecompEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let enabler_pre = eval.get_preprocessed_column(pre_id("enabler_pre"));
         let start = eval.get_preprocessed_column(pre_id("start"));
-        let wbid_lo = eval.get_preprocessed_column(pre_id("w_bind_id_lo"));
-        let wbid_hi = eval.get_preprocessed_column(pre_id("w_bind_id_hi"));
         let byte_pos = eval.get_preprocessed_column(pre_id("byte_pos"));
         let is_last = eval.get_preprocessed_column(pre_id("is_last"));
+        let wbid_lo = byte_pos.clone() + byte_pos.clone();
+        let wbid_hi = wbid_lo.clone() + enabler_pre.clone();
 
-        // COL_ENABLER is a committed Boolean column. Preprocessed selectors
-        // gate the active rows.
-        let enabler = eval.next_trace_mask();
         // Two lanes' worth of base columns.
         let lanes: Vec<Vec<E::F>> = (0..2)
             .map(|_| (0..PER_LANE).map(|_| eval.next_trace_mask()).collect())
@@ -446,9 +448,6 @@ impl FrameworkEval for DecompEval {
         let two_pow_13 = E::F::from(m31(1 << 13));
         let sixteen = E::F::from(m31(16));
 
-        // C0: enabler boolean.
-        eval.add_constraint(enabler.clone() * (one.clone() - enabler.clone()));
-
         let wbids = [wbid_lo, wbid_hi];
         let mut hint_sum = E::EF::from(E::F::from(m31(0)));
 
@@ -468,24 +467,24 @@ impl FrameworkEval for DecompEval {
             let sign_hi = c[L_SIGN_HI].clone();
             let (v_is_zero, v_inv) = &boundary[lane];
 
-            // C1: booleans (hint, wrap_k, s0) — ungated (padding = 0 ⇒ satisfied).
+            // The hint, wrap_k, and s0 values are Boolean. Padding uses zero.
             eval.add_constraint(hint.clone() * (one.clone() - hint.clone()));
             eval.add_constraint(wrap_k.clone() * (one.clone() - wrap_k.clone()));
             eval.add_constraint(s0.clone() * (one.clone() - s0.clone()));
 
-            // C2: [DECOMP] reconstruction  w1·α + w0 − w + wrap_k·q == 0.
+            // [DECOMP] reconstruction: w1·α + w0 − w + wrap_k·q = 0.
             eval.add_constraint(
                 w1.clone() * alpha.clone() + w0.clone() - w.clone() + wrap_k.clone() * q.clone(),
             );
 
-            // C3: w1 ∈ [0,16) (rc4).
+            // Range-check w1 in [0,16).
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.rc4,
                 enabler_pre.clone(),
                 core::slice::from_ref(&w1),
             ));
 
-            // C4: exact FIPS lower endpoint. For v=w0+γ2, the first two
+            // Enforce the exact FIPS lower endpoint. For v=w0+γ2, the first two
             // equations force v_is_zero=[v=0] and its inverse witness; the
             // third permits v=0 only with w1=0. Booleanity is implied:
             // v=0 forces b=1 in (a), while v≠0 forces b=0 in (b).
@@ -545,14 +544,14 @@ impl FrameworkEval for DecompEval {
                 core::slice::from_ref(&sign_hi),
             ));
 
-            // C5: [HINT] UseHint  w1' = w1 + h·(2s0 − 1) + 16·wrap16.
+            // [HINT] UseHint: w1' = w1 + h·(2s0 − 1) + 16·wrap16.
             let delta_sign = s0.clone() + s0.clone() - one.clone(); // 2s0 − 1
             eval.add_constraint(
                 w1p.clone()
                     - (w1.clone() + hint.clone() * delta_sign + sixteen.clone() * wrap16.clone()),
             );
 
-            // C6: wrap16 ∈ {−1,0,1} via `{0,1,2}` membership lookup on (wrap16+1).
+            // Check wrap16 ∈ {−1,0,1} with a `{0,1,2}` lookup on wrap16+1.
             let w16_plus1 = wrap16.clone() + one.clone();
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.rc4, // rc4 ⊇ {0,1,2}; the value is always < 16
@@ -560,14 +559,14 @@ impl FrameworkEval for DecompEval {
                 core::slice::from_ref(&w16_plus1),
             ));
 
-            // C7: w1' ∈ [0,16) (rc4).
+            // Range-check w1' in [0,16).
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.rc4,
                 enabler_pre.clone(),
                 core::slice::from_ref(&w1p),
             ));
 
-            // C8: w-binding — USE of the coeffs W cell (poly_id·N + m, w).
+            // Use the coeffs W cell `(poly_id·N + m, w)`.
             let wtuple = [wbids[lane].clone(), w.clone()];
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.wcell,
@@ -578,20 +577,20 @@ impl FrameworkEval for DecompEval {
             hint_sum += E::EF::from(hint);
         }
 
-        // C9: hint accumulator transition  acc_cur = (1−start)·acc_prev + Σ_lane h.
+        // Update the hint accumulator: acc_cur = (1−start)·acc_prev + Σ_lane h.
         // `start` (coset row 0) zeroes the `[-1,0]` mask's wraparound acc_prev so
         // the running sum begins at 0. No per-poly reset — Σ_i Σ_m h is the global
         // total. Padding rows carry h=0, so acc stays flat past the last active row.
         let acc_prev_gated = E::EF::from(one.clone() - start.clone()) * acc_prev;
         eval.add_constraint(acc_cur.clone() - (acc_prev_gated + hint_sum));
 
-        // C10: the rc8 lookup reads the base-column copy, so bind that copy to
+        // The rc8 lookup reads the base-column copy. Bind that copy to
         // the true interaction running sum on the only row where it is used.
         eval.add_constraint(
             E::EF::from(is_last.clone()) * (E::EF::from(hint_acc.clone()) - acc_cur.clone()),
         );
 
-        // C11: w1Encode byte emission — byte = w1'_lo + 16·w1'_hi, YIELD (+) into
+        // Emit the w1Encode byte `w1'_lo + 16·w1'_hi` into
         // HashIo(STREAM_ID_CTILDE_ABSORB, byte_pos, byte). Emitted BEFORE the
         // hint gate to match the interaction generator's fraction order.
         let byte = lanes[0][L_W1P].clone() + sixteen.clone() * lanes[1][L_W1P].clone();
@@ -603,7 +602,7 @@ impl FrameworkEval for DecompEval {
             &io_tuple,
         ));
 
-        // C12: final-row hint gate — the last active row's acc = Σ_i Σ_m h is
+        // On the last active row, range-check acc = Σ_i Σ_m h
         // range-checked two-sided into rc8: Σh ∈ [0,256) AND ω−Σh ∈ [0,256).
         // The second use forces Σh ≤ ω = 55 EXACTLY (Σh > ω ⇒ ω−Σh wraps out of
         // [0,256) ⇒ no rc8 row ⇒ imbalance). Gated by is_last (no use elsewhere).

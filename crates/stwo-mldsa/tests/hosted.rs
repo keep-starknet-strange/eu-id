@@ -1118,11 +1118,11 @@ fn hosted_public_native_mu_proves_and_verifies() {
 
 #[test]
 fn hosted_private_key_shapes_kat_and_layout_are_exact() {
-    const EXPECTED_EXTRA_PREPROCESSED_COLUMNS: usize = 29;
-    const EXPECTED_EXTRA_TRACE_COLUMNS: usize = 72;
+    const EXPECTED_EXTRA_PREPROCESSED_COLUMNS: usize = 27;
+    const EXPECTED_EXTRA_TRACE_COLUMNS: usize = 67;
     const EXPECTED_EXTRA_INTERACTION_COLUMNS: usize = 172;
-    const EXPECTED_EXTRA_PREPROCESSED_CELLS: usize = 318_224;
-    const EXPECTED_EXTRA_TRACE_CELLS: usize = 1_374_960;
+    const EXPECTED_EXTRA_PREPROCESSED_CELLS: usize = 318_096;
+    const EXPECTED_EXTRA_TRACE_CELLS: usize = 1_372_528;
     const EXPECTED_EXTRA_INTERACTION_M31_CELLS: usize = 1_322_048;
 
     let msg = b"private device key tr reference vector".to_vec();

@@ -10,7 +10,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntr
 use super::relations::RcRelation;
 use crate::air_util::{
     gen_value_table_interaction, gen_value_table_multiplicities, gen_value_table_preprocessed,
-    table_log_size, ColEval,
+    table_log_size, value_table_preprocessed_id, ColEval,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,9 +44,7 @@ impl RcKind {
     }
 
     pub fn value_column_id(self) -> PreProcessedColumnId {
-        PreProcessedColumnId {
-            id: format!("mldsa_sib_{}_value", self.name()),
-        }
+        value_table_preprocessed_id(self.log_size(), self.n_values())
     }
 }
 
@@ -127,5 +125,19 @@ impl RcUses {
 impl Default for RcUses {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_value_tables_share_one_preprocessed_id() {
+        assert_eq!(
+            RcKind::Rc8.value_column_id(),
+            crate::decomp::tables::RcKind::Rc8.value_column_id()
+        );
+        assert_ne!(RcKind::Rc8.value_column_id(), RcKind::Rc9.value_column_id());
     }
 }

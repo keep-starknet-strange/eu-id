@@ -141,10 +141,11 @@ pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
 /// Class-D `is_dummy` selector ID for a shared producer's blinded table.
 /// It is `1` over the reserved dummy-key upper half
 /// `[2^L, 2^(L+1))`, `0` over the real lower half `[0, 2^L)`. Keyed by the
-/// producer's stable tag so no two producers alias, and namespaced under
-/// `sha_shared_` so it never collides with the standalone tables.
+/// blinded log size because equal-sized producers have the same selector.
+/// This lets the preprocessing tree commit one physical selector for all
+/// equal-sized tables.
 pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessedColumnId {
-    shared_id(&format!("{}_isdummy", producer.tag()))
+    shared_id(&format!("dummy_log_{}", producer.blind_log_size()))
 }
 
 /// Preprocessed-column ID of the single-cell `is_first_row` selector
@@ -543,5 +544,16 @@ mod tests {
         assert!(shared_table_preprocessed_column_ids()
             .iter()
             .all(|id| id.id.starts_with(SHARED_ID_PREFIX) && !id.id.contains("412f00")));
+    }
+
+    #[test]
+    fn equal_blinded_domains_share_the_dummy_selector() {
+        let range2 = shared_producer_dummy_column_id(SharedProducer::Range(RangeKind::Range2));
+        let range4 = shared_producer_dummy_column_id(SharedProducer::Range(RangeKind::Range4));
+        let range5 = shared_producer_dummy_column_id(SharedProducer::Range(RangeKind::Range5));
+        let range8 = shared_producer_dummy_column_id(SharedProducer::Range(RangeKind::Range8));
+        assert_eq!(range2, range4);
+        assert_eq!(range2, range5);
+        assert_ne!(range2, range8);
     }
 }

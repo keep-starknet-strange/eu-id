@@ -373,11 +373,13 @@ fn write_selected(
         cols.len(),
         "service preprocessed ids/cols mismatch"
     );
-    let selected: std::collections::HashSet<&PreProcessedColumnId> = selected_ids.iter().collect();
+    let selected: std::collections::HashSet<PreProcessedColumnId> =
+        selected_ids.iter().cloned().collect();
+    let mut emitted = std::collections::HashSet::new();
     let (picked_ids, picked_cols): (Vec<_>, Vec<_>) = ids
         .into_iter()
         .zip(cols)
-        .filter(|(id, _)| selected.contains(id))
+        .filter(|(id, _)| selected.contains(id) && emitted.insert(id.clone()))
         .unzip();
     assert_eq!(
         picked_ids.as_slice(),

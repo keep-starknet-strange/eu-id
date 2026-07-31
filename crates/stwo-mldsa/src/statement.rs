@@ -70,8 +70,9 @@ use crate::private_key_eval::{
     PrivateKeyEvalError, PrivateKeyEvalRelations, PrivateKeyEvalWitness, PrivateKeyTraceComponents,
 };
 use crate::sponge_link::{
-    BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation, BRIDGE_BASE_COLS,
-    BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, SINK_BASE_COLS, SINK_INTERACTION_COLS,
+    bridge_preprocessed_column_count, BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation,
+    BRIDGE_BASE_COLS, BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, SINK_BASE_COLS,
+    SINK_INTERACTION_COLS,
 };
 use crate::types::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
@@ -771,10 +772,18 @@ fn all_preprocessed_log_sizes(
         sizes.push(kind.log_size());
     }
     if !public_message {
-        sizes.extend(vec![bridge_log_size(message_len); 2]);
+        let log_size = bridge_log_size(message_len);
+        sizes.extend(vec![
+            log_size;
+            bridge_preprocessed_column_count(log_size, message_len)
+        ]);
     }
     for len in bridge_lens(native_mu, private_key) {
-        sizes.extend(vec![bridge_log_size(len); 2]);
+        let log_size = bridge_log_size(len);
+        sizes.extend(vec![
+            log_size;
+            bridge_preprocessed_column_count(log_size, len)
+        ]);
     }
     for len in sink_lens(message_len, native_mu, private_key) {
         sizes.extend(vec![bridge_log_size(len); 2]);
@@ -1980,12 +1989,13 @@ impl AirProver for MlDsaProver {
             cols.len(),
             "mldsa preprocessed ids/cols length mismatch"
         );
-        let selected: std::collections::HashSet<&PreProcessedColumnId> =
-            selected_ids.iter().collect();
+        let selected: std::collections::HashSet<PreProcessedColumnId> =
+            selected_ids.iter().cloned().collect();
+        let mut emitted = std::collections::HashSet::new();
         let (picked_ids, picked_cols): (Vec<_>, Vec<_>) = ids
             .into_iter()
             .zip(cols)
-            .filter(|(id, _)| selected.contains(id))
+            .filter(|(id, _)| selected.contains(id) && emitted.insert(id.clone()))
             .unzip();
         assert_eq!(
             picked_ids.as_slice(),

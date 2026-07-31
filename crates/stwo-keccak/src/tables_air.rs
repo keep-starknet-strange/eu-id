@@ -111,7 +111,11 @@ impl TableKind {
         let t = self.tag();
         (0..self.n_cols())
             .map(|c| PreProcessedColumnId {
-                id: format!("{t}_{c}"),
+                id: if matches!((self, c), (TableKind::Conv, 1) | (TableKind::Split(_), 0)) {
+                    "keccak_spread_byte_8".to_string()
+                } else {
+                    format!("{t}_{c}")
+                },
             })
             .collect()
     }
@@ -400,3 +404,24 @@ impl FrameworkEval for Eval {
 }
 
 pub type Component = FrameworkComponent<Eval>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spread_byte_tables_share_one_physical_column() {
+        let shared = TableKind::Conv.column_ids()[1].clone();
+        for shift in 1..=7 {
+            assert_eq!(TableKind::Split(shift).column_ids()[0], shared);
+        }
+        assert_eq!(
+            all_preprocessed_column_ids()
+                .into_iter()
+                .map(|id| id.id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            19
+        );
+    }
+}

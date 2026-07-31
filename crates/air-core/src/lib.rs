@@ -399,11 +399,100 @@ pub fn prove(
     Ok(proof)
 }
 
-fn report_prove_phase(timing: bool, name: &str, t_last: &mut std::time::Instant) {
-    if timing {
-        eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
-        *t_last = std::time::Instant::now();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProveTimingMode {
+    Disabled,
+    Legacy,
+    Json,
+}
+
+fn prove_timing_mode() -> ProveTimingMode {
+    prove_timing_mode_for(
+        std::env::var_os("EUID_PROVE_TIMING").is_some(),
+        std::env::var_os("AIR_CORE_PROVE_TIMING").is_some(),
+    )
+}
+
+fn prove_timing_mode_for(json: bool, legacy: bool) -> ProveTimingMode {
+    if json {
+        ProveTimingMode::Json
+    } else if legacy {
+        ProveTimingMode::Legacy
+    } else {
+        ProveTimingMode::Disabled
     }
+}
+
+fn timing_json(scope: &str, phase: &str, elapsed_us: u128) -> String {
+    format!(
+        r#"EUID_PROVE_TIMING {{"scope":"{scope}","phase":"{phase}","elapsed_us":{elapsed_us}}}"#
+    )
+}
+
+fn emit_timing_line(line: &str) {
+    eprintln!("{line}");
+    let Some(path) = std::env::var_os("EUID_PROVE_TIMING_FILE") else {
+        return;
+    };
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            writeln!(file, "{line}")
+        });
+    if let Err(error) = result {
+        eprintln!("EUID_PROVE_TIMING_WRITE_ERROR {error}");
+    }
+}
+
+fn report_prove_phase(timing: ProveTimingMode, name: &str, t_last: &mut std::time::Instant) {
+    match timing {
+        ProveTimingMode::Disabled => return,
+        ProveTimingMode::Legacy => {
+            eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
+        }
+        ProveTimingMode::Json => {
+            emit_timing_line(&timing_json("air_core", name, t_last.elapsed().as_micros()));
+        }
+    }
+    *t_last = std::time::Instant::now();
+}
+
+fn parse_stwo_span_csv(csv: &str) -> Vec<(&str, u128)> {
+    csv.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let (label, duration_ms) = line.split_once(',')?;
+            let phase = match label {
+                "Composition" => "composition",
+                "CompositionPolynomialGeneration" => "composition_polynomial_generation",
+                "EvaluateOutOfDomain" => "oods_evaluation",
+                "FRIQuotients" => "fri_quotients",
+                "Queries POW" => "proof_of_work",
+                _ => return None,
+            };
+            Some((phase, (duration_ms.parse::<f64>().ok()? * 1_000.0) as u128))
+        })
+        .collect()
+}
+
+fn report_stwo_spans(csv: &str, stark_total_us: u128) {
+    let spans = parse_stwo_span_csv(csv);
+    let separated_us = spans
+        .iter()
+        .filter(|(phase, _)| *phase != "composition_polynomial_generation")
+        .map(|(_, elapsed_us)| *elapsed_us)
+        .sum::<u128>();
+    for (phase, elapsed_us) in spans {
+        emit_timing_line(&timing_json("stwo", phase, elapsed_us));
+    }
+    emit_timing_line(&timing_json(
+        "stwo",
+        "fri_opening_and_unspanned_remainder",
+        stark_total_us.saturating_sub(separated_us),
+    ));
 }
 
 fn dump_shape_census_if_requested(modules: &[&mut dyn AirProver]) {
@@ -451,7 +540,7 @@ pub fn prove_with_post_interaction(
         .lifting_log_size
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
-    let timing = std::env::var_os("AIR_CORE_PROVE_TIMING").is_some();
+    let timing = prove_timing_mode();
     let t_start = std::time::Instant::now();
     let mut t_last = t_start;
     dump_shape_census_if_requested(modules);
@@ -529,6 +618,7 @@ pub fn prove_with_post_interaction(
         .iter_mut()
         .map(|m| m.take_post_interaction_payload())
         .collect();
+    report_prove_phase(timing, "post_interaction_gkr", &mut t_last);
     if modules
         .iter()
         .any(|m| !m.post_interaction_log_sizes().is_empty())
@@ -539,6 +629,7 @@ pub fn prove_with_post_interaction(
         }
         tb.commit(channel);
     }
+    report_prove_phase(timing, "post_interaction_commit", &mut t_last);
 
     // Build every module's components against one shared allocator seeded with
     // unique preprocessed column ids. Repeated deterministic tables resolve to
@@ -551,10 +642,35 @@ pub fn prove_with_post_interaction(
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         modules.iter().flat_map(|m| m.prover_components()).collect();
     report_prove_phase(timing, "build-components", &mut t_last);
-    let result = stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme);
-    report_prove_phase(timing, "stark-prove(composition+FRI+open)", &mut t_last);
-    if timing {
-        eprintln!("air-core prove TOTAL: {:?}", t_start.elapsed());
+    let stark_start = std::time::Instant::now();
+    let (result, stwo_spans) = if timing == ProveTimingMode::Json {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let spans = stwo::tracing::SpanAccumulator::default();
+        let subscriber = tracing_subscriber::Registry::default().with(spans.clone());
+        let result = tracing::subscriber::with_default(subscriber, || {
+            stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
+        });
+        (result, Some(spans.export_csv()))
+    } else {
+        (
+            stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme),
+            None,
+        )
+    };
+    let stark_total_us = stark_start.elapsed().as_micros();
+    report_prove_phase(timing, "stark_prove_total", &mut t_last);
+    if let Some(csv) = stwo_spans {
+        report_stwo_spans(&csv, stark_total_us);
+    }
+    match timing {
+        ProveTimingMode::Disabled => {}
+        ProveTimingMode::Legacy => eprintln!("air-core prove TOTAL: {:?}", t_start.elapsed()),
+        ProveTimingMode::Json => emit_timing_line(&timing_json(
+            "air_core",
+            "total",
+            t_start.elapsed().as_micros(),
+        )),
     }
     result.map(|proof| (proof, post_interaction_payloads))
 }
@@ -1033,6 +1149,32 @@ mod tests {
     use super::*;
     use stwo::core::fields::m31::M31;
     use stwo::prover::backend::simd::column::BaseColumn;
+
+    #[test]
+    fn timing_output_is_opt_in_and_stwo_spans_are_coherent() {
+        assert_eq!(
+            prove_timing_mode_for(false, false),
+            ProveTimingMode::Disabled
+        );
+        assert_eq!(
+            timing_json("air_core", "tree0_write", 17),
+            r#"EUID_PROVE_TIMING {"scope":"air_core","phase":"tree0_write","elapsed_us":17}"#
+        );
+        let spans = parse_stwo_span_csv(
+            "Label,Duration_ms\nComposition,2.5\nEvaluateOutOfDomain,1\nFRIQuotients,3.25\nQueries POW,0.5\n",
+        );
+        assert_eq!(
+            spans,
+            vec![
+                ("composition", 2_500),
+                ("oods_evaluation", 1_000),
+                ("fri_quotients", 3_250),
+                ("proof_of_work", 500),
+            ]
+        );
+        let separated_us: u128 = spans.iter().map(|(_, elapsed)| elapsed).sum();
+        assert_eq!(10_000u128.saturating_sub(separated_us), 2_750);
+    }
 
     struct FingerprintOnlyProver {
         module: &'static str,

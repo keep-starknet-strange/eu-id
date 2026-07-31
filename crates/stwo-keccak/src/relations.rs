@@ -20,7 +20,7 @@
 use stwo::core::channel::Channel;
 use stwo_constraint_framework::relation;
 
-use crate::constants::{N_BYTES_IN_STATE, N_BYTES_IN_U64};
+use crate::constants::{IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE};
 
 // ───────────────────────────── Interface relations ─────────────────────────
 
@@ -93,11 +93,18 @@ relation!(Split5, SPLIT_LOOKUP_ARITY);
 relation!(Split6, SPLIT_LOOKUP_ARITY);
 relation!(Split7, SPLIT_LOOKUP_ARITY);
 
-/// Arity of [`KeccakRound`]: permutation id, round index, 8 round-constant
-/// bytes, then the 200 state bytes. The identity fields prevent LogUp's
-/// multiset semantics from swapping states across permutations or reordering
-/// rounds within one permutation.
-pub const KECCAK_ROUND_ARITY: usize = 2 + N_BYTES_IN_U64 + N_BYTES_IN_STATE;
+/// Arity of [`KeccakRound`]: permutation id, input/output direction, round
+/// index, four round-constant byte lanes, then the 200 state bytes. Input links
+/// carry the nonzero-capable Iota lanes. Output links carry zero in those four
+/// positions. The identity fields prevent LogUp's multiset semantics from
+/// swapping states across permutations, reordering rounds, or canceling a
+/// round input against an output without the fixed wrapper schedule.
+pub const KECCAK_ROUND_ARITY: usize = 3 + IOTA_RC_BYTE_INDICES.len() + N_BYTES_IN_STATE;
+pub const KECCAK_ROUND_PERM_ID_INDEX: usize = 0;
+pub const KECCAK_ROUND_DIRECTION_INDEX: usize = 1;
+pub const KECCAK_ROUND_INDEX_INDEX: usize = 2;
+pub const KECCAK_ROUND_RC_START: usize = 3;
+pub const KECCAK_ROUND_STATE_START: usize = KECCAK_ROUND_RC_START + IOTA_RC_BYTE_INDICES.len();
 relation!(KeccakRound, KECCAK_ROUND_ARITY);
 
 /// Shared handle for the ONE drawn [`KeccakRelations`] of a composed proof.

@@ -9,15 +9,15 @@
 //! - [`PublicPrefixEval`] provides or requires fixed public bytes on a HashIo
 //!   stream. It feeds verifier-native `tr ‖ 0x00 ‖ 0x00` into a private
 //!   µ-absorb, or verifier-native µ directly into c̃-absorb for public messages.
-//! - [`Bridge`] requires `(src_stream, src_off+i, byte)` (−) and
-//!   yields `(dst_stream, dst_off+i, byte)` (+), where `byte` is ONE committed
+//! - [`BridgeEval`] requires `(src_stream, src_off+i, byte)` (−) and
+//!   yields `(dst_stream, dst_off+i, byte)` (+), where `byte` is one committed
 //!   trace cell used on both sides. This constrains the two values to be equal.
 //!   Bridges connect private µ→c̃, w1Encode→c̃, and c̃→SIB
 //!   seams. A variant with `src_relation = MsgLink` bridges private/standalone
 //!   message bytes into µ-absorb.
 //!
-//! Every constraint here is degree ≤ 2 (enabler boolean + degree-1 HashIo/MsgLink
-//! uses), so `max_constraint_log_degree_bound == log_size + 1`.
+//! Every constraint here has degree 2 or less, so
+//! `max_constraint_log_degree_bound == log_size + 1`.
 
 #![allow(clippy::needless_range_loop)]
 
@@ -200,10 +200,24 @@ pub(crate) fn ns_prefix(ns: &str) -> String {
     }
 }
 
-fn bridge_pre_id(ns: &str, tag: &str, name: &str) -> PreProcessedColumnId {
+fn prefix_active_id(log_size: u32, len: usize) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("{}mldsa_bridge_{tag}_{name}", ns_prefix(ns)),
+        id: format!("mldsa_prefix_shape/log{log_size}/len{len}/active"),
     }
+}
+
+fn prefix_affine_id(log_size: u32, len: usize, offset: u32) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_prefix_shape/log{log_size}/len{len}/offset{offset}/index"),
+    }
+}
+
+/// Number of preprocessed bridge columns: an index, plus an active mask when
+/// the bridge does not fill its trace domain.
+pub(crate) fn bridge_preprocessed_column_count(log_size: u32, len: usize) -> usize {
+    let rows = 1usize << log_size;
+    assert!(len <= rows, "bridge length exceeds its trace domain");
+    1 + usize::from(len < rows)
 }
 
 /// A HashIo bridge: for each of `len` rows, requires the source tuple (−) and
@@ -223,42 +237,50 @@ pub struct BridgeEval {
 }
 
 impl BridgeEval {
+    fn uses_active_column(&self) -> bool {
+        bridge_preprocessed_column_count(self.log_size, self.len) == 2
+    }
     fn active_col(&self) -> PreProcessedColumnId {
-        bridge_pre_id(&self.ns, self.tag, "active")
+        prefix_active_id(self.log_size, self.len)
     }
     fn idx_col(&self) -> PreProcessedColumnId {
-        bridge_pre_id(&self.ns, self.tag, "idx")
+        prefix_affine_id(self.log_size, self.len, 0)
     }
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
-        vec![self.active_col(), self.idx_col()]
+        let mut ids = Vec::with_capacity(bridge_preprocessed_column_count(self.log_size, self.len));
+        if self.uses_active_column() {
+            ids.push(self.active_col());
+        }
+        ids.push(self.idx_col());
+        ids
     }
     pub fn gen_preprocessed(&self) -> Vec<ColEval> {
         let rows = 1usize << self.log_size;
-        let mut active = vec![m31(0); rows];
         let mut idx = vec![m31(0); rows];
         for i in 0..self.len {
-            active[i] = m31(1);
             idx[i] = m31(i as u32);
         }
-        vec![active, idx]
-            .into_iter()
+        let mut cols =
+            Vec::with_capacity(bridge_preprocessed_column_count(self.log_size, self.len));
+        if self.uses_active_column() {
+            let mut active = vec![m31(0); rows];
+            active[..self.len].fill(m31(1));
+            cols.push(active);
+        }
+        cols.push(idx);
+        cols.into_iter()
             .map(|v| col_eval(self.log_size, v))
             .collect()
     }
-    /// Base trace: enabler + the moved byte per row.
+    /// Base trace: the moved byte per row.
     pub fn gen_base(&self, bytes: &[u8]) -> Vec<ColEval> {
         assert_eq!(bytes.len(), self.len, "bridge byte count mismatch");
         let rows = 1usize << self.log_size;
-        let mut enabler = vec![m31(0); rows];
         let mut byte = vec![m31(0); rows];
         for (i, &b) in bytes.iter().enumerate() {
-            enabler[i] = m31(1);
             byte[i] = m31(b as u32);
         }
-        vec![enabler, byte]
-            .into_iter()
-            .map(|v| col_eval(self.log_size, v))
-            .collect()
+        vec![col_eval(self.log_size, byte)]
     }
     pub fn gen_interaction(&self, bytes: &[u8]) -> (Vec<ColEval>, SecureField) {
         // Two fractions per row: source require (−), dest yield (+).
@@ -352,12 +374,13 @@ impl FrameworkEval for BridgeEval {
         self.log_size + 1
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(self.active_col());
+        let active = if self.uses_active_column() {
+            eval.get_preprocessed_column(self.active_col())
+        } else {
+            E::F::from(M31::one())
+        };
         let idx = eval.get_preprocessed_column(self.idx_col());
-        let enabler = eval.next_trace_mask();
         let byte = eval.next_trace_mask();
-        let one = E::F::from(M31::one());
-        eval.add_constraint(enabler.clone() * (one - enabler.clone()));
 
         // Source require (−active).
         match &self.src {
@@ -412,14 +435,10 @@ pub struct SqueezeSinkEval {
 
 impl SqueezeSinkEval {
     fn active_col(&self) -> PreProcessedColumnId {
-        PreProcessedColumnId {
-            id: format!("{}mldsa_sink_{}_active", ns_prefix(&self.ns), self.tag),
-        }
+        prefix_active_id(self.log_size, self.len)
     }
     fn pos_col(&self) -> PreProcessedColumnId {
-        PreProcessedColumnId {
-            id: format!("{}mldsa_sink_{}_pos", ns_prefix(&self.ns), self.tag),
-        }
+        prefix_affine_id(self.log_size, self.len, self.off)
     }
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
         vec![self.active_col(), self.pos_col()]
@@ -440,16 +459,11 @@ impl SqueezeSinkEval {
     pub fn gen_base(&self, bytes: &[u8]) -> Vec<ColEval> {
         assert_eq!(bytes.len(), self.len, "sink byte count mismatch");
         let rows = 1usize << self.log_size;
-        let mut enabler = vec![m31(0); rows];
         let mut byte = vec![m31(0); rows];
         for (i, &b) in bytes.iter().enumerate() {
-            enabler[i] = m31(1);
             byte[i] = m31(b as u32);
         }
-        vec![enabler, byte]
-            .into_iter()
-            .map(|v| col_eval(self.log_size, v))
-            .collect()
+        vec![col_eval(self.log_size, byte)]
     }
     pub fn gen_interaction(&self, bytes: &[u8]) -> (Vec<ColEval>, SecureField) {
         gen_single_yield(
@@ -478,10 +492,7 @@ impl FrameworkEval for SqueezeSinkEval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let active = eval.get_preprocessed_column(self.active_col());
         let pos = eval.get_preprocessed_column(self.pos_col());
-        let enabler = eval.next_trace_mask();
         let byte = eval.next_trace_mask();
-        let one = E::F::from(M31::one());
-        eval.add_constraint(enabler.clone() * (one - enabler.clone()));
         let tuple = [E::F::from(m31(self.stream)), pos, byte];
         eval.add_to_relation(RelationEntry::base(&self.hash_io, -active, &tuple));
         eval.finalize_logup();
@@ -489,13 +500,13 @@ impl FrameworkEval for SqueezeSinkEval {
     }
 }
 
-/// Base column count of a squeeze sink (`enabler`, `byte`).
-pub const SINK_BASE_COLS: usize = 2;
+/// Base column count of a squeeze sink (`byte`).
+pub const SINK_BASE_COLS: usize = 1;
 /// Interaction columns for a squeeze sink (one require, unbatched).
 pub const SINK_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 
-/// Base column count of a bridge (`enabler`, `byte`).
-pub const BRIDGE_BASE_COLS: usize = 2;
+/// Base column count of a bridge (`byte`).
+pub const BRIDGE_BASE_COLS: usize = 1;
 /// Base column count of a public-prefix producer (`enabler` only).
 pub const PREFIX_BASE_COLS: usize = 1;
 /// Interaction columns for a bridge (source require + dest yield, unbatched).
@@ -539,4 +550,82 @@ fn gen_single_yield(
     let (trace, claimed_sum) = logup.finalize_last();
     debug_assert_eq!(claimed_sum, claimed, "prefix logup claimed sum mismatch");
     (trace, claimed_sum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bridge(tag: &'static str, log_size: u32, len: usize) -> BridgeEval {
+        let hash_io = HashIoRelation::dummy();
+        BridgeEval {
+            tag,
+            ns: "test".to_string(),
+            log_size,
+            src: SrcRelation::HashIo(hash_io.clone(), 1, 2),
+            dst_stream: 3,
+            dst_off: 4,
+            len,
+            hash_io,
+        }
+    }
+
+    #[test]
+    fn full_domain_bridge_uses_literal_active_value() {
+        let bridge = bridge("full", 6, 64);
+
+        assert!(!bridge.uses_active_column());
+        assert_eq!(bridge.preprocessed_ids(), vec![bridge.idx_col()]);
+        assert_eq!(bridge.gen_preprocessed().len(), 1);
+        assert_eq!(bridge.gen_base(&vec![7; bridge.len]).len(), 1);
+        assert_eq!(BRIDGE_BASE_COLS, 1);
+    }
+
+    #[test]
+    fn partial_domain_bridge_keeps_active_mask() {
+        let bridge = bridge("partial", 6, 48);
+
+        assert!(bridge.uses_active_column());
+        assert_eq!(
+            bridge.preprocessed_ids(),
+            vec![bridge.active_col(), bridge.idx_col()]
+        );
+        assert_eq!(bridge.gen_preprocessed().len(), 2);
+        assert_eq!(bridge.gen_base(&vec![9; bridge.len]).len(), 1);
+    }
+
+    #[test]
+    fn equal_prefix_shapes_share_physical_preprocessing() {
+        let first = bridge("first", 6, 48);
+        let mut second = bridge("second", 6, 48);
+        second.ns = "another-instance".to_string();
+        assert_eq!(first.preprocessed_ids(), second.preprocessed_ids());
+
+        let sink = SqueezeSinkEval {
+            tag: "same-shape",
+            ns: "sink-instance".to_string(),
+            log_size: 6,
+            stream: 9,
+            off: 0,
+            len: 48,
+            hash_io: HashIoRelation::dummy(),
+        };
+        assert_eq!(sink.preprocessed_ids(), first.preprocessed_ids());
+    }
+
+    #[test]
+    fn squeeze_sink_commits_only_bytes() {
+        let sink = SqueezeSinkEval {
+            tag: "tail",
+            ns: "test".to_string(),
+            log_size: 7,
+            stream: 1,
+            off: 64,
+            len: 72,
+            hash_io: HashIoRelation::dummy(),
+        };
+
+        assert_eq!(sink.gen_base(&vec![11; sink.len]).len(), 1);
+        assert_eq!(SINK_BASE_COLS, 1);
+    }
 }

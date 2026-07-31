@@ -10,7 +10,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntr
 use super::relations::RcRelation;
 use crate::air_util::{
     gen_value_table_interaction, gen_value_table_multiplicities, gen_value_table_preprocessed,
-    table_log_size, ColEval,
+    table_log_size, value_table_preprocessed_id, ColEval,
 };
 
 /// The four range-check widths used by decomp.
@@ -48,9 +48,7 @@ impl RcKind {
     }
 
     pub fn value_column_id(self) -> PreProcessedColumnId {
-        PreProcessedColumnId {
-            id: format!("mldsa_decomp_{}_value", self.name()),
-        }
+        value_table_preprocessed_id(self.log_size(), self.n_values())
     }
 }
 

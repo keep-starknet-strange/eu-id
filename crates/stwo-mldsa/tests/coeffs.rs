@@ -237,10 +237,10 @@ fn paired_zw_shape_is_log13_and_batch4_legal() {
     assert_eq!(log_size, 13);
     assert_eq!(rows, 8192);
     assert_eq!(
-        N_BASE_COLS, 17,
+        N_BASE_COLS, 16,
         "z/w reuse six digit columns; two dedicated norm highs prevent carry-stream aliasing"
     );
-    assert_eq!(coeffs_preprocessed_ids().len(), 18);
+    assert_eq!(coeffs_preprocessed_ids().len(), 11);
     assert_eq!(N_RANGE_STREAMS, 14);
     assert_eq!(N_LOGUP_ENTRIES, 18);
     assert_eq!(LOGUP_BATCH, 4);
@@ -249,7 +249,7 @@ fn paired_zw_shape_is_log13_and_batch4_legal() {
     assert_eq!(N_INTERACTION_COLS, 24);
     assert_eq!(
         (coeffs_preprocessed_ids().len() + N_BASE_COLS + N_INTERACTION_COLS) * rows,
-        483_328
+        417_792
     );
 }
 

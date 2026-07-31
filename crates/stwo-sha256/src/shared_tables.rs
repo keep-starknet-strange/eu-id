@@ -21,6 +21,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::{ComponentProver, TreeBuilder};
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
 use crate::components::{
@@ -266,6 +267,29 @@ impl AirProver for ShaTablesProver {
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         let (evals, _ids, _log_sizes) = generate_shared_table_preprocessed_trace();
         tb.extend_evals(evals);
+    }
+
+    fn write_selected_preprocessed(
+        &mut self,
+        tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>,
+        selected_ids: &[PreProcessedColumnId],
+    ) {
+        let (evals, ids, _log_sizes) = generate_shared_table_preprocessed_trace();
+        let selected = selected_ids
+            .iter()
+            .map(|selected_id| {
+                ids.iter()
+                    .zip(&evals)
+                    .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "selected preprocessed column {} is not owned by the shared SHA tables",
+                            selected_id.id
+                        )
+                    })
+            })
+            .collect();
+        tb.extend_evals(selected);
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {

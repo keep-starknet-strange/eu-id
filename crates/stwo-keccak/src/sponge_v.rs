@@ -25,10 +25,9 @@
 //!   with `new_rate = prev_rate ⊕ block` witnessed and xor3-table-checked.
 //! * `is_active − is_absorb`→ `[perm_id, IN, post_prev]` (extra squeeze perm).
 //!
-//! Every schedule flag and constant is preprocessed and is pinned by the
-//! tree-0 root. Thus, all plain constraints are degree ≤ 2 and every LogUp
-//! tuple cell is degree ≤ 1; batch-4 logup constraints are degree 5 at
-//! `max_constraint_log_degree_bound = log + 2`.
+//! The tree-0 root pins the committed schedule columns. The AIR derives rate,
+//! capacity-mode, and padding values from those columns. Plain constraints
+//! have degree at most 4. Batch-four LogUp constraints have degree 5.
 //!
 //! ## Relation signs
 //!
@@ -73,12 +72,6 @@ pub const N_CAPACITY_BASE_COLS: usize = 2 + MAX_RATE;
 /// Scalar schedule columns. Padding masks add one column per distinct,
 /// nonzero fixed-job mask.
 pub const N_SCHEDULE_COLS: usize = 10;
-
-/// Capacity-mode schedule columns shared across all capacity jobs. One
-/// additional one-hot column is appended per capacity job so the AIR can
-/// select that job's transcript-bound actual length without putting it in
-/// tree zero.
-pub const N_CAPACITY_SCHEDULE_COLS: usize = 2;
 
 /// Logup entries per row: five MAX_RATE byte families plus six state entries
 /// (mode-gated first/absorb inputs, squeeze input, and output).
@@ -170,7 +163,6 @@ impl JobList {
                 .enumerate()
                 .filter(|(column, alias)| **alias == Some(*column))
                 .count()
-            + usize::from(self.has_message_capacity()) * N_CAPACITY_SCHEDULE_COLS
             + self.capacity_job_count()
     }
 
@@ -240,7 +232,7 @@ impl JobList {
 // The preprocessed schedule depends only on the shape.
 // =============================================================================
 
-/// One row's schedule entry (all preprocessed).
+/// One canonical row used to generate the committed schedule columns.
 #[derive(Clone)]
 struct RowSched {
     first: bool,
@@ -253,7 +245,6 @@ struct RowSched {
     absorb_pos_base: u32,
     squeeze_pos_base: u32,
     capacity_mode: bool,
-    capacity_last: bool,
     capacity_job: Option<usize>,
     /// `pad_gate[j] = 1` iff byte `j` of this row's block is a pad10*1 constant.
     pad_gate: [u8; MAX_RATE],
@@ -294,7 +285,6 @@ fn build_schedule(jobs: &JobList) -> Vec<RowSched> {
                     0
                 },
                 capacity_mode: shape.has_message_capacity(),
-                capacity_last: shape.has_message_capacity() && last_absorb,
                 capacity_job,
                 pad_gate,
             });
@@ -366,8 +356,6 @@ pub fn schedule_ids(jobs: &JobList) -> Vec<PreProcessedColumnId> {
         }
     }
     if jobs.has_message_capacity() {
-        ids.push(schedule_id(&d, "capacity_mode"));
-        ids.push(schedule_id(&d, "capacity_last"));
         for job in 0..jobs.capacity_job_count() {
             ids.push(schedule_id(&d, &format!("capacity_job_{job}")));
         }
@@ -410,8 +398,6 @@ pub fn gen_schedule_preprocessed(jobs: &JobList) -> Vec<ColEval> {
         }
     }
     if jobs.has_message_capacity() {
-        cols.push(scalar(&|s| s.capacity_mode as u32));
-        cols.push(scalar(&|s| s.capacity_last as u32));
         for job in 0..jobs.capacity_job_count() {
             cols.push(scalar(&move |s| (s.capacity_job == Some(job)) as u32));
         }
@@ -670,10 +656,10 @@ impl FrameworkEval for Eval {
         self.jobs.log_size()
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Every plain constraint is degree ≤ 2, every logup numerator is a
-        // degree ≤ 2 product of preprocessed gates. Every tuple cell and
-        // denominator is degree ≤ 1, so batch-4 constraints are
-        // degree 1 + 4·1 = 5 ≤ D5. The log + 2 bound supports this degree.
+        // The capacity-prefix constraint has degree 4. Every other plain
+        // constraint has degree 2 or less. Every tuple cell and denominator
+        // has degree 1 or less, so batch-four LogUp constraints reach degree 5.
+        // The log + 2 bound supports both cases.
         self.log_size() + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -711,19 +697,10 @@ impl FrameworkEval for Eval {
             };
             scheduled_pad_gate.push(gate);
         }
-        let capacity_mode = if self.jobs.has_message_capacity() {
-            eval.get_preprocessed_column(schedule_id(&d, "capacity_mode"))
-        } else {
-            E::F::zero()
-        };
-        let capacity_last = if self.jobs.has_message_capacity() {
-            eval.get_preprocessed_column(schedule_id(&d, "capacity_last"))
-        } else {
-            E::F::zero()
-        };
         // Select the public actual length with capacity-only one-hot schedule
-        // columns. The selected constants affect constraints and transcript,
-        // never the preprocessed column bytes or ids.
+        // columns. Their sum is the capacity-mode gate. The selected constants
+        // affect constraints and transcript, never the column bytes or ids.
+        let mut capacity_mode = E::F::zero();
         let mut actual_message_len = E::F::zero();
         if self.jobs.has_message_capacity() {
             for (capacity_job, shape) in self
@@ -737,6 +714,7 @@ impl FrameworkEval for Eval {
                     &d,
                     &format!("capacity_job_{capacity_job}"),
                 ));
+                capacity_mode += selector.clone();
                 actual_message_len +=
                     selector * E::F::from(BaseField::from(shape.message_len as u32));
             }
@@ -789,14 +767,14 @@ impl FrameworkEval for Eval {
             );
             eval.add_constraint(
                 capacity_mode.clone()
-                    * (one.clone() - capacity_last.clone())
+                    * (one.clone() - is_squeeze_out.clone())
                     * absorb_next.clone()
                     * (one.clone() - absorb_active.clone()),
             );
             eval.add_constraint(
                 capacity_mode.clone()
                     * (squeeze_active.clone() - absorb_active.clone()
-                        + (one.clone() - capacity_last.clone()) * absorb_next.clone()),
+                        + (one.clone() - is_squeeze_out.clone()) * absorb_next.clone()),
             );
         }
 
@@ -1320,13 +1298,12 @@ mod tests {
     fn capacity_jobs_do_not_commit_unused_fixed_padding_masks() {
         let jobs = JobList::new([Shape::with_message_capacity(303, 1_024, 1, 0, 1).unwrap()]);
         assert!(pad_gate_aliases(&jobs).iter().all(Option::is_none));
-        assert_eq!(
-            jobs.n_schedule_cols(),
-            N_SCHEDULE_COLS + N_CAPACITY_SCHEDULE_COLS + 1
-        );
-        assert!(schedule_ids(&jobs)
-            .iter()
-            .all(|id| !id.id.contains("pad_gate_")));
+        assert_eq!(jobs.n_schedule_cols(), N_SCHEDULE_COLS + 1);
+        let ids = schedule_ids(&jobs);
+        assert!(ids.iter().all(|id| !id.id.contains("pad_gate_")));
+        assert!(ids.iter().all(|id| !id.id.ends_with("/capacity_mode")));
+        assert!(ids.iter().all(|id| !id.id.ends_with("/capacity_last")));
+        assert!(ids.iter().any(|id| id.id.ends_with("/capacity_job_0")));
     }
 
     #[test]

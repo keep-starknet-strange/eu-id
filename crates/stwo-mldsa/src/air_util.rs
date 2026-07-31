@@ -10,6 +10,7 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
+use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::LogupTraceGenerator;
 
 /// A base-field column evaluation over the circle domain (bit-reversed order).
@@ -33,6 +34,16 @@ pub(crate) const fn table_log_size(n_values: usize) -> u32 {
         LOG_N_LANES
     } else {
         bits
+    }
+}
+
+/// Stable ID for a canonical `[0, n_values)` value table.
+///
+/// Components with the same row count and values share one physical
+/// preprocessing commitment.
+pub(crate) fn value_table_preprocessed_id(log_size: u32, n_values: usize) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_value_table/log{log_size}/n{n_values}"),
     }
 }
 

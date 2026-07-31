@@ -81,17 +81,17 @@ const CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 3] = [1, 2, 3];
 const CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256: &str =
     "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
 const CANONICAL_NORMATIVE_SPEC_SHA256: &str =
-    "01606b356cad9101da23a71fd8de537c5616f9430b856d09aa3101da81916060";
+    "423edeeebd5c62844db646e8f362dc3b3b53bbf885275b97269106607f32190e";
 const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
 const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
 const CANONICAL_DEVICE_SIG_STRUCTURE_CAPACITY: u32 = 1_024;
-const CANONICAL_TREE_COLUMN_COUNTS: [u64; 5] = [946, 4_906, 2_400, 8, 32];
+const CANONICAL_TREE_COLUMN_COUNTS: [u64; 5] = [310, 4_868, 2_400, 8, 32];
 const CANONICAL_TREE_DEPTHS: [u32; 5] = [19, 19, 19, 16, 19];
 const CANONICAL_FRI_LAYER_INPUT_LOGS: [u32; 8] = [19, 17, 15, 13, 11, 9, 7, 5];
 const CANONICAL_FRI_LAYER_OUTPUT_LOGS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
 const CANONICAL_FRI_WITNESS_CAPS: [u64; 8] = [108, 108, 108, 108, 108, 108, 108, 36];
 const CANONICAL_FRI_MERKLE_DEPTHS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
-const CANONICAL_SAMPLED_SECURE_FIELD_COUNT: u64 = 10_709;
+const CANONICAL_SAMPLED_SECURE_FIELD_COUNT: u64 = 10_035;
 const CANONICAL_OUTER_CLAIMS_AND_FRAMING_BYTES: u64 = 3_840;
 const CANONICAL_COMPONENT_COUNT: usize = 96;
 const CANONICAL_RELATION_COUNT: usize = 85;
@@ -3490,9 +3490,9 @@ mod tests {
         assert_eq!(first.circuit_hash, second.circuit_hash);
         assert_eq!(
             deterministic_proof_bound(&ts13_demo_proof_bound_terms()).unwrap(),
-            (1_734_952, 1_769_472)
+            (1_616_328, 1_638_400)
         );
-        assert_eq!(first.proof_body_capacity, 1_769_472);
+        assert_eq!(first.proof_body_capacity, 1_638_400);
 
         let decoded: Value =
             ciborium::de::from_reader(first.artifact.as_slice()).expect("artifact decodes");

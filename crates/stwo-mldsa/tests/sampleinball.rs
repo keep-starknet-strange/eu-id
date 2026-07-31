@@ -12,6 +12,83 @@ use common::{standalone_pcs_config as pcs_config, witness_for};
 use stwo_mldsa::sampleinball::proof::{prove_sib, verify_sib};
 use stwo_mldsa::witness::MlDsaWitness;
 
+#[test]
+fn current_schedule_has_the_audited_fifteen_column_basis() {
+    use std::collections::HashMap;
+
+    use stwo::core::fields::m31::M31;
+    use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
+    use stwo_mldsa::constants::{N, TAU};
+    use stwo_mldsa::sampleinball::{
+        gen_sib_preprocessed, sib_preprocessed_ids, MAX_SIB_SQUEEZE_BYTES, N_CORE, SIGN_BIT_COLS,
+        SIGN_BYTES,
+    };
+
+    let log_size = 10;
+    let rows = 1usize << log_size;
+    let columns: HashMap<_, _> = sib_preprocessed_ids()
+        .into_iter()
+        .zip(gen_sib_preprocessed(log_size))
+        .map(|(id, column)| (id.id, column.to_cpu().values))
+        .collect();
+    let row_value = |name: &str, row: usize| {
+        let circle_row =
+            bit_reverse_index(coset_index_to_circle_domain_index(row, log_size), log_size);
+        columns[&format!("mldsa_sib_{name}")][circle_row]
+    };
+    let m31 = M31::from_u32_unchecked;
+    let bit = |value: bool| m31(u32::from(value));
+    let three_inv = m31(3).inverse();
+
+    for row in 0..rows {
+        let is_stream = row_value("is_stream", row);
+        let is_placement = row_value("is_placement", row);
+        let is_c = row_value("is_c", row);
+        let acc_start = row_value("acc_start", row);
+        let c_bind_id = row_value("c_bind_id", row);
+        let is_core = row_value("is_core", row);
+        let is_init = row_value("is_init", row);
+        let is_read = row_value("is_read_row", row);
+        let is_write_i = row_value("is_wr_i_row", row);
+        let is_write_j = row_value("is_wr_j_row", row);
+        let row_counter = m31(row as u32);
+
+        assert_eq!(is_stream - is_placement, bit(row < SIGN_BYTES));
+        assert_eq!(row_value("is_sign", row), bit(row < SIGN_BYTES));
+        assert_eq!(row_value("sorted_start", row), acc_start);
+        assert_eq!(
+            c_bind_id + m31(N_CORE as u32) * is_c,
+            row_value("ts_final", row)
+        );
+        assert_eq!(is_core - is_init - is_read - is_write_i, is_write_j);
+
+        if row < MAX_SIB_SQUEEZE_BYTES {
+            assert_eq!(row_value("byte_pos", row), row_counter);
+        }
+        if row < N_CORE {
+            assert_eq!(row_value("core_ts", row), row_counter);
+        }
+        if row < N {
+            assert_eq!(row_value("init_addr", row), row_counter);
+        }
+        if (N..N_CORE).contains(&row) {
+            let step = (row_counter - m31(N as u32) - is_write_i - m31(2) * is_write_j) * three_inv;
+            assert_eq!(row_value("step_no", row), step);
+        }
+
+        for sign_bit in 0..SIGN_BIT_COLS {
+            let expected = bit(row < SIGN_BYTES && SIGN_BIT_COLS * row + sign_bit < TAU);
+            assert_eq!(row_value(&format!("sign_mask_{sign_bit}"), row), expected);
+            if sign_bit >= 2 {
+                assert_eq!(
+                    row_value(&format!("sign_mask_{sign_bit}"), row),
+                    row_value("sign_mask_1", row)
+                );
+            }
+        }
+    }
+}
+
 /// A witness mutation is REJECTED if proving fails/panics or verify fails.
 fn rejected(witness: MlDsaWitness) -> bool {
     let w2 = witness.clone();

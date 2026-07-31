@@ -50,13 +50,11 @@ use stwo_constraint_framework::{
 };
 
 use crate::constants::{
-    N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, RHO_OFFSETS, SQRT_N_LANES,
+    IOTA_RC, IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, RHO_OFFSETS,
+    SQRT_N_LANES,
 };
-use crate::relations::{KeccakRelations, KECCAK_ROUND_ARITY};
+use crate::relations::{direction, KeccakRelations, KECCAK_ROUND_ARITY};
 use crate::utils::{spread_u32, unspread_u32, Enabler};
-
-/// Round constants including the trailing dummy "next" value (index 24).
-const IOTA_RC_PLUS: [u64; 25] = crate::constants::IOTA_RC;
 
 // ── Lookup budgets per row (must match the AIR's `add_to_relation` order) ──
 
@@ -81,15 +79,24 @@ pub const N_SPLIT_LOOKUPS: usize = N_SPLIT_C_ROT + N_SPLIT_RHO; // 216
 /// hi-limb witness columns: one per split lookup.
 const N_HI_WITNESS: usize = N_SPLIT_LOOKUPS;
 
-const N_COLUMNS: usize = 1
-    + 2 * N_BYTES_IN_U64            // current_rc + next_rc (byte constants)
+/// First committed trace column for the nonzero-capable Iota byte lanes.
+pub const ROUND_CONSTANT_TRACE_START: usize = 1;
+
+/// First committed trace column for the interleaved chi and round-output cells.
+pub const ROUND_CHI_TRACE_START: usize = ROUND_CONSTANT_TRACE_START
+    + IOTA_RC_BYTE_INDICES.len() // nonzero-capable current_rc byte lanes
     + 2                              // perm_id + round_idx
     + N_BYTES_IN_STATE             // initial spread state
     + N_XOR3_C                     // theta C-parity intermediates (t + C)
     + N_HI_WITNESS                 // spread-hi witnesses for all rotations
-    + N_XOR3_THETA_APPLY           // theta-apply outputs (res_S)
-    + N_ANDNOT_LOOKUPS             // chi andnot outputs
-    + N_XOR3_CHI_CLOSE; // chi closing outputs (new state, incl. iota)
+    + N_XOR3_THETA_APPLY; // theta-apply outputs (res_S)
+
+/// Return the trace column for one spread byte of the round output.
+pub const fn round_output_trace_index(byte_index: usize) -> usize {
+    ROUND_CHI_TRACE_START + 2 * byte_index + 1
+}
+
+const N_COLUMNS: usize = ROUND_CHI_TRACE_START + N_ANDNOT_LOOKUPS + N_XOR3_CHI_CLOSE;
 
 pub const N_TOTAL_LOOKUPS: usize =
     N_KECCAK_ROUND_LOOKUPS + N_XOR3_LOOKUPS + N_ANDNOT_LOOKUPS + N_SPLIT_LOOKUPS;
@@ -237,31 +244,19 @@ fn fill_row(
     *row[idx.col] = enabler_col.packed_at(row_index);
     idx.col += 1;
 
-    // Round constants for this round and the next, in SPREAD form (the link
-    // markers). Carrying them spread lets iota fold directly into lane 0's
-    // closing xor3 with no extra column.
+    // Carry the current constant in spread form. This lets Iota use the
+    // closing lane-zero xor3 without an extra conversion column.
     let round_of = |lane_val: u32| lane_val as usize;
     let current_rc: [PackedM31; N_BYTES_IN_U64] = std::array::from_fn(|i| {
         PackedM31::from_array(std::array::from_fn(|lane| {
             let r = round_of(input[N_BYTES_IN_STATE].to_array()[lane].0);
-            M31::from(spread_u32(IOTA_RC_PLUS[r].to_le_bytes()[i] as u32))
+            M31::from(spread_u32(IOTA_RC[r].to_le_bytes()[i] as u32))
         }))
     });
-    for b in current_rc {
-        *row[idx.col] = b;
+    for byte_index in IOTA_RC_BYTE_INDICES {
+        *row[idx.col] = current_rc[byte_index];
         idx.col += 1;
     }
-    let next_rc: [PackedM31; N_BYTES_IN_U64] = std::array::from_fn(|i| {
-        PackedM31::from_array(std::array::from_fn(|lane| {
-            let r = round_of(input[N_BYTES_IN_STATE].to_array()[lane].0) + 1;
-            M31::from(spread_u32(IOTA_RC_PLUS[r].to_le_bytes()[i] as u32))
-        }))
-    });
-    for b in next_rc {
-        *row[idx.col] = b;
-        idx.col += 1;
-    }
-
     // Identity carried by both round links. `round_idx + 1` is derived in the
     // outgoing tuple, so a row cannot redirect its result to another round;
     // `perm_id` is reused unchanged, so results cannot cross permutations.
@@ -277,12 +272,20 @@ fn fill_row(
         *row[idx.col] = *x;
         idx.col += 1;
     }
-    let round_data: Vec<PackedM31> = [perm_id, round_idx]
-        .iter()
-        .chain(current_rc.iter())
-        .chain(input[..N_BYTES_IN_STATE].iter())
-        .cloned()
-        .collect();
+    let round_data: Vec<PackedM31> = [
+        perm_id,
+        PackedM31::from(M31::from(direction::IN)),
+        round_idx,
+    ]
+    .iter()
+    .chain(
+        IOTA_RC_BYTE_INDICES
+            .iter()
+            .map(|&byte_index| &current_rc[byte_index]),
+    )
+    .chain(input[..N_BYTES_IN_STATE].iter())
+    .cloned()
+    .collect();
     *lookup_data.keccak_round[0] = round_data.try_into().unwrap();
 
     // Per-lane byte view of the incoming state.
@@ -445,12 +448,16 @@ fn fill_row(
             out[base + i] = S_spread[lane][i];
         }
     }
-    let next_data: Vec<PackedM31> = [perm_id, round_idx + PackedM31::one()]
-        .iter()
-        .chain(next_rc.iter())
-        .chain(out.iter())
-        .cloned()
-        .collect();
+    let next_data: Vec<PackedM31> = [
+        perm_id,
+        PackedM31::from(M31::from(direction::OUT)),
+        round_idx + PackedM31::one(),
+    ]
+    .iter()
+    .chain([PackedM31::zero(); IOTA_RC_BYTE_INDICES.len()].iter())
+    .chain(out.iter())
+    .cloned()
+    .collect();
     *lookup_data.keccak_round[1] = next_data.try_into().unwrap();
 }
 
@@ -611,18 +618,22 @@ pub fn collect_round_lookups<E: EvalAtRow>(eval: &mut E) -> Vec<RoundLookup<E>> 
     eval.add_constraint(enabler.clone() * (E::F::one() - enabler.clone()));
     let enabler_ef = E::EF::from(enabler);
 
-    let current_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|_| eval.next_trace_mask());
-    let next_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|_| eval.next_trace_mask());
+    let current_rc: [E::F; IOTA_RC_BYTE_INDICES.len()] =
+        std::array::from_fn(|_| eval.next_trace_mask());
     let perm_id = eval.next_trace_mask();
     let round_idx = eval.next_trace_mask();
     let state: [E::F; N_BYTES_IN_STATE] = std::array::from_fn(|_| eval.next_trace_mask());
 
     // Incoming chain link (require, NEGATED numerator).
-    let round_data: Vec<E::F> = [perm_id.clone(), round_idx.clone()]
-        .into_iter()
-        .chain(current_rc.iter().cloned())
-        .chain(state.iter().cloned())
-        .collect();
+    let round_data: Vec<E::F> = [
+        perm_id.clone(),
+        E::F::from(BaseField::from(direction::IN)),
+        round_idx.clone(),
+    ]
+    .into_iter()
+    .chain(current_rc.iter().cloned())
+    .chain(state.iter().cloned())
+    .collect();
     lookups.push(RoundLookup {
         kind: RoundLookupKind::Kr,
         num: -enabler_ef.clone(),
@@ -708,10 +719,14 @@ pub fn collect_round_lookups<E: EvalAtRow>(eval: &mut E) -> Vec<RoundLookup<E>> 
                 let an = eval.next_trace_mask();
                 andnot_lookup(&mut lookups, &B[b1_idx][i], &B[b2_idx][i], &an);
                 let out = eval.next_trace_mask();
-                // iota folds into output-lane-0's closing xor3: the rc columns
-                // carry spread(rc), so the third input is `current_rc[i]`.
+                // Iota folds into output lane 0. The four byte lanes that are
+                // zero in every official constant are inlined as zero.
                 let third = if out_idx == 0 {
-                    current_rc[i].clone()
+                    IOTA_RC_BYTE_INDICES
+                        .iter()
+                        .position(|&byte_index| byte_index == i)
+                        .map(|slot| current_rc[slot].clone())
+                        .unwrap_or_else(E::F::zero)
                 } else {
                     E::F::zero()
                 };
@@ -726,8 +741,12 @@ pub fn collect_round_lookups<E: EvalAtRow>(eval: &mut E) -> Vec<RoundLookup<E>> 
     }
 
     // Outgoing chain link (yield, POSITIVE numerator): spread state.
-    let mut out: Vec<E::F> = vec![perm_id, round_idx + E::F::one()];
-    out.extend(next_rc);
+    let mut out: Vec<E::F> = vec![
+        perm_id,
+        E::F::from(BaseField::from(direction::OUT)),
+        round_idx + E::F::one(),
+    ];
+    out.extend((0..IOTA_RC_BYTE_INDICES.len()).map(|_| E::F::zero()));
     for lane in &out_state {
         out.extend(lane.iter().cloned());
     }

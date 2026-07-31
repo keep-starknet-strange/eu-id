@@ -1082,8 +1082,8 @@ offset  size       field
 46      P          canonical proof and zero padding
 ```
 
-For this circuit, `P` is 1,769,472 bytes.
-The total envelope is 1,769,518 bytes.
+For this circuit, `P` is 1,638,400 bytes.
+The total envelope is 1,638,446 bytes.
 
 `P` is a circuit-artifact constant.
 It is not the used proof length.
@@ -1351,7 +1351,7 @@ Tests MUST prove these conditions:
 ### 11.7 Resource evidence
 
 Functional acceptance requires a successful proof and verification.
-It also requires the exact 1,769,518-byte identity-proof envelope.
+It also requires the exact 1,638,446-byte identity-proof envelope.
 
 Performance is not a conformance requirement.
 Benchmark reports MUST record:

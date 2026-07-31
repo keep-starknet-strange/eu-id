@@ -67,12 +67,15 @@
 - Isolate the domain tag in a cross-domain lookup test.
 - Balance the forged multiset when the test removes the tag.
 - Require rejection when the test restores the tag.
+- Give opposite-sign lookup roles distinct tuple tags when identical tuples could cancel.
 - Copy attack state into immutable relation state before Rayon evaluation.
 - Use the same attack state for shape inference, proving, and verification.
 
 ## Public preprocessing
 
 - Distinguish AIR self-containment from end-to-end soundness.
+- Randomized or out-of-domain checks do not detect fixed-versus-fixed tautologies.
+- Derive a fixed column when the verifier can reconstruct it from other fixed columns.
 - Read each aliased preprocessed representative once and clone its field value for logical uses.
 - Identify each value that the verifier computes outside the AIR.
 - State the trust boundary for each computed value.
@@ -122,3 +125,4 @@
 - Keep the core proof contract independent of wallet code.
 - End the core contract at the exported prove and verify API.
 - Treat the proof bytes as opaque at that boundary.
+- Check the repository root for task files even when source work uses a worktree.

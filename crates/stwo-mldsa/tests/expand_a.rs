@@ -44,11 +44,10 @@ const NAMESPACE: &str = "expand-a-test";
 const STREAM_BASE: u32 = 256;
 const OWNER_TAG: u64 = 0x4558_5041_4f57_4e52;
 const BALANCER_TAG: u64 = 0x4558_5041_4241_4c41;
-const ABSORB_PRE_BYTE_POS: usize = 1;
-const ABSORB_PRE_STREAM: usize = 2;
-const REJECTION_PRE_POLY: usize = 4;
-const REJECTION_PRE_BYTE_POS: usize = 5;
-const REJECTION_PRE_STREAM: usize = 6;
+const ABSORB_PRE_BYTE_POS: usize = 0;
+const ABSORB_PRE_STREAM: usize = 1;
+const REJECTION_PRE_BYTE_POS: usize = 3;
+const REJECTION_PRE_STREAM: usize = 4;
 static PROOF_LOCK: Mutex<()> = Mutex::new(());
 static CORE_PREPROCESSED_ROOT: OnceLock<CommitmentRoot> = OnceLock::new();
 static SERVICE_PREPROCESSED_ROOT: OnceLock<CommitmentRoot> = OnceLock::new();
@@ -556,7 +555,7 @@ fn fixed_expand_a_proves_and_verifies() {
     let preprocessing_attack = ExpandATraceAttack::Preprocessed {
         component: ExpandAPreprocessedComponent::Absorb,
         row: ABSORB_ACTIVE_ROWS,
-        column: 2,
+        column: ABSORB_PRE_STREAM,
         value: 1,
     };
     let forged_preprocessing = prove_core(rho, rho, Some(preprocessing_attack))
@@ -730,12 +729,6 @@ fn adversarial_traces_and_disconnected_matrix_fail() {
             row: accept_row,
             column: TRACE_COL_B2,
             value: 256,
-        },
-        ExpandATraceAttack::Preprocessed {
-            component: ExpandAPreprocessedComponent::Rejection,
-            row: accept_row,
-            column: REJECTION_PRE_POLY,
-            value: 1,
         },
         ExpandATraceAttack::Preprocessed {
             component: ExpandAPreprocessedComponent::Rejection,

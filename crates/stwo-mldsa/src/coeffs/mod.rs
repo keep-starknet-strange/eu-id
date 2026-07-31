@@ -24,36 +24,36 @@
 //!
 //! | idx | column        | meaning |
 //! |-----|---------------|---------|
-//! | 0   | `enabler`     | 1 on active rows |
-//! | 1-6 | `digit[0..6]` | two z/w triplets, one wider coefficient, or carry cells |
-//! | 7   | `recomp_cell` | first z/w coefficient `Σ_t d_t·B^t`; else 0 |
-//! | 8   | `norm_a_hi`   | first z coefficient: 7-bit hi of `cell + 524_091` |
-//! | 9   | `norm_b_hi`   | first z coefficient: 7-bit hi of `524_091 − cell` |
-//! |10-14| `carry_hi[0..5]` | 8-bit hi of `C_{m,t}+2^20` (carry rows) |
-//! |15   | `norm2_a_hi` | second z coefficient: 7-bit hi of `cell + 524_091` |
-//! |16   | `norm2_b_hi` | second z coefficient: 7-bit hi of `524_091 − cell` |
+//! | 0-5 | `digit[0..6]` | two z/w triplets, one wider coefficient, or carry cells |
+//! | 6   | `recomp_cell` | first z/w coefficient `Σ_t d_t·B^t`; else 0 |
+//! | 7   | `norm_a_hi`   | first z coefficient: 7-bit hi of `cell + 524_091` |
+//! | 8   | `norm_b_hi`   | first z coefficient: 7-bit hi of `524_091 − cell` |
+//! | 9-13| `carry_hi[0..5]` | 8-bit hi of `C_{m,t}+2^20` (carry rows) |
+//! |14   | `norm2_a_hi` | second z coefficient: 7-bit hi of `cell + 524_091` |
+//! |15   | `norm2_b_hi` | second z coefficient: 7-bit hi of `524_091 − cell` |
 //!
 //! ## Preprocessed columns
-//! `start, end, poly_id, live_mask[0..6], is_digit, is_carry, is_recomp,
-//!  is_norm, is_c, is_w, paired_continue, w_bind_id, c_bind_id` — all
-//! row-index-deterministic.
+//! `start, end, poly_id, active, live_mask_4, is_carry, is_norm, is_c, is_w,
+//!  w_bind_id, c_bind_id` — all row-index-deterministic. The AIR derives the
+//! other live masks and selectors from these columns.
 //!
 //! ## Constraint degrees
 //!
-//! Each base constraint has degree 2 or less.
+//! Base constraints have degree 2 or less, except the derived paired Horner
+//! continuation, which has degree 3.
 //! Four-way LogUp batching reaches degree 5, so the unlocked bound is
 //! `log_size + 2`. The interaction-tree Horner `[-1,0]` mask remains safe under
 //! the engine's uniform composition split. The `decomp` component uses the same
 //! design. The ternary remains a LOOKUP, not the cubic `c(c−1)(c+1)`.
 //! | site | degree |
 //! |------|--------|
-//! | enabler boolean `e(1−e)` | 2 |
 //! | tail-digit zero `(1−mask)·digit` | 2 |
 //! | recomp `is_recomp·(cell − Σ d·B^t)` | 2 |
 //! | z-norm rc uses (a/b lo+hi, degree-1 values) | 1 |
 //! | carry rc uses (lo degree-1 expr, hi cell) | 1 |
 //! | ternary use `c+1 ∈ {0,1,2}` (lookup) | 1 |
-//! | Horner `acc − ((1−start)·acc_prev·r + Σ d·s^t)` | 2 |
+//! | ordinary Horner `acc − ((1−start)·acc_prev·r + Σ d·s^t)` | 2 |
+//! | paired Horner `is_recomp·(1−start)·acc_prev·r` | 3 |
 //! | digit/eval logup | 1–2 |
 
 // This is a numeric kernel: coefficient index `m`, digit index `t`, poly index
@@ -132,16 +132,15 @@ pub const CARRY_OFFSET: i64 = 1 << 20;
 pub const DIGIT_OFFSET: u32 = 1 << 8;
 
 // --- Base column indices ------------------------------------------------------
-const COL_ENABLER: usize = 0;
-const COL_DIGIT0: usize = 1;
-const COL_RECOMP: usize = COL_DIGIT0 + MAX_DIGITS; // 7
-const COL_NORM_A_HI: usize = COL_RECOMP + 1; // 8
-const COL_NORM_B_HI: usize = COL_NORM_A_HI + 1; // 9
-const COL_CARRY_HI0: usize = COL_NORM_B_HI + 1; // 10
-const COL_NORM2_A_HI: usize = COL_CARRY_HI0 + CARRY_DIGITS; // 15
-const COL_NORM2_B_HI: usize = COL_NORM2_A_HI + 1; // 16
+const COL_DIGIT0: usize = 0;
+const COL_RECOMP: usize = COL_DIGIT0 + MAX_DIGITS; // 6
+const COL_NORM_A_HI: usize = COL_RECOMP + 1; // 7
+const COL_NORM_B_HI: usize = COL_NORM_A_HI + 1; // 8
+const COL_CARRY_HI0: usize = COL_NORM_B_HI + 1; // 9
+const COL_NORM2_A_HI: usize = COL_CARRY_HI0 + CARRY_DIGITS; // 14
+const COL_NORM2_B_HI: usize = COL_NORM2_A_HI + 1; // 15
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_NORM2_B_HI + 1; // 17
+pub const N_BASE_COLS: usize = COL_NORM2_B_HI + 1; // 16
 
 /// Carry-high streams are interleaved with z norm streams. The permutation
 /// lets each carry-high lookup share a stream with a disjoint z norm lookup
@@ -164,34 +163,26 @@ fn pre_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
-fn digit_mask_name(t: usize) -> String {
-    format!("live_mask_{t}")
-}
-
 /// All preprocessed column ids for the coeffs component, in commit order.
 pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    let mut ids = vec![pre_id("start"), pre_id("end"), pre_id("poly_id")];
-    for t in 0..MAX_DIGITS {
-        ids.push(pre_id(&digit_mask_name(t)));
-    }
-    // `is_w`, `w_bind_id`, and `c_bind_id` provide the row-index-deterministic
-    // selectors + keys the WCell / CCell binding yields need. On a paired w row,
-    // `w_bind_id` is the first key and the otherwise-idle `c_bind_id` column is
-    // the second key. On c rows `c_bind_id = m` exactly as before.
-    for name in [
-        "is_digit",
+    // On a paired w row, `w_bind_id` is the first WCell key and the otherwise
+    // idle `c_bind_id` is the second key. On c rows, `c_bind_id = m`.
+    [
+        "start",
+        "end",
+        "poly_id",
+        "active",
+        "live_mask_4",
         "is_carry",
-        "is_recomp",
         "is_norm",
         "is_c",
         "is_w",
-        "paired_continue",
-    ] {
-        ids.push(pre_id(name));
-    }
-    ids.push(pre_id("w_bind_id"));
-    ids.push(pre_id("c_bind_id"));
-    ids
+        "w_bind_id",
+        "c_bind_id",
+    ]
+    .into_iter()
+    .map(pre_id)
+    .collect()
 }
 
 /// Fourteen shared range streams plus the four distinct relation yields. Range
@@ -244,14 +235,12 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
     let mut start = vec![m31(0); rows];
     let mut end = vec![m31(0); rows];
     let mut poly_id = vec![m31(0); rows];
-    let mut live_mask: Vec<Vec<M31>> = (0..MAX_DIGITS).map(|_| vec![m31(0); rows]).collect();
-    let mut is_digit = vec![m31(0); rows];
+    let mut active = vec![m31(0); rows];
+    let mut live_mask_4 = vec![m31(0); rows];
     let mut is_carry = vec![m31(0); rows];
-    let mut is_recomp = vec![m31(0); rows];
     let mut is_norm = vec![m31(0); rows];
     let mut is_c = vec![m31(0); rows];
     let mut is_w = vec![m31(0); rows];
-    let mut paired_continue = vec![m31(0); rows];
     let mut w_bind_id = vec![m31(0); rows];
     let mut c_bind_id = vec![m31(0); rows];
 
@@ -260,18 +249,9 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
         start[row] = m31(u32::from(info.in_group == 0));
         end[row] = m31(u32::from(info.in_group == g.rows() - 1));
         poly_id[row] = m31(g.poly_id);
-        let live = g.kind.row_live_digits();
-        for t in 0..MAX_DIGITS {
-            live_mask[t][row] = m31(u32::from(t < live));
-        }
-        match g.kind {
-            Kind::Carry => is_carry[row] = m31(1),
-            _ => is_digit[row] = m31(1),
-        }
-        if g.kind.has_recomp() {
-            is_recomp[row] = m31(1);
-            paired_continue[row] = m31(u32::from(info.in_group != 0));
-        }
+        active[row] = m31(1);
+        live_mask_4[row] = m31(u32::from(g.kind.row_live_digits() > 4));
+        is_carry[row] = m31(u32::from(g.kind == Kind::Carry));
         if g.kind == Kind::Z {
             is_norm[row] = m31(1);
         }
@@ -296,20 +276,22 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
         }
     }
 
-    let mut out = vec![start, end, poly_id];
-    out.extend(live_mask);
-    out.extend([
-        is_digit,
+    [
+        start,
+        end,
+        poly_id,
+        active,
+        live_mask_4,
         is_carry,
-        is_recomp,
         is_norm,
         is_c,
         is_w,
-        paired_continue,
         w_bind_id,
         c_bind_id,
-    ]);
-    out.into_iter().map(|v| col_eval(log_size, v)).collect()
+    ]
+    .into_iter()
+    .map(|v| col_eval(log_size, v))
+    .collect()
 }
 
 // =============================================================================
@@ -323,7 +305,6 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
     let mut cols: Vec<Vec<M31>> = (0..N_BASE_COLS).map(|_| vec![m31(0); rows]).collect();
 
     for (row, info) in sched.iter().enumerate() {
-        cols[COL_ENABLER][row] = m31(1);
         let digits = row_digits(witness, info);
         for (t, &d) in digits.iter().enumerate() {
             cols[COL_DIGIT0 + t][row] = enc_signed(d);
@@ -475,23 +456,28 @@ impl FrameworkEval for CoeffsEval {
         let start = eval.get_preprocessed_column(pre_id("start"));
         let end = eval.get_preprocessed_column(pre_id("end"));
         let poly_id = eval.get_preprocessed_column(pre_id("poly_id"));
-        let live_mask: Vec<E::F> = (0..MAX_DIGITS)
-            .map(|t| eval.get_preprocessed_column(pre_id(&digit_mask_name(t))))
-            .collect();
-        let is_digit = eval.get_preprocessed_column(pre_id("is_digit"));
+        let active = eval.get_preprocessed_column(pre_id("active"));
+        let live_mask_4 = eval.get_preprocessed_column(pre_id("live_mask_4"));
         let is_carry = eval.get_preprocessed_column(pre_id("is_carry"));
-        let is_recomp = eval.get_preprocessed_column(pre_id("is_recomp"));
         let is_norm = eval.get_preprocessed_column(pre_id("is_norm"));
         let is_c = eval.get_preprocessed_column(pre_id("is_c"));
         let is_w = eval.get_preprocessed_column(pre_id("is_w"));
-        let paired_continue = eval.get_preprocessed_column(pre_id("paired_continue"));
         let w_bind_id = eval.get_preprocessed_column(pre_id("w_bind_id"));
         let c_bind_id = eval.get_preprocessed_column(pre_id("c_bind_id"));
 
+        let is_digit = active.clone() - is_carry.clone();
+        let is_recomp = is_norm.clone() + is_w.clone();
+        let paired_continue = is_recomp.clone() * (E::F::from(M31::one()) - start.clone());
+        let live_mask = [
+            active.clone(),
+            active.clone() - is_c.clone(),
+            active.clone() - is_c.clone(),
+            active.clone() - is_c.clone(),
+            live_mask_4.clone(),
+            live_mask_4 - is_carry.clone(),
+        ];
+
         // --- Base columns ---
-        // COL_ENABLER is a committed Boolean column. Preprocessed selectors
-        // gate the active rows.
-        let enabler = eval.next_trace_mask();
         let digit: Vec<E::F> = (0..MAX_DIGITS).map(|_| eval.next_trace_mask()).collect();
         let recomp_cell = eval.next_trace_mask();
         let norm_a_hi = eval.next_trace_mask();
@@ -509,15 +495,12 @@ impl FrameworkEval for CoeffsEval {
         let one = E::F::from(M31::one());
         let b_ef = M31::from_u32_unchecked(B as u32);
 
-        // C0: enabler boolean (ungated).
-        eval.add_constraint(enabler.clone() * (one.clone() - enabler.clone()));
-
-        // C1: cells after the live digit count must be zero.
+        // Cells after the live digit count must be zero.
         for t in 0..MAX_DIGITS {
             eval.add_constraint((one.clone() - live_mask[t].clone()) * digit[t].clone());
         }
 
-        // C2: auxiliary columns are zero outside the row kinds that use them.
+        // Auxiliary columns are zero outside the row kinds that use them.
         // This lets the range denominators select values by addition instead
         // of multiplying witness values by selectors (which would raise degree).
         eval.add_constraint((one.clone() - is_recomp.clone()) * recomp_cell.clone());
@@ -530,7 +513,7 @@ impl FrameworkEval for CoeffsEval {
         eval.add_constraint((one.clone() - is_norm.clone()) * norm2_b_hi.clone());
         eval.add_constraint(is_c.clone() * (norm_a_hi.clone() - digit[0].clone() - one.clone()));
 
-        // C3: first packed coefficient's recomposition cell. The second
+        // The first packed coefficient uses a recomposition cell. The second
         // coefficient is recomposed directly from its triplet wherever it is
         // consumed (norm and WCell), leaving no auxiliary value to bind.
         let split = Kind::Z.live_digits();
@@ -544,7 +527,7 @@ impl FrameworkEval for CoeffsEval {
         }
         eval.add_constraint(is_recomp.clone() * (recomp_cell.clone() - first_recomp_expr.clone()));
 
-        // C4: fourteen shared range streams. Every bound id is a constant-weighted
+        // Fourteen shared range streams. Every bound id is a constant-weighted
         // preprocessed selector; no witness column can choose a wider bound.
         let digit_offset = E::F::from(M31::from_u32_unchecked(DIGIT_OFFSET));
         let two_pow_13 = E::F::from(M31::from_u32_unchecked(1 << 13));
@@ -672,9 +655,10 @@ impl FrameworkEval for CoeffsEval {
             &[value, bound_id],
         ));
 
-        // C7: bivariate Horner. z/w perform two ordinary Horner steps in one
-        // row; `paired_continue = is_recomp·(1−start)` is preprocessed so the
-        // transition remains degree 2.
+        // The bivariate Horner step. z/w perform two ordinary steps in one
+        // row. `paired_continue = is_recomp·(1−start)` is derived from the
+        // fixed schedule. The resulting degree-3 term remains below the
+        // component's degree-5 bound.
         let mut ordinary_digit_row = E::EF::from(digit[0].clone());
         for (t, d) in digit.iter().enumerate().skip(1) {
             ordinary_digit_row += self.s_power::<E>(t) * E::EF::from(d.clone());
@@ -695,13 +679,13 @@ impl FrameworkEval for CoeffsEval {
             + digit_row;
         eval.add_constraint(acc.clone() - expected);
 
-        // C8: EvalAtRs YIELD at group end (−end). Verifier-native fold uses (+).
+        // EvalAtRs yields at group end (−end). The verifier-native fold uses (+).
         let mut tuple = Vec::with_capacity(relations::EVAL_ARITY);
         tuple.push(poly_id);
         tuple.extend(coords.iter().map(|p| p[1].clone()));
         eval.add_to_relation(RelationEntry::base(&self.relations.eval, -end, &tuple));
 
-        // C9: two WCell YIELDs (−is_w), one for each packed w coefficient.
+        // Two WCell yields (−is_w), one for each packed w coefficient.
         // `c_bind_id` is otherwise idle on w rows and carries the second exact
         // key. Both recompositions are affine in the digit cells.
         let wtuple = [w_bind_id.clone(), recomp_cell.clone()];
@@ -717,7 +701,7 @@ impl FrameworkEval for CoeffsEval {
             &wtuple,
         ));
 
-        // C10: CCell YIELD (−is_c) — the coeffs C-cell binding. digit[0] (= c,
+        // CCell yields (−is_c) for the coeffs C-cell binding. digit[0] (= c,
         // enc_signed) with c_bind_id = m. Each challenge coefficient is
         // yielded once; sampleinball consumes it once. Value degree 1.
         let ctuple = [c_bind_id.clone(), digit[0].clone()];
@@ -958,7 +942,7 @@ pub fn gen_coeffs_interaction(
         })
         .collect();
 
-    // C4 fourteen shared range streams, matching the AIR slot assignment.
+    // Fourteen shared range streams, matching the AIR slot assignment.
     for stream in 0..N_RANGE_STREAMS {
         push_entry(
             &|coset| {
@@ -1015,7 +999,7 @@ pub fn gen_coeffs_interaction(
             &mut claimed,
         );
     }
-    // C8 eval YIELD at group-end (−1).
+    // EvalAtRs yields at group end (−1).
     push_entry(
         &|coset| match &coset_digits[coset] {
             Some((_, group, in_group)) if *in_group == group.rows() - 1 => {
@@ -1034,7 +1018,7 @@ pub fn gen_coeffs_interaction(
         &mut entries,
         &mut claimed,
     );
-    // C9 two WCell YIELDs (−1), one for each `(i·N+m, w)` tuple.
+    // Two WCell yields (−1), one for each `(i·N+m, w)` tuple.
     for slot in 0..Kind::W.coefficients_per_row() {
         push_entry(
             &|coset| match &coset_digits[coset] {
@@ -1054,7 +1038,7 @@ pub fn gen_coeffs_interaction(
             &mut claimed,
         );
     }
-    // C10 CCell YIELD (−1) — c rows only. Mirrors `-is_c`. Value = digit[0]
+    // CCell yields (−1) on c rows only. This mirrors `-is_c`. Value = digit[0]
     // (enc_signed c); key = m.
     push_entry(
         &|coset| match &coset_digits[coset] {
@@ -1199,6 +1183,47 @@ mod packed_tests {
             paired_recompositions(&digits),
             [1 + 2 * B + 3 * B * B, 4 + 5 * B + 6 * B * B,]
         );
+    }
+
+    #[test]
+    fn compact_schedule_derives_every_original_selector() {
+        let schedule = row_schedule();
+        for row in 0..schedule.len().next_power_of_two() {
+            let info = schedule.get(row);
+            let kind = info.map(|row| row.group.kind);
+            let active = info.is_some();
+            let is_c = kind == Some(Kind::C);
+            let is_carry = kind == Some(Kind::Carry);
+            let is_norm = kind == Some(Kind::Z);
+            let is_w = kind == Some(Kind::W);
+            let live_mask_4 = kind.is_some_and(|kind| kind.row_live_digits() > 4);
+            let derived_masks = [
+                active,
+                active && !is_c,
+                active && !is_c,
+                active && !is_c,
+                live_mask_4,
+                live_mask_4 && !is_carry,
+            ];
+            let original_masks = std::array::from_fn(|digit| {
+                kind.is_some_and(|kind| digit < kind.row_live_digits())
+            });
+            assert_eq!(
+                derived_masks, original_masks,
+                "digit masks differ at row {row}"
+            );
+            assert_eq!(
+                active && !is_carry,
+                kind.is_some_and(|kind| kind != Kind::Carry)
+            );
+            let is_recomp = is_norm || is_w;
+            assert_eq!(is_recomp, kind.is_some_and(Kind::has_recomp));
+            let start = info.is_some_and(|row| row.in_group == 0);
+            assert_eq!(
+                is_recomp && !start,
+                is_recomp && info.is_some_and(|row| row.in_group != 0)
+            );
+        }
     }
 
     #[test]
