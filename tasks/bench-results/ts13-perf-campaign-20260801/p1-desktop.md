@@ -57,3 +57,29 @@ The median canonical-to-AIR ratio is `1.059`. This passes the P1 limit of
 The previous untimed median was 1,368 ms. P1 improves it by 39 ms, or 2.9%.
 The median peak RSS is 2,073.69 MiB, which is within measurement noise of the
 previous 2,071.12 MiB.
+
+## Pixel 8 result
+
+The phone measurement used the same P1 checkpoint in a detached clean
+worktree. It ran one cold release instrumentation test on Firebase model
+`shiba`, Android API 34.
+
+- Android AAR SHA-256: `8ed1b2a9d1b99702bd018b89553ee79f710dd216949e4e8e8c56f89d4bb387b6`
+- Host APK SHA-256: `56c78e9498d1e597075cfee638bf37cb0da47cb12b0c2bfc2edf1eff8f313f27`
+- Test APK SHA-256: `2d31c3593796fb21c9f38dc658017ded178a6902d8a5a74cd8a538dd48a24e35`
+- Fixture SHA-256: `0ba93c225b49de29842300584787f7c4f1d3c75745d791152cf603a68b156bf4`
+- Firebase matrix: `matrix-26ifimb8gvh6b`
+- [Firebase result](https://console.firebase.google.com/project/exploration-dev-417917/testlab/histories/bh.a21b73b77a063202/matrices/8716527956927216949)
+
+| Metric | P0 | P1 | Change |
+| --- | ---: | ---: | ---: |
+| Prove | 9,578 ms | 7,986 ms | −1,592 ms (−16.6%) |
+| Verify | 254 ms | 224 ms | −30 ms |
+| Witness generation | 1,190.715 ms | 505.737 ms | −684.978 ms (−57.5%) |
+| AIR core | 8,324.672 ms | 7,417.405 ms | −907.267 ms |
+| Peak RSS | 1,989,380 KiB | 1,989,876 KiB | +496 KiB |
+| Envelope | 1,638,446 B | 1,638,446 B | unchanged |
+
+The P1 Pixel canonical-to-AIR ratio is `1.072`. One cold sample is the
+campaign's phone convention; the final operating point must be measured again
+on all three devices.
