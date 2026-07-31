@@ -52,7 +52,8 @@ The normative demo profile is
 - `crates/stwo-mldsa` proves ML-DSA-65 verification.
 - `crates/eu-id-prover` implements the fixed TS13 circuit.
 - `crates/sdk` exposes the two identity functions through UniFFI.
-- `crates/sdk/android` builds and tests the Android AAR.
+- `crates/sdk/android` builds the Android AAR.
+- `mobile/EuIdBenchAndroid` supplies the Android instrumentation host.
 
 ## Development
 

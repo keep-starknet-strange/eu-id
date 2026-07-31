@@ -43,16 +43,16 @@ Privacy claim:
 
 ## Verification
 
-- [ ] Format all changed Rust and Kotlin files.
-- [ ] Pass release workspace check for all targets.
-- [ ] Pass release Clippy with warnings denied.
-- [ ] Pass release unit and integration tests.
-- [ ] Pass focused `proveIdentity` and `verifyIdentity` envelope tests.
-- [ ] Regenerate the source-bound circuit artifact and hash.
-- [ ] Record the canonical circuit geometry and envelope capacity.
-- [ ] Update the Android fixture with the new circuit hash.
-- [ ] Build and test the canonical Android binding.
-- [ ] Pass `git diff --check`.
+- [x] Format all changed Rust and Kotlin files.
+- [x] Pass release workspace check for all targets.
+- [x] Pass release Clippy with warnings denied.
+- [x] Pass release unit and integration tests.
+- [x] Pass focused `proveIdentity` and `verifyIdentity` envelope tests.
+- [x] Regenerate the source-bound circuit artifact and hash.
+- [x] Record the canonical circuit geometry and envelope capacity.
+- [x] Update the Android fixture with the new circuit hash.
+- [x] Build the canonical Android binding and compile its device test.
+- [x] Pass `git diff --check`.
 
 ## Invariants
 
@@ -66,4 +66,44 @@ Privacy claim:
 
 ## Review
 
-Complete this section after all verification passes.
+The final source-bound artifact check passed after all generated build files moved out of the
+soundness source roots.
+
+- Soundness source commit: `2d46ab7072d3f1ccbeba1d94d2bf867632e1c06a`.
+- Soundness source-tree SHA-256: `374693d509c77303a3d3913394aae900262fb833886b5ea46f1d56d2792a666c`.
+- Normative specification SHA-256: `01606b356cad9101da23a71fd8de537c5616f9430b856d09aa3101da81916060`.
+- `Cargo.lock` SHA-256: `9c4615255aa28e4d2dd46263a6cf1b2c4f2b82129453d955ae871bc8d8c529fb`.
+- Rust toolchain: `rustc 1.94.0-nightly (86a49fd71 2026-01-14)`.
+- Circuit SHA-256: `4134801384833ac572475617ce6f05637f0d7f5b5d1fb868d9b3df9b653342d1`.
+- Shape-manifest SHA-256: `bf67ed51c1bcde99811b13d72fdf8ea260b01f5f318f39adbe00c57f936241aa`.
+- Merkle-tree column counts: `[946, 4906, 2400, 8, 32]`.
+- Query count: `36`.
+- Sampled secure fields: `10,709`.
+- Serialized non-STARK claims: `24,136` bytes.
+- Outer claims and framing: `3,840` bytes.
+- Deterministic maximum proof body: `1,734,952` bytes.
+- Pinned proof-body capacity: `1,769,472` bytes.
+- Fixed envelope size: `1,769,518` bytes.
+
+Release verification used `RAYON_NUM_THREADS=12`, `RUST_MIN_STACK=536870912`, 12 Cargo jobs,
+and one test-harness thread.
+
+- The all-target workspace check passed.
+- Clippy passed for all release targets with warnings denied.
+- The main workspace run passed 467 tests and left 18 ignored tests.
+- The ignored-test run passed all 18 tests.
+- The complete composed proof and all three TS13 integration tests passed.
+- The SDK identity-envelope and unlinkability tests passed.
+- `cargo fmt --all -- --check` and `git diff --check` passed.
+- The artifact drift check passed with the circuit hash above.
+
+The Android release build completed for `arm64-v8a` and `x86_64`. The demo release APK and its
+release instrumentation APK also compiled. No device benchmark ran because performance work is
+deferred.
+
+- SDK AAR SHA-256: `ef0204fe0ca350f46a8e2c9e45c11490f0c61f7704fd284b5e19c6ef72ab575a`.
+- Demo APK SHA-256: `4905cb677e74795a293b7fc47b565fabba15a84eaece06df792558c770c6b484`.
+- Instrumentation APK SHA-256: `981e146e5e50aa1e0b0e81f2aeec8a46249d8c0d140593bb0036561907eea3eb`.
+
+The demo provides public-input unlinkability. STWO transcript zero knowledge is pending and is not
+part of this implementation.
