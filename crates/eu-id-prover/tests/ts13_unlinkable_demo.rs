@@ -176,7 +176,10 @@ fn public_issuer_trust_mismatch_rejects_before_proving() {
         signature,
     ) {
         Err(eu_id_prover::Error::Prove(message)) => {
-            assert!(message.contains("trusted public key"));
+            assert_eq!(
+                message,
+                "TS13 demo private witness does not match the public theorem"
+            );
         }
         Err(error) => panic!("unexpected issuer trust error: {error:?}"),
         Ok(_) => panic!("an untrusted issuer key must reject"),
@@ -1055,8 +1058,11 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         Err(error) => error,
         Ok(_) => panic!("capacity overflow must reject"),
     };
-    assert!(
-        format!("{error:?}").contains("outside 1..=1024"),
-        "unexpected capacity overflow error: {error:?}"
-    );
+    match error {
+        eu_id_prover::Error::Prove(message) => assert_eq!(
+            message,
+            "mdoc public shape: public input does not match the fixed TS13 profile"
+        ),
+        error => panic!("unexpected capacity overflow error: {error:?}"),
+    }
 }
