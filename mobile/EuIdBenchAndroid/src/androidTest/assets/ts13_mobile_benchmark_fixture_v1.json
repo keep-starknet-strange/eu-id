@@ -13,7 +13,7 @@
   "byteEncoding": "lowercase-hex",
   "u64Encoding": "decimal-string",
   "statement": {
-    "circuitHash": "cda51a5a3f98f87f217d8cac7fba8f30f965a95434fe564399be2eec5caf86e1",
+    "circuitHash": "9772642c038b0b34c2bbbe2d6a72d11f3d4a954c696a5bacccd5d15ed4974ad9",
     "zkSystemId": "rp-local-perf-probe",
     "documentType": "eu.europa.ec.eudi.pid.1",
     "namespace": "eu.europa.ec.eudi.pid.1",
