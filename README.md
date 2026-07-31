@@ -1,73 +1,86 @@
 # eu-id
 
-Quantum-safe STARK proofs for the EU Digital Identity Wallet — a research
-prototype for privacy-preserving selective disclosure from an ISO/IEC 18013-5
-PID mdoc.
+This repository contains a quantum-safe TS13 identity-proof demo for the EU
+Digital Identity Wallet.
 
-It is a concrete contribution to the EU's *Topic G* zero-knowledge technology
-decision for the Digital Identity Wallet.
+The demo proves these facts in one STARK:
+
+- A trusted ML-DSA-65 issuer signed the PID.
+- The PID contains `age_over_18 = true`.
+- The PID is valid at the verifier timestamp.
+- The holder used the device key from the PID.
+- The PID is not revoked in the verifier epoch.
+
+The native SDK has one identity path:
+
+```rust
+prove_identity(statement, witness)
+verify_identity(statement, proof)
+```
+
+UniFFI generates the Kotlin and Swift names `proveIdentity` and
+`verifyIdentity`.
+
+## Privacy
+
+The privacy claim is:
+
+```text
+public-input unlinkable; transcript zero knowledge pending
+```
+
+The public statement and proof length do not contain a credential-stable
+identifier. A fresh presentation context changes the public statement.
+
+STWO is transparent and is not zero knowledge. The proof transcript can expose
+witness-derived data. Do not claim complete unlinkability or zero knowledge.
 
 ## Status
 
-**This code is not audited and is not production-ready.** It is a research
-prototype. The first iteration produces **succinct** proofs (small, fast to
-verify) but not yet **zero-knowledge** proofs (witness masking is a deferred
-follow-on). The product path uses ML-DSA-65 for issuer and device
-authentication; revocation is TS13-path-only. Classical P-256 implementations
-and parity benchmarks live on their dedicated branches.
+This code is for a demonstration. It is not audited and is not
+production-ready. It supports one fixed PID shape and one claim. It does not
+provide production PKI, wallet integration, or STWO witness masking.
 
-The cryptographic components are built and individually sound:
-
-- **ML-DSA-65 verification** — issuer/device signatures on the product path and
-  TS13 revocation signatures are verified in-circuit through a shared SHAKE-256
-  service.
-- **SHA-256** — multi-block hashing with padding/IV/carry constraints and a
-  constraint-level negative-test suite.
-- **Predicates** — age-over-18 and nationality set-membership.
-
-These compose into one `StarkProof` via the `air-core` orchestration layer,
-**cross-bound** to a *single* mdoc presentation: issuer auth, ISO device auth,
-MSO digest membership, device-key origin, credential validity, and the
-age/nationality predicates are bound in the mdoc proof. The product Rust API is
-`eu_id_prover::{prove_mdoc, verify_mdoc}` and the SDK product API is
-`prove_identity` / `verify_identity`.
+The normative demo profile is
+[docs/ts13-unlinkable-age18-demo-spec.md](docs/ts13-unlinkable-age18-demo-spec.md).
 
 ## Workspace
 
-- `crates/stwo-mldsa` — ML-DSA-65 verification AIR and native reference.
-- `crates/stwo-keccak` — shared SHAKE-256/Keccak service used by the ML-DSA
-  instances.
-- `crates/stwo-sha256` — SHA-256 AIR (M31 lookup-table design). See
-  `crates/stwo-sha256/docs/research/sha256-air-design.md`.
-- `crates/predicates` — age-over-N and nationality-in-set predicates, with
-  `prove`/`verify` CLI binaries. See `crates/predicates/USAGE.md`.
-- `crates/air-core` — composes `Air`/`AirProver` modules into one STARK proof
-  under a single channel, commitment scheme, and global LogUp balance.
-- `crates/eu-id-prover` — the end-to-end quantum-safe mdoc prover built on
-  `air-core`.
-- `crates/sdk` — UniFFI-facing SDK contract and product mdoc PID proof
-  envelope (`prove_identity` / `verify_identity`).
-- `crates/eu-id-ffi` — C-ABI surface for the mobile benchmark harness (`mobile/`).
+- `crates/air-core` composes the AIR modules into one STARK.
+- `crates/stwo-sha256` proves SHA-256 computations.
+- `crates/stwo-keccak` supplies the shared Keccak service.
+- `crates/stwo-mldsa` proves ML-DSA-65 verification.
+- `crates/eu-id-prover` implements the fixed TS13 circuit.
+- `crates/sdk` exposes the two identity functions through UniFFI.
+- `crates/sdk/android` builds and tests the Android AAR.
 
 ## Development
 
-Use the pinned Rust toolchain from `rust-toolchain.toml`.
+Use the Rust toolchain in `rust-toolchain.toml`.
 
 ```bash
-cargo check
-cargo test
-make check      # CI-equivalent: clippy -D warnings + fmt --check
+make build
+make test
+make check
 make check-quantum-only-deps
 ```
 
-## Benchmarks
-
-The metric of record is the full quantum-safe mdoc proof in a single-threaded
-release build. The S1-S9 campaign record and proof-size breakdown are in
-`tasks/keccak-service-design.md`.
+All proof tests must use a release build. Run one expensive test at a time.
+`--test-threads=1` serializes the test harness. The prover still uses the 12
+Rayon workers selected by `RAYON_NUM_THREADS=12`.
 
 ```bash
-make perf
+RAYON_NUM_THREADS=12 \
+RUST_MIN_STACK=536870912 \
+cargo test --locked --release -p sdk --test ts13_e2e \
+  -- --test-threads=1
 ```
 
-There is currently no repository license file.
+Build the Android AAR from `crates/sdk/android`:
+
+```bash
+cd crates/sdk/android
+./gradlew assembleRelease
+```
+
+There is no repository license file.

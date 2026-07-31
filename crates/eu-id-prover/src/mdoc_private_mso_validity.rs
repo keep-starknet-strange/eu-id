@@ -1,17 +1,19 @@
-//! Exact private MSO validity for the unlinkable TS13 demo profile.
+//! Exact private MSO validity for the TS13 identity demo.
 //!
-//! The private MSO binder authenticates and yields the two exact 20-byte
-//! tag-0 UTC strings through [`MdocMsoValidityBytesRelation`].  This component
-//! consumes those bytes, proves their canonical Gregorian interpretation, and
-//! proves the strict whole-second inequalities
+//! The private MSO binder authenticates two 20-byte tag-0 UTC strings.
+//! It emits the strings through [`MdocMsoValidityBytesRelation`].
+//! This component consumes the bytes.
+//! It proves the canonical Gregorian interpretation.
+//! It also proves these strict whole-second inequalities:
 //!
 //! ```text
-//! validFrom < timestamp < validUntil.
+//! validFrom < timestamp < validUntil
 //! ```
 //!
-//! Host parsing is only an early-error path.  Every digit, separator, calendar
-//! rule, Unix-second conversion limb, and comparison slack is constrained in
-//! the AIR.
+//! Host parsing only reports errors early.
+//! The AIR constrains each digit and separator.
+//! It also constrains each calendar rule and Unix-second limb.
+//! The AIR constrains each comparison slack.
 
 use std::fmt;
 
@@ -55,16 +57,17 @@ pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_ROWS: usize =
     1usize << MDOC_PRIVATE_MSO_VALIDITY_LOG_SIZE;
 pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS: usize = 2;
-pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_BLIND_ROWS: usize =
+pub(crate) const MDOC_PRIVATE_MSO_VALIDITY_INACTIVE_ROWS: usize =
     MDOC_PRIVATE_MSO_VALIDITY_ROWS - MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS;
 pub(crate) const MDOC_TDATE_BYTES: usize = 20;
 
 const _: () = assert!(MDOC_PRIVATE_MSO_VALIDITY_ACTIVE_ROWS == 2);
-const _: () = assert!(MDOC_PRIVATE_MSO_VALIDITY_BLIND_ROWS >= 256);
+const _: () = assert!(MDOC_PRIVATE_MSO_VALIDITY_INACTIVE_ROWS >= 256);
 const _: () = assert!(MDOC_TDATE_BYTES == TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES);
 
-const VALIDITY_VERSION: u64 = 2;
-const VALIDITY_DOMAIN: u64 = 0x4d44_4f43_5641_4c32; // "MDOCVAL2"
+// This identifier binds the preprocessed layout and the public transcript.
+const VALIDITY_LAYOUT_VERSION: u64 = 2;
+const VALIDITY_TRANSCRIPT_DOMAIN: u64 = 0x4d44_4f43_5641_4c32; // "MDOCVAL2"
 const PREPROCESSED_COLS: usize = 2;
 const DIGIT_COUNT: usize = 14;
 const MONTHS: usize = 12;
@@ -277,7 +280,7 @@ fn parse_digits(bytes: &[u8]) -> Option<u32> {
 }
 
 fn is_leap_year(year: u32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 fn days_in_month(year: u32, month: u32) -> Option<u32> {
@@ -365,7 +368,7 @@ fn parse_tdate(
 
 fn unix_days(date: ParsedTdate) -> u32 {
     let years_since_2020 = date.year - 2020;
-    let leap_days_before_year = (years_since_2020 + 3) / 4;
+    let leap_days_before_year = years_since_2020.div_ceil(4);
     let month_index = (date.month - 1) as usize;
     let leap_day_before_month = u32::from(is_leap_year(date.year) && date.month > 2);
     UNIX_DAYS_TO_2020
@@ -404,7 +407,7 @@ fn row_for(
     };
 
     let years_since_2020 = date.year - 2020;
-    let leap_quotient = (years_since_2020 + 3) / 4;
+    let leap_quotient = years_since_2020.div_ceil(4);
     let leap_remainder = (years_since_2020 + 3) % 4;
     let max_day =
         days_in_month(date.year, date.month).expect("parsed tdate has a supported Gregorian month");
@@ -529,7 +532,7 @@ fn column_eval(values: Vec<M31>) -> ValidityColumnEval {
 
 fn col_id(name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("mdoc/private_mso_validity/v{VALIDITY_VERSION}/{name}"),
+        id: format!("mdoc/private_mso_validity/v{VALIDITY_LAYOUT_VERSION}/{name}"),
     }
 }
 
@@ -763,14 +766,12 @@ impl FrameworkEval for MdocPrivateMsoValidityEval {
         let mut after_february = m31_const::<E>(0);
         for (index, selector) in month_selectors.iter().cloned().enumerate() {
             boolean_constraint(&mut eval, active.clone(), selector.clone());
-            month_selector_sum = month_selector_sum + selector.clone();
-            selected_month = selected_month + m31_const::<E>((index + 1) as u32) * selector.clone();
-            days_before_month = days_before_month
-                + m31_const::<E>(COMMON_DAYS_BEFORE_MONTH[index]) * selector.clone();
-            common_days_in_month = common_days_in_month
-                + m31_const::<E>(COMMON_DAYS_IN_MONTH[index]) * selector.clone();
+            month_selector_sum += selector.clone();
+            selected_month += m31_const::<E>((index + 1) as u32) * selector.clone();
+            days_before_month += m31_const::<E>(COMMON_DAYS_BEFORE_MONTH[index]) * selector.clone();
+            common_days_in_month += m31_const::<E>(COMMON_DAYS_IN_MONTH[index]) * selector.clone();
             if index >= 2 {
-                after_february = after_february + selector;
+                after_february += selector;
             }
         }
         eval.add_constraint(active.clone() * (month_selector_sum - one.clone()));
@@ -782,8 +783,8 @@ impl FrameworkEval for MdocPrivateMsoValidityEval {
         let mut remainder = m31_const::<E>(0);
         for (index, selector) in remainder_selectors.iter().cloned().enumerate() {
             boolean_constraint(&mut eval, active.clone(), selector.clone());
-            remainder_sum = remainder_sum + selector.clone();
-            remainder = remainder + m31_const::<E>(index as u32) * selector;
+            remainder_sum += selector.clone();
+            remainder += m31_const::<E>(index as u32) * selector;
         }
         eval.add_constraint(active.clone() * (remainder_sum - one.clone()));
         eval.add_constraint(
@@ -841,8 +842,8 @@ impl FrameworkEval for MdocPrivateMsoValidityEval {
         let mut carry = m31_const::<E>(0);
         for (index, selector) in carry_selectors.iter().cloned().enumerate() {
             boolean_constraint(&mut eval, active.clone(), selector.clone());
-            carry_selector_sum = carry_selector_sum + selector.clone();
-            carry = carry + m31_const::<E>(index as u32) * selector;
+            carry_selector_sum += selector.clone();
+            carry += m31_const::<E>(index as u32) * selector;
         }
         eval.add_constraint(active.clone() * (carry_selector_sum - one.clone()));
         eval.add_constraint(
@@ -904,7 +905,7 @@ impl FrameworkEval for MdocPrivateMsoValidityEval {
     }
 }
 
-pub(crate) struct MdocPrivateMsoValidityV2 {
+pub(crate) struct MdocPrivateMsoValidity {
     spec: MdocPrivateMsoValiditySpec,
     rows: Option<[ValidityRow; 2]>,
     range_handle: SharedRangeRelation,
@@ -915,7 +916,7 @@ pub(crate) struct MdocPrivateMsoValidityV2 {
     blinder_component: Option<FrameworkComponent<ClaimedSumBlinderEval>>,
 }
 
-impl MdocPrivateMsoValidityV2 {
+impl MdocPrivateMsoValidity {
     pub(crate) fn prover(
         spec: MdocPrivateMsoValiditySpec,
         witness: MdocPrivateMsoValidityWitness,
@@ -965,16 +966,16 @@ impl MdocPrivateMsoValidityV2 {
     }
 
     fn interaction_columns(&self) -> usize {
-        // 50 main sites pair into 25 QM31 columns, plus one QM31 blinder
-        // counterpart component.
+        // The 50 main sites use 25 QM31 columns.
+        // The blinder component uses one QM31 column.
         (50usize.div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE
     }
 }
 
-impl Air for MdocPrivateMsoValidityV2 {
+impl Air for MdocPrivateMsoValidity {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(VALIDITY_DOMAIN);
-        channel.mix_u64(VALIDITY_VERSION);
+        channel.mix_u64(VALIDITY_TRANSCRIPT_DOMAIN);
+        channel.mix_u64(VALIDITY_LAYOUT_VERSION);
         channel.mix_u64(self.spec.timestamp_epoch_seconds as u64);
         for byte in self.spec.verification_timestamp_rfc3339_utc {
             channel.mix_u64(u64::from(byte));
@@ -1055,7 +1056,7 @@ impl Air for MdocPrivateMsoValidityV2 {
     }
 }
 
-impl AirProver for MdocPrivateMsoValidityV2 {
+impl AirProver for MdocPrivateMsoValidity {
     fn max_log_size(&self) -> u32 {
         MDOC_PRIVATE_MSO_VALIDITY_LOG_SIZE
     }
@@ -1070,7 +1071,7 @@ impl AirProver for MdocPrivateMsoValidityV2 {
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         fingerprint_preprocessed_columns(
-            "eu_id_prover::mdoc_private_mso_validity::MdocPrivateMsoValidityV2",
+            "eu_id_prover::mdoc_private_mso_validity::MdocPrivateMsoValidity",
             &preprocessed_column_ids(),
             &preprocessed_columns(),
         )
@@ -1206,7 +1207,7 @@ mod tests {
             Err(MdocPrivateMsoValidityError::TimestampRenderingMismatch)
         );
         assert_eq!(
-            MdocPrivateMsoValidityV2::prover(
+            MdocPrivateMsoValidity::prover(
                 mismatched,
                 witness("2024-02-29T23:59:59Z", "2024-03-01T00:00:01Z"),
                 SharedRangeRelation::new(),
@@ -1216,7 +1217,7 @@ mod tests {
             Some(MdocPrivateMsoValidityError::TimestampRenderingMismatch)
         );
 
-        let (mut validity, _) = MdocPrivateMsoValidityV2::prover(
+        let (mut validity, _) = MdocPrivateMsoValidity::prover(
             spec(timestamp),
             witness("2024-02-29T23:59:59Z", "2024-03-01T00:00:01Z"),
             SharedRangeRelation::new(),
@@ -1245,7 +1246,7 @@ mod tests {
             )
         };
         let (range, validity) = handles();
-        assert!(MdocPrivateMsoValidityV2::prover(
+        assert!(MdocPrivateMsoValidity::prover(
             spec(center),
             witness(from, until),
             range,
@@ -1256,7 +1257,7 @@ mod tests {
         let until_second = i64::from(unix_seconds(parse_tdate(tdate(until), "until").unwrap()));
         let (range, validity) = handles();
         assert_eq!(
-            MdocPrivateMsoValidityV2::prover(
+            MdocPrivateMsoValidity::prover(
                 spec(from_second),
                 witness(from, until),
                 range,
@@ -1267,7 +1268,7 @@ mod tests {
         );
         let (range, validity) = handles();
         assert_eq!(
-            MdocPrivateMsoValidityV2::prover(
+            MdocPrivateMsoValidity::prover(
                 spec(until_second),
                 witness(from, until),
                 range,
@@ -1441,10 +1442,10 @@ mod tests {
                 evaluated.nonzero_constraints()
             );
 
-            // Equality has only two possible boolean borrow witnesses.  With
-            // borrow=0, the low-limb equation requires a negative slack.  With
-            // borrow=1, its only range-valid low slack is 65535 and the
-            // high-limb equation then requires a negative slack.
+            // Equality permits only two Boolean borrow values.
+            // A zero borrow requires a negative low-limb slack.
+            // A one borrow forces the low slack to 65535.
+            // The high-limb equation then requires a negative slack.
             for compare_borrow in 0..=1 {
                 let mut equality = inside.clone();
                 equality.cells[TRACE_COMPARE_BORROW] = compare_borrow;
@@ -1561,7 +1562,7 @@ mod tests {
     }
 
     #[test]
-    fn range_census_is_exact_and_blind_rows_exceed_requirement() {
+    fn range_census_is_exact_and_inactive_rows_exceed_requirement() {
         let timestamp =
             unix_seconds(parse_tdate(tdate("2024-03-01T00:00:00Z"), "timestamp").unwrap());
         let rows = build_rows(
@@ -1575,6 +1576,6 @@ mod tests {
         assert_eq!(uses.rc9.iter().sum::<u32>(), 0);
         assert_eq!(uses.rc13.iter().sum::<u32>(), 0);
         assert_eq!(uses.ternary.iter().sum::<u32>(), 0);
-        assert_eq!(MDOC_PRIVATE_MSO_VALIDITY_BLIND_ROWS, 510);
+        assert_eq!(MDOC_PRIVATE_MSO_VALIDITY_INACTIVE_ROWS, 510);
     }
 }

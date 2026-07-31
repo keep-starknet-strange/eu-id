@@ -1,23 +1,17 @@
-//! `msglink` — the message-byte producer for `M`'s bytes (M6 composed statement).
+//! `msglink` produces the public message bytes for a composed statement.
 //!
-//! The µ chain absorbs `tr ‖ 0x00 ‖ 0x00 ‖ M`. This component is the LogUp
-//! *producer* of `M`'s bytes: it yields one [`MsgLinkRelation`]
-//! `(field_id, byte_index, byte)` per message byte. The bytes are PUBLIC Eval
-//! constants (the verifier constructs this Eval from the public message, exactly
-//! like `stwo_keccak::sponge::io_provider` pins its message), so the yielded
-//! tuples are pinned to the real `M` — no committed byte cell to forge and no
-//! range check needed (a constant `u8` is a byte by construction).
+//! The µ chain absorbs `tr ‖ 0x00 ‖ 0x00 ‖ M`. This component yields one
+//! [`MsgLinkRelation`] tuple `(field_id, byte_index, byte)` for each byte in
+//! `M`. The verifier builds the evaluation from the public message. Thus, the
+//! tuples are fixed public constants and do not need a byte range check.
 //!
-//! ## Hosted SHA producer compatibility
+//! ## Hosted message source
 //!
-//! stwo-sha256's `FieldExposure` producer already yields arbitrary multi-block
-//! `(field_id, byte_index, byte)` windows of the SHA-256 preimage, per-byte
-//! range-checked in-AIR (see `crates/stwo-sha256/src/field_exposure.rs`).
-//! [`MsgLinkRelation`] deliberately mirrors that exact tuple shape so hosted
-//! proofs can use the SHA-side producer as the yield source with no relation or
-//! consumer change; the µ-absorb bridge (the consumer) stays the same.
+//! The public-message path uses [`MsgLinkRelation`]. The hosted path uses a
+//! `FieldBytesRelation`. Both relations contain
+//! `(field_id, byte_index, byte)`, so the µ bridge can consume either source.
 //!
-//! Layout: a single packed row (`LOG_N_LANES`), lane-0 enabler; one relation
+//! The layout uses one packed row (`LOG_N_LANES`) and enables lane 0. One relation
 //! entry per message byte. Every constraint degree ≤ 2 (enabler boolean +
 //! degree-0 constant tuples), bound = log_size + 1.
 
@@ -32,8 +26,7 @@ use stwo_constraint_framework::{
 use crate::air_util::{col_eval, m31, ColEval};
 use crate::binding::MsgLinkRelation;
 
-/// The single `field_id` tag M's bytes are yielded under. M is one contiguous
-/// window; hosted SHA producers use their own field ids and are mapped by the bridge.
+/// Field identifier for the public message bytes.
 pub const MSG_FIELD_ID: u32 = 0;
 
 /// The component's fixed log-size: one packed row, lane 0 active.
@@ -65,7 +58,7 @@ pub fn gen_msglink_base_trace() -> Vec<ColEval> {
 
 #[derive(Clone)]
 pub struct MsgLinkEval {
-    /// The PUBLIC message bytes (both sides construct from the public input).
+    /// The public message bytes that both sides construct from the public input.
     pub message: Vec<u8>,
     pub msglink: MsgLinkRelation,
 }
@@ -99,8 +92,8 @@ impl FrameworkEval for MsgLinkEval {
     }
 }
 
-/// Interaction trace: one `+enabler / combine(tuple)` fraction per byte, paired
-/// two-per-column (mirrors `io_provider::generate_interaction_trace`).
+/// Interaction trace with one positive fraction per byte and two fractions per
+/// column.
 pub fn gen_msglink_interaction(
     message: &[u8],
     msglink: &MsgLinkRelation,

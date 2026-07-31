@@ -58,7 +58,7 @@ fn run() -> Result<(), String> {
     let result = generate_from_json(&arguments.workspace, &arguments.input, arguments.mode)
         .map_err(|error| error.to_string())?;
     println!(
-        "TS13 circuit artifact {} (hash {}, V4 body capacity {} bytes)",
+        "TS13 circuit artifact {} (hash {}, identity-proof body capacity {} bytes)",
         match arguments.mode {
             GenerationMode::Write => "generated",
             GenerationMode::Check => "matches",

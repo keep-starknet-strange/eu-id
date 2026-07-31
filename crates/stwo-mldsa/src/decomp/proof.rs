@@ -3,10 +3,10 @@
 //!   1. `decomp`             — the [DECOMP]+[HINT] byte-pair component.
 //!   2. rc providers          — rc4, rc13, rc7, rc8 (one each).
 //!   3. `wcell_provider`      — TEST-SIDE balancer: yields the `(w_bind_id, w)`
-//!      tuples decomp consumes (stands in for the coeffs W-cell yields; M6 wires
-//!      the real coeffs component here instead).
+//!      tuples that decomp consumes. It stands in for the coefficient W-cell
+//!      yields in the composed statement.
 //!   4. `hashio_consumer`     — TEST-SIDE balancer: consumes the 768 `w1Encode`
-//!      bytes decomp yields (stands in for the sponge absorb side; M6 wires it).
+//!      bytes that decomp yields. It stands in for the sponge absorb side.
 //!
 //! Transcript order: mix nothing public (the witness is the statement here) →
 //! commit base → draw relations → commit interaction. `air-core` enforces it.
@@ -392,7 +392,7 @@ impl AirProver for DecompProver {
         // Every constraint is degree ≤ 2 (each component needs its_log_size + 1);
         // the orchestrator sizes twiddles from the max over modules, so return the
         // largest (rc13 at log 13 ⇒ 14). Each component still declares its own
-        // exact +1 bound (the M4 Horner-mask trap) via `FrameworkEval`.
+        // exact +1 bound through `FrameworkEval`.
         self.max_log_size() + 1
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {

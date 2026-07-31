@@ -1,4 +1,4 @@
-//! Byte-level decoding of the public key and signature (FIPS 204 §7.1–7.2).
+//! Byte-level decoding of the public key and signature (FIPS 204 §§7.1 and 7.2).
 //!
 //! - `pkDecode` (Algorithm 23) → `(ρ, t1)`; `t1` uses `SimpleBitUnpack` at 10
 //!   bits/coefficient (values already in `[0, 2^10)`).
@@ -198,7 +198,7 @@ pub fn sig_decode(sig: &[u8]) -> Result<SignatureParts, MlDsaError> {
 
 /// FIPS 204 Algorithm 21 `HintBitUnpack`: reconstruct the hint vector `h` and
 /// validate the encoding (indices strictly increasing within each polynomial,
-/// unused slots zero). Rejects malformed encodings — this is what several ACVP
+/// unused slots zero). Rejects malformed encodings. Several ACVP
 /// "modified signature - hint" negatives exercise.
 fn hint_bit_unpack(bytes: &[u8]) -> Result<[[u8; N]; K], MlDsaError> {
     let mut h = [[0u8; N]; K];
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn hint_bit_unpack_rejects_nonincreasing_indices() {
         let mut bytes = vec![0u8; OMEGA + K];
-        // Poly 0 claims 2 hint indices [5, 5] — not strictly increasing.
+        // Poly 0 claims two equal hint indices: [5, 5].
         bytes[0] = 5;
         bytes[1] = 5;
         bytes[OMEGA] = 2; // end pointer for poly 0

@@ -8,12 +8,9 @@ use air_core::{Air, AirProver};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::PcsConfig;
-use stwo_sha256::air::{Sha256MultiProver, Sha256MultiVerifier, Sha256Prover, Sha256Verifier};
-use stwo_sha256::field_exposure::FieldExposure;
-use stwo_sha256::partitions::MAX_ROUND_GROUP_BITS;
+use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::relations::SharedShaTableRelations;
 use stwo_sha256::shared_tables::{ShaTableMultiplicities, ShaTablesProver, ShaTablesVerifier};
-use stwo_sha256::slots::{MultiSlotConfig, SlotSpec};
 use stwo_sha256::stark::{prove_sha256, ProverConfig};
 use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
@@ -37,106 +34,6 @@ fn witnesses() -> Vec<stwo_sha256::types::Sha256Witness> {
         .collect()
 }
 
-fn one_plain_slot() -> MultiSlotConfig {
-    MultiSlotConfig::new(
-        7,
-        vec![SlotSpec {
-            expose_digest: false,
-            field_exposure: FieldExposure::empty(),
-        }],
-    )
-}
-
-#[test]
-fn namespaced_standalone_and_different_log_multi_consumer_compose() {
-    let merged_witness = compute_sha256_witness(b"merged");
-    let standalone_witness = compute_sha256_witness(b"standalone");
-    let merged_config = one_plain_slot();
-    let merged_log = merged_config.min_log_n_rows();
-    let standalone_log = merged_log + 1;
-    let consumers = [
-        (&merged_witness, FieldExposure::empty()),
-        (&standalone_witness, FieldExposure::empty()),
-    ];
-
-    let shared = SharedShaTableRelations::new();
-    let mut tables = ShaTablesProver::new(
-        ShaTableMultiplicities::from_consumers(&consumers),
-        shared.clone(),
-    );
-    let mut merged = Sha256MultiProver::new(
-        vec![&merged_witness],
-        merged_log,
-        merged_config.clone(),
-        shared.clone(),
-    );
-    let mut standalone =
-        Sha256Prover::new(&standalone_witness, standalone_log, MAX_ROUND_GROUP_BITS)
-            .with_shared_tables(shared.clone())
-            .with_instance_namespace("test/standalone");
-    let mut provers: [&mut dyn AirProver; 3] = [&mut tables, &mut merged, &mut standalone];
-    let proof = air_core::prove(&mut provers, pcs_config())
-        .expect("namespaced different-log SHA consumers compose");
-
-    let shared = SharedShaTableRelations::new();
-    let mut tables_verifier =
-        ShaTablesVerifier::new(tables.interaction_claim().clone(), shared.clone());
-    let mut merged_verifier = Sha256MultiVerifier::new(
-        merged_log,
-        merged_config,
-        shared.clone(),
-        merged.interaction_claim().clone(),
-    );
-    let mut standalone_verifier = Sha256Verifier::new(
-        standalone_log,
-        MAX_ROUND_GROUP_BITS,
-        standalone.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared)
-    .with_instance_namespace("test/standalone");
-    let mut verifiers: [&mut dyn Air; 3] = [
-        &mut tables_verifier,
-        &mut merged_verifier,
-        &mut standalone_verifier,
-    ];
-    let expected_root = air_core::compute_canonical_preprocessed_root(&mut verifiers, pcs_config())
-        .expect("verifier reconstructs namespaced tree zero without a witness");
-    air_core::verify_with_expected_preprocessed_root(&mut verifiers, &proof, Some(expected_root))
-        .expect("namespaced different-log SHA composition verifies against canonical tree zero");
-}
-
-#[test]
-fn default_different_log_consumers_keep_failing_closed_on_shared_ids() {
-    let merged_witness = compute_sha256_witness(b"merged");
-    let standalone_witness = compute_sha256_witness(b"standalone");
-    let merged_config = one_plain_slot();
-    let merged_log = merged_config.min_log_n_rows();
-    let shared = SharedShaTableRelations::new();
-    let mut merged = Sha256MultiProver::new(
-        vec![&merged_witness],
-        merged_log,
-        merged_config,
-        shared.clone(),
-    );
-    let mut standalone =
-        Sha256Prover::new(&standalone_witness, merged_log + 1, MAX_ROUND_GROUP_BITS)
-            .with_shared_tables(shared);
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut provers: [&mut dyn AirProver; 2] = [&mut merged, &mut standalone];
-        let _ = air_core::prove(&mut provers, pcs_config());
-    }))
-    .expect_err("default consumers with incompatible shared IDs must fail closed");
-    let message = panic
-        .downcast_ref::<String>()
-        .map(String::as_str)
-        .or_else(|| panic.downcast_ref::<&str>().copied())
-        .expect("preprocessed invariant panic has a message");
-    assert!(
-        message.contains("sha256_k_lo") && message.contains("different content"),
-        "unexpected invariant panic: {message}"
-    );
-}
-
 #[ignore = "slow: proves a five-module shared SHA composition"]
 #[test]
 fn shared_sha_table_union_with_heterogeneous_messages_balances() {
@@ -146,24 +43,17 @@ fn shared_sha_table_union_with_heterogeneous_messages_balances() {
         .map(|witness| min_log_size(witness.blocks.len()))
         .max()
         .expect("non-empty witnesses");
-    let consumers: Vec<_> = witnesses
-        .iter()
-        .map(|witness| (witness, FieldExposure::empty()))
-        .collect();
+    let consumers: Vec<_> = witnesses.iter().collect();
 
     let shared = SharedShaTableRelations::new();
     let mut sha_tables = ShaTablesProver::new(
         ShaTableMultiplicities::from_consumers(&consumers),
         shared.clone(),
     );
-    let mut sha0 = Sha256Prover::new(&witnesses[0], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha1 = Sha256Prover::new(&witnesses[1], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha2 = Sha256Prover::new(&witnesses[2], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha3 = Sha256Prover::new(&witnesses[3], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
+    let mut sha0 = Sha256Prover::new(&witnesses[0], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha1 = Sha256Prover::new(&witnesses[1], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha2 = Sha256Prover::new(&witnesses[2], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha3 = Sha256Prover::new(&witnesses[3], log_n_rows).with_shared_tables(shared.clone());
 
     let mut provers: [&mut dyn AirProver; 5] =
         [&mut sha_tables, &mut sha0, &mut sha1, &mut sha2, &mut sha3];
@@ -173,30 +63,14 @@ fn shared_sha_table_union_with_heterogeneous_messages_balances() {
     let shared = SharedShaTableRelations::new();
     let mut table_verifier =
         ShaTablesVerifier::new(sha_tables.interaction_claim().clone(), shared.clone());
-    let mut sha0_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha0.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha1_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha1.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha2_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha2.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha3_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha3.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared);
+    let mut sha0_verifier = Sha256Verifier::new(log_n_rows, sha0.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha1_verifier = Sha256Verifier::new(log_n_rows, sha1.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha2_verifier = Sha256Verifier::new(log_n_rows, sha2.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha3_verifier = Sha256Verifier::new(log_n_rows, sha3.interaction_claim().clone())
+        .with_shared_tables(shared);
 
     let mut verifiers: [&mut dyn Air; 5] = [
         &mut table_verifier,
@@ -217,24 +91,17 @@ fn corrupt_shared_sha_table_provider_claim_rejects() {
         .map(|witness| min_log_size(witness.blocks.len()))
         .max()
         .expect("non-empty witnesses");
-    let consumers: Vec<_> = witnesses
-        .iter()
-        .map(|witness| (witness, FieldExposure::empty()))
-        .collect();
+    let consumers: Vec<_> = witnesses.iter().collect();
 
     let shared = SharedShaTableRelations::new();
     let mut sha_tables = ShaTablesProver::new(
         ShaTableMultiplicities::from_consumers(&consumers),
         shared.clone(),
     );
-    let mut sha0 = Sha256Prover::new(&witnesses[0], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha1 = Sha256Prover::new(&witnesses[1], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha2 = Sha256Prover::new(&witnesses[2], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha3 = Sha256Prover::new(&witnesses[3], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared);
+    let mut sha0 = Sha256Prover::new(&witnesses[0], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha1 = Sha256Prover::new(&witnesses[1], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha2 = Sha256Prover::new(&witnesses[2], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha3 = Sha256Prover::new(&witnesses[3], log_n_rows).with_shared_tables(shared);
 
     let mut provers: [&mut dyn AirProver; 5] =
         [&mut sha_tables, &mut sha0, &mut sha1, &mut sha2, &mut sha3];
@@ -246,30 +113,14 @@ fn corrupt_shared_sha_table_provider_claim_rejects() {
 
     let shared = SharedShaTableRelations::new();
     let mut table_verifier = ShaTablesVerifier::new(corrupted_claim, shared.clone());
-    let mut sha0_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha0.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha1_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha1.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha2_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha2.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha3_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha3.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared);
+    let mut sha0_verifier = Sha256Verifier::new(log_n_rows, sha0.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha1_verifier = Sha256Verifier::new(log_n_rows, sha1.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha2_verifier = Sha256Verifier::new(log_n_rows, sha2.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha3_verifier = Sha256Verifier::new(log_n_rows, sha3.interaction_claim().clone())
+        .with_shared_tables(shared);
 
     let mut verifiers: [&mut dyn Air; 5] = [
         &mut table_verifier,
@@ -290,14 +141,8 @@ fn corrupt_shared_sha_table_provider_claim_rejects() {
 #[ignore = "slow: proves standalone SHA to bound bincode proof bytes"]
 #[test]
 fn standalone_sha_proof_bytes_unchanged_by_shared_tables_feature() {
-    // The standalone SHA proof size is NO LONGER an exact pin: padding rows are
-    // now filled with fresh random SHA decoys (masking) and the shared SHA
-    // tables carry Class-D random dummy multiplicities, so FRI query openings
-    // (hence serialized bytes) vary per proof by design (Q-015 §5: two proofs of
-    // one witness share no opened values). We therefore bound the size rather
-    // than pin it — the intent (enabling shared tables must not BLOAT the
-    // standalone proof) survives as an upper bound. Observed ~57.5–58.1 KB
-    // release / ~59 KB debug; band leaves margin for opening-count jitter.
+    // Random padding rows and Class-D dummy multiplicities make the serialized
+    // size vary. This test sets an upper bound instead of an exact size.
     let proof = prove_sha256(b"abc", &ProverConfig::default()).expect("standalone SHA proves");
     let bytes = bincode::serialize(&proof.stark_proof).expect("standalone SHA proof serializes");
     let upper = if cfg!(debug_assertions) {
@@ -319,11 +164,9 @@ fn standalone_sha_proof_bytes_unchanged_by_shared_tables_feature() {
     );
 }
 
-/// Class-D dummy-region blinding (Q-015 §4b / p4c Class D): every shared SHA
-/// producer's committed multiplicity column is doubled — the real lower half is
-/// the deterministic union count, the reserved dummy upper half holds fresh
-/// per-proof random cells. This test pins the three observable Class-D
-/// properties without paying for a full proof:
+/// Each shared SHA producer doubles its committed multiplicity column for
+/// Class-D blinding. The real lower half contains deterministic union counts.
+/// The dummy upper half contains fresh random cells. This test checks:
 /// - the stored multiplicity vector is `2^(L+1)` rows (domain 2× extended);
 /// - the real lower half is DETERMINISTIC across two builds of the same
 ///   consumers (it is the honest union count);
@@ -334,10 +177,7 @@ fn class_d_sha_tables_dummy_region_is_doubled_and_randomised() {
     use stwo_sha256::components::{SharedProducer, RANGE_TABLES};
 
     let witnesses = witnesses();
-    let consumers: Vec<_> = witnesses
-        .iter()
-        .map(|witness| (witness, FieldExposure::empty()))
-        .collect();
+    let consumers: Vec<_> = witnesses.iter().collect();
 
     let a = ShaTableMultiplicities::from_consumers(&consumers);
     let b = ShaTableMultiplicities::from_consumers(&consumers);
@@ -377,12 +217,9 @@ fn class_d_sha_tables_dummy_region_is_doubled_and_randomised() {
     }
 }
 
-/// Class-D balance-tamper rejection at the stwo-sha256 layer (mirror of the
-/// p256 bridge's `class_d_bridge_balance_tamper_rejected`). The cancelling twin
-/// (`-mult + is_dummy·mult`) preserves the global LogUp balance and gives the
-/// prover NO free claimed-sum term: shifting a blinded table's published
-/// claimed sum by a single field unit must fail verification. This proves the
-/// blinding did not open a soundness hole in the claimed-sum split.
+/// Class-D balance-tamper rejection for the shared SHA composition.
+/// The cancelling twin preserves the global LogUp balance.
+/// A one-unit change to a blinded table's claimed sum must fail verification.
 #[ignore = "slow: proves the shared SHA composition before tampering a Class-D claimed sum"]
 #[test]
 fn class_d_sha_table_balance_tamper_rejected() {
@@ -392,24 +229,17 @@ fn class_d_sha_table_balance_tamper_rejected() {
         .map(|witness| min_log_size(witness.blocks.len()))
         .max()
         .expect("non-empty witnesses");
-    let consumers: Vec<_> = witnesses
-        .iter()
-        .map(|witness| (witness, FieldExposure::empty()))
-        .collect();
+    let consumers: Vec<_> = witnesses.iter().collect();
 
     let shared = SharedShaTableRelations::new();
     let mut sha_tables = ShaTablesProver::new(
         ShaTableMultiplicities::from_consumers(&consumers),
         shared.clone(),
     );
-    let mut sha0 = Sha256Prover::new(&witnesses[0], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha1 = Sha256Prover::new(&witnesses[1], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha2 = Sha256Prover::new(&witnesses[2], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared.clone());
-    let mut sha3 = Sha256Prover::new(&witnesses[3], log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared);
+    let mut sha0 = Sha256Prover::new(&witnesses[0], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha1 = Sha256Prover::new(&witnesses[1], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha2 = Sha256Prover::new(&witnesses[2], log_n_rows).with_shared_tables(shared.clone());
+    let mut sha3 = Sha256Prover::new(&witnesses[3], log_n_rows).with_shared_tables(shared);
 
     let mut provers: [&mut dyn AirProver; 5] =
         [&mut sha_tables, &mut sha0, &mut sha1, &mut sha2, &mut sha3];
@@ -425,30 +255,14 @@ fn class_d_sha_table_balance_tamper_rejected() {
 
     let shared = SharedShaTableRelations::new();
     let mut table_verifier = ShaTablesVerifier::new(corrupted_claim, shared.clone());
-    let mut sha0_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha0.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha1_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha1.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha2_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha2.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared.clone());
-    let mut sha3_verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha3.interaction_claim().clone(),
-    )
-    .with_shared_tables(shared);
+    let mut sha0_verifier = Sha256Verifier::new(log_n_rows, sha0.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha1_verifier = Sha256Verifier::new(log_n_rows, sha1.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha2_verifier = Sha256Verifier::new(log_n_rows, sha2.interaction_claim().clone())
+        .with_shared_tables(shared.clone());
+    let mut sha3_verifier = Sha256Verifier::new(log_n_rows, sha3.interaction_claim().clone())
+        .with_shared_tables(shared);
 
     let mut verifiers: [&mut dyn Air; 5] = [
         &mut table_verifier,

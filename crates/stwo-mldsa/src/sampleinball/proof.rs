@@ -2,9 +2,9 @@
 //!   1. `sib`             — the [CHAL] FSM + ternary/τ + c-binding component.
 //!   2. rc providers       — rc8, rc9, rc11 (one each).
 //!   3. `ccell_provider`   — TEST-SIDE balancer yielding the coeffs C-cell
-//!      `(c_bind_id, c)` tuples the FSM consumes (M6 uses the real coeffs C group).
+//!      `(c_bind_id, c)` tuples that the FSM consumes.
 //!   4. `hashio_producer`  — TEST-SIDE balancer yielding the squeeze bytes the FSM
-//!      consumes (M6 uses the proven sponge squeeze).
+//!      consumes. The composed statement uses the proven sponge squeeze.
 
 use num_traits::Zero;
 use stwo::core::air::Component;

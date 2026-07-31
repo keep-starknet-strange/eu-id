@@ -1,8 +1,9 @@
-//! Private canonical `valueDigests` scanner for unlinkable mdoc proofs.
+//! Private canonical `valueDigests` scanner for the TS13 identity proof.
 //!
-//! The scanner consumes the exact canonical byte run from the private issuer
-//! message, proves the requested namespace occurs exactly once, and binds each
-//! disclosed digest ID and SHA-256 digest without publishing either value.
+//! The scanner consumes canonical bytes from the private issuer message.
+//! It proves that the requested namespace occurs exactly once.
+//! It binds each selected digest ID and SHA-256 digest.
+//! It does not add either value to the clear public inputs.
 //! Extra canonical namespaces remain accepted.
 //!
 //! # Relation polarity
@@ -10,15 +11,10 @@
 //! | relation | provider | sign | consumer | sign |
 //! |---|---|---:|---|---:|
 //! | issuer hosted message | private-message provider | `-` | this scanner | `+` |
-//! | `(mso_start,is_v2)` | private-MSO binder | `-` | this scanner | `+` |
+//! | MSO start | private-MSO binder | `-` | this scanner | `+` |
 //! | private digest ID | private item binder | `-` | this scanner | `+` |
 //! | item SHA digest | SHA-256 AIR | `-` | this scanner | `+` |
 //! | raw/sorted `(namespace,id)` | this scanner | `+` | this scanner | `-` |
-//!
-//! `is_v2` deliberately rides in the **same** tuple as `mso_start`, and in the
-//! same selected-digest tuple consumed from each item. Separate version tuples
-//! would permit a prover to pair a v1 anchor or digest with a v2 bit (or vice
-//! versa); the chained tuples are the soundness argument.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -56,13 +52,9 @@ use crate::claimed_sum_blinder::{
     ClaimedSumBlinderEval, ClaimedSumBlinderRelation,
 };
 use crate::mdoc_private_item_bind::{
-    MdocPrivateDigestIdRelation, SharedMdocPrivateDigestIdRelation,
-    MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES, MDOC_PRIVATE_ITEM_PRODUCT_DIGEST_ID_MAX,
-    MDOC_PRIVATE_ITEM_TS13_DIGEST_ID_MAX,
+    MdocPrivateDigestIdRelation, SharedMdocPrivateDigestIdRelation, MDOC_PRIVATE_ITEM_DIGEST_ID_MAX,
 };
-use crate::mdoc_private_mso_bind::{
-    MdocMsoStartRelation, MdocPrivateMsoVersion, SharedMdocMsoStartRelation,
-};
+use crate::mdoc_private_mso_bind::{MdocMsoStartRelation, SharedMdocMsoStartRelation};
 
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_ROWS: usize = 1usize << MDOC_VALUE_DIGESTS_SCAN_LOG_SIZE;
@@ -71,7 +63,12 @@ pub(crate) const MDOC_MAX_PUBLIC_NAMESPACE_BYTES: usize = 32;
 
 const SCAN_VERSION: u64 = 1;
 const SCAN_DOMAIN: u64 = 0x4d44_4f43_5644_5343; // "MDOCVDSC"
-const BYTE_SITES: usize = 39;
+const SCAN_TRANSCRIPT_TAG: u64 = 1;
+const TS13_SELECTED_ATTRIBUTE_COUNT: usize = 1;
+const DIGEST_ID_ENCODING_BYTES: usize = 3;
+const DIGEST_BSTR_HEAD_END: usize = DIGEST_ID_ENCODING_BYTES + 1;
+const DIGEST_BYTES_START: usize = DIGEST_ID_ENCODING_BYTES + 2;
+const BYTE_SITES: usize = DIGEST_BYTES_START + 32;
 const NAMESPACE_BYTE_SITES: usize = 32;
 const COUNT_BITS: usize = 8;
 const OFFSET_BITS: usize = 13;
@@ -84,12 +81,12 @@ const NAMESPACE_PACK_BYTES: usize = 3;
 const NAMESPACE_PACKS: usize = MDOC_MAX_PUBLIC_NAMESPACE_BYTES.div_ceil(NAMESPACE_PACK_BYTES);
 const NAMESPACE_MISMATCHES: usize = 1 + NAMESPACE_PACKS;
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS: usize = 4;
-pub(crate) const MDOC_VALUE_DIGESTS_SCAN_TRACE_COLS: usize = 324;
+pub(crate) const MDOC_VALUE_DIGESTS_SCAN_TRACE_COLS: usize = 305;
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_RELATION_SITES: usize = BYTE_SITES
-    + 1 // same-tuple mso_start/version handoff
+    + 1 // MSO start handoff
     + 2 // raw/sorted private ID multiset
-    + MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES // private item digest IDs
-    + MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES // SHA digests
+    + 1 // private item digest ID
+    + 1 // SHA digest
     + 1; // claimed-sum blinder
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_INTERACTION_COLS: usize =
     (MDOC_VALUE_DIGESTS_SCAN_RELATION_SITES.div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE;
@@ -103,39 +100,15 @@ relation!(MdocValueDigestIdMultisetRelation, 3);
 type Column = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type ScanComponent = FrameworkComponent<MdocValueDigestsScanEval>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MdocValueDigestsProfile {
-    Product,
-    Ts13,
-}
-
-impl MdocValueDigestsProfile {
-    fn transcript_tag(self) -> u64 {
-        match self {
-            Self::Product => 0,
-            Self::Ts13 => 1,
-        }
-    }
-
-    fn digest_id_max(self) -> u32 {
-        match self {
-            Self::Product => MDOC_PRIVATE_ITEM_PRODUCT_DIGEST_ID_MAX,
-            Self::Ts13 => MDOC_PRIVATE_ITEM_TS13_DIGEST_ID_MAX,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MdocValueDigestsScanSpec {
     pub(crate) issuer_message_len: usize,
     pub(crate) mso_len: usize,
     pub(crate) namespace: String,
-    pub(crate) profile: MdocValueDigestsProfile,
-    pub(crate) attribute_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MdocValueDigestDisclosure {
+pub(crate) struct MdocSelectedValueDigest {
     pub(crate) digest_id: u32,
     pub(crate) digest: [u8; 32],
 }
@@ -144,8 +117,7 @@ pub(crate) struct MdocValueDigestDisclosure {
 pub(crate) struct MdocValueDigestsScanWitness {
     pub(crate) issuer_message: Vec<u8>,
     pub(crate) mso_start: usize,
-    pub(crate) version: MdocPrivateMsoVersion,
-    pub(crate) disclosures: Vec<MdocValueDigestDisclosure>,
+    pub(crate) selected_digest: MdocSelectedValueDigest,
 }
 
 #[derive(Clone)]
@@ -158,7 +130,7 @@ pub(crate) struct MdocValueDigestItemHandles {
 pub(crate) struct MdocValueDigestsScanHandles {
     pub(crate) issuer_message: SharedFieldRelation,
     pub(crate) mso_start: SharedMdocMsoStartRelation,
-    pub(crate) items: Vec<MdocValueDigestItemHandles>,
+    pub(crate) item: MdocValueDigestItemHandles,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,10 +165,10 @@ impl fmt::Display for MsoValueDigestsCanonicalityReason {
             }
             Self::DuplicateNamespace => write!(f, "duplicate valueDigests namespace"),
             Self::ExpectedCanonicalDigestId => {
-                write!(f, "expected a minimally encoded canonical u32 digest ID")
+                write!(f, "expected a minimally encoded canonical digest ID")
             }
             Self::DigestIdOutOfRange { value, max } => {
-                write!(f, "digest ID {value} exceeds profile cap {max}")
+                write!(f, "digest ID {value} exceeds maximum {max}")
             }
             Self::ExpectedDigestBstr32 => write!(f, "expected canonical bstr(32) digest"),
             Self::DuplicateDigestId => write!(f, "duplicate digest ID in namespace"),
@@ -230,18 +202,6 @@ pub(crate) enum MdocValueDigestsScanError {
         length: usize,
         max: usize,
     },
-    AttributeCountOutOfRange {
-        count: usize,
-        max: usize,
-    },
-    HandleCountMismatch {
-        expected: usize,
-        actual: usize,
-    },
-    DisclosureCountMismatch {
-        expected: usize,
-        actual: usize,
-    },
     ScanItemCapExceeded {
         items: usize,
         max: usize,
@@ -252,12 +212,7 @@ pub(crate) enum MdocValueDigestsScanError {
     },
     RequestedNamespaceMissing,
     RequestedNamespaceDuplicate,
-    RequestedDigestMissing {
-        attribute_index: usize,
-    },
-    RequestedDigestDuplicate {
-        attribute_index: usize,
-    },
+    RequestedDigestMissing,
     IssuerUseCountOverflow {
         issuer_index: usize,
     },
@@ -291,17 +246,6 @@ impl fmt::Display for MdocValueDigestsScanError {
             Self::PublicNamespaceTooLong { length, max } => {
                 write!(f, "public namespace has {length} bytes; maximum is {max}")
             }
-            Self::AttributeCountOutOfRange { count, max } => {
-                write!(f, "attribute count {count} is outside 1..={max}")
-            }
-            Self::HandleCountMismatch { expected, actual } => write!(
-                f,
-                "valueDigests scanner requires {expected} item handles, got {actual}"
-            ),
-            Self::DisclosureCountMismatch { expected, actual } => write!(
-                f,
-                "valueDigests scanner requires {expected} disclosures, got {actual}"
-            ),
             Self::ScanItemCapExceeded { items, max } => {
                 write!(f, "valueDigests scan has {items} items; maximum is {max}")
             }
@@ -315,15 +259,7 @@ impl fmt::Display for MdocValueDigestsScanError {
             Self::RequestedNamespaceDuplicate => {
                 write!(f, "requested namespace occurs more than once")
             }
-            Self::RequestedDigestMissing { attribute_index } => {
-                write!(f, "disclosed digest {attribute_index} is missing")
-            }
-            Self::RequestedDigestDuplicate { attribute_index } => {
-                write!(
-                    f,
-                    "disclosed digest {attribute_index} occurs more than once"
-                )
-            }
+            Self::RequestedDigestMissing => write!(f, "selected digest is missing"),
             Self::IssuerUseCountOverflow { issuer_index } => {
                 write!(f, "issuer byte-use count overflows at index {issuer_index}")
             }
@@ -463,10 +399,7 @@ fn read_map_count(
         })
 }
 
-fn read_text<'a>(
-    bytes: &'a [u8],
-    offset: usize,
-) -> Result<(&'a [u8], usize), MdocValueDigestsScanError> {
+fn read_text(bytes: &[u8], offset: usize) -> Result<(&[u8], usize), MdocValueDigestsScanError> {
     let (length, head_len) = read_argument(bytes, offset, 3, "namespace text")?;
     let length = usize::try_from(length).map_err(|_| {
         canonical_error(
@@ -513,8 +446,7 @@ fn read_text<'a>(
 fn read_digest_id(
     bytes: &[u8],
     offset: usize,
-    max: u32,
-) -> Result<(u32, usize, [u8; 5]), MdocValueDigestsScanError> {
+) -> Result<(u32, usize, [u8; DIGEST_ID_ENCODING_BYTES]), MdocValueDigestsScanError> {
     let first = *bytes.get(offset).ok_or_else(|| {
         canonical_error(
             offset,
@@ -584,13 +516,16 @@ fn read_digest_id(
             ));
         }
     };
-    if value > u64::from(max) {
+    if value > u64::from(MDOC_PRIVATE_ITEM_DIGEST_ID_MAX) {
         return Err(canonical_error(
             offset,
-            MsoValueDigestsCanonicalityReason::DigestIdOutOfRange { value, max },
+            MsoValueDigestsCanonicalityReason::DigestIdOutOfRange {
+                value,
+                max: MDOC_PRIVATE_ITEM_DIGEST_ID_MAX,
+            },
         ));
     }
-    let mut encoded = [0u8; 5];
+    let mut encoded = [0u8; DIGEST_ID_ENCODING_BYTES];
     encoded[..width].copy_from_slice(&bytes[offset..offset + width]);
     Ok((value as u32, width, encoded))
 }
@@ -599,7 +534,7 @@ fn read_digest_id(
 struct ParsedDigest {
     id: u32,
     encoding_len: usize,
-    encoding: [u8; 5],
+    encoding: [u8; DIGEST_ID_ENCODING_BYTES],
     digest: [u8; 32],
     offset: usize,
 }
@@ -622,7 +557,6 @@ struct ParsedValueDigests {
 
 fn parse_value_digests_at(
     mso: &[u8],
-    profile: MdocValueDigestsProfile,
     offset: usize,
 ) -> Result<ParsedValueDigests, MdocValueDigestsScanError> {
     let map_offset = offset + VALUE_DIGESTS_KEY.len();
@@ -634,8 +568,8 @@ fn parse_value_digests_at(
         });
     }
 
-    // Cap first, allocate second: a declared 256th scan item is rejected
-    // before any schedule-sized allocation.
+    // Check the limit before allocation.
+    // Reject a declared 256th scan item before schedule allocation.
     let mut namespaces = Vec::with_capacity(namespace_count);
     let mut seen_namespaces = HashSet::with_capacity(namespace_count);
     let mut cursor = map_offset + map_head_len;
@@ -671,8 +605,7 @@ fn parse_value_digests_at(
         let mut seen_ids = HashSet::with_capacity(digest_count);
         for _ in 0..digest_count {
             let digest_offset = cursor;
-            let (id, encoding_len, encoding) =
-                read_digest_id(mso, cursor, profile.digest_id_max())?;
+            let (id, encoding_len, encoding) = read_digest_id(mso, cursor)?;
             cursor += encoding_len;
             if !seen_ids.insert(id) {
                 return Err(canonical_error(
@@ -722,13 +655,9 @@ fn parse_value_digests_at(
 
 fn select_value_digests(
     mso: &[u8],
-    profile: MdocValueDigestsProfile,
     requested_namespace: &[u8],
-    disclosures: &[MdocValueDigestDisclosure],
+    selected_digest: &MdocSelectedValueDigest,
 ) -> Result<(ParsedValueDigests, Vec<ScanRow>), MdocValueDigestsScanError> {
-    // ponytail: trusted issuers make raw canonical-key candidate selection
-    // sufficient; admit non-canonical issuers only with a private top-level
-    // CBOR path proof.
     let offsets = mso
         .windows(VALUE_DIGESTS_KEY.len())
         .enumerate()
@@ -744,8 +673,8 @@ fn select_value_digests(
     let mut selected = None;
     let mut first_semantic_error = None;
     for &offset in &offsets {
-        let candidate = parse_value_digests_at(mso, profile, offset).and_then(|parsed| {
-            build_rows(&parsed, requested_namespace, disclosures).map(|rows| (parsed, rows))
+        let candidate = parse_value_digests_at(mso, offset).and_then(|parsed| {
+            build_rows(&parsed, requested_namespace, selected_digest).map(|rows| (parsed, rows))
         });
         match candidate {
             Ok(candidate) if selected.is_some() => {
@@ -758,8 +687,7 @@ fn select_value_digests(
             Err(error) if offsets.len() == 1 => return Err(error),
             Err(error @ MdocValueDigestsScanError::RequestedNamespaceMissing)
             | Err(error @ MdocValueDigestsScanError::RequestedNamespaceDuplicate)
-            | Err(error @ MdocValueDigestsScanError::RequestedDigestMissing { .. })
-            | Err(error @ MdocValueDigestsScanError::RequestedDigestDuplicate { .. }) => {
+            | Err(error @ MdocValueDigestsScanError::RequestedDigestMissing) => {
                 first_semantic_error.get_or_insert(error);
             }
             Err(_) => {}
@@ -780,38 +708,34 @@ mod trace_col {
     pub(super) const ROW_LEN: usize = 4;
     pub(super) const CURSOR: usize = 5;
     pub(super) const MSO_START: usize = 6;
-    pub(super) const IS_V2: usize = 7;
-    pub(super) const OUTER_REMAINING: usize = 8;
-    pub(super) const INNER_REMAINING: usize = 9;
-    pub(super) const OUTER_ONE: usize = 10;
-    pub(super) const OUTER_MORE: usize = 11;
-    pub(super) const INNER_ZERO: usize = 12;
-    pub(super) const INNER_ONE: usize = 13;
-    pub(super) const INNER_MORE: usize = 14;
-    pub(super) const NS_EMPTY_ONE: usize = 15;
-    pub(super) const NS_EMPTY_MORE: usize = 16;
-    pub(super) const DIGEST_LAST_ONE: usize = 17;
-    pub(super) const DIGEST_LAST_MORE: usize = 18;
-    pub(super) const NS_MATCH: usize = 19;
-    pub(super) const REQUESTED_SCOPE: usize = 20;
-    pub(super) const REQUESTED_COUNT: usize = 21;
-    pub(super) const SELECTED: usize = 22;
-    pub(super) const SELECTED_COUNT: usize = 26;
-    pub(super) const NAMESPACE_INDEX: usize = 30;
-    pub(super) const SORTED_ACTIVE: usize = 31;
-    pub(super) const SORTED_NAMESPACE: usize = 32;
-    pub(super) const SORTED_LO: usize = 33;
-    pub(super) const SORTED_HI: usize = 34;
-    pub(super) const SORTED_NAMESPACE_GT: usize = 35;
-    pub(super) const SORTED_NAMESPACE_EQ: usize = 36;
-    pub(super) const SORTED_HIGH_GT: usize = 37;
-    pub(super) const SORTED_HIGH_EQ: usize = 38;
-    pub(super) const OUTER_NONZERO_INV: usize = 39;
-    pub(super) const OUTER_ONE_INV: usize = 40;
-    pub(super) const INNER_ZERO_INV: usize = 41;
-    pub(super) const INNER_ONE_INV: usize = 42;
+    pub(super) const OUTER_REMAINING: usize = 7;
+    pub(super) const INNER_REMAINING: usize = 8;
+    pub(super) const OUTER_ONE: usize = 9;
+    pub(super) const OUTER_MORE: usize = 10;
+    pub(super) const INNER_ZERO: usize = 11;
+    pub(super) const INNER_ONE: usize = 12;
+    pub(super) const INNER_MORE: usize = 13;
+    pub(super) const NS_EMPTY_ONE: usize = 14;
+    pub(super) const NS_EMPTY_MORE: usize = 15;
+    pub(super) const DIGEST_LAST_ONE: usize = 16;
+    pub(super) const DIGEST_LAST_MORE: usize = 17;
+    pub(super) const NS_MATCH: usize = 18;
+    pub(super) const REQUESTED_SCOPE: usize = 19;
+    pub(super) const REQUESTED_COUNT: usize = 20;
+    pub(super) const SELECTED: usize = 21;
+    pub(super) const SELECTED_COUNT: usize = 22;
+    pub(super) const NAMESPACE_INDEX: usize = 23;
+    pub(super) const SORTED_ACTIVE: usize = 24;
+    pub(super) const SORTED_NAMESPACE: usize = 25;
+    pub(super) const SORTED_ID: usize = 26;
+    pub(super) const SORTED_NAMESPACE_GT: usize = 27;
+    pub(super) const SORTED_NAMESPACE_EQ: usize = 28;
+    pub(super) const OUTER_NONZERO_INV: usize = 29;
+    pub(super) const OUTER_ONE_INV: usize = 30;
+    pub(super) const INNER_ZERO_INV: usize = 31;
+    pub(super) const INNER_ONE_INV: usize = 32;
 
-    pub(super) const BYTE: usize = 43;
+    pub(super) const BYTE: usize = 33;
     pub(super) const BYTE_ACTIVE: usize = BYTE + super::BYTE_SITES;
     pub(super) const BYTE_OFFSET: usize = BYTE_ACTIVE + super::BYTE_SITES;
     pub(super) const CURSOR_BITS: usize = BYTE_OFFSET + super::BYTE_SITES;
@@ -831,13 +755,11 @@ mod trace_col {
     pub(super) const OUTER_MAP_SLACK_BITS: usize = INNER_LONG + 1;
     pub(super) const INNER_MAP_SLACK_BITS: usize = OUTER_MAP_SLACK_BITS + super::MAP_SLACK_BITS;
     pub(super) const DIGEST_KIND: usize = INNER_MAP_SLACK_BITS + super::MAP_SLACK_BITS;
-    pub(super) const DIGEST_ENCODING_LEN: usize = DIGEST_KIND + 4;
+    pub(super) const DIGEST_ENCODING_LEN: usize = DIGEST_KIND + 3;
     pub(super) const DIGEST_ID_LO: usize = DIGEST_ENCODING_LEN + 1;
-    pub(super) const DIGEST_ID_HI: usize = DIGEST_ID_LO + 1;
-    pub(super) const DIGEST_CANONICAL_SLACK_BITS: usize = DIGEST_ID_HI + 1;
-    pub(super) const DIGEST_NONZERO_INV: usize =
+    pub(super) const DIGEST_CANONICAL_SLACK_BITS: usize = DIGEST_ID_LO + 1;
+    pub(super) const SORTED_NAMESPACE_DIFF_BITS: usize =
         DIGEST_CANONICAL_SLACK_BITS + super::DIGEST_CANONICAL_SLACK_BITS;
-    pub(super) const SORTED_NAMESPACE_DIFF_BITS: usize = DIGEST_NONZERO_INV + 1;
     pub(super) const SORTED_ID_DIFF_BITS: usize = SORTED_NAMESPACE_DIFF_BITS + super::COUNT_BITS;
     pub(super) const NAMESPACE_UPPER_SLACK_BITS: usize =
         SORTED_ID_DIFF_BITS + super::SORTED_DIFF_BITS;
@@ -845,8 +767,8 @@ mod trace_col {
 }
 
 const _: [(); TRACE_COLS] = [(); trace_col::COUNT];
-const _: [(); 51] = [(); MAIN_RELATION_SITES];
-const _: [(); 108] = [(); INTERACTION_COLS];
+const _: [(); 43] = [(); MAIN_RELATION_SITES];
+const _: [(); 92] = [(); INTERACTION_COLS];
 
 fn m31(value: usize) -> M31 {
     M31::from_u32_unchecked(value as u32)
@@ -921,8 +843,8 @@ fn namespace_tag(namespace: &str) -> String {
 fn preprocessed_id(spec: &MdocValueDigestsScanSpec, name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!(
-            "mdoc/value_digests_scan/v{SCAN_VERSION}/profile_{}/ns_{}/{name}",
-            spec.profile.transcript_tag(),
+            "mdoc/value_digests_scan/v{SCAN_VERSION}/attribute_{}/ns_{}/{name}",
+            TS13_SELECTED_ATTRIBUTE_COUNT,
             namespace_tag(&spec.namespace)
         ),
     }
@@ -975,9 +897,9 @@ enum RowKind {
     Digest {
         id: u32,
         encoding_len: usize,
-        encoding: [u8; 5],
+        encoding: [u8; DIGEST_ID_ENCODING_BYTES],
         digest: [u8; 32],
-        selected: [bool; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
+        selected: bool,
         requested_scope: bool,
     },
 }
@@ -1063,14 +985,14 @@ impl ScanRow {
                     active[index] = true;
                     offsets[index] = index;
                 }
-                bytes[5] = 0x58;
-                bytes[6] = 0x20;
-                active[5] = true;
-                active[6] = true;
-                offsets[5] = *encoding_len;
-                offsets[6] = *encoding_len + 1;
+                bytes[DIGEST_ID_ENCODING_BYTES] = 0x58;
+                bytes[DIGEST_ID_ENCODING_BYTES + 1] = 0x20;
+                active[DIGEST_ID_ENCODING_BYTES] = true;
+                active[DIGEST_ID_ENCODING_BYTES + 1] = true;
+                offsets[DIGEST_ID_ENCODING_BYTES] = *encoding_len;
+                offsets[DIGEST_ID_ENCODING_BYTES + 1] = *encoding_len + 1;
                 for (index, &byte) in digest.iter().enumerate() {
-                    let site = 7 + index;
+                    let site = DIGEST_BYTES_START + index;
                     bytes[site] = byte;
                     active[site] = true;
                     offsets[site] = *encoding_len + 2 + index;
@@ -1107,10 +1029,7 @@ impl MdocValueDigestsWitnessTrace {
     }
 }
 
-fn validate_spec(
-    spec: &MdocValueDigestsScanSpec,
-    handles: &MdocValueDigestsScanHandles,
-) -> Result<(), MdocValueDigestsScanError> {
+fn validate_spec(spec: &MdocValueDigestsScanSpec) -> Result<(), MdocValueDigestsScanError> {
     if spec.issuer_message_len == 0 {
         return Err(MdocValueDigestsScanError::EmptyIssuerMessage);
     }
@@ -1140,25 +1059,13 @@ fn validate_spec(
             max: MDOC_MAX_PUBLIC_NAMESPACE_BYTES,
         });
     }
-    if !(1..=MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES).contains(&spec.attribute_count) {
-        return Err(MdocValueDigestsScanError::AttributeCountOutOfRange {
-            count: spec.attribute_count,
-            max: MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES,
-        });
-    }
-    if handles.items.len() != spec.attribute_count {
-        return Err(MdocValueDigestsScanError::HandleCountMismatch {
-            expected: spec.attribute_count,
-            actual: handles.items.len(),
-        });
-    }
     Ok(())
 }
 
 fn build_rows(
     parsed: &ParsedValueDigests,
     requested_namespace: &[u8],
-    disclosures: &[MdocValueDigestDisclosure],
+    selected_digest: &MdocSelectedValueDigest,
 ) -> Result<Vec<ScanRow>, MdocValueDigestsScanError> {
     let requested = parsed
         .namespaces
@@ -1172,41 +1079,14 @@ fn build_rows(
         [] => Err(MdocValueDigestsScanError::RequestedNamespaceMissing),
         [index] => {
             let requested_namespace = &parsed.namespaces[*index];
-            let mut selected_by_digest =
-                vec![[false; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES]; requested_namespace.digests.len()];
-            for (attribute_index, disclosure) in disclosures.iter().enumerate() {
-                let matches = requested_namespace
-                    .digests
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(digest_index, digest)| {
-                        (digest.id == disclosure.digest_id && digest.digest == disclosure.digest)
-                            .then_some(digest_index)
-                    })
-                    .collect::<Vec<_>>();
-                let digest_index = match matches.as_slice() {
-                    [] => {
-                        return Err(MdocValueDigestsScanError::RequestedDigestMissing {
-                            attribute_index,
-                        });
-                    }
-                    [index] => *index,
-                    _ => {
-                        return Err(MdocValueDigestsScanError::RequestedDigestDuplicate {
-                            attribute_index,
-                        });
-                    }
-                };
-                if selected_by_digest[digest_index]
-                    .iter()
-                    .any(|selected| *selected)
-                {
-                    return Err(MdocValueDigestsScanError::RequestedDigestDuplicate {
-                        attribute_index,
-                    });
-                }
-                selected_by_digest[digest_index][attribute_index] = true;
-            }
+            let selected_index = requested_namespace
+                .digests
+                .iter()
+                .position(|digest| {
+                    digest.id == selected_digest.digest_id
+                        && digest.digest == selected_digest.digest
+                })
+                .ok_or(MdocValueDigestsScanError::RequestedDigestMissing)?;
 
             let mut rows = Vec::with_capacity(1 + parsed.namespaces.len() + parsed.digest_entries);
             rows.push(ScanRow {
@@ -1239,11 +1119,7 @@ fn build_rows(
                             encoding_len: digest.encoding_len,
                             encoding: digest.encoding,
                             digest: digest.digest,
-                            selected: if requested_scope {
-                                selected_by_digest[digest_index]
-                            } else {
-                                [false; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES]
-                            },
+                            selected: requested_scope && digest_index == selected_index,
                             requested_scope,
                         },
                         cursor: digest.offset,
@@ -1297,9 +1173,6 @@ fn build_trace(
     for column in &mut columns[trace_col::BYTE_OFFSET..trace_col::BYTE_OFFSET + BYTE_SITES] {
         column.iter_mut().for_each(|value| *value = random_m31());
     }
-    columns[trace_col::IS_V2]
-        .iter_mut()
-        .for_each(|value| *value = random_bit());
     for (start, count) in [
         (trace_col::CURSOR_BITS, OFFSET_BITS),
         (trace_col::ROW_LEN_BITS, ROW_LEN_BITS),
@@ -1319,12 +1192,8 @@ fn build_trace(
     ] {
         write_random_bits(&mut columns, start, count);
     }
-    columns[trace_col::DIGEST_NONZERO_INV]
-        .iter_mut()
-        .for_each(|value| *value = random_m31());
-
     let mut requested_count = 0usize;
-    let mut selected_counts = [0usize; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES];
+    let mut selected_count = 0usize;
     let mut issuer_position_uses = vec![0u32; spec.issuer_message_len];
     let mut issuer_uses_total = 0usize;
     for (row_index, row) in rows.iter().enumerate() {
@@ -1348,10 +1217,6 @@ fn build_trace(
         columns[trace_col::ROW_LEN][row_index] = m31(row_len);
         columns[trace_col::CURSOR][row_index] = m31(row.cursor);
         columns[trace_col::MSO_START][row_index] = m31(witness.mso_start);
-        columns[trace_col::IS_V2][row_index] = m31_u32(u32::from(matches!(
-            witness.version,
-            MdocPrivateMsoVersion::V2
-        )));
         columns[trace_col::OUTER_REMAINING][row_index] = m31(row.outer_remaining);
         columns[trace_col::INNER_REMAINING][row_index] = m31(row.inner_remaining);
         columns[trace_col::NAMESPACE_INDEX][row_index] = m31(row.namespace_index);
@@ -1544,18 +1409,15 @@ fn build_trace(
                     1 => 0,
                     2 => 1,
                     3 => 2,
-                    5 => 3,
                     _ => unreachable!("canonical digest ID width"),
                 };
                 columns[trace_col::DIGEST_KIND + kind][row_index] = m31(1);
                 columns[trace_col::DIGEST_ENCODING_LEN][row_index] = m31(*encoding_len);
                 columns[trace_col::DIGEST_ID_LO][row_index] = m31_u32(*id & 0xffff);
-                columns[trace_col::DIGEST_ID_HI][row_index] = m31_u32(*id >> 16);
                 let canonical_slack = match kind {
                     0 => 23 - usize::from(encoding[0]),
                     1 => usize::from(encoding[1]) - 24,
                     2 => usize::from(encoding[1]) - 1,
-                    3 => 0,
                     _ => unreachable!(),
                 };
                 write_bits(
@@ -1565,14 +1427,9 @@ fn build_trace(
                     canonical_slack,
                     DIGEST_CANONICAL_SLACK_BITS,
                 );
-                if kind == 3 {
-                    columns[trace_col::DIGEST_NONZERO_INV][row_index] = inverse(m31_u32(*id >> 16));
-                }
-                for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-                    if selected[attribute_index] {
-                        columns[trace_col::SELECTED + attribute_index][row_index] = m31(1);
-                        selected_counts[attribute_index] += 1;
-                    }
+                if *selected {
+                    columns[trace_col::SELECTED][row_index] = m31(1);
+                    selected_count += 1;
                 }
                 if row.inner_remaining == 1 {
                     let branch = if row.outer_remaining == 1 {
@@ -1585,10 +1442,7 @@ fn build_trace(
             }
         }
         columns[trace_col::REQUESTED_COUNT][row_index] = m31(requested_count);
-        for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-            columns[trace_col::SELECTED_COUNT + attribute_index][row_index] =
-                m31(selected_counts[attribute_index]);
-        }
+        columns[trace_col::SELECTED_COUNT][row_index] = m31(selected_count);
     }
 
     let active_rows = rows.len();
@@ -1607,8 +1461,7 @@ fn build_trace(
     for (row, &(namespace, id)) in sorted.iter().enumerate() {
         columns[trace_col::SORTED_ACTIVE][row] = m31(1);
         columns[trace_col::SORTED_NAMESPACE][row] = m31(namespace);
-        columns[trace_col::SORTED_LO][row] = m31_u32(id & 0xffff);
-        columns[trace_col::SORTED_HI][row] = m31_u32(id >> 16);
+        columns[trace_col::SORTED_ID][row] = m31_u32(id);
         if row == 0 {
             continue;
         }
@@ -1624,27 +1477,13 @@ fn build_trace(
             );
         } else {
             columns[trace_col::SORTED_NAMESPACE_EQ][row] = m31(1);
-            let previous_hi = previous_id >> 16;
-            let current_hi = id >> 16;
-            if current_hi > previous_hi {
-                columns[trace_col::SORTED_HIGH_GT][row] = m31(1);
-                write_bits(
-                    &mut columns,
-                    trace_col::SORTED_ID_DIFF_BITS,
-                    row,
-                    (current_hi - previous_hi - 1) as usize,
-                    SORTED_DIFF_BITS,
-                );
-            } else {
-                columns[trace_col::SORTED_HIGH_EQ][row] = m31(1);
-                write_bits(
-                    &mut columns,
-                    trace_col::SORTED_ID_DIFF_BITS,
-                    row,
-                    ((id & 0xffff) - (previous_id & 0xffff) - 1) as usize,
-                    SORTED_DIFF_BITS,
-                );
-            }
+            write_bits(
+                &mut columns,
+                trace_col::SORTED_ID_DIFF_BITS,
+                row,
+                (id - previous_id - 1) as usize,
+                SORTED_DIFF_BITS,
+            );
         }
     }
 
@@ -1687,8 +1526,8 @@ struct MdocValueDigestsScanEval {
     issuer_relation: FieldBytesRelation,
     mso_start_relation: MdocMsoStartRelation,
     id_multiset_relation: MdocValueDigestIdMultisetRelation,
-    item_id_relations: [MdocPrivateDigestIdRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
-    digest_relations: [DigestBytesRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
+    item_id_relation: MdocPrivateDigestIdRelation,
+    digest_relation: DigestBytesRelation,
     blinder_relation: ClaimedSumBlinderRelation,
     blinder_v: QM31,
     blinder_m: QM31,
@@ -1719,7 +1558,6 @@ impl FrameworkEval for MdocValueDigestsScanEval {
         let [row_len, _row_len_next] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [cursor, cursor_next] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [mso_start, mso_start_next] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
-        let [is_v2, is_v2_next] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [outer_remaining, outer_remaining_next] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [inner_remaining, inner_remaining_next] =
@@ -1738,22 +1576,18 @@ impl FrameworkEval for MdocValueDigestsScanEval {
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [requested_count, requested_count_next] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
-        let selected: [[E::F; 2]; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]));
-        let selected_count: [[E::F; 2]; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]));
+        let [selected, selected_next] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
+        let [selected_count, selected_count_next] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [namespace_index, namespace_index_next] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [sorted_active, sorted_active_next] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
         let [sorted_namespace, sorted_namespace_prev] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
-        let [sorted_lo, sorted_lo_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
-        let [sorted_hi, sorted_hi_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+        let [sorted_id, sorted_id_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         let sorted_namespace_gt = eval.next_trace_mask();
         let sorted_namespace_eq = eval.next_trace_mask();
-        let sorted_high_gt = eval.next_trace_mask();
-        let sorted_high_eq = eval.next_trace_mask();
         let outer_nonzero_inv = eval.next_trace_mask();
         let outer_one_inv = eval.next_trace_mask();
         let inner_zero_inv = eval.next_trace_mask();
@@ -1780,13 +1614,11 @@ impl FrameworkEval for MdocValueDigestsScanEval {
             std::array::from_fn(|_| eval.next_trace_mask());
         let inner_map_slack_bits: [E::F; MAP_SLACK_BITS] =
             std::array::from_fn(|_| eval.next_trace_mask());
-        let digest_kind: [E::F; 4] = std::array::from_fn(|_| eval.next_trace_mask());
+        let digest_kind: [E::F; 3] = std::array::from_fn(|_| eval.next_trace_mask());
         let digest_encoding_len = eval.next_trace_mask();
         let digest_id_lo = eval.next_trace_mask();
-        let digest_id_hi = eval.next_trace_mask();
         let digest_canonical_slack_bits: [E::F; DIGEST_CANONICAL_SLACK_BITS] =
             std::array::from_fn(|_| eval.next_trace_mask());
-        let digest_nonzero_inv = eval.next_trace_mask();
         let sorted_namespace_diff_bits: [E::F; COUNT_BITS] =
             std::array::from_fn(|_| eval.next_trace_mask());
         let sorted_id_diff_bits: [E::F; SORTED_DIFF_BITS] =
@@ -1801,7 +1633,6 @@ impl FrameworkEval for MdocValueDigestsScanEval {
             head.clone(),
             namespace.clone(),
             digest.clone(),
-            is_v2.clone(),
             outer_one.clone(),
             outer_more.clone(),
             inner_zero.clone(),
@@ -1813,17 +1644,15 @@ impl FrameworkEval for MdocValueDigestsScanEval {
             digest_last_more.clone(),
             ns_match.clone(),
             requested_scope.clone(),
+            selected.clone(),
             sorted_active.clone(),
             sorted_namespace_gt.clone(),
             sorted_namespace_eq.clone(),
-            sorted_high_gt.clone(),
-            sorted_high_eq.clone(),
             namespace_long.clone(),
             outer_long.clone(),
             inner_long.clone(),
         ]
         .into_iter()
-        .chain(selected.iter().map(|pair| pair[0].clone()))
         .chain(byte_active.iter().cloned())
         .chain(namespace_content_active.iter().cloned())
         .chain(digest_kind.iter().cloned())
@@ -1924,7 +1753,6 @@ impl FrameworkEval for MdocValueDigestsScanEval {
             continue_active.clone() * (cursor_next - cursor.clone() - row_len.clone()),
         );
         eval.add_constraint(continue_active.clone() * (mso_start_next - mso_start.clone()));
-        eval.add_constraint(continue_active.clone() * (is_v2_next - is_v2.clone()));
 
         let same_outer = head.clone() + ns_nonempty.clone() + digest_more.clone();
         let next_namespace = ns_empty_more.clone() + digest_last_more.clone();
@@ -1963,29 +1791,14 @@ impl FrameworkEval for MdocValueDigestsScanEval {
         );
         eval.add_constraint(terminal.clone() * (requested_count - one.clone()));
 
-        let selected_sum = selected
-            .iter()
-            .fold(zero.clone(), |sum, pair| sum + pair[0].clone());
-        add_boolean(&mut eval, selected_sum.clone(), &one);
-        eval.add_constraint(selected_sum.clone() * (one.clone() - digest.clone()));
-        eval.add_constraint(selected_sum * (one.clone() - requested_scope.clone()));
-        for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-            if attribute_index >= self.spec.attribute_count {
-                eval.add_constraint(selected[attribute_index][0].clone());
-            }
-            eval.add_constraint(first.clone() * selected_count[attribute_index][0].clone());
-            eval.add_constraint(
-                continue_active.clone()
-                    * (selected_count[attribute_index][1].clone()
-                        - selected_count[attribute_index][0].clone()
-                        - selected[attribute_index][1].clone()),
-            );
-            if attribute_index < self.spec.attribute_count {
-                eval.add_constraint(
-                    terminal.clone() * (selected_count[attribute_index][0].clone() - one.clone()),
-                );
-            }
-        }
+        eval.add_constraint(selected.clone() * (one.clone() - digest.clone()));
+        eval.add_constraint(selected.clone() * (one.clone() - requested_scope.clone()));
+        eval.add_constraint(first.clone() * selected_count.clone());
+        eval.add_constraint(
+            continue_active.clone()
+                * (selected_count_next - selected_count.clone() - selected_next),
+        );
+        eval.add_constraint(terminal.clone() * (selected_count - one.clone()));
 
         let outer_short = head.clone() - outer_long.clone();
         eval.add_constraint(outer_long.clone() * (one.clone() - head.clone()));
@@ -2071,13 +1884,13 @@ impl FrameworkEval for MdocValueDigestsScanEval {
                 35 => expected_active += inner_long.clone(),
                 _ => {}
             }
-            if site <= 4 {
-                for (kind, len) in [1usize, 2, 3, 5].into_iter().enumerate() {
+            if site < DIGEST_ID_ENCODING_BYTES {
+                for (kind, len) in [1usize, 2, 3].into_iter().enumerate() {
                     if site < len {
                         expected_active += digest_kind[kind].clone();
                     }
                 }
-            } else if site == 5 || site == 6 || (7..BYTE_SITES).contains(&site) {
+            } else if site >= DIGEST_ID_ENCODING_BYTES {
                 expected_active += digest.clone();
             }
             eval.add_constraint(byte_active[site].clone() - expected_active);
@@ -2110,25 +1923,25 @@ impl FrameworkEval for MdocValueDigestsScanEval {
                 eval.add_constraint(gate * (byte_offset[site].clone() - expected));
             }
             let digest_offset = match site {
-                0..=4 => m31_const::<E>(site),
-                5 => digest_encoding_len.clone(),
-                6 => digest_encoding_len.clone() + one.clone(),
-                7..=38 => digest_encoding_len.clone() + m31_const::<E>(site - 5),
+                0..DIGEST_ID_ENCODING_BYTES => m31_const::<E>(site),
+                DIGEST_ID_ENCODING_BYTES => digest_encoding_len.clone(),
+                DIGEST_BSTR_HEAD_END => digest_encoding_len.clone() + one.clone(),
+                DIGEST_BYTES_START..BYTE_SITES => {
+                    digest_encoding_len.clone() + m31_const::<E>(site - DIGEST_ID_ENCODING_BYTES)
+                }
                 _ => unreachable!(),
             };
-            let digest_gate = if site <= 4 {
+            let digest_gate = if site < DIGEST_ID_ENCODING_BYTES {
                 byte_active[site].clone()
                     - head.clone()
                     - match site {
                         0 => namespace.clone(),
                         1 => namespace_long.clone(),
-                        2..=4 => namespace_content_active[site - 2].clone(),
+                        2 => namespace_content_active[0].clone(),
                         _ => zero.clone(),
                     }
-            } else if site == 5 || site == 6 || site >= 7 {
-                digest.clone()
             } else {
-                zero.clone()
+                digest.clone()
             };
             eval.add_constraint(digest_gate * (byte_offset[site].clone() - digest_offset));
         }
@@ -2200,25 +2013,27 @@ impl FrameworkEval for MdocValueDigestsScanEval {
         eval.add_constraint(digest_kind_sum - digest.clone());
         let encoding_len_expected = digest_kind
             .iter()
-            .zip([1usize, 2, 3, 5])
+            .zip([1usize, 2, 3])
             .fold(zero.clone(), |sum, (selector, len)| {
                 sum + m31_const::<E>(len) * selector.clone()
             });
         eval.add_constraint(digest_encoding_len.clone() - encoding_len_expected);
-        eval.add_constraint(digest.clone() * (bytes[5].clone() - m31_const::<E>(0x58)));
-        eval.add_constraint(digest.clone() * (bytes[6].clone() - m31_const::<E>(0x20)));
+        eval.add_constraint(
+            digest.clone() * (bytes[DIGEST_ID_ENCODING_BYTES].clone() - m31_const::<E>(0x58)),
+        );
+        eval.add_constraint(
+            digest.clone() * (bytes[DIGEST_ID_ENCODING_BYTES + 1].clone() - m31_const::<E>(0x20)),
+        );
         let digest_slack = bit_sum::<E>(&digest_canonical_slack_bits);
         eval.add_constraint(
             digest_kind[0].clone() * (bytes[0].clone() + digest_slack.clone() - m31_const::<E>(23)),
         );
         eval.add_constraint(digest_kind[0].clone() * (digest_id_lo.clone() - bytes[0].clone()));
-        eval.add_constraint(digest_kind[0].clone() * digest_id_hi.clone());
         eval.add_constraint(digest_kind[1].clone() * (bytes[0].clone() - m31_const::<E>(0x18)));
         eval.add_constraint(
             digest_kind[1].clone() * (bytes[1].clone() - m31_const::<E>(24) - digest_slack.clone()),
         );
         eval.add_constraint(digest_kind[1].clone() * (digest_id_lo.clone() - bytes[1].clone()));
-        eval.add_constraint(digest_kind[1].clone() * digest_id_hi.clone());
         eval.add_constraint(digest_kind[2].clone() * (bytes[0].clone() - m31_const::<E>(0x19)));
         eval.add_constraint(
             digest_kind[2].clone() * (bytes[1].clone() - one.clone() - digest_slack.clone()),
@@ -2229,28 +2044,10 @@ impl FrameworkEval for MdocValueDigestsScanEval {
                     - m31_const::<E>(256) * bytes[1].clone()
                     - bytes[2].clone()),
         );
-        eval.add_constraint(digest_kind[2].clone() * digest_id_hi.clone());
-        eval.add_constraint(digest_kind[3].clone() * (bytes[0].clone() - m31_const::<E>(0x1a)));
-        eval.add_constraint(
-            digest_kind[3].clone()
-                * (digest_id_hi.clone()
-                    - m31_const::<E>(256) * bytes[1].clone()
-                    - bytes[2].clone()),
-        );
-        eval.add_constraint(
-            digest_kind[3].clone()
-                * (digest_id_lo.clone()
-                    - m31_const::<E>(256) * bytes[3].clone()
-                    - bytes[4].clone()),
-        );
-        eval.add_constraint(digest_id_hi.clone() * digest_nonzero_inv - digest_kind[3].clone());
-        for (kind, len) in [1usize, 2, 3, 5].into_iter().enumerate() {
-            for site in len..5 {
-                eval.add_constraint(digest_kind[kind].clone() * bytes[site].clone());
+        for (kind, len) in [1usize, 2, 3].into_iter().enumerate() {
+            for byte in bytes.iter().take(DIGEST_ID_ENCODING_BYTES).skip(len) {
+                eval.add_constraint(digest_kind[kind].clone() * byte.clone());
             }
-        }
-        if matches!(self.spec.profile, MdocValueDigestsProfile::Ts13) {
-            eval.add_constraint(digest_kind[3].clone());
         }
 
         eval.add_constraint(first.clone() * (sorted_active.clone() - one.clone()));
@@ -2262,9 +2059,6 @@ impl FrameworkEval for MdocValueDigestsScanEval {
         let sorted_nonfirst = sorted_active.clone() - first.clone();
         eval.add_constraint(
             sorted_namespace_gt.clone() + sorted_namespace_eq.clone() - sorted_nonfirst,
-        );
-        eval.add_constraint(
-            sorted_high_gt.clone() + sorted_high_eq.clone() - sorted_namespace_eq.clone(),
         );
         let namespace_diff = bit_sum::<E>(&sorted_namespace_diff_bits);
         eval.add_constraint(
@@ -2279,12 +2073,7 @@ impl FrameworkEval for MdocValueDigestsScanEval {
         );
         let id_diff = bit_sum::<E>(&sorted_id_diff_bits);
         eval.add_constraint(
-            sorted_high_gt.clone()
-                * (sorted_hi.clone() - sorted_hi_prev.clone() - one.clone() - id_diff.clone()),
-        );
-        eval.add_constraint(sorted_high_eq.clone() * (sorted_hi.clone() - sorted_hi_prev));
-        eval.add_constraint(
-            sorted_high_eq * (sorted_lo.clone() - sorted_lo_prev - one.clone() - id_diff),
+            sorted_namespace_eq * (sorted_id.clone() - sorted_id_prev - one.clone() - id_diff),
         );
 
         for site in 0..BYTE_SITES {
@@ -2301,43 +2090,40 @@ impl FrameworkEval for MdocValueDigestsScanEval {
         eval.add_to_relation(RelationEntry::new(
             &self.mso_start_relation,
             E::EF::from(head.clone()),
-            &[mso_start, is_v2.clone()],
+            &[mso_start],
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.id_multiset_relation,
             E::EF::from(digest.clone()),
-            &[namespace_index, digest_id_lo.clone(), digest_id_hi.clone()],
+            &[namespace_index, digest_id_lo.clone(), zero.clone()],
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.id_multiset_relation,
             -E::EF::from(sorted_active),
-            &[sorted_namespace, sorted_lo, sorted_hi],
+            &[sorted_namespace, sorted_id, zero.clone()],
         ));
-        for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-            eval.add_to_relation(RelationEntry::new(
-                &self.item_id_relations[attribute_index],
-                E::EF::from(selected[attribute_index][0].clone()),
-                &[
-                    digest_encoding_len.clone(),
-                    bytes[0].clone(),
-                    bytes[1].clone(),
-                    bytes[2].clone(),
-                    bytes[3].clone(),
-                    bytes[4].clone(),
-                    digest_id_lo.clone(),
-                    digest_id_hi.clone(),
-                    is_v2.clone(),
-                ],
-            ));
-        }
-        let digest_values: [E::F; 32] = std::array::from_fn(|index| bytes[7 + index].clone());
-        for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-            eval.add_to_relation(RelationEntry::new(
-                &self.digest_relations[attribute_index],
-                E::EF::from(selected[attribute_index][0].clone()),
-                &digest_values,
-            ));
-        }
+        eval.add_to_relation(RelationEntry::new(
+            &self.item_id_relation,
+            E::EF::from(selected.clone()),
+            // The fixed profile sets both unused bytes and the high limb to zero.
+            &[
+                digest_encoding_len,
+                bytes[0].clone(),
+                bytes[1].clone(),
+                bytes[2].clone(),
+                zero.clone(),
+                zero,
+                digest_id_lo,
+                m31_const::<E>(0),
+            ],
+        ));
+        let digest_values: [E::F; 32] =
+            std::array::from_fn(|index| bytes[DIGEST_BYTES_START + index].clone());
+        eval.add_to_relation(RelationEntry::new(
+            &self.digest_relation,
+            E::EF::from(selected),
+            &digest_values,
+        ));
         add_blinder_relation_entry(
             &mut eval,
             &self.blinder_relation,
@@ -2354,8 +2140,8 @@ struct ScanInteractionInputs<'a> {
     issuer_relation: &'a FieldBytesRelation,
     mso_start_relation: &'a MdocMsoStartRelation,
     id_multiset_relation: &'a MdocValueDigestIdMultisetRelation,
-    item_id_relations: &'a [MdocPrivateDigestIdRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
-    digest_relations: &'a [DigestBytesRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
+    item_id_relation: &'a MdocPrivateDigestIdRelation,
+    digest_relation: &'a DigestBytesRelation,
     blinder_relation: &'a ClaimedSumBlinderRelation,
     blinder_v: QM31,
     blinder_m: QM31,
@@ -2391,10 +2177,9 @@ fn interaction_trace(
             .map(|row| {
                 (
                     PackedQM31::from(base[trace_col::HEAD].data[row]),
-                    inputs.mso_start_relation.combine(&[
-                        base[trace_col::MSO_START].data[row],
-                        base[trace_col::IS_V2].data[row],
-                    ]),
+                    inputs
+                        .mso_start_relation
+                        .combine(&[base[trace_col::MSO_START].data[row]]),
                 )
             })
             .collect(),
@@ -2407,7 +2192,7 @@ fn interaction_trace(
                     inputs.id_multiset_relation.combine(&[
                         base[trace_col::NAMESPACE_INDEX].data[row],
                         base[trace_col::DIGEST_ID_LO].data[row],
-                        base[trace_col::DIGEST_ID_HI].data[row],
+                        PackedM31::broadcast(m31(0)),
                     ]),
                 )
             })
@@ -2420,49 +2205,45 @@ fn interaction_trace(
                     -PackedQM31::from(base[trace_col::SORTED_ACTIVE].data[row]),
                     inputs.id_multiset_relation.combine(&[
                         base[trace_col::SORTED_NAMESPACE].data[row],
-                        base[trace_col::SORTED_LO].data[row],
-                        base[trace_col::SORTED_HI].data[row],
+                        base[trace_col::SORTED_ID].data[row],
+                        PackedM31::broadcast(m31(0)),
                     ]),
                 )
             })
             .collect(),
     );
-    for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-        sites.push(
-            (0..packed_rows)
-                .map(|row| {
-                    (
-                        PackedQM31::from(base[trace_col::SELECTED + attribute_index].data[row]),
-                        inputs.item_id_relations[attribute_index].combine(&[
-                            base[trace_col::DIGEST_ENCODING_LEN].data[row],
-                            base[trace_col::BYTE].data[row],
-                            base[trace_col::BYTE + 1].data[row],
-                            base[trace_col::BYTE + 2].data[row],
-                            base[trace_col::BYTE + 3].data[row],
-                            base[trace_col::BYTE + 4].data[row],
-                            base[trace_col::DIGEST_ID_LO].data[row],
-                            base[trace_col::DIGEST_ID_HI].data[row],
-                            base[trace_col::IS_V2].data[row],
-                        ]),
-                    )
-                })
-                .collect(),
-        );
-    }
-    for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-        sites.push(
-            (0..packed_rows)
-                .map(|row| {
-                    let values: [PackedM31; 32] =
-                        std::array::from_fn(|index| base[trace_col::BYTE + 7 + index].data[row]);
-                    (
-                        PackedQM31::from(base[trace_col::SELECTED + attribute_index].data[row]),
-                        inputs.digest_relations[attribute_index].combine(&values),
-                    )
-                })
-                .collect(),
-        );
-    }
+    sites.push(
+        (0..packed_rows)
+            .map(|row| {
+                (
+                    PackedQM31::from(base[trace_col::SELECTED].data[row]),
+                    inputs.item_id_relation.combine(&[
+                        base[trace_col::DIGEST_ENCODING_LEN].data[row],
+                        base[trace_col::BYTE].data[row],
+                        base[trace_col::BYTE + 1].data[row],
+                        base[trace_col::BYTE + 2].data[row],
+                        PackedM31::broadcast(m31(0)),
+                        PackedM31::broadcast(m31(0)),
+                        base[trace_col::DIGEST_ID_LO].data[row],
+                        PackedM31::broadcast(m31(0)),
+                    ]),
+                )
+            })
+            .collect(),
+    );
+    sites.push(
+        (0..packed_rows)
+            .map(|row| {
+                let values: [PackedM31; 32] = std::array::from_fn(|index| {
+                    base[trace_col::BYTE + DIGEST_BYTES_START + index].data[row]
+                });
+                (
+                    PackedQM31::from(base[trace_col::SELECTED].data[row]),
+                    inputs.digest_relation.combine(&values),
+                )
+            })
+            .collect(),
+    );
     let blinder_numerator = PackedQM31::broadcast(inputs.blinder_m);
     let blinder_denominator = blinder_denominator(inputs.blinder_relation, inputs.blinder_v);
     sites.push(vec![(blinder_numerator, blinder_denominator); packed_rows]);
@@ -2506,17 +2287,11 @@ impl MdocValueDigestsScan {
         witness: MdocValueDigestsScanWitness,
         handles: MdocValueDigestsScanHandles,
     ) -> Result<(Self, MdocValueDigestsUseCensus), MdocValueDigestsScanError> {
-        validate_spec(&spec, &handles)?;
+        validate_spec(&spec)?;
         if witness.issuer_message.len() != spec.issuer_message_len {
             return Err(MdocValueDigestsScanError::IssuerMessageLengthMismatch {
                 expected: spec.issuer_message_len,
                 actual: witness.issuer_message.len(),
-            });
-        }
-        if witness.disclosures.len() != spec.attribute_count {
-            return Err(MdocValueDigestsScanError::DisclosureCountMismatch {
-                expected: spec.attribute_count,
-                actual: witness.disclosures.len(),
             });
         }
         let mso_end = witness.mso_start.checked_add(spec.mso_len).ok_or(
@@ -2534,12 +2309,8 @@ impl MdocValueDigestsScan {
                 length: spec.mso_len,
                 issuer_message_len: spec.issuer_message_len,
             })?;
-        let (parsed, rows) = select_value_digests(
-            mso,
-            spec.profile,
-            spec.namespace.as_bytes(),
-            &witness.disclosures,
-        )?;
+        let (parsed, rows) =
+            select_value_digests(mso, spec.namespace.as_bytes(), &witness.selected_digest)?;
         debug_assert_eq!(
             rows.len(),
             1 + parsed.namespaces.len() + parsed.digest_entries
@@ -2565,7 +2336,7 @@ impl MdocValueDigestsScan {
         handles: MdocValueDigestsScanHandles,
         interaction_claim: MdocValueDigestsInteractionClaim,
     ) -> Result<Self, MdocValueDigestsScanError> {
-        validate_spec(&spec, &handles)?;
+        validate_spec(&spec)?;
         Ok(Self {
             spec,
             handles,
@@ -2592,24 +2363,12 @@ impl MdocValueDigestsScan {
         self.handles.mso_start.get()
     }
 
-    fn item_id_relations(&self) -> [MdocPrivateDigestIdRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES] {
-        let first = self.handles.items[0].digest_id.get();
-        std::array::from_fn(|index| {
-            self.handles
-                .items
-                .get(index)
-                .map_or_else(|| first.clone(), |item| item.digest_id.get())
-        })
+    fn item_id_relation(&self) -> MdocPrivateDigestIdRelation {
+        self.handles.item.digest_id.get()
     }
 
-    fn digest_relations(&self) -> [DigestBytesRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES] {
-        let first = self.handles.items[0].digest.get();
-        std::array::from_fn(|index| {
-            self.handles
-                .items
-                .get(index)
-                .map_or_else(|| first.clone(), |item| item.digest.get())
-        })
+    fn digest_relation(&self) -> DigestBytesRelation {
+        self.handles.item.digest.get()
     }
 
     fn id_multiset_relation(&self) -> MdocValueDigestIdMultisetRelation {
@@ -2623,10 +2382,10 @@ impl Air for MdocValueDigestsScan {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(SCAN_DOMAIN);
         channel.mix_u64(SCAN_VERSION);
-        channel.mix_u64(self.spec.profile.transcript_tag());
+        channel.mix_u64(SCAN_TRANSCRIPT_TAG);
         channel.mix_u64(self.spec.issuer_message_len as u64);
         channel.mix_u64(self.spec.mso_len as u64);
-        channel.mix_u64(self.spec.attribute_count as u64);
+        channel.mix_u64(TS13_SELECTED_ATTRIBUTE_COUNT as u64);
         channel.mix_u64(self.spec.namespace.len() as u64);
         for &byte in self.spec.namespace.as_bytes() {
             channel.mix_u64(u64::from(byte));
@@ -2638,7 +2397,7 @@ impl Air for MdocValueDigestsScan {
         channel.mix_u64(TRACE_COLS as u64);
         channel.mix_u64(MAIN_RELATION_SITES as u64);
         channel.mix_u64(INTERACTION_COLS as u64);
-        channel.mix_u64(u64::from(self.spec.profile.digest_id_max()));
+        channel.mix_u64(u64::from(MDOC_PRIVATE_ITEM_DIGEST_ID_MAX));
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
@@ -2683,8 +2442,8 @@ impl Air for MdocValueDigestsScan {
                 issuer_relation: self.issuer_relation(),
                 mso_start_relation: self.mso_start_relation(),
                 id_multiset_relation: self.id_multiset_relation(),
-                item_id_relations: self.item_id_relations(),
-                digest_relations: self.digest_relations(),
+                item_id_relation: self.item_id_relation(),
+                digest_relation: self.digest_relation(),
                 blinder_relation: blinder_relation.clone(),
                 blinder_v: claim.blinder_v,
                 blinder_m: claim.blinder_m,
@@ -2779,8 +2538,8 @@ impl AirProver for MdocValueDigestsScan {
         let issuer_relation = self.issuer_relation();
         let mso_start_relation = self.mso_start_relation();
         let id_multiset_relation = self.id_multiset_relation();
-        let item_id_relations = self.item_id_relations();
-        let digest_relations = self.digest_relations();
+        let item_id_relation = self.item_id_relation();
+        let digest_relation = self.digest_relation();
         let (interaction, claimed_sum) = interaction_trace(
             self.witness
                 .as_ref()
@@ -2789,8 +2548,8 @@ impl AirProver for MdocValueDigestsScan {
                 issuer_relation: &issuer_relation,
                 mso_start_relation: &mso_start_relation,
                 id_multiset_relation: &id_multiset_relation,
-                item_id_relations: &item_id_relations,
-                digest_relations: &digest_relations,
+                item_id_relation: &item_id_relation,
+                digest_relation: &digest_relation,
                 blinder_relation: &blinder_relation,
                 blinder_v,
                 blinder_m,
@@ -2923,64 +2682,52 @@ mod tests {
         output
     }
 
-    fn parse_value_digests(
-        mso: &[u8],
-        profile: MdocValueDigestsProfile,
-    ) -> Result<ParsedValueDigests, MdocValueDigestsScanError> {
+    fn parse_value_digests(mso: &[u8]) -> Result<ParsedValueDigests, MdocValueDigestsScanError> {
         let offset = mso
             .windows(VALUE_DIGESTS_KEY.len())
             .position(|bytes| bytes == VALUE_DIGESTS_KEY)
             .ok_or_else(|| {
                 canonical_error(0, MsoValueDigestsCanonicalityReason::MissingValueDigests)
             })?;
-        parse_value_digests_at(mso, profile, offset)
+        parse_value_digests_at(mso, offset)
     }
 
-    fn handles(attribute_count: usize) -> MdocValueDigestsScanHandles {
+    fn handles() -> MdocValueDigestsScanHandles {
         MdocValueDigestsScanHandles {
             issuer_message: SharedFieldRelation::new(),
             mso_start: SharedMdocMsoStartRelation::new(),
-            items: (0..attribute_count)
-                .map(|_| MdocValueDigestItemHandles {
-                    digest_id: SharedMdocPrivateDigestIdRelation::new(),
-                    digest: SharedDigestRelation::new(),
-                })
-                .collect(),
+            item: MdocValueDigestItemHandles {
+                digest_id: SharedMdocPrivateDigestIdRelation::new(),
+                digest: SharedDigestRelation::new(),
+            },
         }
     }
 
     fn scanner_for_mso(
         mso: Vec<u8>,
         namespace: &str,
-        profile: MdocValueDigestsProfile,
-        disclosures: Vec<MdocValueDigestDisclosure>,
+        selected_digest: MdocSelectedValueDigest,
     ) -> Result<(MdocValueDigestsScan, MdocValueDigestsUseCensus), MdocValueDigestsScanError> {
         let mso_start = 3;
-        let attribute_count = disclosures.len();
         let mut issuer_message = vec![0x55; mso_start];
         issuer_message.extend_from_slice(&mso);
         let spec = MdocValueDigestsScanSpec {
             issuer_message_len: issuer_message.len(),
             mso_len: mso.len(),
             namespace: namespace.to_owned(),
-            profile,
-            attribute_count,
         };
         MdocValueDigestsScan::prover(
             spec,
             MdocValueDigestsScanWitness {
                 issuer_message,
                 mso_start,
-                version: MdocPrivateMsoVersion::V2,
-                disclosures,
+                selected_digest,
             },
-            handles(attribute_count),
+            handles(),
         )
     }
 
-    fn fixture(
-        version: MdocPrivateMsoVersion,
-    ) -> (
+    fn fixture() -> (
         MdocValueDigestsScan,
         MdocValueDigestsUseCensus,
         MdocValueDigestsScanWitness,
@@ -2991,38 +2738,29 @@ mod tests {
             (b"org.example.extra".to_vec(), vec![(7, digest(0xa0))]),
             (
                 REQUESTED_NAMESPACE.as_bytes().to_vec(),
-                vec![(7, requested_first), (65_536, requested_second)],
+                vec![(7, requested_first), (u16::MAX as u32, requested_second)],
             ),
         ]);
         let mso_start = 5;
         let mut issuer_message = vec![0x55; mso_start];
         issuer_message.extend_from_slice(&mso);
         issuer_message.extend_from_slice(&[0xaa; 3]);
-        let disclosures = vec![
-            MdocValueDigestDisclosure {
-                digest_id: 7,
-                digest: requested_first,
-            },
-            MdocValueDigestDisclosure {
-                digest_id: 65_536,
-                digest: requested_second,
-            },
-        ];
+        let selected_digest = MdocSelectedValueDigest {
+            digest_id: u16::MAX as u32,
+            digest: requested_second,
+        };
         let spec = MdocValueDigestsScanSpec {
             issuer_message_len: issuer_message.len(),
             mso_len: mso.len(),
             namespace: REQUESTED_NAMESPACE.to_owned(),
-            profile: MdocValueDigestsProfile::Product,
-            attribute_count: disclosures.len(),
         };
         let witness = MdocValueDigestsScanWitness {
             issuer_message,
             mso_start,
-            version,
-            disclosures,
+            selected_digest,
         };
         let (scan, census) =
-            MdocValueDigestsScan::prover(spec, witness.clone(), handles(2)).unwrap();
+            MdocValueDigestsScan::prover(spec, witness.clone(), handles()).unwrap();
         (scan, census, witness)
     }
 
@@ -3047,7 +2785,7 @@ mod tests {
 
     #[test]
     fn canonical_multi_namespace_scan_selects_only_the_requested_namespace() {
-        let (scan, census, witness) = fixture(MdocPrivateMsoVersion::V2);
+        let (scan, census, witness) = fixture();
         assert_eq!(census.active_rows, 6);
         assert_eq!(census.blind_rows, MDOC_VALUE_DIGESTS_SCAN_ROWS - 6);
         assert_eq!(census.namespaces, 2);
@@ -3065,12 +2803,9 @@ mod tests {
             .all(|&uses| uses == 0));
         let trace = scan.witness.as_ref().unwrap();
         let selected_rows = (0..MDOC_VALUE_DIGESTS_SCAN_ROWS)
-            .filter(|&row| {
-                (0..2)
-                    .any(|attribute| trace.columns[trace_col::SELECTED + attribute][row] == m31(1))
-            })
+            .filter(|&row| trace.columns[trace_col::SELECTED][row] == m31(1))
             .collect::<Vec<_>>();
-        assert_eq!(selected_rows.len(), 2);
+        assert_eq!(selected_rows.len(), 1);
         assert!(selected_rows
             .iter()
             .all(|&row| trace.columns[trace_col::NAMESPACE_INDEX][row] == m31(1)));
@@ -3078,14 +2813,14 @@ mod tests {
 
     #[test]
     fn viable_candidate_selection_ignores_inert_and_wrong_namespace_decoys() {
-        let selected_digest = digest(0x20);
-        let disclosure = MdocValueDigestDisclosure {
+        let selected_digest_bytes = digest(0x20);
+        let selected_digest = MdocSelectedValueDigest {
             digest_id: 7,
-            digest: selected_digest,
+            digest: selected_digest_bytes,
         };
         let actual = encode_value_digests(&[(
             REQUESTED_NAMESPACE.as_bytes().to_vec(),
-            vec![(7, selected_digest)],
+            vec![(7, selected_digest_bytes)],
         )]);
 
         let mut inert_then_actual = VALUE_DIGESTS_KEY.to_vec();
@@ -3095,25 +2830,21 @@ mod tests {
         let (scan, _) = scanner_for_mso(
             inert_then_actual,
             REQUESTED_NAMESPACE,
-            MdocValueDigestsProfile::Product,
-            vec![disclosure.clone()],
+            selected_digest.clone(),
         )
         .unwrap();
         assert_eq!(scan.witness.as_ref().unwrap().rows[0].cursor, actual_offset);
         assert_trace_satisfies_air(&scan);
 
-        let wrong =
-            encode_value_digests(&[(b"org.example.wrong".to_vec(), vec![(7, selected_digest)])]);
+        let wrong = encode_value_digests(&[(
+            b"org.example.wrong".to_vec(),
+            vec![(7, selected_digest_bytes)],
+        )]);
         let actual_offset = wrong.len() + 1;
         let mut wrong_then_actual = wrong;
         wrong_then_actual.extend_from_slice(&actual);
-        let (scan, _) = scanner_for_mso(
-            wrong_then_actual,
-            REQUESTED_NAMESPACE,
-            MdocValueDigestsProfile::Product,
-            vec![disclosure],
-        )
-        .unwrap();
+        let (scan, _) =
+            scanner_for_mso(wrong_then_actual, REQUESTED_NAMESPACE, selected_digest).unwrap();
         assert_eq!(scan.witness.as_ref().unwrap().rows[0].cursor, actual_offset);
         assert_trace_satisfies_air(&scan);
     }
@@ -3132,11 +2863,10 @@ mod tests {
             scanner_error(scanner_for_mso(
                 two_viable,
                 REQUESTED_NAMESPACE,
-                MdocValueDigestsProfile::Product,
-                vec![MdocValueDigestDisclosure {
+                MdocSelectedValueDigest {
                     digest_id: 7,
                     digest: selected_digest,
-                }],
+                },
             )),
             canonical_error(
                 second_offset,
@@ -3147,16 +2877,15 @@ mod tests {
 
     #[test]
     fn candidate_selection_preserves_missing_and_single_malformed_errors() {
-        let disclosure = vec![MdocValueDigestDisclosure {
+        let selected_digest = MdocSelectedValueDigest {
             digest_id: 7,
             digest: digest(0x20),
-        }];
+        };
         assert_eq!(
             scanner_error(scanner_for_mso(
                 vec![0xa0],
                 REQUESTED_NAMESPACE,
-                MdocValueDigestsProfile::Product,
-                disclosure.clone(),
+                selected_digest.clone(),
             )),
             canonical_error(0, MsoValueDigestsCanonicalityReason::MissingValueDigests)
         );
@@ -3168,8 +2897,7 @@ mod tests {
             scanner_error(scanner_for_mso(
                 malformed,
                 REQUESTED_NAMESPACE,
-                MdocValueDigestsProfile::Product,
-                disclosure,
+                selected_digest,
             )),
             canonical_error(
                 2 + VALUE_DIGESTS_KEY.len(),
@@ -3180,18 +2908,19 @@ mod tests {
 
     #[test]
     fn prover_rejects_missing_namespace_and_noncanonical_heads_or_keys() {
-        let disclosure = MdocValueDigestDisclosure {
+        let selected_digest = MdocSelectedValueDigest {
             digest_id: 7,
             digest: digest(0x20),
         };
-        let wrong_namespace =
-            encode_value_digests(&[(b"org.example.wrong".to_vec(), vec![(7, disclosure.digest)])]);
+        let wrong_namespace = encode_value_digests(&[(
+            b"org.example.wrong".to_vec(),
+            vec![(7, selected_digest.digest)],
+        )]);
         assert_eq!(
             scanner_error(scanner_for_mso(
                 wrong_namespace.clone(),
                 REQUESTED_NAMESPACE,
-                MdocValueDigestsProfile::Product,
-                vec![disclosure.clone()],
+                selected_digest.clone(),
             )),
             MdocValueDigestsScanError::RequestedNamespaceMissing
         );
@@ -3203,8 +2932,7 @@ mod tests {
             scanner_error(scanner_for_mso(
                 inert_then_wrong,
                 REQUESTED_NAMESPACE,
-                MdocValueDigestsProfile::Product,
-                vec![disclosure.clone()],
+                selected_digest.clone(),
             )),
             MdocValueDigestsScanError::RequestedNamespaceMissing,
             "an inert malformed decoy must not mask the first semantic candidate error"
@@ -3274,8 +3002,7 @@ mod tests {
                 canonical_reason(scanner_error(scanner_for_mso(
                     mso,
                     REQUESTED_NAMESPACE,
-                    MdocValueDigestsProfile::Product,
-                    vec![disclosure.clone()],
+                    selected_digest.clone(),
                 ))),
                 expected
             );
@@ -3352,41 +3079,42 @@ mod tests {
         ];
         for (mso, expected) in cases {
             assert_eq!(
-                canonical_reason(
-                    parse_value_digests(&mso, MdocValueDigestsProfile::Product).unwrap_err()
-                ),
+                canonical_reason(parse_value_digests(&mso).unwrap_err()),
                 expected
             );
         }
     }
 
     #[test]
-    fn profile_digest_caps_and_scan_item_cap_are_exact() {
-        let ts13_too_large =
+    fn digest_and_scan_item_caps_are_exact() {
+        let at_digest_cap =
+            encode_value_digests(&[(b"a".to_vec(), vec![(u16::MAX as u32, digest(1))])]);
+        assert_eq!(
+            parse_value_digests(&at_digest_cap).unwrap().namespaces[0].digests[0].id,
+            u16::MAX as u32
+        );
+
+        let too_large =
             encode_value_digests(&[(b"a".to_vec(), vec![(u16::MAX as u32 + 1, digest(1))])]);
         assert_eq!(
-            canonical_reason(
-                parse_value_digests(&ts13_too_large, MdocValueDigestsProfile::Ts13).unwrap_err()
-            ),
+            canonical_reason(parse_value_digests(&too_large).unwrap_err()),
             MsoValueDigestsCanonicalityReason::DigestIdOutOfRange {
                 value: u16::MAX as u64 + 1,
                 max: u16::MAX as u32,
             }
         );
-        parse_value_digests(&ts13_too_large, MdocValueDigestsProfile::Product)
-            .expect("product profile keeps the full u32 digest-ID range");
 
         let namespaces = (0..MDOC_MAX_VALUE_DIGEST_SCAN_ITEMS)
             .map(|index| (format!("n{index:03}").into_bytes(), Vec::new()))
             .collect::<Vec<_>>();
         let at_cap = encode_value_digests(&namespaces);
-        let parsed = parse_value_digests(&at_cap, MdocValueDigestsProfile::Product).unwrap();
+        let parsed = parse_value_digests(&at_cap).unwrap();
         assert_eq!(parsed.namespaces.len(), MDOC_MAX_VALUE_DIGEST_SCAN_ITEMS);
         assert_eq!(parsed.digest_entries, 0);
 
         let over_cap = with_value_digests_tail(&[0xb9, 0x01, 0x00]);
         assert_eq!(
-            parse_value_digests(&over_cap, MdocValueDigestsProfile::Product).unwrap_err(),
+            parse_value_digests(&over_cap).unwrap_err(),
             MdocValueDigestsScanError::ScanItemCapExceeded {
                 items: MDOC_MAX_VALUE_DIGEST_SCAN_ITEMS + 1,
                 max: MDOC_MAX_VALUE_DIGEST_SCAN_ITEMS,
@@ -3395,7 +3123,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_namespace_and_disclosures_are_bound_exactly() {
+    fn requested_namespace_and_selected_digest_are_bound_exactly() {
         let target_digest = digest(4);
         let extra_digest = digest(8);
         let mso = encode_value_digests(&[
@@ -3405,64 +3133,46 @@ mod tests {
                 vec![(9, target_digest)],
             ),
         ]);
-        let parsed = parse_value_digests(&mso, MdocValueDigestsProfile::Product).unwrap();
+        let parsed = parse_value_digests(&mso).unwrap();
         build_rows(
             &parsed,
             REQUESTED_NAMESPACE.as_bytes(),
-            &[MdocValueDigestDisclosure {
+            &MdocSelectedValueDigest {
                 digest_id: 9,
                 digest: target_digest,
-            }],
+            },
         )
         .expect("same ID in an extra namespace must not collide");
         assert_eq!(
             build_rows(
                 &parsed,
                 REQUESTED_NAMESPACE.as_bytes(),
-                &[MdocValueDigestDisclosure {
+                &MdocSelectedValueDigest {
                     digest_id: 9,
                     digest: extra_digest,
-                }],
+                },
             )
             .unwrap_err(),
-            MdocValueDigestsScanError::RequestedDigestMissing { attribute_index: 0 }
+            MdocValueDigestsScanError::RequestedDigestMissing
         );
         assert_eq!(
             build_rows(
                 &parsed,
                 b"missing.namespace",
-                &[MdocValueDigestDisclosure {
+                &MdocSelectedValueDigest {
                     digest_id: 9,
                     digest: target_digest,
-                }],
+                },
             )
             .unwrap_err(),
             MdocValueDigestsScanError::RequestedNamespaceMissing
         );
-        assert_eq!(
-            build_rows(
-                &parsed,
-                REQUESTED_NAMESPACE.as_bytes(),
-                &[
-                    MdocValueDigestDisclosure {
-                        digest_id: 9,
-                        digest: target_digest,
-                    },
-                    MdocValueDigestDisclosure {
-                        digest_id: 9,
-                        digest: target_digest,
-                    },
-                ],
-            )
-            .unwrap_err(),
-            MdocValueDigestsScanError::RequestedDigestDuplicate { attribute_index: 1 }
-        );
     }
 
     #[test]
-    fn every_frozen_real_mso_namespace_is_accepted() {
+    fn every_fixed_real_mso_namespace_is_accepted() {
         for vector in real_mdoc_vectors() {
-            let parsed = parse_value_digests(&vector.mso, MdocValueDigestsProfile::Product)
+            let parsed = parse_value_digests(&vector.mso)
                 .unwrap_or_else(|error| panic!("{}: {error}", vector.source));
             assert_eq!(
                 parsed
@@ -3490,19 +3200,16 @@ mod tests {
                     issuer_message_len: issuer_message.len(),
                     mso_len: vector.mso.len(),
                     namespace: std::str::from_utf8(&namespace.name).unwrap().to_owned(),
-                    profile: MdocValueDigestsProfile::Product,
-                    attribute_count: 1,
                 };
                 let witness = MdocValueDigestsScanWitness {
                     issuer_message,
                     mso_start,
-                    version: MdocPrivateMsoVersion::V1,
-                    disclosures: vec![MdocValueDigestDisclosure {
+                    selected_digest: MdocSelectedValueDigest {
                         digest_id: selected.id,
                         digest: selected.digest,
-                    }],
+                    },
                 };
-                let (scan, census) = MdocValueDigestsScan::prover(spec, witness, handles(1))
+                let (scan, census) = MdocValueDigestsScan::prover(spec, witness, handles())
                     .unwrap_or_else(|error| {
                         panic!(
                             "{} namespace {:?}: {error}",
@@ -3558,28 +3265,17 @@ mod tests {
                 trace_col::ROW_LEN,
                 trace_col::CURSOR,
                 trace_col::MSO_START,
-                trace_col::IS_V2,
                 trace_col::OUTER_REMAINING,
                 trace_col::INNER_REMAINING,
                 trace_col::NS_MATCH,
                 trace_col::REQUESTED_SCOPE,
                 trace_col::REQUESTED_COUNT,
                 trace_col::SELECTED,
-                trace_col::SELECTED + 1,
-                trace_col::SELECTED + 2,
-                trace_col::SELECTED + 3,
                 trace_col::SELECTED_COUNT,
-                trace_col::SELECTED_COUNT + 1,
-                trace_col::SELECTED_COUNT + 2,
-                trace_col::SELECTED_COUNT + 3,
                 trace_col::NAMESPACE_INDEX,
                 trace_col::SORTED_ACTIVE,
             ];
-            let previous_columns = [
-                trace_col::SORTED_NAMESPACE,
-                trace_col::SORTED_LO,
-                trace_col::SORTED_HI,
-            ];
+            let previous_columns = [trace_col::SORTED_NAMESPACE, trace_col::SORTED_ID];
             for column in 0..trace_col::COUNT {
                 let values = if next_columns.contains(&column) {
                     vec![trace.columns[column][row], trace.columns[column][next]]
@@ -3657,8 +3353,8 @@ mod tests {
             issuer_relation: FieldBytesRelation::dummy(),
             mso_start_relation: MdocMsoStartRelation::dummy(),
             id_multiset_relation: MdocValueDigestIdMultisetRelation::dummy(),
-            item_id_relations: std::array::from_fn(|_| MdocPrivateDigestIdRelation::dummy()),
-            digest_relations: std::array::from_fn(|_| DigestBytesRelation::dummy()),
+            item_id_relation: MdocPrivateDigestIdRelation::dummy(),
+            digest_relation: DigestBytesRelation::dummy(),
             blinder_relation: ClaimedSumBlinderRelation::dummy(),
             blinder_v: qm31(7),
             blinder_m: qm31(11),
@@ -3753,25 +3449,44 @@ mod tests {
             .find(|&row| {
                 trace.columns[trace_col::SORTED_ACTIVE][row] == m31(1)
                     && trace.columns[trace_col::SORTED_NAMESPACE][row] == m31(namespace_index)
-                    && trace.columns[trace_col::SORTED_LO][row] == m31(3)
-                    && trace.columns[trace_col::SORTED_HI][row] == m31(0)
+                    && trace.columns[trace_col::SORTED_ID][row] == m31(3)
             })
             .unwrap();
-        trace.columns[trace_col::SORTED_LO][sorted_row] = m31(2);
+        trace.columns[trace_col::SORTED_ID][sorted_row] = m31(2);
         sorted_row
     }
 
     #[test]
-    fn honest_v1_and_v2_traces_satisfy_every_air_row() {
-        for version in [MdocPrivateMsoVersion::V1, MdocPrivateMsoVersion::V2] {
-            let (scan, _, _) = fixture(version);
-            assert_trace_satisfies_air(&scan);
-        }
+    fn honest_trace_satisfies_every_air_row() {
+        let (scan, _, _) = fixture();
+        assert_trace_satisfies_air(&scan);
     }
 
     #[test]
-    fn air_rejects_cursor_namespace_version_digest_and_sorted_mutations() {
-        let (scan, _, _) = fixture(MdocPrivateMsoVersion::V2);
+    fn air_rejects_unsupported_five_byte_digest_shape() {
+        let (scan, _, _) = fixture();
+        let mut forged = scan.witness.as_ref().unwrap().clone();
+        let row = forged
+            .rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row.kind,
+                    RowKind::Digest {
+                        id,
+                        ..
+                    } if id == u16::MAX as u32
+                )
+            })
+            .unwrap();
+
+        forged.columns[trace_col::DIGEST_ENCODING_LEN][row] = m31(5);
+        assert_mutated_row_rejected(&scan, &forged, row);
+    }
+
+    #[test]
+    fn air_rejects_cursor_namespace_digest_and_sorted_mutations() {
+        let (scan, _, _) = fixture();
         let honest = scan.witness.as_ref().unwrap();
 
         let mut wrong_cursor = honest.clone();
@@ -3795,10 +3510,6 @@ mod tests {
         wrong_namespace.columns[trace_col::BYTE + 2][namespace_row] += m31(1);
         assert_mutated_row_rejected(&scan, &wrong_namespace, namespace_row);
 
-        let mut wrong_version = honest.clone();
-        wrong_version.columns[trace_col::IS_V2][2] = m31(0);
-        assert_mutated_row_rejected(&scan, &wrong_version, 1);
-
         let digest_row = honest
             .rows
             .iter()
@@ -3811,16 +3522,14 @@ mod tests {
         let mut duplicate_sorted = honest.clone();
         duplicate_sorted.columns[trace_col::SORTED_NAMESPACE][1] =
             duplicate_sorted.columns[trace_col::SORTED_NAMESPACE][0];
-        duplicate_sorted.columns[trace_col::SORTED_HI][1] =
-            duplicate_sorted.columns[trace_col::SORTED_HI][0];
-        duplicate_sorted.columns[trace_col::SORTED_LO][1] =
-            duplicate_sorted.columns[trace_col::SORTED_LO][0];
+        duplicate_sorted.columns[trace_col::SORTED_ID][1] =
+            duplicate_sorted.columns[trace_col::SORTED_ID][0];
         assert_mutated_row_rejected(&scan, &duplicate_sorted, 1);
     }
 
     #[test]
     fn air_rejects_duplicate_requested_namespace_hidden_in_a_trailing_byte() {
-        let (scan, _, _) = fixture(MdocPrivateMsoVersion::V2);
+        let (scan, _, _) = fixture();
         let (forged, duplicate_row) = hidden_duplicate_requested_namespace(&scan);
         let evaluated =
             test_eval(&scan).evaluate(RowEval::for_row(&forged, &scan.spec, duplicate_row));
@@ -3835,8 +3544,8 @@ mod tests {
     const TEST_ISSUER: usize = 0;
     const TEST_MSO_START: usize = 1;
     const TEST_ITEM_ID: usize = 2;
-    const TEST_DIGEST: usize = TEST_ITEM_ID + MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES;
-    const TEST_COUNTER_SELECTORS: usize = TEST_DIGEST + MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES;
+    const TEST_DIGEST: usize = 3;
+    const TEST_COUNTER_SELECTORS: usize = 4;
     const TEST_COUNTER_VALUES: usize = 32;
     const TEST_COUNTER_COLS: usize = TEST_COUNTER_SELECTORS + TEST_COUNTER_VALUES;
 
@@ -3899,8 +3608,8 @@ mod tests {
         log_size: u32,
         issuer: FieldBytesRelation,
         mso_start: MdocMsoStartRelation,
-        item_ids: [MdocPrivateDigestIdRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
-        digests: [DigestBytesRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
+        item_id: MdocPrivateDigestIdRelation,
+        digest: DigestBytesRelation,
     }
 
     impl FrameworkEval for TestCounterEval {
@@ -3934,20 +3643,18 @@ mod tests {
             eval.add_to_relation(RelationEntry::new(
                 &self.mso_start,
                 -E::EF::from(selectors[TEST_MSO_START].clone()),
-                &values[..2],
+                &values[..1],
             ));
-            for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-                eval.add_to_relation(RelationEntry::new(
-                    &self.item_ids[attribute_index],
-                    -E::EF::from(selectors[TEST_ITEM_ID + attribute_index].clone()),
-                    &values[..9],
-                ));
-                eval.add_to_relation(RelationEntry::new(
-                    &self.digests[attribute_index],
-                    -E::EF::from(selectors[TEST_DIGEST + attribute_index].clone()),
-                    &values,
-                ));
-            }
+            eval.add_to_relation(RelationEntry::new(
+                &self.item_id,
+                -E::EF::from(selectors[TEST_ITEM_ID].clone()),
+                &values[..8],
+            ));
+            eval.add_to_relation(RelationEntry::new(
+                &self.digest,
+                -E::EF::from(selectors[TEST_DIGEST].clone()),
+                &values,
+            ));
             eval.finalize_logup_in_pairs();
             eval
         }
@@ -3958,26 +3665,14 @@ mod tests {
     ) -> (
         FieldBytesRelation,
         MdocMsoStartRelation,
-        [MdocPrivateDigestIdRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
-        [DigestBytesRelation; MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES],
+        MdocPrivateDigestIdRelation,
+        DigestBytesRelation,
     ) {
-        let first_id = handles.items[0].digest_id.get();
-        let first_digest = handles.items[0].digest.get();
         (
             handles.issuer_message.get(),
             handles.mso_start.get(),
-            std::array::from_fn(|index| {
-                handles
-                    .items
-                    .get(index)
-                    .map_or_else(|| first_id.clone(), |item| item.digest_id.get())
-            }),
-            std::array::from_fn(|index| {
-                handles
-                    .items
-                    .get(index)
-                    .map_or_else(|| first_digest.clone(), |item| item.digest.get())
-            }),
+            handles.item.digest_id.get(),
+            handles.item.digest.get(),
         )
     }
 
@@ -3988,7 +3683,7 @@ mod tests {
     ) -> (Vec<Column>, QM31) {
         let trace = test_counter_evals(rows, log_size);
         let packed_rows = 1usize << (log_size - LOG_N_LANES);
-        let (issuer, mso_start, item_ids, digests) = external_relations(handles);
+        let (issuer, mso_start, item_id, digest) = external_relations(handles);
         let values = |row: usize| -> [PackedM31; TEST_COUNTER_VALUES] {
             std::array::from_fn(|index| trace[TEST_COUNTER_SELECTORS + index].data[row])
         };
@@ -4011,35 +3706,33 @@ mod tests {
                     let values = values(row);
                     (
                         -PackedQM31::from(trace[TEST_MSO_START].data[row]),
-                        mso_start.combine(&values[..2]),
+                        mso_start.combine(&values[..1]),
                     )
                 })
                 .collect(),
         );
-        for attribute_index in 0..MDOC_PRIVATE_ITEM_MAX_ATTRIBUTES {
-            sites.push(
-                (0..packed_rows)
-                    .map(|row| {
-                        let values = values(row);
-                        (
-                            -PackedQM31::from(trace[TEST_ITEM_ID + attribute_index].data[row]),
-                            item_ids[attribute_index].combine(&values[..9]),
-                        )
-                    })
-                    .collect(),
-            );
-            sites.push(
-                (0..packed_rows)
-                    .map(|row| {
-                        let values = values(row);
-                        (
-                            -PackedQM31::from(trace[TEST_DIGEST + attribute_index].data[row]),
-                            digests[attribute_index].combine(&values),
-                        )
-                    })
-                    .collect(),
-            );
-        }
+        sites.push(
+            (0..packed_rows)
+                .map(|row| {
+                    let values = values(row);
+                    (
+                        -PackedQM31::from(trace[TEST_ITEM_ID].data[row]),
+                        item_id.combine(&values[..8]),
+                    )
+                })
+                .collect(),
+        );
+        sites.push(
+            (0..packed_rows)
+                .map(|row| {
+                    let values = values(row);
+                    (
+                        -PackedQM31::from(trace[TEST_DIGEST].data[row]),
+                        digest.combine(&values),
+                    )
+                })
+                .collect(),
+        );
         assert_eq!(sites.len(), TEST_COUNTER_SELECTORS);
 
         let mut logup = LogupTraceGenerator::new(log_size);
@@ -4094,13 +3787,16 @@ mod tests {
             self.handles
                 .mso_start
                 .set(MdocMsoStartRelation::draw(channel));
-            for item in &self.handles.items {
-                assert!(!item.digest_id.is_set());
-                assert!(!item.digest.is_set());
-                item.digest_id
-                    .set(MdocPrivateDigestIdRelation::draw(channel));
-                item.digest.set(DigestBytesRelation::draw(channel));
-            }
+            assert!(!self.handles.item.digest_id.is_set());
+            assert!(!self.handles.item.digest.is_set());
+            self.handles
+                .item
+                .digest_id
+                .set(MdocPrivateDigestIdRelation::draw(channel));
+            self.handles
+                .item
+                .digest
+                .set(DigestBytesRelation::draw(channel));
         }
 
         fn layout(&self) -> TreeLayout {
@@ -4123,15 +3819,15 @@ mod tests {
         }
 
         fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
-            let (issuer, mso_start, item_ids, digests) = external_relations(&self.handles);
+            let (issuer, mso_start, item_id, digest) = external_relations(&self.handles);
             self.component = Some(FrameworkComponent::new(
                 allocator,
                 TestCounterEval {
                     log_size: self.log_size,
                     issuer,
                     mso_start,
-                    item_ids,
-                    digests,
+                    item_id,
+                    digest,
                 },
                 self.interaction().1,
             ));
@@ -4195,36 +3891,27 @@ mod tests {
             if trace.columns[trace_col::HEAD][row] == m31(1) {
                 rows.push(TestCounterRow::new(
                     TEST_MSO_START,
-                    &[
-                        trace.columns[trace_col::MSO_START][row],
-                        trace.columns[trace_col::IS_V2][row],
-                    ],
+                    &[trace.columns[trace_col::MSO_START][row]],
                 ));
             }
-            for attribute_index in 0..scan.spec.attribute_count {
-                if trace.columns[trace_col::SELECTED + attribute_index][row] == m31(1) {
-                    rows.push(TestCounterRow::new(
-                        TEST_ITEM_ID + attribute_index,
-                        &[
-                            trace.columns[trace_col::DIGEST_ENCODING_LEN][row],
-                            trace.columns[trace_col::BYTE][row],
-                            trace.columns[trace_col::BYTE + 1][row],
-                            trace.columns[trace_col::BYTE + 2][row],
-                            trace.columns[trace_col::BYTE + 3][row],
-                            trace.columns[trace_col::BYTE + 4][row],
-                            trace.columns[trace_col::DIGEST_ID_LO][row],
-                            trace.columns[trace_col::DIGEST_ID_HI][row],
-                            trace.columns[trace_col::IS_V2][row],
-                        ],
-                    ));
-                    let digest_values = (0..32)
-                        .map(|index| trace.columns[trace_col::BYTE + 7 + index][row])
-                        .collect::<Vec<_>>();
-                    rows.push(TestCounterRow::new(
-                        TEST_DIGEST + attribute_index,
-                        &digest_values,
-                    ));
-                }
+            if trace.columns[trace_col::SELECTED][row] == m31(1) {
+                rows.push(TestCounterRow::new(
+                    TEST_ITEM_ID,
+                    &[
+                        trace.columns[trace_col::DIGEST_ENCODING_LEN][row],
+                        trace.columns[trace_col::BYTE][row],
+                        trace.columns[trace_col::BYTE + 1][row],
+                        trace.columns[trace_col::BYTE + 2][row],
+                        m31(0),
+                        m31(0),
+                        trace.columns[trace_col::DIGEST_ID_LO][row],
+                        m31(0),
+                    ],
+                ));
+                let digest_values = (0..32)
+                    .map(|index| trace.columns[trace_col::BYTE + DIGEST_BYTES_START + index][row])
+                    .collect::<Vec<_>>();
+                rows.push(TestCounterRow::new(TEST_DIGEST, &digest_values));
             }
         }
         rows
@@ -4242,7 +3929,7 @@ mod tests {
         let mut counter = TestExternalCounter::new(counter_rows.clone(), scan.handles.clone());
         let stark = air_core::prove(
             &mut [&mut counter, &mut scan],
-            crate::mdoc::mdoc_production_pcs_config(),
+            crate::mdoc::mdoc_ts13_pcs_config(),
         )
         .expect("honest valueDigests scanner composition proves");
         ComposedScannerProof {
@@ -4254,7 +3941,7 @@ mod tests {
     }
 
     fn prove_composed_scanner() -> ComposedScannerProof {
-        let (scan, _, _) = fixture(MdocPrivateMsoVersion::V2);
+        let (scan, _, _) = fixture();
         prove_composed_scan(scan)
     }
 
@@ -4262,7 +3949,7 @@ mod tests {
         fixture: &ComposedScannerProof,
         counter_rows: Vec<TestCounterRow>,
     ) -> Result<(), air_core::VerifyError> {
-        let handles = handles(fixture.spec.attribute_count);
+        let handles = handles();
         let mut counter = TestExternalCounter::new(counter_rows, handles.clone());
         let mut scan = MdocValueDigestsScan::verifier(
             fixture.spec.clone(),
@@ -4283,7 +3970,7 @@ mod tests {
         assert!(
             air_core::prove(
                 &mut [&mut counter, &mut scan],
-                crate::mdoc::mdoc_production_pcs_config(),
+                crate::mdoc::mdoc_ts13_pcs_config(),
             )
             .is_err(),
             "{message}"
@@ -4318,10 +4005,8 @@ mod tests {
             ("issuer index", TEST_ISSUER, 1),
             ("issuer byte", TEST_ISSUER, 2),
             ("MSO start", TEST_MSO_START, 0),
-            ("MSO version", TEST_MSO_START, 1),
             ("item encoding", TEST_ITEM_ID, 0),
             ("item digest ID", TEST_ITEM_ID, 6),
-            ("item version", TEST_ITEM_ID, 8),
             ("SHA digest", TEST_DIGEST, 0),
         ] {
             assert_counter_mutation_rejects(&fixture, name, kind, value_index);
@@ -4344,11 +4029,10 @@ mod tests {
             let (mut scan, _) = scanner_for_mso(
                 mso.clone(),
                 decoy_namespace,
-                MdocValueDigestsProfile::Product,
-                vec![MdocValueDigestDisclosure {
+                MdocSelectedValueDigest {
                     digest_id: 7,
                     digest: decoy_digest,
-                }],
+                },
             )
             .unwrap();
             scan.spec.namespace = public_namespace.to_owned();
@@ -4377,7 +4061,7 @@ mod tests {
                     vec![(2, digest(0x30)), (1, digest(0x10)), (2, digest(0x20))]
                 };
                 let requested_digest = digest(0x90);
-                let (duplicate_namespaces, unique_namespaces, disclosure, namespace_index) =
+                let (duplicate_namespaces, unique_namespaces, selected_digest, namespace_index) =
                     if requested_target {
                         (
                             vec![
@@ -4388,7 +4072,7 @@ mod tests {
                                 (b"org.example.extra".to_vec(), vec![(9, digest(0xa0))]),
                                 (REQUESTED_NAMESPACE.as_bytes().to_vec(), unique_entries),
                             ],
-                            MdocValueDigestDisclosure {
+                            MdocSelectedValueDigest {
                                 digest_id: 1,
                                 digest: digest(0x10),
                             },
@@ -4410,7 +4094,7 @@ mod tests {
                                     vec![(9, requested_digest)],
                                 ),
                             ],
-                            MdocValueDigestDisclosure {
+                            MdocSelectedValueDigest {
                                 digest_id: 9,
                                 digest: requested_digest,
                             },
@@ -4422,8 +4106,7 @@ mod tests {
                     canonical_reason(scanner_error(scanner_for_mso(
                         encode_value_digests(&duplicate_namespaces),
                         REQUESTED_NAMESPACE,
-                        MdocValueDigestsProfile::Product,
-                        vec![disclosure.clone()],
+                        selected_digest.clone(),
                     ))),
                     MsoValueDigestsCanonicalityReason::DuplicateDigestId,
                     "requested_target={requested_target}, ordered={ordered}"
@@ -4432,8 +4115,7 @@ mod tests {
                 let (mut scan, _) = scanner_for_mso(
                     encode_value_digests(&unique_namespaces),
                     REQUESTED_NAMESPACE,
-                    MdocValueDigestsProfile::Product,
-                    vec![disclosure],
+                    selected_digest,
                 )
                 .unwrap();
                 let sorted_row = forge_duplicate_digest_id(&mut scan, namespace_index);
@@ -4459,7 +4141,7 @@ mod tests {
             ("inner map nonminimal", true, 34, 0xb8),
             ("inner map indefinite", true, 34, 0xbf),
         ] {
-            let (mut scan, _, _) = fixture(MdocPrivateMsoVersion::V2);
+            let (mut scan, _, _) = fixture();
             let trace = scan.witness.as_mut().unwrap();
             let row = if namespace_row {
                 trace
@@ -4498,11 +4180,10 @@ mod tests {
         let (scan, census) = scanner_for_mso(
             encode_value_digests(&namespaces),
             REQUESTED_NAMESPACE,
-            MdocValueDigestsProfile::Product,
-            vec![MdocValueDigestDisclosure {
+            MdocSelectedValueDigest {
                 digest_id: 7,
                 digest: selected_digest,
-            }],
+            },
         )
         .unwrap();
         assert_eq!(census.namespaces + census.digest_entries, 255);
@@ -4516,11 +4197,10 @@ mod tests {
             scanner_error(scanner_for_mso(
                 with_value_digests_tail(&[0xb9, 0x01, 0x00]),
                 REQUESTED_NAMESPACE,
-                MdocValueDigestsProfile::Product,
-                vec![MdocValueDigestDisclosure {
+                MdocSelectedValueDigest {
                     digest_id: 7,
                     digest: selected_digest,
-                }],
+                },
             )),
             MdocValueDigestsScanError::ScanItemCapExceeded {
                 items: 256,
@@ -4531,7 +4211,7 @@ mod tests {
 
     #[test]
     fn composed_proof_rejects_a_hidden_duplicate_requested_namespace() {
-        let (mut scan, _, _) = fixture(MdocPrivateMsoVersion::V2);
+        let (mut scan, _, _) = fixture();
         let (forged, _) = hidden_duplicate_requested_namespace(&scan);
         scan.witness = Some(forged);
         assert_forged_scan_does_not_prove(
@@ -4541,41 +4221,31 @@ mod tests {
     }
 
     #[test]
-    fn fixed_geometry_private_version_and_inactive_randomization_are_stable() {
-        let (mut v1, _, _) = fixture(MdocPrivateMsoVersion::V1);
-        let (mut v2, _, _) = fixture(MdocPrivateMsoVersion::V2);
-        assert_eq!(v1.layout().preprocessed, vec![9; PREPROCESSED_COLS]);
-        assert_eq!(v1.layout().trace, vec![9; 324]);
-        assert_eq!(MAIN_RELATION_SITES, 51);
-        assert_eq!(v1.layout().interaction, vec![9; 108]);
+    fn fixed_geometry_and_inactive_randomization_are_stable() {
+        let (mut scan, _, _) = fixture();
+        assert_eq!(scan.layout().preprocessed, vec![9; PREPROCESSED_COLS]);
+        assert_eq!(scan.layout().trace, vec![9; 305]);
+        assert_eq!(MAIN_RELATION_SITES, 43);
+        assert_eq!(scan.layout().interaction, vec![9; 92]);
         assert_eq!(
             <MdocValueDigestsScanEval as FrameworkEval>::max_constraint_log_degree_bound(
-                &test_eval(&v1),
+                &test_eval(&scan),
             ),
             11
         );
         assert_eq!(
-            <MdocValueDigestsScan as AirProver>::max_constraint_log_degree_bound(&v1),
+            <MdocValueDigestsScan as AirProver>::max_constraint_log_degree_bound(&scan),
             11
         );
-        assert!(<MdocValueDigestsScan as AirProver>::store_polynomial_coefficients(&v1));
-        assert_eq!(v1.preprocessed_column_ids(), v2.preprocessed_column_ids());
+        assert!(<MdocValueDigestsScan as AirProver>::store_polynomial_coefficients(&scan));
+        assert_eq!(scan.preprocessed_column_ids().len(), PREPROCESSED_COLS);
         assert_eq!(
-            v1.preprocessed_column_fingerprints(),
-            v2.preprocessed_column_fingerprints()
-        );
-        let mut v1_channel = Blake2sChannel::default();
-        let mut v2_channel = Blake2sChannel::default();
-        v1.mix_public(&mut v1_channel);
-        v2.mix_public(&mut v2_channel);
-        assert_eq!(
-            FieldBytesRelation::draw(&mut v1_channel),
-            FieldBytesRelation::draw(&mut v2_channel),
-            "private v1/v2 choice must not enter tree zero or the public transcript"
+            scan.preprocessed_column_fingerprints().len(),
+            PREPROCESSED_COLS
         );
 
-        let (first, _, _) = fixture(MdocPrivateMsoVersion::V2);
-        let (second, _, _) = fixture(MdocPrivateMsoVersion::V2);
+        let (first, _, _) = fixture();
+        let (second, _, _) = fixture();
         let first = first.witness.as_ref().unwrap();
         let second = second.witness.as_ref().unwrap();
         let inactive = first.rows.len();
@@ -4583,7 +4253,6 @@ mod tests {
             trace_col::BYTE,
             trace_col::BYTE_OFFSET,
             trace_col::CURSOR_BITS,
-            trace_col::IS_V2,
         ] {
             assert_ne!(
                 &first.columns[column][inactive..],

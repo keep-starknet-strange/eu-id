@@ -1,5 +1,5 @@
 //! `SampleInBall` (FIPS 204 §7.3, Algorithm 29): expand the 32-byte challenge
-//! seed (the first `λ/4` bytes of `c̃`) into the challenge polynomial `c` — a
+//! seed (the first `λ/4` bytes of `c̃`) into the challenge polynomial `c`. The
 //! polynomial with exactly `τ = 49` coefficients in `{−1, +1}` and the rest
 //! zero.
 //!
@@ -31,14 +31,13 @@ pub struct SampleInBallResult {
 /// `s`, then for each `i ∈ [n−τ, n)` a rejection-sampled index `j ≤ i` is drawn
 /// and `c[i] ← c[j]; c[j] ← (−1)^{bit}`.
 pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
-    // Squeeze on demand, one SHAKE-256 rate block (136 bytes) at a time —
+    // Squeeze one SHAKE-256 rate block (136 bytes) at a time.
     // the spec's streaming XOF. The recorded transcript is then block-aligned
     // to what the sampler actually consumed
     // (`squeezed.len() == RATE · ceil(consumed_len / RATE)`), which is exactly
     // the stream the in-circuit sponge job replays (`statement::n_squeeze_sib`)
-    // and what sizes the SIB component's log size. A flat over-squeeze here
-    // (the old `8 + 8·N`) would inflate that component 4× for bytes nothing
-    // ever consumes.
+    // and sets the SIB component's log size. Squeezing more bytes would increase
+    // that component without adding consumed data.
     let mut reader = Shake256Reader::new(&[c_tilde]);
     let mut stream = reader.read(RATE);
 

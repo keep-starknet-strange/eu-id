@@ -1,39 +1,35 @@
-//! `keccak_round` LogUp → GKR offload (W3b).
+//! GKR offload for `keccak_round` LogUp interactions.
 //!
-//! The round component's ~900 log-11 interaction columns are replaced by ONE
-//! LogUp-GKR proof over the flattened fraction multiset plus a single
-//! `MleEval` tie-back component (8 committed tree-3 columns) that binds the
-//! GKR input-layer claims back to the committed base trace.
+//! A LogUp GKR proof replaces the round component's interaction columns. One
+//! `MleEval` tie-back component binds the GKR input claims to the committed
+//! base trace. The component uses eight committed tree-3 columns.
 //!
-//! ## Layout (proven by the W3a spike, see `tasks/quantum-safe-branch-plan.md` §Q5)
+//! ## Layout
 //!
-//! The whole per-row fraction multiset — all four relation families in the
-//! exact [`keccak_round::collect_round_lookups`] emission order — is ONE
-//! flattened `Layer::LogUpGeneric` instance with the **lookup slot in the HIGH
-//! index bits and the trace row in the LOW bits**. The GKR OOD point splits as
-//! `r = (r_slot ‖ r_row)` and, because every `Relation::combine` is an affine
-//! form with row-independent coefficients, the input-layer MLEs decompose as
+//! The proof puts all four relation families in one `Layer::LogUpGeneric`
+//! instance. It uses the order from
+//! [`keccak_round::collect_round_lookups`]. The lookup slot uses the high index
+//! bits. The trace row uses the low index bits. The GKR OOD point splits as
+//! `r = (r_slot ‖ r_row)`. Each `Relation::combine` is an affine form with
+//! row-independent coefficients. Thus, the input MLEs decompose as follows:
 //!
 //! ```text
 //! den_mle(r) = Σ_slot eq(slot, r_slot) · combine_slot([tupleⱼ_mle(r_row)]ⱼ)
 //! num_mle(r) = Σ_slot eq(slot, r_slot) · num_slot_mle(r_row)
 //! ```
 //!
-//! so the tie-back lives entirely on the **row domain**: one δ-folded coeff
-//! column `c(row) = Σ_slot eq(slot,r_slot)·(δ·num_slot(row) + den_slot(row))`
-//! whose MLE at `r_row` must equal `δ·num_claim + den_claim − pad(r_slot)`
-//! (padding slots contribute the constant fraction `0/1`). The
-//! [`RoundCoeffOracle`] reconstructs `c` at the STARK OODS point purely from
-//! the round component's committed base-column mask values, closing the chain:
-//! GKR sum == claimed sum, GKR input claims == coeff-column MLE, coeff column
-//! == affine image of the committed base columns.
+//! The tie-back uses only the row domain. It has one δ-folded coefficient
+//! column: `c(row) = Σ_slot eq(slot,r_slot)·(δ·num_slot(row) +
+//! den_slot(row))`. Its MLE at `r_row` must equal `δ·num_claim + den_claim −
+//! pad(r_slot)`. Padding slots contribute the constant fraction `0/1`.
+//! [`RoundCoeffOracle`] reconstructs `c` at the STARK OODS point from the
+//! committed base-column mask values.
 //!
-//! ## Fiat-Shamir order (both sides identical)
+//! ## Fiat-Shamir order
 //!
-//! tree-2 commit → `prove_batch`/`partially_verify_batch` on the shared
-//! channel → draw δ → commit the tree-3 tie-back trace. The GKR proof is thus
-//! bound to trees 0-2, the drawn relations and the mixed claimed sums; the
-//! tie-back columns commit after the GKR transcript.
+//! Commit tree 2. Then, run `prove_batch` or `partially_verify_batch` on the
+//! shared channel. Draw δ and commit the tree-3 tie-back trace. This sequence
+//! binds the GKR proof to trees 0-2, the relations, and the claimed sums.
 
 use num_traits::{One, Zero};
 use stwo::core::air::accumulation::PointEvaluationAccumulator;
@@ -75,7 +71,7 @@ pub const N_TIEBACK_COLUMNS: usize = 2 * SECURE_EXTENSION_DEGREE;
 
 /// Everything both sides derive from the GKR transcript for the tie-back.
 pub struct RoundTieBack {
-    /// The row half of the GKR OOD point — the MleEval evaluation point.
+    /// The row half of the GKR OOD point. This is the MleEval evaluation point.
     pub r_row: Vec<SecureField>,
     /// Post-GKR channel-drawn folding challenge for num+den.
     pub delta: SecureField,
@@ -87,7 +83,7 @@ pub struct RoundTieBack {
 
 /// `eq(bits(index) MSB-first over LOG_SLOTS, r_slot)` for every slot: the slot
 /// index's MOST significant bit pairs with `r_slot[0]` (stwo's `Mle` /
-/// GKR OOD convention — the first point coordinate splits the top half).
+/// GKR OOD convention. The first point coordinate splits the top half).
 fn eq_weights(r_slot: &[SecureField]) -> Vec<SecureField> {
     let mut ws = vec![SecureField::one()];
     for &p in r_slot {
@@ -133,9 +129,7 @@ fn tieback_from_artifact(
     })
 }
 
-// =============================================================================
 // Prover side.
-// =============================================================================
 
 /// Prover state: the per-slot fraction columns (the single witness source for
 /// the claimed sum, the GKR leaves and the tie-back coeff column).
@@ -153,7 +147,7 @@ fn global_claimed_sum(fracs: &RoundFractions) -> SecureField {
     for (numerator, denominator_inverse) in fracs.numerators().iter().zip(&inverses) {
         total += *numerator * *denominator_inverse;
     }
-    // Preserve the legacy lane-reduction order exactly.
+    // Reduce the lanes in the fixed order that defines the claimed sum.
     total.to_array().iter().copied().sum()
 }
 
@@ -250,9 +244,7 @@ impl RoundGkrProver {
     }
 }
 
-// =============================================================================
 // Verifier side.
-// =============================================================================
 
 /// Replay the GKR proof against the shared channel, bind its output claim to
 /// the round's claimed sum (fail-closed), draw δ, and derive the tie-back.
@@ -287,9 +279,7 @@ pub fn verify_round_gkr(
     tieback_from_artifact(&artifact, delta, log_size)
 }
 
-// =============================================================================
-// The MLE coeff-column oracle over the round's committed base columns.
-// =============================================================================
+// The MLE coefficient-column oracle over the committed round columns.
 
 /// Reconstructs the δ-folded coeff column at the STARK OODS point from the
 /// round component's base-column mask values: replays
@@ -351,9 +341,8 @@ mod tests {
         data
     }
 
-    /// The claimed-sum implementation before the packed/global-inversion
-    /// optimization: invert every slot separately, then accumulate slot/row.
-    fn legacy_claimed_sum(fracs: &RoundFractions) -> SecureField {
+    /// Scalar reference: invert each slot, then add the fractions.
+    fn slotwise_claimed_sum_reference(fracs: &RoundFractions) -> SecureField {
         let mut total = PackedQM31::zero();
         for slot in 0..fracs.n_slots() {
             let (numerators, denominators) = fracs.slot(slot);
@@ -365,8 +354,11 @@ mod tests {
         total.to_array().iter().copied().sum()
     }
 
-    /// The scalar unpack/repack path before the packed-leaf optimization.
-    fn legacy_gkr_input_layer(fracs: &RoundFractions, log_size: u32) -> Layer<SimdBackend> {
+    /// Scalar reference for the packed GKR input layer.
+    fn scalar_gkr_input_layer_reference(
+        fracs: &RoundFractions,
+        log_size: u32,
+    ) -> Layer<SimdBackend> {
         let n_rows = 1usize << log_size;
         let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
         let scalar_size = (1usize << LOG_SLOTS) * n_rows;
@@ -404,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_leaves_and_global_claimed_sum_match_legacy_exactly() {
+    fn packed_leaves_and_global_sum_match_scalar_reference() {
         let data = round_data(33);
         let log_size = data_log_size(&data);
         let mut relation_channel = Blake2sChannel::default();
@@ -412,17 +404,17 @@ mod tests {
         let fracs = build_fracs(&relations, &data);
 
         let packed_values = layer_values(gkr_input_layer(&fracs, log_size));
-        let legacy_values = layer_values(legacy_gkr_input_layer(&fracs, log_size));
+        let scalar_values = layer_values(scalar_gkr_input_layer_reference(&fracs, log_size));
         assert_eq!(
-            packed_values, legacy_values,
-            "packed leaves must preserve slot/row/lane order and 0/1 padding"
+            packed_values, scalar_values,
+            "packed leaves must match scalar slot, row, lane, and padding order"
         );
 
         let packed_sum = global_claimed_sum(&fracs);
         assert_eq!(
             packed_sum,
-            legacy_claimed_sum(&fracs),
-            "one global inversion must preserve the legacy claimed sum"
+            slotwise_claimed_sum_reference(&fracs),
+            "global inversion must match the slotwise reference sum"
         );
         let (columnar_claim, _) = generate_interaction_trace(&relations, &data);
         assert_eq!(
@@ -432,64 +424,64 @@ mod tests {
     }
 
     #[test]
-    fn packed_and_legacy_layers_produce_identical_seeded_gkr_transcript() {
+    fn packed_and_scalar_layers_produce_the_same_seeded_gkr_transcript() {
         let data = round_data(33);
         let log_size = data_log_size(&data);
 
-        // Drawing relations and mixing the claimed sum mirrors the production
-        // channel position immediately before the round GKR block.
+        // Draw the relations and mix the claimed sum at the protocol channel
+        // position before the round GKR block.
         let mut packed_channel = Blake2sChannel::default();
         let relations = KeccakRelations::draw(&mut packed_channel);
-        let mut legacy_channel = Blake2sChannel::default();
-        let _ = KeccakRelations::draw(&mut legacy_channel);
+        let mut scalar_channel = Blake2sChannel::default();
+        let _ = KeccakRelations::draw(&mut scalar_channel);
         let fracs = build_fracs(&relations, &data);
         let sum = global_claimed_sum(&fracs);
         packed_channel.mix_felts(&[sum]);
-        legacy_channel.mix_felts(&[sum]);
+        scalar_channel.mix_felts(&[sum]);
 
         let (packed_proof, packed_artifact) =
             prove_batch(&mut packed_channel, vec![gkr_input_layer(&fracs, log_size)]);
-        let (legacy_proof, legacy_artifact) = prove_batch(
-            &mut legacy_channel,
-            vec![legacy_gkr_input_layer(&fracs, log_size)],
+        let (scalar_proof, scalar_artifact) = prove_batch(
+            &mut scalar_channel,
+            vec![scalar_gkr_input_layer_reference(&fracs, log_size)],
         );
 
         assert_eq!(
             encode_gkr_batch_proof(&packed_proof),
-            encode_gkr_batch_proof(&legacy_proof),
+            encode_gkr_batch_proof(&scalar_proof),
             "packed leaves must produce a byte-identical GKR proof"
         );
-        assert_eq!(packed_artifact.ood_point, legacy_artifact.ood_point);
+        assert_eq!(packed_artifact.ood_point, scalar_artifact.ood_point);
         assert_eq!(
             packed_artifact.claims_to_verify_by_instance,
-            legacy_artifact.claims_to_verify_by_instance
+            scalar_artifact.claims_to_verify_by_instance
         );
         assert_eq!(
             packed_artifact.n_variables_by_instance,
-            legacy_artifact.n_variables_by_instance
+            scalar_artifact.n_variables_by_instance
         );
 
         let packed_delta = packed_channel.draw_secure_felt();
-        let legacy_delta = legacy_channel.draw_secure_felt();
+        let scalar_delta = scalar_channel.draw_secure_felt();
         assert_eq!(
-            packed_delta, legacy_delta,
+            packed_delta, scalar_delta,
             "the post-GKR transcript challenge must remain identical"
         );
         let packed_tieback =
             tieback_from_artifact(&packed_artifact, packed_delta, log_size).unwrap();
-        let legacy_tieback =
-            tieback_from_artifact(&legacy_artifact, legacy_delta, log_size).unwrap();
-        assert_eq!(packed_tieback.r_row, legacy_tieback.r_row);
-        assert_eq!(packed_tieback.delta, legacy_tieback.delta);
-        assert_eq!(packed_tieback.eq_ws, legacy_tieback.eq_ws);
-        assert_eq!(packed_tieback.mle_claim, legacy_tieback.mle_claim);
+        let scalar_tieback =
+            tieback_from_artifact(&scalar_artifact, scalar_delta, log_size).unwrap();
+        assert_eq!(packed_tieback.r_row, scalar_tieback.r_row);
+        assert_eq!(packed_tieback.delta, scalar_tieback.delta);
+        assert_eq!(packed_tieback.eq_ws, scalar_tieback.eq_ws);
+        assert_eq!(packed_tieback.mle_claim, scalar_tieback.mle_claim);
     }
 
     #[test]
-    fn production_log12_lengths_keep_slot_high_and_row_low() {
-        const PRODUCTION_LOG_SIZE: u32 = 12;
-        let n_rows = 1usize << PRODUCTION_LOG_SIZE;
-        let n_vec_rows = 1usize << (PRODUCTION_LOG_SIZE - LOG_N_LANES);
+    fn log12_lengths_keep_slot_high_and_row_low() {
+        const LOG_SIZE: u32 = 12;
+        let n_rows = 1usize << LOG_SIZE;
+        let n_vec_rows = 1usize << (LOG_SIZE - LOG_N_LANES);
         let active_packed_len = N_TOTAL_LOOKUPS * n_vec_rows;
         let padded_packed_len = (1usize << LOG_SLOTS) * n_vec_rows;
 
@@ -508,7 +500,7 @@ mod tests {
         );
         assert_eq!(
             padded_packed_len * N_LANES,
-            1usize << (LOG_SLOTS + PRODUCTION_LOG_SIZE),
+            1usize << (LOG_SLOTS + LOG_SIZE),
             "SecureColumn length is scalar, not packed"
         );
         assert_eq!(n_vec_rows * N_LANES, n_rows);

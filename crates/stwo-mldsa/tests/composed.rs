@@ -1,11 +1,12 @@
-//! M6 acceptance for the composed in-circuit ML-DSA-65 statement
-//! (`stwo_mldsa::statement`): ONE `air-core` proof stitching coeffs + decomp +
-//! sib + the remaining SHAKE-256 sponge chains + msglink + bridges/sinks. Positive over
-//! 10 oracle signatures with ≥1 KiB messages, a control, the negative matrix
-//! a–g, and an (ignored) numbers probe.
+//! Tests for the composed in-circuit ML-DSA-65 statement
+//! (`stwo_mldsa::statement`). One `air-core` proof combines coeffs, decomp,
+//! SIB, the remaining SHAKE-256 sponge chains, msglink, bridges, and sinks. The
+//! tests include 10 oracle signatures with messages of at least 1 KiB, a
+//! control, adversarial cases, and an ignored layout probe.
 //!
-//! Run single-threaded: `RAYON_NUM_THREADS=1 cargo test -p stwo-mldsa
-//! --test composed -- --test-threads=1`.
+//! Run one test harness thread and 12 Rayon workers:
+//! `RAYON_NUM_THREADS=12 cargo test -p stwo-mldsa --release --test composed
+//! -- --test-threads=1`.
 
 mod common;
 
@@ -226,7 +227,7 @@ fn composed_negative_f_wrong_pk_rho() {
     proof.input.rho[0] ^= 1;
     assert!(
         verify_mldsa(&proof, pcs_config()).is_err(),
-        "statement ρ tamper must reject"
+        "a change to statement ρ must be rejected"
     );
 }
 
@@ -240,26 +241,25 @@ fn composed_native_expand_a_rejects_tampered_t1() {
     proof.input.t1[0][0] ^= 1;
     assert!(
         verify_mldsa(&proof, pcs_config()).is_err(),
-        "statement t1 tamper must reject"
+        "a change to statement t1 must be rejected"
     );
 }
 
-/// g) free-tr regression: a carried `input.tr` byte is compatibility data only.
-/// Both constructors overwrite it with SHAKE256(pkEncode) before mixing or use.
+/// The prover does not trust `input.tr`. It derives `tr` from `pkEncode` before
+/// it mixes or uses the value.
 #[test]
-fn composed_carried_tr_is_overwritten_before_use() {
+fn composed_derives_tr_from_the_public_key() {
     let msg = big_msg("neg-g", 1024);
     let (w, mut input) = witness_and_input(8007, &msg);
     input.tr[0] ^= 1;
-    let proof = prove_mldsa(w, input, pcs_config()).expect("prove with ignored carried tr");
+    let proof = prove_mldsa(w, input, pcs_config()).expect("prove with an untrusted tr value");
     assert_eq!(proof.input.tr, native_tr(&proof.input));
-    verify_mldsa(&proof, pcs_config()).expect("native tr must replace the carried value");
+    verify_mldsa(&proof, pcs_config()).expect("derived tr must replace the supplied value");
 }
 
 // =====================================================================
-// Preprocessed-root pin (F-ROOT hardening): `verify_mldsa` recomputes the
-// tree-0 root from the public input and rejects a forged preprocessed tree
-// fail-closed, before any STARK work.
+// `verify_mldsa` derives the tree-0 root from the public input. It rejects a
+// different preprocessed tree before STARK verification.
 // =====================================================================
 
 /// Control: an honest proof's committed tree-0 root equals the root
@@ -307,7 +307,7 @@ fn composed_verifier_pins_expected_pcs_config() {
     ];
     for (field, expected_config) in mismatches {
         let error = verify_mldsa(&proof, expected_config)
-            .expect_err(&format!("mismatched {field} must reject"));
+            .expect_err(&format!("a mismatched {field} must be rejected"));
         assert!(
             matches!(error, stwo::core::verifier::VerificationError::InvalidStructure(ref message)
                 if message.contains("unexpected PCS config")),
@@ -316,11 +316,9 @@ fn composed_verifier_pins_expected_pcs_config() {
     }
 }
 
-/// Negative: tamper the proof's tree-0 (preprocessed) commitment root. The pin
-/// recomputes the honest root from `proof.input` and rejects the mismatch
-/// fail-closed — the forged tree never reaches the STARK verifier. This is the
-/// F-ROOT class: a forged range table / schedule / constant column would carry
-/// a different tree-0 root, caught here.
+/// A changed tree-0 commitment root must not reach STARK verification. The
+/// verifier derives the expected root from `proof.input` and rejects the
+/// mismatch.
 #[test]
 fn composed_preprocessed_root_pin_rejects_tampered_root() {
     let msg = big_msg("froot-neg", 1024);
@@ -332,11 +330,11 @@ fn composed_preprocessed_root_pin_rejects_tampered_root() {
     proof.stark_proof.0.commitments[0].0[0] ^= 1;
     assert!(
         verify_mldsa(&proof, pcs_config()).is_err(),
-        "tampered preprocessed root must reject at the pin (not just constraints)"
+        "a changed preprocessed root must be rejected at the pin"
     );
 }
 
-fn legacy_twelve_job_shapes(input: &MlDsaVerifyInput, sib_stream_len: usize) -> Vec<Shape> {
+fn repeated_instance_job_shapes(input: &MlDsaVerifyInput, sib_stream_len: usize) -> Vec<Shape> {
     let n_sib_squeezes = sib_stream_len.div_ceil(136).max(1);
     [0, STREAM_BASE_STRIDE, 2 * STREAM_BASE_STRIDE]
         .into_iter()
@@ -352,19 +350,20 @@ fn legacy_twelve_job_shapes(input: &MlDsaVerifyInput, sib_stream_len: usize) -> 
 }
 
 #[test]
-fn legacy_twelve_job_service_shape_rejects_via_root_mismatch_without_panic() {
-    // A-702: root equality is direction-free, so new-proof/legacy-root exercises the old-proof/new-root gate.
-    let msg = big_msg("legacy-12-job-root", 1024);
+fn repeated_instance_service_shape_rejects_via_root_mismatch_without_panic() {
+    // Root equality is symmetric. A proof with the wrong root exercises the
+    // same mismatch in both directions.
+    let msg = big_msg("wrong-12-job-root", 1024);
     let (witness, input) = witness_and_input(8103, &msg);
-    let legacy_sib_len = stwo_mldsa::sampleinball::stream_len(&witness);
-    let proof = prove_mldsa(witness, input, pcs_config()).expect("prove new shape");
-    let legacy_shapes = legacy_twelve_job_shapes(&proof.input, legacy_sib_len);
-    assert_eq!(legacy_shapes.len(), 12);
+    let sib_len = stwo_mldsa::sampleinball::stream_len(&witness);
+    let proof = prove_mldsa(witness, input, pcs_config()).expect("prove");
+    let repeated_shapes = repeated_instance_job_shapes(&proof.input, sib_len);
+    assert_eq!(repeated_shapes.len(), 12);
 
-    let legacy_root = {
+    let wrong_root = {
         let handle = SharedKeccakRelations::new();
         let mut service = KeccakServiceVerifier::new(
-            legacy_shapes.clone(),
+            repeated_shapes.clone(),
             proof.service_claimed_sums.clone(),
             handle.clone(),
         );
@@ -379,13 +378,13 @@ fn legacy_twelve_job_service_shape_rejects_via_root_mismatch_without_panic() {
             &mut [&mut service, &mut verifier],
             proof.stark_proof.config,
         )
-        .expect("legacy canonical root")
+        .expect("repeated-instance canonical root")
     };
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let handle = SharedKeccakRelations::new();
         let mut service = KeccakServiceVerifier::new(
-            legacy_shapes,
+            repeated_shapes,
             proof.service_claimed_sums.clone(),
             handle.clone(),
         );
@@ -399,7 +398,7 @@ fn legacy_twelve_job_service_shape_rejects_via_root_mismatch_without_panic() {
         air_core::verify_with_expected_preprocessed_root_and_payloads(
             &mut [&mut service, &mut verifier],
             &proof.stark_proof,
-            Some(legacy_root),
+            Some(wrong_root),
             &proof.post_interaction_payloads,
         )
     }));

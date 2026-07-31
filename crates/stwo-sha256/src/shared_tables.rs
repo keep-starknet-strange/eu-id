@@ -1,10 +1,10 @@
-//! Shared SHA table-provider module.
+//! Shared range-table providers for SHA-256 components.
 //!
-//! This module moves the message-agnostic range table providers out
-//! of repeated SHA instances. Each SHA consumer still owns its main trace,
-//! digest relation, field exposure, and consumer-side lookups; this module owns
-//! only the fixed table preprocessed columns plus the union multiplicities that
-//! satisfy those lookups.
+//! Each SHA consumer owns its main trace, digest relation, field exposure, and
+//! lookup consumers. This module owns the fixed preprocessed columns and the
+//! combined multiplicities that satisfy those lookups.
+//! Random dummy multiplicities change the commitments. They do not make STWO
+//! zero knowledge.
 
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
@@ -27,7 +27,6 @@ use crate::components::{
     shared_table_preprocessed_column_ids, RangeKind, SharedProducer, SharedProducerPairEval,
     RANGE_TABLES,
 };
-use crate::field_exposure::FieldExposure;
 use crate::interaction::{
     build_interaction_columns, producer_blind_frac_column, ComponentClaim, Frac,
 };
@@ -88,7 +87,7 @@ pub struct ShaTableMultiplicities {
 }
 
 impl ShaTableMultiplicities {
-    pub fn from_consumers(consumers: &[(&Sha256Witness, FieldExposure)]) -> Self {
+    pub fn from_consumers(consumers: &[&Sha256Witness]) -> Self {
         assert!(
             !consumers.is_empty(),
             "shared SHA table provider needs at least one consumer",
@@ -99,7 +98,7 @@ impl ShaTableMultiplicities {
             range.push(blind_extend(sum_multiplicity_vectors(
                 consumers
                     .iter()
-                    .map(|(witness, exposure)| range_k_multiplicities(witness, kind, exposure)),
+                    .map(|witness| range_k_multiplicities(witness, kind)),
             )));
         }
 
@@ -107,14 +106,12 @@ impl ShaTableMultiplicities {
     }
 }
 
-/// Class-D multiplicity blinding (Q-015 §4b / p4c Class D): double the committed
-/// domain by appending `real.len()` fresh random M31 cells over the reserved
-/// dummy-key upper half. The stored (blinded) vector is committed as the
-/// multiplicity column; the interaction fraction reads the SAME committed cells.
-/// Randomness is host CSPRNG, never transcript-derived: the mask must be secret
-/// from the verifier. The dummy cells never touch the LogUp balance because
-/// `emit_blind` gates the numerator by `(1 − is_dummy)`, forcing it to `0` on
-/// every dummy row regardless of the random multiplicity committed there.
+/// Add Class-D multiplicity blinding. Append `real.len()` fresh random M31
+/// cells in the reserved dummy-key upper half. The stored vector is the
+/// committed multiplicity column, and the interaction fraction reads the same
+/// cells. A host CSPRNG supplies the secret mask. `emit_blind` sets the
+/// numerator to zero on each dummy row, so dummy cells do not affect the LogUp
+/// balance.
 fn blind_extend(real: Vec<u32>) -> Vec<u32> {
     use rand::{rngs::OsRng, RngCore};
     let real_len = real.len();

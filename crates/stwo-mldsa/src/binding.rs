@@ -1,8 +1,7 @@
-//! Cross-component LogUp binding relations shared by `coeffs` (yield side),
-//! `decomp` / `sampleinball` (consume side), the `msglink` message-byte producer,
-//! and the remaining stwo-keccak sponge jobs (M6 composed statement). Kept in
-//! one place so the composed `MlDsaAir` and the standalone M5 tests wire the
-//! SAME relation instances.
+//! Shared LogUp relations for ML-DSA components.
+//!
+//! This module defines each cross-component relation once. The composed AIR
+//! and the standalone tests use the same relation types.
 //!
 //! ## Contracts
 //!
@@ -14,19 +13,19 @@
 //! | `MsgLink`| 3 | `(field_id, byte_index, byte)` | msglink producer (−1, yield) | µ-absorb bridge (+1, use) | — |
 //!
 //! `w_bind_id = i·N + m` uniquely keys each of the `k·N` w-coefficients;
-//! `c_bind_id = m` keys the `N` challenge coefficients. Both cells are the
-//! coeffs `recomp_cell` (w) / `digit[0]` (c) of the matching group (worksheet §3.4).
+//! `c_bind_id = m` keys the `N` challenge coefficients. Each tuple uses the
+//! matching coefficient cell.
 //!
-//! ### `HashIo` — re-exported from stwo-keccak (single source of truth)
+//! ### Shared `HashIo` relation
 //!
 //! The byte-I/O contract is [`stwo_keccak::relations::HashIoRelation`] verbatim:
 //! `(stream_id, byte_pos, byte)`. We re-export it (rather than declaring a second
 //! structurally-identical `relation!`) so the mldsa consumer/producer components
 //! and the keccak sponge instances draw and combine against **the same relation
-//! type** — a distinct `relation!` would have distinct `LookupElements` and never
-//! cancel across the module boundary.
+//! type**. A separate `relation!` would have separate `LookupElements` and
+//! would not cancel across the module boundary.
 //!
-//! Sponge sign convention (from `stwo_keccak::sponge`): the sponge **consumes
+//! Sponge sign convention (from `stwo_keccak::sponge_v`): the sponge **consumes
 //! (−)** each absorb byte and **yields (+)** each squeeze byte. Therefore an
 //! absorb-byte producer yields (+) and a squeeze-byte consumer requires (−):
 //! - [`STREAM_ID_CTILDE_ABSORB`] — decomp's 768 `w1Encode(w1')` bytes yielded (+),
@@ -37,12 +36,11 @@
 //!   [`crate::statement`] (composition-layer namespacing), disjoint from these
 //!   two. Public messages use a verifier-native µ constant instead.
 //!
-//! ### `perm_id` namespacing (M3 carry-forward)
+//! ### Permutation identifiers
 //!
-//! Each sponge instance is assigned a disjoint `perm_id_base` so their
-//! Keccak-f[1600] permutation chains never collide on the shared
-//! [`stwo_keccak::relations::KeccakStateRelation`]. The composition owns this;
-//! see [`crate::statement::PermIdPlan`].
+//! [`stwo_keccak::sponge_v::JobList`] assigns one global sequence of
+//! permutation identifiers to the concatenated job list. This prevents chains
+//! from sharing a [`stwo_keccak::relations::KeccakStateRelation`] identifier.
 
 use stwo_constraint_framework::relation;
 
@@ -55,7 +53,7 @@ pub const CCELL_ARITY: usize = 2;
 relation!(CCellRelation, CCELL_ARITY);
 
 /// `(rho_byte_index, byte)` — the private `rho` cells committed by ExpandA
-/// and consumed by the eventual private public-key binding.
+/// and consumed by the private MSO device-key binding.
 pub const RHO_CELL_ARITY: usize = 2;
 relation!(RhoCellRelation, RHO_CELL_ARITY);
 
@@ -70,27 +68,23 @@ relation!(T1CellRelation, T1_CELL_ARITY);
 /// `(matrix_poly, ntt_stage, coefficient_index, limb0, limb1, limb2)`.
 ///
 /// ExpandA yields accepted coefficients at stage zero. The inverse-NTT
-/// component consumes those cells and reuses the same tuple shape for later
-/// stages.
+/// component consumes those cells. Each NTT stage uses the same tuple shape.
 pub const NTT_CELL_ARITY: usize = 6;
 relation!(NttCellRelation, NTT_CELL_ARITY);
 
-/// Shared handles published by ExpandA for the later public-key and inverse-NTT
-/// components.
+/// Shared handles for the public-key and inverse-NTT components.
 pub type SharedRhoCellRelation = air_core::relations::SharedRelation<RhoCellRelation>;
 pub type SharedT1CellRelation = air_core::relations::SharedRelation<T1CellRelation>;
 pub type SharedNttCellRelation = air_core::relations::SharedRelation<NttCellRelation>;
 
 /// `(field_id, byte_index, byte)` — the message-byte relation for `M`'s bytes.
 ///
-/// REUSE NOTE (M6 decision): stwo-sha256's `FieldExposure` producer
+/// The `stwo-sha256` `FieldExposure` producer
 /// ([`stwo_sha256::field_exposure`]) already yields arbitrary multi-block
 /// `(field_id, byte_index, byte)` windows, each byte range-checked to `[0,256)`
-/// in-AIR. `MsgLinkRelation` deliberately mirrors that exact
-/// `(field_id, byte_index, byte)` shape so M7 can drop the SHA-side producer in
-/// as the yield source with no relation change. For M6-standalone,
-/// [`crate::msglink`] provides an enabler-gated public-byte producer with the
-/// same shape and range-check (the "M7 swap point").
+/// in the AIR. `MsgLinkRelation` uses the same tuple shape.
+/// [`crate::msglink`] provides an enabled public-byte producer for standalone
+/// proofs.
 pub const MSGLINK_ARITY: usize = 3;
 relation!(MsgLinkRelation, MSGLINK_ARITY);
 

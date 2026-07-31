@@ -1,8 +1,7 @@
-//! Deterministic circuit identity generator for the frozen TS13 demo profile.
+//! Deterministic circuit identity generator for the canonical TS13 demo.
 //!
-//! This module is compiled by `src/bin/ts13_demo_artifact.rs`. Its JSON input
-//! deliberately has no defaults: final circuit geometry must be supplied by
-//! the composed prover rather than guessed here.
+//! `src/bin/ts13_demo_artifact.rs` compiles this module.
+//! The JSON input has no defaults. The composed prover supplies the geometry.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -21,16 +20,15 @@ pub const SHAPE_MANIFEST_PATH: &str = "artifacts/ts13-demo-v1/shape-manifest.cbo
 pub const HASH_EMBED_PATH: &str = "crates/eu-id-prover/src/generated/ts13_demo_artifact.rs";
 pub const NORMATIVE_SPEC_PATH: &str = "docs/ts13-unlinkable-age18-demo-spec.md";
 
-/// The only generated files omitted from the soundness source-tree digest.
+/// Generated files that the soundness source-tree digest omits.
 ///
-/// `target/` directories are separately recognized as Cargo build output.
-/// No `.gitignore`, wildcard, suffix, or caller-provided exclusion is used.
+/// The scanner also omits Cargo `target` directories. It does not use
+/// `.gitignore`, wildcards, suffixes, or caller exclusions.
 pub const GENERATED_RECURSION_EXCLUSIONS: [&str; 3] =
     [SHAPE_MANIFEST_PATH, ARTIFACT_PATH, HASH_EMBED_PATH];
 
-pub const SOURCE_PACKAGE_ROOTS: [&str; 7] = [
+pub const SOURCE_PACKAGE_ROOTS: [&str; 6] = [
     "crates/air-core",
-    "crates/predicates",
     "crates/stwo-sha256",
     "crates/stwo-keccak",
     "crates/stwo-mldsa",
@@ -38,11 +36,11 @@ pub const SOURCE_PACKAGE_ROOTS: [&str; 7] = [
     "crates/sdk",
 ];
 
-pub const FROZEN_MODULE_ORDER: [&str; 19] = [
+pub const CANONICAL_MODULE_ORDER: [&str; 19] = [
     "shared_sha256_tables",
     "shared_mldsa_range_tables",
     "shared_keccak_service",
-    "ts13_public_context_bind_v1",
+    "ts13_public_context_bind",
     "private_issuer_message_provider",
     "issuer_private_message_mldsa",
     "requested_item_sha256",
@@ -50,17 +48,17 @@ pub const FROZEN_MODULE_ORDER: [&str; 19] = [
     "private_item_cbor_parsers",
     "private_item_binder",
     "private_mso_binder",
-    "mdoc_private_mso_validity_v2",
+    "mdoc_private_mso_validity",
     "private_value_digests_scanner",
-    "u5_private_expand_a",
-    "u9_private_device_key_binder",
-    "private_device_mldsa_u6_u7",
+    "private_expand_a",
+    "private_device_key_binder",
+    "private_device_mldsa",
     "private_revocation_range",
     "private_revocation_mldsa",
     "public_revocation_key_epoch_bind",
 ];
 
-const FROZEN_MERKLE_TREE_ORDER: [&str; 5] = [
+const CANONICAL_MERKLE_TREE_ORDER: [&str; 5] = [
     "tree_0_preprocessed",
     "tree_1_trace",
     "tree_2_interaction",
@@ -73,44 +71,79 @@ const PROOF_SYSTEM_ID: &str = "stwo-euid-ts13-demo-v1";
 const CONSTRAINT_SYSTEM_VERSION: &str = "ts13-unlinkable-air-v1";
 const ARTIFACT_SCHEMA_VERSION: u64 = 1;
 const SHAPE_SCHEMA_VERSION: u64 = 1;
-const V4_ENVELOPE_VERSION: u64 = 4;
-const V4_HEADER_BYTES: u64 = 46;
-const V4_CAPACITY_ALIGNMENT: u64 = 65_536;
-const FROZEN_ISSUER_COSE_SIG_STRUCTURE_BYTES: u32 = 2_534;
-const FROZEN_MSO_PAYLOAD_BYTES: u32 = 2_513;
-const FROZEN_PADDED_ISSUER_SIGNED_ITEM_BYTES: u32 = 128;
-const FROZEN_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 4] = [1, 2, 3, 5];
-const FROZEN_REQUEST_CONTEXT_CORPUS_SHA256: &str =
+const ENVELOPE_VERSION: u64 = 4;
+const ENVELOPE_HEADER_BYTES: u64 = 46;
+const ENVELOPE_CAPACITY_ALIGNMENT: u64 = 65_536;
+const CANONICAL_ISSUER_COSE_SIG_STRUCTURE_BYTES: u32 = 2_534;
+const CANONICAL_MSO_PAYLOAD_BYTES: u32 = 2_513;
+const CANONICAL_PADDED_ISSUER_SIGNED_ITEM_BYTES: u32 = 128;
+const CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 3] = [1, 2, 3];
+const CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256: &str =
     "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
-const FROZEN_NORMATIVE_SPEC_SHA256: &str =
-    "b31fa7fbb86360bbc1e46b0194017aa116c0a689d074f77543549ca0916521eb";
-const FROZEN_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
-const FROZEN_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
-const FROZEN_DEVICE_SIG_STRUCTURE_CAPACITY: u32 = 1_024;
-const FROZEN_TREE_COLUMN_COUNTS: [u64; 5] = [947, 5_000, 2_416, 8, 32];
-const FROZEN_TREE_DEPTHS: [u32; 5] = [19, 19, 19, 16, 19];
-const FROZEN_FRI_LAYER_INPUT_LOGS: [u32; 8] = [19, 17, 15, 13, 11, 9, 7, 5];
-const FROZEN_FRI_LAYER_OUTPUT_LOGS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
-const FROZEN_FRI_WITNESS_CAPS: [u64; 8] = [108, 108, 108, 108, 108, 108, 108, 36];
-const FROZEN_FRI_MERKLE_DEPTHS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
-const FROZEN_SAMPLED_SECURE_FIELD_COUNT: u64 = 10_852;
-const FROZEN_OUTER_CLAIMS_AND_FRAMING_BYTES: u64 = 3_890;
-const FROZEN_COMPONENT_COUNT: usize = 96;
-const FROZEN_RELATION_COUNT: usize = 85;
-const FROZEN_RELATION_USE_COUNT: usize = 251;
-const FROZEN_PUBLIC_MIX_COUNT: usize = 20;
-const FROZEN_CHALLENGE_ENTRY_COUNT: usize = 94;
-const FROZEN_RAW_MLDSA_CHALLENGE_COUNT: usize = 9;
-const FROZEN_SERIALIZED_CLAIM_COUNT: usize = 26;
-const FROZEN_SERIALIZED_CLAIM_BYTES: u64 = 24_186;
-const FROZEN_STREAM_ID_COUNT: usize = 83;
-const FROZEN_HASH_STREAM_COUNT: usize = 40;
-const FROZEN_RANGE_TABLE_COUNT: usize = 26;
-const FROZEN_BUILTIN_CONSTANT_NAMES: [&str; 40] = [
+const CANONICAL_NORMATIVE_SPEC_SHA256: &str =
+    "01606b356cad9101da23a71fd8de537c5616f9430b856d09aa3101da81916060";
+const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
+const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
+const CANONICAL_DEVICE_SIG_STRUCTURE_CAPACITY: u32 = 1_024;
+const CANONICAL_TREE_COLUMN_COUNTS: [u64; 5] = [946, 4_906, 2_400, 8, 32];
+const CANONICAL_TREE_DEPTHS: [u32; 5] = [19, 19, 19, 16, 19];
+const CANONICAL_FRI_LAYER_INPUT_LOGS: [u32; 8] = [19, 17, 15, 13, 11, 9, 7, 5];
+const CANONICAL_FRI_LAYER_OUTPUT_LOGS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
+const CANONICAL_FRI_WITNESS_CAPS: [u64; 8] = [108, 108, 108, 108, 108, 108, 108, 36];
+const CANONICAL_FRI_MERKLE_DEPTHS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
+const CANONICAL_SAMPLED_SECURE_FIELD_COUNT: u64 = 10_709;
+const CANONICAL_OUTER_CLAIMS_AND_FRAMING_BYTES: u64 = 3_840;
+const CANONICAL_COMPONENT_COUNT: usize = 96;
+const CANONICAL_RELATION_COUNT: usize = 85;
+const CANONICAL_RELATION_USE_COUNT: usize = 251;
+const CANONICAL_PUBLIC_MIX_COUNT: usize = 20;
+const CANONICAL_CHALLENGE_ENTRY_COUNT: usize = 94;
+const CANONICAL_RAW_MLDSA_CHALLENGE_COUNT: usize = 9;
+const CANONICAL_SERIALIZED_CLAIM_COUNT: usize = 19;
+const CANONICAL_SERIALIZED_CLAIM_BYTES: u64 = 24_136;
+const CANONICAL_STREAM_ID_COUNT: usize = 83;
+const CANONICAL_HASH_STREAM_COUNT: usize = 40;
+const CANONICAL_RANGE_TABLE_COUNT: usize = 26;
+const CANONICAL_SERIALIZED_CLAIM_NAMES: [&str; 19] = crate::mdoc::MDOC_PROOF_SERIALIZED_CLAIM_NAMES;
+const OUTER_CBOR_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,mode=outer,stream_id,log_size)";
+const INNER_CBOR_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,mode=inner,stream_id,log_size)";
+const MSO_BIND_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,issuer_message_len,mso_len,\
+payload_anchor_len,row_count,preprocessed_cols,trace_cols,interaction_cols,policy_year,\
+policy_month,policy_day,doc_type_len,each_doc_type_byte,private_device_key_mode,public_key_len,\
+sha_field_id,sha_padded_len)";
+const ITEM_BIND_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,transcript_tag,\
+attribute_index=0,padded_item_bytes=128,log_size,outer_parser_log_size,inner_parser_log_size,\
+max_random_bytes,element_identifier_len,element_value_len,digest_id_max,outer_stream_field_id,\
+inner_stream_field_id,element_identifier_field_id,element_value_field_id,main_relation_sites)";
+const MSO_VALIDITY_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,\
+verification_timestamp_epoch_seconds); mix_u64(each verification_timestamp_rfc3339_utc byte in \
+order); mix_u64(preprocessed_cols,trace_cols,interaction_cols)";
+const VALUE_DIGESTS_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,transcript_tag,\
+issuer_message_len,mso_len,selected_attribute_count=1,namespace_len,each_namespace_byte,log_size,\
+max_scan_items,max_namespace_bytes,preprocessed_cols,trace_cols,relation_sites,interaction_cols,\
+digest_id_max)";
+const CANONICAL_BUILTIN_CONSTANT_NAMES: [&str; 40] = [
     "cbor.device_key_info_prefix",
     "context.domain",
     "context.public_mix_domain",
+    "device_key_binding.active_rows",
+    "device_key_binding.public_key_bytes",
+    "device_key_binding.rho_rows",
+    "envelope.magic",
+    "expand_a.accepted_coefficients_per_polynomial",
+    "expand_a.candidate_bits",
+    "expand_a.jobs",
+    "expand_a.modulus_q",
+    "expand_a.squeeze_blocks_per_job",
     "privacy.claim",
+    "private_key_evaluation.a_evaluation_count",
+    "private_key_evaluation.coefficient_evaluation_count",
+    "private_key_evaluation.inverse_ntt_normalizer",
+    "private_key_evaluation.radix",
+    "private_key_evaluation.scaled_t1_factor",
+    "private_key_evaluation.t1_evaluation_count",
+    "private_key_evaluation.t1_hi_bits",
+    "private_key_evaluation.t1_lo_bits",
     "profile.device_authentication",
     "profile.device_authentication_profile",
     "profile.disclosed_attributes",
@@ -121,34 +154,17 @@ const FROZEN_BUILTIN_CONSTANT_NAMES: [&str; 40] = [
     "profile.hash",
     "profile.issuer_authentication",
     "profile.namespace",
-    "profile.potential_issuers",
     "profile.revocation_authentication",
     "profile.revocation_mandatory",
     "profile.timestamp_precision",
+    "profile.trusted_issuer_count",
     "spec.eudi_arf_commit",
     "spec.eudi_arf_ts13_path",
     "spec.normative_document_sha256",
-    "u5.accepted_coefficients_per_polynomial",
-    "u5.candidate_bits",
-    "u5.expand_a_jobs",
-    "u5.modulus_q",
-    "u5.squeeze_blocks_per_job",
-    "u6.a_evaluation_count",
-    "u6.coefficient_evaluation_count",
-    "u6.inverse_ntt_normalizer",
-    "u6.radix",
-    "u6.scaled_t1_factor",
-    "u6.t1_evaluation_count",
-    "u6.t1_hi_bits",
-    "u6.t1_lo_bits",
-    "u9.active_rows",
-    "u9.device_public_key_bytes",
-    "u9.rho_rows",
-    "v4.magic",
     "validity.maximum_year",
     "validity.minimum_year",
 ];
-const FROZEN_IMPLEMENTATION_CONSTANT_NAMES: [&str; 38] = [
+const CANONICAL_IMPLEMENTATION_CONSTANT_NAMES: [&str; 38] = [
     "impl.air_instance_count",
     "impl.cargo_feature_scope",
     "impl.challenge.raw_mldsa_secure_field_draws",
@@ -342,7 +358,7 @@ impl<'de> Visitor<'de> for Digest32Visitor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HexBytes(Vec<u8>);
+struct HexBytes(Vec<u8>);
 
 impl Serialize for HexBytes {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -401,7 +417,7 @@ fn hex_nibble(value: u8) -> Result<u8, &'static str> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GenerationInputV1 {
+struct GenerationInputV1 {
     credential_shape: CredentialShapeV1,
     request_context_corpus: RequestContextCorpusV1,
     modules: Vec<ModuleLayoutV1>,
@@ -925,28 +941,28 @@ fn checked_name_list<'a>(
 impl GenerationInputV1 {
     fn validate(&self) -> Result<(), ArtifactError> {
         if self.credential_shape.issuer_cose_sig_structure_bytes
-            != FROZEN_ISSUER_COSE_SIG_STRUCTURE_BYTES
-            || self.credential_shape.mso_payload_bytes != FROZEN_MSO_PAYLOAD_BYTES
+            != CANONICAL_ISSUER_COSE_SIG_STRUCTURE_BYTES
+            || self.credential_shape.mso_payload_bytes != CANONICAL_MSO_PAYLOAD_BYTES
             || self.credential_shape.padded_issuer_signed_item_bytes
-                != FROZEN_PADDED_ISSUER_SIGNED_ITEM_BYTES
+                != CANONICAL_PADDED_ISSUER_SIGNED_ITEM_BYTES
             || self.credential_shape.digest_identifier_integer_widths
-                != FROZEN_DIGEST_IDENTIFIER_INTEGER_WIDTHS
+                != CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS
         {
             return Err(ArtifactError::InvalidInput(
-                "credential shape does not match the frozen A/B fixtures".to_owned(),
+                "credential shape does not match the canonical A/B fixtures".to_owned(),
             ));
         }
         if self.request_context_corpus.corpus_sha256.to_string()
-            != FROZEN_REQUEST_CONTEXT_CORPUS_SHA256
+            != CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256
             || self
                 .request_context_corpus
                 .observed_max_device_cose_sig_structure_bytes
-                != FROZEN_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES
+                != CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES
             || self.request_context_corpus.device_sig_structure_capacity
-                != FROZEN_DEVICE_SIG_STRUCTURE_CAPACITY
+                != CANONICAL_DEVICE_SIG_STRUCTURE_CAPACITY
         {
             return Err(ArtifactError::InvalidInput(
-                "request-context corpus does not match the frozen corpus measurement".to_owned(),
+                "request-context corpus does not match the canonical corpus measurement".to_owned(),
             ));
         }
 
@@ -973,10 +989,10 @@ impl GenerationInputV1 {
             .iter()
             .map(|module| module.name.as_str())
             .collect();
-        if module_names != FROZEN_MODULE_ORDER {
+        if module_names != CANONICAL_MODULE_ORDER {
             return Err(ArtifactError::InvalidInput(format!(
                 "module order must be exactly {:?}",
-                FROZEN_MODULE_ORDER
+                CANONICAL_MODULE_ORDER
             )));
         }
         let air_instance_count = self.modules.iter().try_fold(0_u32, |sum, module| {
@@ -1060,9 +1076,9 @@ impl GenerationInputV1 {
                 }
             }
         }
-        if component_names.len() != FROZEN_COMPONENT_COUNT {
+        if component_names.len() != CANONICAL_COMPONENT_COUNT {
             return Err(ArtifactError::InvalidInput(format!(
-                "the frozen profile must contain exactly {FROZEN_COMPONENT_COUNT} components, got {}",
+                "the canonical profile must contain exactly {CANONICAL_COMPONENT_COUNT} components, got {}",
                 component_names.len()
             )));
         }
@@ -1071,8 +1087,7 @@ impl GenerationInputV1 {
             || !public_context.air_instances[0].components.is_empty()
         {
             return Err(ArtifactError::InvalidInput(
-                "Ts13PublicContextBindV1 must be exactly one zero-component AIR instance"
-                    .to_owned(),
+                "Ts13PublicContextBind must be exactly one zero-component AIR instance".to_owned(),
             ));
         }
         let item_parsers = &self.modules[8];
@@ -1082,21 +1097,22 @@ impl GenerationInputV1 {
                     .to_owned(),
             ));
         }
-        let u9 = &self.modules[14];
-        if u9.air_instances.len() != 1
-            || !u9
+        let device_key_binder = &self.modules[14];
+        if device_key_binder.air_instances.len() != 1
+            || !device_key_binder
                 .air_instances
                 .iter()
                 .flat_map(|air| &air.components)
                 .any(|component| component.active_rows == 416)
         {
             return Err(ArtifactError::InvalidInput(
-                "U9 must be one AIR instance with a 416-active-row component".to_owned(),
+                "the private device-key binder must be one AIR instance with a 416-active-row component"
+                    .to_owned(),
             ));
         }
         if self.modules[15].air_instances.len() != 1 {
             return Err(ArtifactError::InvalidInput(
-                "U6 and U7 must be one contiguous private-device ML-DSA AIR instance".to_owned(),
+                "private-device ML-DSA must be one contiguous AIR instance".to_owned(),
             ));
         }
         let public_revocation = &self.modules[18];
@@ -1181,14 +1197,54 @@ impl GenerationInputV1 {
                 ArtifactError::InvalidInput("relation use count exceeds usize".to_owned())
             })
         })?;
-        if self.relations.len() != FROZEN_RELATION_COUNT
-            || relation_use_count != FROZEN_RELATION_USE_COUNT
+        if self.relations.len() != CANONICAL_RELATION_COUNT
+            || relation_use_count != CANONICAL_RELATION_USE_COUNT
         {
             return Err(ArtifactError::InvalidInput(format!(
-                "the frozen profile must contain exactly {FROZEN_RELATION_COUNT} relations and \
-                 {FROZEN_RELATION_USE_COUNT} uses, got {} and {relation_use_count}",
+                "the canonical profile must contain exactly {CANONICAL_RELATION_COUNT} relations and \
+                 {CANONICAL_RELATION_USE_COUNT} uses, got {} and {relation_use_count}",
                 self.relations.len()
             )));
+        }
+        for (name, expected_fields) in [
+            (
+                "r41_private_digest_id",
+                &[
+                    "encoding_len",
+                    "encoded_byte_0",
+                    "encoded_byte_1",
+                    "encoded_byte_2",
+                    "encoded_byte_3",
+                    "encoded_byte_4",
+                    "digest_id_lo16",
+                    "digest_id_hi16",
+                ][..],
+            ),
+            ("r44_private_mso_start", &["mso_start"][..]),
+        ] {
+            let relation = self
+                .relations
+                .iter()
+                .find(|relation| relation.name == name)
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput(format!(
+                        "the canonical relation {name:?} is missing"
+                    ))
+                })?;
+            if relation
+                .tuple
+                .iter()
+                .map(|field| field.name.as_str())
+                .ne(expected_fields.iter().copied())
+                || relation
+                    .tuple
+                    .iter()
+                    .any(|field| !matches!(field.scalar, ColumnScalarV1::M31))
+            {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "relation {name:?} differs from the canonical schema"
+                )));
+            }
         }
         checked_name_list(
             "relation",
@@ -1215,13 +1271,61 @@ impl GenerationInputV1 {
                 }
             }
         }
-        if self.transcript.public_mix_order.len() != FROZEN_PUBLIC_MIX_COUNT
-            || self.transcript.challenge_order.len() != FROZEN_CHALLENGE_ENTRY_COUNT
+        if self.transcript.public_mix_order.len() != CANONICAL_PUBLIC_MIX_COUNT
+            || self.transcript.challenge_order.len() != CANONICAL_CHALLENGE_ENTRY_COUNT
         {
             return Err(ArtifactError::InvalidInput(format!(
-                "the frozen transcript must contain exactly {FROZEN_PUBLIC_MIX_COUNT} public \
-                 mixes and {FROZEN_CHALLENGE_ENTRY_COUNT} challenge entries"
+                "the canonical transcript must contain exactly {CANONICAL_PUBLIC_MIX_COUNT} public \
+                mixes and {CANONICAL_CHALLENGE_ENTRY_COUNT} challenge entries"
             )));
+        }
+        for (ordinal, name, encoding, fixed_length) in [
+            (
+                8,
+                "p08_outer_private_item_cbor_parser",
+                OUTER_CBOR_PUBLIC_MIX_ENCODING,
+                32,
+            ),
+            (
+                9,
+                "p09_inner_private_item_cbor_parser",
+                INNER_CBOR_PUBLIC_MIX_ENCODING,
+                32,
+            ),
+            (
+                10,
+                "p10_private_item_binder",
+                ITEM_BIND_PUBLIC_MIX_ENCODING,
+                136,
+            ),
+            (
+                11,
+                "p11_private_mso_binder",
+                MSO_BIND_PUBLIC_MIX_ENCODING,
+                320,
+            ),
+            (
+                12,
+                "p12_mdoc_private_mso_validity",
+                MSO_VALIDITY_PUBLIC_MIX_ENCODING,
+                208,
+            ),
+            (
+                13,
+                "p13_private_value_digests_scanner",
+                VALUE_DIGESTS_PUBLIC_MIX_ENCODING,
+                304,
+            ),
+        ] {
+            let entry = &self.transcript.public_mix_order[ordinal];
+            if entry.name != name
+                || entry.encoding != encoding
+                || entry.fixed_length != Some(fixed_length)
+            {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "public mix {name:?} differs from the canonical transcript"
+                )));
+            }
         }
         let expected_public_mix_owners = self
             .modules
@@ -1288,10 +1392,10 @@ impl GenerationInputV1 {
                     "relation challenge count exceeds transcript length".to_owned(),
                 )
             })?;
-        if raw_challenges != FROZEN_RAW_MLDSA_CHALLENGE_COUNT {
+        if raw_challenges != CANONICAL_RAW_MLDSA_CHALLENGE_COUNT {
             return Err(ArtifactError::InvalidInput(format!(
-                "the frozen transcript must contain exactly \
-                 {FROZEN_RAW_MLDSA_CHALLENGE_COUNT} raw ML-DSA challenges, got {raw_challenges}"
+                "the canonical transcript must contain exactly \
+                 {CANONICAL_RAW_MLDSA_CHALLENGE_COUNT} raw ML-DSA challenges, got {raw_challenges}"
             )));
         }
         checked_name_list(
@@ -1302,9 +1406,21 @@ impl GenerationInputV1 {
                 .map(|entry| entry.name.as_str()),
         )?;
 
-        if self.serialized_claims.len() != FROZEN_SERIALIZED_CLAIM_COUNT {
+        if self.serialized_claims.len() != CANONICAL_SERIALIZED_CLAIM_COUNT {
+            return Err(ArtifactError::InvalidInput(format!(
+                "serialized claim order must contain exactly \
+                 {CANONICAL_SERIALIZED_CLAIM_COUNT} entries"
+            )));
+        }
+        if self
+            .serialized_claims
+            .iter()
+            .map(|claim| claim.name.as_str())
+            .collect::<Vec<_>>()
+            != CANONICAL_SERIALIZED_CLAIM_NAMES
+        {
             return Err(ArtifactError::InvalidInput(
-                "serialized claim order must contain exactly 26 entries".to_owned(),
+                "serialized claim order differs from MdocProof".to_owned(),
             ));
         }
         let mut claim_names = BTreeSet::new();
@@ -1335,17 +1451,17 @@ impl GenerationInputV1 {
                     .map(|entry| entry.name.as_str()),
             )?;
         }
-        if serialized_claim_bytes != FROZEN_SERIALIZED_CLAIM_BYTES {
+        if serialized_claim_bytes != CANONICAL_SERIALIZED_CLAIM_BYTES {
             return Err(ArtifactError::InvalidInput(format!(
-                "serialized claims must occupy exactly {FROZEN_SERIALIZED_CLAIM_BYTES} bytes \
+                "serialized claims must occupy exactly {CANONICAL_SERIALIZED_CLAIM_BYTES} bytes \
                  excluding StarkProof, got {serialized_claim_bytes}"
             )));
         }
 
         checked_named_values("stream ID", &self.stream_ids)?;
-        if self.stream_ids.len() != FROZEN_STREAM_ID_COUNT {
+        if self.stream_ids.len() != CANONICAL_STREAM_ID_COUNT {
             return Err(ArtifactError::InvalidInput(format!(
-                "the frozen profile must contain exactly {FROZEN_STREAM_ID_COUNT} stream IDs"
+                "the canonical profile must contain exactly {CANONICAL_STREAM_ID_COUNT} stream IDs"
             )));
         }
         checked_name_list(
@@ -1357,7 +1473,7 @@ impl GenerationInputV1 {
             .iter()
             .map(|entry| entry.value)
             .collect::<BTreeSet<_>>();
-        if self.hash_streams.len() != FROZEN_HASH_STREAM_COUNT
+        if self.hash_streams.len() != CANONICAL_HASH_STREAM_COUNT
             || self.hash_streams.iter().any(|stream| {
                 stream.hash_function.is_empty()
                     || stream.job_count == 0
@@ -1382,7 +1498,7 @@ impl GenerationInputV1 {
             "range table",
             self.range_tables.iter().map(|table| table.name.as_str()),
         )?;
-        if self.range_tables.len() != FROZEN_RANGE_TABLE_COUNT
+        if self.range_tables.len() != CANONICAL_RANGE_TABLE_COUNT
             || self.range_tables.iter().any(|table| {
                 table.value_kind.is_empty()
                     || table.bit_width == 0
@@ -1421,16 +1537,35 @@ impl GenerationInputV1 {
             .iter()
             .map(|constant| constant.name.as_str())
             .collect::<Vec<_>>();
-        if implementation_constant_names != FROZEN_IMPLEMENTATION_CONSTANT_NAMES {
+        if implementation_constant_names != CANONICAL_IMPLEMENTATION_CONSTANT_NAMES {
             return Err(ArtifactError::InvalidInput(
-                "implementation constants differ from the frozen universal allowlist".to_owned(),
+                "implementation constants differ from the canonical allowlist".to_owned(),
+            ));
+        }
+        let digest_widths = self
+            .implementation_constants
+            .iter()
+            .find(|constant| constant.name == "impl.digest_identifier_integer_widths")
+            .expect("the canonical allowlist contains digest identifier widths");
+        let ConstantValueV1::UnsignedVector(digest_widths) = &digest_widths.value else {
+            return Err(ArtifactError::InvalidInput(
+                "digest identifier widths must be an unsigned vector".to_owned(),
+            ));
+        };
+        if !digest_widths
+            .iter()
+            .copied()
+            .eq(CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS.map(u64::from))
+        {
+            return Err(ArtifactError::InvalidInput(
+                "digest identifier widths differ from the canonical profile".to_owned(),
             ));
         }
 
         if self.tree_zero.derivation.is_empty()
             || self.tree_zero.hash != "Blake2s-256"
             || self.tree_zero.preprocessed_column_order.len()
-                != FROZEN_TREE_COLUMN_COUNTS[0] as usize
+                != CANONICAL_TREE_COLUMN_COUNTS[0] as usize
             || self
                 .tree_zero
                 .preprocessed_column_order
@@ -1439,17 +1574,17 @@ impl GenerationInputV1 {
                 .len()
                 != self.tree_zero.preprocessed_column_order.len()
             || self.tree_zero.committed_column_log_sizes.len()
-                != FROZEN_TREE_COLUMN_COUNTS[0] as usize
+                != CANONICAL_TREE_COLUMN_COUNTS[0] as usize
             || self
                 .tree_zero
                 .committed_column_log_sizes
                 .iter()
                 .any(|&log_size| log_size >= u32::BITS)
         {
-            return Err(ArtifactError::InvalidInput(
-                "tree zero must carry the exact 947-column deduplicated order and log geometry"
-                    .to_owned(),
-            ));
+            return Err(ArtifactError::InvalidInput(format!(
+                "tree zero must carry the exact {}-column deduplicated order and log geometry",
+                CANONICAL_TREE_COLUMN_COUNTS[0]
+            )));
         }
         if self.proof_system.field != "M31"
             || self.proof_system.field_modulus != 2_147_483_647
@@ -1467,7 +1602,7 @@ impl GenerationInputV1 {
         {
             return Err(ArtifactError::InvalidInput(
                 "proof-system field, PCS, hash, FRI, query, PoW, and lifting parameters differ \
-                 from the frozen demo"
+                 from the canonical demo"
                     .to_owned(),
             ));
         }
@@ -1484,9 +1619,9 @@ impl GenerationInputV1 {
             .iter()
             .map(|tree| tree.name.as_str())
             .collect::<Vec<_>>();
-        if merkle_tree_names != FROZEN_MERKLE_TREE_ORDER {
+        if merkle_tree_names != CANONICAL_MERKLE_TREE_ORDER {
             return Err(ArtifactError::InvalidInput(format!(
-                "Merkle-tree order must be exactly {FROZEN_MERKLE_TREE_ORDER:?}"
+                "Merkle-tree order must be exactly {CANONICAL_MERKLE_TREE_ORDER:?}"
             )));
         }
         if self.proof_system.merkle_trees.len() != 5
@@ -1494,8 +1629,8 @@ impl GenerationInputV1 {
                 .proof_system
                 .merkle_trees
                 .iter()
-                .zip(FROZEN_TREE_DEPTHS)
-                .zip(FROZEN_TREE_COLUMN_COUNTS)
+                .zip(CANONICAL_TREE_DEPTHS)
+                .zip(CANONICAL_TREE_COLUMN_COUNTS)
                 .any(|((tree, depth), columns)| {
                     tree.depth != depth
                         || tree.digest_bytes != 32
@@ -1521,10 +1656,10 @@ impl GenerationInputV1 {
                 .proof_system
                 .fri_layers
                 .iter()
-                .zip(FROZEN_FRI_LAYER_INPUT_LOGS)
-                .zip(FROZEN_FRI_LAYER_OUTPUT_LOGS)
-                .zip(FROZEN_FRI_MERKLE_DEPTHS)
-                .zip(FROZEN_FRI_WITNESS_CAPS)
+                .zip(CANONICAL_FRI_LAYER_INPUT_LOGS)
+                .zip(CANONICAL_FRI_LAYER_OUTPUT_LOGS)
+                .zip(CANONICAL_FRI_MERKLE_DEPTHS)
+                .zip(CANONICAL_FRI_WITNESS_CAPS)
                 .any(|((((layer, input), output), depth), witness_cap)| {
                     layer.input_log_size != input
                         || layer.output_log_size != output
@@ -1533,7 +1668,7 @@ impl GenerationInputV1 {
                 })
         {
             return Err(ArtifactError::InvalidInput(
-                "Merkle-tree and FRI-layer geometry differs from the frozen demo".to_owned(),
+                "Merkle-tree and FRI-layer geometry differs from the canonical demo".to_owned(),
             ));
         }
         validate_proof_bound(&ts13_demo_proof_bound_terms())?;
@@ -1657,17 +1792,17 @@ fn checked_named_values(kind: &str, values: &[NamedU64V1]) -> Result<(), Artifac
 }
 
 fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
-    let committed_columns = FROZEN_TREE_COLUMN_COUNTS.iter().sum::<u64>();
+    let committed_columns = CANONICAL_TREE_COLUMN_COUNTS.iter().sum::<u64>();
     let queried_base_fields = committed_columns * 36;
-    let tree_hashes = FROZEN_TREE_DEPTHS
+    let tree_hashes = CANONICAL_TREE_DEPTHS
         .iter()
         .map(|depth| u64::from(*depth) * 36)
         .sum::<u64>();
-    let fri_hashes = FROZEN_FRI_MERKLE_DEPTHS
+    let fri_hashes = CANONICAL_FRI_MERKLE_DEPTHS
         .iter()
         .map(|depth| u64::from(*depth) * 36)
         .sum::<u64>();
-    let fri_witnesses = FROZEN_FRI_WITNESS_CAPS.iter().sum::<u64>();
+    let fri_witnesses = CANONICAL_FRI_WITNESS_CAPS.iter().sum::<u64>();
     let tree_vector_framing = 8 + 5 * 8 + committed_columns * 8;
     let terms = vec![
         ProofBoundTermV1 {
@@ -1740,7 +1875,7 @@ fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
             section: ProofBoundSectionV1::Claims,
             name: "fixed_outer_claims_and_framing".to_owned(),
             maximum_item_count: 1,
-            maximum_serialized_bytes_per_item: FROZEN_OUTER_CLAIMS_AND_FRAMING_BYTES,
+            maximum_serialized_bytes_per_item: CANONICAL_OUTER_CLAIMS_AND_FRAMING_BYTES,
         },
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::ColumnValues,
@@ -1751,7 +1886,7 @@ fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::ColumnValues,
             name: "sampled_secure_fields".to_owned(),
-            maximum_item_count: FROZEN_SAMPLED_SECURE_FIELD_COUNT,
+            maximum_item_count: CANONICAL_SAMPLED_SECURE_FIELD_COUNT,
             maximum_serialized_bytes_per_item: 16,
         },
         ProofBoundTermV1 {
@@ -1839,18 +1974,20 @@ fn deterministic_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(u64, u32), A
         })
     })?;
     let capacity = worst_case
-        .checked_add(V4_CAPACITY_ALIGNMENT - 1)
-        .map(|value| value / V4_CAPACITY_ALIGNMENT * V4_CAPACITY_ALIGNMENT)
+        .checked_add(ENVELOPE_CAPACITY_ALIGNMENT - 1)
+        .map(|value| value / ENVELOPE_CAPACITY_ALIGNMENT * ENVELOPE_CAPACITY_ALIGNMENT)
         .ok_or_else(|| ArtifactError::InvalidInput("proof capacity overflows u64".to_owned()))?;
     let capacity = u32::try_from(capacity).map_err(|_| {
-        ArtifactError::InvalidInput("V4 capacity does not fit its u32 header field".to_owned())
+        ArtifactError::InvalidInput(
+            "envelope capacity does not fit its u32 header field".to_owned(),
+        )
     })?;
     Ok((worst_case, capacity))
 }
 
 fn builtin_constants() -> Vec<ArtifactConstantV1> {
-    let normative_spec_digest =
-        decode_hex(FROZEN_NORMATIVE_SPEC_SHA256).expect("frozen specification digest is valid hex");
+    let normative_spec_digest = decode_hex(CANONICAL_NORMATIVE_SPEC_SHA256)
+        .expect("canonical specification digest is valid hex");
     let mut constants = vec![
         constant_bytes(
             "cbor.device_key_info_prefix",
@@ -1876,38 +2013,38 @@ fn builtin_constants() -> Vec<ArtifactConstantV1> {
             "ISO-18013-5-DeviceAuthentication",
         ),
         constant_text("profile.namespace", "eu.europa.ec.eudi.pid.1"),
-        constant_unsigned("profile.potential_issuers", 1),
+        constant_unsigned("profile.trusted_issuer_count", 1),
         constant_unsigned("profile.revocation_mandatory", 1),
         constant_text("profile.timestamp_precision", "UTC-whole-Unix-second"),
         constant_text(
             "privacy.claim",
             "public-input unlinkable; transcript zero knowledge pending",
         ),
-        constant_text("spec.eudi_arf_commit", FROZEN_EUDI_ARF_COMMIT),
+        constant_text("spec.eudi_arf_commit", CANONICAL_EUDI_ARF_COMMIT),
         constant_text(
             "spec.eudi_arf_ts13_path",
             "docs/technical-specifications/ts13-zksnarks.md",
         ),
         constant_bytes("spec.normative_document_sha256", &normative_spec_digest),
-        constant_unsigned("u5.accepted_coefficients_per_polynomial", 256),
-        constant_unsigned("u5.candidate_bits", 23),
-        constant_unsigned("u5.expand_a_jobs", 30),
-        constant_unsigned("u5.modulus_q", 8_380_417),
-        constant_unsigned("u5.squeeze_blocks_per_job", 6),
-        constant_unsigned("u6.a_evaluation_count", 30),
-        constant_unsigned("u6.coefficient_evaluation_count", 30),
-        constant_unsigned("u6.inverse_ntt_normalizer", 8_347_681),
-        constant_unsigned("u6.radix", 512),
-        constant_unsigned("u6.scaled_t1_factor", 1 << 13),
-        constant_unsigned("u6.t1_evaluation_count", 6),
-        constant_unsigned("u6.t1_hi_bits", 1),
-        constant_unsigned("u6.t1_lo_bits", 9),
-        constant_unsigned("u9.active_rows", 416),
-        constant_unsigned("u9.device_public_key_bytes", 1_952),
-        constant_unsigned("u9.rho_rows", 32),
+        constant_unsigned("expand_a.accepted_coefficients_per_polynomial", 256),
+        constant_unsigned("expand_a.candidate_bits", 23),
+        constant_unsigned("expand_a.jobs", 30),
+        constant_unsigned("expand_a.modulus_q", 8_380_417),
+        constant_unsigned("expand_a.squeeze_blocks_per_job", 6),
+        constant_unsigned("private_key_evaluation.a_evaluation_count", 30),
+        constant_unsigned("private_key_evaluation.coefficient_evaluation_count", 30),
+        constant_unsigned("private_key_evaluation.inverse_ntt_normalizer", 8_347_681),
+        constant_unsigned("private_key_evaluation.radix", 512),
+        constant_unsigned("private_key_evaluation.scaled_t1_factor", 1 << 13),
+        constant_unsigned("private_key_evaluation.t1_evaluation_count", 6),
+        constant_unsigned("private_key_evaluation.t1_hi_bits", 1),
+        constant_unsigned("private_key_evaluation.t1_lo_bits", 9),
+        constant_unsigned("device_key_binding.active_rows", 416),
+        constant_unsigned("device_key_binding.public_key_bytes", 1_952),
+        constant_unsigned("device_key_binding.rho_rows", 32),
         constant_unsigned("validity.maximum_year", 2099),
         constant_unsigned("validity.minimum_year", 2020),
-        constant_bytes("v4.magic", b"EUIDTS13"),
+        constant_bytes("envelope.magic", b"EUIDTS13"),
     ];
     constants.sort_by(|left, right| left.name.cmp(&right.name));
     constants
@@ -2265,21 +2402,6 @@ fn resolved_source_package_features(
         .collect()
 }
 
-fn checked_compiled_feature_profile() -> Result<(), ArtifactError> {
-    if cfg!(feature = "parallel")
-        || cfg!(feature = "unlink-spikes")
-        || stwo_mldsa::ATTACK_HOOKS_FEATURE_ENABLED
-        || stwo_sha256::PARALLEL_FEATURE_ENABLED
-        || !stwo_sha256::STD_FEATURE_ENABLED
-        || !predicates::STD_FEATURE_ENABLED
-    {
-        return Err(ArtifactError::InvalidInput(
-            "artifact generation requires the frozen default feature profile".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 fn git_path_arguments(prefix: &[&'static str]) -> Vec<&'static str> {
     let mut arguments = prefix.to_vec();
     arguments.push("--");
@@ -2434,9 +2556,9 @@ fn toolchain_metadata(workspace: &Path) -> Result<RustToolchainV1, ArtifactError
 
 fn checked_normative_spec(workspace: &Path) -> Result<(), ArtifactError> {
     let normative_spec_digest = Digest32::of(&read(&workspace.join(NORMATIVE_SPEC_PATH))?);
-    if normative_spec_digest.to_string() != FROZEN_NORMATIVE_SPEC_SHA256 {
+    if normative_spec_digest.to_string() != CANONICAL_NORMATIVE_SPEC_SHA256 {
         return Err(ArtifactError::InvalidInput(format!(
-            "normative specification digest differs: expected {FROZEN_NORMATIVE_SPEC_SHA256}, \
+            "normative specification digest differs: expected {CANONICAL_NORMATIVE_SPEC_SHA256}, \
              got {normative_spec_digest}"
         )));
     }
@@ -2444,7 +2566,6 @@ fn checked_normative_spec(workspace: &Path) -> Result<(), ArtifactError> {
 }
 
 fn generation_environment(workspace: &Path) -> Result<GenerationEnvironmentV1, ArtifactError> {
-    checked_compiled_feature_profile()?;
     checked_normative_spec(workspace)?;
     let source_manifest = collect_source_tree(workspace)?;
     checked_git_source_paths(workspace, &source_manifest)?;
@@ -2481,10 +2602,10 @@ fn build_outputs(
         .iter()
         .map(|constant| constant.name.as_str())
         .collect::<Vec<_>>()
-        != FROZEN_BUILTIN_CONSTANT_NAMES
+        != CANONICAL_BUILTIN_CONSTANT_NAMES
     {
         return Err(ArtifactError::InvalidInput(
-            "built-in constants differ from the frozen universal allowlist".to_owned(),
+            "built-in constants differ from the canonical allowlist".to_owned(),
         ));
     }
     constants.extend(input.implementation_constants.clone());
@@ -2504,7 +2625,7 @@ fn build_outputs(
         profile: PROFILE_ID,
         proof_system_id: PROOF_SYSTEM_ID,
         constraint_system_version: CONSTRAINT_SYSTEM_VERSION,
-        module_order: FROZEN_MODULE_ORDER
+        module_order: CANONICAL_MODULE_ORDER
             .iter()
             .map(|name| (*name).to_owned())
             .collect(),
@@ -2521,9 +2642,9 @@ fn build_outputs(
         proof_serialization: ProofSerializationV1 {
             proof_codec: "bincode-1-fixed-int-little-endian",
             envelope_magic: HexBytes(b"EUIDTS13".to_vec()),
-            envelope_version: V4_ENVELOPE_VERSION,
-            envelope_header_bytes: V4_HEADER_BYTES,
-            capacity_alignment_bytes: V4_CAPACITY_ALIGNMENT,
+            envelope_version: ENVELOPE_VERSION,
+            envelope_header_bytes: ENVELOPE_HEADER_BYTES,
+            capacity_alignment_bytes: ENVELOPE_CAPACITY_ALIGNMENT,
             bound_terms: proof_serialization_bound,
             deterministic_worst_case_bytes: worst_case,
             proof_body_capacity,
@@ -2605,7 +2726,7 @@ fn render_hash_embedding(
 ) -> String {
     let mut output = String::from(
         "// @generated by `ts13_demo_artifact`; do not edit.\n\
-         // This exact path is the sole in-tree circuit-identity recursion exclusion.\n\n",
+         // This path is the only in-tree circuit-identity recursion exclusion.\n\n",
     );
     render_digest_array(&mut output, "TS13_DEMO_CIRCUIT_HASH", circuit_hash);
     output.push('\n');
@@ -2813,13 +2934,39 @@ pub fn generate_from_json(
     })
 }
 
-/// Compare a generated-artifact input with geometry captured from an actual
-/// composed TS13 demo proof. This is the CI drift bridge between declarative
-/// JSON and the executable prover; it deliberately compares dimensions only,
-/// never witness values.
+/// Compare artifact input with geometry from a composed TS13 demo proof.
+///
+/// This CI check compares dimensions. It does not compare witness values.
 #[doc(hidden)]
 pub fn validate_live_ts13_demo_profile(
     input_json: &[u8],
+    geometry: &crate::mdoc::MdocTs13DemoCircuitGeometry,
+    proof: &crate::mdoc::MdocTs13DemoProofShape,
+) -> Result<(), ArtifactError> {
+    let input = serde_json::from_slice::<GenerationInputV1>(input_json).map_err(|error| {
+        ArtifactError::InvalidInput(format!("live artifact input is not valid JSON: {error}"))
+    })?;
+    input.validate()?;
+    let sampled_secure_fields = proof
+        .sampled_values
+        .iter()
+        .flatten()
+        .copied()
+        .sum::<usize>();
+    let (proof_worst_case, _) = deterministic_proof_bound(&ts13_demo_proof_bound_terms())?;
+    if sampled_secure_fields != CANONICAL_SAMPLED_SECURE_FIELD_COUNT as usize
+        || proof.outer_claims_and_framing_bytes != CANONICAL_OUTER_CLAIMS_AND_FRAMING_BYTES as usize
+        || proof.proof_bytes > proof_worst_case as usize
+    {
+        return Err(ArtifactError::InvalidInput(
+            "live proof differs from the canonical serialization aggregates".to_owned(),
+        ));
+    }
+    validate_live_profile_input(&input, geometry, proof)
+}
+
+fn validate_live_profile_input(
+    input: &GenerationInputV1,
     geometry: &crate::mdoc::MdocTs13DemoCircuitGeometry,
     proof: &crate::mdoc::MdocTs13DemoProofShape,
 ) -> Result<(), ArtifactError> {
@@ -2838,16 +2985,22 @@ pub fn validate_live_ts13_demo_profile(
             .collect()
     }
 
-    let input = serde_json::from_slice::<GenerationInputV1>(input_json).map_err(|error| {
-        ArtifactError::InvalidInput(format!("live artifact input is not valid JSON: {error}"))
-    })?;
-    input.validate()?;
-
     let declared_airs = input
         .modules
         .iter()
         .flat_map(|module| &module.air_instances)
         .collect::<Vec<_>>();
+    if input
+        .serialized_claims
+        .iter()
+        .map(|claim| claim.fixed_length as usize)
+        .collect::<Vec<_>>()
+        != proof.serialized_non_stark_field_lengths
+    {
+        return Err(ArtifactError::InvalidInput(
+            "live serialized field lengths differ from the artifact input".to_owned(),
+        ));
+    }
     if declared_airs.len() != geometry.air_instances.len() {
         return Err(ArtifactError::InvalidInput(format!(
             "live AIR count differs: artifact {}, prover {}",
@@ -2930,12 +3083,6 @@ pub fn validate_live_ts13_demo_profile(
         .map(Vec::len)
         .collect::<Vec<_>>();
     let query_count = input.proof_system.fri_query_count as usize;
-    let sampled_secure_field_count = proof
-        .sampled_values
-        .iter()
-        .flatten()
-        .copied()
-        .sum::<usize>();
     let sampled_value_histograms_match = proof.sampled_values.len()
         == input.proof_system.merkle_trees.len()
         && proof
@@ -2981,20 +3128,15 @@ pub fn validate_live_ts13_demo_profile(
         .ok_or_else(|| {
             ArtifactError::InvalidInput("FRI last-layer coefficient count exceeds usize".to_owned())
         })?;
-    let (proof_worst_case, _) = deterministic_proof_bound(&ts13_demo_proof_bound_terms())?;
     if proof.commitment_count != 5
         || proof.tree_zero_root != Some(input.tree_zero.root.0)
         || sampled_tree_columns != expected_tree_columns
         || queried_tree_columns != expected_tree_columns
-        || sampled_secure_field_count != FROZEN_SAMPLED_SECURE_FIELD_COUNT as usize
         || !sampled_value_histograms_match
         || !queried_value_shape_matches
         || !decommitment_shape_matches
         || !fri_shape_matches
-        || proof.outer_claims_and_framing_bytes != FROZEN_OUTER_CLAIMS_AND_FRAMING_BYTES as usize
-        || proof.proof_bytes > proof_worst_case as usize
         || proof.fri_last_layer_coefficient_count != expected_last_layer_coefficients
-        || proof.merged_sha_layout != Some((8, 8))
         || proof.post_interaction_payload_bytes.len() != 20
         || proof
             .post_interaction_payload_bytes
@@ -3008,7 +3150,7 @@ pub fn validate_live_ts13_demo_profile(
                 }
             })
         || proof.sha_table_pair_claim_count != 3
-        || proof.attribute_sha_range_claim_counts != [0]
+        || proof.attribute_sha_range_claim_count != 0
         || proof.mso_sha_range_claim_count != Some(0)
         || proof.issuer_mldsa_group_eval_count != Some(30)
         || proof.issuer_mldsa_claimed_sum_count != Some(18)
@@ -3063,7 +3205,7 @@ mod tests {
     }
 
     fn minimal_input() -> GenerationInputV1 {
-        let modules = FROZEN_MODULE_ORDER
+        let modules = CANONICAL_MODULE_ORDER
             .iter()
             .map(|name| ModuleLayoutV1 {
                 name: (*name).to_owned(),
@@ -3075,9 +3217,9 @@ mod tests {
                     .map(|air_instance_ordinal| {
                         let zero_component = matches!(
                             *name,
-                            "ts13_public_context_bind_v1" | "public_revocation_key_epoch_bind"
+                            "ts13_public_context_bind" | "public_revocation_key_epoch_bind"
                         );
-                        let max_log_size = if *name == "u9_private_device_key_binder" {
+                        let max_log_size = if *name == "private_device_key_binder" {
                             9
                         } else if zero_component {
                             0
@@ -3103,7 +3245,7 @@ mod tests {
                                 .then_some(AirComponentLayoutV1 {
                                     name: format!("{name}_component_{air_instance_ordinal}"),
                                     trace_rows: 1_u32 << max_log_size,
-                                    active_rows: if *name == "u9_private_device_key_binder" {
+                                    active_rows: if *name == "private_device_key_binder" {
                                         416
                                     } else {
                                         1
@@ -3120,33 +3262,34 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let first_component = modules[0].air_instances[0].components[0].name.clone();
-        let corpus_sha256: [u8; 32] = decode_hex(FROZEN_REQUEST_CONTEXT_CORPUS_SHA256)
-            .expect("frozen corpus digest is hex")
+        let corpus_sha256: [u8; 32] = decode_hex(CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256)
+            .expect("canonical corpus digest is hex")
             .try_into()
-            .expect("frozen corpus digest is 32 bytes");
+            .expect("canonical corpus digest is 32 bytes");
         GenerationInputV1 {
             credential_shape: CredentialShapeV1 {
-                issuer_cose_sig_structure_bytes: FROZEN_ISSUER_COSE_SIG_STRUCTURE_BYTES,
-                mso_payload_bytes: FROZEN_MSO_PAYLOAD_BYTES,
-                padded_issuer_signed_item_bytes: FROZEN_PADDED_ISSUER_SIGNED_ITEM_BYTES,
-                digest_identifier_integer_widths: FROZEN_DIGEST_IDENTIFIER_INTEGER_WIDTHS.to_vec(),
+                issuer_cose_sig_structure_bytes: CANONICAL_ISSUER_COSE_SIG_STRUCTURE_BYTES,
+                mso_payload_bytes: CANONICAL_MSO_PAYLOAD_BYTES,
+                padded_issuer_signed_item_bytes: CANONICAL_PADDED_ISSUER_SIGNED_ITEM_BYTES,
+                digest_identifier_integer_widths: CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS
+                    .to_vec(),
             },
             request_context_corpus: RequestContextCorpusV1 {
                 corpus_sha256: Digest32(corpus_sha256),
                 observed_max_device_cose_sig_structure_bytes:
-                    FROZEN_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES,
-                device_sig_structure_capacity: FROZEN_DEVICE_SIG_STRUCTURE_CAPACITY,
+                    CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES,
+                device_sig_structure_capacity: CANONICAL_DEVICE_SIG_STRUCTURE_CAPACITY,
             },
             modules,
             relations: vec![RelationLayoutV1 {
                 name: "FixtureRelation".to_owned(),
-                challenge_owner_module: FROZEN_MODULE_ORDER[0].to_owned(),
+                challenge_owner_module: CANONICAL_MODULE_ORDER[0].to_owned(),
                 tuple: vec![RelationFieldV1 {
                     name: "value".to_owned(),
                     scalar: ColumnScalarV1::M31,
                 }],
                 uses: vec![RelationUseV1 {
-                    module: FROZEN_MODULE_ORDER[0].to_owned(),
+                    module: CANONICAL_MODULE_ORDER[0].to_owned(),
                     component: first_component,
                     sign: RelationSignV1::Positive,
                     multiplicity: "1".to_owned(),
@@ -3154,13 +3297,13 @@ mod tests {
             }],
             transcript: TranscriptLayoutV1 {
                 public_mix_order: vec![TranscriptEntryV1 {
-                    owner_module: FROZEN_MODULE_ORDER[3].to_owned(),
+                    owner_module: CANONICAL_MODULE_ORDER[3].to_owned(),
                     name: "public_context".to_owned(),
                     encoding: "bytes".to_owned(),
                     fixed_length: Some(96),
                 }],
                 challenge_order: vec![TranscriptEntryV1 {
-                    owner_module: FROZEN_MODULE_ORDER[0].to_owned(),
+                    owner_module: CANONICAL_MODULE_ORDER[0].to_owned(),
                     name: "lookup".to_owned(),
                     encoding: "secure_field".to_owned(),
                     fixed_length: Some(16),
@@ -3206,10 +3349,10 @@ mod tests {
             tree_zero: TreeZeroV1 {
                 derivation: "fixture".to_owned(),
                 hash: "Blake2s-256".to_owned(),
-                preprocessed_column_order: (0..FROZEN_TREE_COLUMN_COUNTS[0])
+                preprocessed_column_order: (0..CANONICAL_TREE_COLUMN_COUNTS[0])
                     .map(|index| format!("fixture_{index}"))
                     .collect(),
-                committed_column_log_sizes: vec![1; FROZEN_TREE_COLUMN_COUNTS[0] as usize],
+                committed_column_log_sizes: vec![1; CANONICAL_TREE_COLUMN_COUNTS[0] as usize],
                 root: Digest32([2; 32]),
             },
             proof_system: ProofSystemV1 {
@@ -3226,10 +3369,10 @@ mod tests {
                 fri_fold_step: 2,
                 pow_bits: 20,
                 lifting_log_size: None,
-                merkle_trees: FROZEN_MERKLE_TREE_ORDER
+                merkle_trees: CANONICAL_MERKLE_TREE_ORDER
                     .iter()
-                    .zip(FROZEN_TREE_DEPTHS)
-                    .zip(FROZEN_TREE_COLUMN_COUNTS)
+                    .zip(CANONICAL_TREE_DEPTHS)
+                    .zip(CANONICAL_TREE_COLUMN_COUNTS)
                     .map(|((name, depth), columns)| MerkleTreeParametersV1 {
                         name: (*name).to_owned(),
                         depth,
@@ -3241,11 +3384,11 @@ mod tests {
                         }],
                     })
                     .collect(),
-                fri_layers: FROZEN_FRI_LAYER_INPUT_LOGS
+                fri_layers: CANONICAL_FRI_LAYER_INPUT_LOGS
                     .into_iter()
-                    .zip(FROZEN_FRI_LAYER_OUTPUT_LOGS)
-                    .zip(FROZEN_FRI_MERKLE_DEPTHS)
-                    .zip(FROZEN_FRI_WITNESS_CAPS)
+                    .zip(CANONICAL_FRI_LAYER_OUTPUT_LOGS)
+                    .zip(CANONICAL_FRI_MERKLE_DEPTHS)
+                    .zip(CANONICAL_FRI_WITNESS_CAPS)
                     .map(
                         |(((input_log_size, output_log_size), merkle_depth), witness_cap)| {
                             FriLayerParametersV1 {
@@ -3347,7 +3490,7 @@ mod tests {
         assert_eq!(first.circuit_hash, second.circuit_hash);
         assert_eq!(
             deterministic_proof_bound(&ts13_demo_proof_bound_terms()).unwrap(),
-            (1_755_050, 1_769_472)
+            (1_734_952, 1_769_472)
         );
         assert_eq!(first.proof_body_capacity, 1_769_472);
 
@@ -3448,14 +3591,14 @@ mod tests {
         let input = sample_input();
         input
             .validate()
-            .expect("committed generation input matches the frozen profile");
+            .expect("committed generation input matches the canonical profile");
     }
 
     #[test]
-    fn frozen_generation_input_rejects_census_and_cross_list_drift() {
+    fn canonical_generation_input_rejects_census_and_cross_list_drift() {
         assert!(
             minimal_input().validate().is_err(),
-            "a shape-only skeleton is not the frozen circuit"
+            "a shape-only skeleton is not the canonical circuit"
         );
 
         let mut drifted = sample_input();
@@ -3466,7 +3609,7 @@ mod tests {
         );
 
         let mut drifted = sample_input();
-        drifted.transcript.challenge_order[0].owner_module = FROZEN_MODULE_ORDER[1].to_owned();
+        drifted.transcript.challenge_order[0].owner_module = CANONICAL_MODULE_ORDER[1].to_owned();
         assert!(
             drifted.validate().is_err(),
             "each relation challenge is owned by its exact module"
@@ -3477,6 +3620,28 @@ mod tests {
         assert!(
             drifted.validate().is_err(),
             "tuple-count metadata must equal the relation schema"
+        );
+
+        let mut drifted = sample_input();
+        drifted
+            .relations
+            .iter_mut()
+            .find(|relation| relation.name == "r44_private_mso_start")
+            .expect("the canonical relation is present")
+            .tuple[0]
+            .name = "unexpected".to_owned();
+        assert!(
+            drifted.validate().is_err(),
+            "fixed-path relation schemas must be exact"
+        );
+
+        let mut drifted = sample_input();
+        drifted.transcript.public_mix_order[11]
+            .encoding
+            .push_str(",unexpected");
+        assert!(
+            drifted.validate().is_err(),
+            "fixed-path public transcript metadata must be exact"
         );
 
         let mut drifted = sample_input();
@@ -3491,6 +3656,18 @@ mod tests {
         assert!(
             drifted.validate().is_err(),
             "the implementation-constant allowlist is exact"
+        );
+
+        let mut drifted = sample_input();
+        let digest_widths = drifted
+            .implementation_constants
+            .iter_mut()
+            .find(|constant| constant.name == "impl.digest_identifier_integer_widths")
+            .expect("the canonical constant is present");
+        digest_widths.value = ConstantValueV1::UnsignedVector(vec![1, 2]);
+        assert!(
+            drifted.validate().is_err(),
+            "digest identifier widths must remain canonical"
         );
 
         let mut environment = sample_environment();

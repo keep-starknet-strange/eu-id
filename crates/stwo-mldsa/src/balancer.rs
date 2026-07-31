@@ -1,6 +1,6 @@
 //! Test-side LogUp balancer component: yields or consumes a fixed list of
 //! tuples against a cross-component relation so a component under standalone test
-//! is self-balancing. In the full composition (M6) the real counterpart
+//! is self-balancing. In the full composition, the real counterpart
 //! component (coeffs / the sponge) replaces the balancer — the relation contract
 //! is identical, so nothing in the component-under-test changes.
 //!

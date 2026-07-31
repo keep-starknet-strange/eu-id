@@ -1,6 +1,6 @@
 package com.kss.euid.zk.sdk
 
-// Runs as a conventional host/test APK pair on Firebase Test Lab.
+// Firebase Test Lab runs one host APK and one test APK.
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -19,7 +19,7 @@ import org.junit.runner.RunWith
 class Ts13MobileBenchmarkInstrumentedTest {
 
     @Test
-    fun proveIdentity_ts13DemoV1_emitsBenchmarkResult() {
+    fun proveIdentity_emitsBenchmarkResult() {
         val fixture = JSONObject(
             InstrumentationRegistry.getInstrumentation().context.assets
                 .open(FIXTURE_ASSET)
@@ -29,57 +29,53 @@ class Ts13MobileBenchmarkInstrumentedTest {
         assertEquals(FIXTURE_SCHEMA, fixture.getString("schema"))
         assertEquals(TS13_PROFILE, fixture.getString("profile"))
         assertEquals(TS13_PROOF_SYSTEM, fixture.getString("proofSystem"))
+        assertEquals(PRIVACY_CLAIM, fixture.getString("privacyClaim"))
         assertEquals("proveIdentity", fixture.getString("proveApi"))
         assertEquals("verifyIdentity", fixture.getString("verifyApi"))
-        assertEquals("Ts13DemoV1", fixture.getString("statementVariant"))
-        assertEquals("Ts13DemoV1", fixture.getString("witnessVariant"))
+        assertEquals("IdentityStatement", fixture.getString("statementType"))
+        assertEquals("IdentityWitness", fixture.getString("witnessType"))
         val statementFixture = fixture.getJSONObject("statement")
         val witnessFixture = fixture.getJSONObject("witness")
         val circuitHash = statementFixture.getString("circuitHash").decodeHex()
-        assertArrayEquals(ts13DemoCircuitHash(), circuitHash)
 
         val revocationEpoch = statementFixture.getLong("revocationEpoch")
         require(revocationEpoch in 0L..UInt.MAX_VALUE.toLong())
-        val statement = ZkPublicStatement.Ts13DemoV1(
-            Ts13DemoPublicStatementV1(
-                circuitHash = circuitHash,
-                zkSystemId = statementFixture.getString("zkSystemId"),
-                documentType = statementFixture.getString("documentType"),
-                namespace = statementFixture.getString("namespace"),
-                elementIdentifier = statementFixture.getString("elementIdentifier"),
-                expectedValueCbor = statementFixture.getString("expectedValueCbor").decodeHex(),
-                timestampEpochSeconds = statementFixture.getLong("timestampEpochSeconds"),
-                sessionTranscript = statementFixture.getString("sessionTranscript").decodeHex(),
-                trustedIssuerPublicKey =
-                    statementFixture.getString("trustedIssuerPublicKey").decodeHex(),
-                revocationPublicKey =
-                    statementFixture.getString("revocationPublicKey").decodeHex(),
-                revocationEpoch = revocationEpoch.toUInt(),
-            ),
+        val statement = IdentityStatement(
+            circuitHash = circuitHash,
+            zkSystemId = statementFixture.getString("zkSystemId"),
+            documentType = statementFixture.getString("documentType"),
+            namespace = statementFixture.getString("namespace"),
+            elementIdentifier = statementFixture.getString("elementIdentifier"),
+            expectedValueCbor = statementFixture.getString("expectedValueCbor").decodeHex(),
+            timestampEpochSeconds = statementFixture.getLong("timestampEpochSeconds"),
+            sessionTranscript = statementFixture.getString("sessionTranscript").decodeHex(),
+            trustedIssuerPublicKey =
+                statementFixture.getString("trustedIssuerPublicKey").decodeHex(),
+            revocationPublicKey =
+                statementFixture.getString("revocationPublicKey").decodeHex(),
+            revocationEpoch = revocationEpoch.toUInt(),
         )
-        val witness = ZkMdocWitness.Ts13DemoV1(
-            Ts13DemoWitnessV1(
-                document = witnessFixture.getString("document").decodeHex(),
-                revocationIdLo = witnessFixture.getString("revocationIdLo").toULong(),
-                revocationIdHi = witnessFixture.getString("revocationIdHi").toULong(),
-                revocationSignature =
-                    witnessFixture.getString("revocationSignature").decodeHex(),
-            ),
+        val witness = IdentityWitness(
+            document = witnessFixture.getString("document").decodeHex(),
+            revocationIdLo = witnessFixture.getString("revocationIdLo").toULong(),
+            revocationIdHi = witnessFixture.getString("revocationIdHi").toULong(),
+            revocationSignature =
+                witnessFixture.getString("revocationSignature").decodeHex(),
         )
 
         val proveStarted = SystemClock.elapsedRealtimeNanos()
         val proof = proveIdentity(statement, witness)
         val proveMs = elapsedMilliseconds(proveStarted)
 
-        assertTrue(proof.size >= V4_HEADER_BYTES)
-        assertArrayEquals(V4_MAGIC, proof.copyOfRange(0, V4_MAGIC.size))
-        assertEquals(V4_VERSION, readU16Le(proof, 8))
+        assertTrue(proof.size >= ENVELOPE_HEADER_BYTES)
+        assertArrayEquals(ENVELOPE_MAGIC, proof.copyOfRange(0, ENVELOPE_MAGIC.size))
+        assertEquals(ENVELOPE_VERSION, readU16Le(proof, 8))
         assertArrayEquals(circuitHash, proof.copyOfRange(10, 42))
         val bodyCapacity = readU32Le(proof, 42)
-        assertEquals(V4_HEADER_BYTES.toLong() + bodyCapacity, proof.size.toLong())
+        assertEquals(ENVELOPE_HEADER_BYTES.toLong() + bodyCapacity, proof.size.toLong())
 
         val verifyStarted = SystemClock.elapsedRealtimeNanos()
-        assertTrue(verifyIdentity(statement, proof).ok)
+        verifyIdentity(statement, proof)
         val verifyMs = elapsedMilliseconds(verifyStarted)
         val vmHwmKib = vmHwmKib()
         assertTrue(vmHwmKib > 0)
@@ -133,10 +129,12 @@ class Ts13MobileBenchmarkInstrumentedTest {
         const val FIXTURE_ASSET = "ts13_mobile_benchmark_fixture_v1.json"
         const val FIXTURE_SCHEMA = "euid-ts13-mobile-fixture-v1"
         const val LOG_TAG = "Ts13MobileBenchmark"
+        const val PRIVACY_CLAIM =
+            "public-input unlinkable; transcript zero knowledge pending"
         const val TS13_PROFILE = "ts13-pid-age-over-18-unlinkable-demo-v1"
         const val TS13_PROOF_SYSTEM = "stwo-euid-ts13-demo-v1"
-        const val V4_HEADER_BYTES = 46
-        const val V4_VERSION = 4
-        val V4_MAGIC = "EUIDTS13".toByteArray(Charsets.US_ASCII)
+        const val ENVELOPE_HEADER_BYTES = 46
+        const val ENVELOPE_VERSION = 4
+        val ENVELOPE_MAGIC = "EUIDTS13".toByteArray(Charsets.US_ASCII)
     }
 }

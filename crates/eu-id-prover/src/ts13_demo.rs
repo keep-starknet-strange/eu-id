@@ -1,7 +1,8 @@
-//! Frozen public-context primitives for the TS13 unlinkable age-over-18 demo.
+//! Fixed public-context primitives for the TS13 public-input-unlinkable demo.
 //!
-//! It owns the deterministic public derivation and the zero-column transcript
-//! component inserted into the frozen mdoc composition.
+//! This module defines the deterministic public derivation.
+//! It also defines the zero-column transcript component.
+//! The fixed mdoc composition includes this component.
 
 use std::cmp::Ordering;
 
@@ -23,35 +24,48 @@ const DOCUMENT_TYPE: &str = "eu.europa.ec.eudi.pid.1";
 const NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const ELEMENT_IDENTIFIER: &str = "age_over_18";
 const EXPECTED_VALUE_CBOR: &[u8] = &[0xf5];
+#[cfg(test)]
 const REQUEST_CONTEXT_CORPUS_LABEL: &str = "EUDI-TS13-REQUEST-CONTEXT-CORPUS-V1";
+#[cfg(test)]
 const REQUEST_CONTEXT_CAPACITY_HEADROOM: usize = 128;
 const SECONDS_PER_DAY: i64 = 86_400;
 const TS13_DEMO_MIN_TIMESTAMP_SECONDS: i64 = 1_577_836_800;
 const TS13_DEMO_MAX_TIMESTAMP_SECONDS: i64 = 4_102_444_799;
+#[cfg(test)]
 const OPENID4VP_CORPUS_LABEL: &str = "official-openid4vp-1.0";
+#[cfg(test)]
 const ISO_QR_CORPUS_LABEL: &str = "iso18013-5-qr-ble-both-p256";
+#[cfg(test)]
 const ISO_NFC_STATIC_CORPUS_LABEL: &str = "iso18013-5-nfc-static-ble-both-p256";
+#[cfg(test)]
 const NDEF_DEVICE_ENGAGEMENT_TYPE: &[u8] = b"iso.org:18013:deviceengagement";
+#[cfg(test)]
 const NDEF_BLE_OOB_TYPE: &[u8] = b"application/vnd.bluetooth.le.oob";
+#[cfg(test)]
 const CORPUS_BLE_UUID: [u8; 16] = [
     0xb3, 0xd5, 0x2a, 0xc4, 0xa1, 0xb6, 0x4b, 0x51, 0xa2, 0x2e, 0x78, 0xee, 0x55, 0xef, 0x6e, 0xb6,
 ];
+#[cfg(test)]
 const CORPUS_DEVICE_KEY_X: [u8; 32] = [
     0x71, 0x04, 0xf7, 0xe2, 0xc2, 0xe9, 0x5c, 0xa7, 0x64, 0x82, 0xc0, 0xc9, 0x63, 0xd4, 0x54, 0xb7,
     0xe5, 0xd0, 0x53, 0xc5, 0xb5, 0x9c, 0xe8, 0x9d, 0x00, 0xff, 0x7c, 0x7d, 0x7a, 0xb6, 0xff, 0x7d,
 ];
+#[cfg(test)]
 const CORPUS_DEVICE_KEY_Y: [u8; 32] = [
     0xf4, 0x42, 0x82, 0x12, 0x92, 0xc2, 0x45, 0x3e, 0xc6, 0x7c, 0x75, 0x23, 0x3e, 0xa5, 0x6e, 0x17,
     0x34, 0xc2, 0x11, 0xae, 0x26, 0xb2, 0x59, 0xfd, 0xf2, 0x32, 0xb5, 0xb3, 0xd8, 0x2b, 0x1b, 0xa2,
 ];
+#[cfg(test)]
 const CORPUS_READER_KEY_X: [u8; 32] = [
     0xdb, 0x1b, 0x6d, 0x2c, 0xc5, 0xe6, 0xba, 0xeb, 0xd1, 0x2f, 0xb7, 0x6d, 0x4f, 0xa4, 0x09, 0x57,
     0x65, 0x98, 0x32, 0xe4, 0x1c, 0xad, 0xe1, 0x5d, 0xb9, 0x03, 0x8f, 0x37, 0xef, 0x5b, 0xa3, 0x21,
 ];
+#[cfg(test)]
 const CORPUS_READER_KEY_Y: [u8; 32] = [
     0xb0, 0x36, 0x1e, 0x20, 0x84, 0x71, 0xbb, 0x94, 0xa6, 0x87, 0x08, 0x9c, 0x49, 0x57, 0xfc, 0x4d,
     0x99, 0x83, 0xab, 0xe0, 0x4c, 0xde, 0xeb, 0x15, 0x5b, 0xcd, 0x69, 0x06, 0x40, 0x13, 0x77, 0x27,
 ];
+#[cfg(test)]
 const OPENID4VP_HANDOVER_INFO_SHA256: [u8; 32] = [
     0x04, 0x8b, 0xc0, 0x53, 0xc0, 0x04, 0x42, 0xaf, 0x9b, 0x8e, 0xed, 0x49, 0x4c, 0xef, 0xdd, 0x9d,
     0x95, 0x24, 0x0d, 0x25, 0x4b, 0x04, 0x6b, 0x11, 0xb6, 0x80, 0x13, 0x72, 0x2a, 0xad, 0x38, 0xac,
@@ -64,7 +78,7 @@ pub const ML_DSA_65_SIGNATURE_BYTES: usize = stwo_mldsa::constants::SIG_BYTES;
 /// Byte length of canonical `YYYY-MM-DDTHH:MM:SSZ`.
 pub const TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES: usize = 20;
 
-/// Public values needed to derive the frozen TS13 request context.
+/// Public values that derive the TS13 request context.
 ///
 /// `zk_system_id` is the relying-party-local request identifier. The fixed
 /// proof-system name is a separate constant in the canonical context array.
@@ -83,7 +97,7 @@ pub struct Ts13DemoPublicContextInput<'a> {
     pub revocation_epoch: u32,
 }
 
-/// All verifier-derived public bytes consumed by the final TS13 composition.
+/// All verifier-derived public bytes that the TS13 composition consumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13DemoDerivedContext {
     pub canonical_session_transcript: Vec<u8>,
@@ -103,23 +117,24 @@ pub struct Ts13DemoDerivedDeviceAuthentication {
     pub device_cose_sig_structure: Vec<u8>,
 }
 
-/// One captured request shape used to freeze the device-message capacity.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ts13DemoRequestContextCorpusEntry {
-    pub label: &'static str,
-    pub canonical_session_transcript: Vec<u8>,
-    pub device_cose_sig_structure: Vec<u8>,
+#[cfg(test)]
+struct Ts13DemoRequestContextCorpusEntry {
+    label: &'static str,
+    canonical_session_transcript: Vec<u8>,
+    device_cose_sig_structure: Vec<u8>,
 }
 
-/// Evidence committed to the later shape manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ts13DemoRequestContextMeasurement {
-    pub corpus_sha256: [u8; 32],
-    pub observed_max_device_cose_sig_structure_bytes: u32,
-    pub device_sig_structure_capacity: u32,
+#[cfg(test)]
+struct Ts13DemoRequestContextMeasurement {
+    corpus_sha256: [u8; 32],
+    observed_max_device_cose_sig_structure_bytes: u32,
+    device_sig_structure_capacity: u32,
 }
 
-/// Privacy-safe failures from deterministic TS13 public-context construction.
+/// Errors from deterministic TS13 public-context construction.
+/// These errors do not contain private data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ts13DemoContextError {
     MalformedSessionTranscript,
@@ -474,9 +489,9 @@ fn validate_canonical_cbor(bytes: &[u8]) -> Result<usize, Ts13DemoContextError> 
     }
 }
 
-/// Fully consume and validate the deterministic RFC 8949 encoding of a
-/// SessionTranscript. Token-level validation keeps canonical simple values,
-/// NaN, and infinities which `ciborium::Value` cannot round-trip losslessly.
+/// Consume and validate all bytes of an RFC 8949 SessionTranscript.
+/// Token validation preserves canonical simple values, NaN, and infinities.
+/// `ciborium::Value` cannot preserve these values without data loss.
 pub fn canonical_session_transcript(bytes: &[u8]) -> Result<Vec<u8>, Ts13DemoContextError> {
     if bytes.first().map(|byte| byte >> 5) != Some(4)
         || validate_canonical_cbor(bytes)? != bytes.len()
@@ -535,6 +550,7 @@ pub(crate) fn verification_timestamp_rfc3339_utc(
     Ok(rendered)
 }
 
+#[cfg(test)]
 fn p256_cose_key(x: &[u8; 32], y: &[u8; 32]) -> Result<Vec<u8>, Ts13DemoContextError> {
     canonical_cbor(&Value::Map(vec![
         (Value::Integer(1.into()), Value::Integer(2.into())),
@@ -544,10 +560,12 @@ fn p256_cose_key(x: &[u8; 32], y: &[u8; 32]) -> Result<Vec<u8>, Ts13DemoContextE
     ]))
 }
 
+#[cfg(test)]
 fn tagged_encoded_cbor(encoded: Vec<u8>) -> Value {
     Value::Tag(24, Box::new(Value::Bytes(encoded)))
 }
 
+#[cfg(test)]
 fn corpus_device_engagement(
     include_qr_retrieval_methods: bool,
 ) -> Result<Vec<u8>, Ts13DemoContextError> {
@@ -595,6 +613,7 @@ fn corpus_device_engagement(
     canonical_cbor(&Value::Map(entries))
 }
 
+#[cfg(test)]
 fn corpus_nfc_static_handover(device_engagement: &[u8]) -> Result<Value, Ts13DemoContextError> {
     let engagement_len = u8::try_from(device_engagement.len())
         .map_err(|_| Ts13DemoContextError::InvalidPublicContext)?;
@@ -603,8 +622,8 @@ fn corpus_nfc_static_handover(device_engagement: &[u8]) -> Result<Value, Ts13Dem
     let ble_type_len = u8::try_from(NDEF_BLE_OOB_TYPE.len())
         .map_err(|_| Ts13DemoContextError::InvalidPublicContext)?;
 
-    // NFC Forum Connection Handover 1.5, one active BLE carrier, and the
-    // auxiliary ISO DeviceEngagement record used by the wallet's static path.
+    // NFC Forum Connection Handover 1.5 with one active BLE carrier and one
+    // auxiliary ISO DeviceEngagement record.
     let mut handover_select = vec![
         0x91,
         0x02,
@@ -648,6 +667,7 @@ fn corpus_nfc_static_handover(device_engagement: &[u8]) -> Result<Value, Ts13Dem
     ]))
 }
 
+#[cfg(test)]
 fn corpus_session_transcripts() -> Result<Vec<(&'static str, Vec<u8>)>, Ts13DemoContextError> {
     let openid4vp = canonical_cbor(&Value::Array(vec![
         Value::Null,
@@ -721,11 +741,11 @@ pub fn derive_device_authentication(
     })
 }
 
-/// Deterministic request corpus shared by capacity measurement and artifact
-/// generation. Entries contain both the captured transcript and its full
-/// derived device COSE message.
-pub fn request_context_corpus(
-) -> Result<Vec<Ts13DemoRequestContextCorpusEntry>, Ts13DemoContextError> {
+/// Deterministic request corpus for capacity measurement and artifact generation.
+/// Each entry contains a transcript and its complete device COSE message.
+#[cfg(test)]
+fn request_context_corpus() -> Result<Vec<Ts13DemoRequestContextCorpusEntry>, Ts13DemoContextError>
+{
     corpus_session_transcripts()?
         .into_iter()
         .map(|(label, transcript)| {
@@ -739,6 +759,7 @@ pub fn request_context_corpus(
         .collect()
 }
 
+#[cfg(test)]
 fn canonical_request_context_corpus(
     corpus: &[Ts13DemoRequestContextCorpusEntry],
 ) -> Result<Vec<u8>, Ts13DemoContextError> {
@@ -759,9 +780,10 @@ fn canonical_request_context_corpus(
     ]))
 }
 
-/// Measure the supported request corpus and select the frozen power-of-two
-/// message capacity with the specification's 128-byte headroom.
-pub fn measure_request_context_corpus(
+/// Measure the supported request corpus.
+/// Select a fixed power-of-two capacity with 128 bytes of headroom.
+#[cfg(test)]
+fn measure_request_context_corpus(
 ) -> Result<Ts13DemoRequestContextMeasurement, Ts13DemoContextError> {
     let corpus = request_context_corpus()?;
     let observed_max = corpus
@@ -783,7 +805,7 @@ pub fn measure_request_context_corpus(
     })
 }
 
-/// Reject a request message which cannot fit the artifact's fixed geometry.
+/// Reject a request message that exceeds the artifact geometry.
 pub fn ensure_device_cose_sig_structure_capacity(
     device_cose_sig_structure: &[u8],
     capacity: u32,
@@ -796,8 +818,9 @@ pub fn ensure_device_cose_sig_structure_capacity(
     Ok(())
 }
 
-/// Derive the exact ISO DeviceAuthentication, COSE Sig_structure, and TS13
-/// canonical request context from verifier-authoritative public inputs.
+/// Derive the ISO DeviceAuthentication and COSE `Sig_structure`.
+/// Also derive the canonical TS13 request context.
+/// Use only verifier-authoritative public inputs.
 pub fn derive_public_context(
     input: Ts13DemoPublicContextInput<'_>,
 ) -> Result<Ts13DemoDerivedContext, Ts13DemoContextError> {
@@ -846,16 +869,16 @@ pub fn derive_public_context(
     })
 }
 
-/// Frozen zero-column AIR module which binds the TS13 request theorem before
-/// relation challenges are drawn.
+/// Zero-column AIR module for the TS13 request theorem.
+/// The module binds the theorem before the verifier draws relation challenges.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ts13PublicContextBindV1 {
+pub(crate) struct Ts13PublicContextBind {
     request_context_digest: [u8; 32],
     circuit_hash: [u8; 32],
 }
 
-impl Ts13PublicContextBindV1 {
-    pub const fn new(request_context_digest: [u8; 32], circuit_hash: [u8; 32]) -> Self {
+impl Ts13PublicContextBind {
+    pub(crate) const fn new(request_context_digest: [u8; 32], circuit_hash: [u8; 32]) -> Self {
         Self {
             request_context_digest,
             circuit_hash,
@@ -863,7 +886,7 @@ impl Ts13PublicContextBindV1 {
     }
 }
 
-impl Air for Ts13PublicContextBindV1 {
+impl Air for Ts13PublicContextBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         for &byte in PUBLIC_CONTEXT_TRANSCRIPT_DOMAIN
             .iter()
@@ -899,7 +922,7 @@ impl Air for Ts13PublicContextBindV1 {
     }
 }
 
-impl AirProver for Ts13PublicContextBindV1 {
+impl AirProver for Ts13PublicContextBind {
     fn max_log_size(&self) -> u32 {
         0
     }
@@ -1032,7 +1055,7 @@ mod tests {
         ] {
             assert_eq!(
                 verification_timestamp_rfc3339_utc(timestamp)
-                    .expect("timestamp is in the frozen range")
+                    .expect("timestamp is in the fixed range")
                     .as_slice(),
                 expected.as_bytes(),
                 "{timestamp}"
@@ -1191,8 +1214,8 @@ mod tests {
     }
 
     #[test]
-    fn context_bind_has_no_columns_and_mixes_exact_frozen_bytes() {
-        let bind = Ts13PublicContextBindV1::new([0x44; 32], [0x55; 32]);
+    fn context_bind_has_no_columns_and_mixes_exact_fixed_bytes() {
+        let bind = Ts13PublicContextBind::new([0x44; 32], [0x55; 32]);
         let mut channel = Blake2sChannel::default();
         bind.mix_public(&mut channel);
 
@@ -1210,7 +1233,7 @@ mod tests {
     #[test]
     fn context_bind_changes_for_each_bound_input_class() {
         let digest = |request_context_digest, circuit_hash| {
-            let bind = Ts13PublicContextBindV1::new(request_context_digest, circuit_hash);
+            let bind = Ts13PublicContextBind::new(request_context_digest, circuit_hash);
             let mut channel = Blake2sChannel::default();
             bind.mix_public(&mut channel);
             channel.digest()

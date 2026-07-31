@@ -1,33 +1,15 @@
 //! Fixed local range-check table contents for the SHA-256 component.
 //!
-//! Each public function returns the canonical row values for one active
-//! `Range_k` producer. A uniform `Vec<u32>` return type keeps the small carry
-//! tables and byte table committed through the same preprocessed-column path.
+//! Each function returns the canonical row values for one `Range_k` producer.
 //!
 //! ## What lives here
 //!
-//! - [`range_2`] / [`range_4`] / [`range_5`] — the three carry range-check
+//! - [`range_2`], [`range_4`], and [`range_5`] are the carry range-check
 //!   tables for the four mod-2³² limb-add families audited in
 //!   [`crate::headroom`]. Sizes are `RANGE_2 = 2`, `RANGE_4 = 4`,
 //!   `RANGE_5 = 5`.
-//! - [`range_8`] — the byte range-check table. 2⁸ rows. Used for terminal
-//!   digest bytes and exposed message bytes.
-//!
-//! ## What does **not** live here
-//!
-//! - **The LogUp pair-batching finalizer.** Stwo's
-//!   `stwo_constraint_framework::EvalAtRow::finalize_logup_in_pairs` is
-//!   already callable directly; the shared crate's eventual contribution
-//!   here is either a thin batching-policy wrapper or no wrapper at all.
-//!   Either way, no local stub is needed — call sites use the trait
-//!   method.
-//! - **Relation-tag types** (`Range2Relation`, `Range8Relation`, …).
-//!   These are emitted alongside `add_to_relation` wiring in the
-//!   downstream lookup-wiring work; until that wiring is in flight there
-//!   is nothing here to tag. Relation tags are component-owned, not
-//!   foundation-owned.
-//! - **SHA-256-specific tables.** Those are component-owned and live in
-//!   [`crate::tables`].
+//! - [`range_8`] is the byte range-check table. It has 2⁸ rows. It checks
+//!   terminal digest bytes.
 
 use crate::headroom::{RANGE_2, RANGE_4, RANGE_5};
 
@@ -69,9 +51,9 @@ pub fn range_5() -> Vec<u32> {
 
 /// Preprocessed `Range_8` row content: `[0, 1, …, 2⁸ − 1]`.
 ///
-/// Used to range-check terminal digest bytes and exposed message bytes. Their
-/// existing `limb = 256·b_hi + b_lo` constraints then pin the corresponding
-/// 16-bit limbs without a 65,536-row table.
+/// Used to range-check terminal digest bytes. The
+/// `limb = 256·b_hi + b_lo` constraints pin the corresponding 16-bit digest
+/// limbs without a 65,536-row table.
 pub fn range_8() -> Vec<u32> {
     (0..RANGE_8).collect()
 }

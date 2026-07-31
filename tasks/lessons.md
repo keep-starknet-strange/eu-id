@@ -1,106 +1,122 @@
-# Campaign lessons
+# Repository rules
 
-- Before calling a benchmark a full identity or revocation proof, trace its exact FFI entrypoint,
-  fixture constructor, and optional statement fields. Keep legacy `identity`, default mdoc, and
-  revocation-enabled mdoc labels separate; do not infer revocation from a benchmark name.
-- Performance reports must set and record `RAYON_NUM_THREADS` explicitly. A default Rayon run is
-  multithreaded even when the product's `parallel` feature is not named directly, because dependency
-  feature unification can enable Stwo's parallel paths. Every benchmark result line must expose the
-  effective Rayon thread count before it is compared with a one-thread campaign baseline.
-- The full-PQ end-to-end acceptance gates are hard: issuer, device, and revocation must all use
-  ML-DSA-65; `pq_perf_probe` must run in release mode with `RAYON_NUM_THREADS=1` and the production
-  PCS config; prove must be under 1,000 ms, verify must remain under 100 ms, and the proof must remain
-  under 1,000,000 bytes. A campaign may document a blocked approach, but it must not reclassify an
-  unmet hard gate as unreachable or complete.
-- "Full-PQ proven in a STARK" fixes the trust boundary: issuer, device, and revocation ML-DSA-65
-  verification must all remain inside the STARK, and the existing production PCS parameters are
-  immutable unless the user explicitly authorizes a protocol change. Native verification or merely
-  renaming a faster PCS point is not a valid performance optimization and its measurements must be
-  retracted immediately.
-- A STARK verifier that accepts the prover's preprocessed-tree commitment without an independently
-  supplied root does not have trusted constants or lookup tables. Product verification must fail
-  closed unless tree 0 is pinned by the verifier; a root copied from the proof or its envelope is not
-  a pin.
-- Transcript-mixing a derived public value proves agreement with that value, not its derivation.
-  For exact ML-DSA, `tr` must be constrained to `SHAKE256(pkEncode(rho, t1), 64)` (or be derived by
-  an explicitly accepted public-input canonicalization boundary); treating a caller-supplied `tr`
-  as free weakens the FIPS relation.
-- Honest-vector and witness-mutation tests cannot establish AIR soundness. Audit every state column,
-  transition, permutation tuple field, and relation multiplicity directly; zeroed lookup gates and a
-  field omitted from a memory tuple can leave honest proving green while admitting adversarial traces.
-- When the requirement is literally "everything proven in a STARK," a transcript-bound GKR payload
-  verified by native code is still out of scope. Remove native acceptance hooks, make the outer AIR
-  constrain the result, and separately disclose any verifier-derived public preprocessing (such as
-  `ExpandA(rho)`) that has not itself been traced; do not call the result fully all-arithmetic-in-AIR.
-- Distinguish AIR self-containment from end-to-end soundness: deterministic public preprocessing
-  recomputed by the verifier can be a valid application trust boundary even when that derivation is
-  not traced. State that boundary precisely and let the integration requirement decide whether it
-  is acceptable; do not describe the whole flow as unusable merely because it is not self-contained.
-- When closing a public-derivation boundary, a post-proof claim mutation is not enough as the main
-  regression. Also give the prover a self-consistent forged derived witness and prove that the AIR
-  rejects its missing link to the canonical source transcript.
-- For heterogeneous mobile CPUs, thread count is not a sufficient benchmark policy. Pin the prover
-  pool to explicitly selected performance-core CPU IDs, exclude the lowest-capacity cluster, and
-  record selected/excluded IDs plus the topology source; use an unpinned all-core run only when the
-  user explicitly asks for it.
-- A late prover optimization is not covered by an earlier candidate's phone results. Give the final
-  shipped source its own same-APK, counter-ordered physical-phone A/B gate and keep it only when every
-  target clears a predeclared usefulness threshold without verifier, proof-size, memory, affinity,
-  provenance, or full-proof-success regression.
-- A cross-domain lookup negative must isolate the domain tag: move matching consumer and provider
-  multiplicities so the forged multiset would balance if tags were erased, then require rejection
-  with tags retained. Mutating only the consumer proves generic lookup imbalance, not tag separation.
-- Test attack state read by AIR evaluation cannot remain thread-local when quotient evaluation may
-  run on Rayon workers. Snapshot it once into immutable relation/eval state so shape inference,
-  interaction generation, prover workers, and verifier reconstruction all exercise the same attack.
-- A malformed optional-arm regression must first build a fixture that actually contains that arm.
-  Prove the three-role control fixture before shortening or extending revocation claim vectors.
-## 2026-07-29 — Treat a work-order exclusion as an immediate scope override
+## Evidence
 
-Pattern: the demo-prep document listed D5 alongside the requested implementation, but the user
-subsequently said to ignore D5.
+- Trace the exact prover entrypoint before you name a proof or benchmark.
+- Trace the exact verifier entrypoint.
+- Trace the fixture constructor.
+- Inspect every statement field.
+- Do not infer behavior from a function or benchmark name.
+- Treat comments and campaign prose as hypotheses.
+- Use executable constraints and verifier behavior as evidence.
+- Check public serialization.
+- Check relation signs and multiplicities.
+- Search hidden files with `rg --files -uu` or `git ls-tree -r HEAD`.
+- Do not report a required file as absent before this search.
+- Confirm that each filtered test executes at least one test.
+- A result with `0 passed` is not test evidence.
 
-Rule: immediately stop D5 research/implementation, remove it from the active plan, and do not carry
-its suggested code or tests into adjacent demo-prep branches.
+## Proof tests
 
-## 2026-07-29 — Use release mode for all verification suites when requested
+- Run all proof tests with `--release`.
+- Use a release profile with debug information when you need symbols.
+- Do not use a debug proof as final evidence.
+- Set `RAYON_NUM_THREADS` explicitly.
+- Record the effective Rayon thread count in each result.
+- On the 12-core demo host, set `RAYON_NUM_THREADS=12`.
+- Run one memory-heavy test harness thread with `--test-threads=1`.
+- Do not confuse the harness thread count with the Rayon worker count.
+- Prove the complete control fixture before each mutation test.
+- Build an optional witness arm before you test malformed forms of that arm.
 
-Pattern: the default work-order commands used the normal Cargo test profile, but the user wanted
-the substantially faster optimized test binaries throughout.
+## Trust boundaries
 
-Rule: add `--release` to every remaining Cargo test run and report only release-suite results as
-final verification evidence; keep perf probes release-built as well.
+- Keep required issuer verification inside the STARK.
+- Keep required device verification inside the STARK.
+- Keep required revocation verification inside the STARK.
+- Do not replace a required AIR check with native verification.
+- Pin the tree-zero root with verifier-trusted data.
+- Do not trust a tree-zero root from the proof or envelope.
+- Fail closed when the verifier cannot obtain the trusted root.
+- Hold every public preprocessing input fixed during a privacy comparison.
+- Test an intentional public-key change in a separate allowlist test.
 
-- Before reporting a repository-required file as absent, search hidden tracked
-  paths too (`rg --files -uu` or `git ls-tree -r HEAD`); ordinary file
-  discovery can omit `.agents` and turn a search mistake into a false
-  protocol-escalation premise.
-- An exact Cargo test filter is not evidence unless the result reports at
-  least one executed test. Confirm the fully qualified module path and the
-  nonzero `passed` count; a green `0 passed` run is only a filter typo.
-- Hold every verifier-preprocessing determinant fixed in cross-credential
-  privacy-region comparisons, especially the public device key. Otherwise a
-  legitimate tree-zero change is indistinguishable from a private-witness
-  leak; test the known public key exposure in a separate exact-whitelist gate.
-- Run every Cargo gate for this proof system with release optimizations.
-  Repeating debug proofs adds wall-clock cost without improving protocol
-  diagnosis. If symbols are needed, add a release-optimized profile that keeps
-  debug information instead of falling back to the dev profile.
-- On a 12-core demo workstation, serialize memory-heavy proof tests with
-  `--test-threads=1` but give each proof `RAYON_NUM_THREADS=12`; reserving a
-  one-worker rail for every correctness run needlessly wastes the available
-  cores. Keep the selected worker count explicit in every command and result.
-- Treat comments and campaign prose as hypotheses, not implementation
-  evidence. Trace the executable prover/verifier path, relation signs, public
-  serialization, and nonzero test results before reusing a branch.
-- Keep a core cryptographic proof contract independent of downstream wallet
-  frameworks unless the user explicitly puts integration in scope. The core
-  boundary ends at its exported prove/verify API and opaque proof bytes.
-- Before treating mobile benchmarking as new infrastructure, inspect the
-  repository's existing Firebase Game Loop APK, JNI entrypoint, provenance
-  manifests, and prior device matrix. Reuse that delivery path, but trace the
-  measured function: a historical `fullPq` benchmark is not evidence for a new
-  `proveIdentity` profile merely because both mention TS13.
-- When a derived circuit value needs transcript binding, preserve any separate
-  module's exact normative mix order and bind the value in the AIR that consumes
-  it; “public transcript” does not authorize changing an unrelated frozen binder.
+## Derived values
+
+- Constrain each security-relevant derived value to its canonical source.
+- Transcript mixing proves agreement only.
+- Transcript mixing does not prove derivation.
+- Constrain ML-DSA `tr` to `SHAKE256(pkEncode(rho, t1), 64)`.
+- State each accepted public canonicalization boundary.
+- Add a forged derived witness to each boundary regression.
+- Require the AIR to reject the forged witness.
+- Preserve the normative transcript mix order.
+- Bind a derived value in the AIR that consumes the value.
+
+## AIR soundness
+
+- Audit each state column directly.
+- Audit each transition directly.
+- Audit each permutation tuple field directly.
+- Audit each relation multiplicity directly.
+- Do not use honest vectors as the only soundness evidence.
+- Do not use witness mutations as the only soundness evidence.
+- Check each lookup gate for a zero-value bypass.
+- Check each memory tuple for an omitted field.
+- Isolate the domain tag in a cross-domain lookup test.
+- Balance the forged multiset when the test removes the tag.
+- Require rejection when the test restores the tag.
+- Copy attack state into immutable relation state before Rayon evaluation.
+- Use the same attack state for shape inference, proving, and verification.
+
+## Public preprocessing
+
+- Distinguish AIR self-containment from end-to-end soundness.
+- Identify each value that the verifier computes outside the AIR.
+- State the trust boundary for each computed value.
+- Do not describe verifier preprocessing as an AIR constraint.
+- If all arithmetic must be in the STARK, reject native GKR acceptance.
+- Constrain the GKR result in the outer AIR.
+
+## Mobile benchmarks
+
+- Identify the measured function before you reuse a mobile harness.
+- Benchmark only the canonical `proveIdentity` path.
+- Use the same APK for each physical-device comparison.
+- Measure the final source revision.
+- Use counter-ordered A/B runs for an optimization comparison.
+- Select performance-core CPU identifiers explicitly.
+- Exclude the lowest-capacity CPU cluster.
+- Record selected and excluded CPU identifiers.
+- Record the topology source.
+- Use all-core scheduling only when the user requests it.
+- Stop performance work when the user defers performance.
+- Do not add an optimization after that instruction.
+
+## Artifact provenance
+
+- Record the exact source commit for each artifact.
+- Record the fixture SHA-256.
+- Record each binary, AAR, and APK SHA-256.
+- Record the circuit hash.
+- Record the shape-manifest digest.
+- Record the soundness source-tree digest.
+- Record `Cargo.lock`, the Rust toolchain, and enabled features.
+- Use complete source roots for the soundness digest.
+- Use a closed allowlist for recursive generated-file exclusions.
+- Regenerate the artifact after each soundness-source change.
+- Reject artifact drift in verification.
+- Do not change transcript or domain-separator bytes during a terminology cleanup.
+
+## Scope
+
+- Apply a user scope change immediately.
+- Remove excluded work from the active plan.
+- Remove compatibility routes when the user selects one canonical API.
+- Do not keep a one-variant routing enum.
+- Require mandatory trust inputs in the canonical constructor.
+- Do not invent a protocol version to select an encoding rule.
+- Check the official credential schema before you restrict CBOR map order.
+- Keep the core proof contract independent of wallet code.
+- End the core contract at the exported prove and verify API.
+- Treat the proof bytes as opaque at that boundary.

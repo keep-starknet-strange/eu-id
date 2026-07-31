@@ -3,7 +3,7 @@
 //! `k × l` matrix `Â` of NTT-domain polynomials.
 //!
 //! Each entry `Â[r][s]` is `RejNTTPoly(ρ ‖ IntegerToBytes(s, 1) ‖
-//! IntegerToBytes(r, 1))` — note the column index is absorbed *before* the row
+//! IntegerToBytes(r, 1))`. The column index is absorbed before the row
 //! index (FIPS 204 Algorithm 32, line 3). Each coefficient is rejection-sampled
 //! from a 3-byte little-endian value masked to 23 bits, accepted iff `< q`.
 

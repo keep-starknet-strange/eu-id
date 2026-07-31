@@ -11,12 +11,10 @@ stwo-air-utils-derive.workspace = true
 air-core = { path = "../air-core" }
 serde.workspace = true
 num-traits.workspace = true
-itertools = "0.14"
 rayon = "1"
 
 [dev-dependencies]
 sha3 = "0.11.0"
-tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 
 [lints]
 workspace = true

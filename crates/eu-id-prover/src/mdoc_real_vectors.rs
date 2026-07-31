@@ -1,12 +1,12 @@
-//! Frozen third-party mdoc vectors shared by strict-parser unit tests.
+//! Fixed third-party mdoc vectors shared by strict-parser unit tests.
 
 use std::io::Cursor;
 
 use ciborium::value::Value;
 
-pub(crate) const CANONICAL_ITEM_KEY_ORDER: [&str; 4] =
+pub(crate) const PYMDOC_ITEM_KEY_ORDER: [&str; 4] =
     ["random", "digestID", "elementValue", "elementIdentifier"];
-pub(crate) const LEGACY_ITEM_KEY_ORDER: [&str; 4] =
+pub(crate) const LONGFELLOW_ITEM_KEY_ORDER: [&str; 4] =
     ["digestID", "random", "elementIdentifier", "elementValue"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,7 +76,7 @@ const FIXTURES: [FixtureSpec; 3] = [
         mso_len: 526,
         namespaces: PID_NAMESPACES,
         item_lengths: PID_ITEM_LENGTHS,
-        item_key_order: &CANONICAL_ITEM_KEY_ORDER,
+        item_key_order: &PYMDOC_ITEM_KEY_ORDER,
     },
     FixtureSpec {
         source: LONGFELLOW_MDL3_SOURCE,
@@ -84,7 +84,7 @@ const FIXTURES: [FixtureSpec; 3] = [
         mso_len: 1_750,
         namespaces: MDL3_NAMESPACES,
         item_lengths: MDL3_ITEM_LENGTHS,
-        item_key_order: &LEGACY_ITEM_KEY_ORDER,
+        item_key_order: &LONGFELLOW_ITEM_KEY_ORDER,
     },
     FixtureSpec {
         source: LONGFELLOW_EUAV11_SOURCE,
@@ -92,7 +92,7 @@ const FIXTURES: [FixtureSpec; 3] = [
         mso_len: 479,
         namespaces: EUAV11_NAMESPACES,
         item_lengths: EUAV11_ITEM_LENGTHS,
-        item_key_order: &LEGACY_ITEM_KEY_ORDER,
+        item_key_order: &LONGFELLOW_ITEM_KEY_ORDER,
     },
 ];
 
@@ -354,7 +354,7 @@ fn assert_subslice_once(haystack: &[u8], needle: &[u8], source: &str) {
         .count();
     assert_eq!(
         count, 1,
-        "{source}: reconstructed IssuerSignedItem occurs {count} times in the frozen bytes"
+        "{source}: reconstructed IssuerSignedItem occurs {count} times in the fixed bytes"
     );
 }
 
@@ -363,7 +363,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_all_frozen_vector_shapes() {
+    fn loads_all_fixed_vector_shapes() {
         let vectors = real_mdoc_vectors();
         assert_eq!(vectors.len(), 3);
         assert_eq!(

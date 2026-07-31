@@ -1,4 +1,4 @@
-//! LogUp relation contracts for `sampleinball_fsm` (M5, [CHAL]).
+//! LogUp relation contracts for `sampleinball_fsm`.
 //!
 //! Cross-component bindings ([`CCellRelation`], [`HashIoRelation`]) live in
 //! [`crate::binding`]; this module adds the FSM's own range tables and the
@@ -7,7 +7,7 @@
 //! | relation | arity | tuple | provider | consumer |
 //! |----------|-------|-------|----------|----------|
 //! | `CCell` | 2 | `(c_bind_id, c)` | coeffs C rows (−1) | sampleinball final reads (+1) |
-//! | `HashIo`| 3 | `(stream_id, byte_pos, byte)` | sponge/M6 (+1) | FSM stream consume (−1) |
+//! | `HashIo`| 3 | `(stream_id, byte_pos, byte)` | sponge (+1) | FSM stream consume (−1) |
 //! | `Mem`   | 4 | `(addr, value, timestamp, is_write)` | unsorted/final (+) | sorted (−) | offline memory |
 //! | `Swap`  | 2 | `(step, addr)` | accept rows ×2 (+) | read + write-j rows (−) | FSM↔mem addr tie |
 //! | `StepVal`| 2 | `(step, value)` | read rows (+) | write-i rows (−) | FSM↔mem value tie |
@@ -95,7 +95,7 @@ impl SibRelations {
         }
     }
 
-    /// Composed-statement constructor (M6): draw only the sib-private relations
+    /// Composed-statement constructor. Draw only the private SIB relations
     /// (mem + range tables) and reuse SHARED `ccell` (from coeffs) and `hash_io`
     /// (from the SIB-chain sponge) instances so the c-binding and squeeze-stream
     /// bytes cancel across components. Private draw order matches [`Self::draw`].

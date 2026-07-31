@@ -1,40 +1,36 @@
-//! The rotated (vertical) sponge component: one trace row per Keccak-f[1600]
-//! PERMUTATION, constant width, for a whole JOB LIST of SHAKE-128/SHAKE-256 sponges
-//! (S1 of the PQ perf campaign — see `tasks/keccak-service-design.md`).
+//! The vertical sponge component uses one constant-width trace row for each
+//! Keccak-f[1600] permutation in an ordered list of SHAKE-128 and SHAKE-256
+//! jobs.
 //!
-//! The horizontal [`crate::sponge`] commits one column per absorb/state/squeeze
-//! byte, so its column count grows with the message length (the measured
-//! column whale). This component rotates that layout: the rows are the
-//! concatenation of every job's permutations (absorb perms then extra squeeze
-//! perms), and the width is fixed at [`N_BASE_COLS`] base columns.
+//! The rows contain every job's absorb and extra squeeze permutations. The
+//! width is fixed at [`N_BASE_COLS`] base columns.
 //!
 //! ## Row semantics (job-local permutation index `r`, `0 ≤ r < n_perms`)
 //!
-//! * `r < n_absorb` — an ABSORB row: consumes padded block `r`.
-//! * `r ≥ n_absorb − 1` — a SQUEEZE-OUT row: this row's post-state rate is
-//!   squeeze block `s = r − (n_absorb − 1)` (post-state framing — the last
-//!   absorb row doubles as squeeze block 0, exactly FIPS 202).
+//! * `r < n_absorb`: an ABSORB row that consumes padded block `r`.
+//! * `r ≥ n_absorb − 1`: a SQUEEZE-OUT row. Its post-state rate is squeeze
+//!   block `s = r − (n_absorb − 1)`. The last absorb row is also squeeze block
+//!   0, as specified by FIPS 202.
 //!
 //! ## Chaining (Pattern B, `[-1, 0]` masks on `post`)
 //!
-//! The 200 `post` columns are read with a `[-1, 0]` mask: `post_prev` is the
+//! The 200 `post` columns use a `[-1, 0]` mask. `post_prev` is the
 //! previous row's post-permutation state. The pre-state of row `r` is built by
-//! MULTIPLICITY-GATED KeccakState IN tuples (three variants, so every tuple
-//! cell stays degree ≤ 1 — the design doc's "folded into the IN tuple
-//! construction"):
+//! multiplicity-gated KeccakState input tuples. The three variants keep each
+//! tuple cell at degree 1 or less:
 //!
 //! * `is_first`             → `[perm_id, IN, block0_spread | 0…0]` (capacity 0:
-//!   a job's chain NEVER leaks in from the previous job or the wraparound row).
+//!   this prevents input from a previous job or the wraparound row).
 //! * `is_absorb − is_first` → `[perm_id, IN, new_rate | post_prev.capacity]`,
 //!   with `new_rate = prev_rate ⊕ block` witnessed and xor3-table-checked.
 //! * `is_active − is_absorb`→ `[perm_id, IN, post_prev]` (extra squeeze perm).
 //!
-//! Every schedule flag/constant is PREPROCESSED (trusted — pinned by the
-//! tree-0 root), so all plain constraints are degree ≤ 2 and every logup
+//! Every schedule flag and constant is preprocessed and is pinned by the
+//! tree-0 root. Thus, all plain constraints are degree ≤ 2 and every LogUp
 //! tuple cell is degree ≤ 1; batch-4 logup constraints are degree 5 at
 //! `max_constraint_log_degree_bound = log + 2`.
 //!
-//! ## Relation signs (I-2: EXACTLY the horizontal sponge's)
+//! ## Relation signs
 //!
 //! conv use (+), xor3 use (+), HashIo absorb consume (−) / squeeze yield (+),
 //! KeccakState IN yield (+) / OUT require (−).
@@ -119,7 +115,7 @@ pub struct JobList {
 
 impl JobList {
     /// Build the list from job shapes, re-stamping `perm_id_base` cumulatively
-    /// (any incoming base is ignored — the list owns the global perm-id plan).
+    /// The list owns the global permutation-id plan and ignores an input base.
     pub fn new(shapes: impl IntoIterator<Item = Shape>) -> Self {
         let mut jobs = Vec::new();
         let mut base = 0usize;
@@ -185,7 +181,7 @@ impl JobList {
     }
 
     /// Stable FNV-1a digest of the full job-list shape, embedded in every
-    /// schedule preprocessed id (I-5: the id encodes the job list, so two
+    /// schedule preprocessed identifier. It encodes the job list, so two
     /// different job lists can never alias through tree-0 first-writer dedup).
     pub fn shape_digest(&self) -> String {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -200,8 +196,8 @@ impl JobList {
             mix(s.xof_mode.transcript_tag());
             mix(s.rate() as u64);
             if let Some(capacity) = s.message_capacity {
-                // Capacity schedules must collide across actual request
-                // lengths, but never with a historical fixed-length shape.
+                // Capacity schedules must match across actual request lengths
+                // but must not match a fixed-length shape.
                 mix(0x4341_5041_4349_5459);
                 mix(capacity as u64);
             } else {
@@ -236,7 +232,7 @@ impl JobList {
 }
 
 // =============================================================================
-// Schedule (preprocessed, shape-derived — witness-independent).
+// The preprocessed schedule depends only on the shape.
 // =============================================================================
 
 /// One row's schedule entry (all preprocessed).
@@ -417,7 +413,7 @@ pub fn gen_schedule_preprocessed(jobs: &JobList) -> Vec<ColEval> {
 // =============================================================================
 
 /// One active row's committed values (bytes; spreads derived). Cells a row does
-/// not use stay 0 — the constraint side gates them out with zero multiplicity.
+/// not use stay 0. The constraints gate them out with zero multiplicity.
 #[derive(Clone)]
 pub struct RowData {
     /// Actual absorb activity. For fixed shapes this mirrors the preprocessed
@@ -663,17 +659,16 @@ impl FrameworkEval for Eval {
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         // Every plain constraint is degree ≤ 2, every logup numerator is a
-        // degree ≤ 2 product of preprocessed gates, and every tuple cell —
-        // hence every denominator — is degree ≤ 1, so batch-4 constraints are
-        // degree 1 + 4·1 = 5 ≤ D5, which log + 2 affords (the M4 trap around
-        // the Pattern-B `[-1, 0]` masks is fixed in the pinned engine).
+        // degree ≤ 2 product of preprocessed gates. Every tuple cell and
+        // denominator is degree ≤ 1, so batch-4 constraints are
+        // degree 1 + 4·1 = 5 ≤ D5. The log + 2 bound supports this degree.
         self.log_size() + 2
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let rel = &self.relations;
         let d = self.jobs.shape_digest();
 
-        // Schedule (preprocessed, trusted — no boolean constraints needed).
+        // The preprocessed schedule does not need boolean constraints.
         let is_active = eval.get_preprocessed_column(schedule_id(&d, "is_active"));
         let is_first = eval.get_preprocessed_column(schedule_id(&d, "is_first"));
         let is_absorb = eval.get_preprocessed_column(schedule_id(&d, "is_absorb"));
@@ -782,9 +777,9 @@ impl FrameworkEval for Eval {
             );
         }
 
-        // Fixed jobs retain their historical preprocessed pad. Capacity jobs
-        // commit the pad suffix and pin its unique rising edge to the public
-        // actual length. The last rate byte is always in the suffix.
+        // Fixed jobs use the preprocessed padding schedule. Capacity jobs
+        // commit the padding suffix and bind its rising edge to the public
+        // length. The last rate byte is always in the suffix.
         for j in 0..MAX_RATE {
             if self.jobs.has_message_capacity() {
                 eval.add_constraint(
@@ -849,8 +844,7 @@ impl FrameworkEval for Eval {
                 eval.add_constraint(inactive_capacity.clone() * block_byte[j].clone());
                 eval.add_constraint(inactive_capacity.clone() * block_spread[j].clone());
                 eval.add_constraint(inactive_capacity.clone() * new_rate[j].clone());
-                let outside_rate =
-                    capacity_mode.clone() * (one.clone() - rate_gate[j].clone());
+                let outside_rate = capacity_mode.clone() * (one.clone() - rate_gate[j].clone());
                 eval.add_constraint(outside_rate.clone() * block_byte[j].clone());
                 eval.add_constraint(outside_rate.clone() * block_spread[j].clone());
                 eval.add_constraint(outside_rate.clone() * new_rate[j].clone());
@@ -1024,7 +1018,7 @@ impl InteractionClaim {
 }
 
 /// The per-row logup fractions in EXACTLY the AIR's emission order.
-/// Zero-multiplicity entries are `(0, 1)` — sound because the batch constraint
+/// Zero-multiplicity entries are `(0, 1)`. This is sound because the batch constraint
 /// evaluates the symbolic multiplicity (a preprocessed gate that IS zero
 /// there), so the committed accumulator step is 0 either way.
 fn row_fracs(

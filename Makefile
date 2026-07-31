@@ -1,32 +1,9 @@
-# eu-id — workspace build & developer-tooling entry point.
-#
-# A single interface shared by contributors and CI. `make check` delegates to
-# scripts/check.sh — the single definition of the lint gate, also run by the
-# pre-commit hook — so local and CI lint results never diverge.
-#
-# This branch is quantum-only: the product path uses ML-DSA issuer/device
-# authentication, and revocation lives on the dedicated TS13 path. Classical
-# P-256 demo and coprocessor targets live on the classical branches.
-
-PROOF ?= proof.bin
-
-# Predicates CLI overrides
-DOB      ?=
-DATE     ?= $(shell date +%Y-%m-%d)
-MIN_AGE  ?= 18
-STRATEGY ?= rc
-
-# Nationality predicate overrides
-NATIONALITY ?=
-ACCEPTABLE  ?=
+# Workspace commands for the canonical TS13 identity proof.
 
 .DEFAULT_GOAL := help
-.PHONY: help dev build test check check-quantum-only-deps fmt perf bench-predicates \
-        prove-age verify-age \
-        prove-nat verify-nat \
-        profile-prove-age-rc profile-verify-age-rc \
-        publish-android-local publish-android-symbols publish-jvm-local publish-local \
-        clean
+RAYON_NUM_THREADS ?= 12
+.PHONY: help dev build test check check-quantum-only-deps fmt perf \
+        publish-android-local clean
 
 help:
 	@echo "eu-id — workspace make targets"
@@ -37,30 +14,10 @@ help:
 	@echo "  make check         clippy + rustfmt — identical to the CI lint step"
 	@echo "  make check-quantum-only-deps  reject classical crypto in the workspace tree"
 	@echo "  make fmt           apply rustfmt across the workspace"
-	@echo "  make perf          run the full quantum-safe mdoc performance probe"
-	@echo "  make bench-predicates  run predicates benchmarks only"
+	@echo "  make perf          run the canonical identity API performance probe"
 	@echo "  make clean         remove build artifacts"
 	@echo ""
-	@echo "  make prove-age     run the age predicate prover  (DOB= required)"
-	@echo "  make verify-age    run the age predicate verifier"
-	@echo ""
-	@echo "  prove-age overrides: DOB= DATE= MIN_AGE= STRATEGY=rc PROOF="
-	@echo "  verify-age overrides: STRATEGY=rc PROOF="
-	@echo ""
-	@echo "  make prove-nat     run the nationality predicate prover  (NATIONALITY= ACCEPTABLE= required)"
-	@echo "  make verify-nat    run the nationality predicate verifier"
-	@echo ""
-	@echo "  prove-nat overrides: NATIONALITY= ACCEPTABLE= PROOF="
-	@echo "  verify-nat overrides: PROOF="
-	@echo ""
-	@echo "  make profile-prove-age-rc    profile age prove (range check)"
-	@echo "  make profile-verify-age-rc   profile age verify (range check)"
-	@echo ""
 	@echo "  make publish-android-local   build + publish the SDK AAR to ~/.m2 (mavenLocal)"
-	@echo "  make publish-android-symbols build + publish the SDK AAR with a GNU build-id (DWARF"
-	@echo "                               already on) so heapprofd/simpleperf traces symbolize"
-	@echo "  make publish-jvm-local       build + publish the SDK JVM jar to ~/.m2 (mavenLocal)"
-	@echo "  make publish-local           publish both the AAR and the JVM jar to ~/.m2"
 
 dev:
 	@if command -v cargo-watch >/dev/null 2>&1; then \
@@ -72,10 +29,10 @@ dev:
 	fi
 
 build:
-	cargo build --locked --workspace
+	cargo build --locked --workspace --all-targets --release
 
 test:
-	cargo test --locked --workspace --release
+	RAYON_NUM_THREADS=$(RAYON_NUM_THREADS) cargo test --locked --workspace --release -- --test-threads=1
 
 check:
 	@bash scripts/check.sh
@@ -87,58 +44,11 @@ fmt:
 	cargo fmt
 
 perf:
-	RAYON_NUM_THREADS=1 cargo run --locked --release -p eu-id-prover --example pq_perf_probe
+	RAYON_NUM_THREADS=$(RAYON_NUM_THREADS) cargo run --locked --release -p sdk --example ts13_sdk_perf_probe
 
-bench-predicates:
-	cargo bench --locked -p predicates
-
-prove-age:
-ifndef DOB
-	$(error DOB is required, e.g. make prove-age DOB=1990-01-01)
-endif
-	cargo run --bin prove -- age --dob $(DOB) --date $(DATE) --min-age $(MIN_AGE) --strategy $(STRATEGY) --output $(PROOF)
-
-verify-age:
-	cargo run --bin verify -- age --strategy $(STRATEGY) --input $(PROOF)
-
-prove-nat:
-ifndef NATIONALITY
-	$(error NATIONALITY is required, e.g. make prove-nat NATIONALITY=300 ACCEPTABLE=250,276,300)
-endif
-ifndef ACCEPTABLE
-	$(error ACCEPTABLE is required, e.g. make prove-nat NATIONALITY=300 ACCEPTABLE=250,276,300)
-endif
-	cargo run --bin prove -- nat --nationality $(NATIONALITY) --acceptable $(ACCEPTABLE) --output $(PROOF)
-
-verify-nat:
-	cargo run --bin verify -- nat --input $(PROOF)
-
-profile-prove-age-rc:
-	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin prove --release -- age --dob 1990-01-01 --output target/instruments/age-rc.bin
-
-profile-verify-age-rc:
-	cargo instruments -t Allocations --manifest-path crates/predicates/Cargo.toml --bin verify --release -- age --input target/instruments/age-rc.bin
-
-# Cross-compile + package the SDK and install it into the local Maven repo
-# (~/.m2). Each Gradle project owns its native build (cargo-ndk / cargo-zigbuild)
-# and UniFFI binding generation, and stamps the artifact with the workspace
-# version (parsed from [workspace.package] in Cargo.toml). Consumers depend on
-# the result via `mavenLocal()`.
+# Build the Android AAR and publish it to the local Maven repository.
 publish-android-local:
 	cd crates/sdk/android && ./gradlew publishToMavenLocal
-
-# Same as publish-android-local, but relinks each .so with a GNU build-id so the
-# stripped on-device lib can be matched to the unstripped copy in
-# crates/sdk/android/src/main/jniLibs for offline symbolization (Perfetto/heapprofd,
-# simpleperf). CARGO_PROFILE_RELEASE_DEBUG=true adds DWARF for this build only
-# (release is lean otherwise). Both toggles change the cargo fingerprint -> full rebuild.
-publish-android-symbols:
-	cd crates/sdk/android && CARGO_PROFILE_RELEASE_DEBUG=true ./gradlew publishToMavenLocal -PemitBuildId=true
-
-publish-jvm-local:
-	cd crates/sdk/jvm && ./gradlew publishToMavenLocal
-
-publish-local: publish-android-local publish-jvm-local
 
 clean:
 	cargo clean

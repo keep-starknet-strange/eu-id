@@ -3,69 +3,38 @@ name = "sdk"
 version.workspace = true
 edition.workspace = true
 
-# The EU-ID ZK SDK: the single source of truth for the prover/verifier data
-# contract. It owns the tagged Product/TS13 contract types, Product's
-# deterministic-CBOR statement encoding, and the shared `prove_identity` /
-# `verify_identity` entry points.
-#
-# The mdoc PID bodies run the real STWO prover/verifier behind the UniFFI
-# surface. No Multipaz / verifier-core types leak in; callers pass the CBOR mdoc
-# bytes and verifier trust material directly.
+# The EU-ID identity proof SDK exposes the TS13 prover and verifier through UniFFI.
+# Callers supply the mdoc bytes and the verifier trust data.
 [lib]
-# Crate/lib identifier -> output filename `libeuid_zk_sdk.so` / `.dylib`. Rust
-# lib names can't contain hyphens, so this is the underscore form of euid-zk-sdk.
+# Rust library names cannot contain hyphens.
 name = "euid_zk_sdk"
-# cdylib -> the `.so`/`.dylib` loaded by the Kotlin bindings on Android.
-# staticlib -> iOS static link (deferred). rlib -> lets the bundled
-# `uniffi-bindgen` bin link against this crate.
+# The cdylib serves Android. The staticlib serves iOS. The rlib serves the
+# binding generator.
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
-# Pulls the binding generator (clap, cargo_metadata, …) into the build. Needed
-# ONLY for the `uniffi-bindgen` bin — kept off by default so the SDK cdylib
-# does not link the whole generator toolchain into the `.so`.
+# Enable the binding generator only when you generate bindings.
 bindgen = ["uniffi/cli"]
-# Demo-only issuance helpers and their deterministic ML-DSA signing key.
-demo = ["dep:ml-dsa"]
 
 [dependencies]
-# The prover is ML-DSA-only by construction.
 eu-id-prover = { path = "../eu-id-prover" }
 uniffi = { version = "0.29" }
-# Demo-only issuance: the RustCrypto `ml-dsa` signer lets the deterministic demo
-# issuer re-sign a P-256 PID mdoc under ML-DSA-65 (see `demo` module). Same
-# version the eu-id-prover fixture uses.
-ml-dsa = { version = "0.1.1", optional = true }
 thiserror = "2.0.18"
-# Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`
-# map, so the same bytes come out on prove and verify sides.
-ciborium = "0.2.2"
-# The mdoc proof is serde-serializable; bincode is the inner proof-envelope
-# format shared by the wallet and verifier SDK calls.
 serde = { workspace = true }
 bincode = "1"
-# FFI transport compression keeps the exported byte API stable while
-# compressing the inner bincode mdoc proof payload.
-bzip2 = "0.6"
-sha2 = "0.10"
 rayon = "1"
 
 [dev-dependencies]
-# The prover's own ML-DSA reference verifier — used only by the demo module's
-# tests to confirm the minted issuer / assembled device signatures verify.
+ciborium = "0.2.2"
+ml-dsa = "0.1.1"
+sha2 = "0.10"
 stwo-mldsa = { path = "../stwo-mldsa" }
 stwo-sha256 = { path = "../stwo-sha256" }
-# Deterministic fully-PQ issuer/device/revocation fixture for the TS13
-# end-to-end envelope regression.
-ml-dsa = "0.1.1"
 
 [[bin]]
-# Bundled binding generator. Run as:
-#   cargo run -p sdk --bin uniffi-bindgen -- generate \
-#     --library <built .so/.dylib> --language kotlin --out-dir <dir>
+# The Android Gradle build uses this binding generator.
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
-# Only buildable with the bindgen toolchain; never compiled for the cdylib/.so.
 required-features = ["bindgen"]
 
 [lints]

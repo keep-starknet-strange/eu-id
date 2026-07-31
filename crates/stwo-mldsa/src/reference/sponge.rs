@@ -1,11 +1,9 @@
 //! SHAKE-128 / SHAKE-256 sponge wrappers that *record* their absorb and squeeze
 //! byte streams.
 //!
-//! The M1 reference is deliberately introspective: the future witness generator
-//! (M2/M3) must reproduce every Keccak permutation the verifier runs, so each
-//! sponge invocation here logs the exact bytes fed in and pulled out. The
-//! recorded [`SpongeTranscript`] is what a later in-circuit sponge is diffed
-//! against.
+//! The reference records each Keccak permutation for witness generation.
+//! Each invocation logs its exact input and output bytes.
+//! Tests compare the in-circuit sponge with the recorded [`SpongeTranscript`].
 //!
 //! FIPS 204 uses two XOFs (§3.7, "H denotes SHAKE-256, G denotes SHAKE-128"):
 //! - SHAKE-256 for `tr`, `µ`, `c̃`, and `SampleInBall`,
@@ -16,7 +14,7 @@ use sha3::{Shake128, Shake256};
 
 /// A recorded XOF invocation: the concatenated absorbed input and the squeezed
 /// output. Two transcripts with the same `absorbed` must produce the same
-/// `squeezed` prefix — the invariant the in-circuit sponge will be checked on.
+/// `squeezed` prefix. The in-circuit sponge checks this invariant.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpongeTranscript {
     /// Every byte absorbed, in order (concatenation of all `absorb` calls).

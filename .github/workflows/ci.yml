@@ -2,16 +2,10 @@ name: CI
 
 # Continuous integration for the eu-id workspace.
 #
-# Build, test, lint, and dependency isolation run on every pull request and on
-# pushes to the quantum-safe branch. Proof generation is slow, so the
-# end-to-end proof test is kept off the per-push path and runs daily.
-#
-# The `lint` job runs `make check` — the exact target contributors run
-# locally — so local and CI lint results can never diverge (see the Makefile).
+# Build, test, lint, and dependency checks run on each pull request and on
+# selected branches. Slow proof tests run each day.
 
 on:
-  # `pull_request` covers all feature-branch work. Direct pushes are checked on
-  # both the classical trunk and this branch's quantum-safe integration ref.
   push:
     branches: [main, feat/quantum-safe]
   pull_request:
@@ -20,9 +14,7 @@ on:
     # job) without slowing down per-push feedback.
     - cron: '0 6 * * *'
 
-# Cancel superseded in-progress runs for the same ref (e.g. rapid successive
-# pushes). The event name is part of the key so a push never cancels an
-# in-progress scheduled e2e run.
+# Cancel an older run for the same event and Git reference.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -37,9 +29,7 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # clippy + rustfmt. The `-D warnings` inside `make check` fails the build on
-  # any warning; it is scoped to the workspace crates, so warnings from the
-  # stwo git dependency never break our CI.
+  # Run Clippy and rustfmt.
   lint:
     name: Lint
     if: github.event_name != 'schedule'
@@ -47,72 +37,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out pinned Stwo engine patch
-        uses: actions/checkout@v4
-        with:
-          repository: 0xLucqs/stwo
-          ref: 8c9983908642f719032e7b7977f3c2081c84a2d9
-          path: .stwo-engine
-
-      - name: Materialize local Stwo patch path
-        run: |
-          sudo mkdir -p /Users/lucas
-          sudo ln -s "$GITHUB_WORKSPACE/.stwo-engine" /Users/lucas/stwo
-
-      # Pinned nightly — must match the channel in rust-toolchain.toml.
+      # Use the toolchain from rust-toolchain.toml.
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-01-15
           components: rustfmt, clippy
 
-      # Caches ~/.cargo/registry, ~/.cargo/git (the stwo git-dependency
-      # source), and target/ (compiled artifacts, including stwo). Keyed on
-      # Cargo.lock, so the heavy stwo build is reused until a dependency bump
-      # invalidates the cache.
+      # Cache dependencies and build output.
       - name: Cache cargo + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
-      # Identical to running `make check` locally:
-      #   cargo clippy -- -D warnings && cargo fmt -- --check
       - name: make check
         run: make check
 
-  # cargo build + cargo test --workspace, in a single job so the heavy stwo
-  # dependency compiles once and is shared between the two steps.
+  # Build and test in one job so both steps use the same build cache.
   build-test:
     name: Build & test
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # Serialize rayon: the stwo prover has a known lost-wakeup deadlock under
-    # multi-threaded release test runs that intermittently stalls CI to the job
-    # timeout. Single-threading is the documented workaround; the heavy proving
-    # tests are `#[ignore]`d (scheduled `e2e` job), so the non-ignored suite here
-    # stays fast.
+    # Use one Rayon worker to limit peak memory on the shared runner.
     env:
       RAYON_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out pinned Stwo engine patch
-        uses: actions/checkout@v4
-        with:
-          repository: 0xLucqs/stwo
-          ref: 8c9983908642f719032e7b7977f3c2081c84a2d9
-          path: .stwo-engine
-
-      - name: Materialize local Stwo patch path
-        run: |
-          sudo mkdir -p /Users/lucas
-          sudo ln -s "$GITHUB_WORKSPACE/.stwo-engine" /Users/lucas/stwo
-
-      # Pinned nightly — must match the channel in rust-toolchain.toml.
+      # Use the toolchain from rust-toolchain.toml.
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-01-15
 
       - name: Cache cargo + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -125,39 +81,25 @@ jobs:
       - name: make build
         run: make build
 
-      # `cargo test --workspace` covers every workspace member, so new
-      # component crates are picked up automatically once registered. Heavy
-      # proof-generation tests are marked `#[ignore]` and run in the scheduled
-      # `e2e` job rather than here.
+      # The workspace test command includes each workspace crate.
       - name: make test
         run: make test
 
-  # Scheduled-only: slow ignored tests plus one full quantum-safe mdoc probe.
-  # Release mode is mandatory because proving in debug is prohibitively slow.
+  # Run slow proof tests in release mode each day.
   e2e:
     name: End-to-end proof generation
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    env:
+      RAYON_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out pinned Stwo engine patch
-        uses: actions/checkout@v4
-        with:
-          repository: 0xLucqs/stwo
-          ref: 8c9983908642f719032e7b7977f3c2081c84a2d9
-          path: .stwo-engine
-
-      - name: Materialize local Stwo patch path
-        run: |
-          sudo mkdir -p /Users/lucas
-          sudo ln -s "$GITHUB_WORKSPACE/.stwo-engine" /Users/lucas/stwo
-
-      # Pinned nightly — must match the channel in rust-toolchain.toml.
+      # Use the toolchain from rust-toolchain.toml.
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-01-15
 
       - name: Cache cargo + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -165,16 +107,11 @@ jobs:
           cache-on-failure: true
 
       - name: Run end-to-end proof tests (release, ignored tests only)
-        run: cargo test --locked --workspace --release -- --ignored
+        run: cargo test --locked --workspace --release -- --ignored --test-threads=1
 
-      - name: Run full quantum-safe mdoc probe (release, single-thread)
+      - name: Run the identity API proof probe
         run: make perf
 
-      # Smoke-test the standalone-component example so it cannot silently
-      # rot. The example documents itself as "the shortest path to running
-      # the SHA-256 prover"; without an executed-in-CI step a regression
-      # that produces a wrong digest but still compiles would slip past
-      # `make build`. Runs in the same scheduled job as the ignored tests
-      # to share the warm cache.
+      # Run the canonical standalone SHA-256 example.
       - name: Run prove_demo example (release)
         run: cargo run --locked --release -p stwo-sha256 --example prove_demo

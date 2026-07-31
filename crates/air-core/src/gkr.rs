@@ -1,29 +1,24 @@
-//! Serializable transport for Stwo's [`GkrBatchProof`].
+//! Byte encoding for Stwo's [`GkrBatchProof`].
 //!
-//! A module that offloads part of its LogUp into a GKR proof cannot ship that
-//! proof inside the [`StarkProof`](stwo::core::proof::StarkProof) it commits —
-//! `GkrBatchProof` is not part of the STARK wire. Instead the orchestrator
-//! carries an opaque per-module byte payload beside the `StarkProof`
-//! (`prove_with_post_interaction` → `verify_with_expected_preprocessed_root_and_payloads`),
-//! and the module (de)serializes its own GKR proof with the helpers here.
+//! `GkrBatchProof` is not part of
+//! [`StarkProof`](stwo::core::proof::StarkProof). A module stores its GKR proof
+//! in an opaque post-interaction payload. The module encodes and decodes that
+//! payload with the functions in this module.
 //!
-//! `GkrBatchProof` is a foreign type with no `serde` derives, so we mirror it
-//! with owned `serde` structs built purely from its public accessors and
-//! constructors ([`GkrMask::new`], [`SumcheckProof.round_polys`],
-//! [`UnivariatePoly::new`]). The mirror is a faithful, lossless copy: encode
-//! then decode round-trips to an identical proof.
+//! `GkrBatchProof` has no `serde` implementation. The local owned types use its
+//! public accessors and constructors. These include [`GkrMask::new`],
+//! [`SumcheckProof.round_polys`], and [`UnivariatePoly::new`]. An encode and
+//! decode cycle preserves the proof.
 //!
 //! # Soundness
 //!
-//! This transport carries data only. It performs no verification. The GKR proof
-//! is bound to the transcript when the module *replays* it against the shared
-//! Fiat-Shamir channel inside `verify_post_interaction` (via
+//! Encoding and decoding do not verify the proof. The module replays the GKR
+//! proof against the shared Fiat-Shamir channel in `verify_post_interaction`
+//! with
 //! [`partially_verify_batch`](stwo::prover::lookups::gkr_verifier::partially_verify_batch)):
-//! the channel state at that point already commits trees 1/2, the drawn
-//! relations, and the claimed sums, so a tampered blob desynchronises the
-//! channel and the sumcheck/circuit checks reject. Corruption of the bytes here
-//! only ever produces a proof that fails that replay — it can never make a false
-//! statement verify.
+//! The channel state already binds trees 1 and 2, the relations, and the claimed
+//! sums. A changed payload changes the channel state. The sumcheck or circuit
+//! check then rejects the proof.
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};
@@ -40,11 +35,11 @@ const TS13_DEMO_GKR_MAX_POLYNOMIAL_COEFFICIENTS: usize = 4;
 /// Maximum canonical GKR payload size accepted by the TS13 demo profile.
 pub const TS13_DEMO_GKR_MAX_PAYLOAD_BYTES: usize = 20_128;
 
-/// `serde` mirror of [`GkrBatchProof`], built from its public surface.
+/// Serializable form of the public [`GkrBatchProof`] data.
 #[derive(Serialize, Deserialize)]
 struct GkrProofWire {
-    /// Per layer: the sumcheck round polynomials, each a coefficient vector.
-    /// `Vec<SumcheckProof>` → `Vec<round_polys>` → `Vec<UnivariatePoly>` → coeffs.
+    /// Sumcheck round polynomials for each layer.
+    /// Each polynomial is a coefficient vector.
     sumcheck_round_polys: Vec<Vec<Vec<QM31>>>,
     /// Per instance, per layer: the mask columns (each column is two evals).
     layer_masks: Vec<Vec<Vec<[QM31; 2]>>>,
@@ -52,7 +47,7 @@ struct GkrProofWire {
     output_claims: Vec<Vec<QM31>>,
 }
 
-/// Return whether an opaque payload has the frozen TS13 demo GKR wire shape.
+/// Return whether a payload has the required TS13 demo GKR wire shape.
 ///
 /// This is a bounded, read-only structural check. It does not verify the GKR
 /// proof; callers must still replay the decoded proof against the transcript.
@@ -115,9 +110,8 @@ pub fn encode_gkr_batch_proof(proof: &GkrBatchProof) -> Vec<u8> {
     bincode::serialize(&wire).expect("GKR proof mirror serializes")
 }
 
-/// Reconstruct a [`GkrBatchProof`] from a byte payload produced by
-/// [`encode_gkr_batch_proof`]. Returns `Err` on malformed bytes; callers must
-/// treat that as a verification failure (fail-closed).
+/// Reconstruct a [`GkrBatchProof`] from a payload produced by
+/// [`encode_gkr_batch_proof`]. Return an error if the payload is malformed.
 pub fn decode_gkr_batch_proof(bytes: &[u8]) -> Result<GkrBatchProof, bincode::Error> {
     let wire: GkrProofWire = bincode::deserialize(bytes)?;
     let sumcheck_proofs = wire

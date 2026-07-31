@@ -1,11 +1,10 @@
 //! State representation and the native Keccak-f[1600] reference used to fill
-//! traces and to validate them against `tiny-keccak`.
+//! and validate traces.
 //!
-//! The state is `[PackedM31; 200]` — 25 lanes of 8 little-endian byte limbs;
+//! The state is `[PackedM31; 200]`: 25 lanes of 8 little-endian byte limbs.
 //! byte `idx = lane*8 + byte_idx`. The `N_LANES` SIMD lanes of each `PackedM31`
-//! carry independent permutation instances (so one column set proves `N_LANES`
-//! permutations at once — this is the unit for cells-per-permutation
-//! accounting).
+//! carry independent permutation instances. One column set proves `N_LANES`
+//! permutations at once. This is the unit for cells-per-permutation accounting.
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;

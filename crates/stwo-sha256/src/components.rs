@@ -1,35 +1,26 @@
-//! Producer-side components for every preprocessed lookup table the
-//! SHA-256 AIR consumes.
+//! Producer components for the SHA-256 preprocessed lookup tables.
 //!
-//! The main `crate::constraints::Sha256Eval` is the **consumer**: it fires
-//! `add_to_relation(rel, +1, …)` on each lookup. For the LogUp protocol
-//! to balance to zero, every consumed row must be produced — yielded with
-//! a negative multiplicity equal to how many times the consumer used it.
+//! [`crate::constraints::Sha256Eval`] consumes each lookup with positive
+//! multiplicity. A producer yields the same row with the matching negative
+//! multiplicity. The total LogUp sum must be zero.
 //!
-//! Each table here is a small `FrameworkEval` with one preprocessed-column
-//! group (the table's row content) plus one main-trace **multiplicity**
-//! column per relation it serves. It emits `add_to_relation(rel,
-//! −multiplicity_cell, &row_cells)`, then `finalize_logup_in_pairs()`.
+//! Each table has preprocessed row columns and one multiplicity column for each
+//! relation. It emits `add_to_relation(rel, -multiplicity, &row_cells)` and
+//! then calls `finalize_logup_in_pairs()`.
 //!
 //! Producer components:
 //!
-//! - [`RangeKEval`] × 4 — one per `Range_k` channel (`k ∈ {2, 4, 5, 16}`);
-//!   `k` rows × 1 preprocessed column (the value) + 1 multiplicity. Each
-//!   producer's `log_size = ceil(log2(k))`, padded with row-`0`
-//!   repetition for `k ∉ {1, 2, 4, 16}`; see [`range_log_size`] and
-//!   [`crate::preprocessed`].
+//! - [`RangeKEval`] × 4, one for each [`RangeKind`]. Each producer has one
+//!   preprocessed value column and one multiplicity column. Small tables use
+//!   trailing value-0 rows to meet the SIMD minimum; see [`range_log_size`]
+//!   and [`crate::preprocessed`].
 //!
-//! Every preprocessed-column ID is namespaced under the `"sha256_"` prefix
-//! so it cannot collide with other modules' tables in a combined workspace
-//! proof. The `id()` constructors live next to their evaluators so the
-//! matching trace generator (`crate::preprocessed`) and the evaluator stay
-//! in lock-step.
+//! Each preprocessed-column ID uses the `"sha256_"` namespace. This namespace
+//! prevents collisions with other proof modules.
 
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
-};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntry};
 
 use crate::tables_local::RANGE_8;
 
@@ -79,13 +70,12 @@ fn shared_id(name: &str) -> PreProcessedColumnId {
 /// Which `Range_k` table a producer or consumer fires against. The lookup
 /// pins one value into `[0, k)`.
 ///
-/// **N1 — `Range8` is reserved for byte checks.**
 /// `Range2`/`Range4`/`Range5` size mod-2³² add-carry checks (per the
 /// `crate::headroom` audit, the carry of a `k`-addend add lives in
 /// `[0, k)`). `Range8`, by contrast, is the 2⁸-row table used for terminal
-/// digest bytes and exposed message bytes. Passing `Range8`
-/// to `crate::constraints::emit_mod_2_32_add_linear` is rejected by an
-/// explicit `panic!` because no mod-2³² add carry uses the byte range.
+/// digest bytes. Passing `Range8` to
+/// `crate::constraints::emit_mod_2_32_add_linear` is rejected by an explicit
+/// `panic!` because no mod-2³² add carry uses the byte range.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RangeKind {
     /// Carries from 2-addend mod-2³² adds (`T2`, `e_new`, `a_new`, finalization).
@@ -148,8 +138,8 @@ pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     shared_id(kind.tag())
 }
 
-/// Class-D `is_dummy` selector id for a shared producer's blinded table
-/// (Q-015 §4b / p4c Class D). `1` over the reserved dummy-key upper half
+/// Class-D `is_dummy` selector ID for a shared producer's blinded table.
+/// It is `1` over the reserved dummy-key upper half
 /// `[2^L, 2^(L+1))`, `0` over the real lower half `[0, 2^L)`. Keyed by the
 /// producer's stable tag so no two producers alias, and namespaced under
 /// `sha_shared_` so it never collides with the standalone tables.
@@ -161,66 +151,14 @@ pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessed
 /// committed at the main `Sha256Eval` trace's `log_n_rows`. The selector
 /// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
 /// `0` elsewhere. `Sha256Eval` reads it via `eval.get_preprocessed_column`
-/// and pins `is_first_block ≡ is_first_row`, anchoring the §10.3 chain
-/// on block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
+/// and pins `is_first_block ≡ is_first_row`. This anchors the block chain
+/// on the IV of block 0.
 pub fn is_first_row_column_id() -> PreProcessedColumnId {
     is_first_row_column_id_ns("")
 }
 
 pub(crate) fn is_first_row_column_id_ns(instance_namespace: &str) -> PreProcessedColumnId {
     consumer_id(instance_namespace, "is_first_row")
-}
-
-/// Preprocessed-column ID of the multi-slot `slot_starts` selector — the
-/// multi-message replacement for [`is_first_row_column_id`]: `1` at the
-/// first row of every slot region, `0` elsewhere. The ID encodes the full
-/// schedule (`n_slots`, `slot_log`, `log_n_rows`) so two different
-/// schedules can never alias one committed column (I-5); the fingerprint
-/// guard and air-core's id-content invariant fail closed on drift.
-pub fn slot_starts_column_id(
-    log_n_rows: u32,
-    slot_log: u32,
-    n_slots: usize,
-) -> PreProcessedColumnId {
-    id(&format!("slot_starts_{n_slots}x{slot_log}_log{log_n_rows}"))
-}
-
-/// Preprocessed-column ID of the multi-slot region selector for slot `s`:
-/// `1` on every row of slot `s`'s region, `0` elsewhere (including the
-/// tail). Gates per-slot digest/field attribution; schedule-encoded like
-/// [`slot_starts_column_id`].
-pub fn slot_sel_column_id(
-    s: usize,
-    log_n_rows: u32,
-    slot_log: u32,
-    n_slots: usize,
-) -> PreProcessedColumnId {
-    id(&format!(
-        "slot_sel_{s}_{n_slots}x{slot_log}_log{log_n_rows}"
-    ))
-}
-
-/// Preprocessed IDs of a multi-slot shared-tables consumer, in commit
-/// order: `slot_starts`, the 9 round-cyclic columns, then one `slot_sel`
-/// per slot. Multi-slot consumers exist only in shared-tables mode, so
-/// there is no producer-table prefix. The default round-cyclic IDs are
-/// log-content-dependent but id-shared — safe here because a composition
-/// mixing default SHA consumers at different `log_n_rows` trips air-core's
-/// preprocessed id-content invariant (fail closed at prove time). A standalone
-/// consumer that must compose at a different size can opt into disjoint
-/// consumer IDs with `Sha256{Prover,Verifier}::with_instance_namespace`.
-pub fn multi_consumer_preprocessed_column_ids(
-    log_n_rows: u32,
-    slot_log: u32,
-    n_slots: usize,
-) -> Vec<PreProcessedColumnId> {
-    let mut out = Vec::with_capacity(10 + n_slots);
-    out.push(slot_starts_column_id(log_n_rows, slot_log, n_slots));
-    out.extend(round_cyclic_column_ids());
-    for s in 0..n_slots {
-        out.push(slot_sel_column_id(s, log_n_rows, slot_log, n_slots));
-    }
-    out
 }
 
 /// IDs of the 9 round-cyclic preprocessed columns of the rotated
@@ -261,33 +199,25 @@ fn emit<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval.add_to_relation(RelationEntry::base(rel, mult, values));
 }
 
-/// Class-D blinded yield of one shared-table producer row (Q-015 §4b).
+/// Class-D blinded yield of one shared-table producer row.
 ///
 /// Emits ONE gated entry against the relation: numerator `-(1 − is_dummy)·mult`
 /// at the row key.
 ///
-/// On a real row (`is_dummy = 0`) the numerator is `-mult` — identical to the
-/// unblinded producer. On a dummy row (`is_dummy = 1`) the numerator is
+/// On a real row (`is_dummy = 0`), the numerator is `-mult`. On a dummy row
+/// (`is_dummy = 1`), the numerator is
 /// identically `0`, so the dummy row contributes nothing to the LogUp sum for
-/// ANY committed `m`. The fresh random blind multiplicities on the reserved
-/// upper half therefore stay in the COMMITTED multiplicity column exactly as
-/// before (same masking: same blind region, same column, same openings masked)
-/// while costing no second fraction — this is what the earlier cancelling PAIR
-/// (`-mult` and `+is_dummy·mult`) achieved at twice the interaction/quotient
-/// cost.
+/// any committed `m`. Random blind multiplicities stay in the committed
+/// multiplicity column but do not need a second fraction.
 ///
-/// Soundness: `is_dummy` is PREPROCESSED (trusted), so a malicious prover
-/// cannot un-gate a dummy row to emit a real key — on the whole dummy region
-/// the emitted numerator is forced to `0`. Dummy keys (`≥ 2^16`, unreachable by
-/// honest consumers) therefore remain unreachable, and the resulting LogUp
-/// balance is exactly that of the unblinded table. Both the key and the gate
-/// come from committed/preprocessed data the verifier reconstructs, so there is
-/// no free claimed-sum term (P4b blind_claim-hole caution).
+/// `is_dummy` is preprocessed, so a prover cannot enable a dummy row. The
+/// emitted numerator is `0` in the complete dummy region. Honest consumers
+/// cannot emit dummy keys (`≥ 2^16`). The verifier reconstructs the key and
+/// gate, so no free claimed-sum term exists.
 ///
 /// Degree: `(1 − is_dummy)·mult` = preprocessed × trace = degree 2, within the
 /// `D ≤ 3` budget under `max_constraint_log_degree_bound = blind_log_size + 1`.
-/// One fraction per producer (down from two) also LOWERS the batched LogUp
-/// denominator degree relative to the pair form.
+/// Each producer emits one fraction.
 fn emit_blind<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval: &mut E,
     rel: &R,
@@ -367,10 +297,8 @@ impl FrameworkEval for RangeKEval {
     }
 }
 
-pub type RangeKComponent = FrameworkComponent<RangeKEval>;
-
 // ---------------------------------------------------------------------------
-// Paired shared-table producer component (R2 fraction batching)
+// Paired shared-table producer component
 // ---------------------------------------------------------------------------
 
 /// One shared-SHA producer table, identified by which lookup it serves. Used
@@ -395,7 +323,7 @@ impl SharedProducer {
 
     /// Class-D committed row count: one log above the real width. The upper
     /// half is the reserved dummy-key region carrying fresh random blind
-    /// multiplicities (Q-015 §4b / p4c Class D). Every committed column of this
+    /// multiplicities. Every committed column of this
     /// producer — preprocessed value/group cells, `is_dummy` selector,
     /// multiplicity trace, interaction fraction — lives at this size.
     pub fn blind_log_size(self) -> u32 {
@@ -486,8 +414,6 @@ impl FrameworkEval for SharedProducerPairEval {
     }
 }
 
-pub type SharedProducerPairComponent = FrameworkComponent<SharedProducerPairEval>;
-
 // ---------------------------------------------------------------------------
 // Aggregate IDs
 // ---------------------------------------------------------------------------
@@ -564,7 +490,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_instance_namespace_preserves_exact_legacy_ids() {
+    fn empty_instance_namespace_preserves_exact_unnamespaced_ids() {
         let expected = [
             "sha256_range_2",
             "sha256_range_4",
@@ -608,10 +534,10 @@ mod tests {
         assert_eq!(namespaced[4].id, "sha256_instance_3_412f00_is_first_row");
         assert_eq!(namespaced[5].id, "sha256_instance_3_412f00_k_lo");
 
-        let legacy = all_preprocessed_column_ids();
+        let unnamespaced = all_preprocessed_column_ids();
         assert_eq!(
             &namespaced[..RANGE_TABLES.len()],
-            &legacy[..RANGE_TABLES.len()],
+            &unnamespaced[..RANGE_TABLES.len()],
             "standalone table-provider IDs stay globally deduplicable"
         );
         assert!(shared_table_preprocessed_column_ids()

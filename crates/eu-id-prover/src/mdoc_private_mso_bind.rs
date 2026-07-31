@@ -1,13 +1,14 @@
-//! Private MobileSecurityObject fact binding for unlinkable mdoc proofs.
+//! Private MobileSecurityObject fact binding for the TS13 identity proof.
 //!
-//! The issuer `Sig_structure` is provided by
-//! `mdoc_private_message::MdocPrivateMessageProvider`. This component consumes
-//! positive `(HOSTED_MSG_FIELD_ID, absolute_index, byte)` tuples at private,
-//! range-checked offsets and proves the public MSO facts which used to be
-//! recovered by parsing a public issuer message.
+//! `mdoc_private_message::MdocPrivateMessageProvider` provides the issuer
+//! `Sig_structure`.
+//! This component consumes positive issuer-message tuples.
+//! Each tuple contains `(HOSTED_MSG_FIELD_ID, absolute_index, byte)`.
+//! Private range-checked offsets select the tuples.
+//! The component proves the required MSO facts.
 //!
-//! `valueDigests` deliberately is not handled here. Its namespace-scoped map
-//! scan is a separate component sharing [`SharedMdocMsoStartRelation`].
+//! A separate component scans the namespace-scoped `valueDigests` map.
+//! Both components share [`SharedMdocMsoStartRelation`].
 //!
 //! # Relation polarity
 //!
@@ -16,11 +17,13 @@
 //! | issuer hosted message | private-message provider | `-` | this binder | `+` |
 //! | full padded MSO SHA stream | SHA-256 AIR | `-` | this binder | `+` |
 //! | private `mso_start` | this binder | `-` | valueDigests scanner | `+` |
-//! | private `device_pk_start` | this binder | `-` | U9 key binder | `+` |
+//! | private `device_pk_start` | this binder | `-` | device-key binder | `+` |
 //! | authenticated validity bytes | this binder | `-` | exact validity AIR | `+` |
 //!
-//! Optional handoff sites follow the 32 issuer sites and optional 32 SHA-stream
-//! sites. The claimed-sum blinder is always the final site.
+//! The SHA-stream sites follow the 32 issuer sites.
+//! The `mso_start` site follows them.
+//! The device-key-start site and two validity sites come next.
+//! The claimed-sum blinder is always the final site.
 
 use std::fmt;
 
@@ -28,7 +31,6 @@ use air_core::relations::{FieldBytesRelation, SharedFieldRelation, SharedRelatio
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use predicates::Date;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
@@ -59,6 +61,7 @@ use crate::mdoc_private_mso_validity::{
     MdocMsoValidityBytesRelation, MdocPrivateMsoValidityWitness,
     SharedMdocMsoValidityBytesRelation, MDOC_TDATE_BYTES,
 };
+use crate::policy::Date;
 
 pub(crate) const MDOC_PRIVATE_MSO_BIND_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_MSO_BIND_ROWS: usize = 1usize << MDOC_PRIVATE_MSO_BIND_LOG_SIZE;
@@ -67,11 +70,10 @@ pub(crate) const MDOC_PRIVATE_MSO_MIN_BLIND_ROWS: usize = 256;
 pub(crate) const MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES: usize = 1_987;
 pub(crate) const MDOC_PRIVATE_MSO_MAX_DOC_TYPE_BYTES: usize = 23;
 
-const BIND_VERSION: u64 = 2;
+const BIND_VERSION: u64 = 4;
 const BIND_DOMAIN: u64 = 0x4d44_4f43_4d53_4f42; // "MDOCMSOB"
 const CHUNK_BYTES: usize = 32;
 const DOC_TYPE_CHUNKS: usize = 1;
-const DEVICE_KEY_INFO_CHUNKS: usize = MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES.div_ceil(CHUNK_BYTES);
 const OFFSET_BITS: usize = 13;
 const TDATE_BYTES: usize = MDOC_TDATE_BYTES;
 const TDATE_DIGITS: usize = 14;
@@ -92,7 +94,7 @@ const M31_MODULUS: u32 = 2_147_483_647;
 // Canonical CBOR prefix through the protected-header byte-string head for
 // `["Signature1", h'a1013830', h'', <payload bstr>]`.
 const ISSUER_SIGNATURE1_CONTEXT_PREFIX: &[u8] = b"\x84\x6aSignature1\x44";
-const VERSION_PREFIX: &[u8] = b"\x67version\x63";
+const VERSION_1_0_RUN: &[u8] = b"\x67version\x631.0";
 const DIGEST_ALGORITHM_RUN: &[u8] = b"\x6fdigestAlgorithm\x67SHA-256";
 const DOC_TYPE_KEY: &[u8] = b"\x67docType";
 const VALID_FROM_ANCHOR: &[u8] = b"\x69validFrom\xc0\x74";
@@ -100,32 +102,19 @@ const VALID_UNTIL_ANCHOR: &[u8] = b"\x6avalidUntil\xc0\x74";
 const DEVICE_KEY_INFO_PREFIX: &[u8; 35] =
     b"\x6ddeviceKeyInfo\xa1\x69deviceKey\xa3\x01\x07\x03\x38\x30\x20\x59\x07\xa0";
 
-relation!(MdocMsoStartRelation, 2);
+relation!(MdocMsoStartRelation, 1);
 relation!(MdocDevicePkStartRelation, 1);
 
-/// Private `(mso_start,is_v2)` handoff to the namespace-scoped scanner.
+/// Private `mso_start` handoff to the namespace-scoped scanner.
 ///
-/// The version bit must ride in the same tuple as the anchor: a separate
-/// relation would let a prover pair a v1 anchor with a v2 bit or vice versa.
-/// This binder emits exactly one negative tuple and the scanner consumes one
-/// positive tuple.
+/// This binder constrains the MSO version to `1.0`.
+/// This binder emits one negative tuple.
+/// The scanner consumes one positive tuple.
 pub(crate) type SharedMdocMsoStartRelation = SharedRelation<MdocMsoStartRelation>;
 pub(crate) type SharedMdocDevicePkStartRelation = SharedRelation<MdocDevicePkStartRelation>;
 
 type MdocPrivateMsoColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type MdocPrivateMsoComponent = FrameworkComponent<MdocPrivateMsoEval>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum MdocPrivateMsoVersion {
-    V1,
-    V2,
-}
-
-impl MdocPrivateMsoVersion {
-    fn selector(self) -> u32 {
-        u32::from(matches!(self, Self::V2))
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MdocPrivateMsoShaStreamSpec {
@@ -133,24 +122,16 @@ pub(crate) struct MdocPrivateMsoShaStreamSpec {
     pub(crate) padded_len: usize,
 }
 
-/// Whether the binder constrains the legacy verifier-known key or hands a
-/// private canonical `pkEncode` window to U9.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MdocPrivateMsoDeviceKeyMode {
-    LegacyPublicExact(Vec<u8>),
-    Ts13PrivateStart,
-}
-
-/// Verifier-known shape and constants. No private MSO byte, offset, version,
-/// tdate, or multiplicity is carried here.
+/// Verifier-known shape and constants.
+/// This type excludes private MSO bytes, offsets, and dates.
+/// It also excludes private multiplicities.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MdocPrivateMsoBindSpec {
     pub(crate) issuer_message_len: usize,
     pub(crate) mso_len: usize,
     pub(crate) doc_type: String,
-    pub(crate) device_key_mode: MdocPrivateMsoDeviceKeyMode,
     pub(crate) policy_date: Date,
-    pub(crate) sha_stream: Option<MdocPrivateMsoShaStreamSpec>,
+    pub(crate) sha_stream: MdocPrivateMsoShaStreamSpec,
 }
 
 /// Prover-only values. Every offset except `payload_anchor_offset` is relative
@@ -165,7 +146,6 @@ pub(crate) struct MdocPrivateMsoBindWitness {
     pub(crate) device_key_info_offset: usize,
     pub(crate) valid_from_offset: usize,
     pub(crate) valid_until_offset: usize,
-    pub(crate) version: MdocPrivateMsoVersion,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -199,15 +179,6 @@ pub(crate) enum MdocPrivateMsoBindError {
         mso_len: usize,
         anchor_len: usize,
     },
-    DevicePublicKeyLength {
-        length: usize,
-        expected: usize,
-    },
-    DeviceKeyRelationHandleMismatch {
-        private_mode: bool,
-        device_pk_start_handle_present: bool,
-        validity_handle_present: bool,
-    },
     EmptyDocType,
     DocTypeTooLong {
         length: usize,
@@ -217,10 +188,6 @@ pub(crate) enum MdocPrivateMsoBindError {
         year: u32,
         month: u32,
         day: u32,
-    },
-    ShaStreamHandleMismatch {
-        spec_present: bool,
-        handle_present: bool,
     },
     ShaFieldIdOutOfRange {
         field_id: u32,
@@ -291,18 +258,6 @@ impl fmt::Display for MdocPrivateMsoBindError {
                 f,
                 "{mso_len}-byte MSO plus {anchor_len}-byte payload anchor cannot fit the {issuer_message_len}-byte issuer message"
             ),
-            Self::DevicePublicKeyLength { length, expected } => write!(
-                f,
-                "device ML-DSA public key has {length} bytes; expected {expected}"
-            ),
-            Self::DeviceKeyRelationHandleMismatch {
-                private_mode,
-                device_pk_start_handle_present,
-                validity_handle_present,
-            } => write!(
-                f,
-                "device-key mode/handle mismatch (private_mode={private_mode}, device_pk_start={device_pk_start_handle_present}, validity={validity_handle_present})"
-            ),
             Self::EmptyDocType => write!(f, "public docType is empty"),
             Self::DocTypeTooLong { length, max } => write!(
                 f,
@@ -311,13 +266,6 @@ impl fmt::Display for MdocPrivateMsoBindError {
             Self::InvalidPolicyDate { year, month, day } => {
                 write!(f, "invalid policy date {year:04}-{month:02}-{day:02}")
             }
-            Self::ShaStreamHandleMismatch {
-                spec_present,
-                handle_present,
-            } => write!(
-                f,
-                "MSO SHA stream spec/handle mismatch (spec={spec_present}, handle={handle_present})"
-            ),
             Self::ShaFieldIdOutOfRange { field_id } => write!(
                 f,
                 "MSO SHA stream field id {field_id} is not canonical in M31"
@@ -404,8 +352,7 @@ impl MdocPrivateMsoBindWitness {
     /// Absolute issuer-message position of the first private MSO byte.
     ///
     /// The valueDigests scanner consumes this same private start through
-    /// [`MdocMsoStartRelation`]; callers must not rediscover it with an
-    /// independent byte search.
+    /// [`MdocMsoStartRelation`]. Do not compute it with a separate byte search.
     pub(crate) fn mso_start(&self, mso_len: usize) -> Result<usize, MdocPrivateMsoBindError> {
         let anchor_len = payload_anchor(mso_len).len();
         self.payload_anchor_offset.checked_add(anchor_len).ok_or(
@@ -416,9 +363,10 @@ impl MdocPrivateMsoBindWitness {
         )
     }
 
-    /// Absolute issuer-message position of the first private FIPS `pkEncode`
-    /// byte. The fixed canonical COSE prefix is authenticated by this binder;
-    /// U9 consumes this exact start through [`MdocDevicePkStartRelation`].
+    /// Absolute issuer-message position of the first private FIPS `pkEncode` byte.
+    /// This binder authenticates the fixed canonical COSE prefix.
+    /// The device-key binder consumes this position.
+    /// It uses [`MdocDevicePkStartRelation`].
     pub(crate) fn device_pk_start(
         &self,
         spec: &MdocPrivateMsoBindSpec,
@@ -471,26 +419,21 @@ impl MdocPrivateMsoBindWitness {
         })
     }
 
-    /// Derive every private offset from canonical bytes rather than accepting
-    /// legacy statement-supplied offsets.
+    /// Derive every private offset from canonical bytes.
     ///
-    /// The complete `empty external_aad || bstr-head || mso_bytes` occurrence
-    /// and every supported fact anchor must be unique. This is the deliberate
-    /// trusted-canonical-issuer boundary of U2.
+    /// The complete payload occurrence must be unique.
+    /// Its form is `empty external_aad || bstr-head || mso_bytes`.
+    /// Each supported fact anchor must also be unique.
+    /// These rules define the canonical issuer boundary.
     ///
-    /// ponytail: if non-canonical or adversarial issuers become supported,
-    /// replace these unique anchors with a full private Sig_structure/MSO CBOR
-    /// parser rather than adding more search heuristics.
     pub(crate) fn from_canonical_issuer_message(
         spec: &MdocPrivateMsoBindSpec,
         issuer_message: Vec<u8>,
         mso_bytes: &[u8],
-        version: MdocPrivateMsoVersion,
     ) -> Result<Self, MdocPrivateMsoBindError> {
-        // Validate all public caps before constructing the anchored-payload
-        // search needle. Relation-handle presence is immaterial to this
-        // canonical witness helper, so mirror the spec's own mode.
-        validate_spec(spec, spec.sha_stream.is_some())?;
+        // Validate all public limits before you construct the search value.
+        // Relation handles do not change this canonical witness helper.
+        validate_spec(spec)?;
         if issuer_message.len() != spec.issuer_message_len {
             return Err(MdocPrivateMsoBindError::IssuerMessageLengthMismatch {
                 expected: spec.issuer_message_len,
@@ -510,13 +453,7 @@ impl MdocPrivateMsoBindWitness {
         let payload_anchor_offset =
             unique_subslice(&issuer_message, &anchored_payload, "Sig_structure payload")?;
 
-        let mut version_run = Vec::with_capacity(VERSION_PREFIX.len() + 3);
-        version_run.extend_from_slice(VERSION_PREFIX);
-        version_run.extend_from_slice(match version {
-            MdocPrivateMsoVersion::V1 => b"1.0",
-            MdocPrivateMsoVersion::V2 => b"2.0",
-        });
-        let version_offset = unique_subslice(mso_bytes, &version_run, "MSO version")?;
+        let version_offset = unique_subslice(mso_bytes, VERSION_1_0_RUN, "MSO version")?;
         let digest_algorithm_offset =
             unique_subslice(mso_bytes, DIGEST_ALGORITHM_RUN, "MSO digestAlgorithm")?;
         let doc_type_offset = unique_subslice(
@@ -524,14 +461,8 @@ impl MdocPrivateMsoBindWitness {
             &canonical_doc_type_run(&spec.doc_type),
             "MSO docType",
         )?;
-        let device_key_info = match &spec.device_key_mode {
-            MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(public_key) => {
-                canonical_device_key_info_run(public_key)
-            }
-            MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart => DEVICE_KEY_INFO_PREFIX.to_vec(),
-        };
         let device_key_info_offset =
-            unique_subslice(mso_bytes, &device_key_info, "MSO deviceKeyInfo")?;
+            unique_subslice(mso_bytes, DEVICE_KEY_INFO_PREFIX, "MSO deviceKeyInfo")?;
         checked_window_end(
             WindowKind::DeviceKeyInfo,
             device_key_info_offset,
@@ -561,7 +492,6 @@ impl MdocPrivateMsoBindWitness {
             device_key_info_offset,
             valid_from_offset,
             valid_until_offset,
-            version,
         })
     }
 }
@@ -584,12 +514,6 @@ enum WindowKind {
     ValidFrom,
     ValidUntil,
     MsoMirror,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EvalConstantKind {
-    DocType,
-    DeviceKeyInfo,
 }
 
 impl WindowKind {
@@ -616,9 +540,8 @@ struct PublicRow {
     continuation: bool,
     expected_active: [bool; CHUNK_BYTES],
     expected: [u8; CHUNK_BYTES],
-    eval_constant: Option<(EvalConstantKind, usize)>,
+    doc_type_chunk: Option<usize>,
     issuer_active: [bool; CHUNK_BYTES],
-    version_row: bool,
     valid_from_date_row: bool,
     valid_until_date_row: bool,
     device_pk_start_row: bool,
@@ -641,9 +564,8 @@ impl PublicRow {
             continuation,
             expected_active: [false; CHUNK_BYTES],
             expected: [0; CHUNK_BYTES],
-            eval_constant: None,
+            doc_type_chunk: None,
             issuer_active: [false; CHUNK_BYTES],
-            version_row: false,
             valid_from_date_row: false,
             valid_until_date_row: false,
             device_pk_start_row: false,
@@ -660,16 +582,11 @@ impl PublicRow {
 struct PublicShape {
     payload_anchor: Vec<u8>,
     rows: Vec<PublicRow>,
-    private_device_key: bool,
 }
 
 impl PublicShape {
     fn preprocessed_cols(&self) -> usize {
-        if self.private_device_key {
-            PRIVATE_PREPROCESSED_COLS
-        } else {
-            LEGACY_PREPROCESSED_COLS
-        }
+        PREPROCESSED_COLS
     }
 }
 
@@ -718,14 +635,6 @@ fn canonical_doc_type_run(doc_type: &str) -> Vec<u8> {
     run
 }
 
-fn canonical_device_key_info_run(public_key: &[u8]) -> Vec<u8> {
-    let mut run = Vec::with_capacity(MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES);
-    run.extend_from_slice(DEVICE_KEY_INFO_PREFIX);
-    run.extend_from_slice(public_key);
-    debug_assert_eq!(run.len(), MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES);
-    run
-}
-
 fn push_constant_window(rows: &mut Vec<PublicRow>, kind: WindowKind, bytes: &[u8]) {
     for (chunk_index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
         let chunk_relative = chunk_index * CHUNK_BYTES;
@@ -743,16 +652,17 @@ fn push_constant_window(rows: &mut Vec<PublicRow>, kind: WindowKind, bytes: &[u8
     }
 }
 
-fn push_eval_constant_window(
-    rows: &mut Vec<PublicRow>,
-    kind: WindowKind,
-    eval_kind: EvalConstantKind,
-    bytes_len: usize,
-) {
+fn push_doc_type_window(rows: &mut Vec<PublicRow>, bytes_len: usize) {
     for (chunk_index, chunk_relative) in (0..bytes_len).step_by(CHUNK_BYTES).enumerate() {
         let chunk_len = (bytes_len - chunk_relative).min(CHUNK_BYTES);
-        let mut row = PublicRow::new(kind, bytes_len, chunk_relative, chunk_len, chunk_index != 0);
-        row.eval_constant = Some((eval_kind, chunk_index));
+        let mut row = PublicRow::new(
+            WindowKind::DocType,
+            bytes_len,
+            chunk_relative,
+            chunk_len,
+            chunk_index != 0,
+        );
+        row.doc_type_chunk = Some(chunk_index);
         row.issuer_active[..chunk_len].fill(true);
         rows.push(row);
     }
@@ -774,21 +684,6 @@ fn push_private_device_key_window(rows: &mut Vec<PublicRow>) {
         row.device_pk_start_row = chunk_index == 0;
         rows.push(row);
     }
-}
-
-fn push_version_window(rows: &mut Vec<PublicRow>) {
-    let mut row = PublicRow::new(
-        WindowKind::Version,
-        VERSION_PREFIX.len() + 3,
-        0,
-        VERSION_PREFIX.len() + 3,
-        false,
-    );
-    row.expected_active[..VERSION_PREFIX.len()].fill(true);
-    row.expected[..VERSION_PREFIX.len()].copy_from_slice(VERSION_PREFIX);
-    row.issuer_active[..row.byte_len].fill(true);
-    row.version_row = true;
-    rows.push(row);
 }
 
 fn push_tdate_window(rows: &mut Vec<PublicRow>, kind: WindowKind, anchor: &[u8], valid_from: bool) {
@@ -840,10 +735,7 @@ fn push_mirror_rows(rows: &mut Vec<PublicRow>, mso_len: usize, padded_len: usize
     }
 }
 
-fn validate_spec(
-    spec: &MdocPrivateMsoBindSpec,
-    sha_handle_present: bool,
-) -> Result<PublicShape, MdocPrivateMsoBindError> {
+fn validate_spec(spec: &MdocPrivateMsoBindSpec) -> Result<PublicShape, MdocPrivateMsoBindError> {
     if spec.issuer_message_len == 0 {
         return Err(MdocPrivateMsoBindError::EmptyIssuerMessage);
     }
@@ -861,14 +753,6 @@ fn validate_spec(
             length: spec.mso_len,
             max: crate::ts13::TS13_MAX_MSO_PAYLOAD_BYTES,
         });
-    }
-    if let MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(public_key) = &spec.device_key_mode {
-        if public_key.len() != stwo_mldsa::constants::PK_BYTES {
-            return Err(MdocPrivateMsoBindError::DevicePublicKeyLength {
-                length: public_key.len(),
-                expected: stwo_mldsa::constants::PK_BYTES,
-            });
-        }
     }
     if spec.doc_type.is_empty() {
         return Err(MdocPrivateMsoBindError::EmptyDocType);
@@ -889,12 +773,6 @@ fn validate_spec(
             day: spec.policy_date.day,
         });
     }
-    if spec.sha_stream.is_some() != sha_handle_present {
-        return Err(MdocPrivateMsoBindError::ShaStreamHandleMismatch {
-            spec_present: spec.sha_stream.is_some(),
-            handle_present: sha_handle_present,
-        });
-    }
     let payload_anchor = payload_anchor(spec.mso_len);
     if payload_anchor.len() + spec.mso_len > spec.issuer_message_len {
         return Err(MdocPrivateMsoBindError::MsoCannotFitIssuerMessage {
@@ -903,20 +781,18 @@ fn validate_spec(
             anchor_len: payload_anchor.len(),
         });
     }
-    if let Some(sha) = &spec.sha_stream {
-        if sha.field_id >= M31_MODULUS {
-            return Err(MdocPrivateMsoBindError::ShaFieldIdOutOfRange {
-                field_id: sha.field_id,
-            });
-        }
-        let expected = checked_sha_padded_len(spec.mso_len)
-            .expect("bounded MSO length cannot overflow SHA padding");
-        if sha.padded_len != expected {
-            return Err(MdocPrivateMsoBindError::ShaPaddedLengthMismatch {
-                expected,
-                actual: sha.padded_len,
-            });
-        }
+    if spec.sha_stream.field_id >= M31_MODULUS {
+        return Err(MdocPrivateMsoBindError::ShaFieldIdOutOfRange {
+            field_id: spec.sha_stream.field_id,
+        });
+    }
+    let expected = checked_sha_padded_len(spec.mso_len)
+        .expect("bounded MSO length cannot overflow SHA padding");
+    if spec.sha_stream.padded_len != expected {
+        return Err(MdocPrivateMsoBindError::ShaPaddedLengthMismatch {
+            expected,
+            actual: spec.sha_stream.padded_len,
+        });
     }
 
     let mut rows = Vec::with_capacity(MDOC_PRIVATE_MSO_MAX_ACTIVE_ROWS);
@@ -927,28 +803,13 @@ fn validate_spec(
     anchor_row.issuer_active[..payload_anchor.len()].fill(true);
     rows.push(anchor_row);
 
-    push_version_window(&mut rows);
+    push_constant_window(&mut rows, WindowKind::Version, VERSION_1_0_RUN);
     push_constant_window(&mut rows, WindowKind::DigestAlgorithm, DIGEST_ALGORITHM_RUN);
-    push_eval_constant_window(
-        &mut rows,
-        WindowKind::DocType,
-        EvalConstantKind::DocType,
-        canonical_doc_type_run(&spec.doc_type).len(),
-    );
-    match &spec.device_key_mode {
-        MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(_) => push_eval_constant_window(
-            &mut rows,
-            WindowKind::DeviceKeyInfo,
-            EvalConstantKind::DeviceKeyInfo,
-            MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES,
-        ),
-        MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart => push_private_device_key_window(&mut rows),
-    }
+    push_doc_type_window(&mut rows, canonical_doc_type_run(&spec.doc_type).len());
+    push_private_device_key_window(&mut rows);
     push_tdate_window(&mut rows, WindowKind::ValidFrom, VALID_FROM_ANCHOR, true);
     push_tdate_window(&mut rows, WindowKind::ValidUntil, VALID_UNTIL_ANCHOR, false);
-    if let Some(sha) = &spec.sha_stream {
-        push_mirror_rows(&mut rows, spec.mso_len, sha.padded_len);
-    }
+    push_mirror_rows(&mut rows, spec.mso_len, spec.sha_stream.padded_len);
     if rows.len() > MDOC_PRIVATE_MSO_MAX_ACTIVE_ROWS {
         return Err(MdocPrivateMsoBindError::ScheduleTooLarge {
             active_rows: rows.len(),
@@ -959,30 +820,7 @@ fn validate_spec(
     Ok(PublicShape {
         payload_anchor,
         rows,
-        private_device_key: matches!(
-            &spec.device_key_mode,
-            MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart
-        ),
     })
-}
-
-fn validate_device_key_handles(
-    spec: &MdocPrivateMsoBindSpec,
-    device_pk_start_handle_present: bool,
-    validity_handle_present: bool,
-) -> Result<(), MdocPrivateMsoBindError> {
-    let private_mode = matches!(
-        &spec.device_key_mode,
-        MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart
-    );
-    if device_pk_start_handle_present != private_mode || validity_handle_present != private_mode {
-        return Err(MdocPrivateMsoBindError::DeviceKeyRelationHandleMismatch {
-            private_mode,
-            device_pk_start_handle_present,
-            validity_handle_present,
-        });
-    }
-    Ok(())
 }
 
 const PP_ACTIVE: usize = 0;
@@ -991,21 +829,18 @@ const PP_WINDOW_START: usize = 2;
 const PP_CONTINUATION: usize = 3;
 const PP_WINDOW_LEN: usize = 4;
 const PP_CHUNK_RELATIVE: usize = 5;
-const PP_VERSION_ROW: usize = 6;
-const PP_VALID_FROM_DATE_ROW: usize = 7;
-const PP_VALID_UNTIL_DATE_ROW: usize = 8;
-const PP_MIRROR_ROW: usize = 9;
-const PP_ANCHOR_ROW: usize = 10;
-const PP_SAME_PAYLOAD_PREV: usize = 11;
-const PP_BYTE_ACTIVE_START: usize = 12;
+const PP_VALID_FROM_DATE_ROW: usize = 6;
+const PP_VALID_UNTIL_DATE_ROW: usize = 7;
+const PP_MIRROR_ROW: usize = 8;
+const PP_ANCHOR_ROW: usize = 9;
+const PP_SAME_PAYLOAD_PREV: usize = 10;
+const PP_BYTE_ACTIVE_START: usize = 11;
 const PP_ISSUER_ACTIVE_START: usize = PP_BYTE_ACTIVE_START + CHUNK_BYTES;
 const PP_EXPECTED_ACTIVE_START: usize = PP_ISSUER_ACTIVE_START + CHUNK_BYTES;
 const PP_EXPECTED_START: usize = PP_EXPECTED_ACTIVE_START + CHUNK_BYTES;
 const PP_DOC_TYPE_CHUNK_START: usize = PP_EXPECTED_START + CHUNK_BYTES;
-const PP_DEVICE_KEY_INFO_CHUNK_START: usize = PP_DOC_TYPE_CHUNK_START + DOC_TYPE_CHUNKS;
-const PP_DEVICE_PK_START_ROW: usize = PP_DEVICE_KEY_INFO_CHUNK_START;
-const LEGACY_PREPROCESSED_COLS: usize = PP_DEVICE_KEY_INFO_CHUNK_START + DEVICE_KEY_INFO_CHUNKS;
-const PRIVATE_PREPROCESSED_COLS: usize = PP_DEVICE_PK_START_ROW + 1;
+const PP_DEVICE_PK_START_ROW: usize = PP_DOC_TYPE_CHUNK_START + DOC_TYPE_CHUNKS;
+const PREPROCESSED_COLS: usize = PP_DEVICE_PK_START_ROW + 1;
 
 const TRACE_BYTE_START: usize = 0;
 const TRACE_PAYLOAD_OFFSET: usize = TRACE_BYTE_START + CHUNK_BYTES;
@@ -1016,8 +851,7 @@ const TRACE_WINDOW_OFFSET: usize = TRACE_PAYLOAD_SLACK_BITS + OFFSET_BITS;
 const TRACE_WINDOW_OFFSET_BITS: usize = TRACE_WINDOW_OFFSET + 1;
 const TRACE_WINDOW_SLACK: usize = TRACE_WINDOW_OFFSET_BITS + OFFSET_BITS;
 const TRACE_WINDOW_SLACK_BITS: usize = TRACE_WINDOW_SLACK + 1;
-const TRACE_VERSION_SELECTOR: usize = TRACE_WINDOW_SLACK_BITS + OFFSET_BITS;
-const TRACE_DIGIT_BITS: usize = TRACE_VERSION_SELECTOR + 1;
+const TRACE_DIGIT_BITS: usize = TRACE_WINDOW_SLACK_BITS + OFFSET_BITS;
 const TRACE_DATE_SLACK_BITS: usize = TRACE_DIGIT_BITS + TDATE_DIGITS * DIGIT_BITS;
 const TRACE_RANGE_BITS: usize = TRACE_DATE_SLACK_BITS + DATE_SLACK_BITS;
 const TRACE_COLS: usize = TRACE_RANGE_BITS + RANGE_BITS;
@@ -1080,7 +914,6 @@ fn preprocessed_column_ids(shape: &PublicShape) -> Vec<PreProcessedColumnId> {
         col_id("continuation"),
         col_id("window_len"),
         col_id("chunk_relative"),
-        col_id("version_row"),
         col_id("valid_from_date_row"),
         col_id("valid_until_date_row"),
         col_id("mirror_row"),
@@ -1092,14 +925,7 @@ fn preprocessed_column_ids(shape: &PublicShape) -> Vec<PreProcessedColumnId> {
     ids.extend((0..CHUNK_BYTES).map(|index| col_id(&format!("expected_active_{index}"))));
     ids.extend((0..CHUNK_BYTES).map(|index| col_id(&format!("expected_{index}"))));
     ids.extend((0..DOC_TYPE_CHUNKS).map(|index| col_id(&format!("doc_type_chunk_{index}"))));
-    if shape.private_device_key {
-        ids.push(col_id("device_pk_start_row"));
-    } else {
-        ids.extend(
-            (0..DEVICE_KEY_INFO_CHUNKS)
-                .map(|index| col_id(&format!("device_key_info_chunk_{index}"))),
-        );
-    }
+    ids.push(col_id("device_pk_start_row"));
     debug_assert_eq!(ids.len(), shape.preprocessed_cols());
     ids
 }
@@ -1117,7 +943,6 @@ fn preprocessed_columns(shape: &PublicShape) -> Vec<MdocPrivateMsoColumnEval> {
         columns[PP_CONTINUATION][row_index] = m31_u32(u32::from(row.continuation));
         columns[PP_WINDOW_LEN][row_index] = m31(row.window_len);
         columns[PP_CHUNK_RELATIVE][row_index] = m31(row.chunk_relative);
-        columns[PP_VERSION_ROW][row_index] = m31_u32(u32::from(row.version_row));
         columns[PP_VALID_FROM_DATE_ROW][row_index] = m31_u32(u32::from(row.valid_from_date_row));
         columns[PP_VALID_UNTIL_DATE_ROW][row_index] = m31_u32(u32::from(row.valid_until_date_row));
         columns[PP_MIRROR_ROW][row_index] = m31_u32(u32::from(row.mirror_row));
@@ -1134,17 +959,10 @@ fn preprocessed_columns(shape: &PublicShape) -> Vec<MdocPrivateMsoColumnEval> {
             columns[PP_EXPECTED_START + byte_index][row_index] =
                 m31_u32(u32::from(row.expected[byte_index]));
         }
-        if let Some((kind, chunk_index)) = row.eval_constant {
-            let column = match kind {
-                EvalConstantKind::DocType => PP_DOC_TYPE_CHUNK_START + chunk_index,
-                EvalConstantKind::DeviceKeyInfo => PP_DEVICE_KEY_INFO_CHUNK_START + chunk_index,
-            };
-            columns[column][row_index] = m31_u32(1);
+        if let Some(chunk_index) = row.doc_type_chunk {
+            columns[PP_DOC_TYPE_CHUNK_START + chunk_index][row_index] = m31_u32(1);
         }
-        if shape.private_device_key {
-            columns[PP_DEVICE_PK_START_ROW][row_index] =
-                m31_u32(u32::from(row.device_pk_start_row));
-        }
+        columns[PP_DEVICE_PK_START_ROW][row_index] = m31_u32(u32::from(row.device_pk_start_row));
     }
     columns.into_iter().map(column_eval).collect()
 }
@@ -1193,7 +1011,6 @@ fn randomize_globally_constrained_cells(columns: &mut [Vec<M31>]) {
                 column[row] = random_bit();
             }
         }
-        columns[TRACE_VERSION_SELECTOR][row] = random_bit();
         let digits = std::array::from_fn(|_| (rand::thread_rng().next_u32() % 10) as u8);
         write_digit_bits(columns, row, &digits);
     }
@@ -1361,7 +1178,6 @@ fn private_trace(
     spec: &MdocPrivateMsoBindSpec,
     shape: &PublicShape,
     witness: &MdocPrivateMsoBindWitness,
-    use_mso_start: bool,
 ) -> Result<(MdocPrivateMsoTrace, MdocPrivateMsoUseCensus), MdocPrivateMsoBindError> {
     if witness.issuer_message.len() != spec.issuer_message_len {
         return Err(MdocPrivateMsoBindError::IssuerMessageLengthMismatch {
@@ -1405,10 +1221,7 @@ fn private_trace(
     }
 
     let raw_mso = &witness.issuer_message[mso_start..mso_end];
-    let padded = spec
-        .sha_stream
-        .as_ref()
-        .map(|sha| padded_mso(raw_mso, sha.padded_len));
+    let padded = padded_mso(raw_mso, spec.sha_stream.padded_len);
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); MDOC_PRIVATE_MSO_BIND_ROWS]; TRACE_COLS];
     for column in &mut columns {
@@ -1465,15 +1278,10 @@ fn private_trace(
             // path. Inactive rows retain their random window-offset cells.
             columns[TRACE_WINDOW_OFFSET][row_index] = m31(0);
         }
-        columns[TRACE_VERSION_SELECTOR][row_index] = m31_u32(witness.version.selector());
-
         let source: &[u8] = if row.kind == WindowKind::PayloadAnchor {
             let start = witness.payload_anchor_offset + row.chunk_relative;
             &witness.issuer_message[start..start + row.byte_len]
         } else if row.kind == WindowKind::MsoMirror {
-            let padded = padded
-                .as_ref()
-                .expect("mirror rows exist only with a SHA stream spec");
             &padded[row.chunk_relative..row.chunk_relative + row.byte_len]
         } else {
             let start = mso_start + offset + row.chunk_relative;
@@ -1509,10 +1317,10 @@ fn private_trace(
         MdocPrivateMsoUseCensus {
             issuer_position_uses,
             issuer_uses_total,
-            sha_stream_uses: spec.sha_stream.as_ref().map_or(0, |sha| sha.padded_len),
-            mso_start_uses: usize::from(use_mso_start),
-            device_pk_start_uses: usize::from(shape.private_device_key),
-            validity_uses: usize::from(shape.private_device_key) * 2,
+            sha_stream_uses: spec.sha_stream.padded_len,
+            mso_start_uses: 1,
+            device_pk_start_uses: 1,
+            validity_uses: 2,
             active_rows,
             blind_rows: MDOC_PRIVATE_MSO_BIND_ROWS - active_rows,
         },
@@ -1524,10 +1332,10 @@ struct MdocPrivateMsoEval {
     spec: MdocPrivateMsoBindSpec,
     payload_anchor_len: usize,
     issuer_relation: FieldBytesRelation,
-    sha_relation: Option<FieldBytesRelation>,
-    mso_start_relation: Option<MdocMsoStartRelation>,
-    device_pk_start_relation: Option<MdocDevicePkStartRelation>,
-    validity_relation: Option<MdocMsoValidityBytesRelation>,
+    sha_relation: FieldBytesRelation,
+    mso_start_relation: MdocMsoStartRelation,
+    device_pk_start_relation: MdocDevicePkStartRelation,
+    validity_relation: MdocMsoValidityBytesRelation,
     blinder_relation: ClaimedSumBlinderRelation,
     blinder_v: QM31,
     blinder_m: QM31,
@@ -1565,10 +1373,10 @@ where
 
 struct MdocPrivateMsoInteractionInputs<'a> {
     issuer_relation: &'a FieldBytesRelation,
-    sha_relation: Option<&'a FieldBytesRelation>,
-    mso_start_relation: Option<&'a MdocMsoStartRelation>,
-    device_pk_start_relation: Option<&'a MdocDevicePkStartRelation>,
-    validity_relation: Option<&'a MdocMsoValidityBytesRelation>,
+    sha_relation: &'a FieldBytesRelation,
+    mso_start_relation: &'a MdocMsoStartRelation,
+    device_pk_start_relation: &'a MdocDevicePkStartRelation,
+    validity_relation: &'a MdocMsoValidityBytesRelation,
     blinder_relation: &'a ClaimedSumBlinderRelation,
     blinder_v: QM31,
     blinder_m: QM31,
@@ -1583,14 +1391,7 @@ fn private_mso_interaction_trace(
     let public = preprocessed_columns(shape);
     let private = trace.column_evals();
     let n_vec_rows = 1usize << (MDOC_PRIVATE_MSO_BIND_LOG_SIZE - LOG_N_LANES);
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(
-        CHUNK_BYTES
-            + usize::from(inputs.sha_relation.is_some()) * CHUNK_BYTES
-            + usize::from(inputs.mso_start_relation.is_some())
-            + usize::from(inputs.device_pk_start_relation.is_some())
-            + usize::from(inputs.validity_relation.is_some()) * 2
-            + 1,
-    );
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(2 * CHUNK_BYTES + 5);
 
     // Fixed sites 0..32: hosted issuer-message consumers.
     for byte_index in 0..CHUNK_BYTES {
@@ -1618,39 +1419,20 @@ fn private_mso_interaction_trace(
         );
     }
 
-    // Optional fixed sites 32..64: complete canonical padded MSO stream.
-    if let (Some(sha), Some(relation)) = (&spec.sha_stream, inputs.sha_relation) {
-        for byte_index in 0..CHUNK_BYTES {
-            sites.push(
-                (0..n_vec_rows)
-                    .map(|vec_row| {
-                        let numerator = PackedQM31::from(
-                            public[PP_MIRROR_ROW].data[vec_row]
-                                * public[PP_BYTE_ACTIVE_START + byte_index].data[vec_row],
-                        );
-                        let denominator = relation.combine(&[
-                            PackedM31::broadcast(m31_u32(sha.field_id)),
-                            public[PP_CHUNK_RELATIVE].data[vec_row]
-                                + PackedM31::broadcast(m31(byte_index)),
-                            private[TRACE_BYTE_START + byte_index].data[vec_row],
-                        ]);
-                        (numerator, denominator)
-                    })
-                    .collect(),
-            );
-        }
-    }
-
-    // Optional Q-732 handoff: binder provider (-), map scanner consumer (+).
-    if let Some(relation) = inputs.mso_start_relation {
+    // Fixed sites 32..64: complete canonical padded MSO stream.
+    for byte_index in 0..CHUNK_BYTES {
         sites.push(
             (0..n_vec_rows)
                 .map(|vec_row| {
-                    let numerator = -PackedQM31::from(public[PP_ANCHOR_ROW].data[vec_row]);
-                    let denominator = relation.combine(&[
-                        private[TRACE_PAYLOAD_OFFSET].data[vec_row]
-                            + PackedM31::broadcast(m31(shape.payload_anchor.len())),
-                        private[TRACE_VERSION_SELECTOR].data[vec_row],
+                    let numerator = PackedQM31::from(
+                        public[PP_MIRROR_ROW].data[vec_row]
+                            * public[PP_BYTE_ACTIVE_START + byte_index].data[vec_row],
+                    );
+                    let denominator = inputs.sha_relation.combine(&[
+                        PackedM31::broadcast(m31_u32(spec.sha_stream.field_id)),
+                        public[PP_CHUNK_RELATIVE].data[vec_row]
+                            + PackedM31::broadcast(m31(byte_index)),
+                        private[TRACE_BYTE_START + byte_index].data[vec_row],
                     ]);
                     (numerator, denominator)
                 })
@@ -1658,46 +1440,56 @@ fn private_mso_interaction_trace(
         );
     }
 
-    // TS13-private U9 handoff: binder provider (-), U9 consumer (+).
-    if let Some(relation) = inputs.device_pk_start_relation {
+    // Scanner handoff: binder provider (-), scanner consumer (+).
+    sites.push(
+        (0..n_vec_rows)
+            .map(|vec_row| {
+                let numerator = -PackedQM31::from(public[PP_ANCHOR_ROW].data[vec_row]);
+                let denominator = inputs
+                    .mso_start_relation
+                    .combine(&[private[TRACE_PAYLOAD_OFFSET].data[vec_row]
+                        + PackedM31::broadcast(m31(shape.payload_anchor.len()))]);
+                (numerator, denominator)
+            })
+            .collect(),
+    );
+
+    // Private device-key handoff: binder provider (-), key-binder consumer (+).
+    sites.push(
+        (0..n_vec_rows)
+            .map(|vec_row| {
+                let numerator = -PackedQM31::from(public[PP_DEVICE_PK_START_ROW].data[vec_row]);
+                let start = private[TRACE_PAYLOAD_OFFSET].data[vec_row]
+                    + PackedM31::broadcast(m31(shape.payload_anchor.len()))
+                    + private[TRACE_WINDOW_OFFSET].data[vec_row]
+                    + PackedM31::broadcast(m31(DEVICE_KEY_INFO_PREFIX.len()));
+                (numerator, inputs.device_pk_start_relation.combine(&[start]))
+            })
+            .collect(),
+    );
+
+    // Exact-validity handoff. The binder emits one negative tuple
+    // for each authenticated tdate and the validity component consumes both.
+    for (kind, selector_column) in [
+        (0u32, PP_VALID_FROM_DATE_ROW),
+        (1u32, PP_VALID_UNTIL_DATE_ROW),
+    ] {
         sites.push(
             (0..n_vec_rows)
                 .map(|vec_row| {
-                    let numerator = -PackedQM31::from(public[PP_DEVICE_PK_START_ROW].data[vec_row]);
-                    let start = private[TRACE_PAYLOAD_OFFSET].data[vec_row]
-                        + PackedM31::broadcast(m31(shape.payload_anchor.len()))
-                        + private[TRACE_WINDOW_OFFSET].data[vec_row]
-                        + PackedM31::broadcast(m31(DEVICE_KEY_INFO_PREFIX.len()));
-                    (numerator, relation.combine(&[start]))
+                    let mut tuple = Vec::with_capacity(1 + MDOC_TDATE_BYTES);
+                    tuple.push(PackedM31::broadcast(m31_u32(kind)));
+                    tuple.extend(
+                        (0..MDOC_TDATE_BYTES)
+                            .map(|index| private[TRACE_BYTE_START + index].data[vec_row]),
+                    );
+                    (
+                        -PackedQM31::from(public[selector_column].data[vec_row]),
+                        inputs.validity_relation.combine(&tuple),
+                    )
                 })
                 .collect(),
         );
-    }
-
-    // TS13-private exact-validity handoff. The binder emits one negative tuple
-    // for each authenticated tdate and the validity component consumes both.
-    if let Some(relation) = inputs.validity_relation {
-        for (kind, selector_column) in [
-            (0u32, PP_VALID_FROM_DATE_ROW),
-            (1u32, PP_VALID_UNTIL_DATE_ROW),
-        ] {
-            sites.push(
-                (0..n_vec_rows)
-                    .map(|vec_row| {
-                        let mut tuple = Vec::with_capacity(1 + MDOC_TDATE_BYTES);
-                        tuple.push(PackedM31::broadcast(m31_u32(kind)));
-                        tuple.extend(
-                            (0..MDOC_TDATE_BYTES)
-                                .map(|index| private[TRACE_BYTE_START + index].data[vec_row]),
-                        );
-                        (
-                            -PackedQM31::from(public[selector_column].data[vec_row]),
-                            relation.combine(&tuple),
-                        )
-                    })
-                    .collect(),
-            );
-        }
     }
 
     // Claimed-sum blinder is always the final main-component site.
@@ -1733,9 +1525,10 @@ impl FrameworkEval for MdocPrivateMsoEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Absolute issuer indices stay linear: non-MSO active rows constrain
-        // window_offset to zero before it is added unconditionally. Paired
-        // LogUp denominators and quadratic selector numerators are cubic.
+        // Absolute issuer indices remain linear.
+        // Non-MSO active rows set `window_offset` to zero.
+        // Each row then adds the offset.
+        // Paired LogUp denominators and selector numerators are cubic.
         MDOC_PRIVATE_MSO_BIND_LOG_SIZE + 2
     }
 
@@ -1746,7 +1539,6 @@ impl FrameworkEval for MdocPrivateMsoEval {
         let continuation = eval.get_preprocessed_column(col_id("continuation"));
         let window_len = eval.get_preprocessed_column(col_id("window_len"));
         let chunk_relative = eval.get_preprocessed_column(col_id("chunk_relative"));
-        let version_row = eval.get_preprocessed_column(col_id("version_row"));
         let valid_from_date_row = eval.get_preprocessed_column(col_id("valid_from_date_row"));
         let valid_until_date_row = eval.get_preprocessed_column(col_id("valid_until_date_row"));
         let mirror_row = eval.get_preprocessed_column(col_id("mirror_row"));
@@ -1767,19 +1559,7 @@ impl FrameworkEval for MdocPrivateMsoEval {
         let doc_type_chunks: [E::F; DOC_TYPE_CHUNKS] = std::array::from_fn(|index| {
             eval.get_preprocessed_column(col_id(&format!("doc_type_chunk_{index}")))
         });
-        let device_key_info_chunks: Vec<E::F> = match &self.spec.device_key_mode {
-            MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(_) => (0..DEVICE_KEY_INFO_CHUNKS)
-                .map(|index| {
-                    eval.get_preprocessed_column(col_id(&format!("device_key_info_chunk_{index}")))
-                })
-                .collect(),
-            MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart => Vec::new(),
-        };
-        let device_pk_start_row = matches!(
-            &self.spec.device_key_mode,
-            MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart
-        )
-        .then(|| eval.get_preprocessed_column(col_id("device_pk_start_row")));
+        let device_pk_start_row = eval.get_preprocessed_column(col_id("device_pk_start_row"));
 
         let bytes: [E::F; CHUNK_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
         let [payload_offset, payload_offset_prev] =
@@ -1796,8 +1576,6 @@ impl FrameworkEval for MdocPrivateMsoEval {
         let window_slack = eval.next_trace_mask();
         let window_slack_bits: [E::F; OFFSET_BITS] =
             std::array::from_fn(|_| eval.next_trace_mask());
-        let [version_selector, version_selector_prev] =
-            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         let digit_bits: [[E::F; DIGIT_BITS]; TDATE_DIGITS] =
             std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
         let date_slack_bits: [E::F; DATE_SLACK_BITS] =
@@ -1810,7 +1588,6 @@ impl FrameworkEval for MdocPrivateMsoEval {
             mso_window.clone(),
             window_start.clone(),
             continuation.clone(),
-            version_row.clone(),
             valid_from_date_row.clone(),
             valid_until_date_row.clone(),
             mirror_row.clone(),
@@ -1837,16 +1614,13 @@ impl FrameworkEval for MdocPrivateMsoEval {
                 expected_active[index].clone() * (one.clone() - byte_active[index].clone()),
             );
         }
-        for selector in doc_type_chunks.iter().chain(device_key_info_chunks.iter()) {
+        for selector in &doc_type_chunks {
             add_boolean(&mut eval, selector.clone(), &one);
             eval.add_constraint(selector.clone() * (active.clone() - one.clone()));
         }
-        if let Some(selector) = &device_pk_start_row {
-            add_boolean(&mut eval, selector.clone(), &one);
-            eval.add_constraint(selector.clone() * (active.clone() - one.clone()));
-        }
-
-        // All private selector/decomposition bits are boolean on every row.
+        add_boolean(&mut eval, device_pk_start_row.clone(), &one);
+        eval.add_constraint(device_pk_start_row.clone() * (active.clone() - one.clone()));
+        // All private decomposition bits are boolean on every row.
         // Inactive rows therefore receive fresh valid bits rather than zeros.
         for bit in payload_offset_bits
             .iter()
@@ -1859,19 +1633,17 @@ impl FrameworkEval for MdocPrivateMsoEval {
         {
             add_boolean(&mut eval, bit.clone(), &one);
         }
-        add_boolean(&mut eval, version_selector.clone(), &one);
         for bits in &digit_bits {
             // Four boolean bits plus these two quadratic exclusions encode 0..9.
             eval.add_constraint(bits[3].clone() * bits[2].clone());
             eval.add_constraint(bits[3].clone() * bits[1].clone());
         }
 
-        // One payload anchor and one private profile selector are common to
-        // every active row. Continuation rows retain one logical-window offset.
+        // One payload anchor is common to every active row.
+        // Continuation rows retain one logical-window offset.
         eval.add_constraint(
             same_payload_prev.clone() * (payload_offset.clone() - payload_offset_prev),
         );
-        eval.add_constraint(same_payload_prev * (version_selector.clone() - version_selector_prev));
         eval.add_constraint(continuation.clone() * (window_offset.clone() - window_offset_prev));
 
         // Four globally-boolean 13-bit decompositions prevent M31 wraparound.
@@ -1924,35 +1696,6 @@ impl FrameworkEval for MdocPrivateMsoEval {
                 );
             }
         }
-        if let MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(public_key) =
-            &self.spec.device_key_mode
-        {
-            let device_key_info = canonical_device_key_info_run(public_key);
-            for (chunk_index, selector) in device_key_info_chunks.iter().enumerate() {
-                let chunk_start = chunk_index * CHUNK_BYTES;
-                for (byte_index, expected_byte) in device_key_info[chunk_start..]
-                    .iter()
-                    .take(CHUNK_BYTES)
-                    .enumerate()
-                {
-                    eval.add_constraint(
-                        selector.clone()
-                            * (bytes[byte_index].clone()
-                                - m31_const::<E>(usize::from(*expected_byte))),
-                    );
-                }
-            }
-        }
-
-        // Private supported profile: selector 0 => "1.0", 1 => "2.0".
-        for (index, (&v1, &v2)) in b"1.0".iter().zip(b"2.0").enumerate() {
-            let byte_index = VERSION_PREFIX.len() + index;
-            let selected = (one.clone() - version_selector.clone())
-                * m31_const::<E>(usize::from(v1))
-                + version_selector.clone() * m31_const::<E>(usize::from(v2));
-            eval.add_constraint(version_row.clone() * (bytes[byte_index].clone() - selected));
-        }
-
         let date_active = valid_from_date_row.clone() + valid_until_date_row.clone();
         const DIGIT_POSITIONS: [usize; TDATE_DIGITS] =
             [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
@@ -2025,9 +1768,8 @@ impl FrameworkEval for MdocPrivateMsoEval {
         );
         eval.add_constraint(valid_until_date_row.clone() * (date_key - policy_key - compare_slack));
 
-        // Fixed relation-site order: 32 issuer, optional 32 SHA, optional
-        // mso_start, optional device start, optional two validity tuples,
-        // blinder last.
+        // Fixed relation-site order: 32 issuer, 32 SHA, one MSO start,
+        // one device start, two validity tuples, and the blinder.
         for index in 0..CHUNK_BYTES {
             let absolute_index = issuer_absolute_index(
                 payload_offset.clone(),
@@ -2047,51 +1789,42 @@ impl FrameworkEval for MdocPrivateMsoEval {
                 ],
             ));
         }
-        if let (Some(sha), Some(relation)) = (&self.spec.sha_stream, &self.sha_relation) {
-            for index in 0..CHUNK_BYTES {
-                eval.add_to_relation(RelationEntry::new(
-                    relation,
-                    E::EF::from(mirror_row.clone() * byte_active[index].clone()),
-                    &[
-                        m31_const::<E>(sha.field_id as usize),
-                        chunk_relative.clone() + m31_const::<E>(index),
-                        bytes[index].clone(),
-                    ],
-                ));
-            }
-        }
-        if let Some(relation) = &self.mso_start_relation {
+        for index in 0..CHUNK_BYTES {
             eval.add_to_relation(RelationEntry::new(
-                relation,
-                -E::EF::from(anchor_row),
+                &self.sha_relation,
+                E::EF::from(mirror_row.clone() * byte_active[index].clone()),
                 &[
-                    payload_offset.clone() + m31_const::<E>(self.payload_anchor_len),
-                    version_selector,
+                    m31_const::<E>(self.spec.sha_stream.field_id as usize),
+                    chunk_relative.clone() + m31_const::<E>(index),
+                    bytes[index].clone(),
                 ],
             ));
         }
-        if let (Some(relation), Some(selector)) =
-            (&self.device_pk_start_relation, device_pk_start_row)
-        {
+        eval.add_to_relation(RelationEntry::new(
+            &self.mso_start_relation,
+            -E::EF::from(anchor_row),
+            &[payload_offset.clone() + m31_const::<E>(self.payload_anchor_len)],
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.device_pk_start_relation,
+            -E::EF::from(device_pk_start_row),
+            &[payload_offset.clone()
+                + m31_const::<E>(self.payload_anchor_len)
+                + window_offset
+                + m31_const::<E>(DEVICE_KEY_INFO_PREFIX.len())],
+        ));
+        for (kind, selector) in [
+            (0usize, valid_from_date_row),
+            (1usize, valid_until_date_row),
+        ] {
+            let mut tuple = Vec::with_capacity(1 + MDOC_TDATE_BYTES);
+            tuple.push(m31_const::<E>(kind));
+            tuple.extend(bytes.iter().take(MDOC_TDATE_BYTES).cloned());
             eval.add_to_relation(RelationEntry::new(
-                relation,
+                &self.validity_relation,
                 -E::EF::from(selector),
-                &[payload_offset.clone()
-                    + m31_const::<E>(self.payload_anchor_len)
-                    + window_offset
-                    + m31_const::<E>(DEVICE_KEY_INFO_PREFIX.len())],
+                &tuple,
             ));
-        }
-        if let Some(relation) = &self.validity_relation {
-            for (kind, selector) in [
-                (0usize, valid_from_date_row),
-                (1usize, valid_until_date_row),
-            ] {
-                let mut tuple = Vec::with_capacity(1 + MDOC_TDATE_BYTES);
-                tuple.push(m31_const::<E>(kind));
-                tuple.extend(bytes.iter().take(MDOC_TDATE_BYTES).cloned());
-                eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(selector), &tuple));
-            }
         }
         add_blinder_relation_entry(
             &mut eval,
@@ -2110,13 +1843,10 @@ pub(crate) struct MdocPrivateMsoBind {
     shape: PublicShape,
     trace: Option<MdocPrivateMsoTrace>,
     issuer_handle: SharedFieldRelation,
-    sha_handle: Option<SharedFieldRelation>,
-    mso_start_handle: Option<SharedMdocMsoStartRelation>,
-    mso_start_relation: Option<MdocMsoStartRelation>,
-    device_pk_start_handle: Option<SharedMdocDevicePkStartRelation>,
-    device_pk_start_relation: Option<MdocDevicePkStartRelation>,
-    validity_handle: Option<SharedMdocMsoValidityBytesRelation>,
-    validity_relation: Option<MdocMsoValidityBytesRelation>,
+    sha_handle: SharedFieldRelation,
+    mso_start_handle: SharedMdocMsoStartRelation,
+    device_pk_start_handle: SharedMdocDevicePkStartRelation,
+    validity_handle: SharedMdocMsoValidityBytesRelation,
     blinder_relation: Option<ClaimedSumBlinderRelation>,
     interaction_claim: Option<MdocPrivateMsoInteractionClaim>,
     component: Option<MdocPrivateMsoComponent>,
@@ -2124,23 +1854,17 @@ pub(crate) struct MdocPrivateMsoBind {
 }
 
 impl MdocPrivateMsoBind {
-    #[allow(clippy::type_complexity)]
     pub(crate) fn prover(
         spec: MdocPrivateMsoBindSpec,
         witness: MdocPrivateMsoBindWitness,
         issuer_handle: SharedFieldRelation,
-        sha_handle: Option<SharedFieldRelation>,
-        mso_start_handle: Option<SharedMdocMsoStartRelation>,
-        device_pk_start_handle: Option<SharedMdocDevicePkStartRelation>,
-        validity_handle: Option<SharedMdocMsoValidityBytesRelation>,
+        sha_handle: SharedFieldRelation,
+        mso_start_handle: SharedMdocMsoStartRelation,
+        device_pk_start_handle: SharedMdocDevicePkStartRelation,
+        validity_handle: SharedMdocMsoValidityBytesRelation,
     ) -> Result<(Self, MdocPrivateMsoUseCensus), MdocPrivateMsoBindError> {
-        let shape = validate_spec(&spec, sha_handle.is_some())?;
-        validate_device_key_handles(
-            &spec,
-            device_pk_start_handle.is_some(),
-            validity_handle.is_some(),
-        )?;
-        let (trace, census) = private_trace(&spec, &shape, &witness, mso_start_handle.is_some())?;
+        let shape = validate_spec(&spec)?;
+        let (trace, census) = private_trace(&spec, &shape, &witness)?;
         Ok((
             Self {
                 spec,
@@ -2149,11 +1873,8 @@ impl MdocPrivateMsoBind {
                 issuer_handle,
                 sha_handle,
                 mso_start_handle,
-                mso_start_relation: None,
                 device_pk_start_handle,
-                device_pk_start_relation: None,
                 validity_handle,
-                validity_relation: None,
                 blinder_relation: None,
                 interaction_claim: None,
                 component: None,
@@ -2166,18 +1887,13 @@ impl MdocPrivateMsoBind {
     pub(crate) fn verifier(
         spec: MdocPrivateMsoBindSpec,
         issuer_handle: SharedFieldRelation,
-        sha_handle: Option<SharedFieldRelation>,
-        mso_start_handle: Option<SharedMdocMsoStartRelation>,
-        device_pk_start_handle: Option<SharedMdocDevicePkStartRelation>,
-        validity_handle: Option<SharedMdocMsoValidityBytesRelation>,
+        sha_handle: SharedFieldRelation,
+        mso_start_handle: SharedMdocMsoStartRelation,
+        device_pk_start_handle: SharedMdocDevicePkStartRelation,
+        validity_handle: SharedMdocMsoValidityBytesRelation,
         interaction_claim: MdocPrivateMsoInteractionClaim,
     ) -> Result<Self, MdocPrivateMsoBindError> {
-        let shape = validate_spec(&spec, sha_handle.is_some())?;
-        validate_device_key_handles(
-            &spec,
-            device_pk_start_handle.is_some(),
-            validity_handle.is_some(),
-        )?;
+        let shape = validate_spec(&spec)?;
         Ok(Self {
             spec,
             shape,
@@ -2185,11 +1901,8 @@ impl MdocPrivateMsoBind {
             issuer_handle,
             sha_handle,
             mso_start_handle,
-            mso_start_relation: None,
             device_pk_start_handle,
-            device_pk_start_relation: None,
             validity_handle,
-            validity_relation: None,
             blinder_relation: None,
             interaction_claim: Some(interaction_claim),
             component: None,
@@ -2212,17 +1925,12 @@ impl MdocPrivateMsoBind {
         self.issuer_handle.get()
     }
 
-    fn sha_relation(&self) -> Option<FieldBytesRelation> {
-        self.sha_handle.as_ref().map(SharedFieldRelation::get)
+    fn sha_relation(&self) -> FieldBytesRelation {
+        self.sha_handle.get()
     }
 
     fn n_main_sites(&self) -> usize {
-        CHUNK_BYTES
-            + usize::from(self.spec.sha_stream.is_some()) * CHUNK_BYTES
-            + usize::from(self.mso_start_handle.is_some())
-            + usize::from(self.device_pk_start_handle.is_some())
-            + usize::from(self.validity_handle.is_some()) * 2
-            + 1 // blinder, last
+        2 * CHUNK_BYTES + 5
     }
 
     fn interaction_columns(&self) -> usize {
@@ -2249,60 +1957,34 @@ impl Air for MdocPrivateMsoBind {
         for &byte in self.spec.doc_type.as_bytes() {
             channel.mix_u64(u64::from(byte));
         }
-        match &self.spec.device_key_mode {
-            MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(public_key) => {
-                channel.mix_u64(0);
-                channel.mix_u64(public_key.len() as u64);
-                for &byte in public_key {
-                    channel.mix_u64(u64::from(byte));
-                }
-            }
-            MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart => {
-                channel.mix_u64(1);
-                channel.mix_u64(stwo_mldsa::constants::PK_BYTES as u64);
-            }
-        }
-        match &self.spec.sha_stream {
-            Some(sha) => {
-                channel.mix_u64(1);
-                channel.mix_u64(u64::from(sha.field_id));
-                channel.mix_u64(sha.padded_len as u64);
-            }
-            None => channel.mix_u64(0),
-        }
-        channel.mix_u64(u64::from(self.mso_start_handle.is_some()));
-        channel.mix_u64(u64::from(self.device_pk_start_handle.is_some()));
-        channel.mix_u64(u64::from(self.validity_handle.is_some()));
+        // Bind the fixed private-start layout and key length.
+        channel.mix_u64(1);
+        channel.mix_u64(stwo_mldsa::constants::PK_BYTES as u64);
+        channel.mix_u64(u64::from(self.spec.sha_stream.field_id));
+        channel.mix_u64(self.spec.sha_stream.padded_len as u64);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        if let Some(handle) = &self.mso_start_handle {
-            assert!(
-                !handle.is_set(),
-                "private MSO binder needs a fresh mso_start relation handle"
-            );
-            let relation = MdocMsoStartRelation::draw(channel);
-            handle.set(relation.clone());
-            self.mso_start_relation = Some(relation);
-        }
-        if let Some(handle) = &self.device_pk_start_handle {
-            assert!(
-                !handle.is_set(),
-                "private MSO binder needs a fresh device-pk-start relation handle"
-            );
-            let relation = MdocDevicePkStartRelation::draw(channel);
-            handle.set(relation.clone());
-            self.device_pk_start_relation = Some(relation);
-        }
-        if let Some(handle) = &self.validity_handle {
-            assert!(
-                !handle.is_set(),
-                "private MSO binder needs a fresh validity-bytes relation handle"
-            );
-            let relation = MdocMsoValidityBytesRelation::draw(channel);
-            handle.set(relation.clone());
-            self.validity_relation = Some(relation);
-        }
+        assert!(
+            !self.mso_start_handle.is_set(),
+            "private MSO binder needs a fresh mso_start relation handle"
+        );
+        let relation = MdocMsoStartRelation::draw(channel);
+        self.mso_start_handle.set(relation);
+
+        assert!(
+            !self.device_pk_start_handle.is_set(),
+            "private MSO binder needs a fresh device-pk-start relation handle"
+        );
+        let device_pk_start_relation = MdocDevicePkStartRelation::draw(channel);
+        self.device_pk_start_handle.set(device_pk_start_relation);
+
+        assert!(
+            !self.validity_handle.is_set(),
+            "private MSO binder needs a fresh validity-bytes relation handle"
+        );
+        let validity_relation = MdocMsoValidityBytesRelation::draw(channel);
+        self.validity_handle.set(validity_relation);
         self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
     }
 
@@ -2343,9 +2025,9 @@ impl Air for MdocPrivateMsoBind {
                 payload_anchor_len: self.shape.payload_anchor.len(),
                 issuer_relation: self.issuer_relation(),
                 sha_relation: self.sha_relation(),
-                mso_start_relation: self.mso_start_relation.clone(),
-                device_pk_start_relation: self.device_pk_start_relation.clone(),
-                validity_relation: self.validity_relation.clone(),
+                mso_start_relation: self.mso_start_handle.get(),
+                device_pk_start_relation: self.device_pk_start_handle.get(),
+                validity_relation: self.validity_handle.get(),
                 blinder_relation: blinder_relation.clone(),
                 blinder_v: claim.blinder_v,
                 blinder_m: claim.blinder_m,
@@ -2442,16 +2124,19 @@ impl AirProver for MdocPrivateMsoBind {
             .expect("private MSO binder blinder relation is drawn");
         let issuer_relation = self.issuer_relation();
         let sha_relation = self.sha_relation();
+        let mso_start_relation = self.mso_start_handle.get();
+        let device_pk_start_relation = self.device_pk_start_handle.get();
+        let validity_relation = self.validity_handle.get();
         let (interaction, claimed_sum) = private_mso_interaction_trace(
             &self.spec,
             &self.shape,
             trace,
             MdocPrivateMsoInteractionInputs {
                 issuer_relation: &issuer_relation,
-                sha_relation: sha_relation.as_ref(),
-                mso_start_relation: self.mso_start_relation.as_ref(),
-                device_pk_start_relation: self.device_pk_start_relation.as_ref(),
-                validity_relation: self.validity_relation.as_ref(),
+                sha_relation: &sha_relation,
+                mso_start_relation: &mso_start_relation,
+                device_pk_start_relation: &device_pk_start_relation,
+                validity_relation: &validity_relation,
                 blinder_relation: &blinder_relation,
                 blinder_v,
                 blinder_m,
@@ -2538,24 +2223,20 @@ mod tests {
         }
     }
 
-    fn test_spec(with_sha: bool) -> MdocPrivateMsoBindSpec {
+    fn test_spec() -> MdocPrivateMsoBindSpec {
         MdocPrivateMsoBindSpec {
             issuer_message_len: crate::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES,
             mso_len: crate::ts13::TS13_MAX_MSO_PAYLOAD_BYTES,
             doc_type: PID.to_string(),
-            device_key_mode: MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(vec![
-                0;
-                stwo_mldsa::constants::PK_BYTES
-            ]),
             policy_date: Date {
                 year: 2026,
                 month: 7,
                 day: 29,
             },
-            sha_stream: with_sha.then_some(MdocPrivateMsoShaStreamSpec {
+            sha_stream: MdocPrivateMsoShaStreamSpec {
                 field_id: 91,
                 padded_len: 4_160,
-            }),
+            },
         }
     }
 
@@ -2563,17 +2244,10 @@ mod tests {
         target[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
-    fn fixture_device_key_info(spec: &MdocPrivateMsoBindSpec) -> Vec<u8> {
-        match &spec.device_key_mode {
-            MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(public_key) => {
-                canonical_device_key_info_run(public_key)
-            }
-            MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart => {
-                let mut run = DEVICE_KEY_INFO_PREFIX.to_vec();
-                run.extend((0..stwo_mldsa::constants::PK_BYTES).map(|index| (index * 73) as u8));
-                run
-            }
-        }
+    fn fixture_device_key_info() -> Vec<u8> {
+        let mut run = DEVICE_KEY_INFO_PREFIX.to_vec();
+        run.extend((0..stwo_mldsa::constants::PK_BYTES).map(|index| (index * 73) as u8));
+        run
     }
 
     fn test_parts_for_spec(
@@ -2581,16 +2255,14 @@ mod tests {
     ) -> (MdocPrivateMsoBindSpec, Vec<u8>, Vec<u8>) {
         let mut mso = vec![0x55; spec.mso_len];
 
-        let mut version = VERSION_PREFIX.to_vec();
-        version.extend_from_slice(b"1.0");
-        write_at(&mut mso, VERSION_OFFSET, &version);
+        write_at(&mut mso, VERSION_OFFSET, VERSION_1_0_RUN);
         write_at(&mut mso, ALGORITHM_OFFSET, DIGEST_ALGORITHM_RUN);
         write_at(
             &mut mso,
             DOC_TYPE_OFFSET,
             &canonical_doc_type_run(&spec.doc_type),
         );
-        write_at(&mut mso, DEVICE_KEY_OFFSET, &fixture_device_key_info(&spec));
+        write_at(&mut mso, DEVICE_KEY_OFFSET, &fixture_device_key_info());
         let mut valid_from = VALID_FROM_ANCHOR.to_vec();
         valid_from.extend_from_slice(b"2020-01-01T00:00:00Z");
         write_at(&mut mso, VALID_FROM_OFFSET, &valid_from);
@@ -2605,8 +2277,8 @@ mod tests {
         (spec, issuer_message, mso)
     }
 
-    fn test_parts(with_sha: bool) -> (MdocPrivateMsoBindSpec, Vec<u8>, Vec<u8>) {
-        test_parts_for_spec(test_spec(with_sha))
+    fn test_parts() -> (MdocPrivateMsoBindSpec, Vec<u8>, Vec<u8>) {
+        test_parts_for_spec(test_spec())
     }
 
     fn test_witness(
@@ -2614,58 +2286,40 @@ mod tests {
         issuer_message: Vec<u8>,
         mso: &[u8],
     ) -> MdocPrivateMsoBindWitness {
-        MdocPrivateMsoBindWitness::from_canonical_issuer_message(
-            spec,
-            issuer_message,
-            mso,
-            MdocPrivateMsoVersion::V1,
-        )
-        .unwrap()
+        MdocPrivateMsoBindWitness::from_canonical_issuer_message(spec, issuer_message, mso).unwrap()
     }
 
-    fn test_binder(
-        with_sha: bool,
-        with_mso_start: bool,
-    ) -> (MdocPrivateMsoBind, MdocPrivateMsoUseCensus) {
-        let (spec, issuer_message, mso) = test_parts(with_sha);
+    fn test_binder() -> (MdocPrivateMsoBind, MdocPrivateMsoUseCensus) {
+        let (spec, issuer_message, mso) = test_parts();
         let witness = test_witness(&spec, issuer_message, &mso);
         MdocPrivateMsoBind::prover(
             spec,
             witness,
             SharedFieldRelation::new(),
-            with_sha.then(SharedFieldRelation::new),
-            with_mso_start.then(SharedMdocMsoStartRelation::new),
-            None,
-            None,
+            SharedFieldRelation::new(),
+            SharedMdocMsoStartRelation::new(),
+            SharedMdocDevicePkStartRelation::new(),
+            SharedMdocMsoValidityBytesRelation::new(),
         )
         .unwrap()
     }
 
-    fn private_test_parts(with_sha: bool) -> (MdocPrivateMsoBindSpec, Vec<u8>, Vec<u8>) {
-        let mut spec = test_spec(with_sha);
-        spec.device_key_mode = MdocPrivateMsoDeviceKeyMode::Ts13PrivateStart;
-        test_parts_for_spec(spec)
-    }
-
-    fn private_test_binder(
-        with_sha: bool,
-        with_mso_start: bool,
-    ) -> (
+    fn test_binder_with_witness() -> (
         MdocPrivateMsoBind,
         MdocPrivateMsoUseCensus,
         MdocPrivateMsoBindWitness,
     ) {
-        let (spec, issuer_message, mso) = private_test_parts(with_sha);
+        let (spec, issuer_message, mso) = test_parts();
         let witness = test_witness(&spec, issuer_message, &mso);
         let witness_copy = witness.clone();
         let (binder, census) = MdocPrivateMsoBind::prover(
             spec,
             witness,
             SharedFieldRelation::new(),
-            with_sha.then(SharedFieldRelation::new),
-            with_mso_start.then(SharedMdocMsoStartRelation::new),
-            Some(SharedMdocDevicePkStartRelation::new()),
-            Some(SharedMdocMsoValidityBytesRelation::new()),
+            SharedFieldRelation::new(),
+            SharedMdocMsoStartRelation::new(),
+            SharedMdocDevicePkStartRelation::new(),
+            SharedMdocMsoValidityBytesRelation::new(),
         )
         .unwrap();
         (binder, census, witness_copy)
@@ -2684,9 +2338,12 @@ mod tests {
         issuer: u32,
         sha: u32,
         start: u32,
+        device_start: u32,
+        validity: u32,
         field_id: u32,
         index: u32,
         byte: u32,
+        validity_bytes: [u8; MDOC_TDATE_BYTES],
     }
 
     impl TestCounterRow {
@@ -2695,9 +2352,12 @@ mod tests {
                 issuer: 1,
                 sha: 0,
                 start: 0,
+                device_start: 0,
+                validity: 0,
                 field_id: HOSTED_MSG_FIELD_ID,
                 index: index as u32,
                 byte: u32::from(byte),
+                validity_bytes: [0; MDOC_TDATE_BYTES],
             }
         }
 
@@ -2706,31 +2366,68 @@ mod tests {
                 issuer: 0,
                 sha: 1,
                 start: 0,
+                device_start: 0,
+                validity: 0,
                 field_id,
                 index: index as u32,
                 byte: u32::from(byte),
+                validity_bytes: [0; MDOC_TDATE_BYTES],
             }
         }
 
-        fn start(index: usize, is_v2: bool, active: bool) -> Self {
+        fn start(index: usize, active: bool) -> Self {
             Self {
                 issuer: 0,
                 sha: 0,
                 start: u32::from(active),
+                device_start: 0,
+                validity: 0,
                 field_id: 0,
                 index: index as u32,
-                byte: u32::from(is_v2),
+                byte: 0,
+                validity_bytes: [0; MDOC_TDATE_BYTES],
+            }
+        }
+
+        fn device_start(index: usize) -> Self {
+            Self {
+                issuer: 0,
+                sha: 0,
+                start: 0,
+                device_start: 1,
+                validity: 0,
+                field_id: 0,
+                index: index as u32,
+                byte: 0,
+                validity_bytes: [0; MDOC_TDATE_BYTES],
+            }
+        }
+
+        fn validity(kind: u32, bytes: [u8; MDOC_TDATE_BYTES]) -> Self {
+            Self {
+                issuer: 0,
+                sha: 0,
+                start: 0,
+                device_start: 0,
+                validity: 1,
+                field_id: kind,
+                index: 0,
+                byte: 0,
+                validity_bytes: bytes,
             }
         }
     }
 
-    const TEST_COUNTER_COLS: usize = 6;
+    const TEST_COUNTER_COLS: usize = TEST_VALIDITY_BYTES + MDOC_TDATE_BYTES;
     const TEST_ISSUER: usize = 0;
     const TEST_SHA: usize = 1;
     const TEST_START: usize = 2;
-    const TEST_FIELD_ID: usize = 3;
-    const TEST_INDEX: usize = 4;
-    const TEST_BYTE: usize = 5;
+    const TEST_DEVICE_START: usize = 3;
+    const TEST_VALIDITY: usize = 4;
+    const TEST_FIELD_ID: usize = 5;
+    const TEST_INDEX: usize = 6;
+    const TEST_BYTE: usize = 7;
+    const TEST_VALIDITY_BYTES: usize = 8;
 
     fn test_counter_log_size(rows: usize) -> u32 {
         rows.next_power_of_two().ilog2().max(LOG_N_LANES)
@@ -2743,6 +2440,8 @@ mod tests {
                 row.issuer,
                 row.sha,
                 row.start,
+                row.device_start,
+                row.validity,
                 row.field_id,
                 row.index,
                 row.byte,
@@ -2751,6 +2450,9 @@ mod tests {
             .enumerate()
             {
                 columns[column][index] = m31_u32(value);
+            }
+            for (byte_index, byte) in row.validity_bytes.iter().copied().enumerate() {
+                columns[TEST_VALIDITY_BYTES + byte_index][index] = m31_u32(u32::from(byte));
             }
         }
         columns
@@ -2774,6 +2476,8 @@ mod tests {
         issuer: FieldBytesRelation,
         sha: FieldBytesRelation,
         start: MdocMsoStartRelation,
+        device_start: MdocDevicePkStartRelation,
+        validity: MdocMsoValidityBytesRelation,
     }
 
     impl FrameworkEval for TestCounterEval {
@@ -2789,11 +2493,15 @@ mod tests {
             let issuer = eval.next_trace_mask();
             let sha = eval.next_trace_mask();
             let start = eval.next_trace_mask();
+            let device_start = eval.next_trace_mask();
+            let validity = eval.next_trace_mask();
             let field_id = eval.next_trace_mask();
             let index = eval.next_trace_mask();
             let byte = eval.next_trace_mask();
+            let validity_bytes: [E::F; MDOC_TDATE_BYTES] =
+                std::array::from_fn(|_| eval.next_trace_mask());
             let one = E::F::from(m31_u32(1));
-            for selector in [&issuer, &sha, &start] {
+            for selector in [&issuer, &sha, &start, &device_start, &validity] {
                 eval.add_constraint(selector.clone() * (one.clone() - selector.clone()));
             }
             eval.add_to_relation(RelationEntry::new(
@@ -2804,12 +2512,25 @@ mod tests {
             eval.add_to_relation(RelationEntry::new(
                 &self.sha,
                 -E::EF::from(sha),
-                &[field_id, index.clone(), byte.clone()],
+                &[field_id.clone(), index.clone(), byte.clone()],
             ));
             eval.add_to_relation(RelationEntry::new(
                 &self.start,
                 E::EF::from(start),
-                &[index, byte],
+                std::slice::from_ref(&index),
+            ));
+            eval.add_to_relation(RelationEntry::new(
+                &self.device_start,
+                E::EF::from(device_start),
+                &[index],
+            ));
+            let mut validity_tuple = Vec::with_capacity(1 + MDOC_TDATE_BYTES);
+            validity_tuple.push(field_id);
+            validity_tuple.extend(validity_bytes);
+            eval.add_to_relation(RelationEntry::new(
+                &self.validity,
+                E::EF::from(validity),
+                &validity_tuple,
             ));
             eval.finalize_logup_in_pairs();
             eval
@@ -2822,6 +2543,8 @@ mod tests {
         issuer_relation: &FieldBytesRelation,
         sha_relation: &FieldBytesRelation,
         start_relation: &MdocMsoStartRelation,
+        device_start_relation: &MdocDevicePkStartRelation,
+        validity_relation: &MdocMsoValidityBytesRelation,
     ) -> (Vec<MdocPrivateMsoColumnEval>, QM31) {
         let trace = test_counter_evals(rows, log_size);
         let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
@@ -2842,12 +2565,26 @@ mod tests {
             )
         });
         logup.col_from_iter((0..n_vec_rows).map(|vec_row| {
+            let start_denominator: PackedQM31 =
+                start_relation.combine(&[trace[TEST_INDEX].data[vec_row]]);
+            let device_denominator: PackedQM31 =
+                device_start_relation.combine(&[trace[TEST_INDEX].data[vec_row]]);
+            let start_numerator = PackedQM31::from(trace[TEST_START].data[vec_row]);
+            let device_numerator = PackedQM31::from(trace[TEST_DEVICE_START].data[vec_row]);
             (
-                PackedQM31::from(trace[TEST_START].data[vec_row]),
-                start_relation.combine(&[
-                    trace[TEST_INDEX].data[vec_row],
-                    trace[TEST_BYTE].data[vec_row],
-                ]),
+                start_numerator * device_denominator + device_numerator * start_denominator,
+                start_denominator * device_denominator,
+            )
+        }));
+        logup.col_from_iter((0..n_vec_rows).map(|vec_row| {
+            let mut tuple = Vec::with_capacity(1 + MDOC_TDATE_BYTES);
+            tuple.push(trace[TEST_FIELD_ID].data[vec_row]);
+            tuple.extend(
+                (0..MDOC_TDATE_BYTES).map(|index| trace[TEST_VALIDITY_BYTES + index].data[vec_row]),
+            );
+            (
+                PackedQM31::from(trace[TEST_VALIDITY].data[vec_row]),
+                validity_relation.combine(&tuple),
             )
         }));
         logup.finalize_last()
@@ -2859,6 +2596,8 @@ mod tests {
         issuer_handle: SharedFieldRelation,
         sha_handle: SharedFieldRelation,
         start_handle: SharedMdocMsoStartRelation,
+        device_start_handle: SharedMdocDevicePkStartRelation,
+        validity_handle: SharedMdocMsoValidityBytesRelation,
         component: Option<FrameworkComponent<TestCounterEval>>,
     }
 
@@ -2868,6 +2607,8 @@ mod tests {
             issuer_handle: SharedFieldRelation,
             sha_handle: SharedFieldRelation,
             start_handle: SharedMdocMsoStartRelation,
+            device_start_handle: SharedMdocDevicePkStartRelation,
+            validity_handle: SharedMdocMsoValidityBytesRelation,
         ) -> Self {
             Self {
                 log_size: test_counter_log_size(rows.len()),
@@ -2875,6 +2616,8 @@ mod tests {
                 issuer_handle,
                 sha_handle,
                 start_handle,
+                device_start_handle,
+                validity_handle,
                 component: None,
             }
         }
@@ -2886,6 +2629,8 @@ mod tests {
                 &self.issuer_handle.get(),
                 &self.sha_handle.get(),
                 &self.start_handle.get(),
+                &self.device_start_handle.get(),
+                &self.validity_handle.get(),
             )
         }
     }
@@ -2910,7 +2655,7 @@ mod tests {
             TreeLayout {
                 preprocessed: Vec::new(),
                 trace: vec![self.log_size; TEST_COUNTER_COLS],
-                interaction: vec![self.log_size; 2 * SECURE_EXTENSION_DEGREE],
+                interaction: vec![self.log_size; 3 * SECURE_EXTENSION_DEGREE],
             }
         }
 
@@ -2930,6 +2675,8 @@ mod tests {
                     issuer: self.issuer_handle.get(),
                     sha: self.sha_handle.get(),
                     start: self.start_handle.get(),
+                    device_start: self.device_start_handle.get(),
+                    validity: self.validity_handle.get(),
                 },
                 self.interaction().1,
             ));
@@ -2992,10 +2739,7 @@ mod tests {
                     .push_back(vec![logical_value(&column, row)]);
             }
             for (index, column) in trace.columns.iter().enumerate() {
-                if matches!(
-                    index,
-                    TRACE_PAYLOAD_OFFSET | TRACE_WINDOW_OFFSET | TRACE_VERSION_SELECTOR
-                ) {
+                if matches!(index, TRACE_PAYLOAD_OFFSET | TRACE_WINDOW_OFFSET) {
                     eval.original.push_back(vec![column[row], column[previous]]);
                 } else {
                     eval.original.push_back(vec![column[row]]);
@@ -3067,13 +2811,10 @@ mod tests {
             spec: spec.clone(),
             payload_anchor_len: shape.payload_anchor.len(),
             issuer_relation: FieldBytesRelation::dummy(),
-            sha_relation: spec
-                .sha_stream
-                .as_ref()
-                .map(|_| FieldBytesRelation::dummy()),
-            mso_start_relation: Some(MdocMsoStartRelation::dummy()),
-            device_pk_start_relation: None,
-            validity_relation: None,
+            sha_relation: FieldBytesRelation::dummy(),
+            mso_start_relation: MdocMsoStartRelation::dummy(),
+            device_pk_start_relation: MdocDevicePkStartRelation::dummy(),
+            validity_relation: MdocMsoValidityBytesRelation::dummy(),
             blinder_relation: ClaimedSumBlinderRelation::dummy(),
             blinder_v: qm31(7),
             blinder_m: qm31(11),
@@ -3120,9 +2861,17 @@ mod tests {
         mso_start: usize,
         census: &MdocPrivateMsoUseCensus,
     ) -> Vec<TestCounterRow> {
-        let sha = spec.sha_stream.as_ref().unwrap();
+        let sha = &spec.sha_stream;
         let raw_mso = &issuer_message[mso_start..mso_start + spec.mso_len];
         let padded = padded_mso(raw_mso, sha.padded_len);
+        let valid_from_start = mso_start + VALID_FROM_OFFSET + VALID_FROM_ANCHOR.len();
+        let valid_until_start = mso_start + VALID_UNTIL_OFFSET + VALID_UNTIL_ANCHOR.len();
+        let valid_from = issuer_message[valid_from_start..valid_from_start + MDOC_TDATE_BYTES]
+            .try_into()
+            .unwrap();
+        let valid_until = issuer_message[valid_until_start..valid_until_start + MDOC_TDATE_BYTES]
+            .try_into()
+            .unwrap();
         census
             .issuer_position_uses
             .iter()
@@ -3141,27 +2890,34 @@ mod tests {
                     .map(|(index, byte)| TestCounterRow::sha(sha.field_id, index, byte)),
             )
             .chain([
-                TestCounterRow::start(mso_start, false, true),
-                TestCounterRow::start(mso_start, false, false),
+                TestCounterRow::start(mso_start, true),
+                TestCounterRow::start(mso_start, false),
+                TestCounterRow::device_start(
+                    mso_start + DEVICE_KEY_OFFSET + DEVICE_KEY_INFO_PREFIX.len(),
+                ),
+                TestCounterRow::validity(0, valid_from),
+                TestCounterRow::validity(1, valid_until),
             ])
             .collect()
     }
 
     fn prove_composed_mso(config: stwo::core::pcs::PcsConfig) -> TestComposedMsoProof {
-        let (spec, issuer_message, mso) = test_parts(true);
+        let (spec, issuer_message, mso) = test_parts();
         let witness = test_witness(&spec, issuer_message.clone(), &mso);
         let mso_start = witness.payload_anchor_offset + payload_anchor(spec.mso_len).len();
         let issuer_handle = SharedFieldRelation::new();
         let sha_handle = SharedFieldRelation::new();
         let start_handle = SharedMdocMsoStartRelation::new();
+        let device_start_handle = SharedMdocDevicePkStartRelation::new();
+        let validity_handle = SharedMdocMsoValidityBytesRelation::new();
         let (mut binder, census) = MdocPrivateMsoBind::prover(
             spec.clone(),
             witness,
             issuer_handle.clone(),
-            Some(sha_handle.clone()),
-            Some(start_handle.clone()),
-            None,
-            None,
+            sha_handle.clone(),
+            start_handle.clone(),
+            device_start_handle.clone(),
+            validity_handle.clone(),
         )
         .unwrap();
         let counter_rows = honest_counter_rows(&spec, &issuer_message, mso_start, &census);
@@ -3170,6 +2926,8 @@ mod tests {
             issuer_handle,
             sha_handle,
             start_handle,
+            device_start_handle,
+            validity_handle,
         );
         let stark = air_core::prove(&mut [&mut counter, &mut binder], config)
             .expect("honest private MSO relation composition proves");
@@ -3188,19 +2946,23 @@ mod tests {
         let issuer_handle = SharedFieldRelation::new();
         let sha_handle = SharedFieldRelation::new();
         let start_handle = SharedMdocMsoStartRelation::new();
+        let device_start_handle = SharedMdocDevicePkStartRelation::new();
+        let validity_handle = SharedMdocMsoValidityBytesRelation::new();
         let mut counter = TestRelationCounter::new(
             counter_rows,
             issuer_handle.clone(),
             sha_handle.clone(),
             start_handle.clone(),
+            device_start_handle.clone(),
+            validity_handle.clone(),
         );
         let mut binder = MdocPrivateMsoBind::verifier(
             fixture.spec.clone(),
             issuer_handle,
-            Some(sha_handle),
-            Some(start_handle),
-            None,
-            None,
+            sha_handle,
+            start_handle,
+            device_start_handle,
+            validity_handle,
             fixture.bind_claim.clone(),
         )
         .unwrap();
@@ -3230,9 +2992,9 @@ mod tests {
 
     #[test]
     fn composed_proof_rejects_every_private_mso_relation_seam_mutation() {
-        let fixture = prove_composed_mso(crate::mdoc::mdoc_production_pcs_config());
+        let fixture = prove_composed_mso(crate::mdoc::mdoc_ts13_pcs_config());
         verify_composed_mso(&fixture, fixture.counter_rows.clone())
-            .expect("full-profile private MSO relation composition must verify");
+            .expect("canonical private MSO relation composition must verify");
 
         assert_counter_mutation_rejects(&fixture, "shifted payload anchor", |rows| {
             rows.iter_mut()
@@ -3243,8 +3005,23 @@ mod tests {
         assert_counter_mutation_rejects(&fixture, "shifted mso_start", |rows| {
             rows.iter_mut().find(|row| row.start == 1).unwrap().index += 1;
         });
-        assert_counter_mutation_rejects(&fixture, "mso_start version bit", |rows| {
-            rows.iter_mut().find(|row| row.start == 1).unwrap().byte ^= 1;
+        assert_counter_mutation_rejects(&fixture, "shifted device key start", |rows| {
+            rows.iter_mut()
+                .find(|row| row.device_start == 1)
+                .unwrap()
+                .index += 1;
+        });
+        assert_counter_mutation_rejects(&fixture, "valid-from byte", |rows| {
+            rows.iter_mut()
+                .find(|row| row.validity == 1 && row.field_id == 0)
+                .unwrap()
+                .validity_bytes[0] ^= 1;
+        });
+        assert_counter_mutation_rejects(&fixture, "valid-until byte", |rows| {
+            rows.iter_mut()
+                .find(|row| row.validity == 1 && row.field_id == 1)
+                .unwrap()
+                .validity_bytes[19] ^= 1;
         });
         assert_counter_mutation_rejects(&fixture, "raw MSO mirror byte", |rows| {
             rows.iter_mut()
@@ -3257,7 +3034,7 @@ mod tests {
             ("SHA padding zero", fixture.spec.mso_len + 1),
             (
                 "SHA padding bit length",
-                fixture.spec.sha_stream.as_ref().unwrap().padded_len - 1,
+                fixture.spec.sha_stream.padded_len - 1,
             ),
         ] {
             assert_counter_mutation_rejects(&fixture, name, |rows| {
@@ -3282,7 +3059,7 @@ mod tests {
 
     #[test]
     fn alternate_same_width_issuer_algorithm_is_rejected_by_the_production_air() {
-        let (spec, issuer_message, mso) = test_parts(true);
+        let (spec, issuer_message, mso) = test_parts();
         let mut witness = test_witness(&spec, issuer_message, &mso);
         let algorithm_argument = PAYLOAD_OFFSET
             + ISSUER_SIGNATURE1_CONTEXT_PREFIX.len()
@@ -3295,23 +3072,31 @@ mod tests {
         let issuer_handle = SharedFieldRelation::new();
         let sha_handle = SharedFieldRelation::new();
         let start_handle = SharedMdocMsoStartRelation::new();
+        let device_start_handle = SharedMdocDevicePkStartRelation::new();
+        let validity_handle = SharedMdocMsoValidityBytesRelation::new();
         let (mut binder, census) = MdocPrivateMsoBind::prover(
             spec.clone(),
             witness,
             issuer_handle.clone(),
-            Some(sha_handle.clone()),
-            Some(start_handle.clone()),
-            None,
-            None,
+            sha_handle.clone(),
+            start_handle.clone(),
+            device_start_handle.clone(),
+            validity_handle.clone(),
         )
-        .expect("test bypasses host extraction and reaches the production AIR");
+        .expect("test bypasses host extraction and reaches the circuit AIR");
         let counter_rows =
             honest_counter_rows(&spec, &alternate_issuer_message, mso_start, &census);
-        let mut counter =
-            TestRelationCounter::new(counter_rows, issuer_handle, sha_handle, start_handle);
+        let mut counter = TestRelationCounter::new(
+            counter_rows,
+            issuer_handle,
+            sha_handle,
+            start_handle,
+            device_start_handle,
+            validity_handle,
+        );
         let error = air_core::prove(
             &mut [&mut counter, &mut binder],
-            crate::mdoc::mdoc_production_pcs_config(),
+            crate::mdoc::mdoc_ts13_pcs_config(),
         )
         .expect_err(
             "the canonical protected-header constraint must reject the alternate algorithm",
@@ -3331,7 +3116,7 @@ mod tests {
 
     #[test]
     fn canonical_constructor_derives_unique_offsets_and_rejects_ambiguity() {
-        let (spec, mut issuer_message, mut mso) = test_parts(true);
+        let (spec, mut issuer_message, mut mso) = test_parts();
         let witness = test_witness(&spec, issuer_message.clone(), &mso);
         assert_eq!(witness.payload_anchor_offset, PAYLOAD_OFFSET);
         assert_eq!(
@@ -3356,22 +3141,15 @@ mod tests {
             "honest fixture must have exactly one payload anchor occurrence"
         );
 
-        let mut duplicate_version = VERSION_PREFIX.to_vec();
-        duplicate_version.extend_from_slice(b"1.0");
-        write_at(&mut mso, 3_000, &duplicate_version);
+        write_at(&mut mso, 3_000, VERSION_1_0_RUN);
         write_at(
             &mut issuer_message,
             PAYLOAD_OFFSET + payload_anchor(spec.mso_len).len(),
             &mso,
         );
         assert_eq!(
-            MdocPrivateMsoBindWitness::from_canonical_issuer_message(
-                &spec,
-                issuer_message,
-                &mso,
-                MdocPrivateMsoVersion::V1,
-            )
-            .unwrap_err(),
+            MdocPrivateMsoBindWitness::from_canonical_issuer_message(&spec, issuer_message, &mso)
+                .unwrap_err(),
             MdocPrivateMsoBindError::CanonicalAnchorAmbiguous {
                 anchor: "MSO version"
             }
@@ -3388,52 +3166,16 @@ mod tests {
         assert_eq!(
             anchor.len() + crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES,
             crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES,
-            "the frozen issuer Sig_structure is exactly prefix || private MSO"
+            "the fixed issuer Sig_structure is exactly prefix || private MSO"
         );
     }
 
     #[test]
-    fn fixed_log9_full_profile_census_is_exact() {
-        let (binder, census) = test_binder(true, true);
-        assert_eq!(LEGACY_PREPROCESSED_COLS, 204);
-        assert_eq!(TRACE_COLS, 203);
-        assert_eq!(DEVICE_KEY_INFO_CHUNKS, 63);
-        assert_eq!(binder.active_rows(), 201);
-        assert_eq!(census.active_rows, 201);
-        assert_eq!(census.blind_rows, 311);
-        assert_eq!(census.issuer_uses_total, 6_237);
-        assert_eq!(census.sha_stream_uses, 4_160);
-        assert_eq!(census.mso_start_uses, 1);
-        assert_eq!(census.device_pk_start_uses, 0);
-        assert_eq!(census.validity_uses, 0);
-        assert_eq!(
-            census
-                .issuer_position_uses
-                .iter()
-                .map(|&count| count as usize)
-                .sum::<usize>(),
-            census.issuer_uses_total
-        );
-        assert_eq!(census.issuer_position_uses[PAYLOAD_OFFSET], 1);
-        assert!(
-            census.issuer_position_uses[PAYLOAD_OFFSET + payload_anchor(4_096).len() + 3_000] >= 1
-        );
-
-        let (without_sha, census) = test_binder(false, false);
-        assert_eq!(without_sha.active_rows(), 71);
-        assert_eq!(census.blind_rows, 441);
-        assert_eq!(census.issuer_uses_total, 2_141);
-        assert_eq!(census.sha_stream_uses, 0);
-        assert_eq!(census.mso_start_uses, 0);
-        assert_eq!(census.device_pk_start_uses, 0);
-        assert_eq!(census.validity_uses, 0);
-    }
-
-    #[test]
-    fn ts13_private_mode_has_minimal_shape_census_and_exact_witness_handoffs() {
-        let (binder, census, witness) = private_test_binder(true, true);
-        assert_eq!(PRIVATE_PREPROCESSED_COLS, 142);
-        assert_eq!(binder.shape.preprocessed_cols(), 142);
+    fn canonical_shape_census_and_witness_handoffs_are_exact() {
+        let (binder, census, witness) = test_binder_with_witness();
+        assert_eq!(PREPROCESSED_COLS, 141);
+        assert_eq!(TRACE_COLS, 202);
+        assert_eq!(binder.shape.preprocessed_cols(), 141);
         assert_eq!(binder.active_rows(), 140);
         assert_eq!(census.active_rows, 140);
         assert_eq!(census.blind_rows, 372);
@@ -3456,63 +3198,37 @@ mod tests {
         let validity = witness.validity_witness(&binder.spec).unwrap();
         assert_eq!(validity.valid_from, *b"2020-01-01T00:00:00Z");
         assert_eq!(validity.valid_until, *b"2030-12-31T23:59:59Z");
-
-        let (without_sha, census, witness) = private_test_binder(false, false);
-        assert_eq!(without_sha.active_rows(), 10);
-        assert_eq!(census.blind_rows, 502);
-        assert_eq!(census.issuer_uses_total, 189);
-        assert_eq!(census.sha_stream_uses, 0);
-        let pk_start = witness.device_pk_start(&without_sha.spec).unwrap();
-        assert!(
-            census.issuer_position_uses[pk_start - DEVICE_KEY_INFO_PREFIX.len()..pk_start]
-                .iter()
-                .all(|&uses| uses == 1)
-        );
-        assert!(
-            census.issuer_position_uses[pk_start..pk_start + stwo_mldsa::constants::PK_BYTES]
-                .iter()
-                .all(|&uses| uses == 0)
-        );
     }
 
     #[test]
-    fn ts13_private_mode_requires_and_publishes_start_and_validity_handles() {
-        let (spec, issuer_message, mso) = private_test_parts(false);
+    fn canonical_binder_publishes_owned_relation_handles() {
+        let (spec, issuer_message, mso) = test_parts();
         let witness = test_witness(&spec, issuer_message, &mso);
-        assert!(matches!(
-            MdocPrivateMsoBind::prover(
-                spec.clone(),
-                witness.clone(),
-                SharedFieldRelation::new(),
-                None,
-                None,
-                None,
-                None,
-            ),
-            Err(MdocPrivateMsoBindError::DeviceKeyRelationHandleMismatch { .. })
-        ));
-
-        let start = SharedMdocDevicePkStartRelation::new();
+        let sha = SharedFieldRelation::new();
+        let mso_start = SharedMdocMsoStartRelation::new();
+        let device_start = SharedMdocDevicePkStartRelation::new();
         let validity = SharedMdocMsoValidityBytesRelation::new();
         let (mut binder, _) = MdocPrivateMsoBind::prover(
             spec,
             witness,
             SharedFieldRelation::new(),
-            None,
-            None,
-            Some(start.clone()),
-            Some(validity.clone()),
+            sha.clone(),
+            mso_start.clone(),
+            device_start.clone(),
+            validity.clone(),
         )
         .unwrap();
         let mut channel = Blake2sChannel::default();
         binder.draw_relations(&mut channel);
-        assert!(start.is_set());
+        assert!(!sha.is_set());
+        assert!(mso_start.is_set());
+        assert!(device_start.is_set());
         assert!(validity.is_set());
     }
 
     #[test]
-    fn ts13_private_device_key_is_absent_from_tree_zero_and_public_mix() {
-        let (spec, first_message, first_mso) = private_test_parts(true);
+    fn private_device_key_is_absent_from_tree_zero_and_public_mix() {
+        let (spec, first_message, first_mso) = test_parts();
         let mut second_message = first_message.clone();
         let mut second_mso = first_mso.clone();
         let key_offset = DEVICE_KEY_OFFSET + DEVICE_KEY_INFO_PREFIX.len();
@@ -3528,30 +3244,31 @@ mod tests {
             (
                 SharedFieldRelation::new(),
                 SharedFieldRelation::new(),
+                SharedMdocMsoStartRelation::new(),
                 SharedMdocDevicePkStartRelation::new(),
                 SharedMdocMsoValidityBytesRelation::new(),
             )
         };
-        let (issuer, sha, start, validity) = handles();
+        let (issuer, sha, mso_start, device_start, validity) = handles();
         let (mut first, _) = MdocPrivateMsoBind::prover(
             spec.clone(),
             first_witness,
             issuer,
-            Some(sha),
-            None,
-            Some(start),
-            Some(validity),
+            sha,
+            mso_start,
+            device_start,
+            validity,
         )
         .unwrap();
-        let (issuer, sha, start, validity) = handles();
+        let (issuer, sha, mso_start, device_start, validity) = handles();
         let (mut second, _) = MdocPrivateMsoBind::prover(
             spec,
             second_witness,
             issuer,
-            Some(sha),
-            None,
-            Some(start),
-            Some(validity),
+            sha,
+            mso_start,
+            device_start,
+            validity,
         )
         .unwrap();
 
@@ -3584,48 +3301,33 @@ mod tests {
 
     #[test]
     fn precise_public_shape_and_private_offset_errors_reject_before_trace_allocation() {
-        let mut spec = test_spec(true);
+        let mut spec = test_spec();
         spec.issuer_message_len = crate::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES + 1;
         assert!(matches!(
-            validate_spec(&spec, true),
+            validate_spec(&spec),
             Err(MdocPrivateMsoBindError::IssuerMessageTooLong { .. })
         ));
 
-        let mut spec = test_spec(true);
-        let MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(public_key) = &mut spec.device_key_mode
-        else {
-            unreachable!()
-        };
-        public_key.pop();
+        let mut spec = test_spec();
+        spec.sha_stream.padded_len -= 64;
         assert!(matches!(
-            validate_spec(&spec, true),
-            Err(MdocPrivateMsoBindError::DevicePublicKeyLength { .. })
-        ));
-
-        let mut spec = test_spec(true);
-        spec.sha_stream.as_mut().unwrap().padded_len -= 64;
-        assert!(matches!(
-            validate_spec(&spec, true),
+            validate_spec(&spec),
             Err(MdocPrivateMsoBindError::ShaPaddedLengthMismatch { .. })
         ));
-        assert!(matches!(
-            validate_spec(&test_spec(true), false),
-            Err(MdocPrivateMsoBindError::ShaStreamHandleMismatch { .. })
-        ));
 
-        let mut spec = test_spec(true);
+        let mut spec = test_spec();
         spec.doc_type = "x".repeat(MDOC_PRIVATE_MSO_MAX_DOC_TYPE_BYTES + 1);
         assert!(matches!(
-            validate_spec(&spec, true),
+            validate_spec(&spec),
             Err(MdocPrivateMsoBindError::DocTypeTooLong { .. })
         ));
 
-        let (spec, issuer_message, mso) = test_parts(true);
+        let (spec, issuer_message, mso) = test_parts();
         let mut witness = test_witness(&spec, issuer_message, &mso);
         witness.version_offset = spec.mso_len - 1;
-        let shape = validate_spec(&spec, true).unwrap();
+        let shape = validate_spec(&spec).unwrap();
         assert!(matches!(
-            private_trace(&spec, &shape, &witness, false),
+            private_trace(&spec, &shape, &witness),
             Err(MdocPrivateMsoBindError::WindowOutOfBounds {
                 window: "MSO version",
                 ..
@@ -3646,7 +3348,7 @@ mod tests {
 
     #[test]
     fn all_honest_active_and_inactive_rows_satisfy_constraints_and_cubic_logup_bound() {
-        let (binder, _) = test_binder(true, true);
+        let (binder, _) = test_binder();
         let trace = binder.trace.as_ref().unwrap();
         let anchor_row = binder
             .shape
@@ -3676,8 +3378,8 @@ mod tests {
     }
 
     #[test]
-    fn anchor_offsets_profile_constants_device_key_tdates_and_padding_mutations_reject() {
-        let (binder, _) = test_binder(true, true);
+    fn canonical_anchors_offsets_prefix_tdates_and_padding_mutations_reject() {
+        let (binder, _) = test_binder();
         let honest = binder.trace.as_ref().unwrap();
         let anchor_row = binder
             .shape
@@ -3715,7 +3417,7 @@ mod tests {
         assert_row_rejects(&binder.spec, &binder.shape, &shifted_window, 2);
 
         let mut version = honest.clone();
-        version.columns[TRACE_BYTE_START + VERSION_PREFIX.len()][1] = m31_u32(b'9' as u32);
+        version.columns[TRACE_BYTE_START + VERSION_1_0_RUN.len() - 3][1] = m31_u32(b'9' as u32);
         assert_row_rejects(&binder.spec, &binder.shape, &version, 1);
 
         let mut algorithm = honest.clone();
@@ -3731,22 +3433,13 @@ mod tests {
         device.columns[TRACE_BYTE_START][device_first_row] += m31_u32(1);
         assert_row_rejects(&binder.spec, &binder.shape, &device, device_first_row);
 
-        let mut device_public_key = honest.clone();
-        device_public_key.columns[TRACE_BYTE_START + 3][device_first_row + 1] += m31_u32(1);
-        assert_row_rejects(
-            &binder.spec,
-            &binder.shape,
-            &device_public_key,
-            device_first_row + 1,
-        );
-
-        let valid_from_date_row = 68;
+        let valid_from_date_row = 7;
         let mut bad_time = honest.clone();
         bad_time.columns[TRACE_BYTE_START + 11][valid_from_date_row] = m31_u32(b'2' as u32);
         bad_time.columns[TRACE_BYTE_START + 12][valid_from_date_row] = m31_u32(b'4' as u32);
         assert_row_rejects(&binder.spec, &binder.shape, &bad_time, valid_from_date_row);
 
-        let padding_marker_row = 199;
+        let padding_marker_row = 138;
         let mut padding = honest.clone();
         padding.columns[TRACE_BYTE_START][padding_marker_row] = m31_u32(0);
         assert_row_rejects(&binder.spec, &binder.shape, &padding, padding_marker_row);
@@ -3754,11 +3447,13 @@ mod tests {
 
     #[test]
     fn relation_claim_changes_for_raw_byte_and_fully_shifted_payload_mutations() {
-        let (binder, _) = test_binder(true, true);
+        let (binder, _) = test_binder();
         let mut channel = Blake2sChannel::default();
         let issuer = FieldBytesRelation::draw(&mut channel);
         let sha = FieldBytesRelation::draw(&mut channel);
         let start = MdocMsoStartRelation::draw(&mut channel);
+        let device_start = MdocDevicePkStartRelation::draw(&mut channel);
+        let validity = MdocMsoValidityBytesRelation::draw(&mut channel);
         let blinder = ClaimedSumBlinderRelation::draw(&mut channel);
         let v = qm31(17);
         let m = qm31(19);
@@ -3769,10 +3464,10 @@ mod tests {
                 trace,
                 MdocPrivateMsoInteractionInputs {
                     issuer_relation: &issuer,
-                    sha_relation: Some(&sha),
-                    mso_start_relation: Some(&start),
-                    device_pk_start_relation: None,
-                    validity_relation: None,
+                    sha_relation: &sha,
+                    mso_start_relation: &start,
+                    device_pk_start_relation: &device_start,
+                    validity_relation: &validity,
                     blinder_relation: &blinder,
                     blinder_v: v,
                     blinder_m: m,
@@ -3818,7 +3513,7 @@ mod tests {
 
     #[test]
     fn private_content_does_not_change_preprocessing_or_public_mixing() {
-        let (spec, issuer_message, mso) = test_parts(true);
+        let (spec, issuer_message, mso) = test_parts();
         let first_witness = test_witness(&spec, issuer_message.clone(), &mso);
         let mut changed_message = issuer_message;
         let mut changed_mso = mso;
@@ -3830,20 +3525,20 @@ mod tests {
             spec.clone(),
             first_witness,
             SharedFieldRelation::new(),
-            Some(SharedFieldRelation::new()),
-            None,
-            None,
-            None,
+            SharedFieldRelation::new(),
+            SharedMdocMsoStartRelation::new(),
+            SharedMdocDevicePkStartRelation::new(),
+            SharedMdocMsoValidityBytesRelation::new(),
         )
         .unwrap();
         let (mut second, _) = MdocPrivateMsoBind::prover(
             spec,
             second_witness,
             SharedFieldRelation::new(),
-            Some(SharedFieldRelation::new()),
-            None,
-            None,
-            None,
+            SharedFieldRelation::new(),
+            SharedMdocMsoStartRelation::new(),
+            SharedMdocDevicePkStartRelation::new(),
+            SharedMdocMsoValidityBytesRelation::new(),
         )
         .unwrap();
         assert_eq!(
@@ -3866,13 +3561,9 @@ mod tests {
 
     #[test]
     fn same_shape_public_content_does_not_change_tree_zero_material() {
-        let (first_spec, first_message, first_mso) = test_parts(true);
+        let (first_spec, first_message, first_mso) = test_parts();
         let mut second_spec = first_spec.clone();
         second_spec.doc_type = "a".repeat(first_spec.doc_type.len());
-        second_spec.device_key_mode = MdocPrivateMsoDeviceKeyMode::LegacyPublicExact(vec![
-            0x3c;
-            stwo_mldsa::constants::PK_BYTES
-        ]);
         let (second_spec, mut second_message, mut second_mso) = test_parts_for_spec(second_spec);
         let second_mso_start = PAYLOAD_OFFSET + payload_anchor(second_spec.mso_len).len();
         second_mso[3_500] ^= 1;
@@ -3884,20 +3575,20 @@ mod tests {
             first_spec,
             first_witness,
             SharedFieldRelation::new(),
-            Some(SharedFieldRelation::new()),
-            None,
-            None,
-            None,
+            SharedFieldRelation::new(),
+            SharedMdocMsoStartRelation::new(),
+            SharedMdocDevicePkStartRelation::new(),
+            SharedMdocMsoValidityBytesRelation::new(),
         )
         .unwrap();
         let (mut second, _) = MdocPrivateMsoBind::prover(
             second_spec,
             second_witness,
             SharedFieldRelation::new(),
-            Some(SharedFieldRelation::new()),
-            None,
-            None,
-            None,
+            SharedFieldRelation::new(),
+            SharedMdocMsoStartRelation::new(),
+            SharedMdocDevicePkStartRelation::new(),
+            SharedMdocMsoValidityBytesRelation::new(),
         )
         .unwrap();
 
@@ -3936,11 +3627,11 @@ mod tests {
 
     #[test]
     fn inactive_bits_and_digits_are_fresh_and_globally_valid() {
-        let (first, _) = test_binder(true, false);
-        let (second, _) = test_binder(true, false);
+        let (first, _) = test_binder();
+        let (second, _) = test_binder();
+        let inactive = first.active_rows();
         let first = first.trace.as_ref().unwrap();
         let second = second.trace.as_ref().unwrap();
-        let inactive = 201;
         assert_ne!(
             first
                 .columns
@@ -3985,10 +3676,12 @@ mod tests {
 
     #[test]
     fn layout_claim_shape_site_order_and_component_order_are_fixed() {
-        let spec = test_spec(true);
+        let spec = test_spec();
         let issuer_handle = SharedFieldRelation::new();
         let sha_handle = SharedFieldRelation::new();
         let start_handle = SharedMdocMsoStartRelation::new();
+        let device_start_handle = SharedMdocDevicePkStartRelation::new();
+        let validity_handle = SharedMdocMsoValidityBytesRelation::new();
         let mut channel = Blake2sChannel::default();
         issuer_handle.set(FieldBytesRelation::draw(&mut channel));
         sha_handle.set(FieldBytesRelation::draw(&mut channel));
@@ -4000,17 +3693,17 @@ mod tests {
         let mut verifier = MdocPrivateMsoBind::verifier(
             spec,
             issuer_handle,
-            Some(sha_handle),
-            Some(start_handle.clone()),
-            None,
-            None,
+            sha_handle,
+            start_handle.clone(),
+            device_start_handle.clone(),
+            validity_handle.clone(),
             decoded,
         )
         .unwrap();
-        assert_eq!(verifier.n_main_sites(), 66);
+        assert_eq!(verifier.n_main_sites(), 69);
         assert_eq!(
             verifier.layout().preprocessed,
-            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; LEGACY_PREPROCESSED_COLS]
+            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; PREPROCESSED_COLS]
         );
         assert_eq!(
             verifier.layout().trace,
@@ -4018,12 +3711,14 @@ mod tests {
         );
         assert_eq!(
             verifier.layout().interaction,
-            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; 34 * SECURE_EXTENSION_DEGREE]
+            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; 36 * SECURE_EXTENSION_DEGREE]
         );
         assert_eq!(verifier.claimed_sums(), vec![qm31(1), qm31(4)]);
 
         verifier.draw_relations(&mut channel);
         assert!(start_handle.is_set());
+        assert!(device_start_handle.is_set());
+        assert!(validity_handle.is_set());
         let ids = verifier.preprocessed_column_ids();
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(ids.as_slice());
         verifier.build_components(&mut allocator);

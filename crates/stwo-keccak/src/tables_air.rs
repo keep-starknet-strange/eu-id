@@ -6,13 +6,13 @@
 //! genuine table row.
 //!
 //! Three table families:
-//! - **Dense** — one `2^16`-row table `(key, spread(xor), andnot)` serving BOTH
+//! - **Dense:** one `2^16`-row table `(key, spread(xor), andnot)` that serves both
 //!   the `xor3` and `andnot` relations. Both key a 16-bit base-4 digit value, so
-//!   they share the dense key space; merging halves M3b's dominant `2^16` fixed
-//!   commitment. Carries two multiplicity columns (one per relation) and yields
+//!   they share the dense key space. Merging halves the fixed `2^16`
+//!   commitment. It carries two multiplicity columns and yields
 //!   both relations.
-//! - **Conv** — `2^8`-row `(byte, spread(byte))` byte↔spread table.
-//! - **Split(r)** — `2^8`-row `(spread_byte, spread_hi, spread_lo)` spread split.
+//! - **Conv:** `2^8`-row `(byte, spread(byte))` byte↔spread table.
+//! - **Split(r):** `2^8`-row `(spread_byte, spread_hi, spread_lo)` spread split.
 
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
@@ -145,7 +145,7 @@ pub fn generate_preprocessed_trace(
     evals
 }
 
-// ── Multiplicities: count table-row hits from the round + sponge lookup data ──
+// Count table-row hits from the round and sponge lookup data.
 
 /// Total preprocessed cell count across all nine tables (for the acceptance
 /// report): `2^16·3 (dense) + 2^8·2 (conv) + 7·2^8·3 (split)`.

@@ -1,7 +1,7 @@
 //! SHA-256 spec constants (FIPS 180-4 §4.2.2, §5.3.3).
 //!
-//! These are circuit constants — never free trace columns. The AIR hard-wires
-//! `K[t]` per round and constrains the initial hash state to equal `IV`.
+//! The AIR fixes `K[t]` for each round. It also constrains the initial hash
+//! state to equal `IV`.
 
 /// Round constants `K[0..63]`: first 32 bits of the fractional parts of the
 /// cube roots of the first 64 primes (FIPS 180-4 §4.2.2).

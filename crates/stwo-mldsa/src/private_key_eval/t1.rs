@@ -445,7 +445,7 @@ mod tests {
         let mut exact_verifier = OneRowAir::new(exact, &trace);
         assert!(
             air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
-            "{label}: production scaling formula must reject"
+            "{label}: the exact scaling formula must reject the input"
         );
     }
 
@@ -707,7 +707,7 @@ mod tests {
             RangeAliasAir::verifier(consumer.claimed_sum, handle, lookup_values, true);
         assert!(
             air_core::verify(&mut [&mut table_verifier, &mut exact_consumer], &proof).is_err(),
-            "t1={value}: signed Rc9 lookup must reject the carry alias"
+            "t1={value}: the signed Rc9 lookup must reject the carry alias"
         );
     }
 
@@ -733,7 +733,7 @@ mod tests {
         assert_ne!(
             acc_cur,
             acc_prev * exact_r + digit_row,
-            "forged accumulator must violate the production recurrence"
+            "forged accumulator must violate the exact recurrence"
         );
 
         let mut trace = vec![m31(1), m31(0)];
@@ -754,7 +754,7 @@ mod tests {
         let mut exact_verifier = OneRowAir::new(exact, &trace);
         assert!(
             air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
-            "production Horner formula must reject an accumulator built with the wrong r"
+            "the exact Horner formula must reject an accumulator built with the wrong r"
         );
     }
 
@@ -789,9 +789,9 @@ mod tests {
         let r = SecureField::from(m31(17));
         let s = SecureField::from(m31(31));
         let interaction = gen_t1_interaction(&t1, r, s, &PrivateKeyEvalRelations::dummy());
-        for poly in 0..K {
+        for (poly, coefficients) in t1.iter().enumerate() {
             let mut expected = SecureField::zero();
-            for &value in t1[poly].iter().rev() {
+            for &value in coefficients.iter().rev() {
                 let digits = scaled_digits(value);
                 let row = SecureField::from(enc_signed(digits[0]))
                     + s * SecureField::from(enc_signed(digits[1]))

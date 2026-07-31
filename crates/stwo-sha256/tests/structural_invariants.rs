@@ -31,8 +31,7 @@ fn sha_air_uses_typed_relation_multiplicities() {
     );
 }
 
-/// Pin `Layout::TOTAL_COLS` to the claimed total so any future
-/// column-count drift fails closed against the test-plan value.
+/// Pin `Layout::TOTAL_COLS` to the documented total.
 ///
 /// Algebraic one-row-per-round layout: enabler (1) + `W` limbs (2) +
 /// W bits (32) + round family (216) + schedule family (70) +

@@ -1,51 +1,35 @@
 //! AIR evaluator for the SHA-256 component.
 //!
-//! Implements [`FrameworkEval`] for the one-row-per-block layout defined in
-//! [`crate::trace`]. The **linear** constraints — IV binding on the first
-//! block, every mod-2³² limb-add identity (schedule recurrence, round adds,
-//! finalization), the within-row state-chain that ties round outputs back
-//! to the next round's inputs, and the §10.3 **cross-row block-chain copy
-//! constraint** that pins block `b+1`'s `h_in` to block `b`'s `h_out` via a
-//! `[0, -1]` interaction mask — are emitted here. The σ/Σ output reassembly,
-//! `O2` XOR recomposition, direct boolean-bit constraints for `Maj`, `Ch`,
-//! and the working-state aliases are all wired below. Separate low/high bit recompositions pin
-//! every 16-bit word limb. The mod-2³² limb-add carries are range-checked through
-//! `Range_{2,4,5}` lookups (one family per add per
-//! [`emit_mod_2_32_add_linear`] call) and the final-block `h_out` digest
-//! bytes through `Range_8`; byte recomposition pins the terminal limbs.
+//! Implements [`FrameworkEval`] for the rotated one-row-per-round layout in
+//! [`crate::trace`]. Linear constraints bind the IV, mod-2³² additions,
+//! round-state chain, block-state chain, and final state. The block-state
+//! constraint binds block `b+1` input `h_in` to block `b` output `h_out`
+//! through a `[0, -1]` interaction mask. Other constraints bind the `σ`,
+//! `Σ`, `Maj`, and `Ch` outputs directly from Boolean bits and bind the
+//! working-state aliases.
+//! Separate bit recompositions bind each 16-bit word limb. `Range_{2,4,5}`
+//! lookups range-check addition carries. `Range_8` lookups range-check the
+//! final `h_out` digest bytes.
 //!
-//! Beyond the compression-loop constraints, the §10.4 **padding-role**
-//! block — appended after `h_out` per [`crate::trace::PADDING_ROW_COLS`]
-//! — emits the constraints that pin the FIPS 180-4 §5.1.1 padding
-//! structure: the `0x80` marker sits at the right byte (one-hot word /
-//! byte selectors → byte-decomposition of the marker word), the bytes
-//! after the marker are zero (cumulative-selector gates), the words after
-//! the marker word are zero (with the length-block exception), and the
-//! length block's `W[14]`/`W[15]` carry the bit-length limbs. Block-
-//! alignment (`padded.len() % 64 == 0`) is structural — one trace row
-//! IS one 64-byte block — and so no per-row constraint expresses it. The
-//! cross-component binding of the bit-length and the marker position to
-//! the mdoc-parser stream lands with the integration layer (mdoc/COSE
-//! structure analysis).
+//! The padding constraints bind the FIPS 180-4 §5.1.1 structure. They bind
+//! the `0x80` marker position, zero bytes after the marker, and the bit length
+//! in `W[14]` and `W[15]`. Block alignment is structural: each 64-row region
+//! represents one 64-byte block. Integration modules bind the length and
+//! marker position to the mdoc parser stream.
 //!
-//! Read-order invariant: every `next_trace_mask` call here happens in the
-//! same order as the writes in [`crate::trace::write_block_row`]. Layout
-//! offsets are not used directly here — they are documented in
-//! [`crate::trace::Layout`] for cross-checking.
+//! Each `next_trace_mask` call must use the order from
+//! [`crate::trace::write_block_row`]. [`crate::trace::Layout`] documents the
+//! matching offsets.
 
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX};
 
-use crate::components::{
-    is_first_row_column_id_ns, round_cyclic_column_ids_ns, slot_sel_column_id,
-    slot_starts_column_id,
-};
+use crate::components::{is_first_row_column_id_ns, round_cyclic_column_ids_ns};
 use crate::constants::{DIGEST_BYTES, IV, N_STATE_WORDS};
 use crate::field_exposure::{FieldExposure, FULL_PADDED_STREAM_SITES_PER_ROW};
-use crate::relations::{Sha256Relations, SlotIoRelations};
-use crate::slots::MultiSlotConfig;
+use crate::relations::Sha256Relations;
 use crate::trace::WORD_BIT_COLS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
 
@@ -66,9 +50,7 @@ pub struct Sha256Eval {
     /// `log2` of the row count (the smallest power of two **strictly**
     /// greater than `64 · block count`, per [`crate::trace::min_log_size`]).
     pub log_size: u32,
-    /// LogUp relation bundle. The live constraints consume the four `Range_k`
-    /// channels and optionally yield digest/field bytes; the decode/Maj/Ch/xor_8
-    /// fields remain in the bundle only to preserve the transcript draw order.
+    /// LogUp relation bundle for range checks, digest bytes, and field bytes.
     pub relations: Sha256Relations,
     /// When set, the AIR *yields* the final-block digest bytes on the
     /// `Sha256Digest` channel (the producer half of the SHA digest binding
@@ -80,42 +62,13 @@ pub struct Sha256Eval {
     /// constraints are present and enforced regardless — only the
     /// cross-module *yield* is gated.
     pub expose_digest: bool,
-    /// Credential-field byte exposure. When non-empty, the AIR commits a
-    /// byte-decomposition of each covered message word as a dynamic column tail
-    /// (live on `t = 15` rows) and *yields* the configured byte windows on the
-    /// **first block** over the `Sha256Field` channel, so predicate consumers
-    /// can require the exact bytes of the field they bind. Empty for a
-    /// standalone SHA proof and for the combined proof before the predicate
-    /// consumers are wired (yields with no consumer would leave the module's
-    /// claimed sum non-zero). The byte columns and their decomposition
-    /// constraints exist iff the exposure is non-empty; the cross-module yield
-    /// is what binds.
+    /// Optional complete padded-stream provider. The active mode uses one
+    /// block-counter column and yields all constrained message bytes.
     pub field_exposure: FieldExposure,
-    /// Standalone-instance namespace for consumer-only preprocessed columns.
-    /// Empty preserves the legacy IDs exactly; multi-slot consumers keep this
-    /// empty and use their schedule-encoded IDs.
+    /// Namespace for consumer-only preprocessed columns.
     pub instance_namespace: String,
-    /// Multi-message (slot-scheduled) mode — S8, see
-    /// `tasks/sha-multimessage-design.md`. `None` (every legacy constructor)
-    /// takes exactly the single-message code paths above. `Some` replaces
-    /// the `is_first_row` anchor with the preprocessed `slot_starts`
-    /// schedule, attributes the per-slot digest/field yields through the
-    /// preprocessed `slot_sel` region selectors, and requires
-    /// `expose_digest == false` and an empty `field_exposure` (the per-slot
-    /// specs carry the exposure surface instead).
-    pub multi: Option<MultiSlotEval>,
     /// Optional zero-sum claim mask, anchored after tree 1.
     pub claim_mask_beta: Option<QM31>,
-}
-
-/// Slot schedule + per-slot cross-module relations for a multi-message
-/// `Sha256Eval`.
-#[derive(Clone)]
-pub struct MultiSlotEval {
-    pub config: MultiSlotConfig,
-    /// One (digest, field) relation pair per slot, in slot order — drawn by
-    /// `Sha256Relations::draw_multi_with_shared_tables`.
-    pub relations: Vec<SlotIoRelations>,
 }
 
 impl FrameworkEval for Sha256Eval {
@@ -124,7 +77,7 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Legacy plain constraints are degree ≤ 3. Full padded-stream mode
+        // Base constraints are degree ≤ 3. Full padded-stream mode
         // adds one degree-4 final-counter identity
         // (`gate_r15 · (1-enabler_after_block) · (counter-expected)`).
         // The binding term is the batch-4 LogUp finalizer
@@ -150,34 +103,9 @@ impl FrameworkEval for Sha256Eval {
         let r15 = eval.get_preprocessed_column(cyclic[6].clone());
         let r63 = eval.get_preprocessed_column(cyclic[7].clone());
         let is_sched = eval.get_preprocessed_column(cyclic[8].clone());
-        // `is_first_row` pins the chain anchor rows for IV binding: natural
-        // row 0 in single-message mode, every slot region's first row in
-        // multi-slot mode (the preprocessed `slot_starts` schedule — the
-        // prover cannot move a slot boundary, I-5). `slot_sel[s]` is slot
-        // `s`'s preprocessed region selector, gating per-slot attribution.
-        let is_first_row = match &self.multi {
-            Some(multi) => eval.get_preprocessed_column(slot_starts_column_id(
-                self.log_size,
-                multi.config.slot_log,
-                multi.config.n_slots(),
-            )),
-            None => {
-                eval.get_preprocessed_column(is_first_row_column_id_ns(&self.instance_namespace))
-            }
-        };
-        let slot_sel: Vec<E::F> = match &self.multi {
-            Some(multi) => (0..multi.config.n_slots())
-                .map(|s| {
-                    eval.get_preprocessed_column(slot_sel_column_id(
-                        s,
-                        self.log_size,
-                        multi.config.slot_log,
-                        multi.config.n_slots(),
-                    ))
-                })
-                .collect(),
-            None => Vec::new(),
-        };
+        // `is_first_row` anchors the message to the SHA-256 IV.
+        let is_first_row =
+            eval.get_preprocessed_column(is_first_row_column_id_ns(&self.instance_namespace));
 
         // ---- header ----
         //
@@ -213,10 +141,9 @@ impl FrameworkEval for Sha256Eval {
             ],
         );
         let w: [(E::F, E::F); 17] = std::array::from_fn(|k| (w_lo[k].clone(), w_hi[k].clone()));
-        // Full padded-stream exposure needs all 16 input words on the
-        // block's t=15 row. Reuse the existing boolean W-bit columns with a
-        // wider mask only in that transcript-distinct mode; every legacy mode
-        // keeps its original [0, -2, -15] mask shape.
+        // Full padded-stream exposure needs all 16 input words on the block's
+        // t=15 row. It uses a wider mask over the existing Boolean W-bit
+        // columns. Other modes use the [0, -2, -15] mask.
         let stream_w_bits_m: Option<[[E::F; WORDS_PER_BLOCK]; WORD_BIT_COLS]> =
             self.field_exposure.full_padded_stream().map(|_| {
                 std::array::from_fn(|_| {
@@ -238,7 +165,7 @@ impl FrameworkEval for Sha256Eval {
         };
         let w_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bits_m[i][0].clone());
 
-        // ---- round family: outputs, carries, Σ-decodes, packed groups ----
+        // ---- round family: outputs, carries, Boolean operands ----
         //
         // Column order matches `trace::write_round_row`: σ0, σ1, ch, maj,
         // t1, t2 read at offset 0; a_new / e_new additionally at offsets
@@ -288,13 +215,9 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- t = 0 family ----
         //
-        // `is_first_block` is also read at offset −15: the field-exposure
-        // family on the `t = 15` row gates its range checks and yields by
-        // "is this block 0", which lives 15 rows up.
-        let [is_first_block, is_first_block_m15] =
-            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -15]);
-        // C1 anchors: pin `is_first_block ≡ is_first_row` and force the
-        // anchor row to be committed as a real row.
+        let is_first_block = eval.next_trace_mask();
+        // Bind `is_first_block` to `is_first_row` and require a real anchor
+        // row.
         eval.add_constraint(is_first_block.clone() - is_first_row.clone());
         eval.add_constraint(is_first_row.clone() * (E::F::one() - enabler.clone()));
 
@@ -553,7 +476,7 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
-        // §10.3 multi-block chain, on continuation blocks' t = 0 rows: this
+        // Multi-block chain on continuation blocks' t = 0 rows: this
         // block's `h_in` equals the previous block's `h_out` (offset −1 =
         // the predecessor's t = 63 row). The gate `enabler·is_round_0 −
         // is_first_block` is 1 exactly on real continuation t = 0 rows, 0 on
@@ -608,39 +531,15 @@ impl FrameworkEval for Sha256Eval {
                 &self.relations,
             );
         }
-        match &self.multi {
-            Some(multi) => {
-                // Per-slot digest yields: `is_last_block` fires at most once
-                // per slot region (single enabler rise per region ⇒ single
-                // drop), and `slot_sel[s]` (preprocessed) attributes it to
-                // the slot's OWN digest relation. Numerator degree 2 — within
-                // the batch-4 LogUp budget. A slot whose run never drops
-                // in-region yields no digest and its consumer's require
-                // cannot balance (fail-closed).
-                debug_assert!(!self.expose_digest);
-                for (s, spec) in multi.config.slots.iter().enumerate() {
-                    if !spec.expose_digest {
-                        continue;
-                    }
-                    eval.add_to_relation(RelationEntry::base(
-                        &multi.relations[s].digest.digest,
-                        -(is_last_block.clone() * slot_sel[s].clone()),
-                        &digest_bytes,
-                    ));
-                }
-            }
-            None => {
-                if self.expose_digest {
-                    eval.add_to_relation(RelationEntry::base(
-                        &self.relations.digest.digest,
-                        -is_last_block.clone(),
-                        &digest_bytes,
-                    ));
-                }
-            }
+        if self.expose_digest {
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.digest.digest,
+                -is_last_block.clone(),
+                &digest_bytes,
+            ));
         }
 
-        // ---- §10.4 padding-role constraints (t = 15 rows) ----
+        // ---- padding-role constraints (t = 15 rows) ----
         //
         // Identical algebra to the wide layout; the block's message words
         // `W[j]` are the `W` columns of rows `t = j`, i.e. `w[15 − j]` from
@@ -682,7 +581,7 @@ impl FrameworkEval for Sha256Eval {
             eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
         }
 
-        // (P.A') Mn1: pin the padding-role flags to 0 on disabled rows.
+        // (P.A') Pin the padding-role flags to 0 on disabled rows.
         let one_minus_enabler = E::F::one() - enabler.clone();
         for flag in [
             &is_marker_block,
@@ -787,7 +686,7 @@ impl FrameworkEval for Sha256Eval {
             is_length_block.clone() * (w_msg(15).1.clone() - bit_length_w15_hi.clone()),
         );
 
-        // ---- C1 contiguity (aux column `enabler_step`) ----
+        // ---- Contiguity anchor (`enabler_step`) ----
         let enabler_step = eval.next_trace_mask();
         eval.add_constraint(
             enabler_step.clone() - enabler.clone() * (E::F::one() - enabler_prev.clone()),
@@ -796,179 +695,11 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- field provider (target block t = 15 rows) ----
         //
-        // The exposed message words are read through the same `W` offsets
-        // the padding family uses. Legacy block-0 exposure is gated by the
-        // existing first-block flag. Multi-block exposure appends a witness
-        // block counter plus one selector per yielded byte; preprocessing stays
-        // independent of message length and offsets.
-        if let Some(multi) = &self.multi {
-            assert!(
-                self.field_exposure.full_padded_stream().is_none()
-                    && multi
-                        .config
-                        .slots
-                        .iter()
-                        .all(|slot| slot.field_exposure.full_padded_stream().is_none()),
-                "full padded stream exposure is unsupported in multi-slot SHA"
-            );
-            // Multi-slot field providers: each slot's exposure keeps the
-            // single-instance tail layout at its own column offset (mask
-            // reads below happen in trace column order: per slot, bytes →
-            // counter → selectors). Two slot-attribution rails on top of
-            // the single-instance algebra:
-            //   - every multi-block selector is pinned to its slot's region
-            //     (`selector·(1−slot_sel[s]) = 0`) — the block counter is
-            //     slot-LOCAL (it resets at every preprocessed slot start),
-            //     so without the rail a counter match in a foreign slot
-            //     could yield foreign bytes;
-            //   - the legacy block-0 selector becomes
-            //     `is_first_block@−15 · slot_sel[s]` (each slot has its own
-            //     block 0).
-            debug_assert!(self.field_exposure.is_empty());
-            for (s, spec) in multi.config.slots.iter().enumerate() {
-                let exposure = &spec.field_exposure;
-                if exposure.is_empty() {
-                    continue;
-                }
-                let sel_slot = slot_sel[s].clone();
-                let field_bytes: Vec<E::F> = (0..exposure.n_byte_columns())
-                    .map(|_| eval.next_trace_mask())
-                    .collect();
-                let block_counter = if exposure.needs_block_witness() {
-                    let [b, b_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
-                    // Slot-local block index: 0 at every slot start (the
-                    // anchor constraint pins `is_first_block ≡ slot_starts`),
-                    // flat within a block, +1 at every real continuation
-                    // boundary. Identical algebra to the single instance.
-                    eval.add_constraint(is_first_block.clone() * b.clone());
-                    eval.add_constraint(
-                        enabler.clone() * (E::F::one() - r0.clone()) * (b.clone() - b_prev.clone()),
-                    );
-                    eval.add_constraint(chain_gate.clone() * (b.clone() - b_prev - E::F::one()));
-                    Some(b)
-                } else {
-                    None
-                };
-                let selectors: Vec<E::F> = if exposure.needs_block_witness() {
-                    (0..exposure.target_blocks().len())
-                        .map(|_| eval.next_trace_mask())
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-                // Byte decomposition of the exposed words — fires on EVERY
-                // enabled t = 15 row (all slots): each row's cells decompose
-                // that row's own block words. Only slot-gated selectors feed
-                // yields/range-checks, so foreign-slot cells are inert.
-                for (word_slot, &word_idx) in exposure.decomposed_words().iter().enumerate() {
-                    let (w_lo_v, w_hi_v) = w_msg(word_idx).clone();
-                    let base = word_slot * BYTES_PER_WORD;
-                    eval.add_constraint(
-                        gate_r15.clone()
-                            * (w_hi_v
-                                - two_pow_8.clone() * field_bytes[base].clone()
-                                - field_bytes[base + 1].clone()),
-                    );
-                    eval.add_constraint(
-                        gate_r15.clone()
-                            * (w_lo_v
-                                - two_pow_8.clone() * field_bytes[base + 2].clone()
-                                - field_bytes[base + 3].clone()),
-                    );
-                }
-
-                let legacy_slot_selector = is_first_block_m15.clone() * sel_slot.clone();
-                if exposure.binds_full_padded_message() {
-                    let final_selector = if exposure.needs_block_witness() {
-                        let selector_sum = selectors
-                            .iter()
-                            .cloned()
-                            .fold(E::F::zero(), |sum, selector| sum + selector);
-                        // A complete padded-message exposure covers every
-                        // enabled block in this slot.  Pinning the selector
-                        // sum makes those selectors live rather than merely
-                        // constraining them conditionally when the prover
-                        // chooses to set one.
-                        eval.add_constraint(
-                            selector_sum - sel_slot.clone() * enabler.clone() * r15.clone(),
-                        );
-                        selectors
-                            .last()
-                            .expect("full padded exposure has a final-block selector")
-                            .clone()
-                    } else {
-                        legacy_slot_selector.clone()
-                    };
-                    eval.add_constraint(final_selector * enabler_after_block.clone());
-                }
-                if !exposure.needs_block_witness() {
-                    // Legacy block-0 path, slot-gated: every byte
-                    // range-checked once on the slot's block-0 t = 15 row.
-                    for byte in &field_bytes {
-                        wire_range_check::<E>(
-                            &mut eval,
-                            legacy_slot_selector.clone(),
-                            byte.clone(),
-                            crate::components::RangeKind::Range8,
-                            &self.relations,
-                        );
-                    }
-                } else {
-                    let b = block_counter
-                        .as_ref()
-                        .expect("multi-block field exposure has a block counter");
-                    for (selector_idx, &target_block) in exposure.target_blocks().iter().enumerate()
-                    {
-                        let selector = selectors[selector_idx].clone();
-                        eval.add_constraint(selector.clone() * (selector.clone() - E::F::one()));
-                        eval.add_constraint(selector.clone() * (E::F::one() - enabler.clone()));
-                        eval.add_constraint(selector.clone() * (E::F::one() - r15.clone()));
-                        eval.add_constraint(
-                            selector.clone()
-                                * (b.clone() - E::F::from(M31::from(target_block as u32))),
-                        );
-                        // Slot-attribution rail (NEW, soundness-critical).
-                        eval.add_constraint(selector.clone() * (E::F::one() - sel_slot.clone()));
-                    }
-                    for (selector_idx, _) in exposure.target_blocks().iter().enumerate() {
-                        let selector = selectors[selector_idx].clone();
-                        for byte in &field_bytes {
-                            wire_range_check::<E>(
-                                &mut eval,
-                                selector.clone(),
-                                byte.clone(),
-                                crate::components::RangeKind::Range8,
-                                &self.relations,
-                            );
-                        }
-                    }
-                }
-
-                for y in exposure.yields() {
-                    let slot = exposure.yield_column_slot(y);
-                    let selector = if exposure.needs_block_witness() {
-                        let selector_idx = exposure
-                            .target_blocks()
-                            .iter()
-                            .position(|&block| block == y.block_idx)
-                            .expect("yield block has a shared selector");
-                        selectors[selector_idx].clone()
-                    } else {
-                        legacy_slot_selector.clone()
-                    };
-                    let tuple = [
-                        E::F::from(M31::from(y.field_id)),
-                        E::F::from(M31::from(y.byte_index)),
-                        field_bytes[slot].clone(),
-                    ];
-                    eval.add_to_relation(RelationEntry::base(
-                        &multi.relations[s].field.field,
-                        -selector.clone(),
-                        &tuple,
-                    ));
-                }
-            }
-        } else if let Some((field_id, padded_len)) = self.field_exposure.full_padded_stream() {
+        // The exposed message words use the same `W` offsets as the padding
+        // family. The first-block flag gates default block-zero exposure.
+        // Multi-block exposure adds a witness block counter and one selector
+        // for each yielded byte.
+        if let Some((field_id, padded_len)) = self.field_exposure.full_padded_stream() {
             // Constant-width full-stream mode: the dynamic tail is exactly
             // one block counter. Its progression proves the block order, and
             // the expected final counter binds the configured padded length.
@@ -1013,143 +744,6 @@ impl FrameworkEval for Sha256Eval {
                 eval.add_to_relation(RelationEntry::base(
                     &self.relations.field.field,
                     -gate_r15.clone(),
-                    &tuple,
-                ));
-            }
-        } else if !self.field_exposure.is_empty() {
-            let field_bytes: Vec<E::F> = (0..self.field_exposure.n_byte_columns())
-                .map(|_| eval.next_trace_mask())
-                .collect();
-            // Block counter: read at [0, -1] to pin its step behaviour. It is a
-            // base/witness column carrying `block_idx` on every row.
-            let block_counter = if self.field_exposure.needs_block_witness() {
-                let [b, b_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
-                // Base: 0 on block 0's anchor row.
-                eval.add_constraint(is_first_block.clone() * b.clone());
-                // Flat within a block (every real non-`t=0` row).
-                eval.add_constraint(
-                    enabler.clone() * (E::F::one() - r0.clone()) * (b.clone() - b_prev.clone()),
-                );
-                // +1 at each real continuation boundary (`chain_gate`, defined
-                // in the h-chaining section above).
-                eval.add_constraint(chain_gate.clone() * (b.clone() - b_prev - E::F::one()));
-                Some(b)
-            } else {
-                None
-            };
-            // One selector per distinct target block (multi-block only).
-            let selectors: Vec<E::F> = if self.field_exposure.needs_block_witness() {
-                (0..self.field_exposure.target_blocks().len())
-                    .map(|_| eval.next_trace_mask())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            for (word_slot, &word_idx) in self.field_exposure.decomposed_words().iter().enumerate()
-            {
-                let (w_lo_v, w_hi_v) = w_msg(word_idx).clone();
-                let base = word_slot * BYTES_PER_WORD;
-                eval.add_constraint(
-                    gate_r15.clone()
-                        * (w_hi_v
-                            - two_pow_8.clone() * field_bytes[base].clone()
-                            - field_bytes[base + 1].clone()),
-                );
-                eval.add_constraint(
-                    gate_r15.clone()
-                        * (w_lo_v
-                            - two_pow_8.clone() * field_bytes[base + 2].clone()
-                            - field_bytes[base + 3].clone()),
-                );
-            }
-
-            let legacy_block0_selector = is_first_block_m15;
-            if self.field_exposure.binds_full_padded_message() {
-                let final_selector = if self.field_exposure.needs_block_witness() {
-                    let selector_sum = selectors
-                        .iter()
-                        .cloned()
-                        .fold(E::F::zero(), |sum, selector| sum + selector);
-                    // A complete padded-message exposure covers every enabled
-                    // block.  This equality forces one target selector to be
-                    // live at each real t=15 row, closing the all-zero
-                    // selector escape hatch.
-                    eval.add_constraint(selector_sum - enabler.clone() * r15.clone());
-                    selectors
-                        .last()
-                        .expect("full padded exposure has a final-block selector")
-                        .clone()
-                } else {
-                    legacy_block0_selector.clone()
-                };
-                eval.add_constraint(final_selector * enabler_after_block);
-            }
-            if !self.field_exposure.needs_block_witness() {
-                // Legacy block-0 path: every byte range-checked once, gated by
-                // the block-0 flag.
-                for b in &field_bytes {
-                    wire_range_check::<E>(
-                        &mut eval,
-                        legacy_block0_selector.clone(),
-                        b.clone(),
-                        crate::components::RangeKind::Range8,
-                        &self.relations,
-                    );
-                }
-            } else {
-                let b = block_counter
-                    .as_ref()
-                    .expect("multi-block field exposure has a block counter");
-                // Pin each shared selector: boolean, live only on `t = 15`,
-                // and hot only when the counter equals its target block.
-                for (selector_idx, &target_block) in
-                    self.field_exposure.target_blocks().iter().enumerate()
-                {
-                    let selector = selectors[selector_idx].clone();
-                    eval.add_constraint(selector.clone() * (selector.clone() - E::F::one()));
-                    eval.add_constraint(selector.clone() * (E::F::one() - enabler.clone()));
-                    eval.add_constraint(selector.clone() * (E::F::one() - r15.clone()));
-                    eval.add_constraint(
-                        selector.clone() * (b.clone() - E::F::from(M31::from(target_block as u32))),
-                    );
-                }
-                // Each byte range-checked once per distinct target block, gated
-                // by that block's representative selector.
-                for (selector_idx, _) in self.field_exposure.target_blocks().iter().enumerate() {
-                    let selector = selectors[selector_idx].clone();
-                    for byte in &field_bytes {
-                        wire_range_check::<E>(
-                            &mut eval,
-                            selector.clone(),
-                            byte.clone(),
-                            crate::components::RangeKind::Range8,
-                            &self.relations,
-                        );
-                    }
-                }
-            }
-
-            for y in self.field_exposure.yields() {
-                let slot = self.field_exposure.yield_column_slot(y);
-                let selector = if self.field_exposure.needs_block_witness() {
-                    let selector_idx = self
-                        .field_exposure
-                        .target_blocks()
-                        .iter()
-                        .position(|&block| block == y.block_idx)
-                        .expect("yield block has a shared selector");
-                    selectors[selector_idx].clone()
-                } else {
-                    legacy_block0_selector.clone()
-                };
-                let tuple = [
-                    E::F::from(M31::from(y.field_id)),
-                    E::F::from(M31::from(y.byte_index)),
-                    field_bytes[slot].clone(),
-                ];
-                eval.add_to_relation(RelationEntry::base(
-                    &self.relations.field.field,
-                    -selector.clone(),
                     &tuple,
                 ));
             }
@@ -1322,12 +916,9 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     range_kind: crate::components::RangeKind,
     relations: &Sha256Relations,
 ) {
-    // Drift guard: the `RangeKind` must match the addend count published
-    // by `crate::headroom`. If a future edit grows or shrinks an add at
-    // a call site without bumping the audit (and hence `RangeKind`), the
-    // mismatch is caught here in debug builds rather than silently
-    // changing the carry range a downstream lookup pins. `Range_8` is a
-    // byte check, never an add-carry, so we reject it outright.
+    // The `RangeKind` must match the addend count in `crate::headroom`.
+    // The debug check detects a mismatch at the call site. `Range_8` is a
+    // byte check and cannot check an addition carry.
     use crate::components::RangeKind;
     let expected_addends = match range_kind {
         RangeKind::Range2 => 2,
@@ -1337,10 +928,7 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
             panic!("Range8 is the terminal byte check; do not use it for mod-2³² add carries")
         }
     };
-    // Mn2: hard assert so release builds (round-trip prove/verify, the
-    // end-to-end tests) also catch a mis-paired addend count vs.
-    // `RangeKind`. The guard runs once per emit, so the cost is
-    // negligible compared to the constraint emission itself.
+    // Check the addend count in release and debug builds.
     assert_eq!(
         addends.len(),
         expected_addends,
@@ -1619,8 +1207,8 @@ mod tests {
         check_linear_constraints_on_message(&[0x42; 150]);
     }
 
-    /// §8.1 duplicate operand bits match their originating cells: on
-    /// every non-boundary row, `b_bits = a_bits@(t−1)`, `c_bits =
+    /// Reused operand bits match their originating cells. On every
+    /// non-boundary row, `b_bits = a_bits@(t−1)`, `c_bits =
     /// a_bits@(t−2)`; e-side symmetric. Boundary rows are tied to `h_in`
     /// by word recomposition in the AIR.
     #[test]

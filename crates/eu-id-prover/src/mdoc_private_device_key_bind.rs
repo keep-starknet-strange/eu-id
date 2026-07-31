@@ -1,9 +1,10 @@
-//! U9: bind and normalize the private ML-DSA device public key in the MSO.
+//! Bind and normalize the private ML-DSA device public key in the MSO.
 //!
-//! The private MSO binder yields the absolute position of the first byte of
-//! FIPS 204 `pkEncode`. This component consumes the 1,952 issuer-message bytes,
-//! re-emits the same bytes as the normalized private-key field consumed by U7,
-//! consumes U5's `rho` cells, and consumes U6's split `t1` cells.
+//! The private MSO binder emits the first FIPS 204 `pkEncode` position.
+//! This component consumes the 1,952 issuer-message bytes.
+//! It emits the same bytes for the private-key evaluator.
+//! It consumes the `rho` cells from `ExpandA`.
+//! It also consumes the evaluator's split `t1` cells.
 
 use std::fmt;
 
@@ -48,7 +49,7 @@ pub(crate) const MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS: usize = 32 + K * 64;
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS: usize =
     MDOC_PRIVATE_DEVICE_KEY_ROWS - MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS;
 
-const DEVICE_KEY_BIND_DOMAIN: u64 = 0x4d44_4f43_504b_5539; // "MDOCPKU9"
+const DEVICE_KEY_BIND_DOMAIN: u64 = 0x4d44_4f43_504b_5539;
 const DEVICE_KEY_BIND_VERSION: u64 = 1;
 const T1_GROUP_BYTES: usize = 5;
 const T1_COEFFICIENTS_PER_GROUP: usize = 4;
@@ -136,7 +137,7 @@ pub(crate) struct MdocPrivateDeviceKeyUseCensus {
 }
 
 impl MdocPrivateDeviceKeyUseCensus {
-    pub(crate) fn has_frozen_demo_shape(&self) -> bool {
+    pub(crate) fn has_fixed_demo_shape(&self) -> bool {
         self.normalized_uses == PK_BYTES
             && self.rho_uses == 32
             && self.t1_uses == K * N
@@ -853,19 +854,19 @@ impl MdocPrivateDeviceKeyBind {
     pub(crate) fn range_uses(&self) -> &RcUses {
         self.range_uses
             .as_ref()
-            .expect("only the U9 prover has range multiplicities")
+            .expect("only the device-key binder prover has range multiplicities")
     }
 
     pub(crate) fn interaction_claim(&self) -> &MdocPrivateDeviceKeyInteractionClaim {
         self.claim
             .as_ref()
-            .expect("U9 interaction claim is available after proving")
+            .expect("device-key interaction claim is available after proving")
     }
 
     fn relations(&self) -> &MdocPrivateDeviceKeyRelations {
         self.relations
             .as_ref()
-            .expect("U9 relations have been drawn")
+            .expect("device-key relations have been drawn")
     }
 }
 
@@ -887,7 +888,7 @@ impl Air for MdocPrivateDeviceKeyBind {
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         assert!(
             !self.t1_handle.is_set(),
-            "U9 owns and requires a fresh T1Cell relation handle"
+            "the device-key binder requires a fresh T1Cell relation handle"
         );
         let t1 = T1CellRelation::draw(channel);
         self.t1_handle.set(t1.clone());
@@ -954,10 +955,12 @@ impl Air for MdocPrivateDeviceKeyBind {
 
     fn components(&self) -> Vec<&dyn Component> {
         vec![
-            self.component.as_ref().expect("U9 component is built"),
+            self.component
+                .as_ref()
+                .expect("device-key binder component is built"),
             self.blinder_component
                 .as_ref()
-                .expect("U9 blinder component is built"),
+                .expect("device-key binder blinder component is built"),
         ]
     }
 }
@@ -991,7 +994,7 @@ impl AirProver for MdocPrivateDeviceKeyBind {
         tb.extend_evals(
             self.trace
                 .as_ref()
-                .expect("U9 prover has a private key")
+                .expect("device-key binder prover has a private key")
                 .evals(),
         );
     }
@@ -1000,7 +1003,9 @@ impl AirProver for MdocPrivateDeviceKeyBind {
         let blinder_v = random_qm31();
         let blinder_m = random_qm31();
         let (trace, claimed_sum) = interaction_trace(
-            self.trace.as_ref().expect("U9 prover has a private key"),
+            self.trace
+                .as_ref()
+                .expect("device-key binder prover has a private key"),
             self.relations(),
             blinder_v,
             blinder_m,
@@ -1023,10 +1028,12 @@ impl AirProver for MdocPrivateDeviceKeyBind {
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![
-            self.component.as_ref().expect("U9 component is built"),
+            self.component
+                .as_ref()
+                .expect("device-key binder component is built"),
             self.blinder_component
                 .as_ref()
-                .expect("U9 blinder component is built"),
+                .expect("device-key binder blinder component is built"),
         ]
     }
 }
@@ -1232,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn every_relation_seam_changes_the_u9_claim() {
+    fn every_relation_seam_changes_the_device_key_claim() {
         let (trace, _) = build_trace(&test_pk(41), 96, 4_096).unwrap();
         let mut channel = Blake2sChannel::default();
         let relations = MdocPrivateDeviceKeyRelations {
@@ -1331,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn u9_owns_and_publishes_the_t1_challenge_after_shared_inputs() {
+    fn device_key_binder_owns_and_publishes_the_t1_challenge_after_shared_inputs() {
         let issuer = SharedFieldRelation::new();
         let range = SharedRangeRelation::new();
         let rho = SharedRhoCellRelation::new();
@@ -1686,7 +1693,7 @@ mod tests {
             vec![self
                 .component
                 .as_ref()
-                .expect("U9 test counter component is built")]
+                .expect("device-key binder test counter component is built")]
         }
     }
 
@@ -1721,7 +1728,7 @@ mod tests {
             vec![self
                 .component
                 .as_ref()
-                .expect("U9 test counter component is built")]
+                .expect("device-key binder test counter component is built")]
         }
     }
 
@@ -1803,14 +1810,17 @@ mod tests {
         rows
     }
 
-    struct TestComposedU9Proof {
+    struct TestComposedDeviceKeyProof {
         stark: stwo::core::proof::StarkProof<air_core::Hasher>,
-        u9_claim: MdocPrivateDeviceKeyInteractionClaim,
+        device_key_claim: MdocPrivateDeviceKeyInteractionClaim,
         rows: Vec<TestCounterRow>,
         issuer_message_len: usize,
     }
 
-    fn prove_composed_u9(authenticated_pk: &[u8], normalized_pk: Vec<u8>) -> TestComposedU9Proof {
+    fn prove_composed_device_key(
+        authenticated_pk: &[u8],
+        normalized_pk: Vec<u8>,
+    ) -> TestComposedDeviceKeyProof {
         let issuer_message_len = 4_096;
         let device_pk_start = 64;
         let issuer = SharedFieldRelation::new();
@@ -1827,7 +1837,7 @@ mod tests {
             t1.clone(),
             start.clone(),
         );
-        let (mut u9, _) = MdocPrivateDeviceKeyBind::prover(
+        let (mut device_key_bind, _) = MdocPrivateDeviceKeyBind::prover(
             normalized_pk,
             device_pk_start,
             issuer_message_len,
@@ -1839,20 +1849,20 @@ mod tests {
         )
         .unwrap();
         let stark = air_core::prove(
-            &mut [&mut counter, &mut u9],
-            crate::mdoc::mdoc_production_pcs_config(),
+            &mut [&mut counter, &mut device_key_bind],
+            crate::mdoc::mdoc_ts13_pcs_config(),
         )
-        .expect("locally constrained U9 composition must produce a proof");
-        TestComposedU9Proof {
+        .expect("locally constrained device-key composition must produce a proof");
+        TestComposedDeviceKeyProof {
             stark,
-            u9_claim: u9.interaction_claim().clone(),
+            device_key_claim: device_key_bind.interaction_claim().clone(),
             rows,
             issuer_message_len,
         }
     }
 
-    fn verify_composed_u9(
-        fixture: &TestComposedU9Proof,
+    fn verify_composed_device_key(
+        fixture: &TestComposedDeviceKeyProof,
         rows: Vec<TestCounterRow>,
     ) -> Result<(), air_core::VerifyError> {
         let issuer = SharedFieldRelation::new();
@@ -1868,31 +1878,35 @@ mod tests {
             t1.clone(),
             start.clone(),
         );
-        let mut u9 = MdocPrivateDeviceKeyBind::verifier(
+        let mut device_key_bind = MdocPrivateDeviceKeyBind::verifier(
             fixture.issuer_message_len,
             issuer,
             range,
             rho,
             t1,
             start,
-            fixture.u9_claim.clone(),
+            fixture.device_key_claim.clone(),
         )
         .unwrap();
         let expected_root = air_core::compute_canonical_preprocessed_root(
-            &mut [&mut counter, &mut u9],
+            &mut [&mut counter, &mut device_key_bind],
             fixture.stark.config,
         )
-        .expect("canonical U9 preprocessing");
+        .expect("canonical device-key binder preprocessing");
         air_core::verify_with_expected_preprocessed_root(
-            &mut [&mut counter, &mut u9],
+            &mut [&mut counter, &mut device_key_bind],
             &fixture.stark,
             Some(expected_root),
         )
     }
 
-    fn assert_logup_rejects(fixture: &TestComposedU9Proof, rows: Vec<TestCounterRow>, name: &str) {
-        match verify_composed_u9(fixture, rows)
-            .expect_err("mutated U9 relation counterpart must not verify")
+    fn assert_logup_rejects(
+        fixture: &TestComposedDeviceKeyProof,
+        rows: Vec<TestCounterRow>,
+        name: &str,
+    ) {
+        match verify_composed_device_key(fixture, rows)
+            .expect_err("mutated device-key relation counterpart must not verify")
         {
             air_core::VerifyError::Stark(
                 stwo::core::verifier::VerificationError::InvalidStructure(reason),
@@ -1902,11 +1916,11 @@ mod tests {
     }
 
     #[test]
-    fn composed_stark_rejects_every_u9_tuple_and_multiplicity_attack() {
+    fn composed_stark_rejects_every_device_key_tuple_and_multiplicity_attack() {
         let pk = test_pk(53);
-        let fixture = prove_composed_u9(&pk, pk.clone());
-        verify_composed_u9(&fixture, fixture.rows.clone())
-            .expect("honest U9 relation composition must verify");
+        let fixture = prove_composed_device_key(&pk, pk.clone());
+        verify_composed_device_key(&fixture, fixture.rows.clone())
+            .expect("honest device-key relation composition must verify");
         assert!(
             fixture
                 .rows
@@ -1980,7 +1994,7 @@ mod tests {
             "the alternate byte must induce a different canonical t1 fragment"
         );
 
-        let forged = prove_composed_u9(&authenticated_pk, alternate_pk);
+        let forged = prove_composed_device_key(&authenticated_pk, alternate_pk);
         assert_logup_rejects(
             &forged,
             forged.rows.clone(),

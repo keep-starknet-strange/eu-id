@@ -54,7 +54,7 @@ fn prove_and_verify_abc() {
     assert_eq!(prove_and_verify(b"abc"), 1);
 }
 
-/// Multi-block round-trip — exercises the §10.3 chain copy constraint,
+/// Multi-block round-trip — exercises the block-chain copy constraint,
 /// the multi-block padding flag layout (marker block ≠ length block),
 /// and the multi-block `Range_k` consumer lookups end-to-end. None of
 /// these constraints fire on the single-block `b"abc"` case.
@@ -63,7 +63,7 @@ fn prove_and_verify_abc() {
 fn prove_and_verify_multi_block() {
     // 200 bytes ⇒ 200 + 9 = 209 padding bytes ⇒ 4 padded blocks. The
     // last block is a length-only block (marker lives in block 3, length
-    // in block 4); blocks 1..3 trigger the §10.3 chain copy constraint.
+    // in block 4); blocks 1..3 trigger the block-chain copy constraint.
     let n_blocks = prove_and_verify(&[0xABu8; 200]);
     assert!(n_blocks >= 2, "test message must span multiple blocks");
 }
@@ -176,8 +176,8 @@ fn verify_rejects_logup_sum_mutation() {
     }
 }
 
-/// Audit-lesson L4 closure: a witness that violates the AIR's documented
-/// bounds cannot produce an accepted proof.
+/// A witness that violates the AIR carry bounds cannot produce an accepted
+/// proof.
 ///
 /// Bumps the last block's finalization-add carry on word 7 from its
 /// honest value (`< 2`, since finalization is a 2-addend add) to `5` —
@@ -188,11 +188,10 @@ fn verify_rejects_logup_sum_mutation() {
 ///   - the prover's constraint-vanishing check (`Sha256ProveError::StwoProveFailed`), or
 ///   - the verifier's downstream gate (any `Sha256VerifyError` variant).
 ///
-/// This is the complementary half of
+/// This complements
 /// [`verify_rejects_range_k_claimed_sum_mutations`]: that test mutates
 /// the *proof* to isolate the `Range_k` LogUp loop; this one mutates the
-/// *witness* end-to-end. Together they cover the L4 audit lesson from
-/// both directions.
+/// *witness* end-to-end.
 #[ignore = "slow: builds a real release STARK proof; run in release with --ignored"]
 #[test]
 fn rejects_out_of_range_carry_witness_mutation() {
@@ -202,9 +201,7 @@ fn rejects_out_of_range_carry_witness_mutation() {
     last.finalization_carries[7].lo = 5;
 
     let config = config_for(witness.blocks.len());
-    // Either the prover refuses to produce a proof, or the verifier
-    // refuses to accept one. Both close L4; the *meaningful* failure
-    // mode is "no accepted proof exists for this witness".
+    // The prover can reject the witness, or the verifier can reject the proof.
     match prove_sha256_from_witness(&witness, &config) {
         Err(_) => {} // prover caught it — pass
         Ok(proof) => {
@@ -215,10 +212,9 @@ fn rejects_out_of_range_carry_witness_mutation() {
 }
 
 /// Carry-out-of-range soundness coverage for the four new `Range_k`
-/// channels (`Range_2`/`Range_4`/`Range_5`/`Range_8`). Each is verified
-/// the same way as the `xor_8` channel in [`verify_rejects_logup_sum_mutation`]:
-/// bumping any one producer's claimed sum makes the per-component sums no
-/// longer total zero, so the `LogupSumNonZero` gate rejects.
+/// channels (`Range_2`/`Range_4`/`Range_5`/`Range_8`). Bumping any one
+/// producer's claimed sum makes the per-component sums no longer total zero,
+/// so the `LogupSumNonZero` gate rejects.
 ///
 /// **Why this is the meaningful test rather than a witness-mutation
 /// prove-and-reject:** an out-of-range carry that *also* keeps the
@@ -259,20 +255,10 @@ fn verify_rejects_range_k_claimed_sum_mutations() {
     }
 }
 
-/// Digest-provider producer-half end-to-end: prove the SHA module with the digest
-/// provider **on** and confirm two things in a *real* proof (not just the
-/// claimed-sum algebra the unit smoke test checks):
+/// Prove with the digest provider enabled.
 ///
-/// 1. The Stwo prover **accepts** the digest yield — its constraint is
-///    satisfiable and degree ≤ 2, and the extra interaction column lines up
-///    with the `add_to_relation` the AIR emits. A degree blow-up or a
-///    provider/consumer tuple desync would fail here, at prove time.
-/// 2. The verifier **rejects** the module on its own — the yield has no
-///    consumer, so the `air_core` global LogUp balance is non-zero. This is
-///    the whole point of the digest provider: the digest term enters the global balance and
-///    only cancels once a consumer (the ML-DSA digest binding) requires the
-///    same bytes. The matching positive case — a consumer that *does* balance
-///    it — lands with that binding.
+/// The prover must accept the digest yield. The standalone verifier must
+/// reject it because no consumer cancels the provider term.
 #[ignore = "slow: produces a real proof first; same cost as prove_and_verify_abc"]
 #[test]
 fn digest_provider_proof_is_unbalanced_without_consumer() {
@@ -283,8 +269,7 @@ fn digest_provider_proof_is_unbalanced_without_consumer() {
     let witness = compute_sha256_witness(b"abc");
     let config = config_for(witness.blocks.len());
 
-    let mut prover =
-        Sha256Prover::new(&witness, config.log_n_rows, config.group_width).with_digest_provider();
+    let mut prover = Sha256Prover::new(&witness, config.log_n_rows).with_digest_provider();
     let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
         .expect("prove with digest provider must succeed");
     let interaction_claim = prover.interaction_claim().clone();
@@ -298,121 +283,18 @@ fn digest_provider_proof_is_unbalanced_without_consumer() {
 
     // (2) The verifier's global LogUp balance check rejects it.
     let mut verifier =
-        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
-            .with_digest_provider();
+        Sha256Verifier::new(config.log_n_rows, interaction_claim).with_digest_provider();
     assert!(
         air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
         "an unbalanced digest yield (no consumer) must fail verification",
     );
 }
 
-/// Credential-field end-to-end: a real proof exposing the credential field windows
-/// (date of birth + nationality). Mirrors the digest test above, exercising the
-/// full constraint + trace + interaction field path (the byte-decomposition
-/// columns, the `is_first_block`-gated yields, and the claimed-sum fold) at
-/// prove time. Two assertions:
+/// Prove with the complete padded message stream exposed.
 ///
-/// 1. The proof **succeeds**, so the AIR's field columns, decomposition
-///    constraints, and per-yield lookups are internally consistent and the
-///    interaction trace matches the constraint firing order — a provider tuple
-///    desync would fail here.
-/// 2. The verifier **rejects** the module on its own — the field yields have no
-///    predicate consumer yet, so the global LogUp balance is
-///    non-zero and fails closed. The matching positive case lands with the
-///    age/nat credential bindings.
+/// The prover must accept the field yields. The standalone verifier must
+/// reject them because no consumer cancels the provider terms.
 #[ignore = "slow: produces a real proof first; same cost as prove_and_verify_abc"]
-#[test]
-fn field_provider_proof_is_unbalanced_without_consumer() {
-    use air_core::relations::field_id;
-    use num_traits::Zero;
-    use stwo::core::fields::qm31::SecureField;
-    use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
-    use stwo_sha256::field_exposure::FieldExposure;
-
-    // A credential-shaped preimage: "EUID" | ver | 2007-03-15 | DE(276).
-    let credential: [u8; 11] = [b'E', b'U', b'I', b'D', 1, 0x07, 0xD7, 3, 15, 0x01, 0x14];
-    let exposure = FieldExposure::from_preimage_windows(&[
-        (field_id::DOB, 5, 4),
-        (field_id::NATIONALITY, 9, 2),
-    ]);
-
-    let witness = compute_sha256_witness(&credential);
-    let config = config_for(witness.blocks.len());
-
-    let mut prover = Sha256Prover::new(&witness, config.log_n_rows, config.group_width)
-        .with_field_provider(exposure.clone());
-    let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
-        .expect("prove with field provider must succeed");
-    let interaction_claim = prover.interaction_claim().clone();
-
-    // (1) The exposed field windows leave the module's claimed sums unbalanced.
-    assert_ne!(
-        interaction_claim.total(),
-        SecureField::zero(),
-        "exposing the credential fields must leave outstanding provider terms",
-    );
-
-    // (2) The verifier's global LogUp balance check rejects it (no consumer).
-    let mut verifier =
-        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
-            .with_field_provider(exposure);
-    assert!(
-        air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
-        "unbalanced field yields (no consumer) must fail verification",
-    );
-}
-
-/// Same end-to-end field-provider proof gate as
-/// [`field_provider_proof_is_unbalanced_without_consumer`], but with field
-/// windows in blocks 0, 1, and 2. This specifically exercises the dynamic
-/// target-block selector columns and the block counter in the AIR, not just the
-/// legacy block-0 path.
-#[ignore = "slow: produces a real proof first; same cost as prove_and_verify_multi_block"]
-#[test]
-fn multi_block_field_provider_proof_is_unbalanced_without_consumer() {
-    use air_core::relations::field_id;
-    use num_traits::Zero;
-    use stwo::core::fields::qm31::SecureField;
-    use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
-    use stwo_sha256::constants::BLOCK_BYTES;
-    use stwo_sha256::field_exposure::FieldExposure;
-
-    let msg: Vec<u8> = (0..150).map(|i| (i % 251) as u8).collect();
-    let witness = compute_sha256_witness(&msg);
-    assert_eq!(witness.blocks.len(), 3, "test message must span 3 blocks");
-    let exposure = FieldExposure::from_preimage_windows_multi(&[
-        (field_id::DOB, 5, 4),
-        (field_id::NATIONALITY, BLOCK_BYTES + 8, 2),
-        (99, 2 * BLOCK_BYTES + 12, 3),
-    ]);
-    let config = config_for(witness.blocks.len());
-
-    let mut prover = Sha256Prover::new(&witness, config.log_n_rows, config.group_width)
-        .with_field_provider(exposure.clone());
-    let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
-        .expect("prove with multi-block field provider must succeed");
-    let interaction_claim = prover.interaction_claim().clone();
-
-    assert_ne!(
-        interaction_claim.total(),
-        SecureField::zero(),
-        "exposing multi-block field windows must leave outstanding provider terms",
-    );
-
-    let mut verifier =
-        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
-            .with_field_provider(exposure);
-    assert!(
-        air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
-        "unbalanced multi-block field yields (no consumer) must fail verification",
-    );
-}
-
-/// Constant-width full padded-stream provider end-to-end. This exercises the
-/// one-counter trace tail, the 16-word W-bit mask, all 64 fixed field
-/// relation sites on each enabled block, and the interaction-column parity in
-/// a real proof.
-#[ignore = "slow: produces a real multi-block release STARK proof"]
 #[test]
 fn full_padded_stream_provider_proof_is_unbalanced_without_consumer() {
     use num_traits::Zero;
@@ -426,8 +308,8 @@ fn full_padded_stream_provider_proof_is_unbalanced_without_consumer() {
     let exposure = FieldExposure::from_full_padded_stream(77, witness.padding.padded.len());
     let config = config_for(witness.blocks.len());
 
-    let mut prover = Sha256Prover::new(&witness, config.log_n_rows, config.group_width)
-        .with_field_provider(exposure.clone());
+    let mut prover =
+        Sha256Prover::new(&witness, config.log_n_rows).with_field_provider(exposure.clone());
     let stark_proof = air_core::prove(&mut [&mut prover], config.pcs_config)
         .expect("prove with full padded-stream provider");
     let interaction_claim = prover.interaction_claim().clone();
@@ -438,8 +320,7 @@ fn full_padded_stream_provider_proof_is_unbalanced_without_consumer() {
     );
 
     let mut verifier =
-        Sha256Verifier::new(config.log_n_rows, config.group_width, interaction_claim)
-            .with_field_provider(exposure);
+        Sha256Verifier::new(config.log_n_rows, interaction_claim).with_field_provider(exposure);
     assert!(
         air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
         "an unconsumed full padded-stream provider must fail global balance",

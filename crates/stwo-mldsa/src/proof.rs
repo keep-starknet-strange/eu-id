@@ -1,6 +1,6 @@
-//! Test harness for the `mldsa_coeffs` component + verifier-native fold, wired
-//! through the `air-core` orchestrator. The composed production statement lives
-//! in [`crate::statement`]; this module also owns shared native fold helpers.
+//! Test harness for the `mldsa_coeffs` component and verifier-native fold. The
+//! composed statement is in [`crate::statement`]. This module also contains
+//! shared native fold helpers.
 //!
 //! One air-core module (`CoeffsModule`) contributes, in commit order:
 //!   1. `coeffs`          — the tall stacked bivariate-Horner component.
@@ -13,7 +13,7 @@
 //!     the committed accumulator — and the same claimed evals must satisfy the
 //!     folded identity `(‡) == 0` (checked structurally, [`verify`]).
 //!
-//! Transcript order (worksheet §3.2 / GAP-1a): mix public `(ρ, t1)` → commit base
+//! Transcript order: mix public `(ρ, t1)` → commit base
 //! (digits + carries + c + norm/rc aux) → draw `ρ_RLC, r, s` + relations → commit
 //! interaction. `air-core` enforces this ordering.
 
@@ -415,9 +415,7 @@ impl AirProver for CoeffsProver {
         coeffs_log_size() + 2
     }
     fn store_polynomial_coefficients(&self) -> bool {
-        // A-707: the standalone test profile's blowup is below the batch-4
-        // degree excess, so retain coefficients here; production blowup-4 does
-        // not need this memory tradeoff.
+        // Keep the coefficients for the standalone batch-4 test module.
         true
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {

@@ -1,33 +1,29 @@
 //! M31 headroom audit for the SHA-256 mod-2³² limb-add equation families.
 //!
-//! Every mod-2³² addition in the SHA-256 AIR is constrained by two linear
-//! identities — one per 16-bit limb `(lo, hi)`:
+//! Two linear identities constrain each mod-2³² addition in the SHA-256 AIR.
+//! There is one identity for each 16-bit limb `(lo, hi)`:
 //!
 //! ```text
 //! Σⱼ addendⱼ.lo +     0    − result.lo − 2¹⁶ · carry_lo = 0
 //! Σⱼ addendⱼ.hi + carry_lo − result.hi − 2¹⁶ · carry_hi = 0
 //! ```
 //!
-//! The combined polynomial expression must lie strictly inside centered M31,
-//! i.e. `|expr| < M31_CENTER_LIMIT = (2³¹ − 2) / 2 = 2³⁰ − 1`, otherwise the
-//! M31 equation could be satisfied with a non-zero integer value and the
-//! constraint would not actually pin down `result`. The validated design
-//! (§3 of `docs/research/sha256-air-design.md`) shows that even the widest add —
-//! `T1` with 5 addends — has roughly 12 bits of headroom, so for SHA-256
-//! every family fits centered M31 directly. But per the AIR-soundness
-//! convention, the assertion must come from **code**, not a paragraph in
-//! the design doc; that's what this module does, and what the fail-closed
-//! tests at the bottom guard against drift.
+//! The combined polynomial expression must be strictly inside centered M31:
+//! `|expr| < M31_CENTER_LIMIT = (2³¹ − 2) / 2 = 2³⁰ − 1`. Otherwise, a
+//! non-zero integer value can satisfy the M31 equation. The constraint would
+//! then fail to bind `result`. The widest addition is `T1` with five addends.
+//! It has approximately 12 bits of headroom. The checks in this module verify
+//! this bound and fail if an equation family does not fit.
 //!
-//! ## What's simpler than the P-256 audit
+//! ## SHA-256 bounds
 //!
 //! - **All addend coefficients are `+1`.** SHA-256 only adds; no
 //!   subtraction, no signed coefficient mixing. The bound shape is just
 //!   `Σ addends − result − 2¹⁶ · carry` per limb.
 //! - **Carries are non-negative.** Every carry lives in `[0, k)` for a
 //!   k-addend add; the range-check table is unsigned. The
-//!   [`EquationHeadroom::signed_carry_bound`] field records that exclusive
-//!   upper bound for compatibility with the existing audit helpers.
+//!   [`EquationHeadroom::signed_carry_bound`] field records the inclusive
+//!   maximum carry.
 //! - **Only 2 limbs.** A SHA-256 word is stored as `(lo, hi)`; the carry
 //!   chain has length 2, not 20+.
 
@@ -81,10 +77,9 @@ pub enum HeadroomStatus {
     /// `M31_CENTER_LIMIT`. The equation must be split before its AIR row
     /// type is enabled. Not expected for any SHA-256 family.
     RequiresSplit,
-    /// The audit formula for this equation is not yet derived. The AIR
-    /// must refuse to enable a row family in this state; the tests below
-    /// enforce that no SHA-256 audit reaches the prover with
-    /// `PendingFormula`.
+    /// No valid bound formula is available for this equation. The AIR must
+    /// reject a row family in this state. Tests require all SHA-256 families
+    /// to have a valid formula.
     PendingFormula,
 }
 
@@ -117,9 +112,7 @@ pub struct EquationHeadroom {
     pub status: HeadroomStatus,
     /// Upper bound on the carry magnitude across every limb. For SHA-256
     /// the carries are **non-negative** (`∈ [0, RANGE_k)`), so the value
-    /// is `k − 1` — the inclusive maximum carry. The field name is the
-    /// same as the signed P-256 audit's so the eventual generalisation is
-    /// a rename, not a redesign.
+    /// is `k − 1`, the inclusive maximum carry.
     pub signed_carry_bound: Option<i128>,
     /// Worst-case `|combined_expression|` across every limb of this
     /// equation. Must be `< M31_CENTER_LIMIT` for `status == Fits`.
@@ -140,8 +133,7 @@ impl EquationHeadroom {
 
 /// Every mod-2³² limb-add equation family the SHA-256 AIR exercises.
 ///
-/// The four families partition every add in the AIR (validated design
-/// §10.2):
+/// The four families cover every addition that the AIR emits:
 ///
 /// - [`audit_schedule_recurrence`] — `W[t] = σ1(W[t−2]) + W[t−7] +
 ///   σ0(W[t−15]) + W[t−16]` (4 addends), one per schedule entry
@@ -153,11 +145,9 @@ impl EquationHeadroom {
 /// - [`audit_finalization`] — the eight 2-addend finalization adds
 ///   `Hⱼ = h_inⱼ + working_varⱼ` per block.
 ///
-/// The fail-closed test `tests::every_add_family_fits_centered_m31`
-/// asserts every entry's status is `Fits`, so adding a new add shape
-/// without an audit, or a drift in the bound formula, triggers a test
-/// failure rather than silently passing — no warnings, no skipped
-/// equations.
+/// The `tests::every_add_family_fits_centered_m31` test requires every entry
+/// to have the `Fits` status. It fails if a family has no valid bound or if a
+/// bound exceeds the limit.
 pub fn current_headroom_audits() -> Vec<EquationHeadroom> {
     vec![
         audit_schedule_recurrence(),
@@ -178,8 +168,7 @@ pub fn audit_schedule_recurrence() -> EquationHeadroom {
 }
 
 /// 5-addend audit: `T1 = h + Σ1(e) + Ch(e,f,g) + K[t] + W[t]`. The widest
-/// add in the AIR — and therefore the family whose bound `T1` produces is
-/// the one design §3's "~12 bits of headroom" is measured against.
+/// add in the AIR. Its bound defines the minimum headroom margin.
 /// Carries are range-checked to `[0, RANGE_5) = [0, 5)`.
 pub fn audit_round_t1() -> EquationHeadroom {
     audit_mod_2_32_add(
@@ -203,9 +192,9 @@ pub fn audit_round_short_adds() -> EquationHeadroom {
 
 /// 2-addend audit for the eight finalization adds per block:
 /// `Hⱼ⁽ᵗ⁺¹⁾ = Hⱼ⁽ᵗ⁾ + working_varⱼ` for `j ∈ [0, 8)`. Same limb shape as
-/// the round short adds; tracked separately for traceability with the
-/// validated design §10.3. Carries are range-checked
-/// to `[0, RANGE_2) = [0, 2)`.
+/// the round short adds. It is tracked separately because finalization is a
+/// separate trace family. Carries are range-checked to
+/// `[0, RANGE_2) = [0, 2)`.
 pub fn audit_finalization() -> EquationHeadroom {
     audit_mod_2_32_add(
         "finalization",
@@ -227,11 +216,9 @@ pub fn audit_finalization() -> EquationHeadroom {
 /// |combined| ≤ (k + 1) · LIMB_MAX + carry_in + LIMB_BASE · carry_out
 /// ```
 ///
-/// — the P-256 stream's `audit_direct_limb_equation` shape, instantiated
-/// for two 16-bit limbs and `+1`-only addend coefficients. The loose bound
-/// sums magnitudes (it does *not* claim cancellation between "addends
-/// are large" and "result is small"), so the audit is conservative by
-/// design — any tighter sign-aware bound is still ≤ this loose one.
+/// This loose bound uses two 16-bit limbs and `+1` addend coefficients. It
+/// sums magnitudes and does not use cancellation. Therefore, a tighter
+/// sign-aware bound cannot exceed it.
 fn audit_mod_2_32_add(name: &'static str, addends: usize, note: &'static str) -> EquationHeadroom {
     let limb_max = i128::from(LIMB_MAX);
     let limb_base = i128::from(LIMB_BASE);
@@ -286,10 +273,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing headroom audit for {name}"))
     }
 
-    /// Fail-closed gate for the build: every mod-2³² add family the AIR
-    /// emits must have a `Fits` audit. Any new family without a matching
-    /// audit, or a drift in the limb bounds that pushes a family into
-    /// `RequiresSplit` / `PendingFormula`, triggers this test.
+    /// Require a `Fits` result for each mod-2³² addition family.
     #[test]
     fn every_add_family_fits_centered_m31() {
         let audits = current_headroom_audits();
@@ -352,16 +336,15 @@ mod tests {
         );
     }
 
-    /// Sanity: the widest family (`T1`, k = 5) has a combined-expression
-    /// bound below 2²⁰, matching the validated design's "~12 bits of
-    /// headroom" estimate in §3 of `docs/research/sha256-air-design.md`.
+    /// The widest family (`T1`, k = 5) has a combined-expression bound below
+    /// 2²⁰.
     #[test]
     fn headroom_matches_design_estimate() {
         let widest = audit("t1");
         let max = widest
             .max_abs_combined_expression
             .expect("audit produces a bound");
-        // 2²⁰ = 1_048_576. The loose bound (P-256-style) is
+        // 2²⁰ = 1_048_576. The loose bound is
         //   (k+1)·(2¹⁶ − 1) + (k − 1) + 2¹⁶·(k − 1)
         // = 6·65535 + 4 + 65536·4 = 655_358 < 2²⁰.
         assert!(max < 1i128 << 20, "T1 bound {max} not < 2²⁰");

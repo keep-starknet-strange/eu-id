@@ -3,8 +3,8 @@
 //! One AIR row holds a **w1Encode byte pair**: the two consecutive coefficients
 //! `(2p, 2p+1)` of a `w_i` poly, `p ∈ [0, N/2)`, `i ∈ [k]`. `k·N/2 = 768` active
 //! rows. Packing two coeffs per row keeps the `w1Encode` byte emission fully
-//! within a single row — no cross-row mask (which would risk the M4 `+2`
-//! composition-bound trap; see [`crate::coeffs`]).
+//! within one row. It does not use a cross-row mask, which would increase the
+//! composition degree bound. See [`crate::coeffs`].
 //!
 //! ## Per sub-lane `ℓ ∈ {lo, hi}` (a single `w_i` coefficient `w`), the FIPS obligations
 //!
@@ -34,7 +34,9 @@
 //! 6. **w1Encode emission** — `byte = w1'_lo + 16·w1'_hi` yielded into
 //!    `HashIoRelation(STREAM_ID_CTILDE_ABSORB, byte_pos, byte)` (768 bytes).
 //!
-//! ## Degree worksheet — EVERY constraint ≤ 2.
+//! ## Constraint degrees
+//!
+//! Each constraint has degree 2 or less.
 //! | site | expr | degree |
 //! |------|------|--------|
 //! | boolean `x(1−x)` (enabler, hint, wrap_k, s0) | | 2 |
@@ -98,8 +100,8 @@ const L_WRAP16: usize = 7;
 const L_A_HI: usize = 8;
 const L_B_HI: usize = 9;
 /// `sign_val = s0·(w0−1) + (1−s0)·(−w0) ∈ [0, γ2]`, witnessed so the rc value
-/// stays degree 1 (a degree-2 lookup value would push the logup constraint to
-/// degree 3 and break the +1 bound — the M4 trap). Pinned by C-DECOMP-S0.
+/// stays at degree 1. A degree-2 lookup value would make the LogUp constraint
+/// degree 3 and break the +1 bound. C-DECOMP-S0 pins this value.
 const L_SIGN_VAL: usize = 10;
 /// 7-bit hi of `sign_val` (13+7 split).
 const L_SIGN_HI: usize = 11;
@@ -419,8 +421,8 @@ impl FrameworkEval for DecompEval {
         let byte_pos = eval.get_preprocessed_column(pre_id("byte_pos"));
         let is_last = eval.get_preprocessed_column(pre_id("is_last"));
 
-        // COL_ENABLER remains committed for layout compatibility; active-row
-        // gates are carried by preprocessed selector masks.
+        // COL_ENABLER is a committed Boolean column. Preprocessed selectors
+        // gate the active rows.
         let enabler = eval.next_trace_mask();
         // Two lanes' worth of base columns.
         let lanes: Vec<Vec<E::F>> = (0..2)
@@ -632,8 +634,8 @@ pub struct DecompInteraction {
     pub trace: Vec<ColEval>,
     pub claimed_sum: SecureField,
     pub rc_uses: RcUses,
-    /// The 768 emitted `w1Encode` bytes, in byte_pos order (for the test balancer
-    /// and M6 sponge to consume). `wcell_uses` are the (w_bind_id, w) tuples.
+    /// The 768 emitted `w1Encode` bytes in byte-position order.
+    /// `wcell_uses` are the `(w_bind_id, w)` tuples.
     pub w1_encode_bytes: Vec<u8>,
     /// The (w_bind_id, w) pairs this component consumes (for the test provider).
     pub wcell_uses: Vec<(u32, u32)>,

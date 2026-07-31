@@ -1,13 +1,12 @@
 //! LogUp relations for the Keccak / SHAKE-256 AIR.
 //!
-//! Two families of relations live here:
+//! This module defines two relation families:
 //!
-//! 1. **Interface relations** — [`KeccakStateRelation`] and [`HashIoRelation`].
-//!    These are the *only* surface downstream ML-DSA components touch. They are
-//!    documented as a frozen cross-module contract below.
-//! 2. **Internal table/chain relations** — [`Xor3`], [`AndNot`], [`Conv`], the
+//! 1. **Interface relations:** [`KeccakStateRelation`] and [`HashIoRelation`].
+//!    Downstream ML-DSA components use only these relations.
+//! 2. **Internal relations:** [`Xor3`], [`AndNot`], [`Conv`], the
 //!    seven `Split*` spread byte-split channels, and [`KeccakRound`]. These wire
-//!    the three compute components (`sponge` → `keccak` → `keccak_round`) to
+//!    the three compute components (`sponge_v` → `keccak` → `keccak_round`) to
 //!    their spread-form lookup tables and to each other. Downstream code never
 //!    names them.
 //!
@@ -34,19 +33,19 @@ relation!(KeccakStateRelation, KECCAK_STATE_ARITY);
 /// Permutation-chaining relation between the sponge and the permutation prover.
 ///
 /// A tuple is `(perm_id, direction, s_0, s_1, …, s_199)`:
-/// - `perm_id` — a running index that uniquely labels one Keccak-f[1600]
+/// - `perm_id`: a running index that uniquely labels one Keccak-f[1600]
 ///   invocation *within a single proof*. The sponge assigns `perm_id`s
 ///   densely `0, 1, …` in issue order; the `keccak` permutation prover echoes
 ///   the same id on both its input- and output-state tuples so the two sides
 ///   pair up. `perm_id` prevents a malicious prover from satisfying one
 ///   sponge permute-request with a different request's permutation.
-/// - `direction` — `IN` (0) for the pre-permutation state, `OUT` (1) for the
+/// - `direction`: `IN` (0) for the pre-permutation state, `OUT` (1) for the
 ///   post-permutation state. The pair `(perm_id, IN)` / `(perm_id, OUT)`
 ///   binds one permutation's endpoints.
-/// - `s_0..s_199` — the 200 little-endian state limbs (`lane*8 + byte`), each
+/// - `s_0..s_199`: the 200 little-endian state limbs (`lane*8 + byte`), each
 ///   the *spread* of the corresponding state byte. The whole Keccak state stays
 ///   in spread form across permutations; byte form appears only at the HashIo
-///   boundary (see [`crate::sponge`]).
+///   boundary (see [`crate::sponge_v`]).
 ///
 /// ## Multiplicity convention
 ///
@@ -56,8 +55,8 @@ relation!(KeccakStateRelation, KECCAK_STATE_ARITY);
 /// permutation prover is the provider: for each row it *requires* (negative)
 /// its `(perm_id, IN, ·)` input and *yields* (positive) its `(perm_id, OUT, ·)`
 /// output. The two balance iff every sponge request is served by exactly one
-/// proven permutation with matching endpoints. (Signs are symmetric; the fixed
-/// convention is what matters — see `interaction.rs` for the concrete signs.)
+/// proven permutation with matching endpoints. The fixed sign convention is
+/// defined by the two component evaluators.
 pub mod direction {
     /// Pre-permutation state tag.
     pub const IN: u32 = 0;
@@ -72,15 +71,15 @@ relation!(HashIoRelation, HASH_IO_ARITY);
 
 // ───────────────────────────── Internal relations ──────────────────────────
 
-/// `xor3` channel: `(key, spread(xor))` with `key = s1+s2+s3` — arity 2, the
-/// key being a degree-1 linear combo of committed spread cells.
+/// `xor3` channel: `(key, spread(xor))` with `key = s1+s2+s3`. Its arity is 2.
+/// The key is a degree-1 linear combination of committed spread cells.
 pub const DENSE_LOOKUP_ARITY: usize = 2;
 relation!(Xor3, DENSE_LOOKUP_ARITY);
 
 // `andnot` channel: `(u, spread(¬b'∧b''))` with `u = spread(b')+2·spread(b'')`.
 relation!(AndNot, DENSE_LOOKUP_ARITY);
 
-// `conv` byte↔spread channel: `(byte, spread(byte))` — arity 2.
+// `conv` byte↔spread channel: `(byte, spread(byte))`. Its arity is 2.
 relation!(Conv, DENSE_LOOKUP_ARITY);
 
 /// Spread split channels, one per sub-byte shift `r ∈ {1..=7}`:

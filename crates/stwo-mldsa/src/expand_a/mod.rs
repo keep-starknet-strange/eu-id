@@ -259,7 +259,7 @@ impl Default for ExpandABindings {
     }
 }
 
-/// The only U5-specific public proof claim. Both log sizes are fixed constants.
+/// The public proof claim for private `ExpandA`. Both log sizes are constants.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpandAClaim {
     pub absorb_claimed_sum: SecureField,
@@ -1162,8 +1162,9 @@ fn draw_relations(
     }
 }
 
-/// Prover-side U5 module. The caller places the shared range table and Keccak
-/// service before it in module order.
+/// Prover module for private `ExpandA`.
+///
+/// The caller places the shared range table and Keccak service before this module.
 pub struct ExpandAProver {
     witness: ExpandAWitness,
     rows: Vec<RejectionRow>,
@@ -1339,7 +1340,9 @@ impl AirProver for ExpandAProver {
     }
 }
 
-/// Verifier-side U5 module; all layout data is fixed and `rho` remains private.
+/// Verifier module for private `ExpandA`.
+///
+/// All layout data is fixed. The `rho` value remains private.
 pub struct ExpandAVerifier {
     claim: ExpandAClaim,
     namespace: String,

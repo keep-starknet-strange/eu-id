@@ -4,9 +4,8 @@
 //! Signature Standard* (final, August 2024). Section citations refer to that
 //! document. ML-DSA-65 is the "Category 3" parameter set (Table 1, §4).
 //!
-//! These are the ground truth the M1 reference and every later milestone pin
-//! against; the oracle crate (`ml-dsa`) is only cross-checked, never a source
-//! of truth here.
+//! These constants are authoritative for this implementation. Tests compare
+//! them with the `ml-dsa` oracle, but the oracle does not define them.
 
 /// Modulus `q = 2^23 − 2^13 + 1 = 8_380_417`. Shared by every ML-DSA parameter
 /// set (FIPS 204 §4, Eq. 4.1 / Table 1).
@@ -94,19 +93,11 @@ pub const ZETA: u32 = 1753;
 /// COSE algorithm identifier for ML-DSA-65 in the issuer `protected` header
 /// (`alg` label `1`).
 ///
-/// Value from `draft-ietf-cose-dilithium` (ML-DSA in COSE). At time of writing
-/// the draft assigns `-49` to ML-DSA-65 in its early-assignment table; IANA has
-/// not yet published the permanent code point.
-///
-/// TODO(verify): re-pin when IANA finalizes the COSE Algorithms registry entry
-/// for ML-DSA-65 (draft-ietf-cose-dilithium).
+/// RFC 9964 and the IANA COSE Algorithms registry assign `-49`.
 pub const COSE_ALG_ML_DSA_65: i64 = -49;
 
 /// COSE Key Type (`kty`) for the "AKP" (Algorithm Key Pair) family that carries
-/// ML-DSA keys, from `draft-ietf-cose-dilithium` / the COSE key-type registry.
-///
-/// TODO(verify): re-pin when IANA finalizes the COSE Key Types registry entry
-/// for AKP.
+/// ML-DSA keys. RFC 9964 and the IANA COSE Key Types registry assign `7`.
 pub const COSE_KTY_AKP: i64 = 7;
 
 #[cfg(test)]

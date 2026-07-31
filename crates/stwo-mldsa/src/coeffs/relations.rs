@@ -1,15 +1,15 @@
-//! LogUp relation contracts for the `mldsa_coeffs` component (M4).
+//! LogUp relation contracts for the `mldsa_coeffs` component.
 //!
 //! | relation | arity | tuple | providers | consumers |
 //! |----------|-------|-------|-----------|-----------|
 //! | `EvalAtRs`  | 5 | `(poly_id, e0,e1,e2,e3)` | coeffs group-end (yield `−end`) | verifier-native fold (use `+`) |
 //! | `Range`     | 2 | `(value, bound_id)` | combined range table (yield `−mult`) | coeffs range uses |
 //!
-//! Digit range (worksheet §3.1): a **dedicated 2^9 table** with offset `+2^8`
-//! (the ×16-scaled-rc13 shortcut is FORBIDDEN). Carry rc (§3.3): `|C| ≤ 2^20`
-//! via `C + 2^20 ∈ [0,2^21)` split 13+8 (`Rc13` lo + new `Rc8` hi). z-norm
-//! (§3.4 / review flag): exact `≤ γ1−β−1` via a symmetric two-sided offset split
-//! (`Rc13` lo + new `Rc7` hi on both `a = z+off` and `b = off−z`).
+//! The digit range uses a dedicated `2^9` table with offset `+2^8`
+//! and does not use a scaled `Rc13` lookup. Carry range checks enforce
+//! `|C| ≤ 2^20` through a 13+8 split of `C + 2^20 ∈ [0,2^21)`. The z-norm
+//! check enforces `≤ γ1−β−1` through symmetric two-sided offsets. It uses
+//! `Rc13` for the low part and `Rc7` for the high part.
 
 use air_core::relations::SharedRelation;
 use stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
@@ -31,7 +31,7 @@ pub type SharedRangeRelation = SharedRelation<RangeRelation>;
 
 /// The relations, drawn together after the base commit.
 ///
-/// `wcell` / `ccell` are the cross-component bindings (M6): the coeffs component
+/// `wcell` and `ccell` are cross-component bindings. The coeffs component
 /// YIELDS `(w_bind_id, w)` for every w-coefficient and `(c_bind_id, c)` for every
 /// challenge coefficient; decomp / sampleinball consume them. In the standalone
 /// coeffs test these two yields would be unbalanced (no consumer), so the
@@ -56,7 +56,7 @@ impl CoeffsRelations {
         }
     }
 
-    /// Composed-statement constructor (M6): draw only the coeffs-private
+    /// Composed-statement constructor. Draw only the coefficient-private
     /// relations from the channel and reuse SHARED `wcell` / `ccell` instances
     /// (drawn once by [`crate::statement`]) so the binding yields cancel against
     /// decomp / sampleinball. Draw order of the private relations matches

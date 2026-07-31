@@ -11,8 +11,7 @@ use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
 use stwo_mldsa::MlDsaVerifyInput;
 
-/// Batch-4 LogUp constraints have log-degree excess 2, so proving needs
-/// `log_blowup >= 2` (production uses 3).
+/// Batch-4 LogUp constraints need `log_blowup >= 2`.
 pub fn standalone_pcs_config() -> PcsConfig {
     PcsConfig {
         fri_config: FriConfig::new(0, 2, 3, 1),
@@ -20,7 +19,7 @@ pub fn standalone_pcs_config() -> PcsConfig {
     }
 }
 
-/// The composed statement keeps the historical direct-Keccak test PCS.
+/// PCS configuration for composed-statement tests.
 pub fn composed_pcs_config() -> PcsConfig {
     PcsConfig {
         pow_bits: 10,

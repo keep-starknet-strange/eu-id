@@ -526,7 +526,10 @@ fn fixed_expand_a_proves_and_verifies() {
 
     let mut tampered = proof.clone();
     tampered.expand_claim.rejection_claimed_sum += SecureField::one();
-    assert!(verify_core(&tampered).is_err(), "forged U5 claim accepted");
+    assert!(
+        verify_core(&tampered).is_err(),
+        "forged ExpandA claim accepted"
+    );
 
     let mut tampered = proof.clone();
     tampered.range_claim += SecureField::one();
@@ -566,16 +569,16 @@ fn fixed_expand_a_proves_and_verifies() {
     ));
 }
 
-/// Required release gate:
-/// `rtk cargo test -p stwo-mldsa --test expand_a adversarial_traces_and_disconnected_matrix_fail -- --ignored --exact`
+/// Slow manual release test:
+/// `rtk cargo test --release -p stwo-mldsa --test expand_a adversarial_traces_and_disconnected_matrix_fail -- --ignored --exact`
 #[test]
 #[ignore = "serial proof-level adversarial matrix"]
 fn adversarial_traces_and_disconnected_matrix_fail() {
     let _guard = PROOF_LOCK.lock().unwrap();
     let rho = [42u8; 32];
 
-    // Exploit shape: U5 and its rho/Ntt consumers agree on a forged matrix,
-    // while the canonical SHAKE provider remains keyed by the honest rho.
+    // This test makes ExpandA and its rho and NttCell consumers agree on a
+    // forged matrix. The canonical SHAKE provider still uses the correct rho.
     let forged = prove_core([99u8; 32], rho, None).expect("local constraints stay self-consistent");
     assert!(
         verify_core(&forged).is_err(),
@@ -877,8 +880,8 @@ fn verify_with_service_shapes(proof: &ServiceProof, shapes: Vec<Shape>) -> Resul
     )
 }
 
-/// Required release gate:
-/// `rtk cargo test -p stwo-mldsa --test expand_a six_block_expand_a_composes_with_real_keccak_service -- --ignored --exact`
+/// Slow manual release test:
+/// `rtk cargo test --release -p stwo-mldsa --test expand_a six_block_expand_a_composes_with_real_keccak_service -- --ignored --exact`
 #[test]
 #[ignore = "real 180-permutation SHAKE-128 service integration"]
 fn six_block_expand_a_composes_with_real_keccak_service() {
@@ -981,12 +984,12 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
     let forged = prove_with_service([99u8; 32], rho).expect("locally self-consistent forged proof");
     assert!(
         verify_with_service(&forged).is_err(),
-        "real Keccak HashIo must reject a disconnected forged A_hat"
+        "the Keccak HashIo relation must reject a disconnected forged A_hat"
     );
 }
 
 #[test]
-fn proof_shape_constants_are_frozen() {
+fn proof_shape_constants_are_fixed() {
     assert_eq!(REJECTION_BASE_COLS, 12);
     let shapes = shake128_job_shapes(STREAM_BASE).expect("valid ExpandA service shapes");
     assert_eq!(shapes.len(), 30);

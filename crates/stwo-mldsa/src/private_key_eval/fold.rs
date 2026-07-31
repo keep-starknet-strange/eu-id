@@ -432,7 +432,7 @@ mod tests {
         assert_ne!(
             native_fold(&evals, rho_rlc, r, s),
             SecureField::zero(),
-            "forged formula fixture must violate the production equation"
+            "forged formula fixture must violate the exact equation"
         );
         evals
     }
@@ -482,10 +482,10 @@ mod tests {
             air_core::verify(&mut [&mut forged_verifier], &proof)
                 .unwrap_or_else(|error| panic!("{label}: forged AIR control failed: {error:?}"));
 
-            let mut production_verifier = FormulaAir::new(evals, rho_rlc, r, s, EXACT_FOLD_FORMULA);
+            let mut exact_verifier = FormulaAir::new(evals, rho_rlc, r, s, EXACT_FOLD_FORMULA);
             assert!(
-                air_core::verify(&mut [&mut production_verifier], &proof).is_err(),
-                "{label}: production fold must reject the forged formula proof"
+                air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
+                "{label}: the exact fold must reject the forged formula proof"
             );
         }
     }

@@ -363,9 +363,8 @@ impl AirProver for SharedRangeTable {
     }
 }
 
-// Standalone coeffs-proof compatibility. These providers remain split only in
-// that test harness; their relation and fixed tuple ids are identical to the
-// composed statement's combined provider.
+// The standalone coefficient tests use these split providers.
+// They use the same relation and tuple IDs as the combined provider.
 pub fn gen_table_preprocessed(kind: RcKind) -> ColEval {
     gen_value_table_preprocessed(kind.log_size(), kind.n_values())
 }

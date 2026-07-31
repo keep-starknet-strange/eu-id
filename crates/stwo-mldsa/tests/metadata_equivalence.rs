@@ -1,6 +1,6 @@
-//! Differential checks for witness-only metadata paths used before relation
-//! challenges are drawn. Each direct census must match the former full dry
-//! interaction on both a vendored ACVP KAT and a seeded oracle signature.
+//! Differential checks for witness metadata that is built before relation
+//! challenges. Each direct census must match the full interaction output for
+//! an ACVP vector and a seeded oracle signature.
 
 use ml_dsa::signature::{Keypair, Signer};
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
@@ -98,7 +98,7 @@ fn direct_metadata_matches_full_dry_interactions() {
         ("seeded-oracle", seeded_oracle_witness()),
     ] {
         let direct = gen_coeffs_rc_uses(&witness);
-        let legacy = gen_coeffs_interaction(
+        let interaction = gen_coeffs_interaction(
             &witness,
             padded_log_size(coeffs_layout::active_rows()),
             SecureField::zero(),
@@ -108,14 +108,14 @@ fn direct_metadata_matches_full_dry_interactions() {
         for kind in CoeffsRcKind::ALL {
             assert_eq!(
                 direct.for_kind(kind),
-                legacy.rc_uses.for_kind(kind),
+                interaction.rc_uses.for_kind(kind),
                 "{case}: coeffs {kind:?}"
             );
         }
-        drop(legacy);
+        drop(interaction);
 
         let direct = gen_decomp_metadata(&witness);
-        let legacy = gen_decomp_interaction(
+        let interaction = gen_decomp_interaction(
             &witness,
             padded_log_size(N_PAIRS),
             STREAM_ID_CTILDE_ABSORB,
@@ -124,12 +124,12 @@ fn direct_metadata_matches_full_dry_interactions() {
         for kind in DecompRcKind::ALL {
             assert_eq!(
                 direct.rc_uses.for_kind(kind),
-                legacy.rc_uses.for_kind(kind),
+                interaction.rc_uses.for_kind(kind),
                 "{case}: decomp {kind:?}"
             );
         }
         assert_eq!(
-            direct.w1_encode_bytes, legacy.w1_encode_bytes,
+            direct.w1_encode_bytes, interaction.w1_encode_bytes,
             "{case}: decomp w1Encode"
         );
         let rows = &witness.rows;
@@ -137,13 +137,13 @@ fn direct_metadata_matches_full_dry_interactions() {
             .flat_map(|i| (0..N).map(move |m| ((i * N + m) as u32, rows[i].w[m])))
             .collect();
         assert_eq!(
-            expected_wcell_uses, legacy.wcell_uses,
+            expected_wcell_uses, interaction.wcell_uses,
             "{case}: decomp WCell uses"
         );
-        drop(legacy);
+        drop(interaction);
 
         let direct = gen_sib_metadata(&witness);
-        let legacy = gen_sib_interaction(
+        let interaction = gen_sib_interaction(
             &witness,
             padded_log_size((MAX_SIB_SQUEEZE_BYTES + N).max(N_ACCESSES)),
             STREAM_ID_SIB_SQUEEZE,
@@ -152,12 +152,12 @@ fn direct_metadata_matches_full_dry_interactions() {
         for kind in SibRcKind::ALL {
             assert_eq!(
                 direct.rc_uses.for_kind(kind),
-                legacy.rc_uses.for_kind(kind),
+                interaction.rc_uses.for_kind(kind),
                 "{case}: SIB {kind:?}"
             );
         }
         assert_eq!(
-            direct.stream_bytes, legacy.stream_bytes,
+            direct.stream_bytes, interaction.stream_bytes,
             "{case}: SIB stream bytes"
         );
         let expected_ccell_uses: Vec<_> = witness
@@ -168,7 +168,7 @@ fn direct_metadata_matches_full_dry_interactions() {
             .map(|(m, &c)| (m as u32, encode_signed(c)))
             .collect();
         assert_eq!(
-            expected_ccell_uses, legacy.ccell_uses,
+            expected_ccell_uses, interaction.ccell_uses,
             "{case}: SIB CCell uses"
         );
     }

@@ -1,8 +1,7 @@
 //! Rounding helpers: `Decompose` (FIPS 204 Algorithm 36), `UseHint`
-//! (Algorithm 39), and `w1Encode` (Algorithm 28). Verification never calls
-//! `Decompose`/`HighBits` directly — it recovers `w1` from the approximate
-//! commitment via `UseHint` — but `Decompose` is exposed because `UseHint` is
-//! defined in terms of it and the witness generator needs both.
+//! (Algorithm 39), and `w1Encode` (Algorithm 28). Verification recovers `w1`
+//! from the approximate commitment through `UseHint`. The witness generator
+//! also uses `Decompose` and `HighBits`.
 //!
 //! All arithmetic is over the centered residue system used by FIPS 204:
 //! `r mod± α ∈ (−α/2, α/2]`.

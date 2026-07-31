@@ -1,13 +1,8 @@
-//! From-scratch FIPS 204 ML-DSA-65 **verification** reference with exposed
-//! internals.
+//! FIPS 204 ML-DSA-65 verification reference with exposed internals.
 //!
-//! This is the native (out-of-circuit) ground truth for the whole ML-DSA
-//! integration effort. It implements verification only (no signing);
-//! signatures for tests come from the oracle crate.
-//!
-//! Every intermediate the future witness generator (M2+) needs is exposed on
-//! [`verify::VerifyTrace`], and every sponge invocation records its absorb /
-//! squeeze byte stream ([`sponge::SpongeTranscript`]).
+//! This module implements verification but not signing.
+//! [`verify::VerifyTrace`] exposes values used by the witness generator. Each
+//! sponge invocation records its absorb and squeeze byte streams.
 
 pub mod decompose;
 pub mod encoding;

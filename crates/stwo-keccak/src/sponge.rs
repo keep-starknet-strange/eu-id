@@ -15,12 +15,6 @@ pub const fn n_perms(n_absorb: usize, n_squeeze: usize) -> usize {
     n_absorb + n_squeeze - 1
 }
 
-/// Number of absorb blocks needed for a message of `l` bytes (pad10*1 always
-/// adds at least one padding byte, so `ceil((l+1)/rate)` for SHAKE-256).
-pub const fn n_absorb_blocks(l: usize) -> usize {
-    (l + 1).div_ceil(N_BYTES_IN_RATE)
-}
-
 /// SHAKE variant and therefore sponge rate.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum XofMode {
@@ -50,8 +44,8 @@ pub struct Shape {
     pub xof_mode: XofMode,
     /// Public byte length that is absorbed by this job.
     pub message_len: usize,
-    /// Fixed allocation bound for a capacity-shaped job. `None` preserves the
-    /// historical fixed-length geometry where `message_len` is also the shape.
+    /// Fixed allocation bound for a capacity-shaped job. With `None`,
+    /// `message_len` also defines the fixed shape.
     ///
     /// Capacity-shaped jobs still bind `message_len` into the public
     /// transcript, but derive their row count and preprocessed schedule from
@@ -61,7 +55,7 @@ pub struct Shape {
     /// This profile parameter is deliberately not proof-serialized. A service
     /// verifier must reconstruct the bounded shape from its semantic public
     /// message and circuit artifact; serializing a capacity-shaped `Shape`
-    /// fails instead of silently downgrading it to historical fixed geometry.
+    /// fails instead of treating it as a fixed-length shape.
     pub message_capacity: Option<usize>,
     pub n_absorb: usize,
     pub n_squeeze: usize,
@@ -70,9 +64,10 @@ pub struct Shape {
     pub perm_id_base: usize,
 }
 
-/// Historical fixed-shape wire format. Keeping this helper field-for-field
-/// preserves existing encodings while the manual implementation below rejects
-/// capacity shapes, which must be reconstructed from the verifier's profile.
+/// Fixed-shape wire format.
+///
+/// The field order defines the serialized format. Capacity shapes are not
+/// serialized. The verifier reconstructs them from its profile.
 #[derive(Serialize, Deserialize)]
 struct FixedShapeWire {
     xof_mode: XofMode,

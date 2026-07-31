@@ -2,20 +2,20 @@
 //! pure mode, delegating to Algorithm 8 `ML-DSA.Verify_internal`).
 //!
 //! [`verify_internals`] runs the whole algorithm and returns a [`VerifyTrace`]
-//! exposing every intermediate the future witness generator needs: the decoded
+//! exposing every intermediate that the witness generator uses: the decoded
 //! `ρ`, `t1`, the hashes `tr` and `µ`, the challenge `c` (both coefficient and
 //! NTT domain), the response `ẑ`, the approximate commitment
 //! `w'approx = A·z − c·t1·2^d` in both domains, the recovered `w1'`, the sponge
 //! transcripts for `µ`, `c̃`, and `SampleInBall`, and the final verdict.
 //!
-//! ## The µ domain prefix (a common bug)
+//! ## The µ domain prefix
 //!
 //! Algorithm 3 computes `µ = H( tr ‖ IntegerToBytes(0,1) ‖
 //! IntegerToBytes(|ctx|,1) ‖ ctx ‖ M , 512 )`, where `tr = H(pk, 512)`. The two
-//! leading bytes are: `0x00` (the domain separator selecting *pure*, non
+//! leading bytes are `0x00` (the domain separator selecting pure, non-
 //! pre-hash mode) and `|ctx|` (the context length). For the mdoc use, `ctx` is
-//! empty, so the prefix is `tr ‖ 0x00 ‖ 0x00 ‖ M`. Getting either byte wrong
-//! silently breaks interop with every conformant signer.
+//! empty, so the prefix is `tr ‖ 0x00 ‖ 0x00 ‖ M`. A wrong prefix does not
+//! interoperate with a conforming signer.
 
 use crate::constants::{C_TILDE_BYTES, D, GAMMA1, K, L, N, TAU};
 use crate::reference::decompose::{use_hint_poly, w1_encode};
@@ -99,8 +99,7 @@ pub fn verify_internals_with_context(
     let mut tr = [0u8; HASH64];
     tr.copy_from_slice(&tr_vec);
 
-    // µ = H(tr ‖ 0x00 ‖ |ctx| ‖ ctx ‖ M, 512). The two leading bytes 0x00,|ctx|
-    // are the pure-mode domain prefix — see the module docs.
+    // µ = H(tr ‖ 0x00 ‖ |ctx| ‖ ctx ‖ M, 512).
     let ctx_len = [ctx.len() as u8];
     let (mu_vec, mu_transcript) = shake256(&[&tr, &[DOMAIN_SEP_PURE], &ctx_len, ctx, msg], HASH64);
     let mut mu = [0u8; HASH64];
@@ -198,8 +197,7 @@ pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// `‖z‖_∞ < γ1 − β` (Algorithm 8). `β = τ·η`; the check keeps `z` small enough
-/// that the honest signer's rejection sampling could have produced it.
+/// `‖z‖_∞ < γ1 − β` (Algorithm 8), where `β = τ·η`.
 fn z_norm_in_bound(z: &[[i32; N]; L]) -> bool {
     let bound = (GAMMA1 - crate::constants::BETA) as i32;
     z.iter().flatten().all(|&c| c.abs() < bound)

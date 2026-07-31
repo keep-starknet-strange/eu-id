@@ -2,13 +2,11 @@
 //!
 //! FIPS 204 §7.5: the NTT (Algorithm 41) maps a polynomial to its evaluations,
 //! `NTT^-1` (Algorithm 42) inverts it, and `MultiplyNTTs` (Algorithm 45) is a
-//! pointwise product. The verifier computes `w'approx = A·z − c·t1·2^d` most
-//! cheaply in the NTT domain, so this module exposes both directions and the
-//! pointwise multiply.
+//! pointwise product. The verifier computes `w'approx = A·z − c·t1·2^d` in the
+//! NTT domain. This module exposes both directions and pointwise multiplication.
 //!
 //! The twiddle table is `zetas[i] = ζ^{brv8(i)} mod q` with `ζ = 1753`
-//! (Appendix B). We derive it at load time rather than hard-coding 256 magic
-//! numbers — cheaper to audit against the spec's one-line definition.
+//! (Appendix B). The code derives the table at load time from this definition.
 
 use crate::constants::{N, Q, ZETA};
 

@@ -1,8 +1,8 @@
 //! Private device-public-key evaluation for hosted ML-DSA verification.
 //!
-//! U5 supplies canonical stage-zero NTT cells, U9 supplies the packed `t1`
-//! cells, and this module proves the inverse NTT, evaluates `A` and
-//! `2^13 * t1`, and closes the complete 66-term integer-lift identity.
+//! Private `ExpandA` supplies canonical stage-zero NTT cells. The private
+//! device-key binder supplies packed `t1` cells. This module proves the inverse
+//! NTT, evaluates `A` and `2^13 * t1`, and closes the 66-term integer identity.
 
 mod fold;
 mod ntt;
@@ -49,7 +49,7 @@ const _: () = assert!(A_EVAL_BASE == 30);
 const _: () = assert!(T1_EVAL_BASE == 60);
 const _: () = assert!(PRIVATE_EVAL_COUNT == 66);
 
-/// Shared relation handles whose challenges are owned by U5 and U9.
+/// Shared relation handles from `ExpandA` and the private device-key binder.
 #[derive(Clone)]
 pub struct PrivateKeyEvalBindings {
     pub ntt: SharedNttCellRelation,
@@ -96,7 +96,7 @@ impl PrivateKeyEvalRelations {
     }
 }
 
-/// Prover-only decoded public-key material used to construct U6 traces.
+/// Prover-only decoded public-key material for private-key evaluation traces.
 #[derive(Clone)]
 pub struct PrivateKeyEvalWitness {
     pub a_hat: Vec<NttPoly>,

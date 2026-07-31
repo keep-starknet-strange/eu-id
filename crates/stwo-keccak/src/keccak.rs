@@ -1,33 +1,31 @@
-//! The `keccak` component, ROTATED (S3a of the PQ perf campaign): one trace
-//! row per ROUND BOUNDARY — 25 rows per Keccak-f[1600] permutation (the input
-//! state plus the 24 post-round states), constant width.
+//! The vertical `keccak` component uses one trace row for each round boundary.
+//! Each Keccak-f[1600] permutation uses 25 rows: the input state and the 24
+//! post-round states.
 //!
-//! The previous layout committed all 25 state snapshots side by side on one
-//! row (`2 + 25·200 = 5,002` columns). This rotation stacks the snapshots
-//! vertically: `201` trace columns (`perm_id + state[200]`), boundary flags and
-//! per-round iota constants PREPROCESSED (shape-encoded ids, I-5), and 2
-//! pair-batched interaction columns. Proof size is queries × columns, so the
-//! wrapper's committed width drops 5,102 → 209.
+//! The component stacks the 25 state snapshots vertically. It uses `201` trace
+//! columns (`perm_id + state[200]`), boundary flags and
+//! per-round iota constants preprocessed with shape-encoded identifiers, and 2
+//! pair-batched interaction columns. The committed width is 209 columns.
 //!
-//! ## LogUp wiring (signs EXACTLY the horizontal wrapper's, per-row gated)
+//! ## LogUp wiring
 //!
 //! Row `25·p + r` holds permutation `p`'s state at boundary `r` (`state_0` is
 //! the input; `state_r` for `r ≥ 1` is the post-round-`r−1` state):
 //!
-//! - `r == 0`  — *require* (−) `KeccakStateRelation(perm_id, IN, state_0)`,
+//! - `r == 0`: *require* (−) `KeccakStateRelation(perm_id, IN, state_0)`,
 //!   served by the sponge's yield.
-//! - `r == 24` — *yield* (+) `KeccakStateRelation(perm_id, OUT, state_24)`,
+//! - `r == 24`: *yield* (+) `KeccakStateRelation(perm_id, OUT, state_24)`,
 //!   consumed by the sponge's require.
-//! - `r < 24`  — *yield* (+) round `r`'s input link
+//! - `r < 24`: *yield* (+) round `r`'s input link
 //!   `KeccakRound(perm_id | r | rc_r | state_r)`.
-//! - `r > 0`   — *require* (−) round `r−1`'s output link
+//! - `r > 0`: *require* (−) round `r−1`'s output link
 //!   `KeccakRound(perm_id | r | rc_r | state_r)` (the output link of round
 //!   `r−1` carries index `r` and `IOTA_RC[r]`, exactly the same tuple as round
 //!   `r`'s input link).
 //!
 //! These cancel the `keccak_round` component, which requires its input link
-//! and yields its output link — the wrapper mediates every link, exactly as
-//! before the rotation. All gates are preprocessed schedule flags, so padding
+//! and yields its output link. The wrapper mediates every link. All gates are
+//! preprocessed schedule flags, so padding
 //! rows emit nothing and no trace enabler (or cross-row mask) is needed.
 
 #![allow(non_snake_case)]
@@ -67,10 +65,10 @@ const N_INTERACTION_COLUMNS: usize = SECURE_EXTENSION_DEGREE * N_LOGUP_ENTRIES.d
 pub const N_COMMITTED_COLUMNS: usize = N_COLUMNS + N_INTERACTION_COLUMNS;
 
 // =============================================================================
-// Schedule (preprocessed, shape-derived — witness-independent).
+// The preprocessed schedule depends only on the shape.
 // =============================================================================
 
-/// Schedule column id: the id encodes `n_perms` (I-5), so two different
+/// Schedule column identifier. It encodes `n_perms`, so two different
 /// permutation counts never alias through tree-0 first-writer dedup, and the
 /// id fully determines the column content.
 fn schedule_id(n_perms: usize, name: &str) -> PreProcessedColumnId {
@@ -169,7 +167,7 @@ impl Claim {
 
     /// Build the boundary-row trace. `perm_inputs` are splatted per-permutation
     /// rows `[spread_state(200) | perm_id]` with lane 0 real (the sponge's
-    /// request order — same feed as [`crate::service::build_perm_witness`]).
+    /// request order. This matches [`crate::service::build_perm_witness`]).
     pub fn generate_trace(
         perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]],
     ) -> (Self, Vec<ColEval>, InteractionClaimData) {
@@ -243,7 +241,7 @@ impl FrameworkEval for Eval {
         let rel = &self.relations;
         let n = self.claim.n_perms;
 
-        // Schedule (preprocessed, trusted — pinned by the tree-0 root).
+        // The tree-0 root pins the preprocessed schedule.
         let is_active = eval.get_preprocessed_column(schedule_id(n, "is_active"));
         let is_first = eval.get_preprocessed_column(schedule_id(n, "is_first"));
         let is_last = eval.get_preprocessed_column(schedule_id(n, "is_last"));
@@ -310,7 +308,7 @@ impl InteractionClaim {
 
 /// The 4 per-row fractions in EXACTLY the AIR's emission order, pair-batched
 /// (matching `finalize_logup_in_pairs`). Zero-multiplicity entries are
-/// `(0, 1)` — sound because the pair constraint evaluates the symbolic
+/// `(0, 1)`. This is sound because the pair constraint evaluates the symbolic
 /// multiplicity (a preprocessed gate that IS zero there).
 fn row_fracs(rel: &KeccakRelations, r: usize, row: &RowLook) -> [(SecureField, SecureField); 4] {
     let zero = SecureField::zero();

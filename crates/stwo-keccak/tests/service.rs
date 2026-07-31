@@ -1,10 +1,11 @@
-//! S1 gate tests for the rotated job-list sponge + `KeccakService` module:
-//! single job, multi job (incl. pad edge shapes and multi-squeeze),
-//! job-boundary isolation, and the design doc's adversarial rows
-//! (tampered new_rate / post / pad byte / producer byte).
+//! Tests for the vertical job-list sponge and `KeccakService`.
 //!
-//! Run single-threaded: `RAYON_NUM_THREADS=1 cargo test -p stwo-keccak
-//! --release --test service -- --test-threads=1`.
+//! The tests cover one job, multiple jobs, padding edges, multiple squeeze
+//! blocks, job-boundary isolation, and adversarial trace changes.
+//!
+//! Run one test harness thread and 12 Rayon workers:
+//! `RAYON_NUM_THREADS=12 cargo test -p stwo-keccak --release --test service
+//! -- --test-threads=1`.
 
 use num_traits::{One, Zero};
 use sha3::digest::{ExtendableOutput, Update, XofReader};
@@ -679,9 +680,8 @@ fn shake128_job_proves_and_matches_sha3() {
     verify_jobs(&p, &[msg]).expect("SHAKE-128 verify");
 }
 
-/// FIPS-202 SHAKE-256 KAT matrix formerly covered by the standalone prover:
-/// empty, final-byte fuse, block-boundary pad, spillover, ML-DSA μ-sized
-/// absorb, and long squeeze.
+/// FIPS 202 SHAKE-256 cases: empty input, final-byte fuse, block-boundary
+/// padding, spillover, an ML-DSA µ-sized input, and a long squeeze.
 #[test]
 fn shake256_kat_matrix_on_service_path() {
     for (name, msg, n_squeeze) in [
@@ -750,7 +750,7 @@ fn verifier_xof_mode_mismatch_rejects() {
 /// pad byte), `L mod 136 = 0` (an all-pad final block), a plain multi-block
 /// message, and a multi-squeeze job. Also the job-boundary isolation gate: two
 /// identical messages under different stream ids must both equal the sha3
-/// reference — any chaining leak across the job seam would corrupt the second.
+/// reference. A chaining leak across the job boundary would change the second.
 #[test]
 fn multi_job_list_proves_with_isolated_boundaries() {
     let m135 = vec![0x11u8; 135];
@@ -779,10 +779,10 @@ fn multi_job_list_proves_with_isolated_boundaries() {
 }
 
 // =====================================================================
-// Adversarial rows (design doc S1 gate).
+// Adversarial trace changes.
 // =====================================================================
 
-/// I-2 xor path: tamper one new_rate spread byte (consistently in the base
+/// Change one new-rate spread byte consistently in the base
 /// trace and the sponge's own logup data) → the xor3 tuple matches no dense
 /// table row → LogUp unbalanced → reject.
 #[test]
@@ -793,7 +793,7 @@ fn tampered_new_rate_rejects() {
     }));
 }
 
-/// I-2 state chain: tamper one post byte → the sponge's OUT require no longer
+/// Change one post byte so the sponge output requirement no longer
 /// matches the keccak component's OUT yield → LogUp unbalanced → reject.
 #[test]
 fn tampered_post_rejects() {
@@ -814,7 +814,7 @@ fn noncanonical_pad_byte_rejects() {
     }));
 }
 
-/// I-4 message binding: the HashIo producer yields a DIFFERENT byte than the
+/// Make the HashIo producer yield a different byte from the
 /// sponge absorbed → global LogUp unbalanced → reject (the hosted-mode swap
 /// soundness, re-run against the rotated sponge).
 #[test]
@@ -900,7 +900,7 @@ fn wrong_conv_at_hashio_boundary_has_no_conv_row() {
 }
 
 // =====================================================================
-// W3b adversarial matrix: the round LogUp -> GKR offload.
+// Adversarial tests for the round LogUp-to-GKR path.
 // =====================================================================
 
 /// Skip the prover-side coeff-poly-vs-oracle completeness self-check so the
@@ -950,9 +950,8 @@ fn gkr_claim_swapped_between_proofs_rejects() {
     assert!(verify_jobs_with_payloads(&b, &b.messages, &a.payloads).is_err());
 }
 
-/// ExpandA contributes thirty SHAKE-128 jobs to this same service. Tampering a
-/// committed round cell in that production-shaped workload must break the GKR
-/// tie-back rather than falling outside the offload.
+/// ExpandA contributes 30 SHAKE-128 jobs to this service. A changed committed
+/// round cell must break the GKR tie-back.
 #[test]
 fn tampered_expand_a_round_base_cell_rejects() {
     const EXPAND_A_POLYS: usize = 30;
@@ -1111,10 +1110,9 @@ fn row_swapped_lookup_data_rejects() {
     assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
-/// Positive regression for the GKR tie-back under the production-shaped FRI
-/// config (`log_blowup=4`, exceeding the composition split).
+/// The GKR tie-back works with `log_blowup = 4`.
 #[test]
-fn gkr_offload_proves_under_blowup_4_subdomain_mode() {
+fn gkr_offload_proves_with_blowup_4_subdomain_mode() {
     let msg = vec![0x51u8; 300];
     let config = PcsConfig {
         fri_config: FriConfig::new(1, 4, 3, 2),

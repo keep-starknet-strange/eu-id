@@ -1,30 +1,24 @@
-//! Witness emitter — produces every intermediate value the AIR refers to,
-//! from raw message bytes through the per-round limb representation and the
-//! carries of every mod-2³² add.
+//! SHA-256 witness generation.
 //!
 //! Pipeline:
 //!
-//! 1. `compute_padding_witness(msg)` — FIPS §5.1.1 padding, byte-exact.
-//! 2. `compute_block_witness(h_in, block_bytes)` — schedule expansion (with
-//!    `σ0`/`σ1` lookups and their carries) + 64 round witnesses + 8
+//! 1. `compute_padding_witness(msg)` applies FIPS 180-4 section 5.1.1.
+//! 2. `compute_block_witness(h_in, block_bytes)` creates the schedule, 64
+//!    round witnesses, and 8
 //!    finalization adds.
-//! 3. `compute_sha256_witness(msg)` — chains blocks: `H⁽⁰⁾ = IV`, then
+//! 3. `compute_sha256_witness(msg)` chains the blocks. It uses `H⁽⁰⁾ = IV` and
 //!    `H⁽ᵗ⁺¹⁾ = compress(H⁽ᵗ⁾, blockₜ)` for each block.
 //!
-//! Every numeric value is reproduced from the native reference in
-//! `crate::native` and cross-checked by the tests. The witness layer never
-//! diverges from the FIPS spec; it just adds the *intermediate* values that
-//! the AIR's linear constraints reference.
+//! [`crate::native`] computes the reference values. This module adds the
+//! intermediate values that the AIR constrains.
 
 use crate::constants::{BLOCK_BYTES, IV, K, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS};
 use crate::native::{
     big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj, pad_message, parse_blocks,
 };
-use crate::partitions::{apply, bits_to_mask, SigmaFn};
-use crate::tables::pack_half_key;
 use crate::types::{
-    AddCarries, BlockWitness, Digest, HashState, LimbPairBytes, PaddingWitness, RoundWitness,
-    ScheduleEntryWitness, Sha256Witness, SigmaDecodeWitness, WordLimbs, LIMB_BITS,
+    AddCarries, BlockWitness, Digest, HashState, PaddingWitness, RoundWitness,
+    ScheduleEntryWitness, Sha256Witness, WordLimbs, LIMB_BITS,
 };
 
 /// Pad the message and assemble the padding witness used by the AIR.
@@ -70,65 +64,6 @@ fn add_words_with_carries(words: &[u32]) -> (u32, AddCarries) {
     )
 }
 
-/// Build the decoded intermediates of one σ-application `y = f(x)` per §9.3:
-/// the two 16-bit half-keys, the spread `O0`/`O1` outputs, the two `O2`
-/// partials, the XOR-combined `O2`, and the byte chunks of all three `O2`
-/// values for the chunk-wise `xor_8` lookup.
-///
-/// `f` is GF(2)-linear, so applying it to the S-only-half and the S′-only-half
-/// of the input separately yields the per-side contributions; the spread `O0`
-/// bits live at natural positions in `f(S-half)`, and the side's `O2` partial
-/// is `f(S-half)` masked to the `O2` bit positions. Same for the S′ side.
-/// Their field sums (disjoint bit sets) plus the chunk-wise XOR of the two
-/// `O2` partials reproduce the full `f(x)` — the reassembly identity the AIR
-/// enforces.
-fn compute_sigma_decode_witness(f: SigmaFn, x: u32) -> SigmaDecodeWitness {
-    let s_mask = f.s_mask();
-    let outputs = f.outputs();
-    let o0_mask = bits_to_mask(outputs.o0);
-    let o1_mask = bits_to_mask(outputs.o1);
-    let o2_mask = bits_to_mask(outputs.o2);
-
-    let key_s = pack_half_key(x, s_mask);
-    let key_s_complement = pack_half_key(x, !s_mask);
-
-    // Per-side spread output: applying f to the half-masked input recovers
-    // O0 (resp. O1) at natural positions and the O2 partial from that side.
-    let x_s_only = x & s_mask;
-    let x_s_complement_only = x & !s_mask;
-    let y_from_s = apply(f, x_s_only);
-    let y_from_s_complement = apply(f, x_s_complement_only);
-
-    let o_main_s = y_from_s & o0_mask;
-    let o_main_s_complement = y_from_s_complement & o1_mask;
-    let o2_partial_s = y_from_s & o2_mask;
-    let o2_partial_s_complement = y_from_s_complement & o2_mask;
-    let o2_combined = o2_partial_s ^ o2_partial_s_complement;
-
-    // Soundness pin (debug-only, since the construction is GF(2)-linear):
-    // the assembled output must equal the full f(x).
-    debug_assert_eq!(
-        o_main_s + o_main_s_complement + o2_combined,
-        apply(f, x),
-        "decoded reassembly disagrees with f({x:#x}) for {f:?}"
-    );
-
-    SigmaDecodeWitness {
-        key_s,
-        key_s_complement,
-        o_main_s: WordLimbs::from_u32(o_main_s),
-        o_main_s_complement: WordLimbs::from_u32(o_main_s_complement),
-        o2_partial_s: WordLimbs::from_u32(o2_partial_s),
-        o2_partial_s_complement: WordLimbs::from_u32(o2_partial_s_complement),
-        o2_combined: WordLimbs::from_u32(o2_combined),
-        o2_chunks_s: LimbPairBytes::from_limbs(WordLimbs::from_u32(o2_partial_s)),
-        o2_chunks_s_complement: LimbPairBytes::from_limbs(WordLimbs::from_u32(
-            o2_partial_s_complement,
-        )),
-        o2_chunks_combined: LimbPairBytes::from_limbs(WordLimbs::from_u32(o2_combined)),
-    }
-}
-
 /// Build the witness for one message-schedule entry `W[t]` (for `t ≥ 16`).
 fn compute_schedule_entry_witness(
     t: u32,
@@ -148,8 +83,6 @@ fn compute_schedule_entry_witness(
         w_t_minus_16: WordLimbs::from_u32(w_t_minus_16),
         lower_sigma0: WordLimbs::from_u32(s0),
         lower_sigma1: WordLimbs::from_u32(s1),
-        lower_sigma0_decode: compute_sigma_decode_witness(SigmaFn::LowerSigma0, w_t_minus_15),
-        lower_sigma1_decode: compute_sigma_decode_witness(SigmaFn::LowerSigma1, w_t_minus_2),
         carries,
         w_t: WordLimbs::from_u32(w_t),
     }
@@ -181,8 +114,6 @@ fn compute_round_witness(
         k_t: WordLimbs::from_u32(k_t),
         sigma0: WordLimbs::from_u32(s0_val),
         sigma1: WordLimbs::from_u32(s1_val),
-        sigma0_decode: compute_sigma_decode_witness(SigmaFn::Sigma0, a),
-        sigma1_decode: compute_sigma_decode_witness(SigmaFn::Sigma1, e),
         ch: WordLimbs::from_u32(ch_val),
         maj: WordLimbs::from_u32(maj_val),
         t1: WordLimbs::from_u32(t1),
@@ -506,8 +437,7 @@ mod tests {
     }
 
     /// All add carries are within their algorithmic bound. Failure here is a
-    /// signal that the carry range-check tables in §10.2 need to be sized
-    /// larger than the design assumes.
+    /// signal that the carry range-check tables need a larger bound.
     #[test]
     fn all_round_carries_within_bound() {
         let msg = vec![0xABu8; 1000];

@@ -1,5 +1,4 @@
-//! Verifier-native scalar fold for the S5a integer-lift (worksheet §3.2 (‡),
-//! native-side warning).
+//! Verifier-native scalar fold for the integer lift.
 //!
 //! The AIR (`coeffs`) yields each committed poly's `P̂(r,s)` into the
 //! `EvalAtRsRelation`. The verifier computes the public `Â_ij`, `t̂1_i`, and
@@ -11,7 +10,7 @@
 //!                 − (r^256 + 1)·v̂_i(r,s) − q̂(s)·ê_i(r,s) − (s − B)·Ĉ_i(r,s) ] == 0
 //! ```
 //!
-//! **Native-side warning (worksheet §3.2):** the public evals are BIVARIATE —
+//! The public evaluations are bivariate:
 //! `Â_ij(r,s) = Σ_{m,t} A_{m,t}·s^t·r^m`, NOT `A_ij(r)`. Evaluating the univariate
 //! value silently reintroduces the unliftable §2 coefficient-granularity check.
 //!
@@ -104,8 +103,8 @@ fn compute_public_evals_from_a(
     }
 }
 
-/// Product constructor: deterministically derive `A` from transcript-mixed
-/// public `ρ`, invert the NTT, and evaluate the public matrix and t1 terms.
+/// Derive `A` from public `rho`.
+/// Invert the NTT and evaluate the public matrix and `t1` terms.
 pub fn compute_public_evals(
     input: &MlDsaVerifyInput,
     r: SecureField,
@@ -147,7 +146,7 @@ impl ClaimedEvals<'_> {
     }
 }
 
-/// The folded identity value. Honest ⇒ zero (worksheet §3.2 (‡)).
+/// The folded identity value. An honest value is zero.
 pub fn folded_check(
     public: &PublicEvals,
     claimed: &ClaimedEvals<'_>,

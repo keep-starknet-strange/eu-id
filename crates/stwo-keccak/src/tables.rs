@@ -4,31 +4,29 @@
 //! [`crate::utils`]). Four table families, all deterministic and
 //! message-agnostic:
 //!
-//! - `xor3` — dense `2^16 × 2`, `(key, spread(xor))` with `key = s1+s2+s3` the
+//! - `xor3`: dense `2^16 × 2`, `(key, spread(xor))` with `key = s1+s2+s3`, the
 //!   carry-free base-4 digit-sum of three spread bytes. Every 16-bit `key` is a
 //!   valid digit-sum (each base-4 slot 0..3), so the table is dense and its
 //!   presence certifies `spread(xor)` is a valid spread value. Serves XOR of 2
 //!   or 3 bytes (the 2-input case passes a third input of 0) and, on lane 0,
 //!   folds the iota round-constant XOR as its third input.
-//! - `andnot` — dense `2^16 × 2`, `(u, spread(¬b'∧b''))` with
+//! - `andnot`: dense `2^16 × 2`, `(u, spread(¬b'∧b''))` with
 //!   `u = spread(b') + 2·spread(b'')` injectively encoding the bit-pair per slot
 //!   (slot value 0..3). Replaces the byte-pair `chi` table.
-//! - `split_r` for `r ∈ {1..=7}` — spread byte-split range tables, `2^8` rows
+//! - `split_r` for `r ∈ {1..=7}`: spread byte-split range tables with `2^8` rows
 //!   `(spread_byte, spread_hi, spread_lo)` with `spread_lo = spread(byte mod
 //!   2^r)`, `spread_hi = spread(byte >> r)`. Because spread is additive across
 //!   disjoint bit ranges, `spread_byte = spread_hi + spread_lo·4^r`.
-//! - `conv` — `2^8 × 2`, `(byte, spread(byte))`. Used only at the HashIo
+//! - `conv`: `2^8 × 2`, `(byte, spread(byte))`. Used only at the HashIo
 //!   boundary to convert absorbed message bytes into spread form and squeezed
 //!   spread limbs back into bytes. Both directions are certified by the one
 //!   dense table (the row pins the `(byte, spread)` pair either way it is keyed).
 //!
 //! ## Why the tables are self-certifying
 //!
-//! Each table enumerates exactly the valid rows. A witnessed tuple that is
-//! present in a table can only be a canonical row — so a committed value that is
-//! a lookup *output* (xor3/andnot result, split hi/lo, conv spread) needs no
-//! separate range check: the dense table is the certificate that it is a valid
-//! spread value. This mirrors M3's split tables, extended to the spread domain.
+//! Each table enumerates the valid rows. A tuple in a table is a canonical row.
+//! Thus, a lookup output does not need a separate range check. This applies to
+//! xor3 and andnot results, split outputs, and conv spread values.
 
 use crate::utils::spread_u32;
 
@@ -48,7 +46,7 @@ pub const SPLIT_SHIFTS: [u32; 7] = [1, 2, 3, 4, 5, 6, 7];
 /// - **andnot**: `key = spread(b') + 2·spread(b'')`; per slot
 ///   `(¬b'∧b'')_i = 1` iff `d_i == 2`.
 ///
-/// Merging halves the dominant fixed `2^16` commitment cost of M3b.
+/// Merging halves the fixed `2^16` commitment cost of separate tables.
 pub fn build_dense_table() -> Vec<[u32; 3]> {
     (0u32..(1 << LOG_SIZE_DENSE))
         .map(|key| {

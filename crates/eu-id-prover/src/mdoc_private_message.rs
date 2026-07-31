@@ -1,9 +1,10 @@
 //! Private issuer `Sig_structure` byte provider.
 //!
-//! Each active row provides one `(HOSTED_MSG_FIELD_ID, index, byte)` tuple for
-//! the issuer ML-DSA absorb plus `extra_uses` additional consumers. The public
-//! preprocessing fixes only `(active, index)` from `message_len`; bytes and
-//! multiplicities remain in the committed trace.
+//! Each active row provides one `(HOSTED_MSG_FIELD_ID, index, byte)` tuple.
+//! The issuer ML-DSA absorb consumes the tuple.
+//! `extra_uses` specifies additional consumers.
+//! Public preprocessing derives only `(active, index)` from `message_len`.
+//! Bytes and multiplicities remain in the committed trace.
 
 use std::fmt;
 
@@ -40,7 +41,7 @@ use crate::claimed_sum_blinder::{
 
 pub(crate) const MDOC_PRIVATE_MESSAGE_MAX_BYTES: usize =
     crate::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES;
-const MDOC_PRIVATE_MESSAGE_BLIND_ROWS: usize = 256;
+const MDOC_PRIVATE_MESSAGE_INACTIVE_ROWS: usize = 256;
 const MDOC_PRIVATE_MESSAGE_VERSION: u64 = 1;
 const MDOC_PRIVATE_MESSAGE_DOMAIN: u64 = 0x4d44_4f43_5052_4956;
 const MDOC_PRIVATE_MESSAGE_PREPROCESSED_COLS: usize = 2;
@@ -106,7 +107,7 @@ fn checked_log_size(message_len: usize) -> Result<u32, MdocPrivateMessageError> 
         return Err(MdocPrivateMessageError::EmptyMessage);
     }
     let needed = message_len
-        .checked_add(MDOC_PRIVATE_MESSAGE_BLIND_ROWS)
+        .checked_add(MDOC_PRIVATE_MESSAGE_INACTIVE_ROWS)
         .ok_or(MdocPrivateMessageError::TraceSizeOverflow { message_len })?;
     let domain_rows = needed
         .checked_next_power_of_two()

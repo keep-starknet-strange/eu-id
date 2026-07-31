@@ -1,8 +1,9 @@
-//! M5 acceptance for `mldsa_decomp` ([DECOMP]+[HINT]): standalone prove+verify
-//! over ≥20 oracle ML-DSA-65 signatures, plus the S5 §5 negative matrix. The
-//! w-cell binding and w1Encode byte emission are balanced test-side (a wcell
-//! provider + a hashio consumer) since coeffs/the sponge are not in this
-//! composition; M6 replaces the balancers with the real components.
+//! Standalone proof and verification tests for `mldsa_decomp`.
+//!
+//! The tests use at least 20 oracle ML-DSA-65 signatures and adversarial
+//! mutations. A WCell provider and a HashIo consumer balance the WCell binding
+//! and w1Encode bytes because the composition excludes coeffs and the sponge.
+//! The composed statement uses the real components.
 
 mod common;
 
@@ -11,7 +12,7 @@ use common::{standalone_pcs_config as pcs_config, witness_and_input};
 use stwo_mldsa::decomp::proof::{prove_decomp, verify_decomp};
 use stwo_mldsa::witness::MlDsaWitness;
 
-/// Legacy witness-mutation oracle: proving failure, panic, or verification
+/// Witness-mutation helper: proving failure, panic, or verification
 /// failure all count as rejection. Trace-level soundness tests must not use it.
 fn rejected_or_panicked(witness: MlDsaWitness) -> bool {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -122,7 +123,7 @@ fn negative_w_binding_tamper() {
     );
 }
 
-/// w0 out of centered range (§5 row I-3a): push one `w0` above γ2. The
+/// Push one `w0` above γ2 and outside the centered range. The
 /// [DECOMP] centered-range gate is the exact two-sided rc `a = w0+γ2−1`,
 /// `b = γ2−w0`, both required in `[0, 2γ2)`. Setting `w0 = γ2+1` makes
 /// `b = γ2 − (γ2+1) = −1`, which has no row in the range table ⇒ reject.

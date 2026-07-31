@@ -1,12 +1,12 @@
-//! M7 Phase-A acceptance: the HOSTED `stwo-mldsa` statement composed with a
-//! throwaway host module that yields the ML-DSA message bytes under a SHARED
+//! Tests for a hosted `stwo-mldsa` statement and a test host module.
+//! The host yields the ML-DSA message bytes under a shared
 //! `air_core::relations::FieldBytesRelation` (the mdoc issuer-SHA swap point).
 //!
-//! Positive: a two-module proof `[field_producer, hosted_mldsa]` proves+verifies,
-//! with NO standalone `msglink` component. Negative: tampering ONE message byte
+//! A two-module proof `[field_producer, hosted_mldsa]` proves and verifies
+//! without a standalone `msglink` component. Changing one message byte
 //! on the producer side (so the yielded bytes differ from what the µ-absorb
 //! bridge requires) makes the global LogUp unbalanced → verify rejects. This
-//! proves the MsgLink→shared-FieldBytes swap is sound and actually binds.
+//! proves that the MsgLink-to-FieldBytes connection binds the message.
 //!
 //! Run single-threaded (proofs must not run concurrently):
 //! `RUST_MIN_STACK=536870912 cargo test -p stwo-mldsa --release --test hosted \
@@ -68,13 +68,12 @@ use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 
 // =====================================================================
-// Throwaway host module: a FieldExposure-style producer yielding the whole
-// message under the SHARED FieldBytesRelation at HOSTED_MSG_FIELD_ID.
+// Test host module. It yields the complete message on the shared
+// FieldBytesRelation at HOSTED_MSG_FIELD_ID.
 // =====================================================================
 
-/// Single packed row, lane-0 enabler; one relation entry per message byte.
-/// Mirrors `stwo_mldsa::msglink::MsgLinkEval` but yields on the shared
-/// `FieldBytesRelation` (the host's SHA field-exposure stand-in).
+/// One packed row with lane 0 active and one relation entry per message byte.
+/// This uses the same tuple order as `stwo_mldsa::msglink::MsgLinkEval`.
 #[derive(Clone)]
 struct FieldProducerEval {
     bytes: Vec<u8>,
@@ -264,7 +263,7 @@ impl AirProver for FieldProducer {
 }
 
 // =====================================================================
-// Focused private-key source for U6.
+// This focused source supplies the private key for hosted verification.
 //
 // Its private bit trace proves the FIPS-204 5-byte -> 4x10-bit t1 packing,
 // publishes the exact normalized
@@ -951,7 +950,7 @@ struct HostedPrivateKeyProof {
 
 /// Compose the exact private-key seams:
 /// `[range, keccak, ExpandA(rho -> NttCell), packed-key source
-/// (pkEncode -> FieldBytes + rho + T1Cell), U6-hosted ML-DSA]`.
+/// (pkEncode -> FieldBytes + rho + T1Cell), hosted private-key ML-DSA]`.
 fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedPrivateKeyProof {
     let input = oracle_input(seed, msg);
     let witness = generate_witness(&input).expect("witness");
@@ -1105,7 +1104,7 @@ fn verify_hosted_private_key(
 
 #[test]
 fn hosted_proves_and_verifies() {
-    let msg = b"m7-phase-a-hosted-swap: the message bytes come from the host".to_vec();
+    let msg = b"the hosted message bytes come from the host".to_vec();
     let proof = prove_hosted(4242, &msg, msg.clone());
     verify_hosted(&proof, msg.clone()).expect("hosted verify");
 }
@@ -1358,7 +1357,7 @@ fn hosted_private_key_over_capacity_is_a_checked_error() {
 }
 
 #[test]
-fn capacity_shape_serialization_fails_closed_without_changing_fixed_wire_format() {
+fn fixed_shape_wire_is_exact_and_capacity_shape_is_not_serialized() {
     #[derive(serde::Serialize)]
     struct FixedShapeWire {
         xof_mode: XofMode,
@@ -1383,7 +1382,7 @@ fn capacity_shape_serialization_fails_closed_without_changing_fixed_wire_format(
     let encoded = bincode::serialize(&fixed).expect("fixed shape remains serializable");
     assert_eq!(
         encoded,
-        bincode::serialize(&expected_wire).expect("historical fixed wire fixture")
+        bincode::serialize(&expected_wire).expect("expected fixed wire")
     );
     assert_eq!(
         bincode::deserialize::<Shape>(&encoded).expect("fixed shape round trip"),
@@ -1459,7 +1458,7 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
         eval_tamper.group_evals[group_eval_index] += SecureField::from(m31(1));
         assert!(
             verify_hosted_private_key(&eval_tamper).is_err(),
-            "tampering private group evaluation {group_eval_index} must reject"
+            "a change to private group evaluation {group_eval_index} must be rejected"
         );
     }
 
@@ -1467,7 +1466,7 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
     source_tamper.private_key_source_claims[1] += SecureField::from(m31(1));
     assert!(
         verify_hosted_private_key(&source_tamper).is_err(),
-        "tampering the packed-t1 source claim must reject"
+        "a change to the packed-t1 source claim must be rejected"
     );
 
     for claimed_sum_index in 0..hosted_private_key_claimed_sums_len() {
@@ -1475,7 +1474,7 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
         claimed_sum_tamper.claimed_sums[claimed_sum_index] += SecureField::from(m31(1));
         assert!(
             verify_hosted_private_key(&claimed_sum_tamper).is_err(),
-            "tampering private-device claimed sum {claimed_sum_index} must reject"
+            "a change to private-device claimed sum {claimed_sum_index} must be rejected"
         );
     }
 
@@ -1487,15 +1486,15 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
     reordered_evals.group_evals.swap(30, 31);
     assert!(
         verify_hosted_private_key(&reordered_evals).is_err(),
-        "reordering two fixed-position private evaluations must reject"
+        "reordering two fixed-position private evaluations must be rejected"
     );
 
-    let wrong_shapes = keccak_job_shapes(msg.len(), 0, true);
-    let wrong_shape_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        verify_hosted_private_key_with_shapes(&proof, wrong_shapes)
+    let public_key_shapes = keccak_job_shapes(msg.len(), 0, true);
+    let public_key_shape_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify_hosted_private_key_with_shapes(&proof, public_key_shapes)
     }));
     assert!(
-        matches!(wrong_shape_result, Ok(Err(_))),
+        matches!(public_key_shape_result, Ok(Err(_))),
         "omitting the tr and µ service jobs must return an error, not panic"
     );
 }
@@ -1630,11 +1629,10 @@ fn hosted_missing_round_gkr_payload_rejects() {
 
 #[test]
 fn hosted_tampered_message_byte_rejects() {
-    let msg = b"m7-phase-a-hosted-swap: the message bytes come from the host".to_vec();
+    let msg = b"the hosted message bytes come from the host".to_vec();
     let proof = prove_hosted(4242, &msg, msg.clone());
-    // The prover committed the honest proof. Now verify against a producer that
-    // yields a DIFFERENT byte 0: the µ-absorb bridge requires the honest bytes,
-    // the producer yields a tampered one → global LogUp unbalanced → reject.
+    // The prover committed the honest proof. Verify against a producer that
+    // yields a different first byte. This makes the global LogUp unbalanced.
     let mut tampered = msg.clone();
     tampered[0] ^= 0x01;
     assert!(
@@ -1644,11 +1642,11 @@ fn hosted_tampered_message_byte_rejects() {
 }
 
 #[test]
-fn hosted_carried_tr_is_overwritten_before_use() {
-    let msg = b"hosted carried tr is untrusted input".to_vec();
+fn hosted_verifier_derives_tr_from_the_public_key() {
+    let msg = b"hosted tr is derived from the public key".to_vec();
     let mut proof = prove_hosted(4243, &msg, msg.clone());
     proof.input.tr[0] ^= 1;
-    verify_hosted(&proof, msg).expect("carried tr must not influence verification");
+    verify_hosted(&proof, msg).expect("the supplied tr value must not influence verification");
 }
 
 #[test]
@@ -1660,9 +1658,8 @@ fn hosted_public_key_tamper_recomputes_tr_and_rejects() {
 }
 
 // =====================================================================
-// Multi-instance hosting (device + revocation prerequisite): two hosted
-// ML-DSA modules in ONE proof, disjoint instance namespaces, one of them
-// in private-message mode.
+// Multi-instance hosting: one proof contains device and revocation modules
+// with different namespaces. One module uses a private message.
 // =====================================================================
 
 /// The claims one hosted instance contributes to the host's proof struct.
@@ -1866,13 +1863,12 @@ fn two_hosted_instances_swapped_claims_reject() {
     assert!(
         verify_two_hosted(&swapped_a, "test/a", &swapped_b, "test/b", &proof, msg_a, msg_b)
             .is_err(),
-        "cross-instance claim replay must reject"
+        "cross-instance claim replay must be rejected"
     );
 }
 
-/// A-706: the old same-namespace collision negative guarded witness-dependent
-/// SIB schedules. Q13 made those schedules static, so identical-content
-/// preprocessed ids now deduplicate soundly and the pair proves and verifies.
+/// Static SIB schedules with identical content can use the same namespace.
+/// Their preprocessed identifiers deduplicate safely, so the pair proves and verifies.
 /// The generic differing-content panic remains covered directly by
 /// `air_core::tests::preprocessed_invariant_rejects_duplicate_id_with_different_content`.
 #[test]

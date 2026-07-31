@@ -1,7 +1,9 @@
-//! M5 acceptance for `sampleinball_fsm` ([CHAL]): standalone prove+verify over
-//! ≥20 oracle ML-DSA-65 signatures, plus S5 §5 negatives. The squeeze stream and
-//! coeffs C-cells are balanced test-side (a hashio producer + a ccell provider);
-//! M6 replaces them with the proven sponge / real coeffs C group.
+//! Standalone proof and verification tests for `sampleinball_fsm`.
+//!
+//! The tests use at least 20 oracle ML-DSA-65 signatures and adversarial
+//! mutations. A HashIo producer and a CCell provider balance the squeeze stream
+//! and coefficient C cells in this standalone test. The composed statement
+//! uses the proven sponge and coefficient C group.
 
 mod common;
 
@@ -98,7 +100,7 @@ fn negative_c_extra_nonzeros() {
 /// c-binding tamper: corrupt the emitted `ccell_claimed_sum` so the c-binding
 /// logup no longer cancels. (In standalone the ccell provider reads the same
 /// witness `c` as the FSM, so a witness-level c change moves both sides together;
-/// M6 makes coeffs the independent producer. Here we tamper the proof directly,
+/// The composed statement makes coeffs the independent producer. This test changes the proof directly,
 /// proving the c-binding is load-bearing.)
 #[test]
 fn negative_c_binding_tamper() {
@@ -116,7 +118,7 @@ fn negative_c_binding_tamper() {
 /// Stream tamper: corrupt the emitted `hashio_claimed_sum` so the stream-consume
 /// logup no longer cancels — the FSM's byte-by-byte stream binding is load-
 /// bearing. (A witness-level stream edit is re-derived consistently by both the
-/// FSM and the test producer; M6's proven sponge is the independent producer.)
+/// FSM and the test producer; the composed statement uses the proven sponge.)
 #[test]
 fn negative_stream_binding_tamper() {
     let w = witness_for(8003, b"rej");
@@ -183,23 +185,14 @@ fn negative_placement_permuted() {
     );
 }
 
-/// THE REAL ATTACK on the closed gap: a FORGED core access list. Before the
-/// FSM↔memory tie channels (Swap/StepVal/SignBit), the unsorted CORE columns
-/// (u_addr/u_val/u_ts/u_write) were FREE WITNESS — only `u_write` booleanity and
-/// the Mem yield constrained them — so a prover could commit an arbitrary
-/// memory-consistent history and the swap-replay gate was vacuous against a real
-/// adversary (the old `negative_placement_permuted` only exercised the HONEST
-/// generator, which replays the true stream).
+/// Inject a forged core access list through the test hook. The
+/// Swap, StepVal, and SignBit channels must bind the unsorted core columns to
+/// the FSM and reject a memory-consistent but incorrect history.
 ///
-/// Here we bypass the honest replay via the test-attack hook and inject a forged
-/// core list that is (1) internally memory-consistent (passes C8's sorted-view
-/// continuity) and (2) reaches the SAME final array as the committed `c` (so the
-/// Mem internal balance is UNTOUCHED — this is NOT what catches it), yet (3) does
-/// not match the FSM: step 0's READ address is redirected from the accepted byte
-/// `j_0` to a different still-zero cell. The read value (0) and both writes are
-/// unchanged, so the final array and Mem balance hold — but the Swap channel's
-/// read-consume `(step_no, u_addr)` no longer matches the accept-yield
-/// `(idx−(N−τ), byte)`. ONLY the Swap channel rejects this.
+/// The forged list passes the sorted-view continuity check and reaches the same
+/// final array as the committed `c`. It redirects the first read to a different
+/// zero cell, so `(step_no, u_addr)` does not match `(idx−(N−τ), byte)`. The
+/// Swap channel must reject it.
 #[test]
 fn negative_forged_access_list() {
     use stwo_mldsa::sampleinball::{honest_core_accesses, install_forged_core};
@@ -312,7 +305,7 @@ fn negative_active_prefix_stops_early() {
 /// placement partition; fabricating an extra accept would instead break the
 /// fixed 49-step Swap balance.
 #[test]
-fn negative_padding_reactivation() {
+fn active_prefix_cannot_restart_after_the_final_accept() {
     use stwo_mldsa::sampleinball::{honest_active_rows, install_forged_active};
 
     let w = witness_for(8011, b"active-reactivation");
@@ -332,11 +325,11 @@ fn negative_padding_reactivation() {
     );
 }
 
-/// A mutation in the legacy witness's unconsumed on-demand tail does not move
+/// A mutation in the unconsumed witness tail does not move
 /// the FSM boundary: the static component and Keccak producer both derive and
 /// bind the canonical five-block stream from the SIB absorb input.
 #[test]
-fn carried_padding_byte_is_not_a_second_consumption() {
+fn unconsumed_witness_tail_does_not_move_the_fsm_boundary() {
     let mut w = witness_for(8012, b"padding-byte");
     let padding_start = stwo_mldsa::sampleinball::validate_stream(&w).expect("valid stream");
     assert!(padding_start < w.sponge.sample_in_ball_squeezed.len());
@@ -344,11 +337,10 @@ fn carried_padding_byte_is_not_a_second_consumption() {
 
     let proof = prove_sib(w.clone(), pcs_config()).expect("padding is outside consumption");
     verify_sib(&proof, &w, pcs_config())
-        .expect("carried padding cannot shift the constrained prefix");
+        .expect("unconsumed bytes cannot shift the constrained prefix");
 }
 
-/// The inherited five-block resource cap remains a typed error. Oversized
-/// witness input is rejected before any trace allocation or indexing.
+/// An oversized witness returns a typed error before trace allocation.
 #[test]
 fn over_five_blocks_is_typed_error_not_panic() {
     let mut w = witness_for(8013, b"resource-cap");

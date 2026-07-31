@@ -1,27 +1,21 @@
 //! Combines one or more proving modules into a single STARK proof.
 //!
-//! Each circuit implements [`Air`] and [`AirProver`]. A module does NOT own the
-//! channel or the commitment scheme; it only contributes columns and components
-//! to shared commitment trees. The orchestrator functions [`prove`] and
-//! [`verify`] own the transcript and drive every module through the same four
-//! phases:
+//! Each circuit implements [`Air`] and [`AirProver`]. A module contributes
+//! columns and components to shared commitment trees. The [`prove`] and
+//! [`verify`] functions own the channel, commitment scheme, and transcript.
+//! They run each module through the same four phases:
 //!
 //! 0. preprocessed tables
-//! 1. main witness + multiplicity columns
+//! 1. main witness and multiplicity columns
 //! 2. interaction (LogUp) columns
-//! 3. component assembly + the single `prove`/`verify` call
+//! 3. component assembly and one proof operation
 //!
 //! Proving a single circuit is just `prove(&mut [&mut module])`.
 //!
 //! ## Hash choice
 //!
-//! A single combined proof has exactly one channel and one commitment scheme,
-//! so every module must agree on one hash. That choice lives here once, behind
-//! the [`Mc`]/[`Ch`]/[`Hasher`] aliases, rather than as a generic parameter
-//! threaded through every module: genericity at the module level buys nothing
-//! when all modules in a `prove` call must use the identical channel anyway.
-//! Switching the system to a different (e.g. Stwo-friendly) hash is a one-line
-//! change to these aliases.
+//! A combined proof has one channel and one commitment scheme. All modules use
+//! the same hash. The [`Mc`], [`Ch`], and [`Hasher`] aliases define that hash.
 
 pub mod claim_mask;
 pub mod gkr;
@@ -52,8 +46,8 @@ use stwo::prover::{
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::TraceLocationAllocator;
 
-/// The Merkle channel (i.e. the hash) that binds the whole proof. Every module
-/// commits its trees and draws its challenges against this one type.
+/// The Merkle channel that binds the complete proof. Each module commits its
+/// trees and draws its challenges through this type.
 pub type Mc = Blake2sMerkleChannel;
 
 /// The Fiat-Shamir channel modules mix their public statement and relations
@@ -82,8 +76,7 @@ static TWIDDLE_CACHE: OnceLock<Mutex<HashMap<u32, &'static TwiddleTree<SimdBacke
 
 fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     let cache = TWIDDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    // The map is left consistent between operations, so a panic while holding
-    // the lock must not make every later prove/verify fail permanently.
+    // Recover the consistent map after a panic while the lock is held.
     let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -99,10 +92,9 @@ fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     twiddles
 }
 
-/// Process-cached FFT twiddles covering circle domains up to `2^log_size`.
-/// Exposed for modules that build post-interaction (tree-3) components which
-/// interpolate/evaluate polynomials outside the orchestrator's own tree, e.g.
-/// the keccak_round GKR tie-back's `MleEvalProverComponent`.
+/// Process-cached FFT twiddles for circle domains up to `2^log_size`.
+/// Post-interaction components use this function when they evaluate
+/// polynomials outside the orchestrator.
 pub fn twiddles(log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     cached_twiddles(log_size)
 }
@@ -247,11 +239,10 @@ pub trait Air {
     /// those terms here too.
     fn claimed_sums(&self) -> Vec<QM31>;
 
-    /// Mix this module's claimed-sum commitment into the transcript, just before
-    /// the interaction tree is committed. The default mixes [`Air::claimed_sums`]
-    /// as one flat felt slice. A module whose standalone transcript mixed a
-    /// richer structure (for example per-component claims plus native counts) can
-    /// override to reproduce it exactly. Must match between prove and verify.
+    /// Mix this module's claimed sums before the interaction-tree commitment.
+    /// The default mixes [`Air::claimed_sums`] as one flat felt slice. A module
+    /// can override this method when it needs a structured claim. Prove and
+    /// verify must use the same structure.
     fn mix_claimed_sums(&self, channel: &mut Ch) {
         channel.mix_felts(&self.claimed_sums());
     }
@@ -261,10 +252,9 @@ pub trait Air {
     /// single shared [`TraceLocationAllocator`] before building components.
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId>;
 
-    /// Canonical tree-0 columns in the same order as
-    /// [`Air::preprocessed_column_ids`]. Production verification uses these
-    /// verifier-side values to reconstruct commitment 0 instead of trusting a
-    /// caller-supplied root.
+    /// Canonical tree-0 columns in the order from
+    /// [`Air::preprocessed_column_ids`]. Pinned verification uses these values
+    /// to reconstruct commitment 0.
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<PreprocessedColumnEval>, VerificationError> {
@@ -277,11 +267,10 @@ pub trait Air {
         }
     }
 
-    /// Build this module's AIR components against the shared allocator and stash
-    /// them. Called once, in module order, after relations are drawn and the
-    /// allocator is seeded. A module owns its components and lends them out via
-    /// [`Air::components`] / [`AirProver::prover_components`] — matching Stwo's
-    /// borrowed-component prove/verify API and avoiding any rebuild.
+    /// Build and store this module's AIR components. The orchestrator calls this
+    /// method once for each module after it draws relations and initializes the
+    /// shared allocator. The module owns the components and lends them through
+    /// [`Air::components`] and [`AirProver::prover_components`].
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator);
 
     /// Borrow the built verifier-side components, in commit order. Call only
@@ -300,12 +289,9 @@ pub trait Air {
         Ok(())
     }
 
-    /// Hand this module the opaque post-interaction payload the prover emitted
-    /// for it (a serialized GKR proof, typically). Called by the orchestrator
-    /// once, before [`Air::verify_post_interaction`], only on the
-    /// payload-carrying verify path. Modules that offload a LogUp into GKR stash
-    /// the bytes here and deserialize them in `verify_post_interaction`; modules
-    /// without a payload ignore it.
+    /// Give this module its post-interaction payload. The orchestrator calls
+    /// this method before [`Air::verify_post_interaction`]. A module that uses
+    /// GKR stores and decodes the payload during verification.
     fn load_post_interaction_payload(&mut self, _payload: &[u8]) {}
 }
 
@@ -321,10 +307,8 @@ pub trait AirProver: Air {
     /// the FRI blow-up to size the precomputed twiddles (unless the config pins
     /// an explicit `lifting_log_size`).
     ///
-    /// The default — `max_log_size() + 1` — is exactly the domain a degree-2 AIR
-    /// needs, which is what the predicate and SHA modules use. A module with
-    /// higher-degree constraints overrides this with the real bound computed
-    /// from its components.
+    /// The default, `max_log_size() + 1`, covers a degree-2 AIR. A module with
+    /// higher-degree constraints must return its computed bound.
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 1
     }
@@ -337,7 +321,7 @@ pub trait AirProver: Air {
         false
     }
 
-    /// Phase 0 — append preprocessed columns to the shared tree.
+    /// Phase 0: append preprocessed columns to the shared tree.
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
     /// Fingerprint preprocessed column content before tree-0 dedup. Equal
@@ -368,10 +352,10 @@ pub trait AirProver: Air {
         self.write_preprocessed(tb);
     }
 
-    /// Phase 1 — append main witness + multiplicity columns to the shared tree.
+    /// Phase 1: append main witness and multiplicity columns to the shared tree.
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
-    /// Phase 2 — build the interaction (LogUp) columns from the drawn relations,
+    /// Phase 2: build the interaction (LogUp) columns from the drawn relations,
     /// append them, and stash this module's claimed sums (read back via
     /// [`Air::claimed_sums`]).
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
@@ -382,14 +366,12 @@ pub trait AirProver: Air {
     /// claimed sums, and interaction columns.
     fn prove_post_interaction(&mut self, _channel: &mut Ch) {}
 
-    /// Optional phase 3 — append post-interaction tie-back columns.
+    /// Optional phase 3: append post-interaction tie-back columns.
     fn write_post_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, Mc>) {}
 
-    /// Hand the orchestrator this module's opaque post-interaction payload — the
-    /// serialized GKR proof produced during [`AirProver::prove_post_interaction`]
-    /// — to travel beside the [`StarkProof`]. Called once, after
-    /// `prove_post_interaction`. The default (no offload) returns an empty
-    /// payload, which the orchestrator treats as "no GKR proof for this module".
+    /// Return this module's post-interaction payload. The orchestrator calls
+    /// this method after [`AirProver::prove_post_interaction`]. The default
+    /// returns an empty payload.
     fn take_post_interaction_payload(&mut self) -> Vec<u8> {
         Vec::new()
     }
@@ -403,9 +385,8 @@ pub trait AirProver: Air {
 /// shared commitment scheme, producing a single STARK proof.
 ///
 /// Convenience wrapper over [`prove_with_post_interaction`] for the common case
-/// of modules that emit no GKR payload. Panics (debug) if any module actually
-/// produced one — such a module must be proven via
-/// [`prove_with_post_interaction`] so its blob reaches the verifier.
+/// of modules that emit no GKR payload. A debug assertion fails if a module
+/// emits a payload. Such a module must use [`prove_with_post_interaction`].
 pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
@@ -450,15 +431,15 @@ fn dump_shape_census_if_requested(modules: &[&mut dyn AirProver]) {
 }
 
 /// [`prove`], additionally returning each module's opaque post-interaction
-/// payload (a serialized GKR proof, or empty). The payloads are indexed by
-/// module position and must be handed back — in the same order — to
+/// payload. The payloads are indexed by module position and must be given, in
+/// the same order, to
 /// [`verify_with_expected_preprocessed_root_and_payloads`].
 pub fn prove_with_post_interaction(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
 ) -> Result<(StarkProof<Hasher>, Vec<Vec<u8>>), ProvingError> {
     // Size the twiddles to the largest constraint-evaluation domain any module
-    // needs, plus the FRI blow-up — unless the config pins an explicit lifting
+    // needs, plus the FRI blow-up, unless the config pins an explicit lifting
     // size. With the default (degree-2) bound this is `max_log_size + 1 +
     // log_blowup`, matching the standalone provers.
     let max_constraint_log_degree_bound = modules
@@ -522,7 +503,7 @@ pub fn prove_with_post_interaction(
     }
 
     // Tree 2: every module's interaction columns. Claimed sums are mixed before
-    // the commit, matching the standalone transcript order.
+    // the commit. Prove and verify use this order.
     let mut tb = commitment_scheme.tree_builder();
     for m in modules.iter_mut() {
         m.write_interaction(&mut tb);
@@ -581,10 +562,8 @@ pub fn prove_with_post_interaction(
 /// Errors from [`verify_with_expected_preprocessed_root`].
 #[derive(Debug)]
 pub enum VerifyError {
-    /// The proof's tree-0 (preprocessed) commitment root does not equal the
-    /// verifier-derived expected root. Rejected fail-closed, before any
-    /// transcript or STARK work — a forged preprocessed table (range table,
-    /// schedule, constant column) never reaches the STARK verifier.
+    /// The proof's tree-0 commitment root does not equal the expected root.
+    /// Verification returns this error before transcript or STARK work starts.
     PreprocessedRootMismatch {
         /// The tree-0 root embedded in the proof (`proof.commitments[0]`).
         got: CommitmentRoot,
@@ -601,11 +580,10 @@ impl From<VerificationError> for VerifyError {
     }
 }
 
-/// Shape key for the preprocessed-root cache: the deduplicated `(column id,
-/// log_size)` list in tree-0 commit order, plus the FRI blow-up factor (the
-/// Merkle tree commits the blown-up LDE, so the root depends on it). The full
-/// key is stored — no key hashing — so cache hits are exact by construction,
-/// with no collision surface at all (strictly stronger than hashing the list).
+/// Shape key for the preprocessed-root cache. It contains the deduplicated
+/// `(column id, log_size)` list in tree-0 commit order and the FRI blow-up
+/// factor. The Merkle tree commits the blown-up LDE, so the root depends on
+/// this factor. The cache stores the full key and does not hash it.
 #[cfg(test)]
 type PreprocessedShapeKey = (Vec<(String, u32)>, u32);
 
@@ -616,24 +594,24 @@ static PREPROCESSED_ROOT_CACHE: OnceLock<Mutex<HashMap<PreprocessedShapeKey, Com
 /// Compute the expected tree-0 (preprocessed) commitment root for a module set,
 /// by running exactly the [`prove`]-side tree-0 path: dedup the preprocessed ids
 /// first-writer-wins, write the selected columns into a fresh commitment
-/// scheme, and commit. Production verifiers compute this once (from their own
-/// trusted module constructions — never from prover-supplied data) and pass it
+/// scheme, and commit. Pinned verifiers compute this from trusted module data
+/// and pass it
 /// to [`verify_with_expected_preprocessed_root`].
 ///
 /// Roots are cached per shape (ordered unique `(id, log_size)` list + FRI
 /// blow-up) in a process-global map, so repeated verifies at one shape pay the
 /// rebuild once. The cache trusts that a preprocessed column id determines its
-/// content — the same invariant [`prove`] enforces via
-/// `assert_preprocessed_id_content_invariant` — so only feed this function
-/// verifier-side (trusted) module constructions.
+/// content. [`prove`] enforces the same rule through
+/// `assert_preprocessed_id_content_invariant`. Call this function only with
+/// trusted verifier modules.
 ///
 /// # Soundness
 ///
 /// This root pin is the soundness anchor for tree 0: the Blake2s Merkle root
 /// cryptographically binds the contents, order, and sizes of every preprocessed
 /// column at once. The prover-side `PreprocessedColumnFingerprint` guard uses a
-/// 64-bit `DefaultHasher` and is **NOT** a soundness pin — it is a dev-time
-/// dedup guard only. Do not downgrade this pin to that fingerprint.
+/// 64-bit `DefaultHasher` and is **NOT** a soundness pin. It only detects
+/// invalid deduplication. Do not use that fingerprint in place of this root.
 #[cfg(test)]
 pub fn compute_preprocessed_root(
     modules: &mut [&mut dyn AirProver],
@@ -647,7 +625,7 @@ pub fn compute_preprocessed_root(
         modules.iter().map(|m| m.layout().preprocessed).collect();
 
     // The shape key mirrors the tree-0 dedup: unique (id, log_size) in commit
-    // order. Module identity is positional — the ordered list pins it.
+    // order. The ordered list fixes the module position.
     let mut seen = HashSet::new();
     let mut unique_columns = Vec::new();
     for (ids, sizes) in module_preprocessed_ids
@@ -688,13 +666,11 @@ pub fn compute_preprocessed_root(
 /// [`compute_preprocessed_root`] without the per-shape cache: every call
 /// rebuilds and commits tree 0.
 ///
-/// Required whenever a preprocessed column's CONTENT is not determined by its
-/// id — e.g. a dynamic preprocessed schedule whose content changes across
-/// witnesses while reusing one id. The cached
-/// variant would return the first witness's root for every later one (a
-/// fail-closed completeness bug, not a soundness one — but a bug). Use the
-/// cached variant only where the id→content invariant of [`prove`] holds
-/// across every call in the process.
+/// Use this function when a preprocessed column ID does not determine its
+/// content. For example, a dynamic schedule can use one ID for different
+/// witness data. The cached function would return the first root for later
+/// calls. Use the cached function only when the ID-to-content rule from
+/// [`prove`] holds for all calls in the process.
 pub fn compute_preprocessed_root_uncached(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
@@ -704,7 +680,7 @@ pub fn compute_preprocessed_root_uncached(
         .map(|m| m.preprocessed_column_ids())
         .collect();
 
-    // Exactly the prove()-side tree-0 path: interpolate + blow up + Merkle
+    // Use the prove-side tree-0 path: interpolate, blow up, and Merkle
     // commit the deduplicated preprocessed columns. The twiddles only need to
     // cover the largest committed LDE domain (tree 0 is the only tree built).
     let max_preprocessed_log_size = modules
@@ -727,9 +703,9 @@ pub fn compute_preprocessed_root_uncached(
 
 /// Defense-in-depth ceiling for canonical verifier-side tree-0 reconstruction.
 ///
-/// Honest product and TS13 modules remain well below this: their largest fixed
-/// tables have log-size 18. This seven-bit margin rejects prover-carried shapes
-/// before they can trigger a leaked, multi-gigabyte twiddle allocation.
+/// Supported modules remain well below this value. Their largest fixed tables
+/// have log-size 18. This seven-bit margin rejects large shapes before a
+/// verifier allocates multi-gigabyte twiddle storage.
 pub const MAX_CANONICAL_PREPROCESSED_LOG_SIZE: u32 = 25;
 
 fn canonical_preprocessed_twiddle_log_size(
@@ -806,10 +782,10 @@ pub fn compute_canonical_preprocessed_root(
 
 /// Re-derive the transcript for every module and verify the single STARK proof.
 ///
-/// Equivalent to [`verify_with_expected_preprocessed_root`] with `None`: the
-/// tree-0 root is absorbed from the proof without a content check. Production
-/// callers must pin the root via the pinned entry point — see the F-ROOT
-/// finding (tasks/audits/2026-07-05-backend-soundness.md).
+/// This is equivalent to [`verify_with_expected_preprocessed_root`] with
+/// `None`. It absorbs the tree-0 root from the proof without a content check.
+/// Callers that need a sound tree-0 content check must use the pinned entry
+/// point.
 pub fn verify(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
@@ -824,13 +800,12 @@ pub fn verify(
 
 /// [`verify`], with the tree-0 (preprocessed) commitment root pinned.
 ///
-/// On `Some(expected)`, the proof's `commitments[0]` must equal `expected` —
-/// checked BEFORE the root is absorbed into the transcript, so a forged
-/// preprocessed tree (range tables, schedules, constants) is rejected
-/// fail-closed with [`VerifyError::PreprocessedRootMismatch`]. Callers obtain
+/// On `Some(expected)`, the proof's `commitments[0]` must equal `expected`.
+/// This check occurs before the root enters the transcript. A mismatch returns
+/// [`VerifyError::PreprocessedRootMismatch`]. Callers obtain
 /// `expected` from [`compute_preprocessed_root`] over their own trusted module
-/// constructions (or from a pinned per-profile constant generated the same
-/// way), never from the proof.
+/// constructions or from a profile constant generated in the same way. They
+/// must not obtain it from the proof.
 ///
 /// # Soundness
 ///
@@ -838,8 +813,8 @@ pub fn verify(
 /// contents, order, and sizes of every preprocessed column cryptographically.
 /// The prover-side 64-bit `DefaultHasher` fingerprint guard
 /// (`PreprocessedColumnFingerprint`) is NOT a soundness pin and must never be
-/// substituted for this check. On `None`, the legacy unpinned behavior is kept
-/// for shape-exploratory tests only.
+/// substituted for this check. `None` enables unpinned verification for shape
+/// tests only.
 pub fn verify_with_expected_preprocessed_root(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
@@ -858,11 +833,11 @@ pub fn verify_with_expected_preprocessed_root(
 /// [`prove_with_post_interaction`]. Each non-empty payload is handed to its
 /// module (positional, same order as prove) via
 /// [`Air::load_post_interaction_payload`] before the module's
-/// [`Air::verify_post_interaction`] runs — that is where a GKR-offloading module
-/// replays its proof against the shared channel.
+/// [`Air::verify_post_interaction`] runs. A module that uses GKR then replays
+/// its proof against the shared channel.
 ///
 /// `post_interaction_payloads` is either empty (no module offloads anything) or
-/// exactly one entry per module. Any other length is rejected fail-closed.
+/// exactly one entry per module. Verification rejects any other length.
 pub fn verify_with_expected_preprocessed_root_and_payloads(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
@@ -1273,13 +1248,11 @@ mod tests {
 
     relation!(TableRelation, 1);
 
-    /// Minimal provable fixture for the preprocessed-root pin: one preprocessed
-    /// "table" column and one trace column constrained equal to it. A doctored
-    /// prover that alters a table cell (and its matching trace cell) satisfies
-    /// every constraint — exactly the F-ROOT attack the root pin must reject.
-    /// The zero-numerator logup entry only gives the module a real interaction
-    /// column (the shared STARK requires a non-degenerate tree structure); it
-    /// contributes nothing to any sum.
+    /// Minimal fixture for the preprocessed-root pin. It has one preprocessed
+    /// table column and one equal trace column. A prover can alter both cells
+    /// and still satisfy the equality constraint. The root pin must reject
+    /// this proof. The zero-numerator LogUp entry creates a non-degenerate
+    /// interaction tree and contributes nothing to the sum.
     #[derive(Clone)]
     struct TableEval {
         log_size: u32,
@@ -1315,8 +1288,8 @@ mod tests {
     }
 
     impl TableModule {
-        /// `tweak` alters one table cell — the doctored (F-ROOT attacking)
-        /// prover, whose trace matches its forged table so constraints hold.
+        /// `tweak` alters one table cell. The trace uses the same altered cell,
+        /// so the equality constraint still holds.
         fn new(id: &str, log_size: u32, tweak: Option<(usize, u32)>) -> Self {
             let mut values: Vec<M31> = (0..1u32 << log_size).map(M31::from_u32_unchecked).collect();
             if let Some((index, value)) = tweak {
@@ -1448,9 +1421,8 @@ mod tests {
         verify_with_expected_preprocessed_root(&mut [&mut a, &mut b], proof, expected_root)
     }
 
-    /// Back-compat + happy path: the unpinned `verify` and a `None` pin keep the
-    /// old behavior, and the pinned verify accepts the honest proof against the
-    /// independently recomputed root.
+    /// Unpinned verification and a `None` pin accept the honest proof. Pinned
+    /// verification accepts the same proof with an independently computed root.
     #[test]
     fn preprocessed_root_pin_accepts_honest_proof() {
         let (mut a, mut b) = honest_provers();
@@ -1458,7 +1430,7 @@ mod tests {
 
         let (mut va, mut vb) = honest_provers();
         verify(&mut [&mut va, &mut vb], &proof).expect("unpinned verify accepts");
-        verify_tables_pinned(&proof, None).expect("None pin keeps the old behavior");
+        verify_tables_pinned(&proof, None).expect("None pin accepts unpinned verification");
         verify_tables_pinned(&proof, Some(honest_root())).expect("pinned verify accepts");
     }
 
@@ -1528,18 +1500,17 @@ mod tests {
         }
     }
 
-    /// THE F-ROOT attack: a doctored prover alters one preprocessed table cell
-    /// (and its matching trace cell) and commits honestly over the forged data.
-    /// Every constraint holds, so the unpinned verifier accepts the forged
-    /// table — the audited gap. The root pin closes it.
+    /// A prover alters one preprocessed table cell and the matching trace cell.
+    /// The unpinned verifier accepts the proof because all constraints hold.
+    /// The pinned verifier rejects the altered table root.
     #[test]
     fn preprocessed_root_pin_closes_the_froot_attack() {
         let mut evil_a = TableModule::new("froot/a", TABLE_LOG_SIZE, Some((7, 999)));
         let mut evil_b = TableModule::new("froot/b", TABLE_LOG_SIZE, None);
         let forged_proof = prove_tables(&mut evil_a, &mut evil_b);
 
-        // Without the pin the forged table verifies: the verifier derives only
-        // the layout, never the content. This is the F-ROOT finding.
+        // Without the pin, the verifier derives only the layout. It does not
+        // derive the table content, so the altered table verifies.
         let (mut va, mut vb) = honest_provers();
         verify(&mut [&mut va, &mut vb], &forged_proof)
             .expect("unpinned verify accepts the forged table (the F-ROOT gap)");
@@ -1559,7 +1530,7 @@ mod tests {
     fn preprocessed_root_cache_discriminates_shapes() {
         let root_a = honest_root();
 
-        // Same ids, larger tables — a different shape, and a different root.
+        // Larger tables give a different shape and root.
         let taller = || {
             (
                 TableModule::new("froot/a", TABLE_LOG_SIZE + 1, None),
@@ -1595,7 +1566,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // W1: end-to-end GKR transport through prove/verify with a toy module.
+    // End-to-end GKR transport through prove and verify.
     // ------------------------------------------------------------------
 
     use num_traits::One;
@@ -1618,10 +1589,10 @@ mod tests {
     /// has real components to open) and, on the side, a GKR grand-product proof
     /// over a private input layer whose product equals a public `claim`.
     ///
-    /// This is the W1 plumbing fixture: it exercises the opaque payload
-    /// transport and the post-tree-2 Fiat-Shamir binding, without the MLE-eval
-    /// tie-back (W2/W3) — so the verifier binds the GKR *output* claim to the
-    /// public value directly and trusts the input-layer eval claims.
+    /// This fixture tests opaque payload transport and the post-tree-2
+    /// Fiat-Shamir binding. It does not use an MLE-evaluation tie-back. The
+    /// verifier binds the GKR output claim directly to the public value and
+    /// accepts the input-layer evaluation claims.
     struct GkrToyModule {
         id: PreProcessedColumnId,
         log_size: u32,
@@ -1642,8 +1613,7 @@ mod tests {
             Self::with_claim(values, claim)
         }
 
-        /// A prover that announces a `claim` that need not match its values —
-        /// used to drive the wrong-claim negative.
+        /// Create a test prover whose `claim` can differ from its values.
         fn with_claim(values: Vec<SecureField>, claim: SecureField) -> Self {
             Self {
                 id: PreProcessedColumnId {
@@ -1845,11 +1815,9 @@ mod tests {
 
     #[test]
     fn gkr_transport_rejects_wrong_claim() {
-        // Both sides agree on the public claim `wrong_claim` (so the transcript
-        // stays in sync), but it does not equal the true grand product the GKR
-        // proof attests to. Only the output-claim binding in
-        // `verify_post_interaction` catches the mismatch — isolating it from
-        // any transcript divergence.
+        // Both sides use the same public claim, so the transcript stays in
+        // sync. The claim does not equal the true grand product.
+        // The output-claim binding rejects this mismatch.
         let values: Vec<SecureField> = (1u32..=16).map(SecureField::from).collect();
         let true_product = grand_product(&values);
         let wrong_claim = true_product + SecureField::one();

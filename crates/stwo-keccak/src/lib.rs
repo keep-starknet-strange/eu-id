@@ -1,9 +1,7 @@
-//! Keccak-f[1600] / SHAKE-256 AIR over stwo/M31, derived from falcon-air's
-//! `crates/shake256` with redesigned rotation tables and a variable-length
-//! sponge.
+//! Keccak-f[1600] and SHAKE AIR over stwo/M31.
 //!
-//! Populated by the M3 workstream; exposes `KeccakStateRelation` (permutation
-//! chaining) and `HashIoRelation` (byte-stream I/O) to consumers.
+//! The crate exposes `KeccakStateRelation` for permutation chaining and
+//! `HashIoRelation` for byte-stream input and output.
 #![feature(iter_array_chunks)]
 #![feature(raw_slice_split)]
 // Keccak's theta/rho/pi/chi steps index several fixed-size lane arrays by a

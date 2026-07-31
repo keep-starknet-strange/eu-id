@@ -1,56 +1,37 @@
 //! Cross-module LogUp relations shared by composed circuits.
 //!
-//! A relation drawn inside one module's `draw_relations` is private to that
-//! module — its `LookupElements` challenge is sampled at that module's point in
-//! the shared transcript. For two *different* modules to balance a yield against
-//! a require they must combine over the **same** drawn `LookupElements`. That is
-//! what lives here: relation types both a provider crate and a consumer crate
-//! can name, plus a [`SharedDigestRelation`] handle the orchestrator uses to
-//! hand the single drawn instance from the module that draws it to the module
-//! that reads it.
+//! Each module draws its own `LookupElements` challenge from the shared
+//! transcript. A provider and a consumer can balance tuples only when they use
+//! the same challenge. A [`SharedRelation`] gives both modules the same drawn
+//! relation.
 //!
-//! Today this hosts two byte-level bridges:
+//! This module defines two byte relations:
 //!
-//! - the SHA→consumer **digest byte bridge**: SHA-256 yields its 32-byte
-//!   final-block digest; ML-DSA verifier modules require those bytes at their
-//!   hash-binding boundaries.
-//! - the SHA→predicate **credential-field byte bridge**: SHA-256 yields the byte
-//!   windows of the signed credential's fields (date of birth, nationality);
-//!   each predicate requires exactly those bytes so the attribute it reasons
-//!   about is the one that was signed.
-//!
-//! Both reuse the same shape — expose some trace bytes as an 8-bit LogUp
-//! relation, share the drawn `LookupElements` via a [`SharedRelation`] handle.
+//! - [`DigestBytesRelation`] transfers one 32-byte digest.
+//! - [`FieldBytesRelation`] transfers tagged, indexed bytes.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use stwo_constraint_framework::relation;
 
-/// Number of base-field cells in the cross-module digest relation — the 32
-/// bytes of a SHA-256 digest. Must equal `stwo_sha256::constants::DIGEST_BYTES`.
+/// Number of base-field cells in the cross-module digest relation. A SHA-256
+/// digest has 32 bytes. This value must equal
+/// `stwo_sha256::constants::DIGEST_BYTES`.
 pub const DIGEST_BYTES_ARITY: usize = 32;
 
 relation!(DigestBytesRelation, DIGEST_BYTES_ARITY);
 
-/// Shared handle for a cross-module relation, generic over the relation type.
+/// Shared handle for a cross-module relation.
 ///
-/// The orchestrator ([`crate::prove`] / [`crate::verify`]) drives every module
-/// through `draw_relations` in module order against one channel. The **provider**
-/// module draws the relation inside its bundle and [`set`]s it here; the
-/// **consumer** module reads it back with [`get`] during its interaction +
-/// component phases, which the orchestrator runs only *after* every module has
-/// drawn — so the handle is always populated by the time the consumer needs it.
-/// The same handle is reconstructed identically on prove and verify, so the
-/// challenge is deterministic.
+/// The provider stores the drawn relation with [`set`]. The consumer reads it
+/// with [`get`]. The orchestrator draws all relations before it builds an
+/// interaction trace, so the relation is available when the consumer needs it.
+/// Prove and verify use the same module order.
 ///
-/// Interior mutability behind an [`Rc`] because the producer and consumer are
-/// two distinct module objects; the orchestrator drives them single-threaded, so
-/// no `Sync` is required. `Clone` and `Default` are hand-written so they do not
-/// demand `R: Clone` / `R: Default` (the `Rc` is always cloneable).
-///
-/// Live instances include [`SharedDigestRelation`] (SHA → digest consumer) and
-/// [`SharedFieldRelation`] (SHA → credential-field consumers).
+/// The provider and consumer are separate module objects. An [`Rc`] with
+/// interior mutability lets both objects use one handle. The orchestrator is
+/// single-threaded, so the handle does not need `Sync`.
 ///
 /// [`set`]: SharedRelation::set
 /// [`get`]: SharedRelation::get
@@ -69,8 +50,7 @@ impl<R> Default for SharedRelation<R> {
 }
 
 impl<R: Clone> SharedRelation<R> {
-    /// A fresh, empty handle. Create one per proof in the orchestrator and clone
-    /// it into the provider and consumer modules.
+    /// Create an empty handle. Clone it into the provider and consumer modules.
     pub fn new() -> Self {
         Self::default()
     }
@@ -81,9 +61,8 @@ impl<R: Clone> SharedRelation<R> {
         *self.0.borrow_mut() = Some(relation);
     }
 
-    /// Read the drawn relation. Panics if called before the provider has drawn
-    /// it — a wiring bug (the orchestrator guarantees all `draw_relations` run
-    /// before any consumer interaction/component phase).
+    /// Read the drawn relation. This function panics if the provider has not
+    /// drawn the relation.
     pub fn get(&self) -> R {
         self.0
             .borrow()
@@ -97,40 +76,17 @@ impl<R: Clone> SharedRelation<R> {
     }
 }
 
-/// The SHA → consumer digest-byte channel handle.
+/// Shared handle for a 32-byte digest relation.
 pub type SharedDigestRelation = SharedRelation<DigestBytesRelation>;
 
-/// Number of base-field cells in the cross-module credential-field relation:
-/// `(field_id, byte_index, value)`. The SHA preimage field-exposure provider
-/// yields one such tuple per exposed credential byte; each predicate consumer
-/// requires exactly the tuples of the field it binds. Keying on
-/// `(field_id, byte_index)` lets one shared channel carry
-/// every field's bytes without an index column — the producer and consumer pin
-/// the same position by emitting the same first two cells.
+/// Number of base-field cells in a tagged-byte relation.
+/// Each row is `(field_id, byte_index, value)`.
 pub const FIELD_BYTES_ARITY: usize = 3;
 
 relation!(FieldBytesRelation, FIELD_BYTES_ARITY);
 
-/// The SHA → predicate credential-field channel handle. One shared channel
-/// carries every exposed field byte; the `field_id` cell distinguishes which
-/// credential field a byte belongs to.
+/// Shared handle for a tagged-byte relation.
 pub type SharedFieldRelation = SharedRelation<FieldBytesRelation>;
-
-/// Opaque credential-field tags carried in the first cell of a
-/// [`FieldBytesRelation`] tuple. They are assigned by the credential layer and
-/// are part of the frozen cross-module contract — the SHA producer is agnostic
-/// to their meaning (it yields whatever tags its field-exposure spec lists), and
-/// each predicate consumer requires the tag of the field it binds. The MVP
-/// credential exposes exactly these two fields (`docs/credential-format.md`).
-pub mod field_id {
-    /// The date-of-birth window (`year_hi, year_lo, month, day`), bound by the
-    /// age predicate.
-    pub const DOB: u32 = 0;
-    /// The nationality window (`code_hi, code_lo`), bound by the nationality
-    /// predicate.
-    pub const NATIONALITY: u32 = 1;
-    // ids 2–15 reserved (legacy); mdoc dynamic fields allocate from 16+.
-}
 
 #[cfg(test)]
 mod tests {
@@ -189,14 +145,5 @@ mod tests {
         handle.set(drawn.clone());
         assert!(handle.is_set());
         assert_eq!(handle.clone().get(), drawn);
-    }
-
-    #[test]
-    fn credential_field_ids_are_distinct() {
-        assert_ne!(field_id::DOB, field_id::NATIONALITY);
-        const {
-            assert!(field_id::DOB < 2);
-            assert!(field_id::NATIONALITY < 2);
-        }
     }
 }

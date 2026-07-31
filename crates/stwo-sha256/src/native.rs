@@ -1,8 +1,8 @@
-//! Pure-Rust SHA-256 reference, used as the out-of-circuit oracle.
+//! Pure Rust SHA-256 reference for out-of-circuit checks.
 //!
 //! Implements FIPS 180-4 §5 (padding, parsing, hash computation) bit-for-bit.
-//! Every operation is `u32::wrapping_*` arithmetic — no `i64`/`u64` carry
-//! tricks — so the witness generator can mirror it exactly.
+//! Every operation uses `u32::wrapping_*` arithmetic. The witness generator
+//! uses the same operations.
 //!
 //! The tests cross-check this against the `sha2` crate for arbitrary input
 //! sizes, including multi-block messages and zero-length input.

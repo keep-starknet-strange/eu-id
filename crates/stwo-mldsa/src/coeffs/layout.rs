@@ -1,5 +1,5 @@
-//! Row-stacking layout for the tall `mldsa_coeffs` component (worksheet S5 §3
-//! row 1, amended by S5a §3). Every witnessed / carry polynomial's coefficients
+//! Row-stacking layout for the tall `mldsa_coeffs` component. The coefficients
+//! of each witness and carry polynomial
 //! are stacked into contiguous Horner groups; the accumulator (interaction tree)
 //! evaluates each group at the drawn `(r, s)` and emits `P̂(r, s)` at its end row.
 //!
@@ -28,7 +28,7 @@ use crate::witness::{T_E, T_MAX, T_V, T_W, T_Z};
 /// column count.
 pub const MAX_DIGITS: usize = T_V;
 
-/// Carry columns per carry coefficient: `t ∈ [0, T_MAX] ⇒ 5` (worksheet §3.3).
+/// Carry columns per carry coefficient: `t ∈ [0, T_MAX] ⇒ 5`.
 pub const CARRY_DIGITS: usize = T_MAX + 1;
 
 /// The kind of polynomial a Horner group holds. `live_digits` is how many of the
@@ -92,8 +92,8 @@ impl Group {
         self.coeffs.div_ceil(self.kind.coefficients_per_row())
     }
 
-    /// Logical coefficient in packed slot `slot`, preserving the original
-    /// high-to-low Horner order. Returns `None` only for a partial final row.
+    /// Logical coefficient in packed slot `slot`, in fixed high-to-low Horner
+    /// order. Returns `None` only for a partial final row.
     pub fn coefficient_index(self, in_group: usize, slot: usize) -> Option<usize> {
         let from_high = in_group * self.kind.coefficients_per_row() + slot;
         if slot < self.kind.coefficients_per_row() && from_high < self.coeffs {

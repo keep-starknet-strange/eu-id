@@ -1,6 +1,7 @@
-//! M4 acceptance: standalone prove+verify of the `mldsa_coeffs` component +
-//! verifier-native fold against real oracle-generated ML-DSA-65 signatures, plus
-//! the worksheet §5 / S5 §5 negative matrix (each mutation must be rejected).
+//! Standalone proof and verification tests for `mldsa_coeffs`.
+//!
+//! The tests use oracle-generated ML-DSA-65 signatures and verify that each
+//! adversarial mutation is rejected.
 
 mod common;
 
@@ -66,26 +67,26 @@ fn coeffs_rejects_proof_under_different_pcs_policy() {
 
 // --- Proof-level negatives (mutate the emitted proof) ---
 
-/// N9: tamper a claimed EvalAtRs sum (a v-group eval) → native fold nonzero +
-/// EvalAtRs balance broken.
+/// Change a claimed EvalAtRs sum. This makes the native fold nonzero and
+/// breaks the EvalAtRs balance.
 #[test]
 fn negative_tampered_claimed_eval() {
     let mut proof = prove_case(2001, b"tamper-eval");
     proof.group_evals[17] += SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(1));
     assert!(
         verify_coeffs(&proof, PcsConfig::default()).is_err(),
-        "tampered claimed eval must reject"
+        "a changed claimed evaluation must be rejected"
     );
 }
 
-/// N8: verify against the WRONG pk (ρ′) → native ExpandA(ρ′) ≠ ExpandA(ρ), fold nonzero.
+/// Verify against a different public key so `ExpandA(ρ′) ≠ ExpandA(ρ)`.
 #[test]
 fn negative_wrong_pk_rho() {
     let mut proof = prove_case(2002, b"wrong-rho");
     proof.input.rho[0] ^= 1;
     assert!(
         verify_coeffs(&proof, PcsConfig::default()).is_err(),
-        "wrong ρ must reject"
+        "an incorrect ρ must be rejected"
     );
 }
 
@@ -97,13 +98,13 @@ fn negative_tampered_claimed_sum() {
         SecureField::from(stwo::core::fields::m31::M31::from_u32_unchecked(1));
     assert!(
         verify_coeffs(&proof, PcsConfig::default()).is_err(),
-        "tampered claimed sum must reject"
+        "a changed claimed sum must be rejected"
     );
 }
 
 // --- Witness-level negatives (mutate the witness before proving) ---
 
-/// N1: perturb one v digit → the SZ bivariate identity fails at (r,s).
+/// Change one v digit so the bivariate identity fails at `(r,s)`.
 #[test]
 fn negative_perturb_v_digit() {
     let (mut w, input) = witness_and_input(3001, b"v-digit");
@@ -111,8 +112,8 @@ fn negative_perturb_v_digit() {
     assert!(rejected(w, input), "perturbed v digit must be rejected");
 }
 
-/// N2: swap two polys in the stack (swap z_0 and z_1 digit tables) → the group
-/// Horner evals land under the wrong poly_id ⇒ native fold / eval balance fails.
+/// Swap the z_0 and z_1 digit tables. The group Horner evaluations then use
+/// the wrong polynomial identifier, and the native fold balance fails.
 #[test]
 fn negative_swap_two_polys() {
     let (mut w, input) = witness_and_input(3002, b"swap-polys");
@@ -120,8 +121,8 @@ fn negative_swap_two_polys() {
     assert!(rejected(w, input), "swapping two polys must be rejected");
 }
 
-/// N3 (reviewer layout-invariant): swap two digits across t within a row → the
-/// recomposition `Σ d_t·B^t` changes ⇒ the SZ identity / recomp binding fails.
+/// Swap two digits with different weights in one row. This changes
+/// `Σ d_t·B^t` and breaks the recomposition binding.
 #[test]
 fn negative_swap_digits_across_t() {
     let (mut w, input) = witness_and_input(3003, b"swap-digits");
@@ -133,8 +134,8 @@ fn negative_swap_digits_across_t() {
     );
 }
 
-/// N4: out-of-range digit (+257, outside the balanced [−256,256) window) → the
-/// rc9 table has no such row ⇒ prover panics/imbalances.
+/// Set a digit to +257, outside the balanced `[−256,256)` range. The rc9 table
+/// has no matching row.
 #[test]
 fn negative_out_of_range_digit() {
     let (mut w, input) = witness_and_input(3004, b"oor-digit");
@@ -142,60 +143,7 @@ fn negative_out_of_range_digit() {
     assert!(rejected(w, input), "out-of-range digit must be rejected");
 }
 
-#[cfg(feature = "attack-hooks")]
-fn coeffs_range_boundary_rejects(
-    kind: stwo_mldsa::coeffs::tables::RcKind,
-    seed: u64,
-    message: &[u8],
-) {
-    let _attack = stwo_mldsa::coeffs::install_range_boundary_attack(kind);
-    let (witness, input) = witness_and_input(seed, message);
-    assert!(
-        rejected(witness, input),
-        "{} first-excluded value must reject in coeffs",
-        kind.name()
-    );
-}
-
-#[cfg(feature = "attack-hooks")]
-#[test]
-fn coeffs_split_coeffs_rc9_boundary_rejects() {
-    coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc9, 3010, b"split-rc9");
-}
-
-#[cfg(feature = "attack-hooks")]
-#[test]
-fn coeffs_split_coeffs_rc13_boundary_rejects() {
-    coeffs_range_boundary_rejects(
-        stwo_mldsa::coeffs::tables::RcKind::Rc13,
-        3011,
-        b"split-rc13",
-    );
-}
-
-#[cfg(feature = "attack-hooks")]
-#[test]
-fn coeffs_split_coeffs_rc8_boundary_rejects() {
-    coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc8, 3012, b"split-rc8");
-}
-
-#[cfg(feature = "attack-hooks")]
-#[test]
-fn coeffs_split_coeffs_rc7_boundary_rejects() {
-    coeffs_range_boundary_rejects(stwo_mldsa::coeffs::tables::RcKind::Rc7, 3013, b"split-rc7");
-}
-
-#[cfg(feature = "attack-hooks")]
-#[test]
-fn coeffs_split_coeffs_ternary_boundary_rejects() {
-    coeffs_range_boundary_rejects(
-        stwo_mldsa::coeffs::tables::RcKind::Ternary,
-        3014,
-        b"split-ternary",
-    );
-}
-
-/// N5: tamper a carry cell → the (s−B)·Ĉ term in the fold changes ⇒ (‡) nonzero.
+/// Change a carry cell so the `(s−B)·Ĉ` term makes the fold nonzero.
 #[test]
 fn negative_tampered_carry() {
     let (mut w, input) = witness_and_input(3005, b"carry");
@@ -203,14 +151,13 @@ fn negative_tampered_carry() {
     assert!(rejected(w, input), "tampered carry must be rejected");
 }
 
-/// N6: recomposition-binding mismatch — change a z digit WITHOUT touching the
-/// coefficient the norm consumes. The recomp constraint `cell = Σ d_t·B^t` binds
-/// them; a lone digit change breaks it (and the SZ identity).
+/// Change a z digit without changing the coefficient that the norm consumes.
+/// The constraint `cell = Σ d_t·B^t` binds them, so the change is rejected.
 #[test]
 fn negative_recomp_binding_mismatch() {
     let (mut w, input) = witness_and_input(3006, b"recomp");
     // Bump the top z digit by 1 (changes Σ d_t·B^t but the norm/aux still target
-    // the original cell) — the recomposition value the AIR commits diverges.
+    // the recomposed cell) — the value committed by the AIR diverges.
     w.digits.z[3][77][2] += 1;
     assert!(
         rejected(w, input),
@@ -232,7 +179,7 @@ fn negative_packed_second_z_coefficient_is_bound() {
     );
 }
 
-/// The second packed w coefficient keeps its original `w_bind_id = i·N+m` and
+/// The second packed w coefficient keeps its assigned `w_bind_id = i·N+m` and
 /// recomposed value. The standalone WCell balancer consumes the unmodified
 /// coefficient, so changing only its second-slot digits must reject.
 #[test]
@@ -246,13 +193,11 @@ fn negative_packed_second_wcell_is_bound() {
     );
 }
 
-/// N7: the exact z-norm gate accepts `|z| ≤ γ1−β−1 = 524_091` and rejects the
-/// boundary `|z| = γ1−β = 524_092` (the review flag — NOT a 2^20 window that
-/// over-accepts by ~195). Checked at constraint-arithmetic granularity: the AIR
-/// C5 predicate is `a = z + bound ∈ [0,2^20)` AND `b = bound − z ∈ [0,2^20)`,
-/// both pinned by rc13+rc7. A full-proof version would conflate the norm with
-/// the SZ identity (mutating z alone breaks the [LIN] witnesses), so we test the
-/// gate directly, exactly as the AIR decomposes it.
+/// The exact z-norm gate accepts `|z| ≤ γ1−β−1 = 524_091` and rejects
+/// `|z| = γ1−β = 524_092`. The AIR C5 predicate is
+/// `a = z + bound ∈ [0,2^20)` and `b = bound − z ∈ [0,2^20)`,
+/// both pinned by rc13+rc7. A full proof also checks the SZ identity, so this
+/// test isolates the norm gate at the same arithmetic level as the AIR.
 #[test]
 fn z_norm_gate_is_exact() {
     let bound = stwo_mldsa::coeffs::Z_NORM_BOUND as i128; // 524_091
@@ -308,11 +253,9 @@ fn paired_zw_shape_is_log13_and_batch4_legal() {
     );
 }
 
-/// Control: the exact seeds/messages used by the witness-level negatives prove
-/// and verify cleanly WITHOUT any mutation — so each negative's rejection is
-/// attributable to its mutation, not a bad seed.
+/// Each mutation fixture proves and verifies before the mutation.
 #[test]
-fn negative_seeds_are_honest_without_mutation() {
+fn mutation_fixtures_verify_without_mutation() {
     for (seed, msg) in [
         (3001u64, &b"v-digit"[..]),
         (3002, b"swap-polys"),

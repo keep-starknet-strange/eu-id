@@ -1,26 +1,13 @@
-//! Q-015 §4b Class-E claimed-sum blinder pairs.
+//! Randomizes individual private-data LogUp claimed-sum slots.
 //!
-//! Every per-component LogUp claimed sum carried in [`crate::mdoc::MdocCircuitProof`]
-//! that is a function of private witness data leaks under the public `(z, α)`
-//! challenges. The masking rule (tasks/mdoc-mailbox/answers/Q-015.md §4b,
-//! tasks/p4c-masking-note.md Case 4) is: mask the SPLIT, not the balance. Per
-//! masked module the prover samples a fresh `v ∈ QM31` and a free multiplicity
-//! `m ∈ QM31` and emits `+m/(z − combine(v))` into one published claimed-sum
-//! slot and `−m/(z − combine(v))` into a second slot of the same module. The
-//! global fold (`air_core` sums every module's claimed sums to zero) is
-//! untouched because the two members cancel exactly; each individual published
-//! number is shifted by a per-proof uniform QM31 value, so the published sum is
-//! uniform (exact ZK argument, no numeric bound needed).
-//!
-//! Mechanics: `v` and `m` ride inside the module's serialized interaction
-//! claim, so the verifier's `evaluate` reproduces the same constant fraction at
-//! the OODS point (the same pattern as `MacBindingEval` reading `self.av`).
-//! The fraction is constant across all rows of its component; both members are
-//! emitted ungated over the full domain, so a pair cancels exactly when
-//! `rows(+side) · m == rows(−side) · m_counter`. Tampering `v`, `m`, or a
-//! blinded claimed sum in a serialized proof breaks the component's LogUp
-//! boundary constraint at OODS, so the pair is bound — there is no free
-//! claimed-sum term (the P4b blind_claim-hole lesson).
+//! The prover samples `v` and `m` for each module.
+//! It adds two opposite fractions to two claim slots.
+//! Their global sum is zero, and each slot is uniform.
+//! The proof carries `v` and `m`.
+//! The verifier rebuilds both fractions at OODS.
+//! A change breaks the LogUp boundary.
+//! The published pair still reveals the module sum.
+//! This method does not make STWO zero knowledge.
 
 use rand::RngCore;
 use stwo::core::fields::m31::M31;
@@ -34,13 +21,10 @@ use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
-// One relation type, one instance drawn per masked module (distinct z/α per
-// module), used by both members of that module's pair and by nothing else.
+// Draw one relation instance for each randomized module.
 relation!(ClaimedSumBlinderRelation, SECURE_EXTENSION_DEGREE);
 
-/// Fresh uniform M31 cell from the host CSPRNG (never channel-derived: the
-/// blinder must stay secret from the verifier). Rejection-sampled like the
-/// per-module `random_m31_cell` helpers.
+/// Sample one uniform M31 cell from the host CSPRNG.
 fn random_m31() -> M31 {
     let mut rng = rand::thread_rng();
     loop {

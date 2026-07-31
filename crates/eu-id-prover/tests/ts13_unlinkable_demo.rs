@@ -1,21 +1,17 @@
 #[allow(dead_code)]
+#[path = "support/mldsa_fixture.rs"]
 mod mldsa_fixture;
 
 use ciborium::value::Value;
 use eu_id_prover::mdoc::{
-    extract_pid_mdoc, MdocCircuitStatement, MdocDeviceAuthenticationProfile, MdocDisclosureMode,
-    MdocError, MdocPidRequest, MdocRequestedAttribute, MdocRevocationKey,
-    MdocRevocationPublicInputs, MdocRevocationRangeWitness, MdocRevocationSignature,
-    MdocTs13PublicStatement, TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY,
+    MdocError, MdocPidRequest, MdocRevocationKey, MdocRevocationPublicInputs,
+    MdocRevocationSignature, TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY,
 };
 use eu_id_prover::ts13_demo::{
     derive_device_authentication, derive_public_context, ensure_device_cose_sig_structure_capacity,
     Ts13DemoContextError, Ts13DemoPublicContextInput, ML_DSA_65_PUBLIC_KEY_BYTES,
 };
-use eu_id_prover::{
-    prove_mdoc_ts13_demo, verify_mdoc, verify_mdoc_ts13_demo, MdocTs13DemoCircuitPublicInput,
-    Policy,
-};
+use eu_id_prover::{prove_mdoc_ts13_demo, verify_mdoc_ts13_demo, MdocTs13DemoCircuitPublicInput};
 use ml_dsa::signature::Signer;
 use ml_dsa::{EncodedSignature, MlDsa65, SigningKey};
 
@@ -25,20 +21,8 @@ const CIRCUIT_HASH: [u8; 32] = eu_id_prover::ts13_demo_artifact_constants::TS13_
 const PID_SCOPE: &str = "eu.europa.ec.eudi.pid.1";
 const AGE_OVER_18: &str = "age_over_18";
 
-fn request(transcript: Vec<u8>, issuer_public_key: Vec<u8>) -> MdocPidRequest {
-    MdocPidRequest {
-        doctype: PID_SCOPE.to_string(),
-        namespace: PID_SCOPE.to_string(),
-        attributes: vec![MdocRequestedAttribute {
-            element_identifier: AGE_OVER_18.to_string(),
-            mode: MdocDisclosureMode::ValueEquality(vec![0xf5]),
-        }],
-        birth_date_element: "birth_date".to_string(),
-        nationality_element: "nationality".to_string(),
-        session_transcript: transcript,
-        trusted_mldsa_issuer_public_keys: vec![issuer_public_key],
-        device_authentication_profile: MdocDeviceAuthenticationProfile::Iso180135,
-    }
+fn request(transcript: Vec<u8>) -> MdocPidRequest {
+    MdocPidRequest::age_over_18(transcript)
 }
 
 fn public_input(
@@ -70,21 +54,9 @@ fn public_input(
         trusted_issuer_public_key: issuer_public_key.to_vec(),
         device_cose_sig_structure: derived.device_cose_sig_structure,
         revocation: MdocRevocationPublicInputs {
-            revocation_public_key: MdocRevocationKey::MlDsa(revocation_public_key.to_vec()),
+            revocation_public_key: MdocRevocationKey(revocation_public_key.to_vec()),
             epoch: REVOCATION_EPOCH,
         },
-    }
-}
-
-fn demo_policy() -> Policy {
-    Policy {
-        current_date: predicates::Date {
-            year: 2027,
-            month: 1,
-            day: 1,
-        },
-        min_age_years: 18,
-        accepted_nationalities: Vec::new(),
     }
 }
 
@@ -93,7 +65,7 @@ fn revocation_witness(mso: &[u8]) -> (u64, u64, MdocRevocationSignature) {
     let id_lo = id.checked_sub(1).expect("fixture revocation id is nonzero");
     let id_hi = id.checked_add(1).expect("fixture revocation id is not max");
     let (_, signature) = mldsa_fixture::mldsa_revocation_fixture(id_lo, id_hi, REVOCATION_EPOCH);
-    (id_lo, id_hi, MdocRevocationSignature::MlDsa(signature))
+    (id_lo, id_hi, MdocRevocationSignature(signature))
 }
 
 fn encode_value(value: &Value) -> Vec<u8> {
@@ -115,10 +87,10 @@ fn text_map_value_mut<'a>(value: &'a mut Value, key: &str) -> &'a mut Value {
 }
 
 fn rewrite_validity(
-    mut fixture: mldsa_fixture::MldsaFullPqFixture,
+    mut fixture: mldsa_fixture::MldsaIdentityFixture,
     valid_from: &str,
     valid_until: &str,
-) -> mldsa_fixture::MldsaFullPqFixture {
+) -> mldsa_fixture::MldsaIdentityFixture {
     let original_mso_len = fixture.mso.len();
     let original_document_len = fixture.document.len();
     let mut mso: Value =
@@ -183,6 +155,35 @@ fn transcript_for_device_message_len(target: usize) -> Vec<u8> {
 }
 
 #[test]
+fn public_issuer_trust_mismatch_rejects_before_proving() {
+    let transcript = eu_id_prover::mdoc::openid4vp_session_transcript(b"issuer-trust-mismatch");
+    let fixture = mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript);
+    let public = public_input(
+        &transcript,
+        &fixture.device_pk,
+        &fixture.revocation_pk,
+        "rp-local-demo-issuer-trust",
+        VERIFY_AT,
+    );
+    let (id_lo, id_hi, signature) = revocation_witness(&fixture.mso);
+
+    match prove_mdoc_ts13_demo(
+        &fixture.document,
+        &request(transcript),
+        &public,
+        id_lo,
+        id_hi,
+        signature,
+    ) {
+        Err(eu_id_prover::Error::Prove(message)) => {
+            assert!(message.contains("trusted public key"));
+        }
+        Err(error) => panic!("unexpected issuer trust error: {error:?}"),
+        Ok(_) => panic!("an untrusted issuer key must reject"),
+    }
+}
+
+#[test]
 fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
     std::thread::Builder::new()
         .name("ts13-demo-composed-test".to_string())
@@ -191,7 +192,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             let transcript =
                 transcript_for_device_message_len(TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY);
             let fixture = rewrite_validity(
-                mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript),
+                mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript),
                 "2026-12-31T23:59:59Z",
                 "2027-01-01T00:00:01Z",
             );
@@ -208,7 +209,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 public.device_cose_sig_structure.len(),
                 TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
             );
-            let request = request(transcript.clone(), fixture.issuer_pk.clone());
+            let request = request(transcript.clone());
             let (id_lo, id_hi, revocation_signature) = revocation_witness(&fixture.mso);
 
             let proof = prove_mdoc_ts13_demo(
@@ -217,7 +218,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 &public,
                 id_lo,
                 id_hi,
-                revocation_signature.clone(),
+                revocation_signature,
             )
             .expect("TS13 demo proves");
             assert!(proof.has_ts13_demo_shape());
@@ -229,7 +230,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 include_bytes!("../../../artifacts/ts13-demo-v1/generation-input-v1.json");
             eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                 artifact_input,
-                &geometry,
+                geometry,
                 &shape,
             )
             .expect("checked-in artifact input matches the live composed circuit");
@@ -256,7 +257,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,
-                    &geometry,
+                    geometry,
                     &drifted,
                 )
                 .is_err(),
@@ -267,7 +268,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,
-                    &geometry,
+                    geometry,
                     &drifted,
                 )
                 .is_err(),
@@ -278,7 +279,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,
-                    &geometry,
+                    geometry,
                     &drifted,
                 )
                 .is_err(),
@@ -289,7 +290,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,
-                    &geometry,
+                    geometry,
                     &drifted,
                 )
                 .is_err(),
@@ -301,7 +302,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,
-                    &geometry,
+                    geometry,
                     &drifted,
                 )
                 .is_err(),
@@ -312,18 +313,18 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,
-                    &geometry,
+                    geometry,
                     &drifted,
                 )
                 .is_err(),
                 "FRI last-layer coefficient drift must reject"
             );
             let mut drifted = shape.clone();
-            drifted.proof_bytes = 1_755_051;
+            drifted.proof_bytes = 1_734_953;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,
-                    &geometry,
+                    geometry,
                     &drifted,
                 )
                 .is_err(),
@@ -341,7 +342,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     (6, 14),
                     (7, 15),
                     (8, 35),
-                    (9, 689),
+                    (9, 688),
                     (10, 104),
                     (11, 8),
                     (12, 4),
@@ -358,7 +359,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [947, 5_000, 2_416, 8, 32]
+                [946, 4_906, 2_400, 8, 32]
             );
             assert_eq!(
                 shape
@@ -366,7 +367,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [947, 5_000, 2_416, 8, 32]
+                [946, 4_906, 2_400, 8, 32]
             );
             assert!(shape
                 .queried_values
@@ -378,7 +379,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             assert_eq!(shape.post_interaction_payload_bytes, expected_post_payloads);
             assert_eq!(shape.fri_last_layer_coefficient_count, 2);
             assert_eq!(shape.sha_table_pair_claim_count, 3);
-            assert_eq!(shape.attribute_sha_range_claim_counts, [0]);
+            assert_eq!(shape.attribute_sha_range_claim_count, 0);
             assert_eq!(shape.mso_sha_range_claim_count, Some(0));
             assert_eq!(
                 (
@@ -428,10 +429,10 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     (10, 438, 124, 0),
                     (3, 117, 4, 0),
                     (3, 117, 4, 0),
-                    (6, 154, 140, 0),
-                    (142, 203, 144, 0),
+                    (6, 80, 140, 0),
+                    (141, 202, 144, 0),
                     (2, 88, 104, 0),
-                    (4, 324, 108, 0),
+                    (4, 305, 92, 0),
                     (16, 13, 16, 0),
                     (12, 34, 52, 0),
                     (94, 165, 312, 0),
@@ -457,7 +458,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 .iter()
                 .enumerate()
                 .all(|(index, air)| index == 2 || air.post_interaction_log_sizes.is_empty()));
-            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 947);
+            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 946);
             assert_eq!(
                 column_counts.iter().fold(
                     [0usize; 3],
@@ -467,9 +468,25 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                         post + air_post,
                     ]
                 ),
-                [5_000, 2_416, 8]
+                [4_906, 2_400, 8]
             );
-            verify_mdoc_ts13_demo(&proof, &public).expect("TS13 demo verifies");
+            let reject_proof_without_panic = |label: &str, candidate: &eu_id_prover::MdocProof| {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    verify_mdoc_ts13_demo(candidate, &public)
+                }));
+                match result {
+                    Ok(Err(_)) => {}
+                    Ok(Ok(())) => panic!("{label} must reject"),
+                    Err(_) => panic!("{label} must return an error without panicking"),
+                }
+            };
+
+            let mut forged_root = proof.clone();
+            forged_root.stark_proof.0.commitments[0].0[0] ^= 1;
+            reject_proof_without_panic("forged tree-zero root", &forged_root);
+            verify_mdoc_ts13_demo(&proof, &public).expect("canonical proof verifies");
+            reject_proof_without_panic("forged tree-zero root after verification", &forged_root);
+            verify_mdoc_ts13_demo(&proof, &public).expect("canonical proof verifies again");
 
             let derive = |circuit_hash: &[u8; 32],
                           zk_system_id: &str,
@@ -624,8 +641,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             )
             .expect("changed revocation context derives");
             let mut changed = public.clone();
-            changed.revocation.revocation_public_key =
-                MdocRevocationKey::MlDsa(fixture.device_pk.clone());
+            changed.revocation.revocation_public_key = MdocRevocationKey(fixture.device_pk.clone());
             changed.request_context_digest = derived.request_context_digest;
             relabeled("revocation key", changed);
 
@@ -748,50 +764,84 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 stwo::core::fields::m31::M31::from_u32_unchecked(1),
             );
             let mut changed = proof.clone();
-            changed
-                .ts13_expand_a_claim_mut_for_test()
-                .expect("TS13 demo carries the U5 ExpandA claim")
-                .absorb_claimed_sum += one;
+            changed.device_mldsa.group_evals[0] += one;
             verify_mdoc_ts13_demo(&changed, &public)
-                .expect_err("changed U5 claim must reject in the final composition");
+                .expect_err("changed private device ML-DSA claim must reject in composition");
+
+            fn role_claims_mut<'a>(
+                proof: &'a mut eu_id_prover::MdocProof,
+                role: &str,
+            ) -> &'a mut eu_id_prover::mdoc::MdocMlDsaClaims {
+                match role {
+                    "issuer" => &mut proof.mldsa,
+                    "device" => &mut proof.device_mldsa,
+                    "revocation" => &mut proof.revocation_mldsa,
+                    _ => unreachable!("test role is fixed"),
+                }
+            }
+
+            for role in ["issuer", "device", "revocation"] {
+                let mut short_group_evals = proof.clone();
+                role_claims_mut(&mut short_group_evals, role)
+                    .group_evals
+                    .pop()
+                    .expect("role has group evaluations");
+                reject_proof_without_panic(
+                    &format!("short {role} group-evaluation vector"),
+                    &short_group_evals,
+                );
+
+                let mut long_group_evals = proof.clone();
+                let extra = *role_claims_mut(&mut long_group_evals, role)
+                    .group_evals
+                    .last()
+                    .expect("role has group evaluations");
+                role_claims_mut(&mut long_group_evals, role)
+                    .group_evals
+                    .push(extra);
+                reject_proof_without_panic(
+                    &format!("long {role} group-evaluation vector"),
+                    &long_group_evals,
+                );
+
+                let mut short_claimed_sums = proof.clone();
+                role_claims_mut(&mut short_claimed_sums, role)
+                    .claimed_sums
+                    .pop()
+                    .expect("role has claimed sums");
+                reject_proof_without_panic(
+                    &format!("short {role} claimed-sum vector"),
+                    &short_claimed_sums,
+                );
+
+                let mut long_claimed_sums = proof.clone();
+                let extra = *role_claims_mut(&mut long_claimed_sums, role)
+                    .claimed_sums
+                    .last()
+                    .expect("role has claimed sums");
+                role_claims_mut(&mut long_claimed_sums, role)
+                    .claimed_sums
+                    .push(extra);
+                reject_proof_without_panic(
+                    &format!("long {role} claimed-sum vector"),
+                    &long_claimed_sums,
+                );
+            }
 
             let mut changed = proof.clone();
-            assert!(
-                changed.tamper_ts13_device_key_bind_claimed_sum_for_test(),
-                "TS13 demo carries the U9 device-key/MSO claim"
-            );
-            verify_mdoc_ts13_demo(&changed, &public)
-                .expect_err("changed U9 claim must reject in the final composition");
+            changed.mldsa.claimed_sums[0] += one;
+            reject_proof_without_panic("changed issuer claimed sum", &changed);
 
-            let mut changed = proof.clone();
-            changed
-                .device_mldsa
-                .as_mut()
-                .expect("TS13 demo carries private-key device ML-DSA claims")
-                .group_evals[0] += one;
-            verify_mdoc_ts13_demo(&changed, &public)
-                .expect_err("changed U6/U7 device ML-DSA claim must reject in composition");
+            let mut short_service_claims = proof.clone();
+            short_service_claims
+                .keccak_service_claimed_sums
+                .pop()
+                .expect("Keccak service claim vector is not empty");
+            reject_proof_without_panic("short Keccak service claim vector", &short_service_claims);
 
-            let extracted =
-                extract_pid_mdoc(&fixture.document, &request).expect("fixture extracts");
-            let product_statement = MdocCircuitStatement::from_extracted(&extracted, demo_policy())
-                .expect("product statement builds");
-            verify_mdoc(&proof, &product_statement.into_public_view())
-                .expect_err("demo proof must not verify as product");
-
-            let legacy_statement = MdocCircuitStatement::from_extracted(&extracted, demo_policy())
-                .expect("legacy statement builds")
-                .with_ts13_revocation(public.revocation.clone())
-                .with_ts13_revocation_range(MdocRevocationRangeWitness {
-                    id: eu_id_prover::ts13::ts13_mso_derived_revocation_id(&fixture.mso),
-                    id_lo,
-                    id_hi,
-                })
-                .with_ts13_revocation_signature(revocation_signature);
-            let legacy_public = MdocTs13PublicStatement::from_circuit(&legacy_statement)
-                .expect("legacy public statement builds");
-            eu_id_prover::mdoc::verify_mdoc_ts13_public_statement(&proof, &legacy_public)
-                .expect_err("demo proof must not verify as legacy TS13");
+            let mut changed_service_claim = proof.clone();
+            changed_service_claim.keccak_service_claimed_sums[0] += one;
+            reject_proof_without_panic("changed Keccak service claim", &changed_service_claim);
         })
         .expect("large-stack TS13 test thread starts")
         .join()
@@ -799,146 +849,10 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
 }
 
 #[test]
-fn composed_k1_mso_k2_device_substitution_rejects() {
-    std::thread::Builder::new()
-        .name("ts13-demo-k1-k2-test".to_string())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let transcript = eu_id_prover::mdoc::openid4vp_session_transcript(b"ts13-demo-k1-k2");
-            let credential_a =
-                mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript);
-            let credential_b =
-                mldsa_fixture::mldsa_ts13_unlinkable_credential_b_with_transcript(&transcript);
-            assert_ne!(credential_a.device_pk, credential_b.device_pk);
-            assert_eq!(
-                credential_a.device_sig_structure,
-                credential_b.device_sig_structure
-            );
-
-            let request_a = request(transcript.clone(), credential_a.issuer_pk.clone());
-            let request_b = request(transcript.clone(), credential_b.issuer_pk.clone());
-            let mut hybrid =
-                extract_pid_mdoc(&credential_a.document, &request_a).expect("K1 fixture extracts");
-            let extracted_b =
-                extract_pid_mdoc(&credential_b.document, &request_b).expect("K2 fixture extracts");
-            stwo_mldsa::witness::generate_witness(
-                extracted_b
-                    .device_auth_input
-                    .as_mldsa()
-                    .expect("K2 device authentication is ML-DSA"),
-            )
-            .expect("K2 device signature and complete ML-DSA witness are internally valid");
-            hybrid.device_auth_input = extracted_b.device_auth_input;
-
-            let public = public_input(
-                &transcript,
-                &credential_a.issuer_pk,
-                &credential_a.revocation_pk,
-                "rp-local-demo-k1-k2",
-                VERIFY_AT,
-            );
-            let (id_lo, id_hi, signature) = revocation_witness(&credential_a.mso);
-            let statement = MdocCircuitStatement::from_extracted(&hybrid, demo_policy())
-                .expect("hybrid statement builds")
-                .with_ts13_revocation(public.revocation.clone())
-                .with_ts13_revocation_range(MdocRevocationRangeWitness {
-                    id: eu_id_prover::ts13::ts13_mso_derived_revocation_id(&credential_a.mso),
-                    id_lo,
-                    id_hi,
-                })
-                .with_ts13_revocation_signature(signature);
-
-            let proof =
-                eu_id_prover::mdoc::prove_mdoc_ts13_demo_circuit(&hybrid, &statement, &public)
-                    .expect("the internally valid K2 witness builds an adversarial proof");
-            verify_mdoc_ts13_demo(&proof, &public)
-                .expect_err("K1-in-MSO/K2 device proof must fail in the composed relation system");
-        })
-        .expect("large-stack K1/K2 test thread starts")
-        .join()
-        .expect("large-stack K1/K2 test thread succeeds");
-}
-
-#[test]
-fn composed_wrong_mso_revocation_id_with_resigned_endpoints_rejects() {
-    std::thread::Builder::new()
-        .name("ts13-demo-wrong-revocation-id-test".to_string())
-        .stack_size(64 * 1024 * 1024)
-        .spawn(|| {
-            let transcript =
-                eu_id_prover::mdoc::openid4vp_session_transcript(b"ts13-wrong-revocation-id");
-            let fixture =
-                mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript);
-            let extracted = extract_pid_mdoc(
-                &fixture.document,
-                &request(transcript.clone(), fixture.issuer_pk.clone()),
-            )
-            .expect("fixture extracts");
-            let actual_id = eu_id_prover::ts13::ts13_mso_derived_revocation_id(&fixture.mso);
-            let wrong_id = if actual_id <= u64::MAX - 3 {
-                actual_id + 2
-            } else {
-                actual_id - 2
-            };
-            let wrong_id_lo = wrong_id - 1;
-            let wrong_id_hi = wrong_id + 1;
-            assert!(wrong_id_lo < wrong_id && wrong_id < wrong_id_hi);
-            assert!(
-                !(wrong_id_lo < actual_id && actual_id < wrong_id_hi),
-                "honest MSO-derived ID is outside the forged interval"
-            );
-
-            let (revocation_pk, signature) =
-                mldsa_fixture::mldsa_revocation_fixture(wrong_id_lo, wrong_id_hi, REVOCATION_EPOCH);
-            assert_eq!(revocation_pk, fixture.revocation_pk);
-            let signed_message =
-                mldsa_fixture::revocation_message(wrong_id_lo, wrong_id_hi, REVOCATION_EPOCH);
-            let signature_trace =
-                stwo_mldsa::verify_internals(&revocation_pk, &signed_message, &signature)
-                    .expect("re-signed forged endpoints decode");
-            assert!(
-                signature_trace.accepted,
-                "re-signed forged endpoints are internally valid: {:?}",
-                signature_trace.reason
-            );
-
-            let public = public_input(
-                &transcript,
-                &fixture.issuer_pk,
-                &revocation_pk,
-                "rp-local-demo-wrong-revocation-id",
-                VERIFY_AT,
-            );
-            let statement = MdocCircuitStatement::from_extracted(&extracted, demo_policy())
-                .expect("statement builds")
-                .with_ts13_revocation(public.revocation.clone())
-                .with_ts13_revocation_range(MdocRevocationRangeWitness {
-                    id: wrong_id,
-                    id_lo: wrong_id_lo,
-                    id_hi: wrong_id_hi,
-                })
-                .with_ts13_revocation_signature(MdocRevocationSignature::MlDsa(signature));
-
-            let proof =
-                eu_id_prover::mdoc::prove_mdoc_ts13_demo_circuit(&extracted, &statement, &public)
-                    .expect("internally valid forged revocation inputs build an adversarial proof");
-            let error = verify_mdoc_ts13_demo(&proof, &public)
-                .expect_err("wrong MSO-derived revocation ID must fail composition");
-            assert!(
-                matches!(error, eu_id_prover::Error::Verify(_)),
-                "adversarial proof must reach and fail STARK verification, got {error:?}"
-            );
-        })
-        .expect("large-stack wrong-revocation-ID test thread starts")
-        .join()
-        .expect("large-stack wrong-revocation-ID test thread succeeds");
-}
-
-#[test]
 fn validity_and_capacity_boundaries_fail_closed_before_proving() {
     let transcript = eu_id_prover::mdoc::openid4vp_session_transcript(b"ts13-validity");
     let tight = rewrite_validity(
-        mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript),
+        mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript),
         "2026-12-31T23:59:59Z",
         "2027-01-01T00:00:01Z",
     );
@@ -970,7 +884,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         );
         let error = match prove_mdoc_ts13_demo(
             &tight.document,
-            &request(transcript.clone(), tight.issuer_pk.clone()),
+            &request(transcript.clone()),
             &public,
             id_lo,
             id_hi,
@@ -989,7 +903,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         (
             "invalid Gregorian date",
             rewrite_validity(
-                mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript),
+                mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript),
                 "2026-02-30T00:00:00Z",
                 "2030-01-01T00:00:00Z",
             ),
@@ -998,7 +912,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         (
             "unsupported validity year",
             rewrite_validity(
-                mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript),
+                mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript),
                 "2026-01-01T00:00:00Z",
                 "2100-01-01T00:00:00Z",
             ),
@@ -1015,7 +929,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         let (id_lo, id_hi, signature) = revocation_witness(&fixture.mso);
         let error = match prove_mdoc_ts13_demo(
             &fixture.document,
-            &request(transcript.clone(), fixture.issuer_pk),
+            &request(transcript.clone()),
             &public,
             id_lo,
             id_hi,
@@ -1031,7 +945,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
     }
 
     let malformed = rewrite_validity(
-        mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript),
+        mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript),
         "2026-01-01T00:00:0xZ",
         "2030-01-01T00:00:00Z",
     );
@@ -1046,7 +960,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
     assert!(matches!(
         prove_mdoc_ts13_demo(
             &malformed.document,
-            &request(transcript.clone(), malformed.issuer_pk),
+            &request(transcript.clone()),
             &public,
             id_lo,
             id_hi,
@@ -1057,8 +971,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         )))
     ));
 
-    let revocation_fixture =
-        mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&transcript);
+    let revocation_fixture = mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript);
     let revocation_id = eu_id_prover::ts13::ts13_mso_derived_revocation_id(&revocation_fixture.mso);
     let revocation_public = public_input(
         &transcript,
@@ -1088,11 +1001,11 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         assert!(
             prove_mdoc_ts13_demo(
                 &revocation_fixture.document,
-                &request(transcript.clone(), revocation_fixture.issuer_pk.clone(),),
+                &request(transcript.clone()),
                 &revocation_public,
                 id_lo,
                 id_hi,
-                MdocRevocationSignature::MlDsa(signature),
+                MdocRevocationSignature(signature),
             )
             .is_err(),
             "{label} must violate the strict private revocation interval"
@@ -1122,8 +1035,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
         Err(Ts13DemoContextError::InvalidPublicContext)
     );
 
-    let overflow_fixture =
-        mldsa_fixture::mldsa_ts13_unlinkable_credential_a_with_transcript(&overflow);
+    let overflow_fixture = mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&overflow);
     let overflow_public = public_input(
         &overflow,
         &overflow_fixture.issuer_pk,
@@ -1134,7 +1046,7 @@ fn validity_and_capacity_boundaries_fail_closed_before_proving() {
     let (id_lo, id_hi, signature) = revocation_witness(&overflow_fixture.mso);
     let error = match prove_mdoc_ts13_demo(
         &overflow_fixture.document,
-        &request(overflow, overflow_fixture.issuer_pk),
+        &request(overflow),
         &overflow_public,
         id_lo,
         id_hi,

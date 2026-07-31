@@ -1057,7 +1057,7 @@ mod tests {
         let mut exact_verifier = OneRowAir::new(FormulaEval { formula: exact }, trace);
         assert!(
             air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
-            "{label}: production formula must reject"
+            "{label}: the exact formula must reject the input"
         );
     }
 

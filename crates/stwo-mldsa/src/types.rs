@@ -12,7 +12,7 @@
 //! NTT, evaluation, and Keccak relations. The private-key verifier therefore
 //! accepts [`MlDsaPrivateKeyPublicInput`] and cannot receive stable key data.
 //!
-//! ## `t1` form (M4 consumption)
+//! ## Decoded `t1` form
 //!
 //! `t1` is stored **decoded** (`[[u32; N]; K]`, coefficients in `[0, 2^10)`) —
 //! the form witness generation needs. Public-key mode evaluates
@@ -38,23 +38,22 @@ pub const T1_COEFFICIENT_BOUND: u32 = 1 << 10;
 pub type HintPoly = [u8; N];
 
 /// Public verifier input for a hosted device statement whose ML-DSA public key
-/// and signature remain private. The request-bound device message is the only
-/// ML-DSA value the verifier needs outside the proof.
+/// and signature are witness-only. The request-bound device message is the
+/// only clear ML-DSA value the verifier needs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MlDsaPrivateKeyPublicInput {
     pub message: Vec<u8>,
 }
 
-/// Every input needed to (a) verify an ML-DSA-65 signature with the M1 reference
-/// and (b) generate the proving witness (M2).
+/// Inputs to verify an ML-DSA-65 signature and generate its proof witness.
 ///
-/// Field-by-field mapping to FIPS 204 notation and the S5a worksheet:
+/// Field mapping to FIPS 204 notation:
 /// - `rho`   — matrix seed `ρ`; public mode computes `Â = ExpandA(ρ)`
 ///   natively, private-key mode proves it through `NttCell`.
 /// - `t1`    — public key vector `t1` (decoded); public mode treats
 ///   `t1_i·2^d` as a public term, private-key mode proves its packed binding.
-/// - `tr`    — `tr = H(pk, 512)`; absorbed into `µ`. Carried so the witness
-///   generator need not re-decode/re-hash the public key to obtain it.
+/// - `tr`    — `tr = H(pk, 512)`; absorbed into `µ`. Proof constructors derive
+///   it from `pkEncode` before use.
 /// - `message` — the full COSE `Sig_structure` (pure mode, empty context); the
 ///   `M` absorbed into `µ = H(tr ‖ 0x00 ‖ 0x00 ‖ M, 512)`.
 /// - `c_tilde` — commitment hash `c̃` (private); `SampleInBall` seed.
@@ -67,7 +66,8 @@ pub struct MlDsaVerifyInput {
     /// Public-key vector `t1`, `k` polynomials, coefficients in `[0, 2^10)`.
     #[serde(with = "flat_u32_kn")]
     pub t1: [T1Poly; K],
-    /// `tr = H(pk, 512)`, the 64-byte public-key digest.
+    /// Storage for `tr = H(pk, 512)`. Proof constructors derive this value from
+    /// `pkEncode`.
     #[serde(with = "flat_bytes")]
     pub tr: [u8; 64],
     /// The full COSE `Sig_structure` (pure mode, empty context).
@@ -118,8 +118,8 @@ impl MlDsaVerifyInput {
         }
     }
 
-    /// Re-encode the public key to FIPS 204 `pkEncode` wire bytes so the M1
-    /// reference verifier (which ingests raw bytes) can be driven from this
+    /// Re-encode the public key to FIPS 204 `pkEncode` bytes so the reference
+    /// verifier, which ingests raw bytes, can use this
     /// decoded input. Inverse of `pk_decode`.
     pub fn encode_pk(&self) -> Vec<u8> {
         crate::reference::encoding::pk_encode(&self.rho, &self.t1)

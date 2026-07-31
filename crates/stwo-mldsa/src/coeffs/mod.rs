@@ -1,5 +1,5 @@
-//! `mldsa_coeffs` — the tall stacked AIR component for the S5a integer-lift
-//! (worksheet `tasks/parity/S5a-integer-lift-worksheet.md`, option a′).
+//! This module implements the tall stacked AIR component for the ML-DSA
+//! integer-lift constraints.
 //!
 //! Every witnessed / carry polynomial's balanced base-`B` (`B = 2^9`) digits are
 //! stacked into contiguous Horner groups ([`layout`]). z/w pair two three-digit
@@ -9,8 +9,8 @@
 //!   * for carry rows, range-checks `|C| ≤ 2^20` via a `C+2^20` 13+8 split;
 //!   * recomposes both packed z/w coefficients (the first through
 //!     `recomp_cell`, the second directly from its digit triplet);
-//!   * enforces the exact z-norm `|z| ≤ γ1−β−1 = 524_091` (two-sided offset, §3.4
-//!     review flag — NOT a 2^20 window);
+//!   * enforces the exact z-norm `|z| ≤ γ1−β−1 = 524_091` with a two-sided
+//!     offset;
 //!   * enforces the ternary `c ∈ {−1,0,1}` via a `{0,1,2}` membership lookup;
 //!   * runs the bivariate Horner accumulator (interaction tree) at the drawn
 //!     `(r,s)`, emitting `P̂(r,s)` at each group end into [`EvalAtRsRelation`].
@@ -38,12 +38,13 @@
 //!  is_norm, is_c, is_w, paired_continue, w_bind_id, c_bind_id` — all
 //! row-index-deterministic.
 //!
-//! ## Degree worksheet — EVERY base constraint degree ≤ 2.
+//! ## Constraint degrees
+//!
+//! Each base constraint has degree 2 or less.
 //! Four-way LogUp batching reaches degree 5, so the unlocked bound is
 //! `log_size + 2`. The interaction-tree Horner `[-1,0]` mask remains safe under
-//! the engine's uniform composition split; this WO-Q14 migration follows the
-//! `decomp` precedent. The ternary remains a LOOKUP, not the cubic
-//! `c(c−1)(c+1)`.
+//! the engine's uniform composition split. The `decomp` component uses the same
+//! design. The ternary remains a LOOKUP, not the cubic `c(c−1)(c+1)`.
 //! | site | degree |
 //! |------|--------|
 //! | enabler boolean `e(1−e)` | 2 |
@@ -79,36 +80,29 @@ use layout::{groups, Group, Kind, CARRY_DIGITS, MAX_DIGITS};
 use relations::CoeffsRelations;
 use tables::RcKind;
 
-#[cfg(any(test, feature = "attack-hooks"))]
+#[cfg(test)]
 thread_local! {
     static RANGE_BOUNDARY_ATTACK: core::cell::RefCell<Option<RcKind>> =
         const { core::cell::RefCell::new(None) };
 }
 
-/// Test-only range-gate attack. Shared fraction streams cannot isolate one kind
-/// without multiplying a witness value by a selector (degree 3), so the hook
-/// replaces every stream occupied by `kind` with its first excluded value.
-/// This preserves every non-lookup constraint and exercises the real shared
-/// relation/table path at the exact `log_size + 1` degree bound.
-#[doc(hidden)]
-#[cfg(any(test, feature = "attack-hooks"))]
-pub struct CoeffsRangeBoundaryGuard;
+#[cfg(test)]
+struct CoeffsRangeBoundaryGuard;
 
-#[cfg(any(test, feature = "attack-hooks"))]
+#[cfg(test)]
 impl Drop for CoeffsRangeBoundaryGuard {
     fn drop(&mut self) {
         RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = None);
     }
 }
 
-#[doc(hidden)]
-#[cfg(any(test, feature = "attack-hooks"))]
-pub fn install_range_boundary_attack(kind: RcKind) -> CoeffsRangeBoundaryGuard {
+#[cfg(test)]
+fn install_range_boundary_attack(kind: RcKind) -> CoeffsRangeBoundaryGuard {
     RANGE_BOUNDARY_ATTACK.with(|attack| *attack.borrow_mut() = Some(kind));
     CoeffsRangeBoundaryGuard
 }
 
-#[cfg(any(test, feature = "attack-hooks"))]
+#[cfg(test)]
 fn attacked_stream_boundary(stream: usize) -> Option<u32> {
     RANGE_BOUNDARY_ATTACK.with(|attack| {
         attack.borrow().and_then(|kind| {
@@ -124,17 +118,17 @@ fn attacked_stream_boundary(stream: usize) -> Option<u32> {
     })
 }
 
-#[cfg(any(test, feature = "attack-hooks"))]
+#[cfg(test)]
 fn attacked_stream_value<E: EvalAtRow>(stream: usize, value: E::F) -> E::F {
     attacked_stream_boundary(stream).map_or(value, |boundary| E::F::from(m31(boundary)))
 }
 
-// --- Norm bound (worksheet §3.4): γ1 − β − 1 = 524_091. -----------------------
+// Norm bound: γ1 − β − 1 = 524_091.
 /// `γ1 − β − 1` for ML-DSA-65 (`γ1 = 2^19`, `β = τ·η = 49·4 = 196`).
 pub const Z_NORM_BOUND: i64 = 524_091;
-/// Carry offset `2^20` (worksheet §3.3).
+/// Carry offset `2^20`.
 pub const CARRY_OFFSET: i64 = 1 << 20;
-/// Digit offset `2^8` into the 2^9 window (worksheet §3.1).
+/// Digit offset `2^8` into the `2^9` window.
 pub const DIGIT_OFFSET: u32 = 1 << 8;
 
 // --- Base column indices ------------------------------------------------------
@@ -180,7 +174,7 @@ pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     for t in 0..MAX_DIGITS {
         ids.push(pre_id(&digit_mask_name(t)));
     }
-    // `is_w` / `w_bind_id` / `c_bind_id` (M6): the row-index-deterministic
+    // `is_w`, `w_bind_id`, and `c_bind_id` provide the row-index-deterministic
     // selectors + keys the WCell / CCell binding yields need. On a paired w row,
     // `w_bind_id` is the first key and the otherwise-idle `c_bind_id` column is
     // the second key. On c rows `c_bind_id = m` exactly as before.
@@ -495,8 +489,8 @@ impl FrameworkEval for CoeffsEval {
         let c_bind_id = eval.get_preprocessed_column(pre_id("c_bind_id"));
 
         // --- Base columns ---
-        // COL_ENABLER remains committed for layout compatibility even though
-        // active-row gates are carried by preprocessed selector masks.
+        // COL_ENABLER is a committed Boolean column. Preprocessed selectors
+        // gate the active rows.
         let enabler = eval.next_trace_mask();
         let digit: Vec<E::F> = (0..MAX_DIGITS).map(|_| eval.next_trace_mask()).collect();
         let recomp_cell = eval.next_trace_mask();
@@ -518,7 +512,7 @@ impl FrameworkEval for CoeffsEval {
         // C0: enabler boolean (ungated).
         eval.add_constraint(enabler.clone() * (one.clone() - enabler.clone()));
 
-        // C1: tail-digit zero — cells past the live count must be 0 (I-1 free var).
+        // C1: cells after the live digit count must be zero.
         for t in 0..MAX_DIGITS {
             eval.add_constraint((one.clone() - live_mask[t].clone()) * digit[t].clone());
         }
@@ -568,7 +562,7 @@ impl FrameworkEval for CoeffsEval {
                 + is_digit.clone() * digit_offset.clone()
                 + is_carry.clone() * carry_offset.clone()
                 - two_pow_13.clone() * carry_hi[t].clone();
-            #[cfg(any(test, feature = "attack-hooks"))]
+            #[cfg(test)]
             let value = attacked_stream_value::<E>(t, value);
             let bound_id = is_digit.clone() * rc9_id.clone() + is_carry.clone() * rc13_id.clone();
             eval.add_to_relation(RelationEntry::base(
@@ -580,7 +574,7 @@ impl FrameworkEval for CoeffsEval {
         // Slot 5: sixth digit rc9. Carry highs are interleaved below.
         let gate = is_digit.clone() * live_mask[5].clone();
         let value = digit[5].clone() + is_digit.clone() * digit_offset;
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(5, value);
         let bound_id = is_digit.clone() * rc9_id;
         eval.add_to_relation(RelationEntry::base(
@@ -594,7 +588,7 @@ impl FrameworkEval for CoeffsEval {
         let bound = E::F::from(M31::from_u32_unchecked(Z_NORM_BOUND as u32));
         let value = carry_hi[2].clone() + recomp_cell.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_a_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(6, value);
         let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
         eval.add_to_relation(RelationEntry::base(
@@ -604,7 +598,7 @@ impl FrameworkEval for CoeffsEval {
         ));
 
         let value = carry_hi[3].clone() + norm_a_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(7, value);
         let bound_id = is_carry.clone() * rc8_id.clone()
             + is_norm.clone() * rc7_id.clone()
@@ -617,7 +611,7 @@ impl FrameworkEval for CoeffsEval {
 
         let value = carry_hi[4].clone() - recomp_cell.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_b_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(8, value);
         let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
         eval.add_to_relation(RelationEntry::base(
@@ -627,7 +621,7 @@ impl FrameworkEval for CoeffsEval {
         ));
 
         let value = norm_b_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(9, value);
         let bound_id = is_norm.clone() * rc7_id.clone();
         eval.add_to_relation(RelationEntry::base(
@@ -640,7 +634,7 @@ impl FrameworkEval for CoeffsEval {
         // simultaneously range-check carry highs 0/1 on disjoint carry rows.
         let value = second_recomp_expr.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm2_a_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(10, value);
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
@@ -649,7 +643,7 @@ impl FrameworkEval for CoeffsEval {
         ));
 
         let value = carry_hi[0].clone() + norm2_a_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(11, value);
         let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc7_id.clone();
         eval.add_to_relation(RelationEntry::base(
@@ -660,7 +654,7 @@ impl FrameworkEval for CoeffsEval {
 
         let value =
             -second_recomp_expr.clone() + is_norm.clone() * bound - two_pow_13 * norm2_b_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(12, value);
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
@@ -669,7 +663,7 @@ impl FrameworkEval for CoeffsEval {
         ));
 
         let value = carry_hi[1].clone() + norm2_b_hi.clone();
-        #[cfg(any(test, feature = "attack-hooks"))]
+        #[cfg(test)]
         let value = attacked_stream_value::<E>(13, value);
         let bound_id = is_carry.clone() * rc8_id + is_norm.clone() * rc7_id;
         eval.add_to_relation(RelationEntry::base(
@@ -1010,7 +1004,7 @@ pub fn gen_coeffs_interaction(
                 };
                 match selected {
                     Some((value, kind)) => {
-                        #[cfg(any(test, feature = "attack-hooks"))]
+                        #[cfg(test)]
                         let value = attacked_stream_boundary(stream).map_or(value, m31);
                         (one, relations.range.combine(&[value, m31(kind.bound_id())]))
                     }
@@ -1040,7 +1034,7 @@ pub fn gen_coeffs_interaction(
         &mut entries,
         &mut claimed,
     );
-    // C9 two WCell YIELDs (−1), preserving each original `(i·N+m, w)` tuple.
+    // C9 two WCell YIELDs (−1), one for each `(i·N+m, w)` tuple.
     for slot in 0..Kind::W.coefficients_per_row() {
         push_entry(
             &|coset| match &coset_digits[coset] {
@@ -1149,6 +1143,54 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
 #[cfg(test)]
 mod packed_tests {
     use super::*;
+    use crate::proof::{prove_coeffs, verify_coeffs};
+    use crate::reference::encoding::{pk_decode, sig_decode};
+    use crate::reference::sponge::shake256;
+    use crate::{generate_witness, MlDsaVerifyInput};
+    use ml_dsa::signature::{Keypair, Signer};
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use stwo::core::pcs::PcsConfig;
+
+    fn boundary_input(seed: u64, message: &[u8]) -> MlDsaVerifyInput {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut secret_seed = [0; 32];
+        rng.fill(&mut secret_seed);
+        let signing_key = SigningKey::<MlDsa65>::from_seed(&secret_seed.into());
+        let verifying_key = signing_key.verifying_key();
+        let signature = signing_key.sign(message);
+        let public_key: EncodedVerifyingKey<MlDsa65> = verifying_key.encode();
+        let signature: EncodedSignature<MlDsa65> = signature.encode();
+        let public_key_decoded = pk_decode(public_key.as_slice()).expect("public key decodes");
+        let signature_decoded = sig_decode(signature.as_slice()).expect("signature decodes");
+        let (tr, _) = shake256(&[public_key.as_slice()], 64);
+        MlDsaVerifyInput::from_decoded(
+            &public_key_decoded,
+            &signature_decoded,
+            tr.try_into().expect("tr has 64 bytes"),
+            message.to_vec(),
+        )
+    }
+
+    fn boundary_proof_rejects(kind: RcKind, seed: u64, message: &[u8]) {
+        let _guard = install_range_boundary_attack(kind);
+        let input = boundary_input(seed, message);
+        let witness = generate_witness(&input).expect("witness builds");
+        let rejected =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                match prove_coeffs(witness, input, PcsConfig::default()) {
+                    Ok(proof) => verify_coeffs(&proof, PcsConfig::default()).is_err(),
+                    Err(_) => true,
+                }
+            }))
+            .unwrap_or(true);
+        assert!(
+            rejected,
+            "{} first-excluded value must be rejected",
+            kind.name()
+        );
+    }
 
     #[test]
     fn paired_recomposition_uses_independent_base_b_triplets() {
@@ -1188,5 +1230,30 @@ mod packed_tests {
         assert_eq!(left.for_kind(RcKind::Ternary)[2], 1);
         assert_eq!(left.for_kind(RcKind::Rc13).iter().sum::<u32>(), 0);
         assert_eq!(left.for_kind(RcKind::Rc7).iter().sum::<u32>(), 0);
+    }
+
+    #[test]
+    fn split_coeffs_rc9_boundary_rejects() {
+        boundary_proof_rejects(RcKind::Rc9, 3010, b"split-rc9");
+    }
+
+    #[test]
+    fn split_coeffs_rc13_boundary_rejects() {
+        boundary_proof_rejects(RcKind::Rc13, 3011, b"split-rc13");
+    }
+
+    #[test]
+    fn split_coeffs_rc8_boundary_rejects() {
+        boundary_proof_rejects(RcKind::Rc8, 3012, b"split-rc8");
+    }
+
+    #[test]
+    fn split_coeffs_rc7_boundary_rejects() {
+        boundary_proof_rejects(RcKind::Rc7, 3013, b"split-rc7");
+    }
+
+    #[test]
+    fn split_coeffs_ternary_boundary_rejects() {
+        boundary_proof_rejects(RcKind::Ternary, 3014, b"split-ternary");
     }
 }

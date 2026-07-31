@@ -1,4 +1,4 @@
-//! LogUp relation contracts for the `mldsa_decomp` component (M5, [DECOMP]+[HINT]).
+//! LogUp relation contracts for the `mldsa_decomp` component.
 //!
 //! Cross-component bindings ([`WCellRelation`], [`HashIoRelation`]) live in
 //! [`crate::binding`]; this module adds only the four range-table instances the
@@ -7,7 +7,7 @@
 //! | relation | arity | tuple | provider | consumer |
 //! |----------|-------|-------|----------|----------|
 //! | `WCell`  | 2 | `(w_bind_id, w)` | coeffs W rows (−1) | decomp (+1) |
-//! | `HashIo` | 3 | `(stream_id, byte_pos, byte)` | decomp w1Encode (+1) | sponge/M6 or test (−1) |
+//! | `HashIo` | 3 | `(stream_id, byte_pos, byte)` | decomp w1Encode (+1) | sponge or test (−1) |
 //! | `Rc4`    | 1 | `v ∈ [0,2^4)` | rc4 table | w1, w1' |
 //! | `Rc13`   | 1 | `v ∈ [0,2^13)` | rc13 table | w0 two-sided lo |
 //! | `Rc7`    | 1 | `v ∈ [0,2^7)`  | rc7 table | w0 two-sided hi |
@@ -43,7 +43,7 @@ impl DecompRelations {
         }
     }
 
-    /// Composed-statement constructor (M6): draw only the decomp-private range
+    /// Composed-statement constructor. Draw only the private decomp range
     /// tables and reuse SHARED `wcell` (from coeffs) and `hash_io` (from the
     /// c̃-chain sponge) instances so the w-binding and w1Encode absorb bytes
     /// cancel across components. Private draw order matches [`Self::draw`].

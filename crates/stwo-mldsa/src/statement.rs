@@ -1,6 +1,6 @@
-//! `MlDsaAir` — the composed in-circuit ML-DSA-65 statement (M6).
+//! `MlDsaAir` composes in-circuit ML-DSA-65 verification.
 //!
-//! ONE air-core module pair ([`MlDsaProver`] impl `Air`+`AirProver`,
+//! One air-core module pair ([`MlDsaProver`] impl `Air`+`AirProver`,
 //! [`MlDsaVerifier`] impl `Air`) proves the entire ML-DSA-65 verification via a
 //! single [`air_core::prove`] / [`air_core::verify`] call. It stitches together:
 //!
@@ -13,25 +13,24 @@
 //!   * `decomp` — [DECOMP]+[HINT]; consumes W-cells, yields the 768 `w1Encode`
 //!     bytes into the c̃-absorb stream.
 //!   * `sib`         — SampleInBall FSM; consumes C-cells + the SIB squeeze stream.
-//!   * `msglink`     — the public message-byte producer (M7 swap point).
+//!   * `msglink` — the public message-byte producer for standalone mode.
 //!   * public-byte links / bridges / sinks ([`crate::sponge_link`]) that feed
 //!     public prefixes, move bytes between the remaining HashIo streams, and
 //!     close every squeeze balance. Hosted-private-key mode computes `tr` in
-//!     the shared Keccak service from field-id-1 private `pkEncode` bytes.
+//!     the shared Keccak service from private `pkEncode` bytes in field 1.
 //!
 //! The remaining SHAKE-256 signature chains are jobs of the proof-wide
-//! [`stwo_keccak::service::KeccakServiceProver`], which owns the rotated
-//! sponge + keccak + round + tables ONCE for all hosted instances and
+//! [`stwo_keccak::service::KeccakServiceProver`], which owns the vertical
+//! sponge, Keccak, round, and table components once for all hosted instances and
 //! publishes the drawn [`KeccakRelations`] through a
 //! [`SharedKeccakRelations`] handle this module consumes. The instance exposes
 //! its sponge job shapes via [`keccak_job_shapes`] / [`MlDsaProver::keccak_jobs`]
 //! so the host can build the service, and takes an explicit per-instance
-//! `stream_base` so HashIo stream ids stay globally unique under the ONE
+//! `stream_base` so HashIo stream identifiers stay globally unique under the
 //! shared relation set.
 //!
-//! Any drift between `layout()`, `claimed_sums()`, `write_trace()`,
-//! `write_interaction()`, `build_components()`, `components()` breaks
-//! verification.
+//! `layout()`, `claimed_sums()`, `write_trace()`, `write_interaction()`,
+//! `build_components()`, and `components()` must use the same component order.
 
 use num_traits::Zero;
 use serde::{Deserialize, Serialize};
@@ -94,12 +93,12 @@ use crate::sampleinball::{self, SibEval};
 // Composition-layer stream-id namespacing.
 // =============================================================================
 //
-// Since S1 every hosted ML-DSA instance shares ONE drawn HashIo relation (the
-// service's), so stream ids must be globally unique per instance. Each id is
+// Every hosted ML-DSA instance shares the service's HashIo relation. Thus,
+// stream identifiers must be unique for each instance. Each identifier is
 // `stream_base + OFFSET`; the per-instance `stream_base` is an explicit
 // constructor parameter (deterministic, mixed into the transcript). The
-// offsets keep the legacy single-instance values at `stream_base = 0`. The
-// decomp / sib offsets ([`STREAM_ID_CTILDE_ABSORB`] = 0,
+// offsets at `stream_base = 0` are the unprefixed identifiers. The decomp and
+// SIB offsets ([`STREAM_ID_CTILDE_ABSORB`] = 0,
 // [`STREAM_ID_SIB_SQUEEZE`] = 1) live in `binding.rs`. Bases retain the
 // protocol's 128-wide namespace stride.
 
@@ -123,7 +122,7 @@ pub const STREAM_BASE_STRIDE: u32 = 128;
 /// SHAKE-256 rate in bytes (block length of a squeeze).
 const RATE: usize = 136;
 
-/// Frozen maximum byte length of the request-derived device COSE
+/// Fixed maximum byte length of the request-derived device COSE
 /// `Sig_structure` in the TS13 demo profile.
 ///
 /// The measured request corpus selects 1024 bytes. Hosted-private-key proofs
@@ -131,37 +130,31 @@ const RATE: usize = 136;
 /// layout, preprocessed root, or Keccak permutation schedule.
 pub const DEVICE_SIG_STRUCTURE_CAPACITY: usize = 1_024;
 
-/// The `field_id` the HOST yields the whole ML-DSA message (Sig_structure)
-/// window under, on the shared [`FieldBytesRelation`], in hosted mode. The mdoc
-/// issuer SHA pass exposes the µ-absorb message bytes under this id; the mldsa
-/// msg bridge requires them under the same id. Distinct from the standalone
-/// `MSG_FIELD_ID` (which keys the self-drawn `MsgLinkRelation`).
+/// Field identifier for the hosted ML-DSA message on the shared
+/// [`FieldBytesRelation`].
+///
+/// The host yields the complete `Sig_structure` under this identifier. The µ
+/// bridge consumes the same tuples.
 pub const HOSTED_MSG_FIELD_ID: u32 = 0;
 /// The normalized private `pkEncode` field yielded by the mdoc key binder.
 ///
-/// It deliberately shares the host-drawn [`FieldBytesRelation`] with
-/// [`HOSTED_MSG_FIELD_ID`]. The distinct field id keeps the two byte domains
-/// disjoint without introducing another relation draw (which would create a
-/// U6 → U9 → U7 module-order cycle).
+/// This field uses the host-drawn [`FieldBytesRelation`] with
+/// [`HOSTED_MSG_FIELD_ID`]. The different field identifier separates the byte
+/// domains. This design does not draw another relation and does not cause a
+/// cycle in module order.
 pub const HOSTED_DEVICE_PK_FIELD_ID: u32 = 1;
 
-/// Transcript tag separating hosted-private-key statements from every
-/// existing public-key mode while keeping legacy modes byte-for-byte stable.
+/// Transcript tag for hosted private-key statements.
 const HOSTED_PRIVATE_KEY_MODE_TAG: u64 = 0x4d4c_4453_4150_4b01;
 
-// =============================================================================
-// Perm-id namespacing plan for the composed SHAKE chains.
-// =============================================================================
+// Permutation-id layout for the composed SHAKE chains.
 
-/// Disjoint `perm_id_base` assignment across the remaining SHAKE-256 sponge
-/// chains (M3 carry-forward): each chain's Keccak-f[1600] permutation ids are
-/// offset so the shared [`stwo_keccak::relations::KeccakStateRelation`] never
-/// crosses chains. Public-message instances omit the µ chain (`n_mu = 0`).
+/// Models the contiguous permutation-id ranges of the SHAKE-256 chains.
+/// Public-message instances omit the µ chain (`n_mu = 0`).
 ///
-/// Since S1 the assignment is executed by
+/// The actual assignment is performed by
 /// [`stwo_keccak::sponge_v::JobList::new`] over the proof-wide concatenated
-/// job list (this struct documents the per-instance invariant and remains the
-/// reference for the disjointness argument).
+/// job list. Tests use this struct to check the same range boundaries.
 #[derive(Clone, Copy, Debug)]
 pub struct PermIdPlan {
     pub mu_base: usize,
@@ -199,8 +192,8 @@ pub struct MlDsaProof {
     /// The keccak service module's claimed sums (`[sponge_v, keccak, round,
     /// tables ×9]`) — the standalone proof composes `[service, mldsa]`.
     pub service_claimed_sums: Vec<SecureField>,
-    /// Opaque post-interaction payloads; production carries the Keccak
-    /// service's round-GKR proof in its module slot.
+    /// Opaque post-interaction payloads. The Keccak service stores its
+    /// round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
@@ -236,7 +229,7 @@ fn validate_device_message_capacity(message_len: usize) -> Result<(), PrivateKey
 
 /// The instance's SHAKE256 signature-job shapes, stream ids offset by
 /// `stream_base`. `native_mu` omits the private µ job.
-/// Perm-id bases stay 0 — the proof-wide [`stwo_keccak::sponge_v::JobList`]
+/// Permutation-id bases stay 0. The proof-wide [`stwo_keccak::sponge_v::JobList`]
 /// stamps the global plan over the concatenated job list.
 fn shapes(message_len: usize, stream_base: u32, native_mu: bool, private_key: bool) -> Shapes {
     debug_assert!(!(native_mu && private_key));
@@ -406,9 +399,8 @@ fn mix_public(
     private_key: bool,
     stream_base: u32,
 ) {
-    // Instance role/domain separation: two hosted instances with compatible
-    // shapes must still produce disjoint transcripts, so a device claim tree
-    // can never be replayed against the revocation slot (or vice versa).
+    // Mix the instance role into the transcript. This prevents replay between
+    // same-shaped device and revocation instances.
     channel.mix_u64(namespace.len() as u64);
     for b in namespace.as_bytes() {
         channel.mix_u64(*b as u64);
@@ -447,8 +439,9 @@ fn mix_public(
     // instance's bridges/sinks/decomp/sib use under the SHARED relation set.
     // (The sponge job shapes themselves are mixed ONCE by the keccak service.)
     channel.mix_u64(stream_base as u64);
-    // NOTE: c̃ and µ stay PRIVATE — never mixed; they flow only through HashIo.
-    // group_evals are mixed with the claimed sums (post base-commit).
+    // c̃ and µ are not mixed as public values. They flow only through HashIo.
+    // The transcript is transparent and can expose witness-derived data.
+    // group_evals are mixed with the claimed sums after the base commitment.
 }
 
 // =============================================================================
@@ -461,10 +454,9 @@ fn bridge_log_size(len: usize) -> u32 {
 
 /// Verifier-native `tr = SHAKE256(pkEncode(ρ,t1), 64)`.
 ///
-/// Public-key constructors overwrite the carried `input.tr` field with this
-/// value before mixing or building any component. Hosted-private-key mode
-/// computes `tr` only as a private service witness; its verifier input contains
-/// only the public message.
+/// Public-key constructors write this value to `input.tr` before they mix the
+/// transcript or build a component. Hosted private-key mode computes `tr` only
+/// as a private service witness.
 pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
     let bytes = full_squeeze(&input.encode_pk(), 1);
     let mut tr = [0u8; 64];
@@ -473,7 +465,7 @@ pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
 }
 
 /// Verifier-native public-message `µ = SHAKE256(tr ‖ 0x00 ‖ 0x00 ‖ M, 64)`.
-/// `tr` is recomputed from `pkEncode`; no carried `input.tr` byte is trusted.
+/// This function derives `tr` from `pkEncode`.
 pub fn native_public_mu(input: &MlDsaVerifyInput) -> [u8; 64] {
     let mut absorbed = Vec::with_capacity(66 + input.message.len());
     absorbed.extend_from_slice(&native_tr(input));
@@ -694,9 +686,10 @@ fn sink_evals(
 // Preprocessed ids + generation (positional).
 // =============================================================================
 
-/// Preprocessed column ids in commit order. msglink + public links contribute NONE;
-/// the keccak side (sponges/keccak/round/tables) lives in the SERVICE module
-/// since S1 and contributes nothing here; private bridges + remaining sinks do.
+/// Preprocessed column identifiers in commit order. Message links and public
+/// links contribute no columns. The Keccak service owns the sponge, Keccak,
+/// round, and table columns. Private bridges and remaining sinks contribute
+/// columns here.
 ///
 /// This is called BEFORE relations are drawn (air-core commits the preprocessed
 /// tree first), so the bridge/sink descriptors use `dummy()` relations — their
@@ -1553,20 +1546,21 @@ pub struct MlDsaProver {
     /// Hosted mode: the host's shared message-source relation handle. `None` for
     /// standalone (the self-drawn `msglink` producer).
     shared_field: Option<SharedFieldRelation>,
-    /// The keccak service's shared relations handle (REQUIRED — the service
-    /// module must be composed before this one and draw into it).
+    /// Shared Keccak-service relations. The service module must draw these
+    /// relations before this module uses them.
     keccak_handle: SharedKeccakRelations,
     /// Hosted mode: the proof-wide range relation published by the shared
     /// table provider. Standalone mode draws and provides its own relation.
     shared_range: Option<SharedRangeRelation>,
-    /// Instance namespace: role/domain tag mixed into the transcript and
-    /// prefixed onto every instance-local preprocessed id (SIB schedule,
-    /// bridges, sinks). "" = legacy single-instance ids. REQUIRED
-    /// (distinct per instance) when a proof hosts more than one ML-DSA module.
+    /// Instance role and domain tag. It is mixed into the transcript and
+    /// prefixes each instance-local preprocessed identifier. An empty value
+    /// leaves the identifiers unprefixed.
+    /// Use a distinct value for each instance when a proof hosts more than one
+    /// ML-DSA module.
     namespace: String,
     /// Per-instance stream-id base (multiples of [`STREAM_BASE_STRIDE`]):
     /// keeps this instance's HashIo stream ids disjoint from every other
-    /// instance under the ONE shared relation set. Mixed into the transcript.
+    /// instance under the shared relation set. Mixed into the transcript.
     stream_base: u32,
     /// Private-message mode: mix only `message.len()` into the transcript; the
     /// bytes flow exclusively through the host's FieldBytesRelation.
@@ -1576,12 +1570,12 @@ pub struct MlDsaProver {
     private_key_base: Option<PrivateKeyBase>,
     private_device_evals: Option<PrivateDeviceEvals>,
     relations: Option<Relations>,
-    // rc multiplicity columns stashed between write_trace and write_interaction.
+    // Range-check multiplicity columns stored between trace phases.
     coeffs_rc_mult: Vec<ColEval>,
     coeffs_rc_uses: RcUses,
     decomp_rc_mult: Vec<ColEval>,
     sib_rc_mult: Vec<ColEval>,
-    // bridge byte payloads stashed for the interaction phase.
+    // Bridge byte payloads stored for the interaction phase.
     decomp_w1_bytes: Vec<u8>,
     sponge_outputs: SpongeOutputs,
     group_evals: Vec<SecureField>,
@@ -1686,7 +1680,7 @@ impl MlDsaProver {
         )
     }
 
-    /// Hosted PUBLIC-message constructor (S4): tr and µ are recomputed
+    /// Hosted public-message constructor. It recomputes tr and µ
     /// natively from the public key and message, and µ is constrained directly
     /// as the c̃-absorb prefix. No shared field relation or upstream byte
     /// conveyor is required. Must not be combined with
@@ -2473,7 +2467,7 @@ impl MlDsaVerifier {
         )
     }
 
-    /// Hosted PUBLIC-message constructor (S4) — mirror of
+    /// Hosted public-message constructor that mirrors
     /// [`MlDsaProver::hosted_public`].
     pub fn hosted_public(
         input: MlDsaVerifyInput,

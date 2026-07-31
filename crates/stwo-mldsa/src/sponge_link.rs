@@ -1,18 +1,18 @@
 //! Sponge-chain glue for the composed statement: HashIo *bridges* and
 //! public-byte links that stitch the SHAKE-256 chains together.
 //!
-//! All four chains and every mldsa component draw the SAME
-//! [`crate::binding::HashIoRelation`] (re-exported from stwo-keccak), so a byte
+//! All chain components draw the same [`crate::binding::HashIoRelation`],
+//! which is re-exported from stwo-keccak. A byte
 //! yielded (+) on one stream and required (−) on another balances through the
-//! global LogUp. These small components move bytes between streams:
+//! global LogUp. These components move bytes between streams:
 //!
-//! - [`PublicPrefixEval`] — provides or requires fixed PUBLIC bytes on a HashIo
+//! - [`PublicPrefixEval`] provides or requires fixed public bytes on a HashIo
 //!   stream. It feeds verifier-native `tr ‖ 0x00 ‖ 0x00` into a private
 //!   µ-absorb, or verifier-native µ directly into c̃-absorb for public messages.
-//! - [`Bridge`] — for each `i` requires `(src_stream, src_off+i, byte)` (−) and
+//! - [`Bridge`] requires `(src_stream, src_off+i, byte)` (−) and
 //!   yields `(dst_stream, dst_off+i, byte)` (+), where `byte` is ONE committed
-//!   trace cell used on BOTH sides (so the moved byte is provably identical; no
-//!   value constraint needed). Used for private µ→c̃, w1Encode→c̃, and c̃→SIB
+//!   trace cell used on both sides. This constrains the two values to be equal.
+//!   Bridges connect private µ→c̃, w1Encode→c̃, and c̃→SIB
 //!   seams. A variant with `src_relation = MsgLink` bridges private/standalone
 //!   message bytes into µ-absorb.
 //!
@@ -43,7 +43,7 @@ use crate::binding::{HashIoRelation, MsgLinkRelation};
 /// A component that provides (`yield_positive = true`) or requires
 /// (`yield_positive = false`) a list of PUBLIC bytes on `dst_stream` at
 /// positions `dst_off + i`. The bytes are Eval CONSTANTS (both sides construct
-/// the Eval from public data — the `io_provider` pattern), so the tuples are
+/// the Eval from public data with the `io_provider` pattern. Thus, the tuples are
 /// pinned to the public values with no committable cell to forge. Single packed
 /// row (`LOG_N_LANES`), lane-0 enabler.
 #[derive(Clone)]
@@ -52,7 +52,7 @@ pub struct PublicPrefixEval {
     pub dst_off: u32,
     pub bytes: Vec<u8>,
     /// Number of relation entries compiled into the component. It equals
-    /// `bytes.len()` for legacy fixed inputs and the profile capacity for the
+    /// `bytes.len()` for fixed inputs and the profile capacity for the
     /// variable public device message. Inactive entries use zero numerator and
     /// a canonical zero byte.
     pub entry_capacity: usize,
@@ -69,8 +69,8 @@ impl PublicPrefixEval {
     /// Every denominator is an Eval CONSTANT (the yielded tuples are public
     /// bytes at fixed positions), so batching the whole entry list into a
     /// single `finalize_logup_batched(len)` column keeps the batched
-    /// constraint at degree ≤ 2 — numerator `enabler` (degree 1) times
-    /// degree-0 denominator products — within the `log + 1` bound.
+    /// constraint at degree ≤ 2. The numerator `enabler` has degree 1 and the
+    /// denominator products have degree 0.
     pub fn n_interaction_cols(&self) -> usize {
         SECURE_EXTENSION_DEGREE
     }
@@ -147,7 +147,7 @@ impl FrameworkEval for PublicPrefixEval {
 
 /// All-batched lane-0 fraction column builder (`(numerator, denom)` per entry):
 /// folds the whole entry list into ONE column, exactly like
-/// `finalize_logup_batched(entries.len())` — start from the first fraction,
+/// `finalize_logup_batched(entries.len())`. Start from the first fraction,
 /// then `num = d·num + n·den, den = den·d`.
 fn gen_lane0_fracs(entries: &[(SecureField, SecureField)]) -> (Vec<ColEval>, SecureField) {
     let zero = SecureField::from(m31(0));
@@ -183,16 +183,15 @@ pub enum SrcRelation {
     HashIo(HashIoRelation, u32, u32),
     /// `(field_id, byte_index, byte)` on the MsgLink relation (the msg producer).
     MsgLink(MsgLinkRelation, u32),
-    /// `(field_id, byte_index, byte)` on the SHARED [`FieldBytesRelation`] (the
-    /// hosted-mode message source: the host's SHA field-exposure yields the
-    /// Sig_structure bytes under this relation). Same tuple shape as `MsgLink`.
+    /// `(field_id, byte_index, byte)` on the shared [`FieldBytesRelation`].
+    /// The host yields the `Sig_structure` bytes on this relation.
     FieldBytes(FieldBytesRelation, u32),
 }
 
-/// Instance-namespace prefix for preprocessed ids. Empty namespace keeps the
-/// legacy (single-instance) id format; a non-empty namespace makes the ids of
-/// two hosted ML-DSA instances disjoint so air-core tree-0 first-writer-wins
-/// dedup cannot alias one instance's shape-dependent columns to the other's.
+/// Prefix for instance-local preprocessed identifiers.
+///
+/// An empty namespace adds no prefix. A non-empty namespace prevents two
+/// hosted instances from using the same shape-dependent column identifiers.
 pub(crate) fn ns_prefix(ns: &str) -> String {
     if ns.is_empty() {
         String::new()
@@ -213,7 +212,7 @@ fn bridge_pre_id(ns: &str, tag: &str, name: &str) -> PreProcessedColumnId {
 #[derive(Clone)]
 pub struct BridgeEval {
     pub tag: &'static str,
-    /// Instance namespace ("" = legacy single-instance ids).
+    /// Instance namespace. An empty value adds no prefix.
     pub ns: String,
     pub log_size: u32,
     pub src: SrcRelation,
@@ -398,11 +397,11 @@ impl FrameworkEval for BridgeEval {
 /// unbalanced. `SqueezeSink` requires `(stream, off+i, byte)` (−) for the tail
 /// `off..off+len`, committing each `byte` as a trace cell. The sink's bytes are
 /// the sponge's actual squeezed bytes (public-derivable from the witness), so it
-/// is not a soundness surface — it only closes the balance.
+/// only closes the LogUp balance.
 #[derive(Clone)]
 pub struct SqueezeSinkEval {
     pub tag: &'static str,
-    /// Instance namespace ("" = legacy single-instance ids).
+    /// Instance namespace. An empty value adds no prefix.
     pub ns: String,
     pub log_size: u32,
     pub stream: u32,

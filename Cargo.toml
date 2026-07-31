@@ -2,9 +2,7 @@
 members = [
     "crates/air-core",
     "crates/stwo-sha256",
-    "crates/predicates",
     "crates/eu-id-prover",
-    "crates/eu-id-ffi",
     "crates/sdk",
     "crates/stwo-keccak",
     "crates/stwo-mldsa",
@@ -14,11 +12,6 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-
-[profile.bench]
-inherits = "release"
-lto = "fat"
-codegen-units = 1
 
 [profile.release]
 lto = "fat"
@@ -31,11 +24,7 @@ stwo-air-utils = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f39939ea
 stwo-air-utils-derive = { git = "https://github.com/0xLucqs/stwo.git", rev = "4f39939eacd0c5efc8ee157e4215a250ca29168f" }
 serde = { version = "1", features = ["derive"] }
 num-traits = "0.2"
-mimalloc = "0.1"
 
-# Workspace-wide lint configuration. Every crate opts in with `[lints]
-# workspace = true`, so the whole workspace shares one clippy baseline and a
-# single place to tighten it. `make check` runs clippy with `-D warnings`,
-# which escalates every lint below to a hard error in CI.
+# All workspace crates use these Clippy settings.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

@@ -1,9 +1,9 @@
-//! `KeccakService` — the ONE keccak side of a composed proof (S1).
+//! `KeccakService` provides the shared Keccak components for a composed proof.
 //!
 //! An air-core module pair ([`KeccakServiceProver`] impl `Air`+`AirProver`,
-//! [`KeccakServiceVerifier`] impl `Air`) that owns, exactly once per proof:
+//! [`KeccakServiceVerifier`] impl `Air`) owns these items once per proof:
 //!
-//! 1. the rotated job-list sponge ([`crate::sponge_v`]) — every SHAKE-128/256
+//! 1. the job-list sponge ([`crate::sponge_v`]) for every SHAKE-128/256
 //!    sponge job of every hosted instance, one row per permutation;
 //! 2. the `keccak` permutation component and the `keccak_round` component;
 //! 3. the nine spread lookup tables ([`crate::tables_air`]);
@@ -20,7 +20,7 @@
 //! against the shared relations; stream ids must be globally unique per
 //! instance (the host assigns per-instance stream-id bases). The service mixes
 //! every job shape into the transcript; the schedule preprocessed ids embed a
-//! digest of the full job list (I-5).
+//! digest of the full job list.
 
 use num_traits::Zero;
 use stwo::core::air::Component;
@@ -194,7 +194,7 @@ impl ServiceClaims {
     }
 }
 
-/// The round GKR tie-back component — prover and verifier flavors of the
+/// The prover and verifier forms of the round GKR tie-back component.
 /// `MleEval` component over the δ-folded coeff column.
 enum TieBack {
     Prover(Box<MleEvalProverComponent<'static, RoundCoeffOracle>>),
@@ -399,11 +399,11 @@ pub struct KeccakServiceProver {
     relations: Option<KeccakRelations>,
     claims: ServiceClaims,
     built: Option<Built>,
-    /// Round GKR offload state, staged phase by phase:
-    /// `write_interaction` → `round_gkr` (fractions + claimed sum);
-    /// `prove_post_interaction` → `gkr_blob` + `tie_back` + `coeff_mle`;
+    /// Round GKR state for each prover step:
+    /// `write_interaction` creates `round_gkr`;
+    /// `prove_post_interaction` creates `gkr_blob`, `tie_back`, and `coeff_mle`;
     /// `write_post_interaction` commits the tie-back trace;
-    /// `build_components` consumes `coeff_mle` into the MleEval component.
+    /// `build_components` gives `coeff_mle` to the MleEval component.
     round_gkr: Option<RoundGkrProver>,
     tie_back: Option<RoundTieBack>,
     gkr_blob: Vec<u8>,
@@ -412,7 +412,7 @@ pub struct KeccakServiceProver {
 
 impl KeccakServiceProver {
     /// Build the service from job shapes + their witness byte streams.
-    /// `shapes[i]`'s `perm_id_base` is ignored — the service stamps the global
+    /// The service ignores `shapes[i]`'s `perm_id_base` and sets the global
     /// perm-id plan cumulatively over the concatenated list. Stream ids must
     /// already be globally unique across instances (host responsibility).
     pub fn new(shapes: Vec<Shape>, messages: Vec<Vec<u8>>, handle: SharedKeccakRelations) -> Self {
@@ -473,7 +473,7 @@ impl KeccakServiceProver {
 
     /// Test-only tamper hook: mutate the sponge run's row data before proving.
     /// The base trace AND the sponge interaction trace are generated from this
-    /// data, while the keccak/round/table witnesses stay honest — exactly the
+    /// data while the keccak, round, and table witnesses stay unchanged. This is the
     /// adversarial "lying sponge" configuration the negative tests exercise.
     #[doc(hidden)]
     pub fn run_mut(&mut self) -> &mut SpongeVRun {

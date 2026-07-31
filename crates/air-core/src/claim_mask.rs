@@ -22,9 +22,8 @@ use stwo_constraint_framework::{EvalAtRow, TraceLocationAllocator};
 
 use crate::{Air, AirProver, Ch, Mc, TreeLayout};
 
-/// A 256-row mask already supplies the TS13 profile's full masking floor while
-/// allowing its fixed log-8 merged-SHA component to join the same zero-sum
-/// ring as the semantic parsers.
+/// The TS13 profile uses a 256-row minimum mask. This size lets its log-8
+/// merged-SHA component join the zero-sum ring with the semantic parsers.
 pub const CLAIM_MASK_MIN_LOG_SIZE: u32 = 8;
 pub const CLAIM_MASK_TRACE_COLUMNS: usize = 4;
 

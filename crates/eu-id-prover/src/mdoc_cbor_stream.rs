@@ -1,12 +1,13 @@
 //! Sound byte-stream parsing for mdoc CBOR.
 //!
-//! This component is deliberately semantic-agnostic. It consumes every byte of
-//! a SHA-padded (or raw nested) stream from [`FieldBytesRelation`], proves that
-//! exactly one definite-length CBOR root occupies the raw prefix, and yields one
-//! [`ParsedCborByteRelation`] tuple for every raw-CBOR byte. A later semantic
-//! component must consume every yielded tuple; it can identify genuine tokens
-//! from the constrained parent/ordinal metadata without verifier-supplied byte
-//! offsets.
+//! This component does not interpret semantics.
+//! It consumes each byte of a SHA-padded or raw nested stream.
+//! The bytes come from [`FieldBytesRelation`].
+//! The component proves that one definite-length CBOR root occupies the prefix.
+//! It emits one [`ParsedCborByteRelation`] tuple for each raw CBOR byte.
+//! A semantic component must consume each emitted tuple.
+//! Constrained parent and ordinal metadata identify genuine tokens.
+//! The verifier does not supply byte offsets.
 
 use std::fmt;
 
@@ -35,8 +36,7 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator, ORIGINAL_TRACE_IDX,
 };
 
-/// Longfellow uses four counters. Eight keeps the same state-machine shape
-/// while covering the deeper nested maps used by current mdoc fixtures.
+/// Use eight counters to support the nested maps in the TS13 mdoc profile.
 pub(crate) const MDOC_CBOR_MAX_DEPTH: usize = 8;
 const MDOC_CBOR_MIN_LOG_SIZE: u32 = 9;
 const MDOC_CBOR_MAX_LOG_SIZE: u32 = 17;
@@ -46,18 +46,20 @@ const SHA_LENGTH_BYTES: usize = 8;
 
 relation!(ParsedCborByteRelation, 15);
 
-/// One parser-instance output channel. The parser draws and sets this relation;
-/// a semantic component reads the same handle and consumes every parsed row.
+/// One parser-instance output channel.
+/// The parser draws and sets this relation.
+/// A semantic component consumes each parsed row through the same handle.
 /// Callers must allocate a distinct handle per parser instance.
 pub(crate) type SharedParsedCborByteRelation = SharedRelation<ParsedCborByteRelation>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MdocCborInputMode {
-    /// Consume the complete SHA compression input, including marker, zeros and
-    /// the final eight-byte big-endian bit length.
+    /// Consume the complete SHA compression input.
+    /// This input includes the marker, zeros, and final big-endian bit length.
     ShaPadded,
-    /// Consume raw CBOR bytes only. The unique root must end at the final active
-    /// byte. This is used for recursively parsing selected tag-24 bstr content.
+    /// Consume raw CBOR bytes only.
+    /// The unique root must end at the final active byte.
+    /// Use this mode to parse selected tag-24 byte-string content.
     Raw,
 }
 
@@ -657,9 +659,10 @@ fn inactive_row_values() -> Vec<M31> {
     let mut values = (0..MDOC_CBOR_TRACE_COLS)
         .map(|_| random_m31_cell())
         .collect::<Vec<_>>();
-    // These columns encode the variable-length schedule itself. Cross-row
-    // phase constraints force the inactive suffix to zero; every private
-    // byte/metadata/state column remains independently blinded.
+    // These columns encode the variable-length schedule.
+    // Cross-row constraints set the inactive suffix to zero.
+    // Other private byte, metadata, and state cells use independent random
+    // filler values. STWO does not hide committed cells.
     values[trace_col::ACTIVE] = m31(0);
     for value in &mut values[trace_col::CBOR..=22] {
         *value = m31(0);
@@ -762,7 +765,7 @@ struct MdocCborStreamEval {
     mode: MdocCborInputMode,
     stream_id: u32,
     input_relation: FieldBytesRelation,
-    parsed_relation: Option<ParsedCborByteRelation>,
+    parsed_relation: ParsedCborByteRelation,
 }
 
 impl FrameworkEval for MdocCborStreamEval {
@@ -830,7 +833,8 @@ impl FrameworkEval for MdocCborStreamEval {
         let child_ordinals: [[E::F; 2]; MDOC_CBOR_MAX_DEPTH] =
             std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]));
 
-        // Active rows are exactly one phase; the all-zero suffix cannot reactivate.
+        // Active rows form one contiguous prefix.
+        // The zero suffix cannot become active.
         boolean_constraint(&mut eval, one.clone(), active.clone());
         boolean_constraint(&mut eval, one.clone(), cbor.clone());
         boolean_constraint(&mut eval, one.clone(), marker.clone());
@@ -1000,8 +1004,8 @@ impl FrameworkEval for MdocCborStreamEval {
             eval.add_constraint(cbor.clone() * (actual.clone() - expected));
         }
 
-        // ai=24 must encode >=24; wider encodings must have a nonzero high
-        // byte region, which is equivalent to their canonical lower bound.
+        // Canonical CBOR requires an argument of at least 24 for ai=24.
+        // Wider arguments require a nonzero high byte.
         let short_slack = short_slack_bits
             .iter()
             .enumerate()
@@ -1077,12 +1081,12 @@ impl FrameworkEval for MdocCborStreamEval {
             .fold(zero.clone(), |sum, value| sum + value);
         eval.add_constraint(cbor.clone() * (selected_sum.clone() - header.clone()));
         let mut selected_counter = zero.clone();
-        for level in 0..MDOC_CBOR_MAX_DEPTH {
-            boolean_constraint(&mut eval, cbor.clone(), selected[level].clone());
-            selected_counter += selected[level].clone() * counters[level][0].clone();
-            for higher in level + 1..MDOC_CBOR_MAX_DEPTH {
+        for (level, (selected_value, counter)) in selected.iter().zip(counters.iter()).enumerate() {
+            boolean_constraint(&mut eval, cbor.clone(), selected_value.clone());
+            selected_counter += selected_value.clone() * counter[0].clone();
+            for higher_counter in counters.iter().skip(level + 1) {
                 eval.add_constraint(
-                    cbor.clone() * selected[level].clone() * counters[higher][0].clone(),
+                    cbor.clone() * selected_value.clone() * higher_counter[0].clone(),
                 );
             }
         }
@@ -1091,8 +1095,8 @@ impl FrameworkEval for MdocCborStreamEval {
         );
         eval.add_constraint(first.clone() * (remaining.clone()));
         eval.add_constraint(first.clone() * (counters[0][0].clone() - one.clone()));
-        for level in 1..MDOC_CBOR_MAX_DEPTH {
-            eval.add_constraint(first.clone() * counters[level][0].clone());
+        for counter in counters.iter().skip(1) {
+            eval.add_constraint(first.clone() * counter[0].clone());
         }
         for level in 0..MDOC_CBOR_MAX_DEPTH {
             eval.add_constraint(first.clone() * map_kinds[level][0].clone());
@@ -1209,14 +1213,13 @@ impl FrameworkEval for MdocCborStreamEval {
         boolean_constraint(&mut eval, cbor.clone(), map_key.clone());
         boolean_constraint(&mut eval, cbor.clone(), map_value.clone());
 
-        for level in 0..MDOC_CBOR_MAX_DEPTH {
-            eval.add_constraint(
-                active.clone() * (one.clone() - cbor.clone()) * counters[level][0].clone(),
-            );
+        for counter in &counters {
+            eval.add_constraint(active.clone() * (one.clone() - cbor.clone()) * counter[0].clone());
         }
 
-        // Consume every input byte. The row-index key plus the active-prefix
-        // constraints make omissions, duplicates and reorderings impossible.
+        // Consume each input byte.
+        // The row index and active-prefix constraints prevent omissions.
+        // They also prevent duplicates and changes to the byte order.
         eval.add_to_relation(RelationEntry::new(
             &self.input_relation,
             E::EF::from(active.clone()),
@@ -1227,26 +1230,28 @@ impl FrameworkEval for MdocCborStreamEval {
             ],
         ));
 
-        if let Some(relation) = &self.parsed_relation {
-            let tuple = [
-                m31_const::<E>(self.stream_id),
-                row_index,
-                byte,
-                header,
-                major,
-                argument[0].clone(),
-                argument[1].clone(),
-                argument[2].clone(),
-                argument[3].clone(),
-                content_len,
-                depth,
-                parent_header_index,
-                child_ordinal,
-                map_key,
-                map_value,
-            ];
-            eval.add_to_relation(RelationEntry::new(relation, -E::EF::from(cbor), &tuple));
-        }
+        let tuple = [
+            m31_const::<E>(self.stream_id),
+            row_index,
+            byte,
+            header,
+            major,
+            argument[0].clone(),
+            argument[1].clone(),
+            argument[2].clone(),
+            argument[3].clone(),
+            content_len,
+            depth,
+            parent_header_index,
+            child_ordinal,
+            map_key,
+            map_value,
+        ];
+        eval.add_to_relation(RelationEntry::new(
+            &self.parsed_relation,
+            -E::EF::from(cbor),
+            &tuple,
+        ));
         eval.finalize_logup_in_pairs();
         eval
     }
@@ -1278,7 +1283,7 @@ pub(crate) struct MdocCborStream {
     log_size: u32,
     witness: Option<MdocCborWitness>,
     input_handle: SharedFieldRelation,
-    parsed_handle: Option<SharedParsedCborByteRelation>,
+    parsed_handle: SharedParsedCborByteRelation,
     interaction_claim: Option<MdocCborStreamInteractionClaim>,
     component: Option<MdocCborComponent>,
 }
@@ -1289,7 +1294,7 @@ impl MdocCborStream {
         mode: MdocCborInputMode,
         stream_id: u32,
         input: SharedFieldRelation,
-        parsed: Option<SharedParsedCborByteRelation>,
+        parsed: SharedParsedCborByteRelation,
     ) -> Result<Self, MdocCborStreamError> {
         let witness = MdocCborWitness::new(&bytes, mode)?;
         Ok(Self {
@@ -1304,13 +1309,12 @@ impl MdocCborStream {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn verifier(
         mode: MdocCborInputMode,
         stream_id: u32,
         log_size: u32,
         input: SharedFieldRelation,
-        parsed: Option<SharedParsedCborByteRelation>,
+        parsed: SharedParsedCborByteRelation,
         interaction_claim: MdocCborStreamInteractionClaim,
     ) -> Result<Self, MdocCborStreamError> {
         if !(MDOC_CBOR_MIN_LOG_SIZE..=MDOC_CBOR_MAX_LOG_SIZE).contains(&log_size) {
@@ -1330,11 +1334,6 @@ impl MdocCborStream {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
     pub(crate) fn interaction_claim(&self) -> &MdocCborStreamInteractionClaim {
         self.interaction_claim
             .as_ref()
@@ -1345,13 +1344,8 @@ impl MdocCborStream {
         self.input_handle.get()
     }
 
-    fn parsed_relation(&self) -> Option<ParsedCborByteRelation> {
-        self.parsed_handle.as_ref().map(SharedRelation::get)
-    }
-
-    fn n_main_lookups(&self) -> usize {
-        // Full input consume plus the optional parsed-byte yield.
-        1 + usize::from(self.parsed_handle.is_some())
+    fn parsed_relation(&self) -> ParsedCborByteRelation {
+        self.parsed_handle.get()
     }
 }
 
@@ -1359,71 +1353,43 @@ fn mdoc_cbor_interaction_trace(
     witness: &MdocCborWitness,
     stream_id: u32,
     input_relation: &FieldBytesRelation,
-    parsed_relation: Option<&ParsedCborByteRelation>,
+    parsed_relation: &ParsedCborByteRelation,
 ) -> (Vec<MdocCborColumnEval>, QM31) {
     let base = mdoc_cbor_base_trace(witness);
     let preprocessed = mdoc_cbor_preprocessed_columns(witness.log_size);
     let n_vec_rows = 1usize << (witness.log_size - LOG_N_LANES);
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> =
-        Vec::with_capacity(2 + usize::from(parsed_relation.is_some()));
-
-    sites.push(
-        (0..n_vec_rows)
-            .map(|vec_row| {
-                let numerator = PackedQM31::from(base[trace_col::ACTIVE].data[vec_row]);
-                let denominator = input_relation.combine(&[
-                    PackedM31::broadcast(m31(stream_id)),
-                    preprocessed[0].data[vec_row],
-                    base[trace_col::BYTE].data[vec_row],
-                ]);
-                (numerator, denominator)
-            })
-            .collect(),
-    );
-
-    if let Some(relation) = parsed_relation {
-        sites.push(
-            (0..n_vec_rows)
-                .map(|vec_row| {
-                    let numerator = -PackedQM31::from(base[trace_col::CBOR].data[vec_row]);
-                    let denominator = relation.combine(&[
-                        PackedM31::broadcast(m31(stream_id)),
-                        preprocessed[0].data[vec_row],
-                        base[trace_col::BYTE].data[vec_row],
-                        base[trace_col::HEADER].data[vec_row],
-                        base[trace_col::MAJOR].data[vec_row],
-                        base[trace_col::ARGUMENT].data[vec_row],
-                        base[trace_col::ARGUMENT + 1].data[vec_row],
-                        base[trace_col::ARGUMENT + 2].data[vec_row],
-                        base[trace_col::ARGUMENT + 3].data[vec_row],
-                        base[trace_col::CONTENT_LEN].data[vec_row],
-                        base[trace_col::DEPTH].data[vec_row],
-                        base[trace_col::PARENT].data[vec_row],
-                        base[trace_col::ORDINAL].data[vec_row],
-                        base[trace_col::MAP_KEY].data[vec_row],
-                        base[trace_col::MAP_VALUE].data[vec_row],
-                    ]);
-                    (numerator, denominator)
-                })
-                .collect(),
-        );
-    }
 
     let mut logup = LogupTraceGenerator::new(witness.log_size);
-    let mut site = 0;
-    while site + 1 < sites.len() {
-        let left = &sites[site];
-        let right = &sites[site + 1];
-        logup.col_from_iter((0..n_vec_rows).map(|row| {
-            let (n0, d0) = left[row];
-            let (n1, d1) = right[row];
-            (n0 * d1 + n1 * d0, d0 * d1)
-        }));
-        site += 2;
-    }
-    if site < sites.len() {
-        logup.col_from_iter((0..n_vec_rows).map(|row| sites[site][row]));
-    }
+    logup.col_from_iter((0..n_vec_rows).map(|vec_row| {
+        let input_numerator = PackedQM31::from(base[trace_col::ACTIVE].data[vec_row]);
+        let input_denominator: PackedQM31 = input_relation.combine(&[
+            PackedM31::broadcast(m31(stream_id)),
+            preprocessed[0].data[vec_row],
+            base[trace_col::BYTE].data[vec_row],
+        ]);
+        let parsed_numerator = -PackedQM31::from(base[trace_col::CBOR].data[vec_row]);
+        let parsed_denominator: PackedQM31 = parsed_relation.combine(&[
+            PackedM31::broadcast(m31(stream_id)),
+            preprocessed[0].data[vec_row],
+            base[trace_col::BYTE].data[vec_row],
+            base[trace_col::HEADER].data[vec_row],
+            base[trace_col::MAJOR].data[vec_row],
+            base[trace_col::ARGUMENT].data[vec_row],
+            base[trace_col::ARGUMENT + 1].data[vec_row],
+            base[trace_col::ARGUMENT + 2].data[vec_row],
+            base[trace_col::ARGUMENT + 3].data[vec_row],
+            base[trace_col::CONTENT_LEN].data[vec_row],
+            base[trace_col::DEPTH].data[vec_row],
+            base[trace_col::PARENT].data[vec_row],
+            base[trace_col::ORDINAL].data[vec_row],
+            base[trace_col::MAP_KEY].data[vec_row],
+            base[trace_col::MAP_VALUE].data[vec_row],
+        ]);
+        (
+            input_numerator * parsed_denominator + parsed_numerator * input_denominator,
+            input_denominator * parsed_denominator,
+        )
+    }));
     logup.finalize_last()
 }
 
@@ -1433,27 +1399,22 @@ impl Air for MdocCborStream {
         channel.mix_u64(self.mode.transcript_tag());
         channel.mix_u64(u64::from(self.stream_id));
         channel.mix_u64(u64::from(self.log_size));
-        channel.mix_u64(u64::from(self.parsed_handle.is_some()));
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        if let Some(handle) = &self.parsed_handle {
-            assert!(
-                !handle.is_set(),
-                "each mdoc CBOR parser instance needs a distinct parsed relation handle"
-            );
-            handle.set(ParsedCborByteRelation::draw(channel));
-        }
+        assert!(
+            !self.parsed_handle.is_set(),
+            "each mdoc CBOR parser instance needs a distinct parsed relation handle"
+        );
+        self.parsed_handle
+            .set(ParsedCborByteRelation::draw(channel));
     }
 
     fn layout(&self) -> TreeLayout {
         TreeLayout {
             preprocessed: vec![self.log_size; MDOC_CBOR_PREPROCESSED_COLS],
             trace: vec![self.log_size; MDOC_CBOR_TRACE_COLS],
-            interaction: vec![
-                self.log_size;
-                self.n_main_lookups().div_ceil(2) * SECURE_EXTENSION_DEGREE
-            ],
+            interaction: vec![self.log_size; SECURE_EXTENSION_DEGREE],
         }
     }
 
@@ -1567,7 +1528,7 @@ impl AirProver for MdocCborStream {
             witness,
             self.stream_id,
             &self.input_relation(),
-            self.parsed_relation().as_ref(),
+            &self.parsed_relation(),
         );
         tb.extend_evals(trace);
         self.interaction_claim = Some(MdocCborStreamInteractionClaim { claimed_sum });
@@ -1578,56 +1539,5 @@ impl AirProver for MdocCborStream {
             .component
             .as_ref()
             .expect("mdoc CBOR component is built")]
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mdoc_private_message::MdocPrivateMessageProvider;
-    use stwo::core::pcs::PcsConfig;
-    use stwo_mldsa::statement::HOSTED_MSG_FIELD_ID;
-
-    #[test]
-    fn default_pcs_proves_the_cbor_degree_bound() {
-        let bytes = vec![0x82, 0x01, 0x02];
-        let handle = SharedFieldRelation::new();
-        let mut provider =
-            MdocPrivateMessageProvider::new(bytes.clone(), vec![0; bytes.len()], handle.clone())
-                .unwrap();
-        let mut parser = MdocCborStream::new(
-            bytes.clone(),
-            MdocCborInputMode::Raw,
-            HOSTED_MSG_FIELD_ID,
-            handle,
-            None,
-        )
-        .unwrap();
-        assert!(parser.store_polynomial_coefficients());
-
-        let proof = air_core::prove(&mut [&mut provider, &mut parser], PcsConfig::default())
-            .expect("default PCS must prove the degree-eight CBOR AIR");
-        let provider_claim = provider.claim().clone();
-        let parser_claim = parser.interaction_claim().clone();
-
-        let handle = SharedFieldRelation::new();
-        let mut provider =
-            MdocPrivateMessageProvider::verifier(bytes.len(), handle.clone(), provider_claim)
-                .unwrap();
-        let mut parser = MdocCborStream::verifier(
-            MdocCborInputMode::Raw,
-            HOSTED_MSG_FIELD_ID,
-            parser.log_size(),
-            handle,
-            None,
-            parser_claim,
-        )
-        .unwrap();
-        air_core::verify_with_expected_preprocessed_root(
-            &mut [&mut provider, &mut parser],
-            &proof,
-            None,
-        )
-        .expect("default-PCS CBOR proof must verify");
     }
 }

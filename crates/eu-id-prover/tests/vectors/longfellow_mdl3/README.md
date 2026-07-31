@@ -1,22 +1,14 @@
-# Longfellow mdoc vector: longfellow_mdl3
+# Longfellow mDL parser fixture
 
-Source: `/Users/lucas/longfellow-zk/lib/circuits/mdoc/mdoc_examples.h` at git commit `d8ad8f65187c7c364a3c2181ad484bcab03f0ec2`.
-Upstream: `https://github.com/google/longfellow-zk.git`.
-License: Apache-2.0, copyright Google LLC.
+`mdoc.cbor` contains the Longfellow `mdoc_tests` entry at index 3. The source
+is [Longfellow ZK](https://github.com/google/longfellow-zk) at commit
+`d8ad8f65187c7c364a3c2181ad484bcab03f0ec2`. The upstream license is
+Apache-2.0.
 
-These files are byte-for-byte extracts of the specified `mdoc_tests` entry.
-Regenerate from the repository root with:
+The Rust tests load only `mdoc.cbor`. The other files record the source values.
 
-```bash
-rtk proxy python3 tools/extract_longfellow_vectors.py --source /Users/lucas/longfellow-zk/lib/circuits/mdoc/mdoc_examples.h
+SHA-256:
+
+```text
+8583f7eb06731c4db7fff8b51a7e5f0649a6328fabb4f11e894f01c87894fbd9  mdoc.cbor
 ```
-
-- mdoc_tests index: `3`
-- description: Sprind-Funke mDL with family_name, birth_date, issue_date, height, age_over_18
-- docType: `org.iso.18013.5.1.mDL`
-- namespace: `org.iso.18013.5.1`
-- transcript bytes: `143`
-- DeviceResponse bytes: `3173`
-- now: `2024-10-01T09:00:00Z`
-- issuer public key x: `0xdc1c1f55cff4cd5c76cf4169278f7217667f86ee81d8669b63f2e19bc12a0c9f`
-- issuer public key y: `0x12355dd0385fed3bc33bedc9781b9aad47b33e4c24704b8d14288b1b3cb45c28`

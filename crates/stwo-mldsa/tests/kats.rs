@@ -6,12 +6,7 @@
 //! reference's verdict — both the valid cases (accept) and the invalid ones
 //! (reject: mutated z / c̃ / hint / message).
 //!
-//! If the vendored file were ever missing, the fetch would be a TODO — but it
-//! is committed, so no network access is needed here.
-//
-// TODO(acvp): the vendored vectors cover only the external+pure group we
-// implement in M1. Extend to the internal / externalMu groups (Algorithm 8 with
-// a supplied µ) when the witness generator gains those entry points.
+//! The file is vendored, so these tests do not use the network.
 
 use serde::Deserialize;
 use stwo_mldsa::reference::verify::verify_internals_with_context;

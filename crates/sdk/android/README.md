@@ -1,100 +1,82 @@
-# eu-id-zk-sdk (Android)
+# EU-ID identity proof SDK for Android
 
-Packages the `sdk` Rust crate into a plug-and-play Android AAR: the UniFFI Kotlin
-bindings, the native `libeuid_zk_sdk.so` for each ABI, and the JNA runtime — all
-behind a single Maven coordinate. Consumers (wallet `:zkp-logic`, the verifier's Android
-`actual`) add one dependency line; nothing is copied or hand-wired.
+This Gradle project packages the Rust SDK as an Android AAR. The AAR contains
+the UniFFI Kotlin bindings and the native library for each supported ABI. The
+published Maven package declares JNA as a transitive dependency.
 
-## Coordinate
+The public Kotlin API contains these functions:
 
-```
-com.kss:eu-id-zk-sdk:0.1.0          // Kotlin package: com.kss.euid.zk.sdk
-```
+- `proveIdentity(IdentityStatement, IdentityWitness)`
+- `verifyIdentity(IdentityStatement, ByteArray)`
 
-## How it works
-
-No third-party Rust/Gradle plugin (the stale `rust-android-gradle` plugin can't
-run on Gradle 9). Two plain Gradle `Exec` tasks drive cargo-ndk + uniffi-bindgen
-directly:
-
-- `cargoNdkBuild` — `cargo ndk` cross-compiles `libeuid_zk_sdk.so` per ABI into `src/main/jniLibs/`.
-- `generateUniffiBindings` — runs the bundled `uniffi-bindgen` into `src/main/kotlin/`.
-
-`preBuild` depends on both; writing into AGP's conventional source dirs means
-they're packaged into the AAR with no source-set DSL. Runs on Gradle 9.x.
-
-The default native library excludes the deterministic issuer demo. For a demo-only build, pass
-the Rust feature explicitly (for example, `cargo build -p sdk --features demo`).
-
-The first `proveIdentity` or `verifyIdentity` call sizes Rayon's global pool to
-the detected performance-core tier. An integrator can call
-`configureProverThreads(threads)` before that first proof operation; a `false`
-return means the value was zero or the pool was already initialized.
+The Maven coordinate is `com.kss:eu-id-zk-sdk:0.1.0`. The Kotlin
+package is `com.kss.euid.zk.sdk`.
 
 ## Prerequisites
 
-- JDK 17+ and Android SDK (Android Studio supplies both).
-- An installed NDK matching `ndkVersion` in `build.gradle.kts` (used by both
-  cargo-ndk and AGP's release strip).
-- `cargo-ndk`: `cargo install cargo-ndk`.
-- The Android Rust targets: `rustup target add aarch64-linux-android x86_64-linux-android`.
+Install these tools:
 
-The Gradle wrapper is committed (`./gradlew`, pinned to Gradle 9.5.0), so no
-system Gradle install is needed — `./gradlew` bootstraps it.
+- JDK 17 or later
+- Android SDK 36
+- The NDK version in `build.gradle.kts`
+- `cargo-ndk`
+- The Rust targets `aarch64-linux-android` and `x86_64-linux-android`
 
-## Build & publish (to Maven Local)
+Set `ANDROID_HOME` or `ANDROID_SDK_ROOT`. You can also put `sdk.dir` in
+`local.properties`.
 
-```bash
-cd crates/sdk/android
-./gradlew publishToMavenLocal      # builds .so (all ABIs) + bindings + AAR -> ~/.m2
-```
+## Build
 
-Local publications overwrite the same development coordinate. After switching SDK branches,
-refresh and rebuild the consuming wallet so its APK cannot retain the previous branch's AAR:
+Run these commands from this directory:
 
 ```bash
-# From the consuming wallet checkout:
-./gradlew --refresh-dependencies :app:assembleDemoDebug
+./gradlew assembleRelease
+./gradlew publishToMavenLocal
 ```
 
-The Android native link uses `--no-undefined`, so a missing dependency such as zstd fails the
-SDK build instead of surfacing later as a JNA `dlopen()` error.
+The build uses the Rust release profile. It creates the native libraries before
+it creates the Kotlin bindings and the AAR. Set `-PndkVersion=<version>` only
+when you must use a different installed NDK.
 
-Useful intermediate tasks:
+Use these tasks for a partial build:
 
-- `./gradlew cargoNdkBuild` — cross-compile `libeuid_zk_sdk.so` per ABI.
-- `./gradlew generateUniffiBindings` — emit `com/kss/euid/zk/sdk/euid_zk_sdk.kt`.
-- `./gradlew assembleRelease` — build the AAR without publishing.
+- `cargoNdkBuild` builds the native libraries.
+- `generateUniffiBindings` creates the Kotlin bindings.
+- `assembleRelease` creates the AAR.
 
-## Test
+## Firebase benchmark
 
-The SDK is exercised by **instrumented tests** (`src/androidTest`), which run on
-an emulator/device and load the bundled ABI `.so` — no host-arch build needed.
+The benchmark host is in `mobile/EuIdBenchAndroid`. Build the current AAR
+first. Then run this command from the repository root:
 
 ```bash
-# with an emulator/device connected:
-./gradlew connectedAndroidTest
+./crates/sdk/android/gradlew -p mobile/EuIdBenchAndroid \
+  assembleRelease assembleReleaseAndroidTest \
+  -Pts13SdkAar=/absolute/path/to/euid-zk-sdk-release.aar
 ```
 
-(JVM unit tests under `src/test` are not used: they'd load the library from the
-host and so would require a separate macOS/Linux `libeuid_zk_sdk` build.)
+Upload these files to Firebase Test Lab:
 
-## Consume
+- `mobile/EuIdBenchAndroid/build/outputs/apk/release/EuIdBenchAndroid-release.apk`
+- `mobile/EuIdBenchAndroid/build/outputs/apk/androidTest/release/EuIdBenchAndroid-release-androidTest.apk`
 
-In the wallet / verifier build:
+Run this test target:
+
+```text
+class com.kss.euid.zk.sdk.Ts13MobileBenchmarkInstrumentedTest#proveIdentity_emitsBenchmarkResult
+```
+
+The test writes one JSON result with the `Ts13MobileBenchmark` log tag. The
+result contains prove time, verify time, proof size, and peak process memory.
+
+## Use the AAR
+
+Add `mavenLocal()` to the repositories of the wallet or verifier. Then add
+this dependency:
 
 ```kotlin
-// settings.gradle.kts (or root build) repositories:
-repositories { mavenLocal(); google(); mavenCentral() }
-
-// module build.gradle.kts:
-dependencies { implementation("com.kss:eu-id-zk-sdk:0.1.0") }
+implementation("com.kss:eu-id-zk-sdk:0.1.0")
 ```
 
-```kotlin
-import com.kss.euid.zk.sdk.proveIdentity
-import com.kss.euid.zk.sdk.verifyIdentity
-// ... ZkPublicStatement, ZkMdocWitness, ZkVerifyResult, PredicateMode, NatMode, ZkException
-```
-
-JNA and the native libs arrive transitively inside the AAR.
+The Maven package supplies the AAR and its JNA dependency. If you use the AAR
+file directly, add JNA 5.19.1 to the application.

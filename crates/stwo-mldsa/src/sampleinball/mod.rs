@@ -1,12 +1,16 @@
-//! `sampleinball_fsm` — FIPS 204 [CHAL] SampleInBall (Alg 29) over the witnessed
+//! `sampleinball_fsm` implements FIPS 204 [CHAL] SampleInBall (Algorithm 29)
+//! over the witnessed
 //! SHAKE squeeze stream.
 //!
-//! Semantic oracle: [`crate::reference::sample_in_ball`]. The reference squeezes
-//! rate blocks on demand: the first 8 bytes are the sign source `s`; then for each target
+//! [`crate::reference::sample_in_ball`] defines the reference behavior. It
+//! squeezes rate blocks on demand. The first 8 bytes are the sign source `s`.
+//! For each target
 //! `i ∈ [N−τ, N)` it rejection-samples `j ← byte` (reject while `byte > i`) and
 //! sets `c[i] = c[j]; c[j] = (−1)^{s&1}; s ≫= 1`.
 //!
-//! ## Layout — two stacked row groups, one committed AIR (log_size 10)
+//! ## Layout
+//!
+//! One committed AIR contains two stacked row groups at log size 10.
 //!
 //! 1. **stream group** (one row per byte in the five-block resource cap): binds
 //!    all 680 bytes from
@@ -21,36 +25,36 @@
 //!    accumulator gated to `τ` on the final c-row, and each `c[m]` bound to the
 //!    coeffs C-group cell via [`CCellRelation`]`(m, c)`.
 //!
-//! ## Soundness scope (documented)
+//! ## Soundness
 //!
-//! This component proves, from the honest witness: (a) the FSM's accept/reject
-//! decisions match the rejection-sampling rule `byte ≤ i` **exactly** (the
-//! security-critical tie of `c`'s support to the stream); (b) `c` is ternary
-//! with **exactly τ** nonzeros (Σc² = τ); (c) `c` equals the coeffs-bound
-//! coefficients; (d) — **the swap-placement gate** — `c` equals SampleInBall's
-//! Fisher–Yates array replayed from the (bound) squeeze stream, via an
+//! This component constrains four properties. (a) The FSM decisions match the
+//! rejection-sampling rule `byte ≤ i`. (b) `c` is ternary and has exactly τ
+//! nonzero coefficients (`Σc² = τ`). (c) `c` equals the coeffs-bound
+//! coefficients. (d) The swap-placement gate constrains `c` to SampleInBall's
+//! Fisher–Yates array replayed from the bound squeeze stream, via an
 //! address-sorted **offline-memory** permutation argument over the [`relations`]
-//! `Mem` channel. Without (d) an adversary could permute the placement of the
-//! ±1's (same multiset, same support size, same Σc²=τ) and pass (a)–(c); the
-//! Mem replay derives placement from the UNCHANGED stream and disagrees with any
-//! permuted `c`. The stream bytes are test-balanced here; M6 connects the proven
-//! sponge squeeze.
+//! `Mem` channel. Without (d), a prover can permute the placement of the
+//! ±1 values while preserving their multiset and pass (a) through (c). The
+//! Mem replay derives placement from the same stream and rejects a
+//! permuted `c`. Standalone tests balance the stream bytes. The composed
+//! statement connects the proven sponge output.
 //!
-//! ## Offline-memory (swap replay) — Cairo-style address-then-timestamp sort
+//! ## Offline-memory swap replay
 //!
 //! Model `c[0..N]` as a memory with addresses `0..N`. Replaying
-//! [`crate::reference::sample_in_ball`] EXACTLY yields an ordered access list
-//! (`ts` strictly increasing): N init writes `(k,0)`, then per step τ a READ
-//! `(j,old_j)` + WRITE `(i,old_j)` + WRITE `(j,sign)`, then N final reads
-//! `(k,c_final[k])`. The final reads consume `COL_C` (the same committed `c` the
-//! ternary/τ/CCell layer pins), so the array's final state IS `c`.
+//! [`crate::reference::sample_in_ball`] yields an ordered access list with
+//! strictly increasing `ts`: N initial writes `(k,0)`, then one read
+//! `(j,old_j)` and two writes `(i,old_j)` and `(j,sign)` for each of τ steps,
+//! then N final reads `(k,c_final[k])`. The final reads consume `COL_C`, which
+//! the ternary, τ, and CCell constraints bind. Thus, the final array state is
+//! `c`.
 //!
 //! Two views live on the same `n_accesses = N + 3τ + N = 659` rows: an
 //! **unsorted** access (emission order) yielded `+` into `Mem`, and the same
 //! multiset **sorted** by `(addr, ts)` required `−`. Equal multisets ⇒ the two
-//! Mem contributions self-cancel (INTERNAL balance). The sorted trace then
-//! enforces, per consecutive pair (all constraints degree ≤ 2, see worksheet in
-//! [`SibEval::evaluate`]): non-decreasing addr, strictly increasing ts within a
+//! Mem contributions cancel internally. For each consecutive pair, the sorted
+//! trace then enforces constraints of degree 2 or less in
+//! [`SibEval::evaluate`]: non-decreasing addr, strictly increasing ts within a
 //! cell, read-value continuity (a READ sees the previous access's value), and
 //! that the first access of each cell is an init WRITE of 0. Last-writer-wins by
 //! ts + the permutation ⇒ the committed `c` is the true SampleInBall output.
@@ -83,7 +87,7 @@ pub const SIGN_BYTES: usize = 8;
 /// SHAKE-256 rate in bytes.
 pub const SHAKE256_RATE: usize = 136;
 
-/// Existing production resource cap for SampleInBall's rejection stream.
+/// Resource cap for the SampleInBall rejection stream.
 ///
 /// One block overruns with probability about 2^-140.25; this five-block cap
 /// overruns with probability about 2^-1448.6. It is deliberately a RESOURCE
@@ -126,7 +130,7 @@ const COL_S_SR_SAME: usize = 21; // same·s_read (witnessed to keep continuity d
 const COL_S_FOC: usize = 22; // first-of-cell = is_access·(1−same) (witnessed, deg 2 pin)
                              // Sign-bit columns — the 8 bits of each sign row's byte (only on the 8 sign rows;
                              // 0 elsewhere). These feed the SignBit channel that ties write-j values to the
-                             // FIPS sign bits (`c[j] = (−1)^bit`), closing part of the free-access-list hole.
+                             // FIPS sign bits (`c[j] = (−1)^bit`).
 const COL_SIGN_BIT0: usize = 23;
 /// Number of sign-bit columns (one per bit of a sign byte).
 pub const SIGN_BIT_COLS: usize = 8;
@@ -155,7 +159,7 @@ fn sign_mask_name(u: usize) -> String {
     format!("sign_mask_{u}")
 }
 
-/// Preprocessed ids in commit order (legacy single-instance ids).
+/// Preprocessed identifiers in commit order for a single instance.
 pub fn sib_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     sib_preprocessed_ids_ns("")
 }
@@ -175,8 +179,8 @@ pub fn sib_preprocessed_ids_ns(ns: &str) -> Vec<PreProcessedColumnId> {
         pre_id("is_sorted"),
         pre_id("sorted_start"),
         pre_id("ts_final"),
-        // FSM↔memory schedule pins (close the free-access-list hole): the core-row
-        // role partition, canonical timestamps, init addresses, and step ordinals.
+        // Bind the core-row roles, timestamps, initial addresses, and step
+        // numbers to the FSM schedule.
         pre_id("step_no"),
         pre_id("is_init"),
         pre_id("is_read_row"),
@@ -217,10 +221,10 @@ fn accepted_prefix_len(stream: &[u8]) -> Result<usize, &'static str> {
     Ok(pos)
 }
 
-/// Validate the inherited on-demand witness stream without panicking.
+/// Validate the witness stream without panicking.
 ///
 /// The stream must end on the canonical SHAKE block containing the 49th
-/// accepted placement and must stay within the existing five-block cap.
+/// accepted placement and must stay within the five-block cap.
 pub fn validate_stream(witness: &MlDsaWitness) -> Result<usize, &'static str> {
     let stream = &witness.sponge.sample_in_ball_squeezed;
     let consumed = accepted_prefix_len(stream)?;
@@ -231,8 +235,7 @@ pub fn validate_stream(witness: &MlDsaWitness) -> Result<usize, &'static str> {
     Ok(consumed)
 }
 
-/// Honest consumed-prefix length. Production entry points call
-/// [`validate_stream`] first; this helper remains for diagnostics and tests.
+/// Return the consumed-prefix length after validation.
 pub fn stream_len(witness: &MlDsaWitness) -> usize {
     validate_stream(witness).expect("validated SampleInBall witness stream")
 }
@@ -493,9 +496,8 @@ pub fn honest_stream_rows(witness: &MlDsaWitness) -> Vec<(u32, u32, bool)> {
     rows
 }
 
-/// Test-attack hook: overrides only `COL_I` on consumed stream rows. This lets
-/// regressions construct a history that balances every old lookup while
-/// violating only the ordered FIPS rejection-sampling transition.
+/// Test hook that overrides only `COL_I` on consumed stream rows. It can make a
+/// balanced history that violates the ordered FIPS sampling transition.
 #[doc(hidden)]
 pub struct ForgedStreamIndicesGuard;
 
@@ -609,7 +611,7 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
             // `c`, not the honest replay's final values. This keeps the Mem
             // permutation internally balanced so the dedicated FSM/sign
             // constraints, rather than an unrelated generator inconsistency,
-            // are what reject exploit regressions.
+            // reject the forged history.
             for k in 0..N {
                 unsorted[N_CORE + k].value = witness.digits.c[k];
             }
@@ -851,7 +853,7 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
 #[derive(Clone)]
 pub struct SibEval {
     pub log_size: u32,
-    /// Instance namespace ("" = legacy single-instance ids).
+    /// Instance namespace. An empty value preserves single-instance identifiers.
     pub ns: String,
     /// The HashIo stream id the SIB squeeze bytes are consumed from. Per
     /// instance under a SHARED keccak relation set: `stream_base +`
@@ -1000,7 +1002,7 @@ impl FrameworkEval for SibEval {
         // to the stream). Accept ⇒ (i − byte) ∈ [0,256): the byte was ≤ i.
         // Reject ⇒ (byte − i − 1) ∈ [0,256): the byte was > i. Each value is
         // degree 1; the gate is a single degree-1 trace flag (accept / reject),
-        // so the logup constraint stays degree ≤ 2 (the M4 +1 bound).
+        // so the LogUp constraint stays at degree 2 or less.
         let accept_lo = (idx.clone() - byte.clone()) - two_pow_8.clone() * accept_hi.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.rc8,
@@ -1046,8 +1048,8 @@ impl FrameworkEval for SibEval {
         eval.add_constraint(c.clone() * csq.clone() - c.clone());
 
         // C5a: witness csq = c² (degree-2 constraint, NOT involving the shifted
-        // interaction mask — keeping the c² product off the accumulator constraint
-        // avoids the M4 `[-1,0]`-mask degree trap). c is zero off the c stage, so
+        // interaction mask. Keeping c² out of the accumulator constraint keeps
+        // the shifted-mask degree in range. c is zero outside the c stage, so
         // the running sum below cannot be padded with unconstrained row values.
         eval.add_constraint(csq.clone() - c.clone() * c.clone());
         eval.add_constraint((one.clone() - is_c.clone()) * c.clone());
@@ -1073,7 +1075,7 @@ impl FrameworkEval for SibEval {
         ));
 
         // =====================================================================
-        // C8: offline-memory (swap replay). Degree worksheet — EVERY row ≤ 2.
+        // C8: offline-memory swap replay. Each row has degree 2 or less.
         // | site                                   | expr                       | deg |
         // | u_write / s_write / s_same booleans    | x(1−x)                     |  2  |
         // | daddr is-zero: daddr·inv == 1−same     | daddr·inv , 1−same         |  2  |
@@ -1086,8 +1088,8 @@ impl FrameworkEval for SibEval {
         // | init: foc·(1−s_write), foc·s_val       | foc·(…)                    |  2  |
         // | rc uses (daddr rc8, dts rc11)          | gate·value                 |  1  |
         // | Mem yields (±combine)                  | gate·combine               |  1  |
-        // The passthrough pins (above) are degree 1. No constraint exceeds 2, so
-        // the `[-1,0]` masks keep the bound at log_size+1 (M4 trap avoided).
+        // The passthrough pins above have degree 1. No constraint exceeds degree
+        // 2, so the `[-1,0]` masks keep the bound at log_size+1.
         // =====================================================================
 
         // C8a: access-flag booleans.
@@ -1111,7 +1113,7 @@ impl FrameworkEval for SibEval {
             not_first.clone()
                 * (s_daddr.clone() * s_daddr_inv.clone() - (one.clone() - s_same.clone())),
         );
-        // The FIRST sorted row (sorted_start) opens a new cell: same == 0.
+        // The first sorted row opens a new cell, so same == 0.
         eval.add_constraint(sorted_start.clone() * s_same.clone());
 
         // C8c: daddr ∈ [0,256) (rc8) — non-decreasing addr. Gated to non-first.
@@ -1175,12 +1177,13 @@ impl FrameworkEval for SibEval {
         ));
 
         // =====================================================================
-        // C9: FSM↔memory schedule pins. Without these the CORE access columns
-        // (u_addr/u_val/u_ts/u_write) are FREE WITNESS: only u_write booleanity +
-        // the Mem yield constrain them, so a prover could commit an arbitrary
+        // C9: FSM↔memory schedule pins. Without these, the core access columns
+        // (u_addr/u_val/u_ts/u_write) are free witness values. Only u_write
+        // booleanity and the Mem yield constrain them, so a prover could commit an arbitrary
         // memory-consistent history and the swap-replay (C8) would be vacuous.
         // The pins force the row roles, canonical timestamps, init writes, and the
-        // schedule-determined write-i address. Degree worksheet — all ≤ 2:
+        // schedule-determined write-i address. All constraints have degree 2
+        // or less:
         // | site                                  | expr                        | deg |
         // | ts == core_ts                         | is_core·(u_ts−core_ts)      |  2  |
         // | u_write role partition                | u_write−(init+wri+wrj)      |  1  |
@@ -1203,7 +1206,7 @@ impl FrameworkEval for SibEval {
         // =====================================================================
         // C10: FSM↔memory tie channels. These bind every CORE access back to the
         // FSM rows so the access list is a deterministic function of the accepted
-        // bytes + FIPS sign bits (not free witness). Degree worksheet — all ≤ 2:
+        // bytes and FIPS sign bits. All constraints have degree 2 or less:
         // | site                          | gate·combine                | deg |
         // | swap accept-yield (×2)        | accept·combine(idx−…, byte) |  2  |
         // | swap read/write-j consume     | role·combine(step_no,u_addr)|  2  |
@@ -1221,8 +1224,8 @@ impl FrameworkEval for SibEval {
         // each consume (step_no, u_addr). Balance ⇒ both memory addresses equal
         // the byte accepted at that step. Accept-count corollary: the consume side
         // demands each key t∈{0..τ−1} exactly twice (τ steps × {read, write-j}), so
-        // exactly one accept row carries each t ⇒ EXACTLY τ accepts (extra/missing
-        // accepts imbalance the Swap channel).
+        // exactly one accept row carries each t. Thus, there are exactly τ
+        // accepts. Extra or missing accepts unbalance the Swap channel.
         let swap_key = idx.clone() - n_minus_tau.clone();
         let swap_accept_tuple = [swap_key.clone(), byte.clone()];
         eval.add_to_relation(RelationEntry::base(
@@ -1310,7 +1313,7 @@ pub struct SibInteraction {
     pub trace: Vec<ColEval>,
     pub claimed_sum: SecureField,
     pub rc_uses: RcUses,
-    /// The stream bytes the FSM consumes (for the test producer / M6 sponge).
+    /// The stream bytes that the FSM consumes.
     pub stream_bytes: Vec<u8>,
     /// The (c_bind_id, c) pairs (for the test coeffs-C producer).
     pub ccell_uses: Vec<(u32, u32)>,

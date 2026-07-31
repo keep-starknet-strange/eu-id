@@ -1,61 +1,12 @@
-//! Trace generation — converts a [`Sha256Witness`] into M31 column data the
-//! Stwo prover can commit to.
+//! Convert a [`Sha256Witness`] into M31 trace columns.
 //!
-//! Layout: **one row per round**, narrow. Natural row index `b · 64 + t` for
-//! block `b`, round `t ∈ [0, 64)`. With `n` blocks the trace has
-//! `next_power_of_two(64 · n)` *slots* per column (at least one padding row —
-//! see [`min_log_size`]). Row `r` is written at the slot returned by
-//! [`row_slot(r, log_size)`] — i.e., in **bit-reversed circle-domain order
-//! with coset index = natural row index**, matching Stwo's standard SIMD/CPU
-//! trace convention. Iterating coset indices walks the rounds in order, which
-//! makes cross-row mask reads at offset `-k` resolve to "`k` rounds earlier"
-//! — the basis of the working-state chain (`b = a@−1`, …), the schedule
-//! recurrence reads (`W@−2, −7, −15, −16`), and the block-chain constraint
-//! (`h_in[t=0] == h_out@−1`, the previous block's `t = 63` row) in
-//! [`crate::constraints`]. Slots past the last real row remain zeroed and are
-//! padding.
+//! Each SHA-256 round uses one natural row. Block `b`, round `t`, uses natural
+//! row `b * 64 + t`. [`row_slot`] maps each natural row to bit-reversed circle
+//! domain order.
 //!
-//! A row of the trace carries (in this order):
-//!
-//! - `enabler` (1 col) — `1` on real rows, `0` on padding rows. Multiplies
-//!   every constraint so padding rows are constraint-free.
-//! - `W` (2 cols, `(lo, hi)`) — the row's schedule word `W[t]`: a message
-//!   word for `t < 16`, the recurrence output for `t ≥ 16`.
-//! - the **round family** (`ROUND_COLS = 216` cols, live on every real row):
-//!   `σ0, σ1, ch, maj, t1, t2, a_new, e_new` (each `(lo, hi)` ⇒ 16 cells),
-//!   4 add carry pairs (⇒ 8 cells), the decoded intermediates of `Σ0(a)` and
-//!   `Σ1(e)` (2 × [`SIGMA_DECODE_COLS`]), then committed operand bits for
-//!   the direct Maj/Ch constraints.
-//! - the **schedule family** (`SCHEDULE_ENTRY_COLS = 70` cols, live only on
-//!   rows with `t ≥ 16`, zero elsewhere): the `σ0`/`σ1` output limbs and add
-//!   carries (6), and committed lower-sigma output bits (64). Recurrence
-//!   inputs are *not* duplicated — they are the `W` columns of earlier rows,
-//!   read via mask offsets `−2, −7, −15, −16`.
-//! - **block-boundary families**, each live on one designated round row of
-//!   its block and zero elsewhere:
-//!   - `t = 0`: `is_first_block` (1), `h_in` (16).
-//!   - `t = 63`: finalization carries (16), `h_out` (16), `is_last_block`
-//!     (1), digest byte view (32).
-//!   - `t = 15`: the §10.4 padding-role block ([`PADDING_ROW_COLS`] = 33);
-//!     the message words it inspects are the `W` columns of rows
-//!     `t = 0..16`, read via mask offsets `0..−15`.
-//! - `enabler_step` (1 col) — C1 contiguity anchor: `1` exactly at the first
-//!   real row (block 0, round 0) when the trace has padding.
-//! - the optional credential-field byte tail (dynamic, live on `t = 15`
-//!   rows; yields are gated to the configured target block in the AIR).
-//!
-//! Per σ-application (`SIGMA_DECODE_COLS = 24`):
-//! `key_s, o_main_s.lo, o_main_s.hi, o2_partial_s.lo, o2_partial_s.hi,
-//!  key_s_complement, o_main_s_complement.lo, o_main_s_complement.hi,
-//!  o2_partial_s_complement.lo, o2_partial_s_complement.hi,
-//!  o2_combined.lo, o2_combined.hi,
-//!  o2_chunks_s (4 bytes),
-//!  o2_chunks_s_complement (4 bytes),
-//!  o2_chunks_combined (4 bytes)`.
-//! The two 5-tuples `[key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi]`
-//! at offsets 0 and 5 are the decode-table lookup keys for the S-side and
-//! S′-side respectively — sharing the read order with the lookup tuple
-//! keeps the AIR `add_to_relation` calls trivially aligned.
+//! A mask offset of `-k` reads the row from `k` rounds earlier. The AIR uses
+//! these offsets for the round state, message schedule, and block hash chain.
+//! [`Layout`] defines the column order.
 //!
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::utils::{
@@ -94,9 +45,8 @@ pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + ROUND_OPERAND_BIT_COLS;
 /// Columns of the schedule family (live for `t ≥ 16`):
 /// `σ0`, `σ1`, carries (= 6), then lower-sigma output bits.
 pub const SCHEDULE_ENTRY_COLS: usize = 6 + SCHEDULE_SIGMA_OUTPUT_BIT_COLS;
-/// Columns dedicated to the per-block padding-role witness (§10.4 of the
-/// validated design), live on each block's `t = 15` row. Laid out in the
-/// order [`write_padding_row`] writes them:
+/// Columns for the per-block padding-role witness. They are active on each
+/// block's `t = 15` row and follow the order in [`write_padding_row`]:
 ///
 /// 1. `is_marker_block` (1)
 /// 2. `is_length_block` (1)
@@ -189,42 +139,20 @@ impl Layout {
     pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 4;
     pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
 
-    /// C1-fix aux column: `enabler_step[r] = enabler[r] · (1 − enabler_prev[r])`.
-    /// This is `1` at the *first* real row in coset order (after a padding
-    /// predecessor) and `0` everywhere else. The constraint
-    /// `(1 − is_first_row) · enabler_step = 0` (emitted in
-    /// `crate::constraints::Sha256Eval`) then forces this "first real row"
-    /// to be exactly row 0 (block 0, round 0) — eliminating the block-skip /
-    /// state-injection variant of the C1 exploit. Using an aux column
-    /// keeps the constraint family degree ≤ 2.
+    /// Contiguity column:
+    /// `enabler_step[r] = enabler[r] * (1 - enabler_prev[r])`. It is `1` at
+    /// the first real row after padding and `0` elsewhere. The AIR requires
+    /// this row to be row zero. The auxiliary column keeps the constraint
+    /// degree at most 2.
     pub const COL_ENABLER_STEP: usize = Self::COL_PADDING_END;
 
-    /// Number of **base** trace columns — the full width when no credential
-    /// field is exposed. The optional field-byte view is a dynamic tail
-    /// appended after this (see [`Self::COL_FIELD_BYTES_START`]).
+    /// Number of base trace columns.
     pub const TOTAL_COLS: usize = Self::COL_ENABLER_STEP + 1;
 
-    /// First column of the optional credential-field byte view.
-    ///
-    /// The field columns are a **dynamic tail** appended after every base
-    /// column (including `enabler_step`), so enabling field exposure never
-    /// shifts a base offset. The first `WORD_BYTES ×` (distinct exposed message
-    /// words) columns are byte columns; multi-block window exposure then
-    /// appends a block counter and one selector per target block (block-0
-    /// legacy exposure has neither). Full padded-stream exposure is the
-    /// constant-width exception: one counter, no byte columns or selectors. See
-    /// [`crate::field_exposure::FieldExposure::n_columns`]. Each `(lo, hi)` limb
-    /// of an exposed word is tied to its two bytes by `limb = 256·b1 + b0` in
-    /// `crate::constraints::Sha256Eval` on the `t = 15` row (which reads the
-    /// exposed words' limbs via `W` mask offsets, the same offsets the
-    /// padding family uses); only the exposed window bytes are yielded across
-    /// the module boundary, gated to each byte's target block.
+    /// First column of the optional padded-stream block counter.
     pub const COL_FIELD_BYTES_START: usize = Self::TOTAL_COLS;
 
-    /// Column of field tail `slot` (`0`-based within the dynamic field tail:
-    /// byte columns packed by decomposed-word then big-endian byte position —
-    /// see [`crate::field_exposure::FieldExposure::yield_column_slot`] — then,
-    /// for multi-block exposure, the block counter and per-yield selectors).
+    /// Return a column in the optional field tail.
     #[inline]
     pub const fn field_byte_col(slot: usize) -> usize {
         Self::COL_FIELD_BYTES_START + slot
@@ -372,10 +300,9 @@ impl Layout {
 /// `word_j = lo + 2¹⁶·hi`, so the high limb supplies the two most-significant
 /// big-endian bytes). The trace generator fills the byte columns from this,
 /// `crate::interaction` combines the digest LogUp tuple from this, and
-/// `crate::constraints` reads the columns back in this order — keeping the
-/// digest provider and any consumer byte-for-byte aligned (interface-contract
-/// item 4). The two bytes of each limb satisfy `limb = 256·b1 + b0`, which is
-/// the decomposition the AIR constrains.
+/// `crate::constraints` reads the columns in this order. Thus, the digest
+/// provider and consumer use the same byte order. The two bytes of each limb
+/// satisfy `limb = 256 * b1 + b0`.
 pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BYTES] {
     let mut out = [0u32; DIGEST_BYTES];
     for (j, limb) in h_out.iter().enumerate() {
@@ -385,9 +312,7 @@ pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BY
     out
 }
 
-/// Materialise the trace for a `Sha256Witness`, with no credential field
-/// exposed (the base width [`Layout::TOTAL_COLS`]). See
-/// [`generate_trace_with_fields`] for the field-exposing variant.
+/// Materialise a trace with no field provider.
 ///
 /// Returns `Vec<Vec<BaseField>>`, one inner `Vec` per column. Length of
 /// every inner `Vec` equals `1 << log_size`, padded with zeros past the
@@ -399,12 +324,7 @@ pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseFie
     generate_trace_with_fields(witness, log_size, &FieldExposure::empty())
 }
 
-/// Materialise the trace for a `Sha256Witness`, additionally committing the
-/// credential-field byte view on every block's `t = 15` row when
-/// `field_exposure` is non-empty.
-///
-/// The field byte columns are appended after every base column; an empty
-/// exposure adds nothing and the result is identical to [`generate_trace`].
+/// Materialise a trace with an optional padded-stream block counter.
 pub fn generate_trace_with_fields(
     witness: &Sha256Witness,
     log_size: u32,
@@ -574,205 +494,6 @@ fn generate_trace_with_fields_scalar_fallback_with_decoys(
     }
     fill_schedule_sigma_bits_columns(&mut cols, log_size);
     cols
-}
-
-/// [`generate_multi_trace_base_columns`] as `Vec<Vec<BaseField>>` (one
-/// inner `Vec` per column, storage order) — the shape the constraint-level
-/// tests consume.
-pub fn generate_multi_trace(
-    witnesses: &[&Sha256Witness],
-    log_size: u32,
-    config: &crate::slots::MultiSlotConfig,
-) -> Vec<Vec<BaseField>> {
-    generate_multi_trace_base_columns(witnesses, log_size, config)
-        .into_iter()
-        .map(BaseColumn::into_cpu_vec)
-        .collect()
-}
-
-/// Materialise the multi-slot merged trace: slot `s`'s message occupies the
-/// leading blocks of region `[s·slot_rows, (s+1)·slot_rows)`; all remaining
-/// rows (in-slot padding and the tail) are fresh one-block SHA decoys with
-/// public flags zeroed — the single-instance zk padding semantics, applied
-/// per 64-row padding block.
-///
-/// Field tail: slot `s`'s self-contained tail (bytes → counter? →
-/// selectors?) starts at `Layout::TOTAL_COLS + config.field_tail_base(s)`.
-/// Every slot's byte columns are filled on every real `t = 15` row from
-/// THAT row's block words (the decomposition constraint is global); each
-/// counter carries the row's slot-local block index; selectors are one-hot
-/// only on their own slot's target rows.
-pub fn generate_multi_trace_base_columns(
-    witnesses: &[&Sha256Witness],
-    log_size: u32,
-    config: &crate::slots::MultiSlotConfig,
-) -> Vec<BaseColumn> {
-    use rayon::prelude::*;
-
-    let n_rows = 1usize << log_size;
-    let slot_rows = config.slot_rows();
-    let n_slots = config.n_slots();
-    assert_eq!(witnesses.len(), n_slots, "one witness per slot");
-    assert!(log_size >= LOG_N_LANES);
-    assert!(n_slots * slot_rows <= n_rows, "schedule exceeds the trace");
-    for (s, witness) in witnesses.iter().enumerate() {
-        assert!(
-            witness.blocks.len() * ROWS_PER_BLOCK < slot_rows,
-            "slot {s} message ({} blocks) does not leave in-slot padding \
-             (capacity {} blocks)",
-            witness.blocks.len(),
-            config.max_blocks_per_slot(),
-        );
-    }
-
-    let total_cols = Layout::TOTAL_COLS + config.n_field_columns();
-
-    // One fresh decoy witness per fully-padding 64-row block (in-slot pads +
-    // tail). Indexed by `row / ROWS_PER_BLOCK`.
-    let n_block_regions = n_rows / ROWS_PER_BLOCK;
-    let is_real_row = |row: usize| -> Option<(usize, usize)> {
-        let s = row / slot_rows;
-        if s >= n_slots {
-            return None;
-        }
-        let local = row % slot_rows;
-        (local < witnesses[s].blocks.len() * ROWS_PER_BLOCK).then_some((s, local))
-    };
-    let decoys: Vec<Option<Sha256Witness>> = {
-        let mut rng = OsRng;
-        (0..n_block_regions)
-            .map(|region| {
-                let row = region * ROWS_PER_BLOCK;
-                debug_assert_eq!(
-                    is_real_row(row).is_some(),
-                    is_real_row(row + ROWS_PER_BLOCK - 1).is_some(),
-                    "block regions are uniformly real or padding"
-                );
-                match is_real_row(row) {
-                    Some(_) => None,
-                    None => Some(random_one_block_decoy_witness(&mut rng)),
-                }
-            })
-            .collect()
-    };
-
-    let mut row_values = (0..n_rows)
-        .into_par_iter()
-        .map(|row_idx| {
-            let t = row_idx % ROWS_PER_BLOCK;
-            let mut values = vec![BaseField::from(0u32); total_cols];
-            match is_real_row(row_idx) {
-                Some((s, local)) => {
-                    let witness = witnesses[s];
-                    let block_idx = local / ROWS_PER_BLOCK;
-                    let last_block_idx = witness.blocks.len() - 1;
-                    write_round_row_values(
-                        &mut values,
-                        witness,
-                        block_idx,
-                        t,
-                        n_rows,
-                        block_idx == 0,
-                        block_idx == last_block_idx,
-                        &FieldExposure::empty(),
-                    );
-                    // enabler_step: 1 exactly at each slot start (its coset
-                    // predecessor is padding — in-slot padding of the
-                    // previous slot, or the wraparound tail for slot 0).
-                    if local == 0 {
-                        values[Layout::COL_ENABLER_STEP] = BaseField::from(1u32);
-                    }
-                    write_multi_field_tail_values(&mut values, config, s, witness, block_idx, t);
-                }
-                None => {
-                    let decoy = decoys[row_idx / ROWS_PER_BLOCK]
-                        .as_ref()
-                        .expect("padding region has a decoy witness");
-                    write_round_row_values(
-                        &mut values,
-                        decoy,
-                        0,
-                        t,
-                        n_rows,
-                        false,
-                        false,
-                        &FieldExposure::empty(),
-                    );
-                    values[Layout::COL_ENABLER] = BaseField::from(0u32);
-                    values[Layout::COL_IS_FIRST_BLOCK] = BaseField::from(0u32);
-                    values[Layout::COL_IS_LAST_BLOCK] = BaseField::from(0u32);
-                    values[Layout::COL_ENABLER_STEP] = BaseField::from(0u32);
-                    values[Layout::COL_PADDING_START..Layout::COL_PADDING_END]
-                        .fill(BaseField::from(0u32));
-                    // Field tail stays zero on padding rows (mirrors
-                    // `disabled_decoy_row_values`).
-                }
-            }
-            values
-        })
-        .collect::<Vec<_>>();
-    fill_schedule_sigma_bits_rows(&mut row_values);
-
-    let packed_rows = 1usize << (log_size - LOG_N_LANES);
-    (0..total_cols)
-        .into_par_iter()
-        .map(|column| {
-            let data = (0..packed_rows)
-                .map(|packed_row| {
-                    PackedM31::from_array(core::array::from_fn(|lane| {
-                        let storage_index = packed_row * N_LANES + lane;
-                        let circle_index = bit_reverse_index(storage_index, log_size);
-                        let coset_index =
-                            circle_domain_index_to_coset_index(circle_index, log_size);
-                        row_values[coset_index][column]
-                    }))
-                })
-                .collect();
-            BaseColumn::from_simd(data)
-        })
-        .collect()
-}
-
-/// Fill every slot's field-tail cells of one real row (slot `s`, slot-local
-/// block `block_idx`, round `t`).
-fn write_multi_field_tail_values(
-    row: &mut [BaseField],
-    config: &crate::slots::MultiSlotConfig,
-    s: usize,
-    witness: &Sha256Witness,
-    block_idx: usize,
-    t: usize,
-) {
-    let block = &witness.blocks[block_idx];
-    for (j, spec) in config.slots.iter().enumerate() {
-        let exposure = &spec.field_exposure;
-        if exposure.is_empty() {
-            continue;
-        }
-        let base = Layout::TOTAL_COLS + config.field_tail_base(j);
-        if t == 15 {
-            // Byte view of THIS row's block words, per exposure j's word map.
-            for (word_slot, &word_idx) in exposure.decomposed_words().iter().enumerate() {
-                let limb = block.schedule[word_idx];
-                let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
-                for (b, &byte) in bytes.iter().enumerate() {
-                    row[base + word_slot * BYTES_PER_WORD + b] = m31(byte);
-                }
-            }
-            if exposure.needs_block_witness() {
-                for &target_block in exposure.target_blocks() {
-                    let slot = exposure
-                        .selector_column_slot_for_block(target_block)
-                        .expect("multi-block exposure has selector columns");
-                    row[base + slot] =
-                        BaseField::from(u32::from(j == s && block_idx == target_block));
-                }
-            }
-        }
-        if let Some(slot) = exposure.block_counter_column_slot() {
-            row[base + slot] = BaseField::from(block_idx as u32);
-        }
-    }
 }
 
 fn decoy_witnesses_for_padding(n_real_rows: usize, n_rows: usize) -> Vec<Sha256Witness> {
@@ -962,33 +683,12 @@ fn write_round_row_values(
         }
     }
 
-    // t = 15 family: padding-role witness + credential-field byte view.
-    // Both inspect message words, which are the `W` columns of rows
-    // `t = 0..16` — read in the AIR via mask offsets `0..−15` from here.
+    // t = 15 family: padding-role witness.
     if t == 15 {
         write_padding_row_values(row, &block.padding_row);
-        for (word_slot, &word_idx) in field_exposure.decomposed_words().iter().enumerate() {
-            let limb = block.schedule[word_idx];
-            let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
-            for (b, &byte) in bytes.iter().enumerate() {
-                row[Layout::field_byte_col(word_slot * BYTES_PER_WORD + b)] = m31(byte);
-            }
-        }
-        // One multi-block selector per target block, shared by all yields on
-        // that block's `t = 15` row.
-        if field_exposure.needs_block_witness() {
-            for &target_block in field_exposure.target_blocks() {
-                let slot = field_exposure
-                    .selector_column_slot_for_block(target_block)
-                    .expect("multi-block exposure has selector columns");
-                row[Layout::field_byte_col(slot)] =
-                    BaseField::from(u32::from(block_idx == target_block));
-            }
-        }
     }
 
-    // Multi-block block counter: `block_idx` on **every** row (the AIR pins it
-    // to 0 on block 0, flat within a block, and +1 at each real boundary).
+    // The block counter is present on every row when the field provider is on.
     if let Some(slot) = field_exposure.block_counter_column_slot() {
         row[Layout::field_byte_col(slot)] = BaseField::from(block_idx as u32);
     }
@@ -1457,11 +1157,11 @@ mod tests {
     }
 
     #[test]
-    fn packed_trace_writer_matches_scalar_writer_with_field_exposure() {
+    fn packed_trace_writer_matches_scalar_writer_with_stream_exposure() {
         use rand::{rngs::StdRng, SeedableRng};
         let witness = compute_sha256_witness(&[0x44; 180]);
         let log_size = min_log_size(witness.blocks.len());
-        let exposure = FieldExposure::from_preimage_windows(&[(7, 5, 4), (8, 9, 2)]);
+        let exposure = FieldExposure::from_full_padded_stream(7, witness.padding.padded.len());
         // Both writers must consume the *same* decoy padding, else the boundary
         // sigma-bit columns (recomputed from padding neighbours) diverge by
         // design. Seed one decoy set and feed it to both.
@@ -1529,7 +1229,7 @@ mod tests {
     fn sha_trace_writer_timing() {
         let witness = compute_sha256_witness(&[0x55; 2048]);
         let log_size = min_log_size(witness.blocks.len());
-        let exposure = FieldExposure::from_preimage_windows(&[(7, 5, 4), (8, 9, 2)]);
+        let exposure = FieldExposure::from_full_padded_stream(7, witness.padding.padded.len());
         let n_rows = 1usize << log_size;
         let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
         let decoys = decoy_witnesses_for_padding(n_real_rows, n_rows);

@@ -1,4 +1,4 @@
-//! Property test for the M2 witness generator (worksheet §5 gate).
+//! Property test for the witness generator.
 //!
 //! Generates ≥1000 random ML-DSA-65 signatures via the `ml-dsa` oracle (varying
 //! message length, including 1–2 KB Sig_structure-sized messages), and for each:
@@ -11,8 +11,8 @@
 //! For a sample of 50 it ALSO re-derives `u_i` from scratch and independently
 //! checks the ℤ[X] identity `u = w + q·e + (X^256+1)·v` in `i128`.
 //!
-//! It PRINTS the observed maxima (per digit-family and carry) and fails if any
-//! exceeds the worksheet §5 bound.
+//! It prints the observed maximum for each digit family and carry. It fails if
+//! a value exceeds its fixed bound.
 
 // This is a numeric property test; explicit index loops are the readable form,
 // and `i % n == 0` is the divisibility idiom we mean.
@@ -32,21 +32,21 @@ use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::witness::{generate_witness, B, CARRY_BOUND};
 use stwo_mldsa::MlDsaVerifyInput;
 
-/// Number of random signatures. ≥1000 per the task.
+/// Number of random signatures.
 const N_SIGS: usize = 1000;
 /// How many get the independent from-scratch `u = w + q·e + (X^256+1)·v` recheck.
 const N_INDEPENDENT: usize = 50;
 
-// Worksheet §5 bound table (adversarial digit maxima; committed polys can be
-// ±256 regardless of honest value). These are the numbers M2 must stay under.
+// Fixed bounds for adversarial digit values. Committed polynomials can be ±256
+// regardless of the honest value.
 //
 // The digit *window* is the half-open `[−256, 256)`, so the lowest digit `−256`
 // is valid while `+256` is not. §5's magnitude budget treats the digit ceiling
 // as `|digit| ≤ 256` (it sums `±256` conservatively), so the magnitude gate is
 // inclusive `≤ 256`; the *range* invariant `[−256, 256)` is checked separately.
-const BOUND_DIGIT_MAG: i128 = 256; // §5 magnitude ceiling, inclusive
+const BOUND_DIGIT_MAG: i128 = 256; // Inclusive magnitude limit.
 const BOUND_CARRY: i128 = CARRY_BOUND; // 2^20 rc pin
-/// Worst-row total magnitude before carry (worksheet §5 total, 2^29.42).
+/// Maximum total row magnitude before carry, approximately `2^29.42`.
 const BOUND_PARTIAL: i128 = 716_382_976;
 
 fn oracle_keypair(rng: &mut StdRng) -> SigningKey<MlDsa65> {
@@ -191,26 +191,24 @@ fn witness_property_over_1000_signatures() {
 
     let dt = t0.elapsed();
 
-    eprintln!("=== M2 witness property test: {N_SIGS} signatures in {dt:?} ===");
+    eprintln!("=== witness property test: {N_SIGS} signatures in {dt:?} ===");
     eprintln!("(independent u = w + q·e + (X^256+1)·v recheck on first {N_INDEPENDENT})");
     eprintln!("digit base B = {B}, digit window [−256, 256)");
-    eprintln!("observed maxima vs worksheet §5 bounds:");
+    eprintln!("observed maxima and fixed bounds:");
     eprintln!("  max |digit z|       = {max_digit_z:>13}  (mag bound {BOUND_DIGIT_MAG})");
     eprintln!("  max |digit w|       = {max_digit_w:>13}  (mag bound {BOUND_DIGIT_MAG})");
     eprintln!("  max |digit e|       = {max_digit_e:>13}  (mag bound {BOUND_DIGIT_MAG})");
     eprintln!("  max |digit v|       = {max_digit_v:>13}  (mag bound {BOUND_DIGIT_MAG})");
     eprintln!("  max honest |carry|  = {max_carry:>13}  (rc bound {BOUND_CARRY} = 2^20)");
-    eprintln!(
-        "  max |partial|       = {max_partial:>13}  (worksheet §5 total {BOUND_PARTIAL} = 2^29.42)"
-    );
+    eprintln!("  max |partial|       = {max_partial:>13}  (bound {BOUND_PARTIAL} = 2^29.42)");
     eprintln!(
         "  max Σ hint bits     = {max_hint_total:>13}  (ω bound {})",
         stwo_mldsa::constants::OMEGA
     );
 
-    // Gate: every observed value must be within the worksheet bound. Digits use
-    // the inclusive §5 magnitude ceiling (the window `[−256,256)` admits −256,
-    // whose magnitude is 256); the strict half-open *range* is enforced inside
+    // Each observed value must be within its bound. Digits use the inclusive
+    // magnitude limit. The window `[−256,256)` permits −256, whose magnitude
+    // is 256. The strict half-open range is enforced inside
     // the generator's `balanced_digits` (debug_assert, active in test builds).
     assert!(
         max_digit_z <= BOUND_DIGIT_MAG,
@@ -231,7 +229,7 @@ fn witness_property_over_1000_signatures() {
     assert!(max_carry <= BOUND_CARRY, "carry exceeded 2^20: {max_carry}");
     assert!(
         max_partial <= BOUND_PARTIAL,
-        "partial-before-carry exceeded worksheet §5 total: {max_partial} > {BOUND_PARTIAL}"
+        "partial before carry exceeded its bound: {max_partial} > {BOUND_PARTIAL}"
     );
     assert!(
         max_hint_total <= stwo_mldsa::constants::OMEGA,

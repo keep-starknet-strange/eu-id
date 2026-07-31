@@ -1,11 +1,10 @@
-//! Witness / hint generator for in-circuit ML-DSA-65 (milestone M2).
+//! Witness and hint generator for in-circuit ML-DSA-65.
 //!
-//! Native Rust only — no AIR code. [`generate_witness`] runs the M1 reference
-//! verifier ([`crate::verify_internals`]) and then materializes **every value
-//! the S5a integer-lift AIR (M4/M5) will commit**, per the reviewed, signed-off
-//! soundness spec `tasks/parity/S5a-integer-lift-worksheet.md` (option a′).
+//! This module contains native Rust and no AIR code. [`generate_witness`] runs
+//! the reference verifier ([`crate::verify_internals`]) and materializes each
+//! value that the integer-lift AIR commits.
 //!
-//! ## The obligation the witness supports (worksheet §1)
+//! ## Integer-lift identity
 //!
 //! For each row `i ∈ [k=6]`, the verifier's linear obligation [LIN] is the
 //! `R_q` identity `Σ_j A_ij·z_j − c·(t1_i·2^d) ≡ w_i`. We prove the equivalent
@@ -21,21 +20,21 @@
 //! `[0, q)`), `z` is centered, `c` is ternary, and `w_i` is the canonical `R_q`
 //! commitment from the reference (`VerifyTrace::w_approx`).
 //!
-//! ## What this struct lays out (field → worksheet section → M4/M5 component)
+//! ## Witness layout
 //!
-//! - `u[i]` — the ℤ[X] products (i128), deg ≤ 510                       (§1 (†))
-//! - `v[i]`, `e[i]` — the two quotient witnesses                         (§1)
-//! - digit decompositions of z, w, e, v, c (balanced base-B, B = 2^9)    (§3.1)
-//! - carries `C[i][m][t]`, m ∈ [0,510], t ∈ [0,4]                        (§3.3)
-//! - `recomp_*` recomposition-binding values for z and w                 (§3.4)
-//! - `decomp` — w1/w0/hint/UseHint effects                       (S5 [DECOMP]/[HINT])
-//! - `sponge` — µ / c̃ / SampleInBall absorb+squeeze byte streams   (S5 [HASH]/[CHAL])
+//! - `u[i]`: the ℤ[X] products in `i128`, with degree at most 510.
+//! - `v[i]` and `e[i]`: the two quotient witnesses.
+//! - Balanced base-512 digits for z, w, e, v, and c.
+//! - Carries `C[i][m][t]` for `m ∈ [0,510]` and `t ∈ [0,4]`.
+//! - Recomposition values that bind the z and w digits.
+//! - `decomp`: w1, w0, hint, and UseHint values.
+//! - `sponge`: µ, c̃, and SampleInBall byte streams.
 //!
-//! The generator **asserts** every soundness invariant of the worksheet in
-//! `i128` (no field reduction): each limb equation `E_{m,t} == 0`, exact
+//! The generator checks each integer invariant in `i128` with no field
+//! reduction. It checks each limb equation `E_{m,t} == 0`, exact
 //! q-divisibility of `e`, every digit in `[−256, 256)`, every honest carry
-//! `|C| ≤ 2^20`, and the recomposition binding. A malformed input therefore
-//! fails loudly here rather than producing a silently-wrong witness.
+//! `|C| ≤ 2^20`, and the recomposition binding. Invalid input causes witness
+//! generation to fail.
 
 // This module is a numeric kernel: `A_ij[m]`, `u[a+z]`, `F[m][t]` and the
 // convolution loops carry mathematical meaning in their indices, so explicit
@@ -52,11 +51,10 @@ use crate::types::MlDsaVerifyInput;
 use crate::MlDsaError;
 
 // ---------------------------------------------------------------------------
-// Worksheet §3.1 layout constants.
+// Integer-lift layout constants.
 // ---------------------------------------------------------------------------
 
-/// Balanced-digit base `B = 2^9 = 512` (worksheet §3.1, chosen over 2^10 for a
-/// 3.0× lift margin).
+/// Balanced-digit base `B = 2^9 = 512`, with a 3.0× lift margin.
 pub const B: i128 = 512;
 
 /// Half-base: digits live in the half-open window `[−HALF_B, HALF_B) = [−256, 256)`.
@@ -65,7 +63,7 @@ pub const HALF_B: i128 = B / 2;
 /// Degree bound of the ℤ[X] product `u_i`: `deg ≤ 510` ⇒ 511 coefficients.
 pub const U_LEN: usize = 2 * N - 1; // 511
 
-/// Digit counts per polynomial kind (worksheet §3.1 table).
+/// Digit counts for each polynomial kind.
 pub const T_Z: usize = 3;
 /// `w_i` digit count.
 pub const T_W: usize = 3;
@@ -78,23 +76,22 @@ pub const T_A: usize = 3;
 /// `t1_i·2^d` (public) digit count.
 pub const T_T1: usize = 3;
 
-/// Highest carry index `T_max = 4`: carry columns exist for `t ∈ [0, 4]`
-/// (worksheet §3.3; `F̂`'s Y-degree ≤ 5, honest `C_{m,t}=0` for `t ≥ 5`).
+/// Highest carry index `T_max = 4`. Carry columns exist for `t ∈ [0, 4]`.
+/// The Y-degree of `F̂` is at most 5, and honest `C_{m,t}=0` for `t ≥ 5`.
 pub const T_MAX: usize = 4;
 
-/// Adversarial carry range bound: honest `|C| ≤ 2^18.42`, but the rc pin — and
-/// therefore the lift bound — uses `2^20` (worksheet §3.3, §5).
+/// Carry range bound. Honest `|C| ≤ 2^18.42`, and the range check uses `2^20`.
 pub const CARRY_BOUND: i128 = 1 << 20;
 
-/// `q` in balanced base-B digits: exactly `(1, −16, 32)` at `B = 2^9`
-/// (worksheet §3.2). `1 − 16·512 + 32·512² = 8_380_417 = q`.
+/// `q` in balanced base-B digits at `B = 2^9`.
+/// `1 − 16·512 + 32·512² = 8_380_417 = q`.
 pub const Q_DIGITS: [i128; 3] = [1, -16, 32];
 
 // ---------------------------------------------------------------------------
 // Witness sub-structures.
 // ---------------------------------------------------------------------------
 
-/// Per-row limb-identity witness for one `i ∈ [k]` (worksheet §1, §3).
+/// Per-row limb-identity witness for one `i ∈ [k]`.
 #[derive(Clone, Debug)]
 pub struct RowWitness {
     /// `v_i`: high half of `u_i`, `v_{i,m} = u_{i,m+256}`, `m ∈ [0,254]`.
@@ -103,11 +100,11 @@ pub struct RowWitness {
     pub e: Vec<i128>,
     /// `w_i`: the canonical `R_q` commitment coefficients (from `VerifyTrace`).
     pub w: [u32; N],
-    /// Carries `carry[m][t]` for `m ∈ [0,510]`, `t ∈ [0, T_MAX]` (worksheet §3.3).
+    /// Carries `carry[m][t]` for `m ∈ [0,510]`, `t ∈ [0, T_MAX]`.
     pub carry: Vec<[i128; T_MAX + 1]>,
 }
 
-/// Balanced-digit tables for all committed polynomials (worksheet §3.1). Each
+/// Balanced-digit tables for all committed polynomials. Each
 /// inner `Vec` is indexed by coefficient `m`; each row holds that coefficient's
 /// low-first digits.
 #[derive(Clone, Debug, Default)]
@@ -128,7 +125,7 @@ pub struct DigitTables {
     pub c: Vec<i128>,
 }
 
-/// Decompose / hint witness (S5 [DECOMP] + [HINT]), read out of `VerifyTrace`.
+/// Decompose and hint witness from `VerifyTrace`.
 #[derive(Clone, Debug)]
 pub struct DecompWitness {
     /// `w1[i][m] ∈ [0,16)` — high bits recovered via `UseHint`.
@@ -142,7 +139,7 @@ pub struct DecompWitness {
     pub hint_weight: [usize; K],
 }
 
-/// SHAKE absorb/squeeze streams (S5 [HASH]/[CHAL]), from the M1 sponge.
+/// SHAKE absorb and squeeze streams from the reference sponge.
 #[derive(Clone, Debug)]
 pub struct SpongeWitness {
     /// `µ = H(tr ‖ 0x00 ‖ |ctx| ‖ ctx ‖ M)` absorb+squeeze.
@@ -159,8 +156,7 @@ pub struct SpongeWitness {
     pub sample_in_ball_squeezed: Vec<u8>,
 }
 
-/// Empirical maxima observed while building one witness, for the property test
-/// to compare against the worksheet §5 bound table.
+/// Maximum values observed while the generator builds one witness.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ObservedMaxima {
     /// Max `|E_{m,t}|` **before** the `B·C_out − C_in` carry terms are applied
@@ -178,7 +174,7 @@ pub struct ObservedMaxima {
     pub max_digit_v: i128,
 }
 
-/// The full M2 witness for one ML-DSA-65 signature.
+/// The complete witness for one ML-DSA-65 signature.
 #[derive(Clone, Debug)]
 pub struct MlDsaWitness {
     /// Per-row limb-identity witness (`u`, `v`, `e`, `w`, carries).
@@ -196,7 +192,7 @@ pub struct MlDsaWitness {
 /// Errors from witness generation.
 #[derive(Debug)]
 pub enum WitnessError {
-    /// The M1 reference reported a hard decode/structural error.
+    /// The reference verifier reported a decode or structure error.
     Reference(MlDsaError),
     /// The reference verified the signature as **invalid** (norm or commitment
     /// mismatch): there is no honest witness to generate.
@@ -215,7 +211,7 @@ impl core::fmt::Display for WitnessError {
 impl std::error::Error for WitnessError {}
 
 // ---------------------------------------------------------------------------
-// Balanced base-B digit decomposition (worksheet §3.1).
+// Balanced base-B digit decomposition.
 // ---------------------------------------------------------------------------
 
 /// Decompose signed `x` into exactly `T` balanced base-B digits in `[−256, 256)`,
@@ -235,12 +231,12 @@ pub(crate) fn balanced_digits<const T: usize>(mut x: i128) -> [i128; T] {
     }
     assert_eq!(
         x, 0,
-        "balanced_digits: value overflows {T} base-{B} digits (worksheet §3.1 budget violated)"
+        "balanced_digits: value does not fit in {T} base-{B} digits"
     );
     out
 }
 
-/// Recompose balanced digits `Σ_t d_t·B^t` (worksheet §3.4 binding value).
+/// Recompose balanced digits as `Σ_t d_t·B^t`.
 fn recompose(digits: &[i128]) -> i128 {
     let mut acc = 0i128;
     let mut weight = 1i128;
@@ -255,9 +251,9 @@ fn recompose(digits: &[i128]) -> i128 {
 // The generator.
 // ---------------------------------------------------------------------------
 
-/// Run the M1 reference and materialize the full S5a integer-lift witness.
+/// Run the reference verifier and materialize the integer-lift witness.
 ///
-/// Asserts every worksheet soundness invariant over ℤ (`i128`). Returns
+/// Check each integer invariant over ℤ (`i128`). Return
 /// [`WitnessError`] on a decode error or a non-accepted signature.
 pub fn generate_witness(input: &MlDsaVerifyInput) -> Result<MlDsaWitness, WitnessError> {
     let pk = input.encode_pk();
@@ -384,10 +380,7 @@ fn build_from_trace(
         for m in 0..N {
             let v_m = if m < N - 1 { v[m] } else { 0 };
             let num = u[m] - w[m] as i128 - v_m;
-            assert!(
-                num % q == 0,
-                "e divisibility failed (worksheet §1): i={i} m={m} num={num}"
-            );
+            assert!(num % q == 0, "e divisibility failed: i={i} m={m} num={num}");
             e[m] = num / q;
         }
 
@@ -461,10 +454,10 @@ fn build_from_trace(
         rows.push(RowWitness { v, e, w, carry });
     }
 
-    // --- Decompose / hint witness (S5 [DECOMP]/[HINT]) ----------------------
+    // Decompose and hint witness.
     let decomp = build_decomp(trace);
 
-    // --- SHAKE transcripts (S5 [HASH]/[CHAL]) -------------------------------
+    // SHAKE transcripts.
     let sponge = SpongeWitness {
         mu_absorbed: trace.mu_transcript.absorbed.clone(),
         mu_squeezed: trace.mu_transcript.squeezed.clone(),
@@ -484,7 +477,7 @@ fn build_from_trace(
 }
 
 /// Compute the per-limb carries and assert the limb identity `E_{m,t} == 0` for
-/// every `m ∈ [0,510]`, `t ∈ [0, T_MAX+1]` (worksheet §3.2 step 2, §3.3).
+/// every `m ∈ [0,510]` and `t ∈ [0, T_MAX+1]`.
 ///
 /// The bivariate check `D̂ = F̂ − (Y−B)·Ĉ` has Y-degree `T_MAX+1 = 5` (the
 /// `q̂·ê` term reaches `t = 2+3 = 5`), so there is one identity equation per
@@ -500,7 +493,7 @@ fn build_from_trace(
 ///
 /// We assert exact `B`-divisibility at each carry step and that the closing
 /// `t = 5` boundary equation holds (this is what forces the carry chain to zero
-/// out — worksheet §3.2 step 2, no explicit boundary constraint needed).
+/// out. No explicit boundary constraint is necessary.
 #[allow(clippy::too_many_arguments)]
 fn compute_carries(
     a_digits: &[Vec<[i128; T_A]>], // a_digits[j][m]
@@ -529,7 +522,7 @@ fn compute_carries(
             maxima.max_partial_before_carry = maxima.max_partial_before_carry.max(partial.abs());
             assert!(
                 partial % B == 0,
-                "limb identity not B-divisible at m={m} t={t} (worksheet §3.3): F−C_prev={partial}"
+                "limb identity is not B-divisible at m={m} t={t}: F−C_prev={partial}"
             );
             let c_out = -partial / B;
 
@@ -537,18 +530,18 @@ fn compute_carries(
             maxima.max_carry = maxima.max_carry.max(c_out.abs());
             assert!(
                 c_out.abs() <= CARRY_BOUND,
-                "honest carry exceeds 2^20 at m={m} t={t}: {c_out} (worksheet §3.3)"
+                "honest carry exceeds 2^20 at m={m} t={t}: {c_out}"
             );
             c_prev = c_out;
         }
         // Closing boundary t = T_MAX+1 = 5: no carry-out column (C_{m,5}=0), so
-        // E_{m,5} = F_{m,5} − C_{m,4} must vanish (worksheet §3.2 step 2).
+        // E_{m,5} = F_{m,5} − C_{m,4} must be zero.
         let boundary = f[m][T_MAX + 1] - c_prev;
         maxima.max_partial_before_carry = maxima.max_partial_before_carry.max(boundary.abs());
         assert_eq!(
             boundary,
             0,
-            "closing limb identity E_{{m,5}} != 0 at m={m} (worksheet §3.2 boundary): \
+            "closing limb identity E_{{m,5}} != 0 at m={m}: \
              F_{{m,5}}={} C_{{m,4}}={c_prev}",
             f[m][T_MAX + 1]
         );
@@ -557,10 +550,11 @@ fn compute_carries(
     carry
 }
 
-/// Build the residual table `F[m][t]` = product terms − w/v/(q·e) terms at limb
-/// `(m,t)`, **excluding** the carry contribution (worksheet §3.3 equation, sans
-/// the `−C_{m,t−1} + B·C_{m,t}` part). `t ∈ [0, T_MAX+1]`. Single pass over every
-/// digit pair — no per-`(m,t)` recomputation.
+/// Build the residual table `F[m][t]` at limb `(m,t)`.
+///
+/// The table contains the product terms minus the w, v, and q·e terms. It
+/// excludes the carry term `−C_{m,t−1} + B·C_{m,t}`. The range of `t` is
+/// `[0, T_MAX+1]`. One pass processes each digit pair.
 #[allow(clippy::too_many_arguments)]
 fn build_residual_table(
     a_digits: &[Vec<[i128; T_A]>],

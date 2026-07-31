@@ -1,32 +1,31 @@
 //! The `keccak_round` component: one trace row proves one Keccak-f[1600]
 //! round (theta, rho, pi, chi, iota) over **spread** 8-bit limbs.
 //!
-//! ## Spread-form fusion (M3b)
+//! ## Spread-form fusion
 //!
 //! The Keccak state is carried in spread form (`spread(b) = Σ bᵢ·4ⁱ`, see
 //! [`crate::utils`]) across every round and across the `KeccakRound` /
 //! `KeccakStateRelation` links. Working in spread form collapses the round's
 //! lookups:
 //!
-//! - **xor3** — XOR of up to three spread bytes is ONE lookup with a degree-1
+//! - **xor3:** XOR of up to three spread bytes uses one lookup with a degree-1
 //!   sum key `s1+s2+s3` into a dense `2^16` table. Theta's 5-way column parity
-//!   `C[x]` is two chained xor3 (vs four `xor_8_8`); the theta-apply
-//!   `res = S ⊕ C[x−1] ⊕ rotl(C[x+1],1)` is one *fused* xor3 (vs a separate `D`
-//!   then a second xor); chi's closing `a ⊕ (¬b'∧b'')` is one xor3 whose third
-//!   input is 0 — or, on lane 0, `spread(rc)` so **iota is folded in for free**.
-//! - **andnot** — `(¬b'∧b'')` is ONE lookup with key `spread(b')+2·spread(b'')`
-//!   into a dense `2^16` table (vs the byte-pair `chi_8_8`).
-//! - **split_r** — the rho/theta sub-byte rotation splits a spread byte at bit
+//!   `C[x]` uses two chained xor3 lookups. The theta step
+//!   `res = S ⊕ C[x−1] ⊕ rotl(C[x+1],1)` uses one xor3 lookup. The chi step
+//!   `a ⊕ (¬b'∧b'')` uses one xor3 lookup whose third input is 0. On lane 0,
+//!   the third input is `spread(rc)`, which also applies iota.
+//! - **andnot:** `(¬b'∧b'')` uses one lookup with key
+//!   `spread(b')+2·spread(b'')` into a dense `2^16` table.
+//! - **split_r:** the rho/theta sub-byte rotation splits a spread byte at bit
 //!   boundary `2r` via the spread split tables; `spread` is additive across the
 //!   disjoint hi/lo ranges, so `spread_lo = spread_byte − spread_hi·4^r` is a
 //!   linear expression and the recombination is
 //!   `res = spread_hi[i] + spread_lo[(i+1)%8]·4^{8-r}`.
 //!
-//! Every committed limb is either a lookup *output* (xor3/andnot result, split
-//! hi) — certified as a valid spread value by its dense/self-certifying table —
-//! or a lookup *key* built as a degree-1 combo of such certified limbs (so the
-//! lookup that consumes it certifies it in turn). The incoming state limbs are
-//! certified by the sponge's `conv` boundary and carried unchanged.
+//! Every committed limb is a lookup output or a lookup key. The lookup table
+//! constrains each output to a valid spread value. Each key is a degree-1
+//! combination of constrained limbs. The sponge `conv` boundary constrains the
+//! incoming state limbs.
 
 #![allow(non_snake_case)]
 
@@ -123,9 +122,9 @@ pub struct InteractionClaimData {
 #[derive(Uninitialized, IterMut, ParIterMut)]
 pub struct LookupData {
     pub keccak_round: [Vec<[PackedM31; KECCAK_ROUND_ARITY]>; N_KECCAK_ROUND_LOOKUPS],
-    /// `[key, out]` — key is the degree-1 sum, out the spread(xor) result.
+    /// `[key, out]`: key is the degree-1 sum and out is the spread(xor) result.
     pub xor3: [Vec<[PackedM31; 2]>; N_XOR3_LOOKUPS],
-    /// `[u, out]` — `u = spread(b')+2·spread(b'')`, out = spread(¬b'∧b'').
+    /// `[u, out]`: `u = spread(b')+2·spread(b'')` and out = spread(¬b'∧b'').
     pub andnot: [Vec<[PackedM31; 2]>; N_ANDNOT_LOOKUPS],
     /// `[shift_r, spread_byte, spread_hi, spread_lo]`; `shift_r` selects the
     /// `Split*` relation and is constant across SIMD lanes.
@@ -346,7 +345,7 @@ fn fill_row(
     }
 
     // ── Theta-apply (fused): res_S[x+5y] = S ^ C[x-1] ^ rotl(C[x+1],1) ──
-    // Keys use the *incoming* spread state (S0_spread), C, and Crot — all
+    // Keys use the incoming spread state (S0_spread), C, and Crot. All
     // pre-theta values. Outputs become the post-theta spread state.
     let mut S_spread: [[PackedM31; N_BYTES_IN_U64]; N_LANES_KECCAK] =
         std::array::from_fn(|_| [PackedM31::zero(); N_BYTES_IN_U64]);
@@ -394,7 +393,7 @@ fn fill_row(
     }
 
     // ── Chi + Iota (fused closing xor3) ──
-    // Chi reads B in M3's `5x+y` convention and writes the output state at
+    // Chi reads B in the `5x+y` convention and writes the output state at
     // `x+5y` (the two together are the KAT-validated rho/pi/chi layout). Iota
     // folds into the output-lane-0 closing xor3 (out_idx == 0).
     for y in 0..SQRT_N_LANES {
@@ -1006,28 +1005,17 @@ fn push_link_fraction<R: Relation<PackedM31, PackedQM31>>(
     }));
 }
 
-// ─────────────────────── W3a: GKR-offload oracle de-risk ────────────────────
-//
-// De-risk spike (the toy_horner pattern for keccak_round): does the batched
-// LogUp denominator/numerator multiset that `keccak_round` emits today
-// reconstruct, at the GKR OOD point, as a selector-weighted `Relation::combine`
-// of the *base-trace* column values? If yes, the `MleCoeffColumnOracle` for the
-// GKR tie-back is a low-degree combination of committed columns and the offload
-// is arithmetically sound. See `tasks/quantum-safe-branch-plan.md` §Q5.
-//
-// Layout: the whole per-row fraction multiset (all four families, in the exact
-// `generate_interaction_trace` emission order) is ONE flattened `LogUpGeneric`
-// GKR instance with the lookup-slot in the HIGH index bits and the trace row in
-// the LOW bits. The OOD point splits as `r = (r_slot ‖ r_row)`; the denominator
-// MLE decomposes as `Σ_slot eq(slot, r_slot) · den_slot_mle(r_row)`, and because
-// every `Relation::combine` is an AFFINE form `z − Σ αⱼ·tupleⱼ` (row-independent
-// coeffs), multilinear eval commutes with it:
+// The tests below verify the GKR tie-back identity. The proof puts the lookup
+// slot in the high index bits and the trace row in the low index bits. The OOD
+// point splits as `r = (r_slot ‖ r_row)`. The denominator MLE decomposes as
+// `Σ_slot eq(slot, r_slot) · den_slot_mle(r_row)`. Each `Relation::combine` is
+// an affine form `z − Σ αⱼ·tupleⱼ` with row-independent coefficients.
+// Therefore, multilinear evaluation commutes with it:
 //   `den_slot_mle(r_row) == combine([tupleⱼ_mle(r_row)])`.
-// So the oracle only needs each base column's MLE at `r_row` — exactly what a
-// single W2 `MleEval` tie-back over the row-domain proves. No slot×row domain
-// blow-up, dissolving the obstruction §Q5 feared.
+// One `MleEval` tie-back over the row domain verifies the required base-column
+// MLEs without a slot-by-row domain.
 #[cfg(test)]
-mod gkr_offload_spike {
+mod gkr_offload_tests {
     use super::*;
     use stwo::core::channel::Blake2sChannel;
     use stwo::prover::lookups::gkr_prover::{prove_batch, Layer};
@@ -1038,7 +1026,7 @@ mod gkr_offload_spike {
 
     type SF = SecureField;
 
-    /// Multilinear eval with `point[0]` the most-significant index bit — matches
+    /// Multilinear evaluation with `point[0]` as the most-significant index bit. It matches
     /// stwo's `Mle::eval_at_point` / GKR OOD convention.
     fn ml_eval(evals: &[SF], point: &[SF]) -> SF {
         match point {
@@ -1188,9 +1176,7 @@ mod gkr_offload_spike {
 
     #[test]
     fn denominator_oracle_reconstructs_at_gkr_ood_point() {
-        // 1. Real keccak_round witness (all-zero spread state, round 0 — a valid
-        //    input; the multiset sum is well-defined for any input and GKR proves
-        //    that same sum, which is all the tie-back must preserve).
+        // Build a valid round-0 witness from the all-zero spread state.
         let invocations = 3usize;
         let log_size = std::cmp::max(invocations.next_power_of_two().ilog2(), LOG_N_LANES);
         let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
@@ -1202,11 +1188,11 @@ mod gkr_offload_spike {
         let mut ch = Blake2sChannel::default();
         let rel = KeccakRelations::draw(&mut ch);
 
-        // Ground-truth columnar claimed sum (the value the offload must preserve).
+        // Compute the reference columnar claimed sum.
         let (columnar, _itr) = generate_interaction_trace(&rel, &icd);
         let columnar_sum = columnar.claimed_sum;
 
-        // 2. Flatten the multiset into one LogUpGeneric instance (slot high bits).
+        // Flatten the multiset into one LogUpGeneric instance.
         let enabler = Enabler::new(icd.non_padded_length);
         let slots = build_slots(&icd.lookup_data, &enabler, n_vec_rows);
 
@@ -1236,12 +1222,12 @@ mod gkr_offload_spike {
         let mut gkr_ch = Blake2sChannel::default();
         let (proof, artifact) = prove_batch(&mut gkr_ch, vec![layer]);
 
-        // 3. GKR-proven sum == columnar claimed sum (step 5).
+        // The GKR sum must equal the columnar claimed sum.
         let out = &proof.output_claims_by_instance[0];
         let gkr_sum = out[0] / out[1];
         assert_eq!(gkr_sum, columnar_sum, "GKR sum != columnar claimed sum");
 
-        // 4. Oracle reconstruction at the GKR OOD point (step 3).
+        // Reconstruct the claims at the GKR OOD point.
         let ood = &artifact.ood_point;
         assert_eq!(ood.len(), v);
         let r_slot = &ood[..log_slots];
@@ -1277,7 +1263,7 @@ mod gkr_offload_spike {
             "numerator oracle reconstruction != GKR claim"
         );
 
-        // 5. Tamper negative (step 6): flip one base cell → reconstruction rejects.
+        // A changed base cell must change the reconstructed denominator.
         let mut tampered = build_slots(&icd.lookup_data, &enabler, n_vec_rows);
         tampered[1].tuples[1][0] += SF::one();
         let (_, den_tampered) = reconstruct(&tampered);
