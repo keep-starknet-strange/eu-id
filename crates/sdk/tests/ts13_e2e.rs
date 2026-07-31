@@ -414,20 +414,23 @@ fn private_identity_markers(
         .expect("unlinkability fixture extracts");
     let attribute = &extracted.attribute;
 
-    let random_offset = attribute
-        .item
-        .windows(b"random".len())
-        .position(|window| window == b"random")
+    let Value::Tag(24, encoded_item) = decode_cbor(&attribute.item, "selected item") else {
+        panic!("selected item has CBOR tag 24");
+    };
+    let Value::Bytes(encoded_item) = *encoded_item else {
+        panic!("selected item tag contains a byte string");
+    };
+    let Value::Map(item_fields) = decode_cbor(&encoded_item, "selected item fields") else {
+        panic!("selected item contains a CBOR map");
+    };
+    let randomizer = item_fields
+        .iter()
+        .find_map(|(key, value)| (key == &Value::Text("random".to_string())).then_some(value))
         .expect("selected item has random");
-    let digest_id_offset = attribute
-        .item
-        .windows(b"digestID".len())
-        .position(|window| window == b"digestID")
-        .expect("selected item has digestID");
-    assert!(random_offset < digest_id_offset);
-    let randomizer_context = attribute.item[random_offset.saturating_sub(1)
-        ..(digest_id_offset + b"digestID".len() + 4).min(attribute.item.len())]
-        .to_vec();
+    let Value::Bytes(randomizer) = randomizer else {
+        panic!("selected item random is a byte string");
+    };
+    let randomizer_context = byte_context(&attribute.item, randomizer, 12, 12);
 
     let item_digest: [u8; 32] = Sha256::digest(&attribute.item).into();
     let digest_entry_context = byte_context(&fixture.mso, &item_digest, 12, 0);
@@ -465,7 +468,7 @@ fn private_identity_markers(
             attribute.item.clone(),
         ),
         (
-            "selected item randomizer/digest-ID context".to_string(),
+            "selected item randomizer context".to_string(),
             randomizer_context,
         ),
         (
