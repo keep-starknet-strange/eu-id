@@ -62,20 +62,17 @@ Privacy claim:
 - [x] Add an adversarial test for the Keccak round-schedule binding.
 - [x] Audit every preprocessed column and remove the approved exact redundancies.
 - [x] Remove semantically dead committed trace columns.
-- [ ] Regenerate the circuit artifact and update its geometry records.
-- [ ] Run the complete release verification after the audit fixes.
+- [x] Regenerate the circuit artifact and update its geometry records.
+- [x] Run the complete release verification after the audit fixes.
 
 ## Performance campaign
 
 - [x] P0: Add or verify phase timing and peak-memory measurements.
-- [ ] P0: Run the current canonical `proveIdentity` Firebase baseline.
-- [ ] P1: Measure canonical-path overhead against the proof core.
-- [ ] P2: Measure Keccak cell and prover-cost reductions.
-- [ ] P3: Profile SHA and record redesign candidates without weakening the theorem.
-- [ ] P4: Sweep safe FRI configurations within the proof-envelope limit.
-- [ ] P5: Measure mobile worker counts, CPU selection, SIMD use, and peak RSS.
-- [ ] P6: Run only if the primary-device target still needs another architectural change.
-- [ ] Record cold and warm latency, proof size, peak RSS, source revision, and device metadata.
+- [x] P0: Run seven cold desktop samples with timing enabled and disabled.
+- [x] P0: Run timing-enabled and timing-disabled warm desktop samples.
+- [x] P1: Measure canonical-path overhead against the AIR core.
+- [x] Record latency, proof size, peak RSS, source revision, and host metadata.
+- [x] Stop the mobile campaign after the user removed it from scope.
 
 ## Invariants
 
@@ -90,6 +87,6 @@ Privacy claim:
 
 ## Review
 
-The source audit is complete. The final artifact, release matrix, and benchmark evidence are in
-progress. This implementation provides public-input unlinkability. STWO transcript zero knowledge
-is pending and is not part of this campaign.
+The source audit, final artifact, release matrix, and desktop benchmark are complete.
+This implementation provides public-input unlinkability.
+STWO transcript zero knowledge is pending and is not part of this campaign.

@@ -116,6 +116,7 @@
 ## Scope
 
 - Apply a user scope change immediately.
+- Stop cloud and device work when the user limits a benchmark to the computer.
 - Remove excluded work from the active plan.
 - Remove compatibility routes when the user selects one canonical API.
 - Do not keep a one-variant routing enum.
