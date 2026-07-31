@@ -70,9 +70,31 @@ Privacy claim:
 - [x] P0: Add or verify phase timing and peak-memory measurements.
 - [x] P0: Run seven cold desktop samples with timing enabled and disabled.
 - [x] P0: Run timing-enabled and timing-disabled warm desktop samples.
-- [x] P1: Measure canonical-path overhead against the AIR core.
 - [x] Record latency, proof size, peak RSS, source revision, and host metadata.
-- [x] Stop the mobile campaign after the user removed it from scope.
+- [x] P0: Build the source-bound Android artifact and run the current-circuit
+  Firebase baseline on Pixel 8, Galaxy S24 Ultra, and Galaxy A54.
+- [x] P1: Reduce canonical-path overhead and prove that canonical
+  `proveIdentity` is at most 1.15 times the AIR-core latency.
+- [ ] P2: Reduce the shared Keccak service to at most 6,000,000 committed
+  cells without weakening the round schedule, job binding, or Iota checks.
+- [ ] P3: Reduce private MSO and item SHA-256 to at most 1,500,000 committed
+  cells without moving private-input checks outside the proof.
+- [ ] P4: Measure the fixed-security PCS and FRI frontier and select the point
+  that meets the mailbox-approved proof-envelope ceiling.
+- [ ] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
+  available ARM acceleration; keep only improvements that help the binding
+  devices.
+- [ ] P6: Add witness-generation parallelism only if it remains a binding
+  phase after P2 through P5.
+- [ ] Regenerate and verify the source-bound artifact after every accepted
+  soundness-affecting change.
+- [ ] Run the complete release, Clippy, formatting, artifact-drift,
+  soundness-negative, and unlinkability-negative test matrix.
+- [ ] Run the final desktop campaign and the final Firebase three-device
+  campaign through the canonical `proveIdentity` and `verifyIdentity` API.
+- [ ] Meet the primary mobile gates: cold prove below 2,000 ms on Pixel 8 and
+  Galaxy S24 Ultra, verify at most 350 ms, fixed credential-independent
+  envelope, and the mailbox-approved proof-size ceiling.
 
 ## Invariants
 
@@ -87,6 +109,7 @@ Privacy claim:
 
 ## Review
 
-The source audit, final artifact, release matrix, and desktop benchmark are complete.
-This implementation provides public-input unlinkability.
-STWO transcript zero knowledge is pending and is not part of this campaign.
+The canonical implementation and its first desktop baseline are complete.
+The full performance campaign is in progress. The final review must record each
+accepted optimization, the rejected frontier points, source and artifact hashes,
+desktop results, Firebase results, and the complete verification matrix.
