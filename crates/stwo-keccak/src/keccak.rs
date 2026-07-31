@@ -29,6 +29,7 @@
 #![allow(non_snake_case)]
 
 use num_traits::Zero;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{BaseField, M31};
@@ -174,27 +175,32 @@ impl Claim {
         let log_size = claim.log_size();
         let n_rows = 1usize << log_size;
 
-        let mut rows: Vec<RowLook> = Vec::with_capacity(n_perms * ROWS_PER_PERM);
-        for prow in perm_inputs {
-            let perm_id = prow[N_BYTES_IN_STATE].to_array()[0];
-            // lane 0 carries the real spread state; keep a byte-form working
-            // copy for the native round, commit/link the spread form.
-            let mut bytes = [0u8; N_BYTES_IN_STATE];
-            let mut spread = [M31::zero(); N_BYTES_IN_STATE];
-            for i in 0..N_BYTES_IN_STATE {
-                spread[i] = prow[i].to_array()[0];
-                bytes[i] = unspread_u32(spread[i].0) as u8;
-            }
-            rows.push(RowLook {
-                perm_id,
-                state: spread,
-            });
-            for round in 0..N_ROUNDS {
-                keccak_round_bytes(&mut bytes, round);
-                let state = std::array::from_fn(|i| M31::from(spread_u32(bytes[i] as u32)));
-                rows.push(RowLook { perm_id, state });
-            }
-        }
+        let per_permutation_rows: Vec<Vec<RowLook>> = perm_inputs
+            .par_iter()
+            .map(|prow| {
+                let perm_id = prow[N_BYTES_IN_STATE].to_array()[0];
+                // Lane 0 contains the real spread state. Keep byte and spread
+                // forms while this permutation generates its boundary rows.
+                let mut bytes = [0u8; N_BYTES_IN_STATE];
+                let mut spread = [M31::zero(); N_BYTES_IN_STATE];
+                for i in 0..N_BYTES_IN_STATE {
+                    spread[i] = prow[i].to_array()[0];
+                    bytes[i] = unspread_u32(spread[i].0) as u8;
+                }
+                let mut rows = Vec::with_capacity(ROWS_PER_PERM);
+                rows.push(RowLook {
+                    perm_id,
+                    state: spread,
+                });
+                for round in 0..N_ROUNDS {
+                    keccak_round_bytes(&mut bytes, round);
+                    let state = std::array::from_fn(|i| M31::from(spread_u32(bytes[i] as u32)));
+                    rows.push(RowLook { perm_id, state });
+                }
+                rows
+            })
+            .collect();
+        let rows: Vec<RowLook> = per_permutation_rows.into_iter().flatten().collect();
         debug_assert_eq!(rows.len(), n_perms * ROWS_PER_PERM);
 
         let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); n_rows]; N_COLUMNS];

@@ -88,26 +88,8 @@ pub struct PermWitness {
 pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> PermWitness {
     let (keccak_claim, keccak_trace, keccak_data) = keccak::Claim::generate_trace(perm_inputs);
 
-    let mut round_instances: Vec<([u8; N_BYTES_IN_STATE], u32, u32)> = Vec::new();
-    for prow in perm_inputs {
-        let mut state = [0u8; N_BYTES_IN_STATE];
-        for i in 0..N_BYTES_IN_STATE {
-            state[i] = crate::utils::unspread_u32(prow[i].to_array()[0].0) as u8;
-        }
-        let perm_id = prow[N_BYTES_IN_STATE].to_array()[0].0;
-        for round in 0..crate::constants::N_ROUNDS {
-            round_instances.push((state, round as u32, perm_id));
-            let mut sp: [PackedM31; N_BYTES_IN_STATE] = std::array::from_fn(|i| {
-                PackedM31::from(stwo::core::fields::m31::M31::from(state[i] as u32))
-            });
-            crate::utils::keccak_f1600_round(&mut sp, round);
-            for i in 0..N_BYTES_IN_STATE {
-                state[i] = sp[i].to_array()[0].0 as u8;
-            }
-        }
-    }
-    let n_rounds = round_instances.len();
-    let round_inputs = pack_round_instances(&round_instances);
+    let n_rounds = keccak_data.n_perms * crate::constants::N_ROUNDS;
+    let round_inputs = pack_round_boundary_rows(&keccak_data);
     let (round_claim, round_ct, round_data) =
         keccak_round::Claim::generate_trace(round_inputs, n_rounds);
 
@@ -124,15 +106,16 @@ pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> 
     }
 }
 
-/// Pack per-lane `(state, round_idx, perm_id)` instances into
-/// `[state|round|perm_id]` vec-rows, `N_LANES` distinct instances per row.
-fn pack_round_instances(
-    instances: &[([u8; N_BYTES_IN_STATE], u32, u32)],
+/// Pack the active Keccak boundary rows into the round component input.
+fn pack_round_boundary_rows(
+    data: &keccak::InteractionClaimData,
 ) -> Vec<[PackedM31; N_BYTES_IN_STATE + 2]> {
     use stwo::core::fields::m31::M31;
     use stwo::prover::backend::simd::m31::N_LANES;
 
-    let n_vec_rows = instances.len().div_ceil(N_LANES);
+    debug_assert_eq!(data.rows.len(), data.n_perms * keccak::ROWS_PER_PERM);
+    let invocation_count = data.n_perms * crate::constants::N_ROUNDS;
+    let n_vec_rows = invocation_count.div_ceil(N_LANES);
     let mut rows = Vec::with_capacity(n_vec_rows);
     for vr in 0..n_vec_rows {
         let mut row = [PackedM31::zero(); N_BYTES_IN_STATE + 2];
@@ -141,15 +124,17 @@ fn pack_round_instances(
         let mut perm_id_lanes = [M31::from(0u32); N_LANES];
         for lane in 0..N_LANES {
             let idx = vr * N_LANES + lane;
-            if idx >= instances.len() {
+            if idx >= invocation_count {
                 break;
             }
-            let (state, round, perm_id) = &instances[idx];
+            let permutation = idx / crate::constants::N_ROUNDS;
+            let round = idx % crate::constants::N_ROUNDS;
+            let boundary = &data.rows[permutation * keccak::ROWS_PER_PERM + round];
             for i in 0..N_BYTES_IN_STATE {
-                state_lanes[i][lane] = M31::from(crate::utils::spread_u32(state[i] as u32));
+                state_lanes[i][lane] = boundary.state[i];
             }
-            round_lanes[lane] = M31::from(*round);
-            perm_id_lanes[lane] = M31::from(*perm_id);
+            round_lanes[lane] = M31::from(round as u32);
+            perm_id_lanes[lane] = boundary.perm_id;
         }
         for i in 0..N_BYTES_IN_STATE {
             row[i] = PackedM31::from_array(state_lanes[i]);
@@ -159,6 +144,62 @@ fn pack_round_instances(
         rows.push(row);
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use stwo::core::fields::m31::M31;
+    use stwo::prover::backend::simd::m31::N_LANES;
+
+    use super::*;
+
+    #[test]
+    fn round_inputs_reuse_ordered_boundary_rows_and_zero_padding() {
+        const PERMUTATIONS: usize = 17;
+        let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; PERMUTATIONS];
+        for (permutation, input) in inputs.iter_mut().enumerate() {
+            for (byte, cell) in input[..N_BYTES_IN_STATE].iter_mut().enumerate() {
+                let value = ((permutation * 17 + byte) & 0xff) as u32;
+                *cell = PackedM31::from(M31::from(crate::utils::spread_u32(value)));
+            }
+            input[N_BYTES_IN_STATE] = PackedM31::from(M31::from((1000 + permutation) as u32));
+        }
+
+        let (_, _, data) = keccak::Claim::generate_trace(&inputs);
+        let packed = pack_round_boundary_rows(&data);
+        let invocation_count = PERMUTATIONS * crate::constants::N_ROUNDS;
+        assert_eq!(packed.len(), invocation_count.div_ceil(N_LANES));
+
+        for invocation in 0..invocation_count {
+            let vector_row = invocation / N_LANES;
+            let lane = invocation % N_LANES;
+            let permutation = invocation / crate::constants::N_ROUNDS;
+            let round = invocation % crate::constants::N_ROUNDS;
+            let boundary = &data.rows[permutation * keccak::ROWS_PER_PERM + round];
+            for byte in 0..N_BYTES_IN_STATE {
+                assert_eq!(
+                    packed[vector_row][byte].to_array()[lane],
+                    boundary.state[byte]
+                );
+            }
+            assert_eq!(
+                packed[vector_row][N_BYTES_IN_STATE].to_array()[lane],
+                M31::from(round as u32)
+            );
+            assert_eq!(
+                packed[vector_row][N_BYTES_IN_STATE + 1].to_array()[lane],
+                boundary.perm_id
+            );
+        }
+
+        for invocation in invocation_count..packed.len() * N_LANES {
+            let vector_row = invocation / N_LANES;
+            let lane = invocation % N_LANES;
+            for column in &packed[vector_row] {
+                assert_eq!(column.to_array()[lane], M31::zero());
+            }
+        }
+    }
 }
 
 // =============================================================================
