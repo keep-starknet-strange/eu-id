@@ -13,8 +13,9 @@ const ENVELOPE_CAPACITY_ALIGNMENT: u32 = 65_536;
 const PROOF_BODY_CAPACITY: u32 =
     eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_PROOF_BODY_CAPACITY;
 
-const _: () =
-    assert!(PROOF_BODY_CAPACITY != 0 && PROOF_BODY_CAPACITY % ENVELOPE_CAPACITY_ALIGNMENT == 0);
+const _: () = assert!(
+    PROOF_BODY_CAPACITY != 0 && PROOF_BODY_CAPACITY.is_multiple_of(ENVELOPE_CAPACITY_ALIGNMENT)
+);
 
 /// Public values for the TS13 identity proof.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
@@ -161,7 +162,7 @@ fn encode_envelope_prefix(prefix: &[u8]) -> Result<Vec<u8>, IdentityError> {
     envelope[10..42]
         .copy_from_slice(&eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH);
     envelope[42..46].copy_from_slice(&PROOF_BODY_CAPACITY.to_le_bytes());
-    envelope[46..46 + prefix.len()].copy_from_slice(&prefix);
+    envelope[46..46 + prefix.len()].copy_from_slice(prefix);
     Ok(envelope)
 }
 
