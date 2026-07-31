@@ -691,12 +691,12 @@ fn ts13_public_input_unlinkability_a1_a2_b_uses_compiled_artifact() {
 }
 
 #[test]
-fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
+fn ts13_exported_prover_rejects_invalid_witness_matrix() {
     let transcript =
-        eu_id_prover::mdoc::openid4vp_session_transcript(b"ts13-exported-theorem-matrix");
+        eu_id_prover::mdoc::openid4vp_session_transcript(b"ts13-exported-invalid-witness-matrix");
     let fixture = mldsa_fixture::mldsa_ts13_credential_a_with_transcript(&transcript);
     let statement = unlinkable_identity_statement(
-        "rp-local-ts13-theorem-matrix",
+        "rp-local-ts13-invalid-witness-matrix",
         transcript,
         &fixture.issuer_pk,
         &fixture.revocation_pk,
@@ -713,8 +713,9 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
     };
 
     let control_proof = prove_identity(statement.clone(), base_witness.clone())
-        .expect("the theorem-matrix control proves");
-    verify_identity(statement.clone(), control_proof).expect("the theorem-matrix control verifies");
+        .expect("the invalid-witness matrix control proves");
+    verify_identity(statement.clone(), control_proof)
+        .expect("the invalid-witness matrix control verifies");
 
     let document_case = |document| IdentityWitness {
         document,
@@ -727,18 +728,21 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut issuer_auth_mut(document)[3], "issuer signature");
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "issuer protected header",
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut issuer_auth_mut(document)[0], "issuer protected header");
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "issuer MSO payload",
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut issuer_auth_mut(document)[2], "issuer MSO payload");
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
 
     cases.push((
@@ -749,6 +753,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                     Value::Text("eu.europa.ec.eudi.pid.2".to_string());
             });
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "MSO digestAlgorithm",
@@ -757,6 +762,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                 *text_map_value_mut(mso, "digestAlgorithm") = Value::Text("SHA-512".to_string());
             });
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "MSO device-key region",
@@ -774,6 +780,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                 flip_middle_byte(public_key, "MSO device public key");
             });
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
 
     cases.push((
@@ -783,6 +790,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                 flip_middle_byte(text_map_value_mut(item, "random"), "item randomizer");
             });
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "selected item value",
@@ -792,6 +800,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
             });
             update_selected_digest_and_resign(document);
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "selected item digest context",
@@ -811,6 +820,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                 flip_middle_byte(digest, "selected item digest");
             });
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
 
     cases.push((
@@ -818,6 +828,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut device_signature_mut(document)[3], "device signature");
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "device protected header",
@@ -827,12 +838,14 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                 "device protected header",
             );
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
     cases.push((
         "device payload",
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut device_signature_mut(document)[2], "device payload");
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
 
     let mut wrong_endpoints = base_witness.clone();
@@ -840,11 +853,19 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
         .revocation_id_lo
         .checked_add(1)
         .expect("fixture lower endpoint can move inward");
-    cases.push(("revocation endpoints", wrong_endpoints));
+    cases.push((
+        "revocation endpoints",
+        wrong_endpoints,
+        IdentityError::ProofGenerationFailed,
+    ));
     let mut wrong_revocation_signature = base_witness.clone();
     let signature_index = wrong_revocation_signature.revocation_signature.len() / 2;
     wrong_revocation_signature.revocation_signature[signature_index] ^= 1;
-    cases.push(("revocation signature", wrong_revocation_signature));
+    cases.push((
+        "revocation signature",
+        wrong_revocation_signature,
+        IdentityError::ProofGenerationFailed,
+    ));
 
     cases.push((
         "fixed-shape short MSO",
@@ -859,6 +880,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                 });
             });
         })),
+        IdentityError::UnsupportedCredentialShape,
     ));
     cases.push((
         "fixed-shape long MSO",
@@ -874,6 +896,7 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
                 ));
             });
         })),
+        IdentityError::UnsupportedCredentialShape,
     ));
     cases.push((
         "selected item trailing CBOR",
@@ -881,36 +904,15 @@ fn ts13_exported_api_theorem_mutation_matrix_fails_closed() {
             append_selected_item_trailing_cbor(document);
             update_selected_digest_and_resign(document);
         })),
+        IdentityError::InvalidPrivateCredential,
     ));
 
     assert_eq!(cases.len(), 17);
-    for (name, witness) in cases {
-        let outcome = prove_identity(statement.clone(), witness);
-        eprintln!(
-            "{name}: {}",
-            match &outcome {
-                Ok(proof) => format!("proof built ({} bytes)", proof.len()),
-                Err(error) => format!("pre-proof rejection ({error:?})"),
-            }
-        );
-        match outcome {
-            Err(error) => assert!(
-                matches!(
-                    error,
-                    IdentityError::UnsupportedCredentialShape
-                        | IdentityError::InvalidPrivateCredential
-                        | IdentityError::InvalidRevocationWitness
-                        | IdentityError::ProofGenerationFailed
-                ),
-                "{name} returned an imprecise pre-proof error: {error:?}"
-            ),
-            Ok(proof) => match verify_identity(statement.clone(), proof) {
-                Ok(()) => panic!("{name} produced a verifying proof"),
-                Err(error) => assert!(
-                    matches!(error, IdentityError::ProofVerificationFailed),
-                    "{name} returned an unexpected verification error: {error:?}"
-                ),
-            },
-        }
+    for (name, witness, expected) in cases {
+        let error = match prove_identity(statement.clone(), witness) {
+            Err(error) => error,
+            Ok(_) => panic!("{name} built a proof instead of rejecting the invalid witness"),
+        };
+        assert_eq!(error, expected, "{name} returned the wrong host error");
     }
 }

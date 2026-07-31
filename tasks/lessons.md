@@ -12,6 +12,7 @@
 - Check public serialization.
 - Check relation signs and multiplicities.
 - Search hidden files with `rg --files -uu` or `git ls-tree -r HEAD`.
+- Search the root working tree before saying that an ignored task file is absent.
 - Do not report a required file as absent before this search.
 - Confirm that each filtered test executes at least one test.
 - A result with `0 passed` is not test evidence.
@@ -72,6 +73,7 @@
 ## Public preprocessing
 
 - Distinguish AIR self-containment from end-to-end soundness.
+- Read each aliased preprocessed representative once and clone its field value for logical uses.
 - Identify each value that the verifier computes outside the AIR.
 - State the trust boundary for each computed value.
 - Do not describe verifier preprocessing as an AIR constraint.

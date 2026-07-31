@@ -1830,10 +1830,56 @@ fn revocation_range_trace_cols() -> usize {
         + REVOCATION_RANGE_DIGEST_TAIL_COLS
 }
 
+#[cfg(test)]
+thread_local! {
+    static REVOCATION_ENDPOINT_ATTACK: core::cell::Cell<Option<RevocationEndpointAttack>> =
+        const { core::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct RevocationRangeAttackGuard;
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum RevocationEndpointAttack {
+    Lower,
+    Upper,
+}
+
+#[cfg(test)]
+impl Drop for RevocationRangeAttackGuard {
+    fn drop(&mut self) {
+        REVOCATION_ENDPOINT_ATTACK.with(|attack| attack.set(None));
+    }
+}
+
+#[cfg(test)]
+fn install_revocation_endpoint_attack(
+    attack: RevocationEndpointAttack,
+) -> RevocationRangeAttackGuard {
+    REVOCATION_ENDPOINT_ATTACK.with(|active| active.set(Some(attack)));
+    RevocationRangeAttackGuard
+}
+
+#[cfg(test)]
+fn prover_revocation_range_strictness() -> (bool, bool) {
+    REVOCATION_ENDPOINT_ATTACK.with(|attack| match attack.get() {
+        Some(RevocationEndpointAttack::Lower) => (false, true),
+        Some(RevocationEndpointAttack::Upper) => (true, false),
+        None => (true, true),
+    })
+}
+
+#[cfg(not(test))]
+fn prover_revocation_range_strictness() -> (bool, bool) {
+    (true, true)
+}
+
 struct MdocRevocationRangeBind {
     witness: Option<MdocRevocationRangeWitness>,
     mso_digest: Option<[u8; 32]>,
     epoch: u32,
+    strict_comparisons: (bool, bool),
     digest_handle: SharedDigestRelation,
     message_field_handle: SharedFieldRelation,
     blinder_relation: Option<ClaimedSumBlinderRelation>,
@@ -1847,6 +1893,7 @@ struct MdocRevocationRangeEval {
     mso_digest_relation: Box<DigestBytesRelation>,
     message_field_relation: FieldBytesRelation,
     epoch: u32,
+    strict_comparisons: (bool, bool),
     blinder_relation: ClaimedSumBlinderRelation,
     blinder_v: QM31,
     blinder_m: QM31,
@@ -1873,6 +1920,7 @@ impl MdocRevocationRangeBind {
             witness: Some(witness),
             mso_digest: Some(mso_digest),
             epoch,
+            strict_comparisons: prover_revocation_range_strictness(),
             digest_handle,
             message_field_handle,
             blinder_relation: None,
@@ -1892,6 +1940,7 @@ impl MdocRevocationRangeBind {
             witness: None,
             mso_digest: None,
             epoch,
+            strict_comparisons: (true, true),
             digest_handle,
             message_field_handle,
             blinder_relation: None,
@@ -1951,10 +2000,10 @@ fn byte_bits(byte: u8) -> [u8; 8] {
     std::array::from_fn(|bit| (byte >> bit) & 1)
 }
 
-fn comparison_carries(lhs: [u8; 8], rhs: [u8; 8], slack: [u8; 8]) -> [u8; 8] {
+fn comparison_carries(lhs: [u8; 8], rhs: [u8; 8], slack: [u8; 8], strict: bool) -> [u8; 8] {
     let mut carry = 0u16;
     std::array::from_fn(|idx| {
-        let add_one = u16::from(idx == 0);
+        let add_one = u16::from(strict && idx == 0);
         let sum = u16::from(lhs[idx]) + u16::from(slack[idx]) + add_one + carry;
         carry = sum >> 8;
         debug_assert_eq!((sum & 0xff) as u8, rhs[idx]);
@@ -1965,6 +2014,7 @@ fn comparison_carries(lhs: [u8; 8], rhs: [u8; 8], slack: [u8; 8]) -> [u8; 8] {
 fn revocation_range_base_trace(
     witness: &MdocRevocationRangeWitness,
     mso_digest: &[u8; 32],
+    strict_comparisons: (bool, bool),
 ) -> Vec<MdocRevocationRangeColumnEval> {
     let id = witness.id.to_le_bytes();
     let id_lo = witness.id_lo.to_le_bytes();
@@ -1972,15 +2022,15 @@ fn revocation_range_base_trace(
     let lower_slack = witness
         .id
         .wrapping_sub(witness.id_lo)
-        .wrapping_sub(1)
+        .wrapping_sub(u64::from(strict_comparisons.0))
         .to_le_bytes();
     let upper_slack = witness
         .id_hi
         .wrapping_sub(witness.id)
-        .wrapping_sub(1)
+        .wrapping_sub(u64::from(strict_comparisons.1))
         .to_le_bytes();
-    let lower_carries = comparison_carries(id_lo, id, lower_slack);
-    let upper_carries = comparison_carries(id, id_hi, upper_slack);
+    let lower_carries = comparison_carries(id_lo, id, lower_slack, strict_comparisons.0);
+    let upper_carries = comparison_carries(id, id_hi, upper_slack, strict_comparisons.1);
 
     let mut first_row = Vec::with_capacity(revocation_range_trace_cols());
     for byte in id
@@ -2023,6 +2073,7 @@ fn revocation_range_base_trace(
 fn revocation_range_interaction_trace(
     witness: &MdocRevocationRangeWitness,
     mso_digest: &[u8; 32],
+    strict_comparisons: (bool, bool),
     mso_digest_relation: &DigestBytesRelation,
     epoch: u32,
     message_relation: &FieldBytesRelation,
@@ -2030,7 +2081,7 @@ fn revocation_range_interaction_trace(
     blinder_v: QM31,
     blinder_m: QM31,
 ) -> (Vec<MdocRevocationRangeColumnEval>, QM31) {
-    let base = revocation_range_base_trace(witness, mso_digest);
+    let base = revocation_range_base_trace(witness, mso_digest, strict_comparisons);
     let active = revocation_range_active_column();
     let n_vec_rows = 1usize << (MDOC_REVOCATION_RANGE_LOG_SIZE - LOG_N_LANES);
     let digest_tail_offset =
@@ -2157,16 +2208,19 @@ impl FrameworkEval for MdocRevocationRangeEval {
                 values[upper_carries_offset + byte_idx - 1].clone()
             };
             let upper_carry_out = values[upper_carries_offset + byte_idx].clone();
-            let add_one = m31_const::<E>(u32::from(byte_idx == 0));
+            let lower_add_one =
+                m31_const::<E>(u32::from(self.strict_comparisons.0 && byte_idx == 0));
+            let upper_add_one =
+                m31_const::<E>(u32::from(self.strict_comparisons.1 && byte_idx == 0));
             eval.add_constraint(
                 active.clone()
-                    * (id_lo + lower_slack + add_one.clone() + lower_carry_in
+                    * (id_lo + lower_slack + lower_add_one + lower_carry_in
                         - id.clone()
                         - m31_const::<E>(256) * lower_carry_out),
             );
             eval.add_constraint(
                 active.clone()
-                    * (id + upper_slack + add_one + upper_carry_in
+                    * (id + upper_slack + upper_add_one + upper_carry_in
                         - id_hi
                         - m31_const::<E>(256) * upper_carry_out),
             );
@@ -2267,6 +2321,7 @@ impl Air for MdocRevocationRangeBind {
                 mso_digest_relation: Box::new(self.mso_digest_relation()),
                 message_field_relation: self.message_relation(),
                 epoch: self.epoch,
+                strict_comparisons: self.strict_comparisons,
                 blinder_relation: blinder_relation.clone(),
                 blinder_v: claim.blinder_v,
                 blinder_m: claim.blinder_m,
@@ -2326,6 +2381,7 @@ impl AirProver for MdocRevocationRangeBind {
             self.mso_digest
                 .as_ref()
                 .expect("mdoc revocation range MSO digest is set"),
+            self.strict_comparisons,
         ));
     }
 
@@ -2343,6 +2399,7 @@ impl AirProver for MdocRevocationRangeBind {
             self.mso_digest
                 .as_ref()
                 .expect("mdoc revocation range MSO digest is set"),
+            self.strict_comparisons,
             &self.mso_digest_relation(),
             self.epoch,
             &self.message_relation(),
@@ -3559,6 +3616,91 @@ mod tests {
             .expect("large-stack revocation test thread starts")
             .join()
             .expect("large-stack revocation test thread succeeds");
+    }
+
+    #[test]
+    fn composed_revocation_endpoint_equalities_fail_air_verification() {
+        std::thread::Builder::new()
+            .name("ts13-revocation-endpoint-test".to_string())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let transcript = openid4vp_session_transcript(b"ts13-revocation-endpoints");
+                let fixture =
+                    crate::mldsa_test_fixture::mldsa_ts13_credential_a_with_transcript(&transcript);
+                let request = MdocPidRequest::age_over_18(transcript.clone());
+                let extracted =
+                    extract_pid_mdoc(&fixture.document, &request).expect("credential extracts");
+                let id = crate::ts13::ts13_mso_derived_revocation_id(&fixture.mso);
+                let below = id.checked_sub(1).expect("fixture revocation ID is nonzero");
+                let above = id
+                    .checked_add(1)
+                    .expect("fixture revocation ID is not the maximum");
+                let public = test_public_input(
+                    &transcript,
+                    &fixture.issuer_pk,
+                    &fixture.revocation_pk,
+                    "rp-local-demo-revocation-endpoints",
+                );
+
+                let prove_range = |id_lo,
+                                   id_hi,
+                                   attack: Option<RevocationEndpointAttack>,
+                                   label: &str| {
+                    let (revocation_pk, signature) =
+                        crate::mldsa_test_fixture::mldsa_revocation_fixture(
+                            id_lo,
+                            id_hi,
+                            TEST_REVOCATION_EPOCH,
+                        );
+                    assert_eq!(revocation_pk, fixture.revocation_pk, "{label}");
+                    let signed_message =
+                        crate::ts13::ts13_revocation_message(id_lo, id_hi, TEST_REVOCATION_EPOCH);
+                    let signature_trace =
+                        stwo_mldsa::verify_internals(&revocation_pk, &signed_message, &signature)
+                            .expect("revocation signature decodes");
+                    assert!(signature_trace.accepted, "{label}");
+                    let _attack = attack.map(install_revocation_endpoint_attack);
+                    prove_mdoc_ts13_demo_circuit(
+                        &extracted,
+                        &public,
+                        MdocRevocationRangeWitness { id, id_lo, id_hi },
+                        MdocRevocationSignature(signature),
+                    )
+                    .unwrap_or_else(|error| panic!("{label} proof generation failed: {error:?}"))
+                };
+
+                let control = prove_range(below, above, None, "strict control");
+                verify_mdoc_ts13_demo_circuit(&control, &public)
+                    .expect("strict revocation interval verifies");
+
+                for (label, id_lo, id_hi, attack) in [
+                    (
+                        "lower endpoint equality",
+                        id,
+                        above,
+                        RevocationEndpointAttack::Lower,
+                    ),
+                    (
+                        "upper endpoint equality",
+                        below,
+                        id,
+                        RevocationEndpointAttack::Upper,
+                    ),
+                ] {
+                    let proof = prove_range(id_lo, id_hi, Some(attack), label);
+                    match verify_mdoc_ts13_demo_circuit(&proof, &public)
+                        .expect_err("endpoint equality must fail AIR verification")
+                    {
+                        Error::Verify(message) => {
+                            assert!(message.starts_with("Stark("), "{label}: {message}")
+                        }
+                        error => panic!("{label}: expected a STARK error, got {error:?}"),
+                    }
+                }
+            })
+            .expect("large-stack revocation endpoint test thread starts")
+            .join()
+            .expect("large-stack revocation endpoint test thread succeeds");
     }
 
     #[test]

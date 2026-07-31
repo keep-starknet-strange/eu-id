@@ -70,9 +70,9 @@ pub const N_BASE_COLS: usize = 3 * MAX_RATE + N_BYTES_IN_STATE + MAX_RATE;
 /// squeeze selector, and the verifier-length-derived pad suffix mask.
 pub const N_CAPACITY_BASE_COLS: usize = 2 + MAX_RATE;
 
-/// Schedule (preprocessed) columns: 10 scalars + `rate_gate[MAX_RATE]` +
-/// `pad_gate[MAX_RATE]` + `pad_val[MAX_RATE]`.
-pub const N_SCHEDULE_COLS: usize = 10 + 3 * MAX_RATE;
+/// Scalar schedule columns. Padding masks add one column per distinct,
+/// nonzero fixed-job mask.
+pub const N_SCHEDULE_COLS: usize = 10;
 
 /// Capacity-mode schedule columns shared across all capacity jobs. One
 /// additional one-hot column is appended per capacity job so the AIR can
@@ -165,6 +165,11 @@ impl JobList {
 
     pub fn n_schedule_cols(&self) -> usize {
         N_SCHEDULE_COLS
+            + pad_gate_aliases(self)
+                .iter()
+                .enumerate()
+                .filter(|(column, alias)| **alias == Some(*column))
+                .count()
             + usize::from(self.has_message_capacity()) * N_CAPACITY_SCHEDULE_COLS
             + self.capacity_job_count()
     }
@@ -251,10 +256,7 @@ struct RowSched {
     capacity_last: bool,
     capacity_job: Option<usize>,
     /// `pad_gate[j] = 1` iff byte `j` of this row's block is a pad10*1 constant.
-    rate_gate: [u8; MAX_RATE],
     pad_gate: [u8; MAX_RATE],
-    /// The pad constant at gated positions (0 elsewhere).
-    pad_val: [u8; MAX_RATE],
 }
 
 /// Build the per-row schedule for the whole job list (active rows only).
@@ -273,22 +275,9 @@ fn build_schedule(jobs: &JobList) -> Vec<RowSched> {
             let absorb = r < shape.n_absorb;
             let last_absorb = r + 1 == shape.n_absorb;
             let squeeze_out = r + 1 >= shape.n_absorb;
-            let mut rate_gate = [0u8; MAX_RATE];
-            rate_gate[..rate].fill(1);
             let mut pad_gate = [0u8; MAX_RATE];
-            let mut pad_val = [0u8; MAX_RATE];
             if absorb && last_absorb {
-                for j in f..rate {
-                    pad_gate[j] = 1;
-                    let mut v = 0u8;
-                    if j == f {
-                        v ^= DELIMITED_SUFFIX;
-                    }
-                    if j == rate - 1 {
-                        v ^= FINAL_BIT;
-                    }
-                    pad_val[j] = v;
-                }
+                pad_gate[f..rate].fill(1);
             }
             rows.push(RowSched {
                 first: r == 0,
@@ -307,13 +296,42 @@ fn build_schedule(jobs: &JobList) -> Vec<RowSched> {
                 capacity_mode: shape.has_message_capacity(),
                 capacity_last: shape.has_message_capacity() && last_absorb,
                 capacity_job,
-                rate_gate,
                 pad_gate,
-                pad_val,
             });
         }
     }
     rows
+}
+
+fn fixed_job_uses_pad_at(shape: &Shape, byte: usize) -> bool {
+    if shape.has_message_capacity() {
+        return false;
+    }
+    let rate = shape.rate();
+    byte >= shape.message_len % rate && byte < rate
+}
+
+/// Map each logical fixed-padding mask to its first equal nonzero mask.
+/// Capacity-job rows are zero because their padding mask is committed.
+fn pad_gate_aliases(jobs: &JobList) -> [Option<usize>; MAX_RATE] {
+    let mut aliases = [None; MAX_RATE];
+    for byte in 0..MAX_RATE {
+        if !jobs
+            .jobs
+            .iter()
+            .any(|shape| fixed_job_uses_pad_at(shape, byte))
+        {
+            continue;
+        }
+        let representative = (0..byte).find(|&candidate| {
+            aliases[candidate] == Some(candidate)
+                && jobs.jobs.iter().all(|shape| {
+                    fixed_job_uses_pad_at(shape, candidate) == fixed_job_uses_pad_at(shape, byte)
+                })
+        });
+        aliases[byte] = Some(representative.unwrap_or(byte));
+    }
+    aliases
 }
 
 fn schedule_id(digest: &str, name: &str) -> PreProcessedColumnId {
@@ -342,14 +360,10 @@ pub fn schedule_ids(jobs: &JobList) -> Vec<PreProcessedColumnId> {
         .iter()
         .map(|n| schedule_id(&d, n))
         .collect();
-    for j in 0..MAX_RATE {
-        ids.push(schedule_id(&d, &format!("rate_gate_{j}")));
-    }
-    for j in 0..MAX_RATE {
-        ids.push(schedule_id(&d, &format!("pad_gate_{j}")));
-    }
-    for j in 0..MAX_RATE {
-        ids.push(schedule_id(&d, &format!("pad_val_{j}")));
+    for (byte, alias) in pad_gate_aliases(jobs).into_iter().enumerate() {
+        if alias == Some(byte) {
+            ids.push(schedule_id(&d, &format!("pad_gate_{byte}")));
+        }
     }
     if jobs.has_message_capacity() {
         ids.push(schedule_id(&d, "capacity_mode"));
@@ -388,14 +402,12 @@ pub fn gen_schedule_preprocessed(jobs: &JobList) -> Vec<ColEval> {
         scalar(&|s| s.absorb_pos_base),
         scalar(&|s| s.squeeze_pos_base),
     ];
-    for j in 0..MAX_RATE {
-        cols.push(scalar(&move |s| s.rate_gate[j] as u32));
-    }
-    for j in 0..MAX_RATE {
-        cols.push(scalar(&move |s| s.pad_gate[j] as u32));
-    }
-    for j in 0..MAX_RATE {
-        cols.push(scalar(&move |s| s.pad_val[j] as u32));
+    for (byte, alias) in pad_gate_aliases(jobs).into_iter().enumerate() {
+        if alias == Some(byte) {
+            cols.push(scalar(&move |s| {
+                (!s.capacity_mode && s.pad_gate[byte] != 0) as u32
+            }));
+        }
     }
     if jobs.has_message_capacity() {
         cols.push(scalar(&|s| s.capacity_mode as u32));
@@ -680,14 +692,25 @@ impl FrameworkEval for Eval {
         let absorb_pos_base = eval.get_preprocessed_column(schedule_id(&d, "absorb_pos_base"));
         let squeeze_pos_base = eval.get_preprocessed_column(schedule_id(&d, "squeeze_pos_base"));
         let rate_gate: Vec<E::F> = (0..MAX_RATE)
-            .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("rate_gate_{j}"))))
+            .map(|j| {
+                if j < N_BYTES_IN_RATE {
+                    is_active.clone()
+                } else {
+                    is_shake128.clone()
+                }
+            })
             .collect();
-        let scheduled_pad_gate: Vec<E::F> = (0..MAX_RATE)
-            .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("pad_gate_{j}"))))
-            .collect();
-        let pad_val: Vec<E::F> = (0..MAX_RATE)
-            .map(|j| eval.get_preprocessed_column(schedule_id(&d, &format!("pad_val_{j}"))))
-            .collect();
+        let mut scheduled_pad_gate: Vec<E::F> = Vec::with_capacity(MAX_RATE);
+        for (byte, alias) in pad_gate_aliases(&self.jobs).into_iter().enumerate() {
+            let gate = match alias {
+                None => E::F::zero(),
+                Some(representative) if representative == byte => {
+                    eval.get_preprocessed_column(schedule_id(&d, &format!("pad_gate_{byte}")))
+                }
+                Some(representative) => scheduled_pad_gate[representative].clone(),
+            };
+            scheduled_pad_gate.push(gate);
+        }
         let capacity_mode = if self.jobs.has_message_capacity() {
             eval.get_preprocessed_column(schedule_id(&d, "capacity_mode"))
         } else {
@@ -825,10 +848,25 @@ impl FrameworkEval for Eval {
                         * (block_byte[j].clone() - expected_pad),
                 );
             }
+            let previous_pad = if j == 0 {
+                E::F::zero()
+            } else {
+                scheduled_pad_gate[j - 1].clone()
+            };
+            let pad_start = scheduled_pad_gate[j].clone() - previous_pad;
+            let final_gate = if j == N_BYTES_IN_RATE - 1 {
+                is_active.clone() - is_shake128.clone()
+            } else if j == N_BYTES_IN_SHAKE128_RATE - 1 {
+                is_shake128.clone()
+            } else {
+                E::F::zero()
+            };
+            let expected_pad = pad_start * E::F::from(BaseField::from(DELIMITED_SUFFIX as u32))
+                + final_gate * E::F::from(BaseField::from(FINAL_BIT as u32));
             eval.add_constraint(
                 fixed_mode.clone()
                     * scheduled_pad_gate[j].clone()
-                    * (block_byte[j].clone() - pad_val[j].clone()),
+                    * (block_byte[j].clone() - expected_pad),
             );
         }
         if self.jobs.has_message_capacity() {
@@ -1042,7 +1080,7 @@ fn row_fracs(
 
     // 1. conv block (+is_absorb·rate_gate).
     for j in 0..MAX_RATE {
-        if row.absorb_active && sched.rate_gate[j] != 0 {
+        if row.absorb_active && j < rate {
             let den: SecureField = rel
                 .conv
                 .combine(&[m(row.block_byte[j] as u32), sp(row.block_byte[j])]);
@@ -1053,7 +1091,7 @@ fn row_fracs(
     }
     // 2. io absorb consume (−(is_absorb·rate_gate − pad_gate)).
     for j in 0..MAX_RATE {
-        if row.absorb_active && sched.rate_gate[j] != 0 && row.pad_gate[j] == 0 {
+        if row.absorb_active && j < rate && row.pad_gate[j] == 0 {
             let den: SecureField = rel.hash_io.combine(&[
                 m(sched.absorb_stream),
                 m(sched.absorb_pos_base + j as u32),
@@ -1066,7 +1104,7 @@ fn row_fracs(
     }
     // 3. xor3 (+(is_absorb − is_first)·rate_gate).
     for j in 0..MAX_RATE {
-        if row.absorb_active && !sched.first && sched.rate_gate[j] != 0 {
+        if row.absorb_active && !sched.first && j < rate {
             let key = sp(row.prev_post[j]) + sp(row.block_byte[j]);
             let den: SecureField = rel.xor3.combine(&[key, sp(row.new_rate[j])]);
             out.push((one, den));
@@ -1236,4 +1274,95 @@ pub fn generate_interaction_trace(
     }
     let (trace, claimed_sum) = gen.finalize_last();
     (InteractionClaim { claimed_sum }, trace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schedule_reuses_equal_padding_masks_and_omits_derived_columns() {
+        let jobs = JobList::new([
+            Shape::new(16, 1, 0, 1),
+            Shape::new(34, 1, 2, 3),
+            Shape::new(48, 1, 4, 5),
+            Shape::new(86, 1, 6, 7),
+            Shape::shake128(16, 1, 8, 9),
+        ]);
+        let aliases = pad_gate_aliases(&jobs);
+        assert!(aliases[..16].iter().all(Option::is_none));
+        for (range, representative) in [
+            (16..34, 16),
+            (34..48, 34),
+            (48..86, 48),
+            (86..136, 86),
+            (136..168, 136),
+        ] {
+            assert!(aliases[range]
+                .iter()
+                .all(|alias| *alias == Some(representative)));
+        }
+
+        let ids = schedule_ids(&jobs);
+        assert_eq!(jobs.n_schedule_cols(), N_SCHEDULE_COLS + 5);
+        assert_eq!(ids.len(), jobs.n_schedule_cols());
+        assert_eq!(gen_schedule_preprocessed(&jobs).len(), ids.len());
+        assert!(ids.iter().all(|id| !id.id.contains("rate_gate_")));
+        assert!(ids.iter().all(|id| !id.id.contains("pad_val_")));
+        for representative in [16, 34, 48, 86, 136] {
+            assert!(ids
+                .iter()
+                .any(|id| id.id.ends_with(&format!("/pad_gate_{representative}"))));
+        }
+    }
+
+    #[test]
+    fn capacity_jobs_do_not_commit_unused_fixed_padding_masks() {
+        let jobs = JobList::new([Shape::with_message_capacity(303, 1_024, 1, 0, 1).unwrap()]);
+        assert!(pad_gate_aliases(&jobs).iter().all(Option::is_none));
+        assert_eq!(
+            jobs.n_schedule_cols(),
+            N_SCHEDULE_COLS + N_CAPACITY_SCHEDULE_COLS + 1
+        );
+        assert!(schedule_ids(&jobs)
+            .iter()
+            .all(|id| !id.id.contains("pad_gate_")));
+    }
+
+    #[test]
+    fn derived_fixed_padding_values_match_fips_padding() {
+        let shapes = vec![
+            Shape::new(0, 1, 0, 1),
+            Shape::new(N_BYTES_IN_RATE - 1, 1, 2, 3),
+            Shape::shake128(0, 1, 4, 5),
+            Shape::shake128(N_BYTES_IN_SHAKE128_RATE - 1, 1, 6, 7),
+        ];
+        let messages = shapes
+            .iter()
+            .map(|shape| vec![0; shape.message_len])
+            .collect::<Vec<_>>();
+        let jobs = JobList::new(shapes);
+        let run = generate_jobs(&jobs, &messages);
+        let schedule = build_schedule(&jobs);
+
+        for (scheduled, row) in schedule.iter().zip(&run.rows) {
+            for byte in 0..MAX_RATE {
+                let previous = byte
+                    .checked_sub(1)
+                    .map_or(0, |previous| scheduled.pad_gate[previous]);
+                let pad_start = i16::from(scheduled.pad_gate[byte]) - i16::from(previous);
+                let final_gate = usize::from(
+                    (byte == N_BYTES_IN_RATE - 1 && !scheduled.shake128)
+                        || (byte == N_BYTES_IN_SHAKE128_RATE - 1 && scheduled.shake128),
+                ) as i16;
+                let expected = if scheduled.pad_gate[byte] == 0 {
+                    0
+                } else {
+                    (pad_start * i16::from(DELIMITED_SUFFIX) + final_gate * i16::from(FINAL_BIT))
+                        as u8
+                };
+                assert_eq!(row.block_byte[byte], expected);
+            }
+        }
+    }
 }

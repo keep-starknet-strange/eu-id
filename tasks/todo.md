@@ -54,6 +54,14 @@ Privacy claim:
 - [x] Build the canonical Android binding and compile its device test.
 - [x] Pass `git diff --check`.
 
+## Audit follow-up
+
+- [x] Make the exported invalid-witness matrix assert exact host rejection.
+- [x] Add a proof-level negative for revocation endpoint equality.
+- [x] Remove or derive unnecessary preprocessed columns.
+- [ ] Regenerate the circuit artifact and update its geometry records.
+- [ ] Run the complete release verification after the audit fixes.
+
 ## Invariants
 
 - Keep the fixed TS13 theorem and identity-proof envelope.

@@ -66,10 +66,9 @@ pub const REJECTION_LOG_SIZE: u32 = 14;
 const LOGUP_BATCH: usize = 4;
 const EXPAND_A_MIX_TAG: u64 = 0x4d4c_4453_4145_5850;
 
-const ABSORB_PRE_NAMES: [&str; 8] = [
+const ABSORB_PRE_NAMES: [&str; 7] = [
     "active",
     "byte_pos",
-    "poly",
     "absorb_stream",
     "rho_first",
     "rho_copy",
@@ -77,13 +76,12 @@ const ABSORB_PRE_NAMES: [&str; 8] = [
     "domain_byte",
 ];
 
-const REJECTION_PRE_NAMES: [&str; 8] = [
+const REJECTION_PRE_NAMES: [&str; 7] = [
     "active",
     "first",
     "last",
     "not_first",
     "poly",
-    "candidate",
     "byte_pos",
     "squeeze_stream",
 ];
@@ -516,12 +514,11 @@ fn gen_absorb_preprocessed(ns: &str, attack: Option<ExpandATraceAttack>) -> Vec<
             let row = pos * MATRIX_POLYS + poly;
             columns[0][row] = m31(1);
             columns[1][row] = m31(pos as u32);
-            columns[2][row] = m31(poly as u32);
-            columns[3][row] = m31(EXPAND_STREAM_OFFSET + EXPAND_STREAM_STRIDE * poly as u32);
-            columns[4][row] = m31((pos < 32 && poly == 0) as u32);
-            columns[5][row] = m31((pos < 32 && poly > 0) as u32);
-            columns[6][row] = m31((pos >= 32) as u32);
-            columns[7][row] = m31(match pos {
+            columns[2][row] = m31(EXPAND_STREAM_OFFSET + EXPAND_STREAM_STRIDE * poly as u32);
+            columns[3][row] = m31((pos < 32 && poly == 0) as u32);
+            columns[4][row] = m31((pos < 32 && poly > 0) as u32);
+            columns[5][row] = m31((pos >= 32) as u32);
+            columns[6][row] = m31(match pos {
                 32 => (poly % L) as u32,
                 33 => (poly / L) as u32,
                 _ => 0,
@@ -555,9 +552,8 @@ fn gen_rejection_preprocessed(ns: &str, attack: Option<ExpandATraceAttack>) -> V
             columns[2][row] = m31((candidate + 1 == MAX_CANDIDATES) as u32);
             columns[3][row] = m31((candidate > 0) as u32);
             columns[4][row] = m31(poly as u32);
-            columns[5][row] = m31(candidate as u32);
-            columns[6][row] = m31((3 * candidate) as u32);
-            columns[7][row] = m31(EXPAND_STREAM_OFFSET + EXPAND_STREAM_STRIDE * poly as u32 + 1);
+            columns[5][row] = m31((3 * candidate) as u32);
+            columns[6][row] = m31(EXPAND_STREAM_OFFSET + EXPAND_STREAM_STRIDE * poly as u32 + 1);
         }
     }
     if let Some(ExpandATraceAttack::Preprocessed {
@@ -731,7 +727,6 @@ impl FrameworkEval for AbsorbEval {
         let id = |name: &str| pre_id(&self.ns, "absorb", name);
         let active = eval.get_preprocessed_column(id("active"));
         let byte_pos = eval.get_preprocessed_column(id("byte_pos"));
-        let poly = eval.get_preprocessed_column(id("poly"));
         let absorb_stream = eval.get_preprocessed_column(id("absorb_stream"));
         let rho_first = eval.get_preprocessed_column(id("rho_first"));
         let rho_copy = eval.get_preprocessed_column(id("rho_copy"));
@@ -742,10 +737,7 @@ impl FrameworkEval for AbsorbEval {
         let byte_prev = byte_mask[0].clone();
         let byte = byte_mask[1].clone();
         let one = E::F::one();
-        let expected_absorb_stream =
-            E::F::from(m31(EXPAND_STREAM_OFFSET)) + E::F::from(m31(EXPAND_STREAM_STRIDE)) * poly;
 
-        eval.add_constraint(active.clone() * (absorb_stream.clone() - expected_absorb_stream));
         eval.add_constraint(rho_copy * (byte.clone() - byte_prev));
         eval.add_constraint(domain_gate * (byte.clone() - domain_byte));
         eval.add_constraint((one - active.clone()) * byte.clone());
@@ -792,7 +784,6 @@ impl FrameworkEval for RejectionEval {
         let last = eval.get_preprocessed_column(id("last"));
         let not_first = eval.get_preprocessed_column(id("not_first"));
         let poly = eval.get_preprocessed_column(id("poly"));
-        let candidate = eval.get_preprocessed_column(id("candidate"));
         let byte_pos = eval.get_preprocessed_column(id("byte_pos"));
         let squeeze_stream = eval.get_preprocessed_column(id("squeeze_stream"));
 
@@ -832,7 +823,6 @@ impl FrameworkEval for RejectionEval {
         eval.add_constraint(sample.clone() * (one.clone() - sample.clone()));
         eval.add_constraint(accept.clone() * (one.clone() - accept.clone()));
         eval.add_constraint(accept.clone() * (one.clone() - sample.clone()));
-        eval.add_constraint(active.clone() * (byte_pos.clone() - E::F::from(m31(3)) * candidate));
         eval.add_constraint(active.clone() * (squeeze_stream.clone() - expected_squeeze_stream));
         eval.add_constraint(active.clone() * (b2.clone() - low7.clone() - c128 * top.clone()));
         eval.add_constraint(
@@ -1450,8 +1440,17 @@ mod tests {
         assert_eq!(REJECTION_ACTIVE_ROWS, 10_080);
         assert_eq!(ABSORB_LOG_SIZE, 10);
         assert_eq!(REJECTION_LOG_SIZE, 14);
-        assert_eq!(ABSORB_PRE_NAMES.len(), 8);
-        assert_eq!(REJECTION_PRE_NAMES.len(), 8);
+        assert_eq!(ABSORB_PRE_NAMES.len(), 7);
+        assert_eq!(REJECTION_PRE_NAMES.len(), 7);
+        let preprocessed_ids = expand_a_preprocessed_ids("shape-test");
+        assert_eq!(preprocessed_ids.len(), 14);
+        assert_eq!(gen_expand_a_preprocessed("shape-test").len(), 14);
+        assert!(preprocessed_ids
+            .iter()
+            .all(|id| !id.id.ends_with("_absorb_poly")));
+        assert!(preprocessed_ids
+            .iter()
+            .all(|id| !id.id.ends_with("_rejection_candidate")));
         assert_eq!(ABSORB_BASE_COLS, 1);
         assert_eq!(REJECTION_BASE_COLS, 12);
         assert_eq!(ABSORB_INTERACTION_COLS, 4);
@@ -1766,18 +1765,6 @@ mod tests {
                 row: ABSORB_ACTIVE_ROWS,
                 value: 1,
             },
-            ExpandATraceAttack::Preprocessed {
-                component: ExpandAPreprocessedComponent::Absorb,
-                row: 0,
-                column: 2,
-                value: 1,
-            },
-            ExpandATraceAttack::Preprocessed {
-                component: ExpandAPreprocessedComponent::Absorb,
-                row: 0,
-                column: 3,
-                value: EXPAND_STREAM_OFFSET + 1,
-            },
         ];
         for attack in absorb_attacks {
             assert_ne!(
@@ -1892,19 +1879,7 @@ mod tests {
             ExpandATraceAttack::Preprocessed {
                 component: ExpandAPreprocessedComponent::Rejection,
                 row: accept_row,
-                column: 5,
-                value: 1,
-            },
-            ExpandATraceAttack::Preprocessed {
-                component: ExpandAPreprocessedComponent::Rejection,
-                row: accept_row,
                 column: 6,
-                value: 1,
-            },
-            ExpandATraceAttack::Preprocessed {
-                component: ExpandAPreprocessedComponent::Rejection,
-                row: accept_row,
-                column: 7,
                 value: EXPAND_STREAM_OFFSET,
             },
         ];
