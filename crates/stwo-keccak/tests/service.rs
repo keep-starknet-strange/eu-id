@@ -273,6 +273,30 @@ fn set_carrier_coset_cell(column: &mut ColEval, coset_row: usize, value: M31) {
     column.values.as_mut_slice()[domain_row] = value;
 }
 
+fn carrier_coset_cell(column: &ColEval, coset_row: usize) -> M31 {
+    let log_size = column.values.len().ilog2();
+    let domain_row = stwo_keccak::utils::circle_row_to_coset(log_size)
+        .into_iter()
+        .position(|row| row == coset_row)
+        .expect("carrier coset row exists");
+    column.values.at(domain_row)
+}
+
+fn rotate_carrier_coset_column(column: &mut ColEval) {
+    let n_rows = column.values.len();
+    let log_size = n_rows.ilog2();
+    let row_to_coset = stwo_keccak::utils::circle_row_to_coset(log_size);
+    let mut coset_to_row = vec![0; n_rows];
+    for (row, coset) in row_to_coset.iter().copied().enumerate() {
+        coset_to_row[coset] = row;
+    }
+    let original = column.values.to_cpu();
+    for (row, coset) in row_to_coset.into_iter().enumerate() {
+        let source_coset = (coset + n_rows - 1) % n_rows;
+        column.values.set(row, original[coset_to_row[source_coset]]);
+    }
+}
+
 /// Build a coherent permutation with one wrong Iota constant. The carrier,
 /// GKR leaves, table counts, sponge output, and all later rounds agree. Only
 /// the verifier-fixed 25-position schedule has the official constant.
@@ -335,22 +359,20 @@ fn install_alternate_iota_witness(run: &mut SpongeVRun) -> PermWitness {
             position,
             alternate,
         );
-        set_packed_lane(
-            &mut carrier_witness.interaction.schedule_mut()
-                [stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + byte][vector_row],
-            lane,
+        set_carrier_coset_cell(
+            &mut carrier_witness.interaction.trace_mut()
+                [stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + byte],
+            position,
             alternate,
         );
-        let key = &mut carrier_witness.interaction.round.lookup_data.xor3
-            [N_XOR3_C + N_XOR3_THETA_APPLY + byte][vector_row][0];
+        let key = &mut carrier_witness.round.lookup_data.xor3[N_XOR3_C + N_XOR3_THETA_APPLY + byte]
+            [vector_row][0];
         let changed_key = packed_lane(*key, lane) - official + alternate;
         set_packed_lane(key, lane, changed_key);
     }
 
-    let mut table_mult = TableMultiplicities::from_carrier_round(
-        &carrier_witness.interaction.round,
-        boundary_data.n_perms,
-    );
+    let mut table_mult =
+        TableMultiplicities::from_carrier_round(&carrier_witness.round, boundary_data.n_perms);
     table_mult.add_sponge(&run.xor, &run.conv);
     PermWitness {
         carrier_claim: carrier_witness.claim,
@@ -1261,18 +1283,16 @@ fn cross_permutation_carrier_state_swap_rejects() {
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
         let first = N_ROUNDS;
         let second = stwo_keccak::carrier::ROWS_PER_PERMUTATION + N_ROUNDS;
-        let (vr_a, lane_a) = (first / N_LANES, first % N_LANES);
-        let (vr_b, lane_b) = (second / N_LANES, second % N_LANES);
-        let carriers = perm
+        let trace = perm
             .carrier_data
             .as_mut()
             .expect("carrier GKR data")
-            .carrier_mut();
-        let mut a = carriers[0][vr_a].to_array();
-        let mut b = carriers[0][vr_b].to_array();
-        std::mem::swap(&mut a[lane_a], &mut b[lane_b]);
-        carriers[0][vr_a] = PackedM31::from_array(a);
-        carriers[0][vr_b] = PackedM31::from_array(b);
+            .trace_mut();
+        let column = &mut trace[stwo_keccak::carrier::CARRIER_COLUMN_START];
+        let first_value = carrier_coset_cell(column, first);
+        let second_value = carrier_coset_cell(column, second);
+        set_carrier_coset_cell(column, first, second_value);
+        set_carrier_coset_cell(column, second, first_value);
     }));
 }
 
@@ -1284,14 +1304,13 @@ fn reordered_carrier_positions_reject() {
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
         set_carrier_coset_cell(&mut perm.carrier_trace[4], 1, M31::from(2u32));
         set_carrier_coset_cell(&mut perm.carrier_trace[4], 2, M31::from(1u32));
-        let schedule = perm
+        let trace = perm
             .carrier_data
             .as_mut()
             .expect("carrier GKR data")
-            .schedule_mut();
-        let mut positions = schedule[4][0].to_array();
-        positions.swap(1, 2);
-        schedule[4][0] = PackedM31::from_array(positions);
+            .trace_mut();
+        set_carrier_coset_cell(&mut trace[4], 1, M31::from(2u32));
+        set_carrier_coset_cell(&mut trace[4], 2, M31::from(1u32));
     }));
 }
 
@@ -1305,12 +1324,14 @@ fn tampered_carrier_endpoint_source_rejects() {
         vec![1],
         None,
         Some(&|perm| {
-            let carrier = perm
+            let trace = perm
                 .carrier_data
                 .as_mut()
                 .expect("carrier GKR data")
-                .carrier_mut();
-            carrier[0][0] += PackedM31::broadcast(M31::one());
+                .trace_mut();
+            let column = &mut trace[stwo_keccak::carrier::CARRIER_COLUMN_START];
+            let value = carrier_coset_cell(column, 0);
+            set_carrier_coset_cell(column, 0, value + M31::one());
         }),
         pcs_config(),
     );
@@ -1371,19 +1392,18 @@ fn missing_carrier_header_role_rejects() {
     let msg = vec![0x46u8; 300];
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
         set_carrier_coset_cell(&mut perm.carrier_trace[HEADER_COLUMN], 0, M31::zero());
-        let schedule = perm
+        let trace = perm
             .carrier_data
             .as_mut()
             .expect("carrier GKR data")
-            .schedule_mut();
-        set_packed_lane(&mut schedule[HEADER_COLUMN][0], 0, M31::zero());
+            .trace_mut();
+        set_carrier_coset_cell(&mut trace[HEADER_COLUMN], 0, M31::zero());
     }));
 }
 
-/// A row swap inside one lookup slot preserves its multiset and claimed sum,
-/// but the committed base columns no longer match the GKR input MLE row-wise.
+/// A row swap in the independent GKR source must fail the MLE tie-back.
 #[test]
-fn row_swapped_lookup_data_rejects() {
+fn row_swapped_gkr_source_column_rejects() {
     skip_prover_oracle_self_check();
     let msg = vec![0x44u8; 300];
     let p = prove_jobs_full(
@@ -1391,17 +1411,41 @@ fn row_swapped_lookup_data_rejects() {
         vec![1],
         None,
         Some(&|perm| {
-            for entry in 0..2 {
-                let col = &mut perm
-                    .carrier_data
-                    .as_mut()
-                    .expect("carrier GKR data")
-                    .round
-                    .lookup_data
-                    .xor3[5][0];
-                let mut lanes: [M31; N_LANES] = col[entry].to_array();
-                lanes.swap(0, 1);
-                col[entry] = stwo::prover::backend::simd::m31::PackedM31::from_array(lanes);
+            let trace = perm
+                .carrier_data
+                .as_mut()
+                .expect("carrier GKR data")
+                .trace_mut();
+            let column = &mut trace[20];
+            let first = carrier_coset_cell(column, 0);
+            let second = carrier_coset_cell(column, 1);
+            set_carrier_coset_cell(column, 0, second);
+            set_carrier_coset_cell(column, 1, first);
+        }),
+        pcs_config(),
+    );
+    assert!(verify_jobs(&p, &[msg]).is_err());
+}
+
+/// A logical row rotation preserves every GKR fraction multiset. The MLE
+/// tie-back must still reject because the committed carrier does not rotate.
+#[test]
+fn cyclically_rotated_gkr_source_rejects() {
+    skip_prover_oracle_self_check();
+    let msg = vec![0x49u8; 300];
+    let p = prove_jobs_full(
+        vec![msg.clone()],
+        vec![1],
+        None,
+        Some(&|perm| {
+            let trace = perm
+                .carrier_data
+                .as_mut()
+                .expect("carrier GKR data")
+                .trace_mut();
+            assert_eq!(trace.len(), stwo_keccak::carrier::N_COLUMNS);
+            for column in trace {
+                rotate_carrier_coset_column(column);
             }
         }),
         pcs_config(),

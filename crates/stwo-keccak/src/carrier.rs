@@ -9,6 +9,7 @@
 #![allow(non_snake_case)]
 
 use num_traits::{One, Zero};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{BaseField, M31};
@@ -25,8 +26,7 @@ use stwo_constraint_framework::{
 use crate::constants::{IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS};
 use crate::keccak;
 use crate::keccak_round::{
-    self, InteractionClaimData as RoundData, N_ANDNOT_LOOKUPS, N_SPLIT_C_ROT, N_SPLIT_LOOKUPS,
-    N_XOR3_C, N_XOR3_THETA_APPLY,
+    self, InteractionClaimData as RoundData, N_ANDNOT_LOOKUPS, N_XOR3_C, N_XOR3_THETA_APPLY,
 };
 use crate::relations::{direction, KeccakRelations};
 use crate::utils::{circle_row_to_coset, col_eval, spread_u32, ColEval};
@@ -85,26 +85,27 @@ impl Claim {
     }
 }
 
-/// Data for the GKR leaves. Values use logical coset order.
+/// Independent source for the carrier GKR leaves and coefficient replay.
+///
+/// The columns are an independently mutable deep clone created alongside the
+/// committed trace in circle-domain order, before either source is used. The
+/// clone lets the MLE tie-back detect changes to either source.
+#[derive(Clone)]
 pub struct InteractionData {
     pub log_size: u32,
     pub n_perms: usize,
-    schedule: Vec<Vec<PackedM31>>,
-    carrier: Vec<Vec<PackedM31>>,
-    pub round: RoundData,
+    trace: Vec<ColEval>,
 }
 
 impl InteractionData {
-    /// Test-only access to the separate GKR schedule source.
-    #[doc(hidden)]
-    pub fn schedule_mut(&mut self) -> &mut [Vec<PackedM31>] {
-        &mut self.schedule
+    pub(crate) fn trace(&self) -> &[ColEval] {
+        &self.trace
     }
 
-    /// Test-only access to the separate GKR carrier source.
+    /// Test-only access to the independent GKR source.
     #[doc(hidden)]
-    pub fn carrier_mut(&mut self) -> &mut [Vec<PackedM31>] {
-        &mut self.carrier
+    pub fn trace_mut(&mut self) -> &mut [ColEval] {
+        &mut self.trace
     }
 }
 
@@ -113,18 +114,7 @@ pub struct Witness {
     pub claim: Claim,
     pub trace: Vec<ColEval>,
     pub interaction: InteractionData,
-}
-
-fn pack_columns(columns: &[Vec<M31>]) -> Vec<Vec<PackedM31>> {
-    columns
-        .iter()
-        .map(|column| {
-            column
-                .chunks_exact(N_LANES)
-                .map(|chunk| PackedM31::from_array(chunk.try_into().unwrap()))
-                .collect()
-        })
-        .collect()
+    pub round: RoundData,
 }
 
 fn set_lane(value: &mut PackedM31, lane: usize, replacement: M31) {
@@ -244,12 +234,11 @@ pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
         }
     }
 
-    let schedule = pack_columns(&columns[..N_SCHEDULE_COLUMNS]);
-    let carrier = pack_columns(&columns[CARRIER_START..CARRIER_START + N_BYTES_IN_STATE]);
-    let trace = columns
+    let trace: Vec<ColEval> = columns
         .into_iter()
         .map(|column| col_eval(claim.log_size(), column))
         .collect();
+    let gkr_trace = trace.clone();
 
     Witness {
         claim,
@@ -257,10 +246,9 @@ pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
         interaction: InteractionData {
             log_size: claim.log_size(),
             n_perms: claim.n_perms,
-            schedule,
-            carrier,
-            round: round_data,
+            trace: gkr_trace,
         },
+        round: round_data,
     }
 }
 
@@ -561,20 +549,13 @@ pub(crate) struct Fractions {
 
 impl Fractions {
     fn new(n_vector_rows: usize) -> Self {
-        let length = N_TOTAL_LOOKUPS * n_vector_rows;
+        let padded_length = N_TOTAL_LOOKUPS.next_power_of_two() * n_vector_rows;
         Self {
-            // This allocation becomes the padded GKR numerator column.
-            numerators: Vec::with_capacity(N_TOTAL_LOOKUPS.next_power_of_two() * n_vector_rows),
-            denominators: Vec::with_capacity(length),
+            // These allocations become the padded GKR input columns.
+            numerators: Vec::with_capacity(padded_length),
+            denominators: Vec::with_capacity(padded_length),
             n_vector_rows,
         }
-    }
-
-    fn push_slot(&mut self, numerator: Vec<PackedM31>, denominator: Vec<PackedQM31>) {
-        assert_eq!(numerator.len(), self.n_vector_rows);
-        assert_eq!(denominator.len(), self.n_vector_rows);
-        self.numerators.extend(numerator);
-        self.denominators.extend(denominator);
     }
 
     pub(crate) fn n_vector_rows(&self) -> usize {
@@ -593,6 +574,12 @@ impl Fractions {
         &self.denominators
     }
 
+    #[cfg(test)]
+    pub(crate) fn denominator_capacity(&self) -> usize {
+        self.denominators.capacity()
+    }
+
+    #[cfg(test)]
     pub(crate) fn slot(&self, slot: usize) -> (&[PackedM31], &[PackedQM31]) {
         let start = slot * self.n_vector_rows;
         let end = start + self.n_vector_rows;
@@ -604,197 +591,305 @@ impl Fractions {
     }
 }
 
-fn circle_order(values: &[PackedQM31], log_size: u32) -> Vec<PackedQM31> {
+#[derive(Clone, Copy)]
+struct PreviousPackedRow {
+    sources: [usize; 2],
+    source_count: usize,
+    lanes: [(usize, usize); N_LANES],
+}
+
+fn previous_packed_rows(log_size: u32) -> Vec<PreviousPackedRow> {
+    let n_rows = 1usize << log_size;
     let row_lookup = circle_row_to_coset(log_size);
-    (0..values.len())
+    let mut coset_to_row = vec![0; n_rows];
+    for (row, coset) in row_lookup.iter().copied().enumerate() {
+        coset_to_row[coset] = row;
+    }
+
+    (0..n_rows / N_LANES)
         .map(|vector_row| {
-            PackedQM31::from_array(std::array::from_fn(|lane| {
-                let coset = row_lookup[vector_row * N_LANES + lane];
-                values[coset / N_LANES].to_array()[coset % N_LANES]
-            }))
+            let mut sources = [usize::MAX; 2];
+            let mut source_count = 0;
+            let lanes = std::array::from_fn(|lane| {
+                let row = vector_row * N_LANES + lane;
+                let previous_coset = (row_lookup[row] + n_rows - 1) % n_rows;
+                let previous_row = coset_to_row[previous_coset];
+                let packed_row = previous_row / N_LANES;
+                let source = sources[..source_count]
+                    .iter()
+                    .position(|candidate| *candidate == packed_row)
+                    .unwrap_or_else(|| {
+                        assert!(source_count < sources.len());
+                        sources[source_count] = packed_row;
+                        source_count += 1;
+                        source_count - 1
+                    });
+                (source, previous_row % N_LANES)
+            });
+            PreviousPackedRow {
+                sources,
+                source_count,
+                lanes,
+            }
         })
         .collect()
 }
 
-fn circle_order_base(values: &[PackedM31], log_size: u32) -> Vec<PackedM31> {
-    let row_lookup = circle_row_to_coset(log_size);
-    (0..values.len())
-        .map(|vector_row| {
-            PackedM31::from_array(std::array::from_fn(|lane| {
-                let coset = row_lookup[vector_row * N_LANES + lane];
-                values[coset / N_LANES].to_array()[coset % N_LANES]
-            }))
-        })
-        .collect()
+struct TraceRowEvaluator<'a> {
+    trace: &'a [ColEval],
+    vector_row: usize,
+    previous: PreviousPackedRow,
+    column: usize,
 }
 
-fn push_dense_fraction<R: Relation<PackedM31, PackedQM31>>(
-    fractions: &mut Fractions,
-    relation: &R,
-    lookup: &[[PackedM31; 2]],
-    gate: &[PackedM31],
-    log_size: u32,
-) {
-    let numerator = gate.to_vec();
-    let denominator = lookup[..gate.len()]
-        .iter()
-        .map(|tuple| relation.combine(tuple))
-        .collect::<Vec<_>>();
-    fractions.push_slot(
-        circle_order_base(&numerator, log_size),
-        circle_order(&denominator, log_size),
+impl TraceRowEvaluator<'_> {
+    fn previous_value(&self, column: &ColEval) -> PackedM31 {
+        let sources: [[M31; N_LANES]; 2] = std::array::from_fn(|source| {
+            if source < self.previous.source_count {
+                column.values.data[self.previous.sources[source]].to_array()
+            } else {
+                [M31::zero(); N_LANES]
+            }
+        });
+        PackedM31::from_array(std::array::from_fn(|lane| {
+            let (source, source_lane) = self.previous.lanes[lane];
+            sources[source][source_lane]
+        }))
+    }
+}
+
+impl EvalAtRow for TraceRowEvaluator<'_> {
+    type F = PackedM31;
+    type EF = PackedQM31;
+
+    fn next_interaction_mask<const N: usize>(
+        &mut self,
+        interaction: usize,
+        offsets: [isize; N],
+    ) -> [Self::F; N] {
+        assert_eq!(interaction, ORIGINAL_TRACE_IDX);
+        let column = &self.trace[self.column];
+        self.column += 1;
+        offsets.map(|offset| match offset {
+            -1 => self.previous_value(column),
+            0 => column.values.data[self.vector_row],
+            _ => panic!("unsupported carrier mask offset {offset}"),
+        })
+    }
+
+    fn add_constraint<G>(&mut self, _constraint: G)
+    where
+        Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+    {
+    }
+
+    fn combine_ef(_values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
+        unreachable!("the carrier lookup replay reads base-trace masks only")
+    }
+}
+
+fn replay_row<'a>(
+    data: &'a InteractionData,
+    previous: PreviousPackedRow,
+    vector_row: usize,
+) -> Vec<Lookup<TraceRowEvaluator<'a>>> {
+    let mut evaluator = TraceRowEvaluator {
+        trace: data.trace(),
+        vector_row,
+        previous,
+        column: 0,
+    };
+    let lookups = collect_lookups(&mut evaluator, data.n_perms);
+    assert_eq!(evaluator.column, N_COLUMNS);
+    assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
+    lookups
+}
+
+fn lookup_denominator(
+    relations: &KeccakRelations,
+    lookup: &Lookup<TraceRowEvaluator<'_>>,
+) -> PackedQM31 {
+    let denominator: PackedQM31 = match lookup.kind {
+        LookupKind::Schedule => relations.round_schedule.combine(&lookup.tuple),
+        LookupKind::State => relations.keccak_state.combine(&lookup.tuple),
+        LookupKind::Xor3 => relations.xor3.combine(&lookup.tuple),
+        LookupKind::Andnot => relations.andnot.combine(&lookup.tuple),
+        LookupKind::Split(shift) => relations.split[shift - 1].combine(&lookup.tuple),
+    };
+    normalize_denominator(denominator)
+}
+
+fn normalize_denominator(denominator: PackedQM31) -> PackedQM31 {
+    PackedQM31::from_array(denominator.to_array())
+}
+
+fn base_numerator(numerator: PackedQM31) -> PackedM31 {
+    let [base, second, third, fourth] = numerator.into_packed_m31s();
+    assert!(
+        second.is_zero() && third.is_zero() && fourth.is_zero(),
+        "carrier lookup numerator must be in the base field"
     );
+    PackedM31::from_array(base.to_array())
 }
 
 pub(crate) fn build_fractions(relations: &KeccakRelations, data: &InteractionData) -> Fractions {
+    assert_eq!(data.trace().len(), N_COLUMNS);
     let n_vector_rows = 1usize << (data.log_size - LOG_N_LANES);
-    let schedule = &data.schedule;
-    let carrier = &data.carrier;
-    let round = &data.round.lookup_data;
+    let previous = previous_packed_rows(data.log_size);
     let mut fractions = Fractions::new(n_vector_rows);
-
-    let header = &schedule[HEADER_COLUMN];
-    let round_active = &schedule[ROUND_COLUMN];
-    let final_round = &schedule[FINAL_COLUMN];
-    let permutation = &schedule[PERMUTATION_COLUMN];
-    let position = &schedule[POSITION_COLUMN];
-    let round_constants: [&[PackedM31]; N_BYTES_IN_U64] =
-        std::array::from_fn(|byte| schedule[ROUND_CONSTANT_START + byte].as_slice());
-
-    let mut schedule_denominator = Vec::with_capacity(n_vector_rows);
-    let mut schedule_numerator = Vec::with_capacity(n_vector_rows);
-    let mut input_denominator = Vec::with_capacity(n_vector_rows);
-    let mut input_numerator = Vec::with_capacity(n_vector_rows);
+    let active_length = N_TOTAL_LOOKUPS * n_vector_rows;
+    fractions
+        .numerators
+        .resize(active_length, PackedM31::zero());
+    fractions
+        .denominators
+        .resize(active_length, PackedQM31::zero());
     for vector_row in 0..n_vector_rows {
-        let active = header[vector_row] + round_active[vector_row];
-        let mut tuple = vec![
-            position[vector_row],
-            header[vector_row],
-            round_active[vector_row],
-            final_round[vector_row],
-        ];
-        tuple.extend(round_constants.iter().map(|column| column[vector_row]));
-        schedule_numerator.push(active);
-        schedule_denominator.push(relations.round_schedule.combine(&tuple));
-
-        let mut endpoint = vec![
-            permutation[vector_row],
-            PackedM31::from(M31::from(direction::IN)),
-        ];
-        endpoint.extend(carrier.iter().map(|column| column[vector_row]));
-        input_numerator.push(-header[vector_row]);
-        input_denominator.push(relations.keccak_state.combine(&endpoint));
+        for (slot, lookup) in replay_row(data, previous[vector_row], vector_row)
+            .into_iter()
+            .enumerate()
+        {
+            let index = slot * n_vector_rows + vector_row;
+            fractions.numerators[index] = base_numerator(lookup.num);
+            fractions.denominators[index] = lookup_denominator(relations, &lookup);
+        }
     }
-    fractions.push_slot(
-        circle_order_base(&schedule_numerator, data.log_size),
-        circle_order(&schedule_denominator, data.log_size),
-    );
-    fractions.push_slot(
-        circle_order_base(&input_numerator, data.log_size),
-        circle_order(&input_denominator, data.log_size),
-    );
-
-    let push_split = |fractions: &mut Fractions, lookup: &[[PackedM31; 4]]| {
-        let shift = lookup[0][0].to_array()[0].0 as usize;
-        let numerator = round_active.to_vec();
-        let denominator = lookup[..n_vector_rows]
-            .iter()
-            .map(|row| relations.split[shift - 1].combine(&[row[1], row[2], row[3]]))
-            .collect::<Vec<_>>();
-        fractions.push_slot(
-            circle_order_base(&numerator, data.log_size),
-            circle_order(&denominator, data.log_size),
-        );
-    };
-
-    for lookup in &round.xor3[..N_XOR3_C] {
-        push_dense_fraction(
-            &mut fractions,
-            &relations.xor3,
-            lookup,
-            round_active,
-            data.log_size,
-        );
-    }
-    for lookup in &round.split[..N_SPLIT_C_ROT] {
-        push_split(&mut fractions, lookup);
-    }
-    for lookup in &round.xor3[N_XOR3_C..N_XOR3_C + N_XOR3_THETA_APPLY] {
-        push_dense_fraction(
-            &mut fractions,
-            &relations.xor3,
-            lookup,
-            round_active,
-            data.log_size,
-        );
-    }
-    for lookup in &round.split[N_SPLIT_C_ROT..N_SPLIT_LOOKUPS] {
-        push_split(&mut fractions, lookup);
-    }
-    for index in 0..N_ANDNOT_LOOKUPS {
-        push_dense_fraction(
-            &mut fractions,
-            &relations.andnot,
-            &round.andnot[index],
-            round_active,
-            data.log_size,
-        );
-        push_dense_fraction(
-            &mut fractions,
-            &relations.xor3,
-            &round.xor3[CHI_CLOSE_LOOKUP_START + index],
-            round_active,
-            data.log_size,
-        );
-    }
-
-    let mut output_numerator = Vec::with_capacity(n_vector_rows);
-    let mut output_denominator = Vec::with_capacity(n_vector_rows);
-    for vector_row in 0..n_vector_rows {
-        let mut endpoint = vec![
-            permutation[vector_row],
-            PackedM31::from(M31::from(direction::OUT)),
-        ];
-        endpoint.extend(carrier.iter().map(|column| column[vector_row]));
-        output_numerator.push(final_round[vector_row]);
-        output_denominator.push(relations.keccak_state.combine(&endpoint));
-    }
-    fractions.push_slot(
-        circle_order_base(&output_numerator, data.log_size),
-        circle_order(&output_denominator, data.log_size),
-    );
 
     assert_eq!(fractions.n_slots(), N_TOTAL_LOOKUPS);
     fractions
 }
 
-/// Build the former columnar LogUp in tests. This is an independent reference
-/// for the GKR claimed sum and batching order.
-#[cfg(test)]
-pub(crate) fn generate_interaction_trace(
+/// Replay the independent GKR source after GKR and build the folded column.
+pub(crate) fn build_folded_coefficients(
     relations: &KeccakRelations,
     data: &InteractionData,
-) -> (InteractionClaim, Vec<ColEval>) {
-    const BATCH: usize = 4;
-    let fractions = build_fractions(relations, data);
-    let mut generator = LogupTraceGenerator::new(data.log_size);
-    for first in (0..fractions.n_slots()).step_by(BATCH) {
-        let last = (first + BATCH).min(fractions.n_slots());
-        let mut column = generator.new_col();
-        let (first_numerator, first_denominator) = fractions.slot(first);
-        for vector_row in 0..fractions.n_vector_rows() {
-            let mut numerator = PackedQM31::from(first_numerator[vector_row]);
-            let mut denominator = first_denominator[vector_row];
-            for slot in first + 1..last {
-                let (next_numerator, next_denominator) = fractions.slot(slot);
-                numerator = next_denominator[vector_row] * numerator
-                    + denominator * next_numerator[vector_row];
-                denominator *= next_denominator[vector_row];
+    delta: SecureField,
+    eq_ws: &[SecureField],
+) -> Vec<PackedQM31> {
+    assert_eq!(data.trace().len(), N_COLUMNS);
+    assert!(eq_ws.len() >= N_TOTAL_LOOKUPS);
+    let n_vector_rows = 1usize << (data.log_size - LOG_N_LANES);
+    let previous = previous_packed_rows(data.log_size);
+    let weights = eq_ws[..N_TOTAL_LOOKUPS]
+        .iter()
+        .copied()
+        .map(PackedQM31::broadcast)
+        .collect::<Vec<_>>();
+    let delta = PackedQM31::broadcast(delta);
+
+    (0..n_vector_rows)
+        .into_par_iter()
+        .map(|vector_row| {
+            replay_row(data, previous[vector_row], vector_row)
+                .into_iter()
+                .enumerate()
+                .fold(PackedQM31::zero(), |sum, (slot, lookup)| {
+                    let denominator = lookup_denominator(relations, &lookup);
+                    let numerator = PackedQM31::from(base_numerator(lookup.num));
+                    sum + weights[slot] * (delta * numerator + denominator)
+                })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use stwo::prover::backend::simd::column::BaseColumn;
+    use stwo::prover::backend::Column;
+
+    use super::*;
+
+    #[test]
+    fn predecessor_map_matches_every_scalar_row() {
+        for log_size in LOG_N_LANES..=18 {
+            let n_rows = 1usize << log_size;
+            let row_to_coset = circle_row_to_coset(log_size);
+            let mut coset_to_row = vec![0; n_rows];
+            for (row, coset) in row_to_coset.iter().copied().enumerate() {
+                coset_to_row[coset] = row;
             }
-            column.write_frac(vector_row, numerator, denominator);
+
+            let maps = previous_packed_rows(log_size);
+            for (vector_row, map) in maps.iter().enumerate() {
+                assert!((1..=2).contains(&map.source_count));
+                for lane in 0..N_LANES {
+                    let row = vector_row * N_LANES + lane;
+                    let expected = coset_to_row[(row_to_coset[row] + n_rows - 1) % n_rows];
+                    let (source, source_lane) = map.lanes[lane];
+                    let actual = map.sources[source] * N_LANES + source_lane;
+                    assert_eq!(
+                        actual, expected,
+                        "predecessor changed at log size {log_size}, domain row {row}"
+                    );
+                }
+            }
         }
-        column.finalize_col();
     }
-    let (trace, claimed_sum) = generator.finalize_last();
-    (InteractionClaim { claimed_sum }, trace)
+
+    #[test]
+    fn gkr_source_is_an_exact_independent_trace_clone() {
+        let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; 2];
+        for (permutation, input) in inputs.iter_mut().enumerate() {
+            input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
+        }
+        let boundaries = keccak::generate_boundary_witness(&inputs);
+        let mut witness = generate(&boundaries);
+        assert_eq!(witness.trace.len(), N_COLUMNS);
+        assert_eq!(witness.interaction.trace().len(), N_COLUMNS);
+
+        for (committed, gkr) in witness.trace.iter().zip(witness.interaction.trace()) {
+            assert_ne!(committed.values.data.as_ptr(), gkr.values.data.as_ptr());
+            assert_eq!(committed.values.to_cpu(), gkr.values.to_cpu());
+        }
+
+        let committed = witness.trace[0].values.at(0);
+        witness.interaction.trace_mut()[0]
+            .values
+            .set(0, committed + M31::one());
+        assert_eq!(witness.trace[0].values.at(0), committed);
+        assert_ne!(witness.interaction.trace()[0].values.at(0), committed);
+    }
+
+    #[test]
+    fn replay_normalizes_zero_without_changing_nonzero_values() {
+        let raw_zero = -PackedM31::zero();
+        let raw_column = BaseColumn::from_simd(vec![raw_zero]);
+        assert_eq!(raw_column.as_slice()[0], M31(2_147_483_647));
+
+        let normalized_numerator = base_numerator(PackedQM31::from(raw_zero));
+        let normalized_column = BaseColumn::from_simd(vec![normalized_numerator]);
+        assert_eq!(normalized_column.as_slice()[0], M31::zero());
+
+        let raw_denominator = PackedQM31::from_packed_m31s([
+            raw_zero,
+            PackedM31::one(),
+            PackedM31::zero(),
+            PackedM31::zero(),
+        ]);
+        let [first, second, third, fourth] =
+            normalize_denominator(raw_denominator).into_packed_m31s();
+        assert_eq!(
+            BaseColumn::from_simd(vec![first]).as_slice()[0],
+            M31::zero()
+        );
+        assert_eq!(
+            BaseColumn::from_simd(vec![second]).as_slice()[0],
+            M31::one()
+        );
+        assert_eq!(
+            BaseColumn::from_simd(vec![third]).as_slice()[0],
+            M31::zero()
+        );
+        assert_eq!(
+            BaseColumn::from_simd(vec![fourth]).as_slice()[0],
+            M31::zero()
+        );
+
+        let tampered = normalize_denominator(raw_denominator + PackedQM31::one());
+        assert_ne!(
+            tampered.to_array(),
+            normalize_denominator(raw_denominator).to_array(),
+            "normalization must not erase a nonzero field change"
+        );
+    }
 }

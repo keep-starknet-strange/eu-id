@@ -82,8 +82,7 @@ pub struct PermWitness {
 pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> PermWitness {
     let boundaries = keccak::generate_boundary_witness(perm_inputs);
     let witness = carrier::generate(&boundaries);
-    let table_mult =
-        TableMultiplicities::from_carrier_round(&witness.interaction.round, boundaries.n_perms);
+    let table_mult = TableMultiplicities::from_carrier_round(&witness.round, boundaries.n_perms);
 
     PermWitness {
         carrier_claim: witness.claim,
@@ -440,7 +439,7 @@ impl Air for KeccakServiceProver {
             .carrier_data
             .take()
             .expect("carrier interaction data is available once");
-        self.round_gkr = Some(RoundGkrProver::new(&relations, &data));
+        self.round_gkr = Some(RoundGkrProver::new(&relations, data));
         self.handle.set(relations.clone());
         self.relations = Some(relations);
     }

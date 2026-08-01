@@ -66,7 +66,8 @@ use stwo_constraint_framework::{PointEvaluator, Relation};
 use air_core::gkr::{decode_gkr_batch_proof, encode_gkr_batch_proof};
 
 use crate::carrier::{
-    build_fractions, collect_lookups, Fractions, InteractionData, LookupKind, N_TOTAL_LOOKUPS,
+    build_folded_coefficients, build_fractions, collect_lookups, Fractions, InteractionData,
+    LookupKind, N_TOTAL_LOOKUPS,
 };
 use crate::relations::KeccakRelations;
 
@@ -84,12 +85,6 @@ const _: () = assert!(N_TIEBACK_COLUMNS == 8);
 
 /// Packed denominators inverted at one time for the global claimed sum.
 const CLAIMED_SUM_INVERSE_CHUNK_SIZE: usize = 1 << 11;
-
-const SCHEDULE_LOOKUP_SLOT: usize = 0;
-const INPUT_LOOKUP_SLOT: usize = 1;
-const FIRST_ARITHMETIC_LOOKUP_SLOT: usize = 2;
-const OUTPUT_LOOKUP_SLOT: usize = N_TOTAL_LOOKUPS - 1;
-const N_NUMERATOR_SCHEDULES: usize = 3;
 
 /// Everything both sides derive from the GKR transcript for the tie-back.
 pub struct RoundTieBack {
@@ -153,41 +148,13 @@ fn tieback_from_artifact(
 
 // Prover side.
 
-/// Prover state for the fractions, compact numerator schedules, and tie-back.
+/// Prover state for the GKR leaves and their independent trace source.
 pub struct RoundGkrProver {
     fracs: Fractions,
-    numerator_schedules: NumeratorSchedules,
+    data: InteractionData,
+    relations: KeccakRelations,
     log_size: u32,
     claimed_sum: SecureField,
-}
-
-/// The three independent row schedules reconstruct every lookup numerator.
-struct NumeratorSchedules {
-    rows: Vec<[PackedM31; N_NUMERATOR_SCHEDULES]>,
-}
-
-impl NumeratorSchedules {
-    fn from_fractions(fracs: &Fractions) -> Self {
-        assert_eq!(fracs.n_slots(), N_TOTAL_LOOKUPS);
-        let input = fracs.slot(INPUT_LOOKUP_SLOT).0;
-        let round = fracs.slot(FIRST_ARITHMETIC_LOOKUP_SLOT).0;
-        let output = fracs.slot(OUTPUT_LOOKUP_SLOT).0;
-        let rows = (0..fracs.n_vector_rows())
-            .map(|row| [-input[row], round[row], output[row]])
-            .collect();
-        Self { rows }
-    }
-
-    fn value(&self, slot: usize, row: usize) -> PackedM31 {
-        let [header, round, final_round] = self.rows[row];
-        match slot {
-            SCHEDULE_LOOKUP_SLOT => header + round,
-            INPUT_LOOKUP_SLOT => -header,
-            OUTPUT_LOOKUP_SLOT => final_round,
-            FIRST_ARITHMETIC_LOOKUP_SLOT..OUTPUT_LOOKUP_SLOT => round,
-            _ => panic!("carrier numerator slot is outside the canonical layout"),
-        }
-    }
 }
 
 /// Sum packed fractions in canonical slot and row order. Each Rayon job uses
@@ -228,7 +195,7 @@ fn global_claimed_sum(fracs: &Fractions) -> SecureField {
 
 /// Move the canonical slot-high/row-low values into the GKR input layer. The
 /// trailing slots are the neutral fraction 0/1.
-fn gkr_input_layer(fracs: Fractions, log_size: u32) -> (Layer<SimdBackend>, Vec<PackedQM31>) {
+fn gkr_input_layer(fracs: Fractions, log_size: u32) -> Layer<SimdBackend> {
     let n_rows = 1usize << log_size;
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     assert_eq!(
@@ -244,43 +211,43 @@ fn gkr_input_layer(fracs: Fractions, log_size: u32) -> (Layer<SimdBackend>, Vec<
 
     let packed_size = (1usize << LOG_SLOTS) * n_vec_rows;
     let scalar_size = (1usize << LOG_SLOTS) * n_rows;
-    let (mut numerators, denominators) = fracs.into_parts();
+    let (mut numerators, mut denominators) = fracs.into_parts();
     assert!(
         numerators.capacity() >= packed_size,
         "carrier numerator allocation must include the padded GKR slots"
     );
+    assert!(
+        denominators.capacity() >= packed_size,
+        "carrier denominator allocation must include the padded GKR slots"
+    );
     numerators.resize(packed_size, PackedM31::zero());
-    let mut padded_denominators = Vec::with_capacity(packed_size);
-    padded_denominators.extend_from_slice(&denominators);
-    padded_denominators.resize(packed_size, PackedQM31::one());
+    denominators.resize(packed_size, PackedQM31::one());
     debug_assert_eq!(packed_size * N_LANES, scalar_size);
 
-    (
-        Layer::LogUpMultiplicities {
-            numerators: Mle::<SimdBackend, BaseField>::new(BaseColumn {
-                data: numerators,
-                length: scalar_size,
-            }),
-            denominators: Mle::<SimdBackend, SecureField>::new(SecureColumn {
-                data: padded_denominators,
-                length: scalar_size,
-            }),
-        },
-        denominators,
-    )
+    Layer::LogUpMultiplicities {
+        numerators: Mle::<SimdBackend, BaseField>::new(BaseColumn {
+            data: numerators,
+            length: scalar_size,
+        }),
+        denominators: Mle::<SimdBackend, SecureField>::new(SecureColumn {
+            data: denominators,
+            length: scalar_size,
+        }),
+    }
 }
 
 impl RoundGkrProver {
     /// Build the fraction multiset and its exact sum (== the columnar
     /// `claimed_sum` the offloaded interaction trace would have produced).
-    pub fn new(rel: &KeccakRelations, data: &InteractionData) -> Self {
-        let fracs = build_fractions(rel, data);
+    pub fn new(relations: &KeccakRelations, data: InteractionData) -> Self {
+        let fracs = build_fractions(relations, &data);
         let claimed_sum = global_claimed_sum(&fracs);
-        let numerator_schedules = NumeratorSchedules::from_fractions(&fracs);
+        let log_size = data.log_size;
         Self {
             fracs,
-            numerator_schedules,
-            log_size: data.log_size,
+            data,
+            relations: relations.clone(),
+            log_size,
             claimed_sum,
         }
     }
@@ -298,13 +265,13 @@ impl RoundGkrProver {
     ) -> (Vec<u8>, RoundTieBack, Mle<SimdBackend, SecureField>) {
         let Self {
             fracs,
-            numerator_schedules,
+            data,
+            relations,
             log_size,
             claimed_sum,
         } = self;
         let n_rows = 1usize << log_size;
-        let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
-        let (layer, denominators) = gkr_input_layer(fracs, log_size);
+        let layer = gkr_input_layer(fracs, log_size);
         let (proof, artifact) = prove_batch(channel, vec![layer]);
         debug_assert_eq!(
             proof.output_claims_by_instance[0][0],
@@ -316,16 +283,7 @@ impl RoundGkrProver {
             .expect("prover-built GKR artifact has the canonical shape");
 
         // c(row) = Σ_slot eq(slot, r_slot) · (δ·num_slot(row) + den_slot(row)).
-        let packed_delta = PackedQM31::broadcast(delta);
-        let mut coeff = vec![PackedQM31::zero(); n_vec_rows];
-        for slot in 0..N_TOTAL_LOOKUPS {
-            let start = slot * n_vec_rows;
-            let den = &denominators[start..start + n_vec_rows];
-            let w = PackedQM31::broadcast(tie_back.eq_ws[slot]);
-            for (vr, acc) in coeff.iter_mut().enumerate() {
-                *acc += w * (packed_delta * numerator_schedules.value(slot, vr) + den[vr]);
-            }
-        }
+        let coeff = build_folded_coefficients(&relations, &data, tie_back.delta, &tie_back.eq_ws);
         let coeff_mle = Mle::<SimdBackend, SecureField>::new(SecureColumn {
             data: coeff,
             length: n_rows,
@@ -424,13 +382,10 @@ mod tests {
     use stwo::core::fields::FieldExpOps;
     use stwo::prover::backend::simd::m31::PackedM31;
     use stwo::prover::backend::Column;
-    use stwo_constraint_framework::{EvalAtRow, ORIGINAL_TRACE_IDX};
+    use stwo_constraint_framework::{EvalAtRow, LogupTraceGenerator, ORIGINAL_TRACE_IDX};
 
     use super::*;
     use crate::constants::N_BYTES_IN_STATE;
-    use crate::keccak_round::{
-        N_ANDNOT_LOOKUPS, N_SPLIT_C_ROT, N_SPLIT_LOOKUPS, N_XOR3_C, N_XOR3_THETA_APPLY,
-    };
     use crate::utils::{circle_row_to_coset, ColEval};
     use crate::{carrier, keccak};
 
@@ -540,6 +495,30 @@ mod tests {
             }
         }
         total.to_array().iter().copied().sum()
+    }
+
+    /// Former columnar LogUp layout, retained as an independent claim check.
+    fn columnar_claimed_sum_reference(fracs: &Fractions, log_size: u32) -> SecureField {
+        const BATCH: usize = 4;
+        let mut generator = LogupTraceGenerator::new(log_size);
+        for first in (0..fracs.n_slots()).step_by(BATCH) {
+            let last = (first + BATCH).min(fracs.n_slots());
+            let mut column = generator.new_col();
+            let (first_numerator, first_denominator) = fracs.slot(first);
+            for vector_row in 0..fracs.n_vector_rows() {
+                let mut numerator = PackedQM31::from(first_numerator[vector_row]);
+                let mut denominator = first_denominator[vector_row];
+                for slot in first + 1..last {
+                    let (next_numerator, next_denominator) = fracs.slot(slot);
+                    numerator = next_denominator[vector_row] * numerator
+                        + denominator * next_numerator[vector_row];
+                    denominator *= next_denominator[vector_row];
+                }
+                column.write_frac(vector_row, numerator, denominator);
+            }
+            column.finalize_col();
+        }
+        generator.finalize_last().1
     }
 
     fn serial_chunked_claimed_sum_reference(
@@ -714,7 +693,7 @@ mod tests {
                     let data = carrier_data(2);
                     let mut prover_channel = Blake2sChannel::default();
                     let relations = KeccakRelations::draw(&mut prover_channel);
-                    let prover = RoundGkrProver::new(&relations, &data);
+                    let prover = RoundGkrProver::new(&relations, data.clone());
                     let claimed_sum = prover.claimed_sum();
                     prover_channel.mix_felts(&[claimed_sum]);
                     let (blob, tie_back, coeff_mle) = prover.prove(&mut prover_channel);
@@ -761,58 +740,137 @@ mod tests {
     }
 
     #[test]
-    fn compact_schedules_reconstruct_every_lookup_family() {
+    fn replayed_numerators_preserve_every_lookup_family() {
+        const HEADER_COLUMN: usize = 0;
+        const ROUND_COLUMN: usize = 1;
+        const FINAL_COLUMN: usize = 2;
+        const SCHEDULE_SLOT: usize = 0;
+        const INPUT_SLOT: usize = 1;
+        const FIRST_ARITHMETIC_SLOT: usize = 2;
+        const OUTPUT_SLOT: usize = N_TOTAL_LOOKUPS - 1;
+
         let data = carrier_data(2);
         let mut relation_channel = Blake2sChannel::default();
         let relations = KeccakRelations::draw(&mut relation_channel);
         let fracs = build_fractions(&relations, &data);
-        let schedules = NumeratorSchedules::from_fractions(&fracs);
-        let mut slot = 0;
-        let mut check_family = |family: &str, count: usize| {
-            for _ in 0..count {
-                let expected = fracs.slot(slot).0;
-                for (row, expected) in expected.iter().copied().enumerate() {
-                    assert_eq!(
-                        schedules.value(slot, row).to_array(),
-                        expected.to_array(),
-                        "{family} numerator changed at slot {slot}, packed row {row}"
-                    );
-                }
-                slot += 1;
+        let trace = data.trace();
+        for slot in 0..N_TOTAL_LOOKUPS {
+            let numerators = fracs.slot(slot).0;
+            for (row, numerator) in numerators.iter().copied().enumerate() {
+                let header = trace[HEADER_COLUMN].values.data[row];
+                let round = trace[ROUND_COLUMN].values.data[row];
+                let final_round = trace[FINAL_COLUMN].values.data[row];
+                let expected = match slot {
+                    SCHEDULE_SLOT => header + round,
+                    INPUT_SLOT => -header,
+                    OUTPUT_SLOT => final_round,
+                    FIRST_ARITHMETIC_SLOT..OUTPUT_SLOT => round,
+                    _ => unreachable!("all carrier lookup slots are classified"),
+                };
+                assert_eq!(
+                    numerator.to_array(),
+                    expected.to_array(),
+                    "numerator changed at slot {slot}, packed row {row}"
+                );
             }
-        };
-
-        check_family("schedule", 1);
-        check_family("input state", 1);
-        check_family("theta xor3", N_XOR3_C);
-        check_family("theta split", N_SPLIT_C_ROT);
-        check_family("theta apply xor3", N_XOR3_THETA_APPLY);
-        check_family("rho split", N_SPLIT_LOOKUPS - N_SPLIT_C_ROT);
-        for _ in 0..N_ANDNOT_LOOKUPS {
-            check_family("chi andnot", 1);
-            check_family("chi close xor3", 1);
         }
-        check_family("output state", 1);
-        assert_eq!(slot, N_TOTAL_LOOKUPS);
     }
 
     #[test]
-    fn canonical_n261_numerator_overlap_reduction_is_28_mib() {
+    fn logical_source_rotation_preserves_sum_but_changes_row_mle() {
+        fn rotate_column(column: &mut ColEval) {
+            let n_rows = column.values.len();
+            let log_size = n_rows.ilog2();
+            let row_to_coset = circle_row_to_coset(log_size);
+            let mut coset_to_row = vec![0; n_rows];
+            for (row, coset) in row_to_coset.iter().copied().enumerate() {
+                coset_to_row[coset] = row;
+            }
+            let original = column.values.to_cpu();
+            for (row, coset) in row_to_coset.into_iter().enumerate() {
+                let source_coset = (coset + n_rows - 1) % n_rows;
+                column.values.set(row, original[coset_to_row[source_coset]]);
+            }
+        }
+
+        let data = carrier_data(2);
+        let mut rotated = data.clone();
+        for column in rotated.trace_mut() {
+            rotate_column(column);
+        }
+        let mut relation_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut relation_channel);
+        let honest = build_fractions(&relations, &data);
+        let shifted = build_fractions(&relations, &rotated);
+        assert_eq!(
+            global_claimed_sum(&honest),
+            global_claimed_sum(&shifted),
+            "a logical row rotation must preserve the fraction multiset"
+        );
+
+        let delta = relation_channel.draw_secure_felt();
+        let eq_ws = eq_weights(
+            &(0..LOG_SLOTS)
+                .map(|_| relation_channel.draw_secure_felt())
+                .collect::<Vec<_>>(),
+        );
+        let honest_coefficients = build_folded_coefficients(&relations, &data, delta, &eq_ws);
+        let shifted_coefficients = build_folded_coefficients(&relations, &rotated, delta, &eq_ws);
+        assert_ne!(
+            honest_coefficients
+                .iter()
+                .map(PackedQM31::to_array)
+                .collect::<Vec<_>>(),
+            shifted_coefficients
+                .iter()
+                .map(PackedQM31::to_array)
+                .collect::<Vec<_>>(),
+            "a logical row rotation must change the row-indexed coefficient MLE"
+        );
+    }
+
+    #[test]
+    fn canonical_denominator_allocation_moves_into_gkr_without_copy() {
         const CANONICAL_LOG_SIZE: u32 = 13;
-        const EXPECTED_FULL_BYTES: usize = 29_458_432;
-        const EXPECTED_COMPACT_BYTES: usize = 98_304;
-        const EXPECTED_REDUCTION_BYTES: usize = 29_360_128;
+        const EXPECTED_ACTIVE_BYTES: usize = 117_833_728;
+        const EXPECTED_PADDED_BYTES: usize = 134_217_728;
 
         let n_vector_rows = 1usize << (CANONICAL_LOG_SIZE - LOG_N_LANES);
-        let packed_bytes = std::mem::size_of::<PackedM31>();
-        let full_bytes = N_TOTAL_LOOKUPS * n_vector_rows * packed_bytes;
-        let compact_bytes = N_NUMERATOR_SCHEDULES * n_vector_rows * packed_bytes;
+        let active_bytes = N_TOTAL_LOOKUPS * n_vector_rows * std::mem::size_of::<PackedQM31>();
+        let padded_bytes =
+            N_TOTAL_LOOKUPS.next_power_of_two() * n_vector_rows * std::mem::size_of::<PackedQM31>();
+        assert_eq!(active_bytes, EXPECTED_ACTIVE_BYTES);
+        assert_eq!(padded_bytes, EXPECTED_PADDED_BYTES);
 
-        assert_eq!(packed_bytes, 64);
-        assert_eq!(full_bytes, EXPECTED_FULL_BYTES);
-        assert_eq!(compact_bytes, EXPECTED_COMPACT_BYTES);
-        assert_eq!(full_bytes - compact_bytes, EXPECTED_REDUCTION_BYTES);
-        assert_eq!(EXPECTED_REDUCTION_BYTES, 28 * 1024 * 1024);
+        let data = carrier_data(2);
+        let log_size = data.log_size;
+        let mut relation_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut relation_channel);
+        let fracs = build_fractions(&relations, &data);
+        let denominator_ptr = fracs.denominators().as_ptr();
+        assert!(
+            fracs.denominator_capacity() >= (1usize << LOG_SLOTS) * fracs.n_vector_rows(),
+            "the denominator allocation must reserve all padding"
+        );
+        let Layer::LogUpMultiplicities {
+            numerators,
+            denominators,
+        } = gkr_input_layer(fracs, log_size)
+        else {
+            unreachable!("the carrier uses multiplicity leaves")
+        };
+        assert_eq!(denominators.data.as_ptr(), denominator_ptr);
+
+        let actual_vector_rows = 1usize << (log_size - LOG_N_LANES);
+        let active = N_TOTAL_LOOKUPS * actual_vector_rows;
+        assert!(numerators.data[active..].iter().all(PackedM31::is_zero));
+        assert!(
+            denominators.data[active..].iter().all(|value| value
+                .to_array()
+                .iter()
+                .all(|lane| *lane == SecureField::one())),
+            "every padded denominator must remain one"
+        );
     }
 
     #[test]
@@ -835,17 +893,29 @@ mod tests {
             slotwise_claimed_sum_reference(&fracs),
             "global inversion must match the slotwise reference sum"
         );
-        let (columnar_claim, _) = carrier::generate_interaction_trace(&relations, &data);
         assert_eq!(
-            multiplicities_sum, columnar_claim.claimed_sum,
+            multiplicities_sum,
+            columnar_claimed_sum_reference(&fracs, log_size),
             "GKR claimed sum must remain identical to the columnar LogUp"
         );
-        let (multiplicities_layer, _) = gkr_input_layer(fracs, log_size);
+        let multiplicities_layer = gkr_input_layer(fracs, log_size);
         let multiplicities_values = multiplicities_layer_values(multiplicities_layer);
-        assert_eq!(
-            multiplicities_values, generic_values,
-            "base leaves must preserve the secure embedding and slot, row, lane, and padding order"
-        );
+        for (name, actual, expected) in [
+            ("numerator", &multiplicities_values.0, &generic_values.0),
+            ("denominator", &multiplicities_values.1, &generic_values.1),
+        ] {
+            assert_eq!(actual.len(), expected.len());
+            if let Some(index) = actual
+                .iter()
+                .zip(expected)
+                .position(|(actual, expected)| actual != expected)
+            {
+                panic!(
+                    "{name} leaf changed at scalar index {index}: actual={:?}, expected={:?}",
+                    actual[index], expected[index]
+                );
+            }
+        }
     }
 
     #[test]
@@ -857,7 +927,7 @@ mod tests {
         let mut relation_channel = Blake2sChannel::default();
         let relations = KeccakRelations::draw(&mut relation_channel);
         let fractions = build_fractions(&relations, &witness.interaction);
-        let (gkr_layer, _) = gkr_input_layer(fractions, log_size);
+        let gkr_layer = gkr_input_layer(fractions, log_size);
 
         let mut gkr_channel = Blake2sChannel::default();
         let (_, artifact) = prove_batch(&mut gkr_channel, vec![gkr_layer]);
@@ -925,7 +995,7 @@ mod tests {
         let sum = global_claimed_sum(&fracs);
         let generic_layer = generic_gkr_input_layer_reference(&fracs, log_size);
         let generic_coeff_layer = generic_gkr_input_layer_reference(&fracs, log_size);
-        let (multiplicities_layer, _) = gkr_input_layer(fracs, log_size);
+        let multiplicities_layer = gkr_input_layer(fracs, log_size);
         multiplicities_channel.mix_felts(&[sum]);
         generic_channel.mix_felts(&[sum]);
         prover_channel.mix_felts(&[sum]);
@@ -972,7 +1042,7 @@ mod tests {
         assert_eq!(multiplicities_tieback.mle_claim, generic_tieback.mle_claim);
 
         let (prover_blob, prover_tieback, coeff_mle) =
-            RoundGkrProver::new(&relations, &data).prove(&mut prover_channel);
+            RoundGkrProver::new(&relations, data.clone()).prove(&mut prover_channel);
         assert_eq!(prover_blob, multiplicities_blob);
         assert_eq!(prover_tieback.r_row, multiplicities_tieback.r_row);
         assert_eq!(prover_tieback.delta, multiplicities_tieback.delta);
@@ -1040,5 +1110,53 @@ mod tests {
             "SecureColumn length is scalar, not packed"
         );
         assert_eq!(n_vec_rows * N_LANES, n_rows);
+    }
+
+    #[test]
+    fn replay_matches_exact_baseline_bytes() {
+        fn mix(state: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *state ^= u64::from(*byte);
+                *state = state.wrapping_mul(0x100000001b3);
+            }
+        }
+
+        let data = carrier_data(261);
+        let mut relation_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut relation_channel);
+        let fracs = build_fractions(&relations, &data);
+        let mut leaf_hash = 0xcbf29ce484222325;
+        for value in fracs.numerators() {
+            for lane in value.to_array() {
+                mix(&mut leaf_hash, &lane.0.to_le_bytes());
+            }
+        }
+        for value in fracs.denominators() {
+            for lane in value.to_array() {
+                for component in lane.to_m31_array() {
+                    mix(&mut leaf_hash, &component.0.to_le_bytes());
+                }
+            }
+        }
+
+        let data = carrier_data(2);
+        let mut prover_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut prover_channel);
+        let prover = RoundGkrProver::new(&relations, data);
+        let claimed_sum = prover.claimed_sum();
+        prover_channel.mix_felts(&[claimed_sum]);
+        let (blob, _, coeff_mle) = prover.prove(&mut prover_channel);
+        let mut proof_hash = 0xcbf29ce484222325;
+        mix(&mut proof_hash, &blob);
+        let mut coeff_hash = 0xcbf29ce484222325;
+        for value in coeff_mle.to_cpu() {
+            for component in value.to_m31_array() {
+                mix(&mut coeff_hash, &component.0.to_le_bytes());
+            }
+        }
+        assert_eq!(leaf_hash, 0xbdfcf01aac9fcae8);
+        assert_eq!(proof_hash, 0x465a62423b4bed77);
+        assert_eq!(coeff_hash, 0x9a58852dcb08ee98);
+        assert_eq!(blob.len(), 9_992);
     }
 }
