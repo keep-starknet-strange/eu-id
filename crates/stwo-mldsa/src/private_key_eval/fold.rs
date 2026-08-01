@@ -8,7 +8,8 @@ use crate::air_util::{col_eval, enc_signed, m31, ColEval};
 use crate::coeffs::layout::{
     POLY_ID_C, POLY_ID_CARRY0, POLY_ID_E0, POLY_ID_V0, POLY_ID_W0, POLY_ID_Z0,
 };
-use crate::constants::{K, L, N};
+use crate::constants::N;
+use crate::profile::MlDsaProfile;
 use crate::witness::B;
 
 use super::{gen_batched_logup, PrivateDeviceEvals, PrivateKeyEvalRelations, PRIVATE_EVAL_COUNT};
@@ -70,6 +71,7 @@ pub fn fold_interaction_layout() -> Vec<u32> {
 
 #[derive(Clone)]
 pub struct PrivateFoldEval {
+    pub profile: MlDsaProfile,
     pub rho_rlc: SecureField,
     pub r: SecureField,
     pub s: SecureField,
@@ -80,6 +82,7 @@ pub struct PrivateFoldEval {
 #[allow(clippy::assign_op_pattern)]
 fn fold_total<E: EvalAtRow>(
     evals: &PrivateDeviceEvals,
+    profile: MlDsaProfile,
     rho_rlc: SecureField,
     r: SecureField,
     s: SecureField,
@@ -105,12 +108,12 @@ fn fold_total<E: EvalAtRow>(
 
     let mut total = E::EF::zero();
     let mut rho_power = one;
-    for i in 0..K {
+    for i in 0..profile.k() {
         let mut row = E::EF::zero();
-        for j in 0..L {
+        for j in 0..profile.l() {
             row = row
                 + fixed(formula.az_sign)
-                    * E::EF::from(evals.a(i, j))
+                    * E::EF::from(evals.a_for(profile, i, j))
                     * value(POLY_ID_Z0 as usize + j);
         }
         row = row + fixed(formula.ct1_sign) * value(POLY_ID_C as usize) * E::EF::from(evals.t1(i));
@@ -153,6 +156,7 @@ impl FrameworkEval for PrivateFoldEval {
 
         let total = fold_total::<E>(
             &self.evals,
+            self.profile,
             self.rho_rlc,
             self.r,
             self.s,
@@ -189,6 +193,7 @@ pub fn gen_fold_interaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::{ML_DSA_44, ML_DSA_65};
     use air_core::{Air, AirProver, TreeLayout};
     use stwo::core::air::Component;
     use stwo::core::channel::{Blake2sChannel, Channel};
@@ -201,6 +206,7 @@ mod tests {
 
     fn native_fold_formula(
         evals: &PrivateDeviceEvals,
+        profile: MlDsaProfile,
         rho_rlc: SecureField,
         r: SecureField,
         s: SecureField,
@@ -221,11 +227,12 @@ mod tests {
         let carry_factor = s + fixed(formula.carry_constant);
         let mut total = SecureField::zero();
         let mut rho_power = one;
-        for i in 0..K {
+        for i in 0..profile.k() {
             let mut row = SecureField::zero();
-            for j in 0..L {
-                row +=
-                    fixed(formula.az_sign) * evals.a(i, j) * evals.coeff(POLY_ID_Z0 as usize + j);
+            for j in 0..profile.l() {
+                row += fixed(formula.az_sign)
+                    * evals.a_for(profile, i, j)
+                    * evals.coeff(POLY_ID_Z0 as usize + j);
             }
             row += fixed(formula.ct1_sign) * evals.coeff(POLY_ID_C as usize) * evals.t1(i);
             row += fixed(formula.w_sign) * evals.coeff(POLY_ID_W0 as usize + i);
@@ -241,15 +248,17 @@ mod tests {
 
     fn native_fold(
         evals: &PrivateDeviceEvals,
+        profile: MlDsaProfile,
         rho_rlc: SecureField,
         r: SecureField,
         s: SecureField,
     ) -> SecureField {
-        native_fold_formula(evals, rho_rlc, r, s, EXACT_FOLD_FORMULA)
+        native_fold_formula(evals, profile, rho_rlc, r, s, EXACT_FOLD_FORMULA)
     }
 
     #[derive(Clone)]
     struct FormulaEval {
+        profile: MlDsaProfile,
         evals: PrivateDeviceEvals,
         rho_rlc: SecureField,
         r: SecureField,
@@ -278,13 +287,21 @@ mod tests {
             eval.add_constraint(dummy_interaction[0].clone());
             eval.add_constraint(
                 E::EF::from(active)
-                    * fold_total::<E>(&self.evals, self.rho_rlc, self.r, self.s, self.formula),
+                    * fold_total::<E>(
+                        &self.evals,
+                        self.profile,
+                        self.rho_rlc,
+                        self.r,
+                        self.s,
+                        self.formula,
+                    ),
             );
             eval
         }
     }
 
     struct FormulaAir {
+        profile: MlDsaProfile,
         evals: PrivateDeviceEvals,
         rho_rlc: SecureField,
         r: SecureField,
@@ -295,6 +312,7 @@ mod tests {
 
     impl FormulaAir {
         fn new(
+            profile: MlDsaProfile,
             evals: PrivateDeviceEvals,
             rho_rlc: SecureField,
             r: SecureField,
@@ -302,6 +320,7 @@ mod tests {
             formula: FoldFormula,
         ) -> Self {
             Self {
+                profile,
                 evals,
                 rho_rlc,
                 r,
@@ -350,6 +369,7 @@ mod tests {
             self.component = Some(FrameworkComponent::new(
                 allocator,
                 FormulaEval {
+                    profile: self.profile,
                     evals: self.evals.clone(),
                     rho_rlc: self.rho_rlc,
                     r: self.r,
@@ -416,7 +436,7 @@ mod tests {
         }
         values[POLY_ID_Z0 as usize] = SecureField::one();
         let provisional = PrivateDeviceEvals::try_from_slice(&values).unwrap();
-        let residue = native_fold_formula(&provisional, rho_rlc, r, s, formula);
+        let residue = native_fold_formula(&provisional, ML_DSA_65, rho_rlc, r, s, formula);
         if formula.az_sign == 1 {
             values[A_EVAL_BASE] -= residue;
         } else {
@@ -425,12 +445,12 @@ mod tests {
         }
         let evals = PrivateDeviceEvals::try_from_slice(&values).unwrap();
         assert_eq!(
-            native_fold_formula(&evals, rho_rlc, r, s, formula),
+            native_fold_formula(&evals, ML_DSA_65, rho_rlc, r, s, formula),
             SecureField::zero(),
             "forged formula fixture must satisfy its own equation"
         );
         assert_ne!(
-            native_fold(&evals, rho_rlc, r, s),
+            native_fold(&evals, ML_DSA_65, rho_rlc, r, s),
             SecureField::zero(),
             "forged formula fixture must violate the exact equation"
         );
@@ -474,15 +494,17 @@ mod tests {
 
         for (label, formula) in cases {
             let evals = forged_formula_evals(formula, rho_rlc, r, s);
-            let mut prover = FormulaAir::new(evals.clone(), rho_rlc, r, s, formula);
+            let mut prover = FormulaAir::new(ML_DSA_65, evals.clone(), rho_rlc, r, s, formula);
             let proof = air_core::prove(&mut [&mut prover], PcsConfig::default())
                 .unwrap_or_else(|error| panic!("{label}: forged AIR proving failed: {error:?}"));
 
-            let mut forged_verifier = FormulaAir::new(evals.clone(), rho_rlc, r, s, formula);
+            let mut forged_verifier =
+                FormulaAir::new(ML_DSA_65, evals.clone(), rho_rlc, r, s, formula);
             air_core::verify(&mut [&mut forged_verifier], &proof)
                 .unwrap_or_else(|error| panic!("{label}: forged AIR control failed: {error:?}"));
 
-            let mut exact_verifier = FormulaAir::new(evals, rho_rlc, r, s, EXACT_FOLD_FORMULA);
+            let mut exact_verifier =
+                FormulaAir::new(ML_DSA_65, evals, rho_rlc, r, s, EXACT_FOLD_FORMULA);
             assert!(
                 air_core::verify(&mut [&mut exact_verifier], &proof).is_err(),
                 "{label}: the exact fold must reject the forged formula proof"
@@ -501,10 +523,13 @@ mod tests {
         }
         let provisional = PrivateDeviceEvals::try_from_slice(&values).unwrap();
         // One free w evaluation closes the scalar fold exactly.
-        let residue = native_fold(&provisional, rho, r, s);
+        let residue = native_fold(&provisional, ML_DSA_65, rho, r, s);
         values[POLY_ID_W0 as usize] += residue;
         let honest = PrivateDeviceEvals::try_from_slice(&values).unwrap();
-        assert_eq!(native_fold(&honest, rho, r, s), SecureField::zero());
+        assert_eq!(
+            native_fold(&honest, ML_DSA_65, rho, r, s),
+            SecureField::zero()
+        );
 
         let live_ids = (0..COEFF_EVAL_COUNT)
             .chain(A_EVAL_BASE..T1_EVAL_BASE)
@@ -514,7 +539,7 @@ mod tests {
             forged[id] += SecureField::one();
             let forged = PrivateDeviceEvals::try_from_slice(&forged).unwrap();
             assert_ne!(
-                native_fold(&forged, rho, r, s),
+                native_fold(&forged, ML_DSA_65, rho, r, s),
                 SecureField::zero(),
                 "evaluation id {id} was not live in the fold"
             );
@@ -528,5 +553,93 @@ mod tests {
         let (trace, _) =
             gen_fold_interaction(&evals, &crate::coeffs::relations::EvalAtRsRelation::dummy());
         assert_eq!(trace.len(), FOLD_INTERACTION_COLS);
+    }
+
+    #[test]
+    fn mldsa44_private_key_evaluations_satisfy_the_exact_fold() {
+        use ml_dsa::signature::{Keypair, Signer};
+        use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa44, SigningKey};
+        use stwo::core::pcs::TreeVec;
+        use stwo_constraint_framework::{assert_constraints_on_trace, FrameworkEval};
+
+        let message = b"ML-DSA-44 private fold";
+        let key = SigningKey::<MlDsa44>::from_seed(&[0x44; 32].into());
+        let public_key: EncodedVerifyingKey<MlDsa44> = key.verifying_key().encode();
+        let signature: EncodedSignature<MlDsa44> = key.sign(message).encode();
+        let decoded_key =
+            crate::reference::encoding::pk_decode_for(ML_DSA_44, public_key.as_slice())
+                .expect("decode ML-DSA-44 public key");
+        let decoded_signature =
+            crate::reference::encoding::sig_decode_for(ML_DSA_44, signature.as_slice())
+                .expect("decode ML-DSA-44 signature");
+        let (tr, _) = crate::reference::sponge::shake256(&[public_key.as_slice()], 64);
+        let input = crate::types::MlDsaVerifyInput::from_decoded_for(
+            ML_DSA_44,
+            &decoded_key,
+            &decoded_signature,
+            tr.try_into().expect("64-byte tr"),
+            message.to_vec(),
+        );
+        let witness =
+            crate::witness::generate_witness_for(ML_DSA_44, &input).expect("ML-DSA-44 witness");
+        let private_witness =
+            super::super::PrivateKeyEvalWitness::from_input_for(ML_DSA_44, &input)
+                .expect("ML-DSA-44 private-key witness");
+        let r = SecureField::from(m31(7));
+        let s = SecureField::from(m31(11));
+        let rho_rlc = SecureField::from(m31(13));
+        let coeffs_log_size =
+            crate::air_util::padded_log_size(crate::coeffs::layout::active_rows());
+        let coeffs_relations = crate::coeffs::relations::CoeffsRelations::dummy();
+        let coeffs = crate::coeffs::gen_coeffs_interaction(
+            &witness,
+            coeffs_log_size,
+            r,
+            s,
+            &coeffs_relations,
+        );
+        let coeffs_trace = TreeVec::new(vec![
+            crate::coeffs::gen_coeffs_preprocessed_for(ML_DSA_44, coeffs_log_size),
+            crate::coeffs::gen_coeffs_base_trace(&witness, coeffs_log_size),
+            coeffs.trace.clone(),
+        ]);
+        let coeffs_trace = coeffs_trace
+            .as_ref()
+            .map_cols(|column| column.to_cpu().values);
+        let coeffs_trace = coeffs_trace.as_cols_ref();
+        let coeffs_component = crate::coeffs::CoeffsEval {
+            profile: ML_DSA_44,
+            log_size: coeffs_log_size,
+            r,
+            s,
+            relations: coeffs_relations,
+        };
+        assert_constraints_on_trace(
+            &coeffs_trace,
+            coeffs_log_size,
+            |eval| {
+                coeffs_component.evaluate(eval);
+            },
+            coeffs.claimed_sum,
+        );
+        let private = super::super::gen_private_key_interaction(
+            &private_witness,
+            r,
+            s,
+            &super::super::PrivateKeyEvalRelations::dummy(),
+        );
+        let evals = PrivateDeviceEvals::from_parts(
+            &coeffs.group_evals,
+            &private.a_evals,
+            &private.t1_evals,
+        )
+        .expect("fixed private evaluation shape");
+
+        assert_eq!(
+            native_fold(&evals, ML_DSA_44, rho_rlc, r, s),
+            SecureField::zero()
+        );
+        assert!(evals.as_slice()[46..60].iter().all(SecureField::is_zero));
+        assert!(evals.as_slice()[64..66].iter().all(SecureField::is_zero));
     }
 }

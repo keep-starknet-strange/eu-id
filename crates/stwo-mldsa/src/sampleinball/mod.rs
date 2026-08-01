@@ -12,10 +12,10 @@
 //!
 //! One committed AIR contains two stacked row groups at log size 10.
 //!
-//! 1. **stream group** (one row per byte in the five-block resource cap): binds
-//!    all 680 bytes from
+//! 1. **stream group** (one row per byte in the profile resource cap): binds
+//!    136 bytes for ML-DSA-44 or 680 bytes for ML-DSA-65 from
 //!    `HashIoRelation(STREAM_ID_SIB_SQUEEZE, byte_pos, byte)`. An `active` base
-//!    bit selects the unique prefix through the 49th accepted placement. The
+//!    bit selects the unique prefix through the final accepted placement. The
 //!    first 8 active bytes are the sign source; each later active byte is
 //!    accepted iff `byte ≤ i` (proven by `(i − byte) ∈ [0,256)`) or rejected
 //!    iff `byte > i` (proven by `(byte − i − 1) ∈ [0,256)`). Every inactive
@@ -77,6 +77,7 @@ use stwo_constraint_framework::{
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 use crate::constants::{N, TAU};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::witness::MlDsaWitness;
 use relations::SibRelations;
 use tables::RcUses;
@@ -89,17 +90,17 @@ pub const SHAKE256_RATE: usize = 136;
 
 /// Resource cap for the SampleInBall rejection stream.
 ///
-/// One block overruns with probability about 2^-140.25; this five-block cap
-/// overruns with probability about 2^-1448.6. It is deliberately a RESOURCE
-/// CAP, not a semantic worst-case bound: FIPS 204 sampling is unbounded.
+/// This is the maximum cap for the fixed internal storage. ML-DSA-44 uses one
+/// block and has exhaustion probability about 2^-202.929. ML-DSA-65 uses five
+/// blocks. This is a resource cap, not a semantic worst-case bound. FIPS 204
+/// sampling is unbounded.
 pub const MAX_SIB_SQUEEZE_BLOCKS: usize = 5;
 
-/// Byte length of the fixed five-block SampleInBall squeeze stream.
+/// Byte length of the maximum SampleInBall squeeze stream.
 pub const MAX_SIB_SQUEEZE_BYTES: usize = SHAKE256_RATE * MAX_SIB_SQUEEZE_BLOCKS;
 
-// The stream stage always binds the fixed five-block resource cap. `active`
-// selects only the FIPS-consumed prefix; the c stage starts at the static row
-// MAX_SIB_SQUEEZE_BYTES.
+// The stream stage binds the verifier-selected resource cap. `active` selects
+// only the FIPS-consumed prefix. The c stage follows the selected stream rows.
 
 /// Base column indices.
 const COL_ACTIVE: usize = 0;
@@ -146,6 +147,18 @@ pub const N_CORE: usize = N + 3 * TAU;
 /// Total offline-memory accesses (core + N final reads). Drives the SORTED
 /// trace row count and the sib log_size.
 pub const N_ACCESSES: usize = N_CORE + N;
+
+fn squeeze_bytes(profile: MlDsaProfile) -> usize {
+    SHAKE256_RATE * profile.sample_in_ball_squeeze_blocks()
+}
+
+fn n_core(profile: MlDsaProfile) -> usize {
+    N + 3 * profile.tau()
+}
+
+fn n_accesses(profile: MlDsaProfile) -> usize {
+    n_core(profile) + N
+}
 
 /// Namespaced preprocessed id for one hosted ML-DSA instance. The schedule
 /// content is static; namespacing preserves the composition's per-role order.
@@ -197,20 +210,21 @@ pub fn sib_preprocessed_ids_ns(ns: &str) -> Vec<PreProcessedColumnId> {
     ids
 }
 
-fn accepted_prefix_len(stream: &[u8]) -> Result<usize, &'static str> {
-    if stream.len() > MAX_SIB_SQUEEZE_BYTES {
-        return Err("SampleInBall stream exceeds the five-block resource cap");
+fn accepted_prefix_len(profile: MlDsaProfile, stream: &[u8]) -> Result<usize, &'static str> {
+    if stream.len() > squeeze_bytes(profile) {
+        return Err("SampleInBall stream exceeds the selected resource cap");
     }
     if stream.len() < SIGN_BYTES {
         return Err("SampleInBall stream is missing sign bytes");
     }
-    let mut i = (N - TAU) as u32;
+    let tau = profile.tau();
+    let mut i = (N - tau) as u32;
     let mut placed = 0usize;
     let mut pos = SIGN_BYTES;
-    while placed < TAU {
+    while placed < tau {
         let b = *stream
             .get(pos)
-            .ok_or("SampleInBall stream ends before 49 accepted placements")?
+            .ok_or("SampleInBall stream ends before the final accepted placement")?
             as u32;
         pos += 1;
         if b <= i {
@@ -223,11 +237,11 @@ fn accepted_prefix_len(stream: &[u8]) -> Result<usize, &'static str> {
 
 /// Validate the witness stream without panicking.
 ///
-/// The stream must end on the canonical SHAKE block containing the 49th
-/// accepted placement and must stay within the five-block cap.
+/// The stream must end on the canonical SHAKE block containing the final
+/// accepted placement and must stay within the selected cap.
 pub fn validate_stream(witness: &MlDsaWitness) -> Result<usize, &'static str> {
     let stream = &witness.sponge.sample_in_ball_squeezed;
-    let consumed = accepted_prefix_len(stream)?;
+    let consumed = accepted_prefix_len(witness.profile, stream)?;
     let expected = SHAKE256_RATE * consumed.div_ceil(SHAKE256_RATE);
     if stream.len() != expected {
         return Err("SampleInBall squeeze length is not canonically derived");
@@ -240,12 +254,12 @@ pub fn stream_len(witness: &MlDsaWitness) -> usize {
     validate_stream(witness).expect("validated SampleInBall witness stream")
 }
 
-/// Deterministic five-block squeeze stream committed by the Keccak service and
-/// consumed in full by this component.
+/// Deterministic profile-sized squeeze stream committed by the Keccak service
+/// and consumed in full by this component.
 pub(crate) fn fixed_squeeze_stream(witness: &MlDsaWitness) -> Vec<u8> {
     crate::reference::sponge::shake256(
         &[&witness.sponge.sample_in_ball_absorbed],
-        MAX_SIB_SQUEEZE_BYTES,
+        squeeze_bytes(witness.profile),
     )
     .0
 }
@@ -260,10 +274,12 @@ struct StreamRow {
 
 fn stream_rows(witness: &MlDsaWitness) -> Vec<StreamRow> {
     let stream = fixed_squeeze_stream(witness);
-    let mut out = Vec::with_capacity(MAX_SIB_SQUEEZE_BYTES);
-    let mut i = (N - TAU) as u32;
+    let tau = witness.profile.tau();
+    let stream_bytes = squeeze_bytes(witness.profile);
+    let mut out = Vec::with_capacity(stream_bytes);
+    let mut i = (N - tau) as u32;
     let mut placed = 0usize;
-    for pos in 0..MAX_SIB_SQUEEZE_BYTES {
+    for pos in 0..stream_bytes {
         let b = stream[pos] as u32;
         if pos < SIGN_BYTES {
             // Sign-collection rows: i stays at N−τ, byte recorded, no accept.
@@ -274,7 +290,7 @@ fn stream_rows(witness: &MlDsaWitness) -> Vec<StreamRow> {
                 accept: false,
             });
         } else {
-            let active = placed < TAU;
+            let active = placed < tau;
             let accept = active && b <= i;
             out.push(StreamRow {
                 byte: b,
@@ -341,7 +357,9 @@ fn mem_accesses(witness: &MlDsaWitness) -> Vec<Access> {
     let mut sign = sign_bits;
     let mut pos = SIGN_BYTES;
 
-    let mut out = Vec::with_capacity(N_ACCESSES);
+    let tau = witness.profile.tau();
+    let accesses = n_accesses(witness.profile);
+    let mut out = Vec::with_capacity(accesses);
     let mut ts: u32 = 0;
 
     // INIT: write (k, 0) for k in 0..N.
@@ -357,7 +375,7 @@ fn mem_accesses(witness: &MlDsaWitness) -> Vec<Access> {
 
     // Per step: rejection-sample j ≤ i, then read (j,old_j), write (i,old_j),
     // write (j, sign). Mirrors reference::sample_in_ball's write order EXACTLY.
-    for i in (N - TAU)..N {
+    for i in (N - tau)..N {
         let j = loop {
             let byte = stream[pos] as usize;
             pos += 1;
@@ -409,7 +427,7 @@ fn mem_accesses(witness: &MlDsaWitness) -> Vec<Access> {
         ts += 1;
     }
 
-    debug_assert_eq!(out.len(), N_ACCESSES);
+    debug_assert_eq!(out.len(), accesses);
     out
 }
 
@@ -462,7 +480,7 @@ impl Drop for ForgedCoreGuard {
 pub fn honest_core_accesses(witness: &MlDsaWitness) -> Vec<(u32, i128, u32, bool)> {
     mem_accesses(witness)
         .into_iter()
-        .take(N_CORE)
+        .take(n_core(witness.profile))
         .map(|a| (a.addr, a.value, a.ts, a.is_write))
         .collect()
 }
@@ -596,6 +614,7 @@ pub fn install_forged_sorted_writes(writes: Vec<bool>) -> ForgedSortedWritesGuar
 
 fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
     let mut unsorted = mem_accesses(witness);
+    let core = n_core(witness.profile);
     // Test-attack hook: swap the CORE accesses (rows 0..N_CORE) for a forged list,
     // keeping the honest FINAL reads (rows N_CORE..N_ACCESSES) so the Mem balance
     // against the committed `c` is untouched — the FSM↔memory channels must catch it.
@@ -603,17 +622,17 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
         if let Some(forged) = f.borrow().as_ref() {
             assert_eq!(
                 forged.len(),
-                N_CORE,
+                core,
                 "forged core list must have N_CORE entries"
             );
-            unsorted[..N_CORE].clone_from_slice(forged);
+            unsorted[..core].clone_from_slice(forged);
             // A malicious CORE is paired with the attacker's committed final
             // `c`, not the honest replay's final values. This keeps the Mem
             // permutation internally balanced so the dedicated FSM/sign
             // constraints, rather than an unrelated generator inconsistency,
             // reject the forged history.
             for k in 0..N {
-                unsorted[N_CORE + k].value = witness.digits.c[k];
+                unsorted[core + k].value = witness.digits.c[k];
             }
         }
     });
@@ -640,9 +659,17 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
 
 /// Reconstruct the canonical, signature-independent SampleInBall schedule.
 pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
+    gen_sib_preprocessed_for(ML_DSA_65, log_size)
+}
+
+pub fn gen_sib_preprocessed_for(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
+    let stream_bytes = squeeze_bytes(profile);
+    let core = n_core(profile);
+    let accesses = n_accesses(profile);
+    let tau = profile.tau();
     assert!(
-        MAX_SIB_SQUEEZE_BYTES + N <= rows,
+        stream_bytes + N <= rows,
         "SampleInBall schedule does not fit its trace domain"
     );
 
@@ -669,7 +696,7 @@ pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
     let mut stream_last = vec![m31(0); rows];
     let mut sign_mask: Vec<Vec<M31>> = (0..SIGN_BIT_COLS).map(|_| vec![m31(0); rows]).collect();
 
-    for pos in 0..MAX_SIB_SQUEEZE_BYTES {
+    for pos in 0..stream_bytes {
         is_stream[pos] = m31(1);
         if pos >= SIGN_BYTES {
             is_placement[pos] = m31(1);
@@ -680,22 +707,22 @@ pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
             is_sign[pos] = m31(1);
             for u in 0..SIGN_BIT_COLS {
                 let step = SIGN_BIT_COLS * pos + u;
-                sign_mask[u][pos] = m31(u32::from(step < TAU));
+                sign_mask[u][pos] = m31(u32::from(step < tau));
             }
         }
         byte_pos[pos] = m31(pos as u32);
     }
-    stream_last[MAX_SIB_SQUEEZE_BYTES - 1] = m31(1);
+    stream_last[stream_bytes - 1] = m31(1);
     for m in 0..N {
-        let row = MAX_SIB_SQUEEZE_BYTES + m;
+        let row = stream_bytes + m;
         is_c[row] = m31(1);
         c_bind_id[row] = m31(m as u32);
         // FINAL-read timestamp for address m (co-located on the c-stage row).
-        ts_final[row] = m31((N_CORE + m) as u32);
+        ts_final[row] = m31((core + m) as u32);
     }
     acc_start[0] = m31(1); // coset row 0 zeroes the Σc² accumulator wraparound.
     if N > 0 {
-        c_last[MAX_SIB_SQUEEZE_BYTES + N - 1] = m31(1);
+        c_last[stream_bytes + N - 1] = m31(1);
     }
 
     // Unsorted CORE accesses occupy rows 0..N_CORE; the SORTED view occupies
@@ -703,7 +730,7 @@ pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
     // (coset row 0 wraparound of the [-1,0] mask). The CORE-row layout MATCHES
     // `mem_accesses` EXACTLY: rows 0..N are init writes (addr=k, val=0, ts=k),
     // then per step t the 3 rows READ / WRITE-i / WRITE-j at ts N+3t+{0,1,2}.
-    for row in 0..N_CORE {
+    for row in 0..core {
         is_core[row] = m31(1);
     }
     for k in 0..N {
@@ -711,7 +738,7 @@ pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
         core_ts[k] = m31(k as u32);
         init_addr[k] = m31(k as u32);
     }
-    for t in 0..TAU {
+    for t in 0..tau {
         let base = N + 3 * t;
         // step_no = t on all three step rows; core_ts matches mem_accesses ts.
         step_no[base] = m31(t as u32);
@@ -724,7 +751,7 @@ pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
         is_wr_i_row[base + 1] = m31(1);
         is_wr_j_row[base + 2] = m31(1);
     }
-    for row in 0..N_ACCESSES {
+    for row in 0..accesses {
         is_sorted[row] = m31(1);
     }
     sorted_start[0] = m31(1);
@@ -763,6 +790,8 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
     let rows = 1usize << log_size;
     let srows = stream_rows(witness);
     let stream = fixed_squeeze_stream(witness);
+    let stream_bytes = squeeze_bytes(witness.profile);
+    let core = n_core(witness.profile);
     let mut cols: Vec<Vec<M31>> = (0..N_BASE_COLS).map(|_| vec![m31(0); rows]).collect();
 
     // Stream stage.
@@ -797,7 +826,7 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
 
     // c stage.
     for m in 0..N {
-        let row = MAX_SIB_SQUEEZE_BYTES + m;
+        let row = stream_bytes + m;
         let c = witness.digits.c[m];
         cols[COL_C][row] = enc_signed(c);
         cols[COL_CSQ][row] = m31((c * c) as u32);
@@ -808,7 +837,7 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
     // Unsorted CORE accesses (rows 0..N_CORE); the N FINAL reads are emitted from
     // the c-stage rows above (COL_C is their value), so only the first N_CORE
     // unsorted accesses live here — they are exactly the non-final accesses.
-    for (row, a) in mem.unsorted.iter().take(N_CORE).enumerate() {
+    for (row, a) in mem.unsorted.iter().take(core).enumerate() {
         cols[COL_U_ADDR][row] = m31(a.addr);
         cols[COL_U_VAL][row] = enc_signed(a.value);
         cols[COL_U_TS][row] = m31(a.ts);
@@ -853,6 +882,7 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
 #[derive(Clone)]
 pub struct SibEval {
     pub log_size: u32,
+    pub profile: MlDsaProfile,
     /// Instance namespace. An empty value preserves single-instance identifiers.
     pub ns: String,
     /// The HashIo stream id the SIB squeeze bytes are consumed from. Per
@@ -967,7 +997,7 @@ impl FrameworkEval for SibEval {
 
         let one = E::F::from(M31::one());
         let two_pow_8 = E::F::from(m31(1 << 8));
-        let n_minus_tau = E::F::from(m31((N - TAU) as u32));
+        let n_minus_tau = E::F::from(m31((N - self.profile.tau()) as u32));
         let n = E::F::from(m31(N as u32));
 
         // C0: `active` is a boolean confined to the fixed squeeze rows. All
@@ -1063,7 +1093,7 @@ impl FrameworkEval for SibEval {
         // C6: final c-row gate — the constrained running accumulator is Σc²=τ.
         // This must use `csq_cur` directly; a separate base accumulator would be
         // free witness unless explicitly tied to the interaction column.
-        let tau = E::EF::from(E::F::from(m31(TAU as u32)));
+        let tau = E::EF::from(E::F::from(m31(self.profile.tau() as u32)));
         eval.add_constraint(E::EF::from(c_last.clone()) * (csq_cur.clone() - tau));
 
         // C7: c-binding — USE the coeffs C cell (c_bind_id = m, c).
@@ -1381,7 +1411,9 @@ pub fn gen_sib_interaction(
     relations: &SibRelations,
 ) -> SibInteraction {
     let rows = 1usize << log_size;
-    let slen = MAX_SIB_SQUEEZE_BYTES;
+    let slen = squeeze_bytes(witness.profile);
+    let core = n_core(witness.profile);
+    let tau = witness.profile.tau();
     let srows = stream_rows(witness);
     let stream = fixed_squeeze_stream(witness);
 
@@ -1620,7 +1652,7 @@ pub fn gen_sib_interaction(
     // Mem unsorted CORE (+): rows 0..N_CORE.
     push(
         &|coset| {
-            if coset < N_CORE {
+            if coset < core {
                 let a = &mem.unsorted[coset];
                 (
                     one,
@@ -1643,7 +1675,7 @@ pub fn gen_sib_interaction(
     push(
         &|coset| match coset_row[coset] {
             Some(Row::C { m, c }) => {
-                let ts = (N_CORE as u32) + m;
+                let ts = (core as u32) + m;
                 (
                     one,
                     relations
@@ -1687,14 +1719,14 @@ pub fn gen_sib_interaction(
     // =====================================================================
     let core_role = |coset: usize| -> Option<(usize, usize)> {
         // Returns (step_t, role) for a step access row; None for init/non-core.
-        if (N..N_CORE).contains(&coset) {
+        if (N..core).contains(&coset) {
             let off = coset - N;
             Some((off / 3, off % 3))
         } else {
             None
         }
     };
-    let n_minus_tau = m31((N - TAU) as u32);
+    let n_minus_tau = m31((N - tau) as u32);
 
     // Swap accept-yield (×2): (idx−(N−τ), byte) on accept stream rows.
     for _ in 0..2 {
@@ -1777,7 +1809,7 @@ pub fn gen_sib_interaction(
             &|coset| {
                 if coset < SIGN_BYTES {
                     let step = SIGN_BIT_COLS * coset + u;
-                    if step < TAU {
+                    if step < tau {
                         let bit = (trace_sign_byte(&stream, coset) >> u) & 1;
                         let value = if bit == 1 { -1 } else { 1 };
                         return (

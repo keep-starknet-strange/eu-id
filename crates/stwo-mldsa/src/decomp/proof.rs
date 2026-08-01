@@ -100,7 +100,7 @@ fn wcell_log_size() -> u32 {
     padded_log_size(crate::constants::K * crate::constants::N) // 1536
 }
 fn hashio_log_size() -> u32 {
-    padded_log_size(N_PAIRS) // 768
+    padded_log_size(crate::profile::ML_DSA_65.w1_encoded_bytes())
 }
 
 struct Built {
@@ -258,6 +258,7 @@ fn build_components(
     let decomp = FrameworkComponent::new(
         allocator,
         DecompEval {
+            profile: crate::profile::ML_DSA_65,
             log_size: decomp_log_size(),
             ct_stream: STREAM_ID_CTILDE_ABSORB,
             relations: relations.clone(),
@@ -585,7 +586,7 @@ pub fn verify_decomp(
 #[cfg(test)]
 mod tests {
     use ml_dsa::signature::{Keypair, Signer};
-    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa44, MlDsa65, SigningKey};
     use stwo::core::pcs::TreeVec;
     use stwo_constraint_framework::{assert_constraints_on_trace, FrameworkEval};
 
@@ -624,6 +625,28 @@ mod tests {
         generate_witness(&input).expect("honest witness")
     }
 
+    fn witness44() -> MlDsaWitness {
+        let profile = crate::profile::ML_DSA_44;
+        let sk = SigningKey::<MlDsa44>::from_seed(&[0x44; 32].into());
+        let vk = sk.verifying_key();
+        let sig = sk.sign(b"mldsa44-decomp-constraints");
+        let vk_bytes: EncodedVerifyingKey<MlDsa44> = vk.encode();
+        let sig_bytes: EncodedSignature<MlDsa44> = sig.encode();
+        let pk = crate::reference::encoding::pk_decode_for(profile, vk_bytes.as_slice())
+            .expect("ML-DSA-44 pk_decode");
+        let sig = crate::reference::encoding::sig_decode_for(profile, sig_bytes.as_slice())
+            .expect("ML-DSA-44 sig_decode");
+        let (tr, _) = shake256(&[vk_bytes.as_slice()], 64);
+        let input = MlDsaVerifyInput::from_decoded_for(
+            profile,
+            &pk,
+            &sig,
+            tr.try_into().expect("64-byte tr"),
+            b"mldsa44-decomp-constraints".to_vec(),
+        );
+        crate::witness::generate_witness_for(profile, &input).expect("honest ML-DSA-44 witness")
+    }
+
     fn witness_with_first_w(w_value: u32, hint: u8) -> MlDsaWitness {
         let mut witness = witness();
         for i in 0..K {
@@ -654,7 +677,10 @@ mod tests {
         witness
     }
 
-    fn assert_decomp_constraints(witness: &MlDsaWitness) {
+    fn assert_decomp_constraints_for(
+        profile: crate::profile::MlDsaProfile,
+        witness: &MlDsaWitness,
+    ) {
         let relations = DecompRelations::dummy();
         let interaction = gen_decomp_interaction(
             witness,
@@ -663,7 +689,7 @@ mod tests {
             &relations,
         );
         let trace = TreeVec::new(vec![
-            gen_decomp_preprocessed(decomp_log_size()),
+            crate::decomp::gen_decomp_preprocessed_for(profile, decomp_log_size()),
             gen_decomp_base_trace(witness, decomp_log_size()),
             interaction.trace,
         ]);
@@ -671,6 +697,7 @@ mod tests {
         let trace = trace.as_cols_ref();
         let component = DecompEval {
             log_size: decomp_log_size(),
+            profile,
             ct_stream: STREAM_ID_CTILDE_ABSORB,
             relations,
         };
@@ -714,7 +741,12 @@ mod tests {
 
     #[test]
     fn fips_wrap_boundary_constraints_pass() {
-        assert_decomp_constraints(&boundary_witness());
+        assert_decomp_constraints_for(crate::profile::ML_DSA_65, &boundary_witness());
+    }
+
+    #[test]
+    fn mldsa44_decomp_constraints_pass() {
+        assert_decomp_constraints_for(crate::profile::ML_DSA_44, &witness44());
     }
 
     #[test]

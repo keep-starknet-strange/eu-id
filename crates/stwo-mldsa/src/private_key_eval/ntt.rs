@@ -10,6 +10,7 @@ use crate::air_util::{col_eval, enc_signed, m31, ColEval};
 use crate::coeffs::tables::RcKind;
 use crate::coeffs::RcUses;
 use crate::constants::{K, L, N, Q, ZETA};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::reference::ntt::NttPoly;
 use crate::witness::B;
 
@@ -111,17 +112,41 @@ fn butterfly_pre_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
+fn butterfly_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_private_key_ntt_butterfly_{profile:?}_active"),
+    }
+}
+
 fn scaling_pre_id(name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("mldsa_private_key_ntt_scaling_{name}"),
     }
 }
 
+fn scaling_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_private_key_ntt_scaling_{profile:?}_active"),
+    }
+}
+
 pub fn ntt_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    BUTTERFLY_PRE_NAMES
-        .iter()
-        .map(|name| butterfly_pre_id(name))
-        .chain(SCALING_PRE_NAMES.iter().map(|name| scaling_pre_id(name)))
+    ntt_preprocessed_ids_for(ML_DSA_65)
+}
+
+pub fn ntt_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
+    core::iter::once(butterfly_active_id(profile))
+        .chain(
+            BUTTERFLY_PRE_NAMES[1..]
+                .iter()
+                .map(|name| butterfly_pre_id(name)),
+        )
+        .chain(core::iter::once(scaling_active_id(profile)))
+        .chain(
+            SCALING_PRE_NAMES[1..]
+                .iter()
+                .map(|name| scaling_pre_id(name)),
+        )
         .collect()
 }
 
@@ -132,11 +157,15 @@ pub fn ntt_preprocessed_log_sizes() -> Vec<u32> {
 }
 
 pub fn gen_ntt_preprocessed() -> Vec<ColEval> {
+    gen_ntt_preprocessed_for(ML_DSA_65)
+}
+
+pub fn gen_ntt_preprocessed_for(profile: MlDsaProfile) -> Vec<ColEval> {
     let mut result = Vec::with_capacity(BUTTERFLY_PRE_NAMES.len() + SCALING_PRE_NAMES.len());
     let mut columns =
         vec![vec![m31(0); 1usize << NTT_BUTTERFLY_LOG_SIZE]; BUTTERFLY_PRE_NAMES.len()];
     for (row, item) in butterfly_schedule().iter().enumerate() {
-        columns[0][row] = m31(1);
+        columns[0][row] = m31(u32::from(item.poly < profile.matrix_polys()));
         columns[1][row] = m31(item.poly as u32);
         columns[2][row] = m31(item.stage as u32);
         columns[3][row] = m31(item.index0 as u32);
@@ -154,7 +183,7 @@ pub fn gen_ntt_preprocessed() -> Vec<ColEval> {
 
     let mut columns = vec![vec![m31(0); 1usize << NTT_SCALING_LOG_SIZE]; SCALING_PRE_NAMES.len()];
     for (row, item) in scaling_schedule().iter().enumerate() {
-        columns[0][row] = m31(1);
+        columns[0][row] = m31(u32::from(item.poly < profile.matrix_polys()));
         columns[1][row] = m31(item.eval_start as u32);
         columns[2][row] = m31(item.eval_end as u32);
         columns[3][row] = m31(item.poly as u32);
@@ -299,11 +328,18 @@ pub struct NttBase {
 }
 
 pub fn gen_ntt_base(a_hat: &[NttPoly]) -> NttBase {
+    gen_ntt_base_for(ML_DSA_65, a_hat)
+}
+
+pub fn gen_ntt_base_for(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
     assert_eq!(a_hat.len(), MATRIX_POLYS);
     let mut states = a_hat.to_vec();
     let mut range_uses = RcUses::new();
     let mut columns = vec![vec![m31(0); 1usize << NTT_BUTTERFLY_LOG_SIZE]; NTT_BUTTERFLY_BASE_COLS];
     for (row, item) in butterfly_schedule().iter().enumerate() {
+        if item.poly >= profile.matrix_polys() {
+            continue;
+        }
         let input0 = states[item.poly][item.index0];
         let input1 = states[item.poly][item.index1];
         for (limb, value) in split_u23(input0).into_iter().enumerate() {
@@ -347,6 +383,9 @@ pub fn gen_ntt_base(a_hat: &[NttPoly]) -> NttBase {
 
     let mut columns = vec![vec![m31(0); 1usize << NTT_SCALING_LOG_SIZE]; NTT_SCALING_BASE_COLS];
     for (row, item) in scaling_schedule().iter().enumerate() {
+        if item.poly >= profile.matrix_polys() {
+            continue;
+        }
         let input = states[item.poly][item.index];
         for (limb, value) in split_u23(input).into_iter().enumerate() {
             columns[S_INPUT + limb][row] = m31(value);
@@ -514,6 +553,7 @@ fn add_canonical_range_lookups<E: EvalAtRow>(
 
 #[derive(Clone)]
 pub struct NttButterflyEval {
+    pub profile: MlDsaProfile,
     pub relations: PrivateKeyEvalRelations,
 }
 
@@ -527,7 +567,7 @@ impl FrameworkEval for NttButterflyEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(butterfly_pre_id("active"));
+        let active = eval.get_preprocessed_column(butterfly_active_id(self.profile));
         let poly = eval.get_preprocessed_column(butterfly_pre_id("poly"));
         let stage = eval.get_preprocessed_column(butterfly_pre_id("stage"));
         let index0 = eval.get_preprocessed_column(butterfly_pre_id("index0"));
@@ -552,6 +592,24 @@ impl FrameworkEval for NttButterflyEval {
         let carries: [E::F; 4] = core::array::from_fn(|_| eval.next_trace_mask());
 
         let one = E::F::one();
+        let inactive = one.clone() - active.clone();
+        for value in input0
+            .iter()
+            .chain(input1.iter())
+            .chain(output0.iter())
+            .chain(output0_slack.iter())
+            .chain(diff.iter())
+            .chain(diff_slack.iter())
+            .chain(output1.iter())
+            .chain(output1_slack.iter())
+            .chain(quotient.iter())
+            .chain(quotient_slack.iter())
+            .chain(core::iter::once(&reduce))
+            .chain(core::iter::once(&borrow))
+            .chain(carries.iter())
+        {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
         let c256 = E::F::from(m31(256));
         let c65536 = E::F::from(m31(1 << 16));
         let input0_value = recompose3(&input0, c256.clone(), c65536.clone());
@@ -632,6 +690,7 @@ impl FrameworkEval for NttButterflyEval {
 
 #[derive(Clone)]
 pub struct NttScalingEval {
+    pub profile: MlDsaProfile,
     pub r: SecureField,
     pub s: SecureField,
     pub relations: PrivateKeyEvalRelations,
@@ -647,7 +706,7 @@ impl FrameworkEval for NttScalingEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(scaling_pre_id("active"));
+        let active = eval.get_preprocessed_column(scaling_active_id(self.profile));
         let eval_start = eval.get_preprocessed_column(scaling_pre_id("eval_start"));
         let eval_end = eval.get_preprocessed_column(scaling_pre_id("eval_end"));
         let poly = eval.get_preprocessed_column(scaling_pre_id("poly"));
@@ -663,6 +722,19 @@ impl FrameworkEval for NttScalingEval {
             core::array::from_fn(|_| eval.next_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]));
         let acc_prev = E::combine_ef(acc_masks.each_ref().map(|mask| mask[0].clone()));
         let acc_cur = E::combine_ef(acc_masks.each_ref().map(|mask| mask[1].clone()));
+
+        let inactive = E::F::one() - active.clone();
+        for value in input
+            .iter()
+            .chain(output.iter())
+            .chain(output_slack.iter())
+            .chain(quotient.iter())
+            .chain(quotient_slack.iter())
+            .chain(carries.iter())
+            .chain(digits.iter())
+        {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
 
         add_canonical_constraint(&mut eval, active.clone(), &output, &output_slack);
         add_canonical_constraint(&mut eval, active.clone(), &quotient, &quotient_slack);
@@ -785,6 +857,16 @@ pub fn gen_ntt_interaction(
     s: SecureField,
     relations: &PrivateKeyEvalRelations,
 ) -> NttInteraction {
+    gen_ntt_interaction_for(ML_DSA_65, a_hat, r, s, relations)
+}
+
+pub fn gen_ntt_interaction_for(
+    profile: MlDsaProfile,
+    a_hat: &[NttPoly],
+    r: SecureField,
+    s: SecureField,
+    relations: &PrivateKeyEvalRelations,
+) -> NttInteraction {
     assert_eq!(a_hat.len(), MATRIX_POLYS);
     let zero = SecureField::zero();
     let one = SecureField::one();
@@ -792,6 +874,9 @@ pub fn gen_ntt_interaction(
     let mut rows =
         vec![vec![(zero, one); NTT_BUTTERFLY_LOGUP_ENTRIES]; 1usize << NTT_BUTTERFLY_LOG_SIZE];
     for (row, item) in butterfly_schedule().iter().enumerate() {
+        if item.poly >= profile.matrix_polys() {
+            continue;
+        }
         let input0 = states[item.poly][item.index0];
         let input1 = states[item.poly][item.index1];
         let input0_limbs = split_u23(input0);
@@ -878,6 +963,22 @@ pub fn gen_ntt_interaction(
     let mut a_evals = vec![zero; MATRIX_POLYS];
     let mut running = zero;
     for (row, item) in scaling_schedule().iter().enumerate() {
+        if item.poly >= profile.matrix_polys() {
+            acc[row] = zero;
+            if item.eval_end {
+                rows[row][NTT_SCALING_LOGUP_ENTRIES - 1] = (
+                    -one,
+                    relations.eval.combine(&[
+                        m31((A_EVAL_BASE + item.poly) as u32),
+                        m31(0),
+                        m31(0),
+                        m31(0),
+                        m31(0),
+                    ]),
+                );
+            }
+            continue;
+        }
         let input = states[item.poly][item.index];
         let input_limbs = split_u23(input);
         let mut entries = Vec::with_capacity(NTT_SCALING_LOGUP_ENTRIES);

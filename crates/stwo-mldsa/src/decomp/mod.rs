@@ -1,19 +1,19 @@
 //! `mldsa_decomp` — FIPS 204 [DECOMP] + [HINT] over each `w_i` coefficient.
 //!
-//! One AIR row holds a **w1Encode byte pair**: the two consecutive coefficients
-//! `(2p, 2p+1)` of a `w_i` poly, `p ∈ [0, N/2)`, `i ∈ [k]`. `k·N/2 = 768` active
-//! rows. Packing two coeffs per row keeps the `w1Encode` byte emission fully
-//! within one row. It does not use a cross-row mask, which would increase the
-//! composition degree bound. See [`crate::coeffs`].
+//! One AIR row holds four consecutive coefficients of one `w_i` polynomial.
+//! ML-DSA-44 encodes them as three 6-bit-packed bytes. ML-DSA-65 encodes them
+//! as two 4-bit-packed bytes. Both profiles emit exactly 768 bytes. The fixed
+//! trace stores six polynomial slots. The verifier-selected `k` activates four
+//! or six slots.
 //!
-//! ## Per sub-lane `ℓ ∈ {lo, hi}` (a single `w_i` coefficient `w`), the FIPS obligations
+//! ## Per-lane FIPS obligations
 //!
 //! Decompose (Alg 36) / UseHint (Alg 39), pinned against
 //! [`crate::reference::decompose`] as the semantic oracle:
 //!
 //! 1. **[DECOMP] reconstruction** — `w1·α + w0 = w − wrap_k·q`, `α = 2γ2`,
 //!    `wrap_k ∈ {0,1}` (the FIPS borderline `r−r0 = q−1` wrap; verified over ℤ
-//!    that `w1·α+w0 − w ∈ {0, −q}`). `w1 ∈ [0,16)` (rc4), and
+//!    that `w1·α+w0 − w ∈ {0, −q}`). `w1` is in the selected profile range, and
 //!    `w0 ∈ (−γ2, γ2] ∪ {−γ2 when w1=0}`. For `v = w0+γ2`, the zero flag
 //!    `b` and inverse witness obey `b+v·v_inv=1`, `b·v=0`, and `b·w1=0`.
 //!    Thus `b=1` exactly when `v=0` without a redundant boolean constraint:
@@ -23,16 +23,15 @@
 //!    13+7-bit splits.
 //! 2. **[HINT] sign** — `s0 = [w0 > 0] ∈ {0,1}`, bound to `w0`'s two-sided
 //!    decomposition so a lying `s0` desyncs the range (see C-DECOMP-S0).
-//! 3. **[HINT] UseHint** — `w1' = (w1 + h·(2·s0−1)) mod 16`, `h ∈ {0,1}`.
-//!    Encoded as `w1' = w1 + h·(2·s0−1) + wrap16·16` with `wrap16 ∈ {−1,0,1}`
-//!    chosen so `w1' ∈ [0,16)` (rc4). (`w1+delta ∈ [−1,16]`.)
-//! 4. **[HINT] Σh ≤ ω** — a running accumulator `hint_acc' = hint_acc + h_lo +
-//!    h_hi`; the final active row's accumulator is range-checked `≤ ω = 55`
-//!    (rc8), enforcing `Σ_i Σ_m h ≤ ω`.
+//! 3. **[HINT] UseHint** — `w1' = (w1 + h·(2·s0−1)) mod m`, where
+//!    `m = (q−1)/(2γ2)` and `h ∈ {0,1}`. A ternary wrap cell selects the exact
+//!    representative in the profile range.
+//! 4. **[HINT] Σh ≤ ω** — a running accumulator adds the four lane hints. The
+//!    final active row is range-checked against the selected `ω`.
 //! 5. **w-binding** — each sub-lane `w` is a USE of the coeffs W-group cell
 //!    (`WCellRelation(w_bind_id, w)`), `w_bind_id = i·N + m`. Yielded by coeffs.
-//! 6. **w1Encode emission** — `byte = w1'_lo + 16·w1'_hi` yielded into
-//!    `HashIoRelation(STREAM_ID_CTILDE_ABSORB, byte_pos, byte)` (768 bytes).
+//! 6. **w1Encode emission** — each row yields two ML-DSA-65 bytes or three
+//!    ML-DSA-44 bytes into the commitment-hash absorb stream.
 //!
 //! ## Constraint degrees
 //!
@@ -72,23 +71,28 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
-use crate::constants::{GAMMA2, K, N, OMEGA, Q};
+use crate::constants::{GAMMA2, K, N, Q};
+use crate::profile::{MlDsaProfile, ML_DSA_44, ML_DSA_65};
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
 use tables::RcUses;
 
-/// `α = 2·γ2`, the decomposition modulus.
+/// Default ML-DSA-65 decomposition modulus `α = 2·γ2`.
 pub const ALPHA: i64 = 2 * GAMMA2 as i64;
-/// Number of `w1` values = `(q−1)/α = 16`.
+/// Default ML-DSA-65 number of `w1` values.
 pub const W1_MODULUS: i64 = 16;
-/// Active rows: `k·N/2` byte pairs.
-pub const N_PAIRS: usize = K * N / 2; // 768
+const LANES_PER_ROW: usize = 4;
+const N_ROWS: usize = K * N / LANES_PER_ROW;
+/// Active rows: four coefficients per row.
+pub const N_PAIRS: usize = N_ROWS;
 
-// --- Base column indices (two sub-lanes ℓ ∈ {0=lo, 1=hi}) ---------------------
-// Per sub-lane: w, w1, w0, hint, wrap_k, s0, w1p, wrap16, a_hi, b_hi, sign_val,
+// --- Base column indices (four lanes) ----------------------------------------
+// Per lane: w, w1, w0, hint, wrap_k, s0, w1p, wrap16, a_hi, b_hi, sign_val,
 // sign_hi. The boundary zero flags/inverses are appended after hint_acc so all
 // existing lane indices remain stable.
 const PER_LANE: usize = 12;
+#[cfg(test)]
+pub(super) const COL_LANE0: usize = 0;
 const L_W: usize = 0;
 const L_W1: usize = 1;
 const L_W0: usize = 2;
@@ -106,19 +110,28 @@ const L_SIGN_VAL: usize = 10;
 /// 7-bit hi of `sign_val` (13+7 split).
 const L_SIGN_HI: usize = 11;
 
-const COL_LANE0: usize = 0; // lane 0 occupies columns 0..=11
-const COL_LANE1: usize = COL_LANE0 + PER_LANE; // lane 1 occupies columns 12..=23
-const COL_HINT_ACC: usize = COL_LANE1 + PER_LANE; // column 24
-const COL_V_ZERO: [usize; 2] = [COL_HINT_ACC + 1, COL_HINT_ACC + 3];
-const COL_V_INV: [usize; 2] = [COL_HINT_ACC + 2, COL_HINT_ACC + 4];
+const COL_HINT_ACC: usize = LANES_PER_ROW * PER_LANE;
+const COL_V_ZERO: [usize; LANES_PER_ROW] = [
+    COL_HINT_ACC + 1,
+    COL_HINT_ACC + 3,
+    COL_HINT_ACC + 5,
+    COL_HINT_ACC + 7,
+];
+const COL_V_INV: [usize; LANES_PER_ROW] = [
+    COL_HINT_ACC + 2,
+    COL_HINT_ACC + 4,
+    COL_HINT_ACC + 6,
+    COL_HINT_ACC + 8,
+];
+const COL_PACK_BIT0: usize = COL_HINT_ACC + 9;
+const PACK_BIT_COLS: usize = 6;
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_V_INV[1] + 1; // 29
+pub const N_BASE_COLS: usize = COL_PACK_BIT0 + PACK_BIT_COLS;
 
-/// Logup entries per row (batched [`LOGUP_BATCH`] per interaction column): 2 lanes
-/// × (rc4 w1, rc13 a_lo, rc13 b_lo, rc7 a_hi, rc7 b_hi, rc13 sign_lo, rc7 sign_hi,
-/// rc4 w16+1, rc4 w1', wcell use) plus 1 byte yield plus 2 hint_acc rc8 uses (Σh,
-/// ω−Σh; final row only) = 2·10 + 1 + 2 = 23.
-pub const N_LOGUP_ENTRIES: usize = 2 * 10 + 1 + 2;
+/// Logup entries per row, batched by [`LOGUP_BATCH`]: four lanes each emit 11
+/// range uses and one WCell use. Three hash-byte slots, two ML-DSA-44 split
+/// checks, and two final hint-sum checks follow. Total: 55.
+pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 12 + 3 + 2 + 2;
 pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // hint_acc is a QM31 running sum
@@ -130,21 +143,32 @@ fn pre_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
+fn hash_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_decomp_{:?}_hash_active", profile),
+    }
+}
+
 /// Preprocessed column ids in commit order.
 pub fn decomp_preprocessed_ids() -> Vec<PreProcessedColumnId> {
+    decomp_preprocessed_ids_for(ML_DSA_65)
+}
+
+pub fn decomp_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     vec![
         pre_id("enabler_pre"),
         pre_id("start"),
         pre_id("byte_pos"),
         pre_id("is_last"),
+        hash_active_id(profile),
     ]
 }
 
 /// The flat row → (i, p) schedule (active rows contiguous from 0).
 fn row_schedule() -> Vec<(usize, usize)> {
-    let mut out = Vec::with_capacity(N_PAIRS);
+    let mut out = Vec::with_capacity(N_ROWS);
     for i in 0..K {
-        for p in 0..(N / 2) {
+        for p in 0..(N / LANES_PER_ROW) {
             out.push((i, p));
         }
     }
@@ -156,6 +180,10 @@ fn row_schedule() -> Vec<(usize, usize)> {
 // =============================================================================
 
 pub fn gen_decomp_preprocessed(log_size: u32) -> Vec<ColEval> {
+    gen_decomp_preprocessed_for(ML_DSA_65, log_size)
+}
+
+pub fn gen_decomp_preprocessed_for(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
 
@@ -163,17 +191,19 @@ pub fn gen_decomp_preprocessed(log_size: u32) -> Vec<ColEval> {
     let mut start = vec![m31(0); rows];
     let mut byte_pos = vec![m31(0); rows];
     let mut is_last = vec![m31(0); rows];
+    let mut hash_active = vec![m31(0); rows];
 
-    for (row, _) in sched.iter().enumerate() {
+    for (row, &(i, _)) in sched.iter().enumerate() {
         enabler[row] = m31(1);
         byte_pos[row] = m31(row as u32);
+        hash_active[row] = m31(u32::from(i < profile.k()));
     }
     start[0] = m31(1); // coset row 0 zeroes the accumulator's wraparound acc_prev.
     if !sched.is_empty() {
         is_last[sched.len() - 1] = m31(1);
     }
 
-    vec![enabler, start, byte_pos, is_last]
+    vec![enabler, start, byte_pos, is_last, hash_active]
         .into_iter()
         .map(|v| col_eval(log_size, v))
         .collect()
@@ -184,12 +214,16 @@ mod schedule_tests {
     use super::*;
 
     #[test]
-    fn byte_position_derives_both_wcell_keys() {
-        assert_eq!(decomp_preprocessed_ids().len(), 4);
+    fn byte_position_derives_all_wcell_keys() {
+        assert_eq!(decomp_preprocessed_ids().len(), 5);
         for (row, (i, p)) in row_schedule().into_iter().enumerate() {
             let byte_pos = row as u32;
-            assert_eq!(2 * byte_pos, (i * N + 2 * p) as u32);
-            assert_eq!(2 * byte_pos + 1, (i * N + 2 * p + 1) as u32);
+            for lane in 0..LANES_PER_ROW {
+                assert_eq!(
+                    LANES_PER_ROW as u32 * byte_pos + lane as u32,
+                    (i * N + LANES_PER_ROW * p + lane) as u32
+                );
+            }
         }
     }
 }
@@ -211,23 +245,26 @@ struct LaneVals {
 }
 
 fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
+    let profile = witness.profile;
     let w = witness.rows[i].w[m] as i64;
     // `decomp.w1` is the reference's `trace.w1` = w1' (POST-UseHint). The pre-hint
     // high bits `w1 = Decompose(w).0` are recomputed from the reference oracle.
-    let (w1_pre, w0_ref) = crate::reference::decompose::decompose(w as u32);
+    let (w1_pre, w0_ref) = crate::reference::decompose::decompose_for(profile, w as u32);
     let w1 = w1_pre as i64;
     let w0 = witness.decomp.w0[i][m] as i64;
     debug_assert_eq!(w0, w0_ref as i64, "w0 matches reference decompose");
     let hint = witness.decomp.hint[i][m] as i64;
     let w1p = witness.decomp.w1[i][m] as i64; // = UseHint(h, w)
-    let wrap_k = (w1 * ALPHA + w0 - w) / -(Q as i64); // 0 or 1
+    let alpha = 2 * profile.gamma2() as i64;
+    let modulus = profile.w1_values() as i64;
+    let wrap_k = (w1 * alpha + w0 - w) / -(Q as i64); // 0 or 1
     debug_assert!(wrap_k == 0 || wrap_k == 1, "wrap_k∈{{0,1}} got {wrap_k}");
-    debug_assert_eq!(w1 * ALPHA + w0 - w + wrap_k * Q as i64, 0);
+    debug_assert_eq!(w1 * alpha + w0 - w + wrap_k * Q as i64, 0);
     let s0 = i64::from(w0 > 0);
     let delta = hint * (2 * s0 - 1);
-    let wrap16 = (w1p - (w1 + delta)) / W1_MODULUS;
+    let wrap16 = (w1p - (w1 + delta)) / modulus;
     debug_assert!((-1..=1).contains(&wrap16), "wrap16∈{{-1,0,1}} got {wrap16}");
-    debug_assert_eq!(w1 + delta + W1_MODULUS * wrap16, w1p);
+    debug_assert_eq!(w1 + delta + modulus * wrap16, w1p);
     LaneVals {
         w,
         w1,
@@ -241,8 +278,8 @@ fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
 }
 
 #[inline]
-fn shifted_lower_range_value(w0: i64) -> i64 {
-    let v = w0 + GAMMA2 as i64;
+fn shifted_lower_range_value(profile: MlDsaProfile, w0: i64) -> i64 {
+    let v = w0 + profile.gamma2() as i64;
     v - 1 + i64::from(v == 0)
 }
 
@@ -325,7 +362,9 @@ impl PokedLane {
         let b = gamma2 - self.w0;
         match field {
             RcField::W1 => self.w1,
+            RcField::W1Room => W1_MODULUS - 1 - self.w1,
             RcField::W1P => self.w1p,
+            RcField::W1PRoom => W1_MODULUS - 1 - self.w1p,
             RcField::W16 => self.wrap16 + 1,
             RcField::ALo => a - (1 << 13) * self.a_hi,
             RcField::AHi => self.a_hi,
@@ -346,17 +385,18 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
     let sched = row_schedule();
     let mut cols: Vec<Vec<M31>> = (0..N_BASE_COLS).map(|_| vec![m31(0); rows]).collect();
 
-    let gamma2 = GAMMA2 as i64;
-    let gamma2_inv = m31(GAMMA2).inverse();
-    for lane in 0..2 {
+    let gamma2 = witness.profile.gamma2() as i64;
+    let gamma2_inv = m31(witness.profile.gamma2()).inverse();
+    for lane in 0..LANES_PER_ROW {
         // The zero-test constraints are ungated. Padding has w0=0, hence
         // v=γ2 and must carry γ2⁻¹ rather than the default zero.
         cols[COL_V_INV[lane]].fill(gamma2_inv);
     }
     let mut hint_acc = 0i64;
     for (row, &(i, p)) in sched.iter().enumerate() {
-        for (lane, &m) in [2 * p, 2 * p + 1].iter().enumerate() {
-            let base = COL_LANE0 + lane * PER_LANE;
+        for lane in 0..LANES_PER_ROW {
+            let m = LANES_PER_ROW * p + lane;
+            let base = lane * PER_LANE;
             let v = lane_vals(witness, i, m);
             cols[base + L_W][row] = m31(v.w as u32);
             cols[base + L_W1][row] = m31(v.w1 as u32);
@@ -376,7 +416,7 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
             };
             // Exact lower endpoint: shift only v−1 by the zero flag so the
             // FIPS (w1,w0)=(0,−γ2) case maps to zero.
-            let a = shifted_lower_range_value(v.w0);
+            let a = shifted_lower_range_value(witness.profile, v.w0);
             let b = gamma2 - v.w0;
             cols[base + L_A_HI][row] = m31((a >> 13) as u32);
             cols[base + L_B_HI][row] = m31((b >> 13) as u32);
@@ -386,6 +426,16 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
             cols[base + L_SIGN_VAL][row] = m31(sign_val as u32);
             cols[base + L_SIGN_HI][row] = m31((sign_val >> 13) as u32);
             hint_acc += v.hint;
+        }
+        if witness.profile == ML_DSA_44 && i < witness.profile.k() {
+            let lane1 = witness.decomp.w1[i][LANES_PER_ROW * p + 1];
+            let lane2 = witness.decomp.w1[i][LANES_PER_ROW * p + 2];
+            for bit in 0..2 {
+                cols[COL_PACK_BIT0 + bit][row] = m31((lane1 >> bit) & 1);
+            }
+            for bit in 0..4 {
+                cols[COL_PACK_BIT0 + 2 + bit][row] = m31((lane2 >> bit) & 1);
+            }
         }
         cols[COL_HINT_ACC][row] = m31(hint_acc as u32);
     }
@@ -400,6 +450,7 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
 #[derive(Clone)]
 pub struct DecompEval {
     pub log_size: u32,
+    pub profile: MlDsaProfile,
     /// The HashIo stream id the 768 `w1Encode` bytes are yielded into. Per
     /// instance under a SHARED keccak relation set: `stream_base +`
     /// [`STREAM_ID_CTILDE_ABSORB`] (the standalone default is the constant).
@@ -423,17 +474,19 @@ impl FrameworkEval for DecompEval {
         let start = eval.get_preprocessed_column(pre_id("start"));
         let byte_pos = eval.get_preprocessed_column(pre_id("byte_pos"));
         let is_last = eval.get_preprocessed_column(pre_id("is_last"));
-        let wbid_lo = byte_pos.clone() + byte_pos.clone();
-        let wbid_hi = wbid_lo.clone() + enabler_pre.clone();
+        let hash_active = eval.get_preprocessed_column(hash_active_id(self.profile));
+        let four = E::F::from(m31(LANES_PER_ROW as u32));
+        let wbid_base = byte_pos.clone() * four;
 
         // Two lanes' worth of base columns.
-        let lanes: Vec<Vec<E::F>> = (0..2)
+        let lanes: Vec<Vec<E::F>> = (0..LANES_PER_ROW)
             .map(|_| (0..PER_LANE).map(|_| eval.next_trace_mask()).collect())
             .collect();
         let hint_acc = eval.next_trace_mask();
-        let boundary: Vec<(E::F, E::F)> = (0..2)
+        let boundary: Vec<(E::F, E::F)> = (0..LANES_PER_ROW)
             .map(|_| (eval.next_trace_mask(), eval.next_trace_mask()))
             .collect();
+        let pack_bits: Vec<E::F> = (0..PACK_BIT_COLS).map(|_| eval.next_trace_mask()).collect();
 
         // hint_acc previous-row value via interaction mask (running sum).
         let acc_coords: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
@@ -442,16 +495,18 @@ impl FrameworkEval for DecompEval {
         let acc_cur = E::combine_ef(acc_coords.each_ref().map(|p| p[1].clone()));
 
         let one = E::F::from(M31::one());
-        let alpha = E::F::from(m31(ALPHA as u32));
+        let alpha = E::F::from(m31(2 * self.profile.gamma2()));
         let q = E::F::from(m31(Q));
-        let gamma2 = E::F::from(m31(GAMMA2));
+        let gamma2 = E::F::from(m31(self.profile.gamma2()));
         let two_pow_13 = E::F::from(m31(1 << 13));
-        let sixteen = E::F::from(m31(16));
+        let w1_modulus = E::F::from(m31(self.profile.w1_values()));
 
-        let wbids = [wbid_lo, wbid_hi];
+        let wbids: Vec<E::F> = (0..LANES_PER_ROW)
+            .map(|lane| wbid_base.clone() + E::F::from(m31(lane as u32)) * enabler_pre.clone())
+            .collect();
         let mut hint_sum = E::EF::from(E::F::from(m31(0)));
 
-        for lane in 0..2 {
+        for lane in 0..LANES_PER_ROW {
             let c = &lanes[lane];
             let w = c[L_W].clone();
             let w1 = c[L_W1].clone();
@@ -469,6 +524,9 @@ impl FrameworkEval for DecompEval {
 
             // The hint, wrap_k, and s0 values are Boolean. Padding uses zero.
             eval.add_constraint(hint.clone() * (one.clone() - hint.clone()));
+            if self.profile == ML_DSA_44 {
+                eval.add_constraint((one.clone() - hash_active.clone()) * hint.clone());
+            }
             eval.add_constraint(wrap_k.clone() * (one.clone() - wrap_k.clone()));
             eval.add_constraint(s0.clone() * (one.clone() - s0.clone()));
 
@@ -477,11 +535,17 @@ impl FrameworkEval for DecompEval {
                 w1.clone() * alpha.clone() + w0.clone() - w.clone() + wrap_k.clone() * q.clone(),
             );
 
-            // Range-check w1 in [0,16).
+            // Range-check w1 in the selected profile's exact interval.
+            let w1_room = E::F::from(m31(self.profile.w1_values() - 1)) - w1.clone();
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc4,
+                &self.relations.rc8,
                 enabler_pre.clone(),
                 core::slice::from_ref(&w1),
+            ));
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.rc8,
+                enabler_pre.clone(),
+                core::slice::from_ref(&w1_room),
             ));
 
             // Enforce the exact FIPS lower endpoint. For v=w0+γ2, the first two
@@ -544,11 +608,13 @@ impl FrameworkEval for DecompEval {
                 core::slice::from_ref(&sign_hi),
             ));
 
-            // [HINT] UseHint: w1' = w1 + h·(2s0 − 1) + 16·wrap16.
+            // [HINT] UseHint in the selected high-bits modulus.
             let delta_sign = s0.clone() + s0.clone() - one.clone(); // 2s0 − 1
             eval.add_constraint(
                 w1p.clone()
-                    - (w1.clone() + hint.clone() * delta_sign + sixteen.clone() * wrap16.clone()),
+                    - (w1.clone()
+                        + hint.clone() * delta_sign
+                        + w1_modulus.clone() * wrap16.clone()),
             );
 
             // Check wrap16 ∈ {−1,0,1} with a `{0,1,2}` lookup on wrap16+1.
@@ -559,18 +625,24 @@ impl FrameworkEval for DecompEval {
                 core::slice::from_ref(&w16_plus1),
             ));
 
-            // Range-check w1' in [0,16).
+            // Range-check w1' in the selected profile's exact interval.
+            let w1p_room = E::F::from(m31(self.profile.w1_values() - 1)) - w1p.clone();
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc4,
+                &self.relations.rc8,
                 enabler_pre.clone(),
                 core::slice::from_ref(&w1p),
+            ));
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.rc8,
+                enabler_pre.clone(),
+                core::slice::from_ref(&w1p_room),
             ));
 
             // Use the coeffs W cell `(poly_id·N + m, w)`.
             let wtuple = [wbids[lane].clone(), w.clone()];
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.wcell,
-                enabler_pre.clone(),
+                hash_active.clone(),
                 &wtuple,
             ));
 
@@ -590,23 +662,80 @@ impl FrameworkEval for DecompEval {
             E::EF::from(is_last.clone()) * (E::EF::from(hint_acc.clone()) - acc_cur.clone()),
         );
 
-        // Emit the w1Encode byte `w1'_lo + 16·w1'_hi` into
-        // HashIo(STREAM_ID_CTILDE_ABSORB, byte_pos, byte). Emitted BEFORE the
-        // hint gate to match the interaction generator's fraction order.
-        let byte = lanes[0][L_W1P].clone() + sixteen.clone() * lanes[1][L_W1P].clone();
+        // Bind the ML-DSA-44 6-bit carrier split. Four coefficients map to
+        // three bytes. The two derived high parts must be in rc4, so the six
+        // Boolean low bits cannot choose a non-integer field alias.
+        for bit in &pack_bits {
+            eval.add_constraint(bit.clone() * (one.clone() - bit.clone()));
+            eval.add_constraint((one.clone() - hash_active.clone()) * bit.clone());
+            if self.profile == ML_DSA_65 {
+                eval.add_constraint(bit.clone());
+            }
+        }
+        let low2 = pack_bits[0].clone() + E::F::from(m31(2)) * pack_bits[1].clone();
+        let low4 = pack_bits[2].clone()
+            + E::F::from(m31(2)) * pack_bits[3].clone()
+            + E::F::from(m31(4)) * pack_bits[4].clone()
+            + E::F::from(m31(8)) * pack_bits[5].clone();
+        let inv4 = E::F::from(m31(4).inverse());
+        let inv16 = E::F::from(m31(16).inverse());
+        let high4 = (lanes[1][L_W1P].clone() - low2.clone()) * inv4;
+        let high2 = (lanes[2][L_W1P].clone() - low4.clone()) * inv16;
+
+        let split_gate = if self.profile == ML_DSA_44 {
+            hash_active.clone()
+        } else {
+            E::F::from(m31(0))
+        };
+        for high in [&high4, &high2] {
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.rc4,
+                split_gate.clone(),
+                core::slice::from_ref(high),
+            ));
+        }
+
+        let output_bytes = if self.profile == ML_DSA_44 {
+            vec![
+                lanes[0][L_W1P].clone() + E::F::from(m31(64)) * low2,
+                high4 + E::F::from(m31(16)) * low4,
+                high2 + E::F::from(m31(4)) * lanes[3][L_W1P].clone(),
+            ]
+        } else {
+            vec![
+                lanes[0][L_W1P].clone() + E::F::from(m31(16)) * lanes[1][L_W1P].clone(),
+                lanes[2][L_W1P].clone() + E::F::from(m31(16)) * lanes[3][L_W1P].clone(),
+            ]
+        };
         let stream = E::F::from(m31(self.ct_stream));
-        let io_tuple = [stream, byte_pos, byte];
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.hash_io,
-            enabler_pre.clone(),
-            &io_tuple,
-        ));
+        let stride = E::F::from(m31(output_bytes.len() as u32));
+        for output in 0..3 {
+            let gate = if output < output_bytes.len() {
+                hash_active.clone()
+            } else {
+                E::F::from(m31(0))
+            };
+            let byte = output_bytes
+                .get(output)
+                .cloned()
+                .unwrap_or_else(|| E::F::from(m31(0)));
+            let io_tuple = [
+                stream.clone(),
+                byte_pos.clone() * stride.clone() + E::F::from(m31(output as u32)),
+                byte,
+            ];
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.hash_io,
+                gate,
+                &io_tuple,
+            ));
+        }
 
         // On the last active row, range-check acc = Σ_i Σ_m h
         // range-checked two-sided into rc8: Σh ∈ [0,256) AND ω−Σh ∈ [0,256).
-        // The second use forces Σh ≤ ω = 55 EXACTLY (Σh > ω ⇒ ω−Σh wraps out of
+        // The second use forces Σh ≤ the selected ω. If Σh is larger, ω−Σh wraps out of
         // [0,256) ⇒ no rc8 row ⇒ imbalance). Gated by is_last (no use elsewhere).
-        let omega = E::F::from(m31(OMEGA as u32));
+        let omega = E::F::from(m31(self.profile.omega() as u32));
         let acc_room = omega - hint_acc.clone(); // = ω − Σh; ∈ [0,256) ⟺ Σh ≤ ω
         eval.add_to_relation(RelationEntry::base(
             &self.relations.rc8,
@@ -672,21 +801,23 @@ fn gen_decomp_metadata_inner(
     sched: &[(usize, usize)],
     checked_hint_total: Option<u32>,
 ) -> DecompMetadata {
-    let gamma2 = GAMMA2 as i64;
+    let profile = witness.profile;
+    let gamma2 = profile.gamma2() as i64;
     let mut rc_uses = RcUses::new();
-    let mut w1_encode_bytes = vec![0u8; sched.len()];
+    let mut w1_encode_bytes = Vec::with_capacity(profile.w1_encoded_bytes());
     let mut total_h = 0u32;
 
-    for (row, &(i, p)) in sched.iter().enumerate() {
-        total_h += witness.decomp.hint[i][2 * p] as u32 + witness.decomp.hint[i][2 * p + 1] as u32;
-        let mut byte = 0u32;
-        for lane in 0..2 {
-            let m = 2 * p + lane;
+    for &(i, p) in sched {
+        for lane in 0..LANES_PER_ROW {
+            let m = LANES_PER_ROW * p + lane;
+            total_h += witness.decomp.hint[i][m] as u32;
             let v = lane_vals(witness, i, m);
-            rc_uses.rc4[v.w1 as usize] += 1;
-            rc_uses.rc4[v.w1p as usize] += 1;
+            rc_uses.rc8[v.w1 as usize] += 1;
+            rc_uses.rc8[profile.w1_values() as usize - 1 - v.w1 as usize] += 1;
+            rc_uses.rc8[v.w1p as usize] += 1;
+            rc_uses.rc8[profile.w1_values() as usize - 1 - v.w1p as usize] += 1;
             rc_uses.rc4[(v.wrap16 + 1) as usize] += 1;
-            let a = shifted_lower_range_value(v.w0);
+            let a = shifted_lower_range_value(profile, v.w0);
             let b = gamma2 - v.w0;
             let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
             rc_uses.rc13[(a & ((1 << 13) - 1)) as usize] += 1;
@@ -695,14 +826,24 @@ fn gen_decomp_metadata_inner(
             rc_uses.rc7[(a >> 13) as usize] += 1;
             rc_uses.rc7[(b >> 13) as usize] += 1;
             rc_uses.rc7[(sign_val >> 13) as usize] += 1;
-            byte += (v.w1p as u32) << (4 * lane);
         }
-        w1_encode_bytes[row] = byte as u8;
+        if i < profile.k() {
+            let bytes = packed_row_bytes(profile, witness, i, p);
+            if profile == ML_DSA_44 {
+                let lane1 = witness.decomp.w1[i][LANES_PER_ROW * p + 1];
+                let lane2 = witness.decomp.w1[i][LANES_PER_ROW * p + 2];
+                rc_uses.rc4[(lane1 >> 2) as usize] += 1;
+                rc_uses.rc4[(lane2 >> 4) as usize] += 1;
+            }
+            w1_encode_bytes.extend(bytes);
+        }
     }
 
     let checked_hint_total = checked_hint_total.unwrap_or(total_h);
     rc_uses.rc8[checked_hint_total as usize] += 1;
-    rc_uses.rc8[(OMEGA as u32 - checked_hint_total) as usize] += 1;
+    rc_uses.rc8[(profile.omega() as u32 - checked_hint_total) as usize] += 1;
+
+    debug_assert_eq!(w1_encode_bytes.len(), profile.w1_encoded_bytes());
 
     DecompMetadata {
         rc_uses,
@@ -711,15 +852,34 @@ fn gen_decomp_metadata_inner(
     }
 }
 
+fn packed_row_bytes(profile: MlDsaProfile, witness: &MlDsaWitness, i: usize, p: usize) -> Vec<u8> {
+    let values: [u32; LANES_PER_ROW] =
+        core::array::from_fn(|lane| witness.decomp.w1[i][LANES_PER_ROW * p + lane]);
+    if profile == ML_DSA_44 {
+        vec![
+            (values[0] | (values[1] << 6)) as u8,
+            ((values[1] >> 2) | (values[2] << 4)) as u8,
+            ((values[2] >> 4) | (values[3] << 2)) as u8,
+        ]
+    } else {
+        vec![
+            (values[0] | (values[1] << 4)) as u8,
+            (values[2] | (values[3] << 4)) as u8,
+        ]
+    }
+}
+
 #[cfg(test)]
-fn honest_lane_rc_integer(v: &LaneVals, field: RcField) -> i64 {
-    let gamma2 = GAMMA2 as i64;
-    let a = shifted_lower_range_value(v.w0);
+fn honest_lane_rc_integer(profile: MlDsaProfile, v: &LaneVals, field: RcField) -> i64 {
+    let gamma2 = profile.gamma2() as i64;
+    let a = shifted_lower_range_value(profile, v.w0);
     let b = gamma2 - v.w0;
     let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
     match field {
         RcField::W1 => v.w1,
+        RcField::W1Room => profile.w1_values() as i64 - 1 - v.w1,
         RcField::W1P => v.w1p,
+        RcField::W1PRoom => profile.w1_values() as i64 - 1 - v.w1p,
         RcField::W16 => v.wrap16 + 1,
         RcField::ALo => a & ((1 << 13) - 1),
         RcField::AHi => a >> 13,
@@ -733,7 +893,8 @@ fn honest_lane_rc_integer(v: &LaneVals, field: RcField) -> i64 {
 #[cfg(test)]
 fn rc_uses_for_field_mut(uses: &mut RcUses, field: RcField) -> &mut [u32] {
     match field {
-        RcField::W1 | RcField::W1P | RcField::W16 => &mut uses.rc4,
+        RcField::W1 | RcField::W1Room | RcField::W1P | RcField::W1PRoom => &mut uses.rc8,
+        RcField::W16 => &mut uses.rc4,
         RcField::ALo | RcField::BLo | RcField::SignLo => &mut uses.rc13,
         RcField::AHi | RcField::BHi | RcField::SignHi => &mut uses.rc7,
     }
@@ -745,8 +906,9 @@ fn apply_trace_poke_to_metadata(
     witness: &MlDsaWitness,
     poke: DecompTracePoke,
 ) -> DecompMetadata {
-    const RC_FIELDS: [RcField; 9] = [
+    const RC_FIELDS: [RcField; 11] = [
         RcField::W1,
+        RcField::W1Room,
         RcField::ALo,
         RcField::BLo,
         RcField::AHi,
@@ -755,6 +917,7 @@ fn apply_trace_poke_to_metadata(
         RcField::SignHi,
         RcField::W16,
         RcField::W1P,
+        RcField::W1PRoom,
     ];
 
     let honest = lane_vals(witness, 0, 0);
@@ -767,7 +930,7 @@ fn apply_trace_poke_to_metadata(
 
     let mut unmatched = 0;
     for field in RC_FIELDS {
-        let old = honest_lane_rc_integer(&honest, field);
+        let old = honest_lane_rc_integer(witness.profile, &honest, field);
         let new = attacked.rc_integer(field);
         let uses = rc_uses_for_field_mut(&mut metadata.rc_uses, field);
         debug_assert!((0..uses.len() as i64).contains(&old));
@@ -838,7 +1001,7 @@ fn gen_decomp_interaction_inner(
     let rows = 1usize << log_size;
     let sched = row_schedule();
     let active = sched.len();
-    let gamma2 = GAMMA2 as i64;
+    let gamma2 = witness.profile.gamma2() as i64;
     let metadata = gen_decomp_metadata_inner(witness, &sched, checked_hint_total);
     #[cfg(test)]
     let metadata = match trace_poke {
@@ -855,8 +1018,9 @@ fn gen_decomp_interaction_inner(
     for row in 0..rows {
         if row < active {
             let (i, p) = sched[row];
-            let h = witness.decomp.hint[i][2 * p] as u32 + witness.decomp.hint[i][2 * p + 1] as u32;
-            running += h;
+            running += (0..LANES_PER_ROW)
+                .map(|lane| witness.decomp.hint[i][LANES_PER_ROW * p + lane] as u32)
+                .sum::<u32>();
         }
         acc[row] = SecureField::from(m31(running));
     }
@@ -908,9 +1072,10 @@ fn gen_decomp_interaction_inner(
     // mirrors N_LOGUP_ENTRIES and the AIR emission order.
     // AIR per-lane emission order: w1, a_lo, b_lo, a_hi, b_hi, sign_lo, sign_hi,
     // w16+1, w1', wcell. Mirror it EXACTLY (kind arg is documentation-only).
-    for lane in 0..2 {
+    for lane in 0..LANES_PER_ROW {
         for field in [
             RcField::W1,
+            RcField::W1Room,
             RcField::ALo,
             RcField::BLo,
             RcField::AHi,
@@ -919,6 +1084,7 @@ fn gen_decomp_interaction_inner(
             RcField::SignHi,
             RcField::W16,
             RcField::W1P,
+            RcField::W1PRoom,
         ] {
             push(
                 &|coset| {
@@ -941,42 +1107,57 @@ fn gen_decomp_interaction_inner(
         // wcell use
         push(
             &|coset| match &coset_rows[coset] {
-                Some((i, p)) => {
-                    let m = 2 * p + lane;
+                Some((i, p)) if *i < witness.profile.k() => {
+                    let m = LANES_PER_ROW * p + lane;
                     let v = lane_vals(witness, *i, m);
                     let tuple = [m31((i * N + m) as u32), m31(v.w as u32)];
                     (one, relations.wcell.combine(&tuple))
                 }
-                None => (zero, one),
+                _ => (zero, one),
             },
             &mut entries,
             &mut claimed,
         );
     }
-    // byte yield (+) into HashIo.
-    push(
-        &|coset| match &coset_rows[coset] {
-            Some((i, p)) => {
-                let mut byte = 0u32;
-                for lane in 0..2 {
-                    let v = lane_vals(witness, *i, 2 * p + lane);
-                    let w1p = v.w1p;
-                    #[cfg(test)]
-                    let w1p = if coset == 0 && lane == 0 {
-                        trace_poke.map_or(w1p, |poke| poke.lane().w1p)
-                    } else {
-                        w1p
-                    };
-                    byte += (w1p as u32) << (4 * lane);
+    // Two split-high rc4 uses for ML-DSA-44. They are zero-numerator streams
+    // for ML-DSA-65 so the interaction layout stays canonical.
+    for split in 0..2 {
+        push(
+            &|coset| match &coset_rows[coset] {
+                Some((i, p)) if witness.profile == ML_DSA_44 && *i < witness.profile.k() => {
+                    let m = LANES_PER_ROW * p + 1 + split;
+                    let shift = if split == 0 { 2 } else { 4 };
+                    let high = witness.decomp.w1[*i][m] >> shift;
+                    (one, relations.rc4.combine(&[m31(high)]))
                 }
-                let tuple = [m31(ct_stream), m31(coset as u32), m31(byte)];
-                (one, relations.hash_io.combine(&tuple))
-            }
-            None => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
+                _ => (zero, one),
+            },
+            &mut entries,
+            &mut claimed,
+        );
+    }
+    // Up to three byte yields into HashIo. ML-DSA-65 uses two, while the third
+    // fraction has numerator zero.
+    for output in 0..3 {
+        push(
+            &|coset| match &coset_rows[coset] {
+                Some((i, p)) if *i < witness.profile.k() => {
+                    let bytes = packed_row_bytes(witness.profile, witness, *i, *p);
+                    match bytes.get(output) {
+                        Some(&byte) => {
+                            let position = coset * bytes.len() + output;
+                            let tuple = [m31(ct_stream), m31(position as u32), m31(byte as u32)];
+                            (one, relations.hash_io.combine(&tuple))
+                        }
+                        None => (zero, one),
+                    }
+                }
+                _ => (zero, one),
+            },
+            &mut entries,
+            &mut claimed,
+        );
+    }
     // hint_acc final rc8: two SEPARATE uses (Σh, then ω−Σh), last active row only.
     // Each is its own fraction, matching the two `add_to_relation` calls in C10.
     push(
@@ -996,7 +1177,7 @@ fn gen_decomp_interaction_inner(
             if coset == active - 1 {
                 let d: SecureField = relations
                     .rc8
-                    .combine(&[m31(OMEGA as u32 - checked_total_h)]);
+                    .combine(&[m31(witness.profile.omega() as u32 - checked_total_h)]);
                 (one, d)
             } else {
                 (zero, one)
@@ -1024,9 +1205,10 @@ fn gen_decomp_interaction_inner(
 
     let wcell_uses = sched
         .iter()
+        .filter(|&&(i, _)| i < witness.profile.k())
         .flat_map(|&(i, p)| {
-            (0..2).map(move |lane| {
-                let m = 2 * p + lane;
+            (0..LANES_PER_ROW).map(move |lane| {
+                let m = LANES_PER_ROW * p + lane;
                 ((i * N + m) as u32, witness.rows[i].w[m])
             })
         })
@@ -1049,7 +1231,9 @@ fn gen_decomp_interaction_inner(
 #[derive(Clone, Copy)]
 enum RcField {
     W1,
+    W1Room,
     W1P,
+    W1PRoom,
     W16,
     ALo,
     AHi,
@@ -1086,7 +1270,10 @@ fn lane_rc(
                         return (zero, one);
                     }
                     let rel = match field {
-                        RcField::W1 | RcField::W1P | RcField::W16 => &relations.rc4,
+                        RcField::W1 | RcField::W1Room | RcField::W1P | RcField::W1PRoom => {
+                            &relations.rc8
+                        }
+                        RcField::W16 => &relations.rc4,
                         RcField::ALo | RcField::BLo | RcField::SignLo => &relations.rc13,
                         RcField::AHi | RcField::BHi | RcField::SignHi => &relations.rc7,
                     };
@@ -1096,14 +1283,22 @@ fn lane_rc(
                     );
                 }
             }
-            let m = 2 * p + lane;
+            let m = LANES_PER_ROW * p + lane;
             let v = lane_vals(witness, *i, m);
-            let a = shifted_lower_range_value(v.w0);
+            let a = shifted_lower_range_value(witness.profile, v.w0);
             let b = gamma2 - v.w0;
             let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
             let (val, rel): (u32, &relations::RcRelation) = match field {
-                RcField::W1 => (v.w1 as u32, &relations.rc4),
-                RcField::W1P => (v.w1p as u32, &relations.rc4),
+                RcField::W1 => (v.w1 as u32, &relations.rc8),
+                RcField::W1Room => (
+                    witness.profile.w1_values() - 1 - v.w1 as u32,
+                    &relations.rc8,
+                ),
+                RcField::W1P => (v.w1p as u32, &relations.rc8),
+                RcField::W1PRoom => (
+                    witness.profile.w1_values() - 1 - v.w1p as u32,
+                    &relations.rc8,
+                ),
                 RcField::W16 => ((v.wrap16 + 1) as u32, &relations.rc4),
                 RcField::ALo => ((a & ((1 << 13) - 1)) as u32, &relations.rc13),
                 RcField::AHi => ((a >> 13) as u32, &relations.rc7),

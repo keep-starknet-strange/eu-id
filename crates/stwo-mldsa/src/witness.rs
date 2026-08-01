@@ -1,4 +1,4 @@
-//! Witness and hint generator for in-circuit ML-DSA-65.
+//! Witness and hint generator for in-circuit ML-DSA verification.
 //!
 //! This module contains native Rust and no AIR code. [`generate_witness`] runs
 //! the reference verifier ([`crate::verify_internals`]) and materializes each
@@ -6,7 +6,7 @@
 //!
 //! ## Integer-lift identity
 //!
-//! For each row `i ∈ [k=6]`, the verifier's linear obligation [LIN] is the
+//! For each active row `i ∈ [k]`, the verifier's linear obligation [LIN] is the
 //! `R_q` identity `Σ_j A_ij·z_j − c·(t1_i·2^d) ≡ w_i`. We prove the equivalent
 //! **ℤ[X]** identity with committed quotient witnesses `v_i` (the X²⁵⁶ fold) and
 //! `e_i` (the q fold):
@@ -45,6 +45,7 @@
 #![allow(clippy::manual_is_multiple_of)]
 
 use crate::constants::{D, K, L, N, Q};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::reference::ntt::ntt_inverse;
 use crate::reference::verify::VerifyTrace;
 use crate::types::MlDsaVerifyInput;
@@ -174,9 +175,11 @@ pub struct ObservedMaxima {
     pub max_digit_v: i128,
 }
 
-/// The complete witness for one ML-DSA-65 signature.
+/// The complete witness for one ML-DSA signature.
 #[derive(Clone, Debug)]
 pub struct MlDsaWitness {
+    /// Verifier-selected parameter set used to build this witness.
+    pub profile: MlDsaProfile,
     /// Per-row limb-identity witness (`u`, `v`, `e`, `w`, carries).
     pub rows: Vec<RowWitness>,
     /// Balanced-digit tables for all committed + public polynomials.
@@ -192,6 +195,9 @@ pub struct MlDsaWitness {
 /// Errors from witness generation.
 #[derive(Debug)]
 pub enum WitnessError {
+    /// The fixed-size internal input contains data outside the selected wire
+    /// profile.
+    InvalidInput(&'static str),
     /// The reference verifier reported a decode or structure error.
     Reference(MlDsaError),
     /// The reference verified the signature as **invalid** (norm or commitment
@@ -202,6 +208,7 @@ pub enum WitnessError {
 impl core::fmt::Display for WitnessError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidInput(message) => write!(f, "invalid profiled input: {message}"),
             Self::Reference(e) => write!(f, "reference decode error: {e}"),
             Self::NotAccepted(r) => write!(f, "signature not accepted by reference: {r:?}"),
         }
@@ -256,18 +263,32 @@ fn recompose(digits: &[i128]) -> i128 {
 /// Check each integer invariant over ℤ (`i128`). Return
 /// [`WitnessError`] on a decode error or a non-accepted signature.
 pub fn generate_witness(input: &MlDsaVerifyInput) -> Result<MlDsaWitness, WitnessError> {
-    let pk = input.encode_pk();
-    let sig = input.encode_sig();
-    let trace =
-        crate::verify_internals(&pk, &input.message, &sig).map_err(WitnessError::Reference)?;
+    generate_witness_for(ML_DSA_65, input)
+}
+
+pub fn generate_witness_for(
+    profile: MlDsaProfile,
+    input: &MlDsaVerifyInput,
+) -> Result<MlDsaWitness, WitnessError> {
+    input
+        .validate_public_key_for(profile)
+        .map_err(WitnessError::InvalidInput)?;
+    input
+        .validate_signature_for(profile)
+        .map_err(WitnessError::InvalidInput)?;
+    let pk = input.encode_pk_for(profile);
+    let sig = input.encode_sig_for(profile);
+    let trace = crate::reference::verify::verify_internals_for(profile, &pk, &input.message, &sig)
+        .map_err(WitnessError::Reference)?;
     if !trace.accepted {
         return Err(WitnessError::NotAccepted(trace.reason));
     }
-    build_from_trace(input, &trace)
+    build_from_trace(profile, input, &trace)
 }
 
 /// Core builder, split out so tests can drive it from a `VerifyTrace` directly.
 fn build_from_trace(
+    profile: MlDsaProfile,
     input: &MlDsaVerifyInput,
     trace: &VerifyTrace,
 ) -> Result<MlDsaWitness, WitnessError> {
@@ -276,8 +297,8 @@ fn build_from_trace(
 
     // --- Public integer matrix A_ij = NTT⁻¹(Â_ij), coeffs in [0,q) --------
     // Recompute Â = ExpandA(ρ) and invert each entry into the integer domain.
-    let a_hat = crate::reference::expand_a::expand_a(&trace.rho);
-    let mut a_int = vec![vec![[0i128; N]; L]; K]; // a_int[i][j][m]
+    let a_hat = crate::reference::expand_a::expand_a_for(profile, &trace.rho);
+    let mut a_int = vec![vec![[0i128; N]; L]; K];
     for i in 0..K {
         for j in 0..L {
             let poly = ntt_inverse(&a_hat.matrix[i][j]); // [u32; N] in [0,q)
@@ -455,7 +476,7 @@ fn build_from_trace(
     }
 
     // Decompose and hint witness.
-    let decomp = build_decomp(trace);
+    let decomp = build_decomp(profile, trace);
 
     // SHAKE transcripts.
     let sponge = SpongeWitness {
@@ -468,6 +489,7 @@ fn build_from_trace(
     };
 
     Ok(MlDsaWitness {
+        profile,
         rows,
         digits,
         decomp,
@@ -633,7 +655,7 @@ fn build_residual_table(
 
 /// Build the decompose/hint witness from the reference trace: recover `w0` (the
 /// centered low part) alongside the reference's `w1` and hint bits.
-fn build_decomp(trace: &VerifyTrace) -> DecompWitness {
+fn build_decomp(profile: MlDsaProfile, trace: &VerifyTrace) -> DecompWitness {
     let mut w0 = [[0i32; N]; K];
     let mut hint = [[0u8; N]; K];
     let mut hint_weight = [0usize; K];
@@ -641,10 +663,10 @@ fn build_decomp(trace: &VerifyTrace) -> DecompWitness {
     // Reconstruct the hint bits and w0 from w_approx. The reference exposes w1
     // (post-UseHint) and w_approx; the hint bit is recoverable as
     // hint = (w1 != HighBits(w_approx)). w0 is Decompose(w_approx).1.
-    for i in 0..K {
+    for i in 0..profile.k() {
         for m in 0..N {
             let r = trace.w_approx[i][m];
-            let (r1, r0) = crate::reference::decompose::decompose(r);
+            let (r1, r0) = crate::reference::decompose::decompose_for(profile, r);
             w0[i][m] = r0;
             let h = if trace.w1[i][m] as i32 != r1 { 1 } else { 0 };
             hint[i][m] = h;

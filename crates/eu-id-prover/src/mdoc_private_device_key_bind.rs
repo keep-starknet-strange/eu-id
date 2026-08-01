@@ -1,7 +1,7 @@
 //! Bind and normalize the private ML-DSA device public key in the MSO.
 //!
 //! The private MSO binder emits the first FIPS 204 `pkEncode` position.
-//! This component consumes the 1,952 issuer-message bytes.
+//! This component consumes the 1,312 ML-DSA-44 `pkEncode` bytes.
 //! It emits the same bytes for the private-key evaluator.
 //! It consumes the `rho` cells from `ExpandA`.
 //! It also consumes the evaluator's split `t1` cells.
@@ -34,7 +34,8 @@ use stwo_mldsa::binding::{
 use stwo_mldsa::coeffs::relations::{RangeRelation, SharedRangeRelation};
 use stwo_mldsa::coeffs::tables::RcKind;
 use stwo_mldsa::coeffs::RcUses;
-use stwo_mldsa::constants::{K, N, PK_BYTES};
+use stwo_mldsa::constants::N;
+use stwo_mldsa::profile::ML_DSA_44;
 use stwo_mldsa::statement::{HOSTED_DEVICE_PK_FIELD_ID, HOSTED_MSG_FIELD_ID};
 
 use crate::claimed_sum_blinder::{
@@ -45,7 +46,9 @@ use crate::mdoc_private_mso_bind::{MdocDevicePkStartRelation, SharedMdocDevicePk
 
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_ROWS: usize = 1usize << MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE;
-pub(crate) const MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS: usize = 32 + K * 64;
+const DEVICE_K: usize = 4;
+const DEVICE_PK_BYTES: usize = 1_312;
+pub(crate) const MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS: usize = 32 + DEVICE_K * 64;
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS: usize =
     MDOC_PRIVATE_DEVICE_KEY_ROWS - MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS;
 
@@ -76,10 +79,10 @@ const COL_B2_BITS: usize = COL_B1_BITS + 8;
 const COL_B3_BITS: usize = COL_B2_BITS + 8;
 const COL_T1_HI_START: usize = COL_B3_BITS + 8;
 
-const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS == 416);
-const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS == 96);
-const _: () = assert!(PK_BYTES == 1_952);
-const _: () = assert!(K == 6);
+const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS == 288);
+const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS == 224);
+const _: () = assert!(DEVICE_PK_BYTES == ML_DSA_44.pk_bytes());
+const _: () = assert!(DEVICE_K == ML_DSA_44.k());
 const _: () = assert!(N == 256);
 const _: () = assert!(COL_T1_HI_START + T1_COEFFICIENTS_PER_GROUP == TRACE_COLS);
 
@@ -139,15 +142,15 @@ pub(crate) struct MdocPrivateDeviceKeyUseCensus {
 
 impl MdocPrivateDeviceKeyUseCensus {
     pub(crate) fn has_fixed_demo_shape(&self) -> bool {
-        self.normalized_uses == PK_BYTES
+        self.normalized_uses == DEVICE_PK_BYTES
             && self.rho_uses == 32
-            && self.t1_uses == K * N
+            && self.t1_uses == DEVICE_K * N
             && self.device_pk_start_uses == 1
             && self.active_rows == MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS
             && self.blind_rows == MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS
             && self.range_uses.rc8.iter().sum::<u32>()
-                == (MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS + K * 64) as u32
-            && self.range_uses.rc9.iter().sum::<u32>() == (K * N) as u32
+                == (MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS + DEVICE_K * 64) as u32
+            && self.range_uses.rc9.iter().sum::<u32>() == (DEVICE_K * N) as u32
             && self.range_uses.rc7.iter().all(|&count| count == 0)
     }
 }
@@ -202,7 +205,7 @@ fn schedule() -> Vec<Row> {
             poly: 0,
         });
     }
-    for poly in 0..K {
+    for poly in 0..DEVICE_K {
         for group in 0..64 {
             rows.push(Row {
                 byte_base: 32 + (poly * 64 + group) * T1_GROUP_BYTES,
@@ -320,23 +323,23 @@ fn build_trace(
 ) -> Result<(MdocPrivateDeviceKeyTrace, MdocPrivateDeviceKeyUseCensus), MdocPrivateDeviceKeyBindError>
 {
     validate_public_shape(issuer_message_len)?;
-    if pk_encode.len() != PK_BYTES {
+    if pk_encode.len() != DEVICE_PK_BYTES {
         return Err(MdocPrivateDeviceKeyBindError::PublicKeyLength {
             length: pk_encode.len(),
-            expected: PK_BYTES,
+            expected: DEVICE_PK_BYTES,
         });
     }
-    let end = device_pk_start.checked_add(PK_BYTES).ok_or(
+    let end = device_pk_start.checked_add(DEVICE_PK_BYTES).ok_or(
         MdocPrivateDeviceKeyBindError::DeviceKeyWindowOutOfBounds {
             start: device_pk_start,
-            length: PK_BYTES,
+            length: DEVICE_PK_BYTES,
             issuer_message_len,
         },
     )?;
     if end > issuer_message_len {
         return Err(MdocPrivateDeviceKeyBindError::DeviceKeyWindowOutOfBounds {
             start: device_pk_start,
-            length: PK_BYTES,
+            length: DEVICE_PK_BYTES,
             issuer_message_len,
         });
     }
@@ -385,9 +388,9 @@ fn build_trace(
         MdocPrivateDeviceKeyTrace { columns },
         MdocPrivateDeviceKeyUseCensus {
             issuer_position_uses,
-            normalized_uses: PK_BYTES,
+            normalized_uses: DEVICE_PK_BYTES,
             rho_uses: 32,
-            t1_uses: K * N,
+            t1_uses: DEVICE_K * N,
             device_pk_start_uses: 1,
             range_uses,
             active_rows: MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS,
@@ -882,8 +885,9 @@ impl Air for MdocPrivateDeviceKeyBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(DEVICE_KEY_BIND_DOMAIN);
         channel.mix_u64(DEVICE_KEY_BIND_VERSION);
+        channel.mix_u64(ML_DSA_44.transcript_tag());
         channel.mix_u64(self.issuer_message_len as u64);
-        channel.mix_u64(PK_BYTES as u64);
+        channel.mix_u64(DEVICE_PK_BYTES as u64);
         channel.mix_u64(MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE as u64);
         channel.mix_u64(MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS as u64);
         channel.mix_u64(PREPROCESSED_COLS as u64);
@@ -1054,7 +1058,7 @@ mod tests {
     use stwo_constraint_framework::{Multiplicity, PREPROCESSED_TRACE_IDX};
 
     fn test_pk(seed: u8) -> Vec<u8> {
-        (0..PK_BYTES)
+        (0..DEVICE_PK_BYTES)
             .map(|index| seed.wrapping_add((index * 73) as u8))
             .collect()
     }
@@ -1178,7 +1182,7 @@ mod tests {
     fn packing_matches_fips_decoder_for_every_t1_coefficient() {
         let pk = test_pk(11);
         let decoded = stwo_mldsa::reference::encoding::pk_decode(&pk).unwrap();
-        for poly in 0..K {
+        for poly in 0..DEVICE_K {
             for group in 0..64 {
                 let start = 32 + (poly * 64 + group) * T1_GROUP_BYTES;
                 let unpacked = unpack_group(&pk[start..start + T1_GROUP_BYTES]);
@@ -1220,11 +1224,11 @@ mod tests {
         assert_eq!(PREPROCESSED_COLS, 5);
         assert_eq!(TRACE_COLS, 34);
         assert_eq!(MAIN_INTERACTION_COLS + BLINDER_INTERACTION_COLS, 52);
-        assert_eq!(census.active_rows, 416);
-        assert_eq!(census.blind_rows, 96);
-        assert_eq!(census.normalized_uses, 1_952);
+        assert_eq!(census.active_rows, 288);
+        assert_eq!(census.blind_rows, 224);
+        assert_eq!(census.normalized_uses, 1_312);
         assert_eq!(census.rho_uses, 32);
-        assert_eq!(census.t1_uses, 1_536);
+        assert_eq!(census.t1_uses, 1_024);
         assert_eq!(census.device_pk_start_uses, 1);
         assert_eq!(
             census
@@ -1232,19 +1236,22 @@ mod tests {
                 .iter()
                 .map(|&count| count as usize)
                 .sum::<usize>(),
-            PK_BYTES
+            DEVICE_PK_BYTES
         );
         assert!(census.issuer_position_uses[..start]
             .iter()
             .all(|&count| count == 0));
-        assert!(census.issuer_position_uses[start..start + PK_BYTES]
+        assert!(census.issuer_position_uses[start..start + DEVICE_PK_BYTES]
             .iter()
             .all(|&count| count == 1));
         assert_eq!(
             census.range_uses.rc8.iter().sum::<u32>(),
-            (MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS + K * 64) as u32
+            (MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS + DEVICE_K * 64) as u32
         );
-        assert_eq!(census.range_uses.rc9.iter().sum::<u32>(), (K * N) as u32);
+        assert_eq!(
+            census.range_uses.rc9.iter().sum::<u32>(),
+            (DEVICE_K * N) as u32
+        );
         assert_eq!(census.range_uses.rc7.iter().sum::<u32>(), 0);
     }
 
@@ -1391,7 +1398,10 @@ mod tests {
         )
         .unwrap();
         assert!(!t1.is_set());
-        assert_eq!(binder.range_uses().rc9.iter().sum::<u32>(), (K * N) as u32);
+        assert_eq!(
+            binder.range_uses().rc9.iter().sum::<u32>(),
+            (DEVICE_K * N) as u32
+        );
         binder.draw_relations(&mut channel);
         assert!(t1.is_set());
 
@@ -1766,8 +1776,8 @@ mod tests {
         normalized_pk: &[u8],
         device_pk_start: usize,
     ) -> Vec<TestCounterRow> {
-        assert_eq!(authenticated_pk.len(), PK_BYTES);
-        assert_eq!(normalized_pk.len(), PK_BYTES);
+        assert_eq!(authenticated_pk.len(), DEVICE_PK_BYTES);
+        assert_eq!(normalized_pk.len(), DEVICE_PK_BYTES);
         let mut rows = Vec::new();
         for (index, &byte) in authenticated_pk.iter().enumerate() {
             rows.push(TestCounterRow::new(
@@ -2034,11 +2044,11 @@ mod tests {
     #[test]
     fn invalid_lengths_and_window_fail_before_trace_allocation() {
         assert!(matches!(
-            build_trace(&test_pk(1)[..PK_BYTES - 1], 0, 4_096),
+            build_trace(&test_pk(1)[..DEVICE_PK_BYTES - 1], 0, 4_096),
             Err(MdocPrivateDeviceKeyBindError::PublicKeyLength { .. })
         ));
         assert!(matches!(
-            build_trace(&test_pk(1), 4_096 - PK_BYTES + 1, 4_096),
+            build_trace(&test_pk(1), 4_096 - DEVICE_PK_BYTES + 1, 4_096),
             Err(MdocPrivateDeviceKeyBindError::DeviceKeyWindowOutOfBounds { .. })
         ));
         assert!(matches!(

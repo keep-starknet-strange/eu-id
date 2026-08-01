@@ -27,13 +27,13 @@ use stwo::prover::lookups::gkr_verifier::{GkrBatchProof, GkrMask};
 use stwo::prover::lookups::sumcheck::SumcheckProof;
 use stwo::prover::lookups::utils::UnivariatePoly;
 
-const TS13_DEMO_GKR_VARIABLE_COUNT: usize = 23;
+const TS13_DEMO_GKR_VARIABLE_COUNT: usize = 22;
 const TS13_DEMO_GKR_MASK_COLUMN_COUNT: usize = 2;
 const TS13_DEMO_GKR_OUTPUT_CLAIM_COUNT: usize = 2;
 const TS13_DEMO_GKR_MAX_POLYNOMIAL_COEFFICIENTS: usize = 4;
 
 /// Maximum canonical GKR payload size accepted by the TS13 demo profile.
-pub const TS13_DEMO_GKR_MAX_PAYLOAD_BYTES: usize = 20_128;
+pub const TS13_DEMO_GKR_MAX_PAYLOAD_BYTES: usize = 18_464;
 
 /// Serializable form of the public [`GkrBatchProof`] data.
 #[derive(Serialize, Deserialize)]

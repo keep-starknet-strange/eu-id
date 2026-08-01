@@ -1,7 +1,7 @@
-//! Error and reject-reason types for the ML-DSA-65 reference verifier.
+//! Error and reject-reason types for the ML-DSA reference verifier.
 
 /// A hard decoding/structural error: the input is malformed and cannot be
-/// interpreted as an ML-DSA-65 public key or signature. Distinct from a
+/// interpreted as an ML-DSA public key or signature. Distinct from a
 /// *cryptographic* rejection (a well-formed but non-verifying signature), which
 /// is carried by [`RejectReason`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +29,13 @@ pub enum MlDsaError {
         /// The offending context length.
         got: usize,
     },
+    /// The circuit profile's fixed SampleInBall squeeze resource ended before
+    /// all challenge positions were placed.
+    SampleInBallExhausted {
+        accepted: usize,
+        required: usize,
+        squeeze_bytes: usize,
+    },
 }
 
 impl core::fmt::Display for MlDsaError {
@@ -42,6 +49,14 @@ impl core::fmt::Display for MlDsaError {
             }
             Self::MalformedHint => write!(f, "hint failed HintBitUnpack validation"),
             Self::ContextTooLong { got } => write!(f, "context length {got} exceeds 255"),
+            Self::SampleInBallExhausted {
+                accepted,
+                required,
+                squeeze_bytes,
+            } => write!(
+                f,
+                "SampleInBall accepted {accepted} of {required} placements within {squeeze_bytes} bytes"
+            ),
         }
     }
 }

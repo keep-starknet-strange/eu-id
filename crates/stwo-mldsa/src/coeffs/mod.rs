@@ -75,6 +75,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::witness::{MlDsaWitness, B};
 use layout::{groups, Group, Kind, CARRY_DIGITS, MAX_DIGITS};
 use relations::CoeffsRelations;
@@ -126,6 +127,9 @@ fn attacked_stream_value<E: EvalAtRow>(stream: usize, value: E::F) -> E::F {
 // Norm bound: γ1 − β − 1 = 524_091.
 /// `γ1 − β − 1` for ML-DSA-65 (`γ1 = 2^19`, `β = τ·η = 49·4 = 196`).
 pub const Z_NORM_BOUND: i64 = 524_091;
+fn z_norm_bound(profile: MlDsaProfile) -> i64 {
+    (profile.gamma1() - profile.beta() - 1) as i64
+}
 /// Carry offset `2^20`.
 pub const CARRY_OFFSET: i64 = 1 << 20;
 /// Digit offset `2^8` into the `2^9` window.
@@ -165,24 +169,39 @@ fn pre_id(name: &str) -> PreProcessedColumnId {
 
 /// All preprocessed column ids for the coeffs component, in commit order.
 pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
+    coeffs_preprocessed_ids_for(ML_DSA_65)
+}
+
+fn profile_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_coeffs_{profile:?}_profile_active"),
+    }
+}
+
+fn profile_pre_id(profile: MlDsaProfile, name: &str) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_coeffs_{profile:?}_{name}"),
+    }
+}
+
+pub fn coeffs_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     // On a paired w row, `w_bind_id` is the first WCell key and the otherwise
     // idle `c_bind_id` is the second key. On c rows, `c_bind_id = m`.
-    [
-        "start",
-        "end",
-        "poly_id",
-        "active",
-        "live_mask_4",
-        "is_carry",
-        "is_norm",
-        "is_c",
-        "is_w",
-        "w_bind_id",
-        "c_bind_id",
+    vec![
+        profile_pre_id(profile, "start"),
+        pre_id("end"),
+        pre_id("poly_id"),
+        pre_id("active"),
+        profile_pre_id(profile, "live_mask_4"),
+        profile_pre_id(profile, "is_carry"),
+        profile_pre_id(profile, "is_norm"),
+        profile_pre_id(profile, "is_c"),
+        profile_pre_id(profile, "is_w"),
+        profile_pre_id(profile, "paired_continue"),
+        pre_id("w_bind_id"),
+        pre_id("c_bind_id"),
+        profile_active_id(profile),
     ]
-    .into_iter()
-    .map(pre_id)
-    .collect()
 }
 
 /// Fourteen shared range streams plus the four distinct relation yields. Range
@@ -229,6 +248,22 @@ fn row_schedule() -> Vec<RowInfo> {
 // =============================================================================
 
 pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
+    gen_coeffs_preprocessed_for(ML_DSA_65, log_size)
+}
+
+fn group_is_active(profile: MlDsaProfile, group: Group) -> bool {
+    let index = group.poly_id as usize;
+    match group.kind {
+        Kind::Z => index - (layout::POLY_ID_Z0 as usize) < profile.l(),
+        Kind::W => index - (layout::POLY_ID_W0 as usize) < profile.k(),
+        Kind::E => index - (layout::POLY_ID_E0 as usize) < profile.k(),
+        Kind::V => index - (layout::POLY_ID_V0 as usize) < profile.k(),
+        Kind::C => true,
+        Kind::Carry => index - (layout::POLY_ID_CARRY0 as usize) < profile.k(),
+    }
+}
+
+pub fn gen_coeffs_preprocessed_for(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
 
@@ -241,29 +276,34 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
     let mut is_norm = vec![m31(0); rows];
     let mut is_c = vec![m31(0); rows];
     let mut is_w = vec![m31(0); rows];
+    let mut paired_continue = vec![m31(0); rows];
     let mut w_bind_id = vec![m31(0); rows];
     let mut c_bind_id = vec![m31(0); rows];
+    let mut profile_active = vec![m31(0); rows];
 
     for (row, info) in sched.iter().enumerate() {
         let g = info.group;
-        start[row] = m31(u32::from(info.in_group == 0));
-        end[row] = m31(u32::from(info.in_group == g.rows() - 1));
         poly_id[row] = m31(g.poly_id);
         active[row] = m31(1);
-        live_mask_4[row] = m31(u32::from(g.kind.row_live_digits() > 4));
-        is_carry[row] = m31(u32::from(g.kind == Kind::Carry));
-        if g.kind == Kind::Z {
-            is_norm[row] = m31(1);
+        let group_active = group_is_active(profile, g);
+        profile_active[row] = m31(u32::from(group_active));
+        end[row] = m31(u32::from(info.in_group == g.rows() - 1));
+        if group_active {
+            start[row] = m31(u32::from(info.in_group == 0));
+            live_mask_4[row] = m31(u32::from(g.kind.row_live_digits() > 4));
+            is_carry[row] = m31(u32::from(g.kind == Kind::Carry));
+            is_norm[row] = m31(u32::from(g.kind == Kind::Z));
+            is_c[row] = m31(u32::from(g.kind == Kind::C));
+            is_w[row] = m31(u32::from(g.kind == Kind::W));
+            paired_continue[row] = m31(u32::from(g.kind.has_recomp() && info.in_group != 0));
         }
         if g.kind == Kind::C {
-            is_c[row] = m31(1);
             let m = g
                 .coefficient_index(info.in_group, 0)
                 .expect("c row has one coefficient");
             c_bind_id[row] = m31(m as u32);
         }
         if g.kind == Kind::W {
-            is_w[row] = m31(1);
             let i = (g.poly_id - layout::POLY_ID_W0) as usize;
             let first = g
                 .coefficient_index(info.in_group, 0)
@@ -286,11 +326,13 @@ pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
         is_norm,
         is_c,
         is_w,
+        paired_continue,
         w_bind_id,
         c_bind_id,
     ]
     .into_iter()
     .map(|v| col_eval(log_size, v))
+    .chain([col_eval(log_size, profile_active)])
     .collect()
 }
 
@@ -304,7 +346,11 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
     let sched = row_schedule();
     let mut cols: Vec<Vec<M31>> = (0..N_BASE_COLS).map(|_| vec![m31(0); rows]).collect();
 
+    let norm_bound = z_norm_bound(witness.profile);
     for (row, info) in sched.iter().enumerate() {
+        if !group_is_active(witness.profile, info.group) {
+            continue;
+        }
         let digits = row_digits(witness, info);
         for (t, &d) in digits.iter().enumerate() {
             cols[COL_DIGIT0 + t][row] = enc_signed(d);
@@ -316,10 +362,10 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
                 if info.group.kind == Kind::Z {
                     // Both packed z coefficients receive the exact two-sided
                     // norm decomposition.
-                    let first_a = first + Z_NORM_BOUND as i128;
-                    let first_b = Z_NORM_BOUND as i128 - first;
-                    let second_a = second + Z_NORM_BOUND as i128;
-                    let second_b = Z_NORM_BOUND as i128 - second;
+                    let first_a = first + norm_bound as i128;
+                    let first_b = norm_bound as i128 - first;
+                    let second_a = second + norm_bound as i128;
+                    let second_b = norm_bound as i128 - second;
                     cols[COL_NORM_A_HI][row] = m31((first_a >> 13) as u32);
                     cols[COL_NORM_B_HI][row] = m31((first_b >> 13) as u32);
                     cols[COL_NORM2_A_HI][row] = m31((second_a >> 13) as u32);
@@ -424,6 +470,7 @@ fn paired_recompositions(digits: &[i128; MAX_DIGITS]) -> [i128; 2] {
 #[derive(Clone)]
 pub struct CoeffsEval {
     pub log_size: u32,
+    pub profile: MlDsaProfile,
     pub r: SecureField,
     pub s: SecureField,
     pub relations: CoeffsRelations,
@@ -453,21 +500,29 @@ impl FrameworkEval for CoeffsEval {
     }
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // --- Preprocessed selectors ---
-        let start = eval.get_preprocessed_column(pre_id("start"));
+        let start = eval.get_preprocessed_column(profile_pre_id(self.profile, "start"));
+        // Every fixed-shape polynomial, including an inactive profile tail,
+        // yields an evaluation. Inactive traces are constrained to zero, so
+        // this binds the fold claim to `(poly_id, 0)` instead of leaving it
+        // unconstrained.
         let end = eval.get_preprocessed_column(pre_id("end"));
         let poly_id = eval.get_preprocessed_column(pre_id("poly_id"));
-        let active = eval.get_preprocessed_column(pre_id("active"));
-        let live_mask_4 = eval.get_preprocessed_column(pre_id("live_mask_4"));
-        let is_carry = eval.get_preprocessed_column(pre_id("is_carry"));
-        let is_norm = eval.get_preprocessed_column(pre_id("is_norm"));
-        let is_c = eval.get_preprocessed_column(pre_id("is_c"));
-        let is_w = eval.get_preprocessed_column(pre_id("is_w"));
+        let schedule_active = eval.get_preprocessed_column(pre_id("active"));
+        let live_mask_4 = eval.get_preprocessed_column(profile_pre_id(self.profile, "live_mask_4"));
+        let is_carry = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_carry"));
+        let is_norm = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_norm"));
+        let is_c = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_c"));
+        let is_w = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_w"));
+        let paired_continue =
+            eval.get_preprocessed_column(profile_pre_id(self.profile, "paired_continue"));
         let w_bind_id = eval.get_preprocessed_column(pre_id("w_bind_id"));
         let c_bind_id = eval.get_preprocessed_column(pre_id("c_bind_id"));
+        let profile_active = eval.get_preprocessed_column(profile_active_id(self.profile));
+
+        let active = profile_active.clone();
 
         let is_digit = active.clone() - is_carry.clone();
         let is_recomp = is_norm.clone() + is_w.clone();
-        let paired_continue = is_recomp.clone() * (E::F::from(M31::one()) - start.clone());
         let live_mask = [
             active.clone(),
             active.clone() - is_c.clone(),
@@ -494,6 +549,22 @@ impl FrameworkEval for CoeffsEval {
 
         let one = E::F::from(M31::one());
         let b_ef = M31::from_u32_unchecked(B as u32);
+
+        // The internal trace retains the maximum ML-DSA shape. Rows outside
+        // the verifier-selected profile are fixed to zero and cannot affect
+        // the live identity.
+        let inactive = schedule_active - profile_active;
+        for value in digit
+            .iter()
+            .chain(core::iter::once(&recomp_cell))
+            .chain(core::iter::once(&norm_a_hi))
+            .chain(core::iter::once(&norm_b_hi))
+            .chain(carry_hi.iter())
+            .chain(core::iter::once(&norm2_a_hi))
+            .chain(core::iter::once(&norm2_b_hi))
+        {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
 
         // Cells after the live digit count must be zero.
         for t in 0..MAX_DIGITS {
@@ -568,7 +639,7 @@ impl FrameworkEval for CoeffsEval {
 
         // Slots 6..9: first z coefficient's exact norm, interleaved with carry
         // highs 2..4. Slot 7 also carries c+1 on c rows.
-        let bound = E::F::from(M31::from_u32_unchecked(Z_NORM_BOUND as u32));
+        let bound = E::F::from(M31::from_u32_unchecked(z_norm_bound(self.profile) as u32));
         let value = carry_hi[2].clone() + recomp_cell.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_a_hi.clone();
         #[cfg(test)]
@@ -674,7 +745,7 @@ impl FrameworkEval for CoeffsEval {
         let paired_digit_row = first_digit_row * r_ef.clone() + second_digit_row;
         let digit_row = ordinary_digit_row.clone()
             + E::EF::from(is_recomp.clone()) * (paired_digit_row - ordinary_digit_row);
-        let expected = E::EF::from(one.clone() - start.clone()) * acc_prev.clone() * r_ef
+        let expected = E::EF::from(active.clone() - start) * acc_prev.clone() * r_ef
             + E::EF::from(paired_continue) * acc_prev * E::EF::from(self.r * self.r - self.r)
             + digit_row;
         eval.add_constraint(acc.clone() - expected);
@@ -811,10 +882,13 @@ impl Default for RcUses {
 pub fn gen_coeffs_rc_uses(witness: &MlDsaWitness) -> RcUses {
     let mut rc_uses = RcUses::new();
     for group in groups() {
+        if !group_is_active(witness.profile, group) {
+            continue;
+        }
         for in_group in 0..group.rows() {
             let info = RowInfo { group, in_group };
             let digits = row_digits(witness, &info);
-            seed_rc_uses(&mut rc_uses, &info, &digits);
+            seed_rc_uses(&mut rc_uses, &info, &digits, z_norm_bound(witness.profile));
         }
     }
     rc_uses
@@ -845,8 +919,9 @@ pub fn gen_coeffs_interaction(
 
     for row in 0..rows {
         let info = if row < active { Some(sched[row]) } else { None };
+        let info = info.filter(|info| group_is_active(witness.profile, info.group));
         let is_start = info.map(|i| i.in_group == 0).unwrap_or(false);
-        let prev = if is_start || row == 0 {
+        let prev = if info.is_none() || is_start || row == 0 {
             zero
         } else {
             acc[row - 1]
@@ -871,7 +946,7 @@ pub fn gen_coeffs_interaction(
                     ordinary
                 };
                 // Seed rc multiplicities for this row.
-                seed_rc_uses(&mut rc_uses, &info, &digits);
+                seed_rc_uses(&mut rc_uses, &info, &digits, z_norm_bound(witness.profile));
                 dr
             }
             None => zero,
@@ -931,11 +1006,20 @@ pub fn gen_coeffs_interaction(
     };
 
     // Precompute per-coset digits (avoid recomputation across the many streams).
+    let coset_schedule: Vec<Option<(Group, usize)>> = (0..rows)
+        .map(|coset| {
+            (coset < active).then(|| {
+                let info = sched[coset];
+                (info.group, info.in_group)
+            })
+        })
+        .collect();
     let coset_digits: Vec<Option<([i128; MAX_DIGITS], Group, usize)>> = (0..rows)
         .map(|coset| {
             if coset < active {
                 let info = sched[coset];
-                Some((row_digits(witness, &info), info.group, info.in_group))
+                group_is_active(witness.profile, info.group)
+                    .then(|| (row_digits(witness, &info), info.group, info.in_group))
             } else {
                 None
             }
@@ -965,10 +1049,11 @@ pub fn gen_coeffs_interaction(
                     }
                     Some((digits, group, _)) if group.kind == Kind::Z && stream >= 6 => {
                         let [first, second] = paired_recompositions(digits);
-                        let first_a = first + Z_NORM_BOUND as i128;
-                        let first_b = Z_NORM_BOUND as i128 - first;
-                        let second_a = second + Z_NORM_BOUND as i128;
-                        let second_b = Z_NORM_BOUND as i128 - second;
+                        let norm_bound = z_norm_bound(witness.profile) as i128;
+                        let first_a = first + norm_bound;
+                        let first_b = norm_bound - first;
+                        let second_a = second + norm_bound;
+                        let second_b = norm_bound - second;
                         Some(match stream {
                             6 => (m31((first_a & ((1 << 13) - 1)) as u32), RcKind::Rc13),
                             7 => (m31((first_a >> 13) as u32), RcKind::Rc7),
@@ -1001,8 +1086,8 @@ pub fn gen_coeffs_interaction(
     }
     // EvalAtRs yields at group end (−1).
     push_entry(
-        &|coset| match &coset_digits[coset] {
-            Some((_, group, in_group)) if *in_group == group.rows() - 1 => {
+        &|coset| match &coset_schedule[coset] {
+            Some((group, in_group)) if *in_group == group.rows() - 1 => {
                 let coords = acc[coset].to_m31_array();
                 let tuple = [
                     m31(group.poly_id),
@@ -1085,7 +1170,7 @@ pub fn gen_coeffs_interaction(
     }
 }
 
-fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
+fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS], norm_bound: i64) {
     match info.group.kind {
         Kind::Carry => {
             for t in 0..CARRY_DIGITS {
@@ -1101,8 +1186,8 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
                 rc.rc9[v] += 1;
             }
             for cell in paired_recompositions(digits) {
-                let a = cell + Z_NORM_BOUND as i128;
-                let b = Z_NORM_BOUND as i128 - cell;
+                let a = cell + norm_bound as i128;
+                let b = norm_bound as i128 - cell;
                 rc.rc13[(a & ((1 << 13) - 1)) as usize] += 1;
                 rc.rc7[(a >> 13) as usize] += 1;
                 rc.rc13[(b & ((1 << 13) - 1)) as usize] += 1;
@@ -1127,12 +1212,13 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS]) {
 #[cfg(test)]
 mod packed_tests {
     use super::*;
+    use crate::profile::ML_DSA_44;
     use crate::proof::{prove_coeffs, verify_coeffs};
-    use crate::reference::encoding::{pk_decode, sig_decode};
+    use crate::reference::encoding::{pk_decode, pk_decode_for, sig_decode, sig_decode_for};
     use crate::reference::sponge::shake256;
     use crate::{generate_witness, MlDsaVerifyInput};
     use ml_dsa::signature::{Keypair, Signer};
-    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa44, MlDsa65, SigningKey};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
     use stwo::core::pcs::PcsConfig;
@@ -1222,6 +1308,97 @@ mod packed_tests {
             assert_eq!(
                 is_recomp && !start,
                 is_recomp && info.is_some_and(|row| row.in_group != 0)
+            );
+        }
+    }
+
+    #[test]
+    fn mldsa44_inactive_fixed_tail_is_zero_and_relation_bound() {
+        let message = b"ML-DSA-44 inactive coefficient tail";
+        let key = SigningKey::<MlDsa44>::from_seed(&[0x44; 32].into());
+        let public_key: EncodedVerifyingKey<MlDsa44> = key.verifying_key().encode();
+        let signature: EncodedSignature<MlDsa44> = key.sign(message).encode();
+        let decoded_key = pk_decode_for(ML_DSA_44, public_key.as_slice()).expect("decode key");
+        let decoded_signature =
+            sig_decode_for(ML_DSA_44, signature.as_slice()).expect("decode signature");
+        let (tr, _) = shake256(&[public_key.as_slice()], 64);
+        let input = MlDsaVerifyInput::from_decoded_for(
+            ML_DSA_44,
+            &decoded_key,
+            &decoded_signature,
+            tr.try_into().expect("64-byte tr"),
+            message.to_vec(),
+        );
+        let witness =
+            crate::witness::generate_witness_for(ML_DSA_44, &input).expect("generate witness");
+        let log_size = crate::air_util::padded_log_size(layout::active_rows());
+        let interaction = gen_coeffs_interaction(
+            &witness,
+            log_size,
+            SecureField::from(m31(7)),
+            SecureField::from(m31(11)),
+            &CoeffsRelations::dummy(),
+        );
+        let schedule = row_schedule();
+        let inactive_ids: Vec<_> = groups()
+            .into_iter()
+            .filter(|group| !group_is_active(ML_DSA_44, *group))
+            .map(|group| group.poly_id as usize)
+            .collect();
+        assert_eq!(inactive_ids, [4, 9, 10, 15, 16, 21, 22, 28, 29]);
+        assert_eq!(interaction.group_evals.len(), layout::N_GROUPS);
+        for &id in &inactive_ids {
+            assert_eq!(
+                interaction.group_evals[id],
+                SecureField::from(m31(0)),
+                "inactive evaluation {id} must be fixed to zero"
+            );
+        }
+
+        let preprocessed: Vec<_> = gen_coeffs_preprocessed_for(ML_DSA_44, log_size)
+            .into_iter()
+            .map(|column| column.to_cpu().values)
+            .collect();
+        let accumulator: Vec<_> = interaction.trace[..N_ACC_COORD_COLS]
+            .iter()
+            .map(|column| column.to_cpu().values)
+            .collect();
+        for (circle_row, coset) in crate::air_util::circle_row_to_coset(log_size)
+            .into_iter()
+            .enumerate()
+        {
+            let Some(info) = schedule.get(coset) else {
+                assert!(
+                    accumulator
+                        .iter()
+                        .all(|column| column[circle_row] == m31(0)),
+                    "padding accumulator must reset at coset row {coset}"
+                );
+                continue;
+            };
+            if group_is_active(ML_DSA_44, info.group) {
+                continue;
+            }
+
+            for selector in [0, 4, 5, 6, 7, 8, 9, 12] {
+                assert_eq!(
+                    preprocessed[selector][circle_row],
+                    m31(0),
+                    "profile selector {selector} is live in inactive group {}",
+                    info.group.poly_id
+                );
+            }
+            assert_eq!(
+                preprocessed[1][circle_row],
+                m31(u32::from(info.in_group == info.group.rows() - 1)),
+                "raw group-end selector must retain the zero-evaluation yield"
+            );
+            assert!(
+                accumulator
+                    .iter()
+                    .all(|column| column[circle_row] == m31(0)),
+                "inactive accumulator must reset in group {}",
+                info.group.poly_id
             );
         }
     }

@@ -1,4 +1,4 @@
-//! FIPS 204 ML-DSA-65 verification reference with exposed internals.
+//! FIPS 204 ML-DSA verification reference with exposed internals.
 //!
 //! This module implements verification but not signing.
 //! [`verify::VerifyTrace`] exposes values used by the witness generator. Each

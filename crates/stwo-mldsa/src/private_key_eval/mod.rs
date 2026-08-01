@@ -2,7 +2,9 @@
 //!
 //! Private `ExpandA` supplies canonical stage-zero NTT cells. The private
 //! device-key binder supplies packed `t1` cells. This module proves the inverse
-//! NTT, evaluates `A` and `2^13 * t1`, and closes the 66-term integer identity.
+//! NTT, evaluates `A` and `2^13 * t1`, and closes the selected integer identity.
+//! The relation vector keeps the maximum 66-slot shape. AIR constraints bind
+//! every inactive ML-DSA-44 slot to zero.
 
 mod fold;
 mod ntt;
@@ -18,6 +20,7 @@ use crate::binding::{SharedNttCellRelation, SharedT1CellRelation};
 use crate::coeffs::relations::{EvalAtRsRelation, RangeRelation};
 use crate::coeffs::RcUses;
 use crate::constants::{K, L};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::reference::ntt::NttPoly;
 use crate::types::{MlDsaVerifyInput, T1Poly};
 
@@ -26,16 +29,18 @@ pub use fold::{
     gen_fold_interaction, gen_fold_preprocessed, PrivateFoldEval,
 };
 pub use ntt::{
-    gen_ntt_base, gen_ntt_interaction, gen_ntt_preprocessed, ntt_interaction_layout,
-    ntt_preprocessed_ids, ntt_preprocessed_log_sizes, ntt_trace_layout, NttBase, NttButterflyEval,
-    NttClaims, NttScalingEval, NTT_BUTTERFLY_LOG_SIZE, NTT_SCALING_LOG_SIZE,
+    gen_ntt_base, gen_ntt_base_for, gen_ntt_interaction, gen_ntt_interaction_for,
+    gen_ntt_preprocessed, gen_ntt_preprocessed_for, ntt_interaction_layout, ntt_preprocessed_ids,
+    ntt_preprocessed_ids_for, ntt_preprocessed_log_sizes, ntt_trace_layout, NttBase,
+    NttButterflyEval, NttClaims, NttScalingEval, NTT_BUTTERFLY_LOG_SIZE, NTT_SCALING_LOG_SIZE,
 };
 pub use t1::{
-    gen_t1_base, gen_t1_interaction, gen_t1_preprocessed, t1_interaction_layout,
-    t1_preprocessed_ids, t1_preprocessed_log_sizes, t1_trace_layout, T1Base, T1Eval, T1Interaction,
-    T1_LOG_SIZE,
+    gen_t1_base, gen_t1_base_for, gen_t1_interaction, gen_t1_interaction_for, gen_t1_preprocessed,
+    gen_t1_preprocessed_for, t1_interaction_layout, t1_preprocessed_ids, t1_preprocessed_ids_for,
+    t1_preprocessed_log_sizes, t1_trace_layout, T1Base, T1Eval, T1Interaction, T1_LOG_SIZE,
 };
 
+/// Maximum-shape relation layout. Active counts come from `MlDsaProfile`.
 pub const COEFF_EVAL_BASE: usize = 0;
 pub const COEFF_EVAL_COUNT: usize = 30;
 pub const A_EVAL_BASE: usize = COEFF_EVAL_BASE + COEFF_EVAL_COUNT;
@@ -99,23 +104,34 @@ impl PrivateKeyEvalRelations {
 /// Prover-only decoded public-key material for private-key evaluation traces.
 #[derive(Clone)]
 pub struct PrivateKeyEvalWitness {
+    pub profile: MlDsaProfile,
     pub a_hat: Vec<NttPoly>,
     pub t1: [T1Poly; K],
 }
 
 impl PrivateKeyEvalWitness {
     pub fn from_input(input: &MlDsaVerifyInput) -> Result<Self, PrivateKeyEvalError> {
+        Self::from_input_for(ML_DSA_65, input)
+    }
+
+    pub fn from_input_for(
+        profile: MlDsaProfile,
+        input: &MlDsaVerifyInput,
+    ) -> Result<Self, PrivateKeyEvalError> {
         input
-            .validate_public_key()
+            .validate_public_key_for(profile)
             .map_err(PrivateKeyEvalError::InvalidPublicKey)?;
-        let expanded = crate::reference::expand_a::expand_a(&input.rho);
-        let mut a_hat = Vec::with_capacity(A_EVAL_COUNT);
-        for i in 0..K {
-            for j in 0..L {
-                a_hat.push(expanded.matrix[i][j]);
+        let expanded = crate::reference::expand_a::expand_a_for(profile, &input.rho);
+        let mut a_hat = vec![[0; crate::constants::N]; A_EVAL_COUNT];
+        let mut poly = 0;
+        for i in 0..profile.k() {
+            for j in 0..profile.l() {
+                a_hat[poly] = expanded.matrix[i][j];
+                poly += 1;
             }
         }
         Ok(Self {
+            profile,
             a_hat,
             t1: input.t1,
         })
@@ -158,7 +174,9 @@ impl core::fmt::Display for PrivateKeyEvalError {
 
 impl std::error::Error for PrivateKeyEvalError {}
 
-/// The exact proof order: coeffs 0..29, A 30..59, scaled-t1 60..65.
+/// Fixed proof order: coeffs 0..29, A 30..59, and scaled t1 60..65.
+/// ML-DSA-44 uses the first 16 A slots and first 4 t1 slots. Its other slots
+/// are relation-bound to zero.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PrivateDeviceEvals([SecureField; PRIVATE_EVAL_COUNT]);
 
@@ -205,8 +223,8 @@ impl PrivateDeviceEvals {
         self.0[id]
     }
 
-    pub(crate) fn a(&self, i: usize, j: usize) -> SecureField {
-        self.0[A_EVAL_BASE + i * L + j]
+    pub(crate) fn a_for(&self, profile: MlDsaProfile, i: usize, j: usize) -> SecureField {
+        self.0[A_EVAL_BASE + i * profile.l() + j]
     }
 
     pub(crate) fn t1(&self, i: usize) -> SecureField {
@@ -230,11 +248,11 @@ pub fn gen_private_key_base(witness: &PrivateKeyEvalWitness) -> PrivateKeyBase {
     let NttBase {
         mut trace,
         mut range_uses,
-    } = gen_ntt_base(&witness.a_hat);
+    } = gen_ntt_base_for(witness.profile, &witness.a_hat);
     let T1Base {
         trace: t1_trace,
         range_uses: t1_uses,
-    } = gen_t1_base(&witness.t1);
+    } = gen_t1_base_for(witness.profile, &witness.t1);
     range_uses.add_assign(&t1_uses);
     trace.extend(t1_trace);
     PrivateKeyBase { trace, range_uses }
@@ -254,8 +272,8 @@ pub fn gen_private_key_interaction(
     s: SecureField,
     relations: &PrivateKeyEvalRelations,
 ) -> PrivateKeyInteraction {
-    let ntt = gen_ntt_interaction(&witness.a_hat, r, s, relations);
-    let t1 = gen_t1_interaction(&witness.t1, r, s, relations);
+    let ntt = gen_ntt_interaction_for(witness.profile, &witness.a_hat, r, s, relations);
+    let t1 = gen_t1_interaction_for(witness.profile, &witness.t1, r, s, relations);
     let mut trace = ntt.trace;
     trace.extend(t1.trace);
     PrivateKeyInteraction {
@@ -269,8 +287,14 @@ pub fn gen_private_key_interaction(
 
 pub fn preprocessed_ids(
 ) -> Vec<stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId> {
-    let mut ids = ntt_preprocessed_ids();
-    ids.extend(t1_preprocessed_ids());
+    preprocessed_ids_for(ML_DSA_65)
+}
+
+pub fn preprocessed_ids_for(
+    profile: MlDsaProfile,
+) -> Vec<stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId> {
+    let mut ids = ntt_preprocessed_ids_for(profile);
+    ids.extend(t1_preprocessed_ids_for(profile));
     ids.extend(fold_preprocessed_ids());
     ids
 }
@@ -283,8 +307,12 @@ pub fn preprocessed_log_sizes() -> Vec<u32> {
 }
 
 pub fn gen_preprocessed() -> Vec<crate::air_util::ColEval> {
-    let mut columns = gen_ntt_preprocessed();
-    columns.extend(gen_t1_preprocessed());
+    gen_preprocessed_for(ML_DSA_65)
+}
+
+pub fn gen_preprocessed_for(profile: MlDsaProfile) -> Vec<crate::air_util::ColEval> {
+    let mut columns = gen_ntt_preprocessed_for(profile);
+    columns.extend(gen_t1_preprocessed_for(profile));
     columns.extend(gen_fold_preprocessed());
     columns
 }
@@ -310,6 +338,7 @@ pub struct PrivateKeyTraceComponents {
 impl PrivateKeyTraceComponents {
     pub fn new(
         allocator: &mut TraceLocationAllocator,
+        profile: MlDsaProfile,
         r: SecureField,
         s: SecureField,
         relations: PrivateKeyEvalRelations,
@@ -318,6 +347,7 @@ impl PrivateKeyTraceComponents {
         let ntt_butterfly = FrameworkComponent::new(
             allocator,
             NttButterflyEval {
+                profile,
                 relations: relations.clone(),
             },
             claims.ntt.butterfly,
@@ -325,6 +355,7 @@ impl PrivateKeyTraceComponents {
         let ntt_scaling = FrameworkComponent::new(
             allocator,
             NttScalingEval {
+                profile,
                 r,
                 s,
                 relations: relations.clone(),
@@ -334,6 +365,7 @@ impl PrivateKeyTraceComponents {
         let t1 = FrameworkComponent::new(
             allocator,
             T1Eval {
+                profile,
                 r,
                 s,
                 relations: relations.clone(),
@@ -354,28 +386,6 @@ impl PrivateKeyTraceComponents {
     pub fn trace_prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![&self.ntt_butterfly, &self.ntt_scaling, &self.t1]
     }
-}
-
-pub fn build_fold_component(
-    allocator: &mut TraceLocationAllocator,
-    rho_rlc: SecureField,
-    r: SecureField,
-    s: SecureField,
-    relations: PrivateKeyEvalRelations,
-    evals: PrivateDeviceEvals,
-    claim: SecureField,
-) -> FrameworkComponent<PrivateFoldEval> {
-    FrameworkComponent::new(
-        allocator,
-        PrivateFoldEval {
-            rho_rlc,
-            r,
-            s,
-            relations,
-            evals,
-        },
-        claim,
-    )
 }
 
 pub(crate) fn range_tuple<E: stwo_constraint_framework::EvalAtRow>(
@@ -591,7 +601,7 @@ mod tests {
         let evals = PrivateDeviceEvals::try_from_slice(&values).unwrap();
         assert_eq!(evals.as_slice(), values);
         assert!(PrivateDeviceEvals::try_from_slice(&values[..65]).is_err());
-        assert_eq!(evals.a(5, 4), values[59]);
+        assert_eq!(evals.a_for(ML_DSA_65, 5, 4), values[59]);
         assert_eq!(evals.t1(5), values[65]);
     }
 }

@@ -9,6 +9,7 @@ use crate::air_util::{col_eval, enc_signed, m31, ColEval};
 use crate::coeffs::tables::RcKind;
 use crate::coeffs::RcUses;
 use crate::constants::{D, K, N};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::types::T1Poly;
 use crate::witness::B;
 
@@ -61,8 +62,20 @@ fn pre_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
+fn active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: format!("mldsa_private_key_t1_{profile:?}_active"),
+    }
+}
+
 pub fn t1_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    PRE_NAMES.iter().map(|name| pre_id(name)).collect()
+    t1_preprocessed_ids_for(ML_DSA_65)
+}
+
+pub fn t1_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
+    core::iter::once(active_id(profile))
+        .chain(PRE_NAMES[1..].iter().map(|name| pre_id(name)))
+        .collect()
 }
 
 pub fn t1_preprocessed_log_sizes() -> Vec<u32> {
@@ -70,9 +83,13 @@ pub fn t1_preprocessed_log_sizes() -> Vec<u32> {
 }
 
 pub fn gen_t1_preprocessed() -> Vec<ColEval> {
+    gen_t1_preprocessed_for(ML_DSA_65)
+}
+
+pub fn gen_t1_preprocessed_for(profile: MlDsaProfile) -> Vec<ColEval> {
     let mut columns = vec![vec![m31(0); 1usize << T1_LOG_SIZE]; PRE_NAMES.len()];
     for (row, item) in schedule().iter().enumerate() {
-        columns[0][row] = m31(1);
+        columns[0][row] = m31(u32::from(item.poly < profile.k()));
         columns[1][row] = m31(item.eval_start as u32);
         columns[2][row] = m31(item.eval_end as u32);
         columns[3][row] = m31(item.poly as u32);
@@ -106,9 +123,16 @@ pub struct T1Base {
 }
 
 pub fn gen_t1_base(t1: &[T1Poly; K]) -> T1Base {
+    gen_t1_base_for(ML_DSA_65, t1)
+}
+
+pub fn gen_t1_base_for(profile: MlDsaProfile, t1: &[T1Poly; K]) -> T1Base {
     let mut columns = vec![vec![m31(0); 1usize << T1_LOG_SIZE]; T1_BASE_COLS];
     let mut range_uses = RcUses::new();
     for (row, item) in schedule().iter().enumerate() {
+        if item.poly >= profile.k() {
+            continue;
+        }
         let value = t1[item.poly][item.index];
         assert!(value < 1 << 10, "non-canonical decoded t1 coefficient");
         let (lo9, hi1) = split_t1(value);
@@ -131,6 +155,7 @@ pub fn gen_t1_base(t1: &[T1Poly; K]) -> T1Base {
 
 #[derive(Clone)]
 pub struct T1Eval {
+    pub profile: MlDsaProfile,
     pub r: SecureField,
     pub s: SecureField,
     pub relations: PrivateKeyEvalRelations,
@@ -178,7 +203,7 @@ impl FrameworkEval for T1Eval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(pre_id("active"));
+        let active = eval.get_preprocessed_column(active_id(self.profile));
         let eval_start = eval.get_preprocessed_column(pre_id("eval_start"));
         let eval_end = eval.get_preprocessed_column(pre_id("eval_end"));
         let poly = eval.get_preprocessed_column(pre_id("poly"));
@@ -190,6 +215,14 @@ impl FrameworkEval for T1Eval {
             core::array::from_fn(|_| eval.next_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]));
         let acc_prev = E::combine_ef(acc_masks.each_ref().map(|mask| mask[0].clone()));
         let acc_cur = E::combine_ef(acc_masks.each_ref().map(|mask| mask[1].clone()));
+
+        let inactive = E::F::one() - active.clone();
+        for value in core::iter::once(&lo9)
+            .chain(core::iter::once(&hi1))
+            .chain(digits.iter())
+        {
+            eval.add_constraint(inactive.clone() * value.clone());
+        }
 
         add_scaling_constraints(
             &mut eval,
@@ -253,6 +286,16 @@ pub fn gen_t1_interaction(
     s: SecureField,
     relations: &PrivateKeyEvalRelations,
 ) -> T1Interaction {
+    gen_t1_interaction_for(ML_DSA_65, t1, r, s, relations)
+}
+
+pub fn gen_t1_interaction_for(
+    profile: MlDsaProfile,
+    t1: &[T1Poly; K],
+    r: SecureField,
+    s: SecureField,
+    relations: &PrivateKeyEvalRelations,
+) -> T1Interaction {
     let zero = SecureField::zero();
     let one = SecureField::one();
     let mut rows = vec![vec![(zero, one); T1_LOGUP_ENTRIES]; 1usize << T1_LOG_SIZE];
@@ -260,6 +303,22 @@ pub fn gen_t1_interaction(
     let mut evals = vec![zero; K];
     let mut running = zero;
     for (row, item) in schedule().iter().enumerate() {
+        if item.poly >= profile.k() {
+            acc[row] = zero;
+            if item.eval_end {
+                rows[row][T1_LOGUP_ENTRIES - 1] = (
+                    -one,
+                    relations.eval.combine(&[
+                        m31((T1_EVAL_BASE + item.poly) as u32),
+                        m31(0),
+                        m31(0),
+                        m31(0),
+                        m31(0),
+                    ]),
+                );
+            }
+            continue;
+        }
         let value = t1[item.poly][item.index];
         let (lo9, hi1) = split_t1(value);
         let digits = scaled_digits(value);

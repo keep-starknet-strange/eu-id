@@ -1,4 +1,4 @@
-//! Serializable public/private inputs to in-circuit ML-DSA-65 verification.
+//! Serializable public and private inputs to in-circuit ML-DSA verification.
 //!
 //! [`MlDsaVerifyInput`] carries the semantically decoded values the prover and
 //! native verifier need. [`MlDsaPrivateKeyPublicInput`] is the deliberately
@@ -22,6 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{C_TILDE_BYTES, K, L, N};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::reference::encoding::{PublicKey, SignatureParts};
 
 /// A ring polynomial with signed coefficients (the response `z`), serialized as
@@ -45,7 +46,7 @@ pub struct MlDsaPrivateKeyPublicInput {
     pub message: Vec<u8>,
 }
 
-/// Inputs to verify an ML-DSA-65 signature and generate its proof witness.
+/// Inputs to verify an ML-DSA signature and generate its proof witness.
 ///
 /// Field mapping to FIPS 204 notation:
 /// - `rho`   — matrix seed `ρ`; public mode computes `Â = ExpandA(ρ)`
@@ -87,13 +88,49 @@ impl MlDsaVerifyInput {
     /// Reject non-canonical decoded public keys before they reach transcript
     /// mixing or verifier-native public-polynomial evaluation.
     pub fn validate_public_key(&self) -> Result<(), &'static str> {
-        if self
-            .t1
+        self.validate_public_key_for(ML_DSA_65)
+    }
+
+    pub fn validate_public_key_for(&self, profile: MlDsaProfile) -> Result<(), &'static str> {
+        if self.t1[..profile.k()]
             .iter()
             .flatten()
             .any(|&coefficient| coefficient >= T1_COEFFICIENT_BOUND)
         {
             return Err("decoded ML-DSA t1 coefficient is not canonical");
+        }
+        if self.t1[profile.k()..]
+            .iter()
+            .flatten()
+            .any(|&coefficient| coefficient != 0)
+        {
+            return Err("inactive ML-DSA t1 coefficient is not zero");
+        }
+        Ok(())
+    }
+
+    /// Reject hidden values outside the selected parameter set's wire image.
+    pub fn validate_signature_for(&self, profile: MlDsaProfile) -> Result<(), &'static str> {
+        if self.c_tilde[profile.c_tilde_bytes()..]
+            .iter()
+            .any(|&byte| byte != 0)
+            || self.z[profile.l()..]
+                .iter()
+                .flatten()
+                .any(|&coefficient| coefficient != 0)
+            || self.hint[profile.k()..]
+                .iter()
+                .flatten()
+                .any(|&bit| bit != 0)
+        {
+            return Err("inactive ML-DSA signature storage is not zero");
+        }
+        if self.hint[..profile.k()]
+            .iter()
+            .flatten()
+            .any(|&bit| bit > 1)
+        {
+            return Err("decoded ML-DSA hint is not binary");
         }
         Ok(())
     }
@@ -107,6 +144,22 @@ impl MlDsaVerifyInput {
         tr: [u8; 64],
         message: Vec<u8>,
     ) -> Self {
+        Self::from_decoded_for(ML_DSA_65, pk, sig, tr, message)
+    }
+
+    pub fn from_decoded_for(
+        profile: MlDsaProfile,
+        pk: &PublicKey,
+        sig: &SignatureParts,
+        tr: [u8; 64],
+        message: Vec<u8>,
+    ) -> Self {
+        debug_assert!(pk.t1[profile.k()..].iter().flatten().all(|&v| v == 0));
+        debug_assert!(sig.c_tilde[profile.c_tilde_bytes()..]
+            .iter()
+            .all(|&v| v == 0));
+        debug_assert!(sig.z[profile.l()..].iter().flatten().all(|&v| v == 0));
+        debug_assert!(sig.h[profile.k()..].iter().flatten().all(|&v| v == 0));
         Self {
             rho: pk.rho,
             t1: pk.t1,
@@ -122,13 +175,21 @@ impl MlDsaVerifyInput {
     /// verifier, which ingests raw bytes, can use this
     /// decoded input. Inverse of `pk_decode`.
     pub fn encode_pk(&self) -> Vec<u8> {
-        crate::reference::encoding::pk_encode(&self.rho, &self.t1)
+        self.encode_pk_for(ML_DSA_65)
+    }
+
+    pub fn encode_pk_for(&self, profile: MlDsaProfile) -> Vec<u8> {
+        crate::reference::encoding::pk_encode_for(profile, &self.rho, &self.t1)
     }
 
     /// Re-encode the signature to FIPS 204 `sigEncode` wire bytes. Inverse of
     /// `sig_decode`.
     pub fn encode_sig(&self) -> Vec<u8> {
-        crate::reference::encoding::sig_encode(&self.c_tilde, &self.z, &self.hint)
+        self.encode_sig_for(ML_DSA_65)
+    }
+
+    pub fn encode_sig_for(&self, profile: MlDsaProfile) -> Vec<u8> {
+        crate::reference::encoding::sig_encode_for(profile, &self.c_tilde, &self.z, &self.hint)
     }
 }
 

@@ -1,4 +1,4 @@
-//! Top-level ML-DSA-65 verification (FIPS 204 Algorithm 3 `ML-DSA.Verify`,
+//! Top-level ML-DSA verification (FIPS 204 Algorithm 3 `ML-DSA.Verify`,
 //! pure mode, delegating to Algorithm 8 `ML-DSA.Verify_internal`).
 //!
 //! [`verify_internals`] runs the whole algorithm and returns a [`VerifyTrace`]
@@ -17,13 +17,14 @@
 //! empty, so the prefix is `tr ‖ 0x00 ‖ 0x00 ‖ M`. A wrong prefix does not
 //! interoperate with a conforming signer.
 
-use crate::constants::{C_TILDE_BYTES, D, GAMMA1, K, L, N, TAU};
-use crate::reference::decompose::{use_hint_poly, w1_encode};
-use crate::reference::encoding::{pk_decode, sig_decode, PublicKey, SignatureParts};
+use crate::constants::{C_TILDE_BYTES, D, K, L, N, TAU};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::reference::decompose::{use_hint_poly_for, w1_encode_for};
+use crate::reference::encoding::{pk_decode_for, sig_decode_for, PublicKey, SignatureParts};
 use crate::reference::error::{MlDsaError, RejectReason};
-use crate::reference::expand_a::expand_a;
+use crate::reference::expand_a::expand_a_for;
 use crate::reference::ntt::{ntt, ntt_inverse, pointwise, NttPoly, Poly};
-use crate::reference::sample_in_ball::sample_in_ball;
+use crate::reference::sample_in_ball::sample_in_ball_for;
 use crate::reference::sponge::{shake256, SpongeTranscript};
 
 /// Domain separator byte for *pure* (non pre-hash) ML-DSA (Algorithm 3).
@@ -43,7 +44,7 @@ pub struct VerifyTrace {
     pub tr: [u8; HASH64],
     /// `µ = H(tr ‖ 0x00 ‖ |ctx| ‖ ctx ‖ M, 512)`, 64 bytes.
     pub mu: [u8; HASH64],
-    /// Commitment hash `c̃` from the signature.
+    /// Maximum storage for the profile-sized commitment hash `c̃`.
     pub c_tilde: [u8; C_TILDE_BYTES],
     /// Challenge polynomial `c` in the coefficient domain (`{−1,0,1}`).
     pub c: [i32; N],
@@ -57,7 +58,7 @@ pub struct VerifyTrace {
     pub w_approx: [[u32; N]; K],
     /// `ŵ'approx`, the same vector in the NTT domain.
     pub w_approx_hat: [NttPoly; K],
-    /// `w1' = UseHint(h, w'approx)`, `k` polynomials of values in `[0, 16)`.
+    /// `w1' = UseHint(h, w'approx)`, with values in the selected high-bit range.
     pub w1: [[u32; N]; K],
     /// Recomputed commitment hash `c̃' = H(µ ‖ w1Encode(w1'), 2λ)`.
     pub c_tilde_prime: [u8; C_TILDE_BYTES],
@@ -76,7 +77,16 @@ pub struct VerifyTrace {
 /// Verify an ML-DSA-65 signature in pure mode with empty context (the mdoc
 /// path). Thin wrapper over [`verify_internals_with_context`].
 pub fn verify_internals(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<VerifyTrace, MlDsaError> {
-    verify_internals_with_context(pk, msg, &[], sig)
+    verify_internals_for(ML_DSA_65, pk, msg, sig)
+}
+
+pub fn verify_internals_for(
+    profile: MlDsaProfile,
+    pk: &[u8],
+    msg: &[u8],
+    sig: &[u8],
+) -> Result<VerifyTrace, MlDsaError> {
+    verify_internals_with_context_for(profile, pk, msg, &[], sig)
 }
 
 /// Verify an ML-DSA-65 signature in pure mode (FIPS 204 Algorithm 3), with an
@@ -88,11 +98,21 @@ pub fn verify_internals_with_context(
     ctx: &[u8],
     sig: &[u8],
 ) -> Result<VerifyTrace, MlDsaError> {
+    verify_internals_with_context_for(ML_DSA_65, pk, msg, ctx, sig)
+}
+
+pub fn verify_internals_with_context_for(
+    profile: MlDsaProfile,
+    pk: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    sig: &[u8],
+) -> Result<VerifyTrace, MlDsaError> {
     if ctx.len() > 255 {
         return Err(MlDsaError::ContextTooLong { got: ctx.len() });
     }
-    let PublicKey { rho, t1 } = pk_decode(pk)?;
-    let SignatureParts { c_tilde, z, h } = sig_decode(sig)?;
+    let PublicKey { rho, t1 } = pk_decode_for(profile, pk)?;
+    let SignatureParts { c_tilde, z, h } = sig_decode_for(profile, sig)?;
 
     // tr = H(pk, 512).
     let (tr_vec, _) = shake256(&[pk], HASH64);
@@ -106,24 +126,24 @@ pub fn verify_internals_with_context(
     mu.copy_from_slice(&mu_vec);
 
     // c = SampleInBall(c̃); ĉ = NTT(c).
-    let sib = sample_in_ball(&c_tilde);
+    let sib = sample_in_ball_for(profile, &c_tilde[..profile.c_tilde_bytes()])?;
     let c = sib.c;
     let c_poly = signed_to_zq(&c);
     let c_hat = ntt(&c_poly);
 
     // ẑ = NTT(z) per column.
     let mut z_hat = [[0u32; N]; L];
-    for (dst, col) in z_hat.iter_mut().zip(z.iter()) {
+    for (dst, col) in z_hat[..profile.l()].iter_mut().zip(&z[..profile.l()]) {
         *dst = ntt(&signed_to_zq(col));
     }
 
     // Â = ExpandA(ρ).
-    let a = expand_a(&rho);
+    let a = expand_a_for(profile, &rho);
 
     // t1·2^d in the NTT domain, per row.
     let two_d = 1u32 << D;
     let mut t1_2d_hat = [[0u32; N]; K];
-    for r in 0..K {
+    for r in 0..profile.k() {
         let mut scaled = [0u32; N];
         for i in 0..N {
             scaled[i] = ((t1[r][i] as u64 * two_d as u64) % crate::constants::Q as u64) as u32;
@@ -134,9 +154,9 @@ pub fn verify_internals_with_context(
     // ŵ'approx[r] = Σ_s Â[r][s]·ẑ[s] − ĉ·(t1·2^d)^[r].
     let mut w_approx_hat = [[0u32; N]; K];
     let mut w_approx = [[0u32; N]; K];
-    for r in 0..K {
+    for r in 0..profile.k() {
         let mut acc = [0u32; N];
-        for (a_rs, z_s) in a.matrix[r].iter().zip(z_hat.iter()) {
+        for (a_rs, z_s) in a.matrix[r][..profile.l()].iter().zip(&z_hat[..profile.l()]) {
             let prod = pointwise(a_rs, z_s);
             acc = add_ntt(&acc, &prod);
         }
@@ -148,18 +168,18 @@ pub fn verify_internals_with_context(
 
     // w1' = UseHint(h, w'approx).
     let mut w1 = [[0u32; N]; K];
-    for r in 0..K {
-        w1[r] = use_hint_poly(&h[r], &w_approx[r]);
+    for r in 0..profile.k() {
+        w1[r] = use_hint_poly_for(profile, &h[r], &w_approx[r]);
     }
 
     // c̃' = H(µ ‖ w1Encode(w1'), 2λ).
-    let w1_bytes = w1_encode(&w1);
-    let (ctp_vec, c_tilde_transcript) = shake256(&[&mu, &w1_bytes], C_TILDE_BYTES);
+    let w1_bytes = w1_encode_for(profile, &w1);
+    let (ctp_vec, c_tilde_transcript) = shake256(&[&mu, &w1_bytes], profile.c_tilde_bytes());
     let mut c_tilde_prime = [0u8; C_TILDE_BYTES];
-    c_tilde_prime.copy_from_slice(&ctp_vec);
+    c_tilde_prime[..profile.c_tilde_bytes()].copy_from_slice(&ctp_vec);
 
     // Verdict: z-norm bound then commitment equality (Algorithm 8).
-    let reason = if !z_norm_in_bound(&z) {
+    let reason = if !z_norm_in_bound(profile, &z) {
         RejectReason::ZNormOutOfBound
     } else if c_tilde_prime != c_tilde {
         RejectReason::CommitmentMismatch
@@ -198,9 +218,9 @@ pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 }
 
 /// `‖z‖_∞ < γ1 − β` (Algorithm 8), where `β = τ·η`.
-fn z_norm_in_bound(z: &[[i32; N]; L]) -> bool {
-    let bound = (GAMMA1 - crate::constants::BETA) as i32;
-    z.iter().flatten().all(|&c| c.abs() < bound)
+fn z_norm_in_bound(profile: MlDsaProfile, z: &[[i32; N]; L]) -> bool {
+    let bound = (profile.gamma1() - profile.beta()) as i32;
+    z[..profile.l()].iter().flatten().all(|&c| c.abs() < bound)
 }
 
 /// Lift signed `{−1,0,1}`-style coefficients into `[0, q)`.

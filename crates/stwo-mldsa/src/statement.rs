@@ -1,12 +1,12 @@
-//! `MlDsaAir` composes in-circuit ML-DSA-65 verification.
+//! `MlDsaAir` composes in-circuit ML-DSA verification.
 //!
 //! One air-core module pair ([`MlDsaProver`] impl `Air`+`AirProver`,
-//! [`MlDsaVerifier`] impl `Air`) proves the entire ML-DSA-65 verification via a
+//! [`MlDsaVerifier`] impl `Air`) proves the selected ML-DSA profile via a
 //! single [`air_core::prove`] / [`air_core::verify`] call. It stitches together:
 //!
 //!   * public-key modes evaluate `ExpandA(ρ)` verifier-natively. Hosted
 //!     private-key mode instead consumes private `NttCell` / `T1Cell` bindings,
-//!     proves the inverse NTT and all 36 public-key polynomial evaluations,
+//!     proves the inverse NTT and the active public-key polynomial evaluations,
 //!     then closes the complete 66-term folded identity in the AIR.
 //!   * `coeffs` — the tall bivariate-Horner integer-lift component (yields the
 //!     W-cell / C-cell bindings + constrained public fold).
@@ -63,12 +63,13 @@ use crate::binding::{
     CCellRelation, HashIoRelation, MsgLinkRelation, WCellRelation, STREAM_ID_CTILDE_ABSORB,
     STREAM_ID_SIB_SQUEEZE,
 };
-use crate::constants::{K, N};
+use crate::constants::N;
 use crate::msglink::{self, MsgLinkEval, MSG_FIELD_ID};
 use crate::private_key_eval::{
     self, PrivateDeviceEvals, PrivateKeyBase, PrivateKeyEvalBindings, PrivateKeyEvalClaims,
     PrivateKeyEvalError, PrivateKeyEvalRelations, PrivateKeyEvalWitness, PrivateKeyTraceComponents,
 };
+use crate::profile::{MlDsaProfile, ML_DSA_44, ML_DSA_65};
 use crate::sponge_link::{
     bridge_preprocessed_column_count, BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation,
     BRIDGE_BASE_COLS, BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, SINK_BASE_COLS,
@@ -179,7 +180,7 @@ impl PermIdPlan {
 // Public proof struct.
 // =============================================================================
 
-/// The public statement + all prover claims of a composed ML-DSA-65 proof.
+/// The public statement and prover claims of a composed ML-DSA proof.
 ///
 /// The verifier reconstructs every component's shape from public inputs,
 /// public lengths, and claimed sums, with no witness.
@@ -205,12 +206,12 @@ pub struct MlDsaProof {
 
 /// The sponge shapes for a statement, derived from PUBLIC lengths/mode only.
 ///
-/// * tr: private-public-key mode only; absorbs `pkEncode` (1,952 bytes),
+/// * tr: private-public-key mode only; absorbs the selected `pkEncode`,
 ///   squeezes 1 block.
 /// * µ:  private-message mode only; absorbs `tr ‖ 0x00 ‖ 0x00 ‖ M`
 ///   (len `66 + |M|`), squeezes 1 block.
-/// * c̃:  absorbs `µ ‖ w1Encode(w1')` (len 832 = 64 + 768), squeezes 1 block.
-/// * SIB: absorbs `c̃` (48 bytes), squeezes the fixed five-block resource cap.
+/// * c̃: absorbs `µ ‖ w1Encode(w1')` and squeezes 1 block.
+/// * SIB: absorbs the selected `c̃` and squeezes the selected resource cap.
 struct Shapes {
     tr: Option<Shape>,
     mu: Option<Shape>,
@@ -232,11 +233,16 @@ fn validate_device_message_capacity(message_len: usize) -> Result<(), PrivateKey
 /// `stream_base`. `native_mu` omits the private µ job.
 /// Permutation-id bases stay 0. The proof-wide [`stwo_keccak::sponge_v::JobList`]
 /// stamps the global plan over the concatenated job list.
-fn shapes(message_len: usize, stream_base: u32, native_mu: bool, private_key: bool) -> Shapes {
+fn shapes(
+    profile: MlDsaProfile,
+    message_len: usize,
+    stream_base: u32,
+    native_mu: bool,
+    private_key: bool,
+) -> Shapes {
     debug_assert!(!(native_mu && private_key));
     let b = stream_base;
-    let tr = private_key
-        .then(|| Shape::new(crate::constants::PK_BYTES, 1, b + TR_ABSORB, b + TR_SQUEEZE));
+    let tr = private_key.then(|| Shape::new(profile.pk_bytes(), 1, b + TR_ABSORB, b + TR_SQUEEZE));
     let mu = (!native_mu).then(|| {
         if private_key {
             Shape::with_message_capacity(
@@ -251,10 +257,15 @@ fn shapes(message_len: usize, stream_base: u32, native_mu: bool, private_key: bo
             Shape::new(66 + message_len, 1, b + MU_ABSORB, b + MU_SQUEEZE)
         }
     });
-    let ct = Shape::new(64 + 768, 1, b + CT_ABSORB, b + CT_SQUEEZE);
+    let ct = Shape::new(
+        64 + profile.w1_encoded_bytes(),
+        1,
+        b + CT_ABSORB,
+        b + CT_SQUEEZE,
+    );
     let sib = Shape::new(
-        48,
-        sampleinball::MAX_SIB_SQUEEZE_BLOCKS,
+        profile.c_tilde_bytes(),
+        profile.sample_in_ball_squeeze_blocks(),
         b + SIB_ABSORB,
         b + STREAM_ID_SIB_SQUEEZE,
     );
@@ -265,7 +276,7 @@ fn shapes(message_len: usize, stream_base: u32, native_mu: bool, private_key: bo
 /// private µ, then c̃ and SIB. `native_mu = true` is the hosted-public
 /// issuer/device shape; `false` is standalone/private revocation.
 pub fn keccak_job_shapes(message_len: usize, stream_base: u32, native_mu: bool) -> Vec<Shape> {
-    let sh = shapes(message_len, stream_base, native_mu, false);
+    let sh = shapes(ML_DSA_65, message_len, stream_base, native_mu, false);
     sh.tr
         .into_iter()
         .chain(sh.mu)
@@ -287,7 +298,7 @@ pub fn try_hosted_private_key_keccak_job_shapes(
     stream_base: u32,
 ) -> Result<Vec<Shape>, PrivateKeyEvalError> {
     validate_device_message_capacity(message_len)?;
-    let sh = shapes(message_len, stream_base, false, true);
+    let sh = shapes(ML_DSA_44, message_len, stream_base, false, true);
     Ok(sh
         .tr
         .into_iter()
@@ -306,9 +317,10 @@ fn coeffs_log_size() -> u32 {
 fn decomp_log_size() -> u32 {
     padded_log_size(decomp::N_PAIRS)
 }
-/// The fixed five-block SIB component log size.
-fn sib_log_size() -> u32 {
-    padded_log_size((sampleinball::MAX_SIB_SQUEEZE_BYTES + N).max(sampleinball::N_ACCESSES))
+fn sib_log_size(profile: MlDsaProfile) -> u32 {
+    let stream_bytes = RATE * profile.sample_in_ball_squeeze_blocks();
+    let accesses = 2 * N + 3 * profile.tau();
+    padded_log_size((stream_bytes + N).max(accesses))
 }
 
 // =============================================================================
@@ -393,20 +405,21 @@ fn draw_relations_common(
 
 fn mix_public(
     channel: &mut Blake2sChannel,
+    ctx: &LayoutCtx,
     input: Option<&MlDsaVerifyInput>,
     message: &[u8],
     namespace: &str,
     private_message: bool,
-    private_key: bool,
     stream_base: u32,
 ) {
+    channel.mix_u64(ctx.profile.transcript_tag());
     // Mix the instance role into the transcript. This prevents replay between
     // same-shaped device and revocation instances.
     channel.mix_u64(namespace.len() as u64);
     for b in namespace.as_bytes() {
         channel.mix_u64(*b as u64);
     }
-    if private_key {
+    if ctx.private_key {
         channel.mix_u64(HOSTED_PRIVATE_KEY_MODE_TAG);
     } else {
         let input = input.expect("public-key statement requires the public key");
@@ -415,7 +428,7 @@ fn mix_public(
             channel.mix_u64(*b as u64);
         }
         // t1 coeffs (copy of proof.rs::mix_public).
-        for i in 0..K {
+        for i in 0..ctx.profile.k() {
             for m in 0..N {
                 channel.mix_u64(input.t1[i][m] as u64);
             }
@@ -459,7 +472,11 @@ fn bridge_log_size(len: usize) -> u32 {
 /// transcript or build a component. Hosted private-key mode computes `tr` only
 /// as a private service witness.
 pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
-    let bytes = full_squeeze(&input.encode_pk(), 1);
+    native_tr_for(ML_DSA_65, input)
+}
+
+pub fn native_tr_for(profile: MlDsaProfile, input: &MlDsaVerifyInput) -> [u8; 64] {
+    let bytes = full_squeeze(&input.encode_pk_for(profile), 1);
     let mut tr = [0u8; 64];
     tr.copy_from_slice(&bytes[..64]);
     tr
@@ -468,8 +485,12 @@ pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
 /// Verifier-native public-message `µ = SHAKE256(tr ‖ 0x00 ‖ 0x00 ‖ M, 64)`.
 /// This function derives `tr` from `pkEncode`.
 pub fn native_public_mu(input: &MlDsaVerifyInput) -> [u8; 64] {
+    native_public_mu_for(ML_DSA_65, input)
+}
+
+fn native_public_mu_for(profile: MlDsaProfile, input: &MlDsaVerifyInput) -> [u8; 64] {
     let mut absorbed = Vec::with_capacity(66 + input.message.len());
-    absorbed.extend_from_slice(&native_tr(input));
+    absorbed.extend_from_slice(&native_tr_for(profile, input));
     absorbed.extend_from_slice(&[0x00, 0x00]);
     absorbed.extend_from_slice(&input.message);
     let bytes = full_squeeze(&absorbed, 1);
@@ -485,6 +506,7 @@ pub fn native_public_mu(input: &MlDsaVerifyInput) -> [u8; 64] {
 /// - private-key mode: public `0x00 ‖ 0x00 ‖ M` into µ-absorb@64; the
 ///   in-circuit tr→µ bridge supplies positions 0..64.
 fn prefix_eval(
+    profile: MlDsaProfile,
     input: Option<&MlDsaVerifyInput>,
     message: &[u8],
     stream_base: u32,
@@ -499,7 +521,11 @@ fn prefix_eval(
         (stream_base + MU_ABSORB, 64, bytes)
     } else if native_mu {
         let input = input.expect("native µ requires the public key");
-        (stream_base + CT_ABSORB, 0, native_public_mu(input).to_vec())
+        (
+            stream_base + CT_ABSORB,
+            0,
+            native_public_mu_for(profile, input).to_vec(),
+        )
     } else {
         let input = input.expect("private-message prefix requires the public key");
         let mut bytes = Vec::with_capacity(66);
@@ -551,6 +577,7 @@ fn msg_bridge_eval(
 /// Fixed sponge bridges. Private-public-key mode prepends pk→tr and tr→µ;
 /// private-µ modes include µ→c̃; native-µ mode starts at w1Encode→c̃.
 fn bridge_evals(
+    profile: MlDsaProfile,
     ns: &str,
     stream_base: u32,
     native_mu: bool,
@@ -571,11 +598,11 @@ fn bridge_evals(
         bridges.push(BridgeEval {
             tag: "pk_tr",
             ns: ns.to_string(),
-            log_size: bridge_log_size(crate::constants::PK_BYTES),
+            log_size: bridge_log_size(profile.pk_bytes()),
             src: SrcRelation::FieldBytes(field.clone(), HOSTED_DEVICE_PK_FIELD_ID),
             dst_stream: b + TR_ABSORB,
             dst_off: 0,
-            len: crate::constants::PK_BYTES,
+            len: profile.pk_bytes(),
             hash_io: hash_io.clone(),
         });
         bridges.push(BridgeEval {
@@ -604,21 +631,21 @@ fn bridge_evals(
     let w1enc = BridgeEval {
         tag: "w1enc",
         ns: ns.to_string(),
-        log_size: bridge_log_size(768),
+        log_size: bridge_log_size(profile.w1_encoded_bytes()),
         src: SrcRelation::HashIo(hash_io.clone(), b + STREAM_ID_CTILDE_ABSORB, 0),
         dst_stream: b + CT_ABSORB,
         dst_off: 64,
-        len: 768,
+        len: profile.w1_encoded_bytes(),
         hash_io: hash_io.clone(),
     };
     let ct_sib = BridgeEval {
         tag: "ct_sib",
         ns: ns.to_string(),
-        log_size: bridge_log_size(48),
+        log_size: bridge_log_size(profile.c_tilde_bytes()),
         src: SrcRelation::HashIo(hash_io.clone(), b + CT_SQUEEZE, 0),
         dst_stream: b + SIB_ABSORB,
         dst_off: 0,
-        len: 48,
+        len: profile.c_tilde_bytes(),
         hash_io: hash_io.clone(),
     };
     bridges.extend([w1enc, ct_sib]);
@@ -629,6 +656,7 @@ fn bridge_evals(
 /// mode needs only the c̃ tail; private µ adds its tail, and private-key mode
 /// adds the `tr` tail too.
 fn sink_evals(
+    profile: MlDsaProfile,
     ns: &str,
     message_len: usize,
     stream_base: u32,
@@ -637,7 +665,7 @@ fn sink_evals(
     hash_io: &HashIoRelation,
 ) -> Vec<SqueezeSinkEval> {
     let b = stream_base;
-    let sh = shapes(message_len, b, native_mu, private_key);
+    let sh = shapes(profile, message_len, b, native_mu, private_key);
     let mut sinks = Vec::with_capacity(if private_key {
         3
     } else if native_mu {
@@ -669,13 +697,13 @@ fn sink_evals(
             hash_io: hash_io.clone(),
         });
     }
-    let ct_len = RATE * sh.ct.n_squeeze - 48;
+    let ct_len = RATE * sh.ct.n_squeeze - profile.c_tilde_bytes();
     let ct = SqueezeSinkEval {
         tag: "ct",
         ns: ns.to_string(),
         log_size: bridge_log_size(ct_len),
         stream: b + CT_SQUEEZE,
-        off: 48,
+        off: profile.c_tilde_bytes() as u32,
         len: ct_len,
         hash_io: hash_io.clone(),
     };
@@ -697,6 +725,7 @@ fn sink_evals(
 /// `preprocessed_ids()` read only `tag` + public shape, never the relation (and
 /// never the stream ids, so `stream_base = 0` here is shape-neutral).
 fn all_preprocessed_ids(
+    profile: MlDsaProfile,
     ns: &str,
     message_len: usize,
     hosted: bool,
@@ -710,15 +739,15 @@ fn all_preprocessed_ids(
     let mut ids = Vec::new();
     // coeffs + its unified range table (standalone only; hosted uses the
     // proof-wide provider module).
-    ids.extend(coeffs::coeffs_preprocessed_ids());
+    ids.extend(coeffs::coeffs_preprocessed_ids_for(profile));
     if !hosted {
         ids.extend(coeffs_tables::range_table_preprocessed_ids());
     }
     if private_key {
-        ids.extend(private_key_eval::preprocessed_ids());
+        ids.extend(private_key_eval::preprocessed_ids_for(profile));
     }
     // decomp (+ its rc kinds).
-    ids.extend(decomp::decomp_preprocessed_ids());
+    ids.extend(decomp::decomp_preprocessed_ids_for(profile));
     for kind in decomp_tables::RcKind::ALL {
         ids.push(kind.value_column_id());
     }
@@ -733,16 +762,33 @@ fn all_preprocessed_ids(
             msg_bridge_eval(ns, message_len, 0, &msglink, None, &hash_io).preprocessed_ids(),
         );
     }
-    for b in bridge_evals(ns, 0, native_mu, private_key, field.as_ref(), &hash_io) {
+    for b in bridge_evals(
+        profile,
+        ns,
+        0,
+        native_mu,
+        private_key,
+        field.as_ref(),
+        &hash_io,
+    ) {
         ids.extend(b.preprocessed_ids());
     }
-    for s in sink_evals(ns, message_len, 0, native_mu, private_key, &hash_io) {
+    for s in sink_evals(
+        profile,
+        ns,
+        message_len,
+        0,
+        native_mu,
+        private_key,
+        &hash_io,
+    ) {
         ids.extend(s.preprocessed_ids());
     }
     ids
 }
 
 fn all_preprocessed_log_sizes(
+    profile: MlDsaProfile,
     message_len: usize,
     hosted: bool,
     public_message: bool,
@@ -751,7 +797,10 @@ fn all_preprocessed_log_sizes(
     let native_mu = public_message && !private_key;
     let mut sizes = Vec::new();
     let cls = coeffs_log_size();
-    sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids().len()]);
+    sizes.extend(vec![
+        cls;
+        coeffs::coeffs_preprocessed_ids_for(profile).len()
+    ]);
     if !hosted {
         sizes.extend(vec![
             coeffs_tables::range_table_log_size();
@@ -766,7 +815,7 @@ fn all_preprocessed_log_sizes(
     for kind in decomp_tables::RcKind::ALL {
         sizes.push(kind.log_size());
     }
-    let sls = sib_log_size();
+    let sls = sib_log_size(profile);
     sizes.extend(vec![sls; sampleinball::sib_preprocessed_ids().len()]);
     for kind in sib_tables::RcKind::ALL {
         sizes.push(kind.log_size());
@@ -778,35 +827,46 @@ fn all_preprocessed_log_sizes(
             bridge_preprocessed_column_count(log_size, message_len)
         ]);
     }
-    for len in bridge_lens(native_mu, private_key) {
+    for len in bridge_lens(profile, native_mu, private_key) {
         let log_size = bridge_log_size(len);
         sizes.extend(vec![
             log_size;
             bridge_preprocessed_column_count(log_size, len)
         ]);
     }
-    for len in sink_lens(message_len, native_mu, private_key) {
+    for len in sink_lens(profile, message_len, native_mu, private_key) {
         sizes.extend(vec![bridge_log_size(len); 2]);
     }
     sizes
 }
 
-fn bridge_lens(native_mu: bool, private_key: bool) -> Vec<usize> {
+fn bridge_lens(profile: MlDsaProfile, native_mu: bool, private_key: bool) -> Vec<usize> {
     if private_key {
-        vec![crate::constants::PK_BYTES, 64, 64, 768, 48]
+        vec![
+            profile.pk_bytes(),
+            64,
+            64,
+            profile.w1_encoded_bytes(),
+            profile.c_tilde_bytes(),
+        ]
     } else if native_mu {
-        vec![768, 48]
+        vec![profile.w1_encoded_bytes(), profile.c_tilde_bytes()]
     } else {
-        vec![64, 768, 48]
+        vec![64, profile.w1_encoded_bytes(), profile.c_tilde_bytes()]
     }
 }
-fn sink_lens(message_len: usize, native_mu: bool, private_key: bool) -> Vec<usize> {
-    let sh = shapes(message_len, 0, native_mu, private_key);
+fn sink_lens(
+    profile: MlDsaProfile,
+    message_len: usize,
+    native_mu: bool,
+    private_key: bool,
+) -> Vec<usize> {
+    let sh = shapes(profile, message_len, 0, native_mu, private_key);
     sh.tr
         .into_iter()
         .map(|tr| RATE * tr.n_squeeze - 64)
         .chain(sh.mu.into_iter().map(|mu| RATE * mu.n_squeeze - 64))
-        .chain([RATE * sh.ct.n_squeeze - 48])
+        .chain([RATE * sh.ct.n_squeeze - profile.c_tilde_bytes()])
         .collect()
 }
 
@@ -814,9 +874,10 @@ fn sink_lens(message_len: usize, native_mu: bool, private_key: bool) -> Vec<usiz
 /// relations are drawn, so bridge/sink descriptors use `dummy()` relations —
 /// their `gen_preprocessed()` reads only `tag` + public shape).
 ///
-/// The SIB schedule is fixed at the five-block resource cap; no signature
+/// The SIB schedule is fixed by the verifier-selected profile. No signature
 /// witness enters tree 0.
 fn gen_all_preprocessed(
+    profile: MlDsaProfile,
     message_len: usize,
     hosted: bool,
     public_message: bool,
@@ -828,20 +889,20 @@ fn gen_all_preprocessed(
     let native_mu = public_message && !private_key;
     let mut cols = Vec::new();
     let cls = coeffs_log_size();
-    cols.extend(coeffs::gen_coeffs_preprocessed(cls));
+    cols.extend(coeffs::gen_coeffs_preprocessed_for(profile, cls));
     if !hosted {
         cols.extend(coeffs_tables::gen_range_table_preprocessed());
     }
     if private_key {
-        cols.extend(private_key_eval::gen_preprocessed());
+        cols.extend(private_key_eval::gen_preprocessed_for(profile));
     }
     let dls = decomp_log_size();
-    cols.extend(decomp::gen_decomp_preprocessed(dls));
+    cols.extend(decomp::gen_decomp_preprocessed_for(profile, dls));
     for kind in decomp_tables::RcKind::ALL {
         cols.push(decomp_tables::gen_table_preprocessed(kind));
     }
-    let sls = sib_log_size();
-    cols.extend(sampleinball::gen_sib_preprocessed(sls));
+    let sls = sib_log_size(profile);
+    cols.extend(sampleinball::gen_sib_preprocessed_for(profile, sls));
     for kind in sib_tables::RcKind::ALL {
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
@@ -850,10 +911,26 @@ fn gen_all_preprocessed(
             msg_bridge_eval("", message_len, 0, &msglink, None, &hash_io).gen_preprocessed(),
         );
     }
-    for b in bridge_evals("", 0, native_mu, private_key, field.as_ref(), &hash_io) {
+    for b in bridge_evals(
+        profile,
+        "",
+        0,
+        native_mu,
+        private_key,
+        field.as_ref(),
+        &hash_io,
+    ) {
         cols.extend(b.gen_preprocessed());
     }
-    for s in sink_evals("", message_len, 0, native_mu, private_key, &hash_io) {
+    for s in sink_evals(
+        profile,
+        "",
+        message_len,
+        0,
+        native_mu,
+        private_key,
+        &hash_io,
+    ) {
         cols.extend(s.gen_preprocessed());
     }
     cols
@@ -1101,6 +1178,7 @@ impl Claims {
 
 /// Everything the layout builders need that is public-derivable from `input`.
 struct LayoutCtx {
+    profile: MlDsaProfile,
     hosted: bool,
     /// Hosted PUBLIC-message mode: µ is verifier-native and the µ sponge plus
     /// message bridge are omitted unless `private_key` requires in-circuit µ.
@@ -1112,8 +1190,15 @@ struct LayoutCtx {
 }
 
 impl LayoutCtx {
-    fn new(message_len: usize, hosted: bool, public_message: bool, private_key: bool) -> Self {
+    fn new(
+        profile: MlDsaProfile,
+        message_len: usize,
+        hosted: bool,
+        public_message: bool,
+        private_key: bool,
+    ) -> Self {
         Self {
+            profile,
             hosted,
             public_message,
             private_key,
@@ -1126,11 +1211,18 @@ impl LayoutCtx {
     }
 
     fn bridge_claims_len(&self) -> usize {
-        usize::from(!self.public_message) + bridge_lens(self.native_mu(), self.private_key).len()
+        usize::from(!self.public_message)
+            + bridge_lens(self.profile, self.native_mu(), self.private_key).len()
     }
 
     fn sink_claims_len(&self) -> usize {
-        sink_lens(self.message_len, self.native_mu(), self.private_key).len()
+        sink_lens(
+            self.profile,
+            self.message_len,
+            self.native_mu(),
+            self.private_key,
+        )
+        .len()
     }
 }
 
@@ -1156,7 +1248,7 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
         t.push(kind.log_size());
     }
     // 5. sib + 6. rc ×3.
-    let sls = sib_log_size();
+    let sls = sib_log_size(ctx.profile);
     t.extend(vec![sls; sampleinball::N_BASE_COLS]);
     for kind in sib_tables::RcKind::ALL {
         t.push(kind.log_size());
@@ -1171,11 +1263,16 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     if !ctx.public_message {
         t.extend(vec![bridge_log_size(ctx.message_len); BRIDGE_BASE_COLS]);
     }
-    for len in bridge_lens(ctx.native_mu(), ctx.private_key) {
+    for len in bridge_lens(ctx.profile, ctx.native_mu(), ctx.private_key) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; BRIDGE_BASE_COLS]);
     }
-    for len in sink_lens(ctx.message_len, ctx.native_mu(), ctx.private_key) {
+    for len in sink_lens(
+        ctx.profile,
+        ctx.message_len,
+        ctx.native_mu(),
+        ctx.private_key,
+    ) {
         let ls = bridge_log_size(len);
         t.extend(vec![ls; SINK_BASE_COLS]);
     }
@@ -1203,7 +1300,7 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
         }
     }
     // 5. sib + 6. rc ×3.
-    let sls = sib_log_size();
+    let sls = sib_log_size(ctx.profile);
     i.extend(vec![sls; sampleinball::N_INTERACTION_COLS]);
     for kind in sib_tables::RcKind::ALL {
         for _ in 0..sib_tables::RC_TABLE_INTERACTION_COLS {
@@ -1228,11 +1325,16 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
             BRIDGE_INTERACTION_COLS
         ]);
     }
-    for len in bridge_lens(ctx.native_mu(), ctx.private_key) {
+    for len in bridge_lens(ctx.profile, ctx.native_mu(), ctx.private_key) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; BRIDGE_INTERACTION_COLS]);
     }
-    for len in sink_lens(ctx.message_len, ctx.native_mu(), ctx.private_key) {
+    for len in sink_lens(
+        ctx.profile,
+        ctx.message_len,
+        ctx.native_mu(),
+        ctx.private_key,
+    ) {
         let ls = bridge_log_size(len);
         i.extend(vec![ls; SINK_INTERACTION_COLS]);
     }
@@ -1251,6 +1353,7 @@ fn prefix_n_interaction() -> usize {
 fn layout_for(ctx: &LayoutCtx) -> TreeLayout {
     TreeLayout {
         preprocessed: all_preprocessed_log_sizes(
+            ctx.profile,
             ctx.message_len,
             ctx.hosted,
             ctx.public_message,
@@ -1282,13 +1385,14 @@ struct SpongeOutputs {
 /// Full squeeze outputs for the in-service jobs. Public-message mode computes
 /// µ natively and therefore has no µ service output unless the key is private.
 fn sponge_outputs(
+    profile: MlDsaProfile,
     witness: &MlDsaWitness,
     input: &MlDsaVerifyInput,
     native_mu: bool,
     private_key: bool,
 ) -> SpongeOutputs {
     SpongeOutputs {
-        tr: private_key.then(|| full_squeeze(&input.encode_pk(), 1)),
+        tr: private_key.then(|| full_squeeze(&input.encode_pk_for(profile), 1)),
         mu: (!native_mu).then(|| full_squeeze(&witness.sponge.mu_absorbed, 1)),
         ct: full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
     }
@@ -1337,6 +1441,7 @@ fn build_components(
         allocator,
         CoeffsEval {
             log_size: coeffs_log_size(),
+            profile: ctx.profile,
             r: rel.r,
             s: rel.s,
             relations: rel.coeffs.clone(),
@@ -1346,6 +1451,7 @@ fn build_components(
     let private_key = ctx.private_key.then(|| {
         PrivateKeyTraceComponents::new(
             allocator,
+            ctx.profile,
             rel.r,
             rel.s,
             rel.private_key
@@ -1372,6 +1478,7 @@ fn build_components(
         allocator,
         DecompEval {
             log_size: decomp_log_size(),
+            profile: ctx.profile,
             ct_stream: stream_base + STREAM_ID_CTILDE_ABSORB,
             relations: rel.decomp.clone(),
         },
@@ -1396,7 +1503,8 @@ fn build_components(
     let sib = FrameworkComponent::new(
         allocator,
         SibEval {
-            log_size: sib_log_size(),
+            log_size: sib_log_size(ctx.profile),
+            profile: ctx.profile,
             ns: ns.to_string(),
             sib_stream: stream_base + STREAM_ID_SIB_SQUEEZE,
             relations: rel.sib.clone(),
@@ -1434,6 +1542,7 @@ fn build_components(
     let prefix = FrameworkComponent::new(
         allocator,
         prefix_eval(
+            ctx.profile,
             input,
             message,
             stream_base,
@@ -1459,6 +1568,7 @@ fn build_components(
     });
     let bridge_claim_offset = usize::from(msg.is_some());
     let bridge_descs = bridge_evals(
+        ctx.profile,
         ns,
         stream_base,
         ctx.native_mu(),
@@ -1474,6 +1584,7 @@ fn build_components(
         })
         .collect();
     let sink_descs = sink_evals(
+        ctx.profile,
         ns,
         message.len(),
         stream_base,
@@ -1487,15 +1598,19 @@ fn build_components(
         .map(|(idx, s)| FrameworkComponent::new(allocator, s, claims.sinks[idx]))
         .collect();
     let private_fold = ctx.private_key.then(|| {
-        private_key_eval::build_fold_component(
+        FrameworkComponent::new(
             allocator,
-            rel.rho_rlc,
-            rel.r,
-            rel.s,
-            rel.private_key
-                .clone()
-                .expect("private-key relations were drawn"),
-            private_device_evals.expect("private-key evaluations were parsed"),
+            private_key_eval::PrivateFoldEval {
+                profile: ctx.profile,
+                rho_rlc: rel.rho_rlc,
+                r: rel.r,
+                s: rel.s,
+                relations: rel
+                    .private_key
+                    .clone()
+                    .expect("private-key relations were drawn"),
+                evals: private_device_evals.expect("private-key evaluations were parsed"),
+            },
             claims
                 .private_key
                 .as_ref()
@@ -1610,6 +1725,7 @@ impl MlDsaProver {
             "hosted ML-DSA requires a shared range provider; use MlDsaProver::hosted"
         );
         Self::build(
+            ML_DSA_65,
             witness,
             input,
             shared_field,
@@ -1620,7 +1736,9 @@ impl MlDsaProver {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
+        profile: MlDsaProfile,
         witness: MlDsaWitness,
         mut input: MlDsaVerifyInput,
         shared_field: Option<SharedFieldRelation>,
@@ -1629,15 +1747,23 @@ impl MlDsaProver {
         shared_range: Option<SharedRangeRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
+        assert_eq!(witness.profile, profile, "ML-DSA witness/profile mismatch");
         input.tr = if private_key {
             [0; 64]
         } else {
-            native_tr(&input)
+            native_tr_for(profile, &input)
         };
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(input.message.len(), hosted, public_message, private_key);
+        let ctx = LayoutCtx::new(
+            profile,
+            input.message.len(),
+            hosted,
+            public_message,
+            private_key,
+        );
         let coeffs_rc_uses = coeffs::gen_coeffs_rc_uses(&witness);
-        let sponge_outputs = sponge_outputs(&witness, &input, ctx.native_mu(), private_key);
+        let sponge_outputs =
+            sponge_outputs(profile, &witness, &input, ctx.native_mu(), private_key);
         let claims = Claims {
             hosted,
             ..Claims::default()
@@ -1679,6 +1805,7 @@ impl MlDsaProver {
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         Self::build(
+            ML_DSA_65,
             witness,
             input,
             Some(shared_field),
@@ -1701,6 +1828,7 @@ impl MlDsaProver {
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
         Self::build(
+            ML_DSA_65,
             witness,
             input,
             None,
@@ -1728,9 +1856,10 @@ impl MlDsaProver {
         bindings: PrivateKeyEvalBindings,
     ) -> Result<Self, PrivateKeyEvalError> {
         validate_device_message_capacity(input.message.len())?;
-        let private_key_witness = PrivateKeyEvalWitness::from_input(&input)?;
+        let private_key_witness = PrivateKeyEvalWitness::from_input_for(ML_DSA_44, &input)?;
         let private_key_base = private_key_eval::gen_private_key_base(&private_key_witness);
         let mut prover = Self::build(
+            ML_DSA_44,
             witness,
             input,
             Some(shared_field),
@@ -1767,6 +1896,7 @@ impl MlDsaProver {
     /// µ, then c̃ and SIB.
     pub fn keccak_jobs(&self) -> (Vec<Shape>, Vec<Vec<u8>>) {
         let job_shapes = shapes(
+            self.ctx.profile,
             self.input.message.len(),
             self.stream_base,
             self.ctx.native_mu(),
@@ -1780,7 +1910,7 @@ impl MlDsaProver {
             .collect();
         let mut streams = Vec::with_capacity(shapes.len());
         if self.ctx.private_key {
-            streams.push(self.input.encode_pk());
+            streams.push(self.input.encode_pk_for(self.ctx.profile));
         }
         if !self.ctx.native_mu() {
             streams.push(self.witness.sponge.mu_absorbed.clone());
@@ -1838,7 +1968,12 @@ impl MlDsaProver {
 }
 
 /// Byte payloads for the fixed bridges, in [`bridge_evals`] order.
-fn bridge_bytes(outputs: &SpongeOutputs, pk_bytes: Option<&[u8]>, w1_bytes: &[u8]) -> Vec<Vec<u8>> {
+fn bridge_bytes(
+    profile: MlDsaProfile,
+    outputs: &SpongeOutputs,
+    pk_bytes: Option<&[u8]>,
+    w1_bytes: &[u8],
+) -> Vec<Vec<u8>> {
     let mut bytes = Vec::new();
     if let Some(tr) = &outputs.tr {
         bytes.push(
@@ -1851,12 +1986,15 @@ fn bridge_bytes(outputs: &SpongeOutputs, pk_bytes: Option<&[u8]>, w1_bytes: &[u8
     if let Some(mu) = &outputs.mu {
         bytes.push(mu[..64].to_vec());
     }
-    bytes.extend([w1_bytes.to_vec(), outputs.ct[..48].to_vec()]);
+    bytes.extend([
+        w1_bytes.to_vec(),
+        outputs.ct[..profile.c_tilde_bytes()].to_vec(),
+    ]);
     bytes
 }
 
 /// Byte payloads for the remaining sinks: optional `tr`, optional µ, then c̃.
-fn sink_bytes(outputs: &SpongeOutputs) -> Vec<Vec<u8>> {
+fn sink_bytes(profile: MlDsaProfile, outputs: &SpongeOutputs) -> Vec<Vec<u8>> {
     let mut bytes = Vec::new();
     if let Some(tr) = &outputs.tr {
         bytes.push(tr[64..].to_vec());
@@ -1864,7 +2002,7 @@ fn sink_bytes(outputs: &SpongeOutputs) -> Vec<Vec<u8>> {
     if let Some(mu) = &outputs.mu {
         bytes.push(mu[64..].to_vec());
     }
-    bytes.push(outputs.ct[48..].to_vec());
+    bytes.push(outputs.ct[profile.c_tilde_bytes()..].to_vec());
     bytes
 }
 
@@ -1872,11 +2010,11 @@ impl Air for MlDsaProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         mix_public(
             channel,
+            &self.ctx,
             Some(&self.input),
             &self.input.message,
             &self.namespace,
             self.private_message,
-            self.ctx.private_key,
             self.stream_base,
         );
     }
@@ -1901,6 +2039,7 @@ impl Air for MlDsaProver {
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids(
+            self.ctx.profile,
             &self.namespace,
             self.ctx.message_len,
             self.ctx.hosted,
@@ -1912,6 +2051,7 @@ impl Air for MlDsaProver {
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
         Ok(gen_all_preprocessed(
+            self.ctx.profile,
             self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
@@ -1941,7 +2081,7 @@ impl AirProver for MlDsaProver {
     fn max_log_size(&self) -> u32 {
         let base_max = coeffs_log_size()
             .max(decomp_log_size())
-            .max(sib_log_size())
+            .max(sib_log_size(self.ctx.profile))
             .max(coeffs_tables::range_table_log_size());
         if self.ctx.private_key {
             base_max.max(private_key_eval::NTT_BUTTERFLY_LOG_SIZE)
@@ -1954,6 +2094,7 @@ impl AirProver for MlDsaProver {
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         tb.extend_evals(gen_all_preprocessed(
+            self.ctx.profile,
             self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
@@ -1972,6 +2113,7 @@ impl AirProver for MlDsaProver {
         selected_ids: &[PreProcessedColumnId],
     ) {
         let ids = all_preprocessed_ids(
+            self.ctx.profile,
             &self.namespace,
             self.ctx.message_len,
             self.ctx.hosted,
@@ -1979,6 +2121,7 @@ impl AirProver for MlDsaProver {
             self.ctx.private_key,
         );
         let cols = gen_all_preprocessed(
+            self.ctx.profile,
             self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
@@ -2007,6 +2150,7 @@ impl AirProver for MlDsaProver {
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         let ids = all_preprocessed_ids(
+            self.ctx.profile,
             &self.namespace,
             self.ctx.message_len,
             self.ctx.hosted,
@@ -2014,6 +2158,7 @@ impl AirProver for MlDsaProver {
             self.ctx.private_key,
         );
         let cols = gen_all_preprocessed(
+            self.ctx.profile,
             self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
@@ -2068,7 +2213,7 @@ impl AirProver for MlDsaProver {
         evals.extend(self.decomp_rc_mult.clone());
 
         // 5. sib base + 6. rc mult.
-        let sls = sib_log_size();
+        let sls = sib_log_size(self.ctx.profile);
         evals.extend(sampleinball::gen_sib_base_trace(&self.witness, sls));
         let sib_metadata = sampleinball::gen_sib_metadata(&self.witness);
         self.sib_rc_mult = sib_tables::RcKind::ALL
@@ -2090,6 +2235,7 @@ impl AirProver for MlDsaProver {
         let dummy_msglink = MsgLinkRelation::dummy();
         evals.extend(
             prefix_eval(
+                self.ctx.profile,
                 Some(&self.input),
                 &self.input.message,
                 self.stream_base,
@@ -2114,10 +2260,19 @@ impl AirProver for MlDsaProver {
                 .gen_base(&self.input.message),
             );
         }
-        let pk_bytes = self.ctx.private_key.then(|| self.input.encode_pk());
+        let pk_bytes = self
+            .ctx
+            .private_key
+            .then(|| self.input.encode_pk_for(self.ctx.profile));
         let dummy_field = self.ctx.private_key.then(FieldBytesRelation::dummy);
-        let bbytes = bridge_bytes(outputs, pk_bytes.as_deref(), &self.decomp_w1_bytes);
+        let bbytes = bridge_bytes(
+            self.ctx.profile,
+            outputs,
+            pk_bytes.as_deref(),
+            &self.decomp_w1_bytes,
+        );
         let bridge_descs = bridge_evals(
+            self.ctx.profile,
             &self.namespace,
             self.stream_base,
             self.ctx.native_mu(),
@@ -2143,12 +2298,13 @@ impl AirProver for MlDsaProver {
             assert_eq!(mu[..64], self.witness.sponge.mu_squeezed[..64]);
         }
         assert_eq!(
-            outputs.ct[..48],
-            self.input.c_tilde[..],
+            outputs.ct[..self.ctx.profile.c_tilde_bytes()],
+            self.input.c_tilde[..self.ctx.profile.c_tilde_bytes()],
             "c̃ squeeze prefix mismatch"
         );
-        let sbytes = sink_bytes(outputs);
+        let sbytes = sink_bytes(self.ctx.profile, outputs);
         let sink_descs = sink_evals(
+            self.ctx.profile,
             &self.namespace,
             self.input.message.len(),
             self.stream_base,
@@ -2234,7 +2390,7 @@ impl AirProver for MlDsaProver {
         }
 
         // 5. sib interaction.
-        let sls = sib_log_size();
+        let sls = sib_log_size(self.ctx.profile);
         let sib_int = sampleinball::gen_sib_interaction(
             &self.witness,
             sls,
@@ -2265,6 +2421,7 @@ impl AirProver for MlDsaProver {
         }
 
         let (prefix_tr, prefix_sum) = prefix_eval(
+            self.ctx.profile,
             Some(&self.input),
             &self.input.message,
             self.stream_base,
@@ -2291,9 +2448,18 @@ impl AirProver for MlDsaProver {
             self.claims.bridges.push(msg_sum);
             evals.extend(msg_tr);
         }
-        let pk_bytes = self.ctx.private_key.then(|| self.input.encode_pk());
-        let bbytes = bridge_bytes(outputs, pk_bytes.as_deref(), &self.decomp_w1_bytes);
+        let pk_bytes = self
+            .ctx
+            .private_key
+            .then(|| self.input.encode_pk_for(self.ctx.profile));
+        let bbytes = bridge_bytes(
+            self.ctx.profile,
+            outputs,
+            pk_bytes.as_deref(),
+            &self.decomp_w1_bytes,
+        );
         let bridge_descs = bridge_evals(
+            self.ctx.profile,
             &self.namespace,
             self.stream_base,
             self.ctx.native_mu(),
@@ -2307,8 +2473,9 @@ impl AirProver for MlDsaProver {
             evals.extend(tr);
         }
 
-        let sbytes = sink_bytes(outputs);
+        let sbytes = sink_bytes(self.ctx.profile, outputs);
         let sink_descs = sink_evals(
+            self.ctx.profile,
             &self.namespace,
             self.input.message.len(),
             self.stream_base,
@@ -2438,7 +2605,13 @@ impl MlDsaVerifier {
     ) -> Self {
         input.tr = native_tr(&input);
         let hosted = shared_field.is_some() || public_message;
-        let ctx = LayoutCtx::new(input.message.len(), hosted, public_message, false);
+        let ctx = LayoutCtx::new(
+            ML_DSA_65,
+            input.message.len(),
+            hosted,
+            public_message,
+            false,
+        );
         let claims = Claims::from_flat(&claimed_sums, &ctx);
         Self {
             input: VerifierStatementInput::Public(Box::new(input)),
@@ -2528,7 +2701,7 @@ impl MlDsaVerifier {
         PrivateDeviceEvals::try_from_slice(&group_evals).map_err(|error| {
             VerificationError::InvalidStructure(format!("ML-DSA hosted private key: {error}"))
         })?;
-        let ctx = LayoutCtx::new(input.message.len(), true, true, true);
+        let ctx = LayoutCtx::new(ML_DSA_44, input.message.len(), true, true, true);
         let claims = Claims::from_flat(&claimed_sums, &ctx);
         Ok(Self {
             input: VerifierStatementInput::PrivateKey(input),
@@ -2574,11 +2747,11 @@ impl Air for MlDsaVerifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         mix_public(
             channel,
+            &self.ctx,
             self.input.public_key(),
             self.input.message(),
             &self.namespace,
             self.private_message,
-            self.ctx.private_key,
             self.stream_base,
         );
     }
@@ -2607,6 +2780,7 @@ impl Air for MlDsaVerifier {
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids(
+            self.ctx.profile,
             &self.namespace,
             self.ctx.message_len,
             self.ctx.hosted,
@@ -2618,6 +2792,7 @@ impl Air for MlDsaVerifier {
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
         Ok(gen_all_preprocessed(
+            self.ctx.profile,
             self.ctx.message_len,
             self.ctx.hosted,
             self.ctx.public_message,
@@ -2681,7 +2856,7 @@ pub fn prove_mldsa(
 /// the total committed M31-cell count; interaction QM31 columns are
 /// pre-expanded to 4 M31 columns in the layout.
 pub fn debug_layout(input: &MlDsaVerifyInput) -> TreeLayout {
-    let ctx = LayoutCtx::new(input.message.len(), false, false, false);
+    let ctx = LayoutCtx::new(ML_DSA_65, input.message.len(), false, false, false);
     layout_for(&ctx)
 }
 
@@ -2699,7 +2874,7 @@ pub fn try_hosted_private_key_layout(
     message_len: usize,
 ) -> Result<TreeLayout, PrivateKeyEvalError> {
     validate_device_message_capacity(message_len)?;
-    let ctx = LayoutCtx::new(message_len, true, true, true);
+    let ctx = LayoutCtx::new(ML_DSA_44, message_len, true, true, true);
     Ok(layout_for(&ctx))
 }
 
@@ -2714,7 +2889,12 @@ pub fn n_private_key_group_evals() -> usize {
     private_key_eval::PRIVATE_EVAL_COUNT
 }
 
-fn claimed_sums_len(hosted: bool, public_message: bool, private_key: bool) -> usize {
+fn claimed_sums_len(
+    profile: MlDsaProfile,
+    hosted: bool,
+    public_message: bool,
+    private_key: bool,
+) -> usize {
     let native_mu = public_message && !private_key;
     1 + usize::from(!hosted) * coeffs_tables::RANGE_TABLE_COMPONENTS
         + 1
@@ -2724,8 +2904,8 @@ fn claimed_sums_len(hosted: bool, public_message: bool, private_key: bool) -> us
         + usize::from(!hosted)
         + 1 // public prefix for the selected message/key mode
         + usize::from(!public_message)
-        + bridge_lens(native_mu, private_key).len()
-        + sink_lens(0, native_mu, private_key).len()
+        + bridge_lens(profile, native_mu, private_key).len()
+        + sink_lens(profile, 0, native_mu, private_key).len()
         + if private_key {
             // NTT butterfly, NTT scaling, t1, and the final fold replace the
             // public native-use claim.
@@ -2737,17 +2917,17 @@ fn claimed_sums_len(hosted: bool, public_message: bool, private_key: bool) -> us
 
 /// Exact claimed-sum length for hosted private-message/revocation mode.
 pub fn hosted_claimed_sums_len() -> usize {
-    claimed_sums_len(true, false, false)
+    claimed_sums_len(ML_DSA_65, true, false, false)
 }
 
 /// Exact claimed-sum length for hosted-public issuer/device native-µ mode.
 pub fn hosted_public_claimed_sums_len() -> usize {
-    claimed_sums_len(true, true, false)
+    claimed_sums_len(ML_DSA_65, true, true, false)
 }
 
 /// Exact claimed-sum length for hosted public-message/private-public-key mode.
 pub fn hosted_private_key_claimed_sums_len() -> usize {
-    claimed_sums_len(true, true, true)
+    claimed_sums_len(ML_DSA_44, true, true, true)
 }
 
 pub fn verify_mldsa(
@@ -2763,7 +2943,7 @@ pub fn verify_mldsa(
         VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
     })?;
     if proof.group_evals.len() != n_group_evals()
-        || proof.claimed_sums.len() != claimed_sums_len(false, false, false)
+        || proof.claimed_sums.len() != claimed_sums_len(ML_DSA_65, false, false, false)
     {
         return Err(VerificationError::InvalidStructure(
             "ML-DSA statement: bad claim shape".to_string(),
@@ -2846,7 +3026,7 @@ mod tests {
     #[test]
     fn prover_cache_equals_fresh_sponge_outputs_in_both_message_modes() {
         let (witness, input) = witness_and_input();
-        let expected_private = sponge_outputs(&witness, &input, false, false);
+        let expected_private = sponge_outputs(ML_DSA_65, &witness, &input, false, false);
         let private = MlDsaProver::new(
             witness.clone(),
             input.clone(),
@@ -2855,7 +3035,7 @@ mod tests {
         );
         assert_eq!(private.sponge_outputs, expected_private);
 
-        let expected_public = sponge_outputs(&witness, &input, true, false);
+        let expected_public = sponge_outputs(ML_DSA_65, &witness, &input, true, false);
         let public = MlDsaProver::hosted_public(
             witness,
             input,

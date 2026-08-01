@@ -1,4 +1,4 @@
-//! ML-DSA-65 mdoc extraction checks.
+//! Mixed-profile ML-DSA mdoc extraction checks.
 //!
 //! These tests check issuer and device signatures and fixed public resource
 //! shapes.

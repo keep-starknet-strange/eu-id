@@ -96,6 +96,9 @@ pub const ZETA: u32 = 1753;
 /// RFC 9964 and the IANA COSE Algorithms registry assign `-49`.
 pub const COSE_ALG_ML_DSA_65: i64 = -49;
 
+/// COSE algorithm identifier for ML-DSA-44 (RFC 9964).
+pub const COSE_ALG_ML_DSA_44: i64 = -48;
+
 /// COSE Key Type (`kty`) for the "AKP" (Algorithm Key Pair) family that carries
 /// ML-DSA keys. RFC 9964 and the IANA COSE Key Types registry assign `7`.
 pub const COSE_KTY_AKP: i64 = 7;

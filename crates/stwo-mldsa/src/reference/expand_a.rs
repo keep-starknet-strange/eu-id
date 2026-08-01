@@ -8,6 +8,7 @@
 //! from a 3-byte little-endian value masked to 23 bits, accepted iff `< q`.
 
 use crate::constants::{K, L, N, Q};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::reference::ntt::NttPoly;
 use crate::reference::sponge::{Shake128Reader, SpongeTranscript};
 
@@ -42,10 +43,14 @@ fn rej_ntt_poly(rho_prime: &[&[u8]]) -> (NttPoly, SpongeTranscript) {
 
 /// FIPS 204 Algorithm 32 `ExpandA(ρ)`.
 pub fn expand_a(rho: &[u8; 32]) -> ExpandedA {
+    expand_a_for(ML_DSA_65, rho)
+}
+
+pub fn expand_a_for(profile: MlDsaProfile, rho: &[u8; 32]) -> ExpandedA {
     let mut matrix = [[[0u32; N]; L]; K];
     let mut transcripts = vec![vec![SpongeTranscript::default(); L]; K];
-    for r in 0..K {
-        for s in 0..L {
+    for r in 0..profile.k() {
+        for s in 0..profile.l() {
             // Domain-separate with (column s, row r) each as one byte.
             let sr = [s as u8, r as u8];
             let (poly, transcript) = rej_ntt_poly(&[rho, &sr[..1], &sr[1..2]]);

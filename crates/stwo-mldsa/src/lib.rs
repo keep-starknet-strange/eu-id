@@ -1,10 +1,10 @@
-//! In-circuit ML-DSA-65 (FIPS 204) issuer-signature verification over stwo/M31.
+//! In-circuit ML-DSA-44 and ML-DSA-65 (FIPS 204) verification over stwo/M31.
 //!
 //! This crate contains the native reference and witness path and the AIR
 //! components for a composed ML-DSA statement:
 //!
-//! - [`constants`]: FIPS 204 ML-DSA-65 parameters, pinned with citations.
-//! - [`reference`]: from-scratch ML-DSA-65 verification with exposed internals,
+//! - [`constants`]: maximum-shape ML-DSA-65 parameters, pinned with citations.
+//! - [`reference`]: from-scratch ML-DSA verification with exposed internals,
 //!   cross-checked against RustCrypto and NIST ACVP vectors.
 //! - [`types`]: full prover/native input plus the keyless hosted verifier input.
 //! - [`witness`]: [`witness::generate_witness`], which materializes the values
@@ -23,6 +23,7 @@ pub mod decomp;
 pub mod expand_a;
 pub mod msglink;
 pub mod private_key_eval;
+pub mod profile;
 pub mod proof;
 pub mod reference;
 pub mod sampleinball;

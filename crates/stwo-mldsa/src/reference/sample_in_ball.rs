@@ -1,13 +1,16 @@
-//! `SampleInBall` (FIPS 204 §7.3, Algorithm 29): expand the 32-byte challenge
-//! seed (the first `λ/4` bytes of `c̃`) into the challenge polynomial `c`. The
-//! polynomial with exactly `τ = 49` coefficients in `{−1, +1}` and the rest
-//! zero.
+//! `SampleInBall` (FIPS 204 §7.3, Algorithm 29) expands the `λ/4`-byte
+//! challenge `c̃` into the challenge polynomial `c`. The selected profile fixes
+//! `λ` and the exact number `τ` of coefficients in `{−1, +1}`. All other
+//! coefficients are zero.
 //!
-//! The seed is the whole `c̃` (`λ/4` bytes; ML-DSA-65 `λ = 192 ⇒ 48` bytes are
-//! absorbed). The first 8 squeezed bytes form the sign source `s`; subsequent
-//! bytes drive Fisher–Yates-style placement.
+//! The seed is the whole `c̃`. The first 8 squeezed bytes form the sign source
+//! `s`. Later bytes drive Fisher-Yates placement.
 
-use crate::constants::{N, TAU};
+use crate::constants::N;
+#[cfg(test)]
+use crate::constants::TAU;
+use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::reference::error::MlDsaError;
 use crate::reference::sponge::{Shake256Reader, SpongeTranscript};
 
 /// SHAKE-256 rate in bytes (must match `statement::RATE` /
@@ -31,8 +34,22 @@ pub struct SampleInBallResult {
 /// `s`, then for each `i ∈ [n−τ, n)` a rejection-sampled index `j ≤ i` is drawn
 /// and `c[i] ← c[j]; c[j] ← (−1)^{bit}`.
 pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
-    // Squeeze one SHAKE-256 rate block (136 bytes) at a time.
-    // the spec's streaming XOF. The recorded transcript is then block-aligned
+    sample_in_ball_for(ML_DSA_65, c_tilde)
+        .expect("ML-DSA-65 SampleInBall exceeded its circuit resource cap")
+}
+
+/// Profiled SampleInBall with the circuit's explicit squeeze resource cap.
+///
+/// ML-DSA-44 uses one 136-byte block. The probability that the 128 candidate
+/// bytes after the sign source fail to place all 39 coefficients is
+/// approximately 2^-202.929. Exhaustion is a typed error, not an implicit
+/// extension of the proof geometry.
+pub fn sample_in_ball_for(
+    profile: MlDsaProfile,
+    c_tilde: &[u8],
+) -> Result<SampleInBallResult, MlDsaError> {
+    // Squeeze one SHAKE-256 rate block (136 bytes) at a time from the standard
+    // streaming XOF. The recorded transcript is then block-aligned
     // to what the sampler actually consumed
     // (`squeezed.len() == RATE · ceil(consumed_len / RATE)`), which is exactly
     // the stream the in-circuit sponge job replays (`statement::n_squeeze_sib`)
@@ -46,10 +63,19 @@ pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
     let mut sign = sign_bits;
     let mut pos = 8usize;
 
-    for i in (N - TAU)..N {
+    let tau = profile.tau();
+    let max_bytes = RATE * profile.sample_in_ball_squeeze_blocks();
+    for (accepted, i) in ((N - tau)..N).enumerate() {
         // Rejection-sample j ∈ [0, i].
         let j = loop {
             if pos == stream.len() {
+                if stream.len() == max_bytes {
+                    return Err(MlDsaError::SampleInBallExhausted {
+                        accepted,
+                        required: tau,
+                        squeeze_bytes: max_bytes,
+                    });
+                }
                 stream.extend(reader.read(RATE));
             }
             let byte = stream[pos];
@@ -64,7 +90,7 @@ pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
     }
 
     let transcript = reader.transcript().clone();
-    SampleInBallResult { c, transcript }
+    Ok(SampleInBallResult { c, transcript })
 }
 
 #[cfg(test)]
@@ -91,5 +117,26 @@ mod tests {
         let c = sample_in_ball(&[2u8; crate::constants::C_TILDE_BYTES]);
         assert_eq!(a.c, b.c);
         assert_ne!(a.c, c.c);
+    }
+
+    #[test]
+    fn mldsa44_one_block_exhaustion_probability_is_below_two_to_minus_202_9() {
+        use crate::profile::ML_DSA_44;
+
+        let candidates = RATE - 8;
+        let mut state = vec![0.0f64; ML_DSA_44.tau() + 1];
+        state[0] = 1.0;
+        for _ in 0..candidates {
+            let mut next = vec![0.0f64; state.len()];
+            next[ML_DSA_44.tau()] += state[ML_DSA_44.tau()];
+            for placed in 0..ML_DSA_44.tau() {
+                let accept = (N - ML_DSA_44.tau() + placed + 1) as f64 / 256.0;
+                next[placed + 1] += state[placed] * accept;
+                next[placed] += state[placed] * (1.0 - accept);
+            }
+            state = next;
+        }
+        let failure: f64 = state[..ML_DSA_44.tau()].iter().sum();
+        assert!((-202.94..-202.92).contains(&failure.log2()));
     }
 }

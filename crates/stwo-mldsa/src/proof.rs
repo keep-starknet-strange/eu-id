@@ -269,6 +269,7 @@ fn build_components(
     let coeffs = FrameworkComponent::new(
         allocator,
         CoeffsEval {
+            profile: crate::profile::ML_DSA_65,
             log_size,
             r,
             s,

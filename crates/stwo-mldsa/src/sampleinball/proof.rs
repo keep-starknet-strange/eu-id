@@ -179,6 +179,7 @@ fn build_components(
     let sib = FrameworkComponent::new(
         allocator,
         SibEval {
+            profile: crate::profile::ML_DSA_65,
             log_size,
             ns: String::new(),
             sib_stream: STREAM_ID_SIB_SQUEEZE,

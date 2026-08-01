@@ -3,15 +3,16 @@
 //! - `pkDecode` (Algorithm 23) → `(ρ, t1)`; `t1` uses `SimpleBitUnpack` at 10
 //!   bits/coefficient (values already in `[0, 2^10)`).
 //! - `sigDecode` (Algorithm 27) → `(c̃, z, h)`; `z` uses `BitUnpack(·, γ1−1, γ1)`
-//!   at 20 bits/coefficient (centered around 0), `h` uses `HintBitUnpack`
+//!   at the selected profile width, and `h` uses `HintBitUnpack`
 //!   (Algorithm 21), which also *validates* the hint encoding.
 //!
 //! Decoding is the verifier's first trust boundary, so malformed lengths and
 //! illegal hint encodings are hard errors, not silent truncations.
 
-use crate::constants::{
-    C_TILDE_BYTES, GAMMA1, K, L, N, OMEGA, PK_BYTES, SIG_BYTES, T1_BITS, Z_BITS,
-};
+use crate::constants::{C_TILDE_BYTES, K, L, N, T1_BITS};
+#[cfg(test)]
+use crate::constants::{GAMMA1, OMEGA, PK_BYTES, SIG_BYTES};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::reference::error::MlDsaError;
 
 /// Decoded public key: seed `ρ` and the vector `t1` (`k` polynomials).
@@ -26,12 +27,12 @@ pub struct PublicKey {
 /// Decoded signature: commitment hash `c̃`, response `z`, and hint `h`.
 #[derive(Clone, Debug)]
 pub struct SignatureParts {
-    /// `c̃`, `2λ/8 = 48` bytes; the `SampleInBall` seed and the value compared
-    /// against the recomputed commitment.
+    /// Maximum storage for `c̃`. The selected `2λ/8`-byte prefix is the
+    /// `SampleInBall` seed and the value compared with the recomputed hash.
     pub c_tilde: [u8; C_TILDE_BYTES],
-    /// `z`, `l` polynomials with signed coefficients (centered around 0).
+    /// Maximum storage for `z`. The selected `l` polynomials are active.
     pub z: [[i32; N]; L],
-    /// `h`, `k` polynomials of hint bits `{0, 1}`.
+    /// Maximum storage for `h`. The selected `k` polynomials are active.
     pub h: [[u8; N]; K],
 }
 
@@ -63,17 +64,22 @@ impl BitWriter {
 /// FIPS 204 Algorithm 22 `pkEncode`: inverse of [`pk_decode`]. Packs `ρ` then
 /// each `t1` coefficient at `T1_BITS` bits, LSB-first.
 pub fn pk_encode(rho: &[u8; 32], t1: &[[u32; N]; K]) -> Vec<u8> {
+    pk_encode_for(ML_DSA_65, rho, t1)
+}
+
+/// FIPS 204 `pkEncode` for a verifier-selected parameter set.
+pub fn pk_encode_for(profile: MlDsaProfile, rho: &[u8; 32], t1: &[[u32; N]; K]) -> Vec<u8> {
     let poly_bytes = N * T1_BITS / 8;
-    let mut out = Vec::with_capacity(PK_BYTES);
+    let mut out = Vec::with_capacity(profile.pk_bytes());
     out.extend_from_slice(rho);
-    for poly in t1 {
+    for poly in &t1[..profile.k()] {
         let mut w = BitWriter::with_capacity(poly_bytes);
         for &coeff in poly {
             w.write(coeff, T1_BITS);
         }
         out.extend_from_slice(&w.bytes);
     }
-    debug_assert_eq!(out.len(), PK_BYTES);
+    debug_assert_eq!(out.len(), profile.pk_bytes());
     out
 }
 
@@ -81,16 +87,25 @@ pub fn pk_encode(rho: &[u8; 32], t1: &[[u32; N]; K]) -> Vec<u8> {
 /// where `z` uses `BitPack(·, γ1−1, γ1)` (`raw = γ1 − coeff`) and `h` uses
 /// `HintBitPack` (Algorithm 20).
 pub fn sig_encode(c_tilde: &[u8; C_TILDE_BYTES], z: &[[i32; N]; L], h: &[[u8; N]; K]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(SIG_BYTES);
-    out.extend_from_slice(c_tilde);
+    sig_encode_for(ML_DSA_65, c_tilde, z, h)
+}
 
-    let z_poly_bytes = N * Z_BITS / 8;
-    for poly in z {
+/// FIPS 204 `sigEncode` for a verifier-selected parameter set.
+pub fn sig_encode_for(
+    profile: MlDsaProfile,
+    c_tilde: &[u8; C_TILDE_BYTES],
+    z: &[[i32; N]; L],
+    h: &[[u8; N]; K],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(profile.sig_bytes());
+    out.extend_from_slice(&c_tilde[..profile.c_tilde_bytes()]);
+
+    let z_poly_bytes = N * profile.z_bits() / 8;
+    for poly in &z[..profile.l()] {
         let mut w = BitWriter::with_capacity(z_poly_bytes);
         for &coeff in poly {
-            // Inverse of BitUnpack(·, γ1−1, γ1): raw = γ1 − coeff.
-            let raw = (GAMMA1 as i32 - coeff) as u32;
-            w.write(raw, Z_BITS);
+            let raw = (profile.gamma1() as i32 - coeff) as u32;
+            w.write(raw, profile.z_bits());
         }
         out.extend_from_slice(&w.bytes);
     }
@@ -98,20 +113,20 @@ pub fn sig_encode(c_tilde: &[u8; C_TILDE_BYTES], z: &[[i32; N]; L], h: &[[u8; N]
     // HintBitPack (Algorithm 20): the first ω bytes list the set-hint indices
     // per polynomial in increasing order; the trailing k bytes are running end
     // pointers into that list. Padding stays zero.
-    let mut h_bytes = vec![0u8; OMEGA + K];
+    let mut h_bytes = vec![0u8; profile.omega() + profile.k()];
     let mut index = 0usize;
-    for (i, poly) in h.iter().enumerate() {
+    for (i, poly) in h[..profile.k()].iter().enumerate() {
         for (coeff, &bit) in poly.iter().enumerate() {
             if bit == 1 {
                 h_bytes[index] = coeff as u8;
                 index += 1;
             }
         }
-        h_bytes[OMEGA + i] = index as u8;
+        h_bytes[profile.omega() + i] = index as u8;
     }
     out.extend_from_slice(&h_bytes);
 
-    debug_assert_eq!(out.len(), SIG_BYTES);
+    debug_assert_eq!(out.len(), profile.sig_bytes());
     out
 }
 
@@ -141,9 +156,14 @@ impl<'a> BitReader<'a> {
 
 /// FIPS 204 Algorithm 23 `pkDecode`.
 pub fn pk_decode(pk: &[u8]) -> Result<PublicKey, MlDsaError> {
-    if pk.len() != PK_BYTES {
+    pk_decode_for(ML_DSA_65, pk)
+}
+
+/// FIPS 204 `pkDecode` for a verifier-selected parameter set.
+pub fn pk_decode_for(profile: MlDsaProfile, pk: &[u8]) -> Result<PublicKey, MlDsaError> {
+    if pk.len() != profile.pk_bytes() {
         return Err(MlDsaError::BadPublicKeyLength {
-            expected: PK_BYTES,
+            expected: profile.pk_bytes(),
             got: pk.len(),
         });
     }
@@ -153,7 +173,7 @@ pub fn pk_decode(pk: &[u8]) -> Result<PublicKey, MlDsaError> {
     // Each t1 polynomial: 256 coeffs × 10 bits = 320 bytes.
     let poly_bytes = N * T1_BITS / 8;
     let mut t1 = [[0u32; N]; K];
-    for (r, poly) in t1.iter_mut().enumerate() {
+    for (r, poly) in t1[..profile.k()].iter_mut().enumerate() {
         let start = 32 + r * poly_bytes;
         let mut reader = BitReader::new(&pk[start..start + poly_bytes]);
         for coeff in poly.iter_mut() {
@@ -166,32 +186,37 @@ pub fn pk_decode(pk: &[u8]) -> Result<PublicKey, MlDsaError> {
 /// FIPS 204 Algorithm 27 `sigDecode`. Returns `None`-style error on a malformed
 /// hint (Algorithm 21 `HintBitUnpack` rejection).
 pub fn sig_decode(sig: &[u8]) -> Result<SignatureParts, MlDsaError> {
-    if sig.len() != SIG_BYTES {
+    sig_decode_for(ML_DSA_65, sig)
+}
+
+/// FIPS 204 `sigDecode` for a verifier-selected parameter set.
+pub fn sig_decode_for(profile: MlDsaProfile, sig: &[u8]) -> Result<SignatureParts, MlDsaError> {
+    if sig.len() != profile.sig_bytes() {
         return Err(MlDsaError::BadSignatureLength {
-            expected: SIG_BYTES,
+            expected: profile.sig_bytes(),
             got: sig.len(),
         });
     }
     let mut c_tilde = [0u8; C_TILDE_BYTES];
-    c_tilde.copy_from_slice(&sig[..C_TILDE_BYTES]);
+    c_tilde[..profile.c_tilde_bytes()].copy_from_slice(&sig[..profile.c_tilde_bytes()]);
 
     // z: l polynomials, 20 bits/coeff, BitUnpack(·, γ1−1, γ1): value = γ1 − raw.
-    let z_poly_bytes = N * Z_BITS / 8; // 640 bytes
+    let z_poly_bytes = N * profile.z_bits() / 8;
     let mut z = [[0i32; N]; L];
-    let z_start = C_TILDE_BYTES;
-    for (idx, poly) in z.iter_mut().enumerate() {
+    let z_start = profile.c_tilde_bytes();
+    for (idx, poly) in z[..profile.l()].iter_mut().enumerate() {
         let start = z_start + idx * z_poly_bytes;
         let mut reader = BitReader::new(&sig[start..start + z_poly_bytes]);
         for coeff in poly.iter_mut() {
-            let raw = reader.read(Z_BITS);
-            *coeff = GAMMA1 as i32 - raw as i32;
+            let raw = reader.read(profile.z_bits());
+            *coeff = profile.gamma1() as i32 - raw as i32;
         }
     }
 
     // h: HintBitUnpack over the trailing ω + k bytes.
-    let h_start = z_start + L * z_poly_bytes;
-    let h_bytes = &sig[h_start..h_start + OMEGA + K];
-    let h = hint_bit_unpack(h_bytes)?;
+    let h_start = z_start + profile.l() * z_poly_bytes;
+    let h_bytes = &sig[h_start..h_start + profile.omega() + profile.k()];
+    let h = hint_bit_unpack(profile, h_bytes)?;
 
     Ok(SignatureParts { c_tilde, z, h })
 }
@@ -200,12 +225,12 @@ pub fn sig_decode(sig: &[u8]) -> Result<SignatureParts, MlDsaError> {
 /// validate the encoding (indices strictly increasing within each polynomial,
 /// unused slots zero). Rejects malformed encodings. Several ACVP
 /// "modified signature - hint" negatives exercise.
-fn hint_bit_unpack(bytes: &[u8]) -> Result<[[u8; N]; K], MlDsaError> {
+fn hint_bit_unpack(profile: MlDsaProfile, bytes: &[u8]) -> Result<[[u8; N]; K], MlDsaError> {
     let mut h = [[0u8; N]; K];
     let mut index = 0usize; // running position into the first ω bytes
-    for i in 0..K {
-        let end = bytes[OMEGA + i] as usize;
-        if end < index || end > OMEGA {
+    for i in 0..profile.k() {
+        let end = bytes[profile.omega() + i] as usize;
+        if end < index || end > profile.omega() {
             return Err(MlDsaError::MalformedHint);
         }
         let first = index;
@@ -220,7 +245,7 @@ fn hint_bit_unpack(bytes: &[u8]) -> Result<[[u8; N]; K], MlDsaError> {
         }
     }
     // All remaining "padding" bytes in the first ω region must be zero.
-    for &b in &bytes[index..OMEGA] {
+    for &b in &bytes[index..profile.omega()] {
         if b != 0 {
             return Err(MlDsaError::MalformedHint);
         }
@@ -256,7 +281,7 @@ mod tests {
         bytes[1] = 5;
         bytes[OMEGA] = 2; // end pointer for poly 0
         assert!(matches!(
-            hint_bit_unpack(&bytes),
+            hint_bit_unpack(ML_DSA_65, &bytes),
             Err(MlDsaError::MalformedHint)
         ));
     }
@@ -315,9 +340,40 @@ mod tests {
         for i in 1..K {
             bytes[OMEGA + i] = 2; // remaining polys empty
         }
-        let h = hint_bit_unpack(&bytes).unwrap();
+        let h = hint_bit_unpack(ML_DSA_65, &bytes).unwrap();
         assert_eq!(h[0][3], 1);
         assert_eq!(h[0][7], 1);
         assert_eq!(h[0].iter().filter(|&&x| x == 1).count(), 2);
+    }
+
+    #[test]
+    fn mldsa44_wire_lengths_round_trip() {
+        use crate::profile::ML_DSA_44;
+
+        let rho = [0x44; 32];
+        let mut t1 = [[0u32; N]; K];
+        for (index, coefficient) in t1[..ML_DSA_44.k()].iter_mut().flatten().enumerate() {
+            *coefficient = (index as u32 * 17) & 0x3ff;
+        }
+        let pk = pk_encode_for(ML_DSA_44, &rho, &t1);
+        assert_eq!(pk.len(), 1_312);
+        let decoded_pk = pk_decode_for(ML_DSA_44, &pk).unwrap();
+        assert_eq!(decoded_pk.rho, rho);
+        assert_eq!(decoded_pk.t1, t1);
+
+        let mut c_tilde = [0u8; C_TILDE_BYTES];
+        c_tilde[..ML_DSA_44.c_tilde_bytes()].fill(0x5a);
+        let mut z = [[0i32; N]; L];
+        z[0][0] = ML_DSA_44.gamma1() as i32 - 1;
+        z[3][255] = -(ML_DSA_44.gamma1() as i32) + 1;
+        let mut h = [[0u8; N]; K];
+        h[0][3] = 1;
+        h[3][200] = 1;
+        let signature = sig_encode_for(ML_DSA_44, &c_tilde, &z, &h);
+        assert_eq!(signature.len(), 2_420);
+        let decoded_signature = sig_decode_for(ML_DSA_44, &signature).unwrap();
+        assert_eq!(decoded_signature.c_tilde, c_tilde);
+        assert_eq!(decoded_signature.z, z);
+        assert_eq!(decoded_signature.h, h);
     }
 }

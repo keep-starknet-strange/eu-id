@@ -729,7 +729,7 @@ pub fn derive_device_authentication(
     ))?;
     let device_cose_sig_structure = canonical_cbor(&Value::Array(vec![
         Value::Text("Signature1".to_string()),
-        Value::Bytes(crate::mdoc::MLDSA_PROTECTED_HEADER.to_vec()),
+        Value::Bytes(crate::mdoc::MLDSA44_PROTECTED_HEADER.to_vec()),
         Value::Bytes(Vec::new()),
         Value::Bytes(device_authentication_bytes.clone()),
     ]))?;

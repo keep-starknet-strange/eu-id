@@ -1103,10 +1103,10 @@ impl GenerationInputV1 {
                 .air_instances
                 .iter()
                 .flat_map(|air| &air.components)
-                .any(|component| component.active_rows == 416)
+                .any(|component| component.active_rows == 288)
         {
             return Err(ArtifactError::InvalidInput(
-                "the private device-key binder must be one AIR instance with a 416-active-row component"
+                "the private device-key binder must be one AIR instance with a 288-active-row component"
                     .to_owned(),
             ));
         }
@@ -1994,7 +1994,7 @@ fn builtin_constants() -> Vec<ArtifactConstantV1> {
             &[
                 0x6d, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x4b, 0x65, 0x79, 0x49, 0x6e, 0x66, 0x6f,
                 0xa1, 0x69, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x4b, 0x65, 0x79, 0xa3, 0x01, 0x07,
-                0x03, 0x38, 0x30, 0x20, 0x59, 0x07, 0xa0,
+                0x03, 0x38, 0x2f, 0x20, 0x59, 0x05, 0x20,
             ],
         ),
         constant_text("context.domain", "EUDI-TS13-DEMO-CONTEXT-V1"),
@@ -2006,7 +2006,7 @@ fn builtin_constants() -> Vec<ArtifactConstantV1> {
         constant_text("profile.format", "mso_mdoc_zk"),
         constant_text("profile.hash", "SHA-256"),
         constant_text("profile.issuer_authentication", "FIPS-204-ML-DSA-65"),
-        constant_text("profile.device_authentication", "FIPS-204-ML-DSA-65"),
+        constant_text("profile.device_authentication", "FIPS-204-ML-DSA-44"),
         constant_text("profile.revocation_authentication", "FIPS-204-ML-DSA-65"),
         constant_text(
             "profile.device_authentication_profile",
@@ -2028,7 +2028,7 @@ fn builtin_constants() -> Vec<ArtifactConstantV1> {
         constant_bytes("spec.normative_document_sha256", &normative_spec_digest),
         constant_unsigned("expand_a.accepted_coefficients_per_polynomial", 256),
         constant_unsigned("expand_a.candidate_bits", 23),
-        constant_unsigned("expand_a.jobs", 30),
+        constant_unsigned("expand_a.jobs", 16),
         constant_unsigned("expand_a.modulus_q", 8_380_417),
         constant_unsigned("expand_a.squeeze_blocks_per_job", 6),
         constant_unsigned("private_key_evaluation.a_evaluation_count", 30),
@@ -2039,8 +2039,8 @@ fn builtin_constants() -> Vec<ArtifactConstantV1> {
         constant_unsigned("private_key_evaluation.t1_evaluation_count", 6),
         constant_unsigned("private_key_evaluation.t1_hi_bits", 1),
         constant_unsigned("private_key_evaluation.t1_lo_bits", 9),
-        constant_unsigned("device_key_binding.active_rows", 416),
-        constant_unsigned("device_key_binding.public_key_bytes", 1_952),
+        constant_unsigned("device_key_binding.active_rows", 288),
+        constant_unsigned("device_key_binding.public_key_bytes", 1_312),
         constant_unsigned("device_key_binding.rho_rows", 32),
         constant_unsigned("validity.maximum_year", 2099),
         constant_unsigned("validity.minimum_year", 2020),
@@ -3246,7 +3246,7 @@ mod tests {
                                     name: format!("{name}_component_{air_instance_ordinal}"),
                                     trace_rows: 1_u32 << max_log_size,
                                     active_rows: if *name == "private_device_key_binder" {
-                                        416
+                                        288
                                     } else {
                                         1
                                     },

@@ -1,15 +1,15 @@
-//! ML-DSA-65 mdoc test fixture.
+//! Mixed-profile ML-DSA mdoc test fixture.
 //!
-//! The issuer, device, and revocation authority use deterministic ML-DSA-65 keys.
+//! The issuer and revocation authority use ML-DSA-65. The device uses ML-DSA-44.
 //! Issuer and device authentication sign the standard COSE `Sig_structure`.
 //! Revocation signs the raw 20-byte message.
 
 use ciborium::value::Value;
 use ml_dsa::signature::{Keypair, Signer};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
+use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa44, MlDsa65, SigningKey};
 use sha2::{Digest, Sha256};
 
-use stwo_mldsa::constants::{COSE_ALG_ML_DSA_65, COSE_KTY_AKP};
+use stwo_mldsa::constants::{COSE_ALG_ML_DSA_44, COSE_ALG_ML_DSA_65, COSE_KTY_AKP};
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const EXTRA_VALUE_DIGESTS_NAMESPACE: &str = "org.example.issuer.metadata";
@@ -20,7 +20,7 @@ const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 
 /// Deterministic ML-DSA-65 issuer seed.
 const MLDSA_ISSUER_SEED: [u8; 32] = [0x5au8; 32];
-/// Deterministic ML-DSA-65 device seed.
+/// Deterministic ML-DSA-44 device seed.
 const MLDSA_DEVICE_SEED: [u8; 32] = [0x6du8; 32];
 /// Independent deterministic device key for credential B.
 const MLDSA_DEVICE_B_SEED: [u8; 32] = [0x6eu8; 32];
@@ -33,12 +33,9 @@ fn encode_value(value: Value) -> Vec<u8> {
     out
 }
 
-/// COSE `protected` header for ML-DSA-65: `{1: alg}` serialized to a bstr.
-fn mldsa_protected_header() -> Vec<u8> {
-    encode_value(Value::Map(vec![(
-        Value::from(1),
-        Value::from(COSE_ALG_ML_DSA_65),
-    )]))
+/// COSE `protected` header: `{1: alg}` serialized to a byte string.
+fn mldsa_protected_header(alg: i64) -> Vec<u8> {
+    encode_value(Value::Map(vec![(Value::from(1), Value::from(alg))]))
 }
 
 /// COSE `Sig_structure` (RFC 9052 §4.4).
@@ -53,13 +50,13 @@ fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
 
 /// ML-DSA COSE_Key with an AKP key type and raw public key.
 /// `kty` is `COSE_KTY_AKP`.
-/// `alg` is `COSE_ALG_ML_DSA_65`.
+/// `alg` selects the fixed theorem-role profile.
 /// Label `-1` contains the public key.
-/// Issuer and device keys use this form.
-fn mldsa_cose_key(pk: &[u8]) -> Value {
+/// All three signature roles use this form.
+fn mldsa_cose_key(pk: &[u8], alg: i64) -> Value {
     Value::Map(vec![
         (Value::from(1), Value::from(COSE_KTY_AKP)),
-        (Value::from(3), Value::from(COSE_ALG_ML_DSA_65)),
+        (Value::from(3), Value::from(alg)),
         (Value::from(-1), Value::Bytes(pk.to_vec())),
     ])
 }
@@ -160,7 +157,7 @@ fn build_pid_document_with_attributes(
     ]));
 
     // ML-DSA-65 signs the issuerAuth COSE `Sig_structure`.
-    let protected = mldsa_protected_header();
+    let protected = mldsa_protected_header(COSE_ALG_ML_DSA_65);
     let sig_struct = sig_structure(&protected, &mso);
     let signature = issuer_sk.sign(&sig_struct);
     let sig_bytes: EncodedSignature<MlDsa65> = signature.encode();
@@ -168,7 +165,10 @@ fn build_pid_document_with_attributes(
 
     let issuer_auth = Value::Array(vec![
         Value::Bytes(protected.clone()),
-        Value::Map(vec![("issuerKey".into(), mldsa_cose_key(&issuer_pk))]),
+        Value::Map(vec![(
+            "issuerKey".into(),
+            mldsa_cose_key(&issuer_pk, COSE_ALG_ML_DSA_65),
+        )]),
         Value::Bytes(mso.clone()),
         Value::Bytes(issuer_signature.clone()),
     ]);
@@ -203,7 +203,7 @@ fn build_pid_document_with_attributes(
     }
 }
 
-/// Complete data for the all-ML-DSA-65 mdoc fixture.
+/// Complete data for the mixed-profile ML-DSA mdoc fixture.
 /// Each role includes its public key and signed message.
 /// Issuer and device roles sign a `Sig_structure`.
 /// The revocation role signs the message from [`mldsa_revocation_fixture`].
@@ -218,12 +218,12 @@ pub struct MldsaIdentityFixture {
     pub issuer_sig_structure: Vec<u8>,
     /// The ML-DSA-65 issuer signature (`SIG_BYTES` = 3309 bytes).
     pub issuer_signature: Vec<u8>,
-    /// Device ML-DSA-65 public key, encoded (`PK_BYTES` = 1952 bytes).
+    /// Device ML-DSA-44 public key, encoded (1,312 bytes).
     pub device_pk: Vec<u8>,
     /// The COSE `Sig_structure` the device signed (payload =
     /// DeviceAuthentication bytes).
     pub device_sig_structure: Vec<u8>,
-    /// The ML-DSA-65 device signature (`SIG_BYTES` = 3309 bytes).
+    /// The ML-DSA-44 device signature (2,420 bytes).
     pub device_signature: Vec<u8>,
     /// Revocation-authority ML-DSA-65 public key. It corresponds to the signing
     /// key used by [`mldsa_revocation_fixture`].
@@ -231,7 +231,7 @@ pub struct MldsaIdentityFixture {
 }
 
 /// PID fixture with the demo session transcript.
-/// The issuer and device use ML-DSA-65.
+/// The issuer uses ML-DSA-65. The device uses ML-DSA-44.
 /// The MSO contains an AKP device key.
 pub fn mldsa_identity_fixture() -> MldsaIdentityFixture {
     mldsa_realistic_pid_fixture_with_age_over_18(&eu_id_prover::mdoc::openid4vp_session_transcript(
@@ -396,18 +396,18 @@ fn mldsa_identity_fixture_with_profile(
     valid_until: &str,
 ) -> MldsaIdentityFixture {
     // A deterministic seed makes the device key pair reproducible.
-    let device_sk = SigningKey::<MlDsa65>::from_seed(&device_seed.into());
-    let device_pk_bytes: EncodedVerifyingKey<MlDsa65> = device_sk.verifying_key().encode();
+    let device_sk = SigningKey::<MlDsa44>::from_seed(&device_seed.into());
+    let device_pk_bytes: EncodedVerifyingKey<MlDsa44> = device_sk.verifying_key().encode();
     let device_pk = device_pk_bytes.to_vec();
 
-    // ML-DSA-65 signs the device COSE `Sig_structure`.
-    let protected = mldsa_protected_header();
+    // ML-DSA-44 signs the device COSE `Sig_structure`.
+    let protected = mldsa_protected_header(COSE_ALG_ML_DSA_44);
     let device_payload =
         eu_id_prover::mdoc::device_authentication_bytes(session_transcript, PID_DOCTYPE)
             .expect("device authentication payload builds");
     let device_sig_structure = sig_structure(&protected, &device_payload);
     let signature = device_sk.sign(&device_sig_structure);
-    let sig_bytes: EncodedSignature<MlDsa65> = signature.encode();
+    let sig_bytes: EncodedSignature<MlDsa44> = signature.encode();
     let device_signature = sig_bytes.to_vec();
     let device_cose_sign1 = Value::Array(vec![
         Value::Bytes(protected),
@@ -417,7 +417,7 @@ fn mldsa_identity_fixture_with_profile(
     ]);
 
     let built = build_pid_document_with_attributes(
-        mldsa_cose_key(&device_pk),
+        mldsa_cose_key(&device_pk, COSE_ALG_ML_DSA_44),
         device_cose_sign1,
         attributes,
         signed,
