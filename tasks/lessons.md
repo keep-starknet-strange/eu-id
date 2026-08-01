@@ -150,6 +150,8 @@
 - Treat a checkpoint result as incomplete when the user authorizes the full campaign.
 - Stop cloud and device work when the user limits a benchmark to the computer.
 - Resume cloud or device work when the user explicitly authorizes it again.
+- Treat a direct statement that Firebase is approved as authorization for the
+  scoped Firebase uploads and test runs. Do not ask for the same approval again.
 - Put external-state questions in the main-repository mailbox when the user selects that channel.
 - Remove excluded work from the active plan.
 - Remove compatibility routes when the user selects one canonical API.

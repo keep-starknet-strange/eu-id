@@ -94,7 +94,7 @@ Privacy claim:
   - [x] Update and validate the live source-bound artifact profile.
   - [x] Pass the canonical `proveIdentity` and `verifyIdentity` release test.
   - [x] Record the seven-sample desktop result and the cold Pixel 8 delta.
-- [ ] P4: Measure the fixed-security PCS and FRI frontier and select the point
+- [x] P4: Measure the fixed-security PCS and FRI frontier and select the point
   that meets the mailbox-approved proof-envelope ceiling.
   - [x] Reduce the canonical CBOR maximum constraint degree from eight to four.
   - [x] Regenerate the live composition profile and pass artifact drift plus
@@ -107,14 +107,15 @@ Privacy claim:
     fresh desktop processes.
   - [x] Package and verify all six blowup-two Android pairs.
   - [x] Package and verify all four blowup-three Android pairs.
-  - [ ] Measure all ten valid points on Pixel 8 with source-bound artifacts.
-  - [ ] Select the fastest cold Pixel 8 point below the 2,500,000-byte ceiling.
+  - [x] Measure all ten valid points on Pixel 8 with source-bound artifacts.
+  - [x] Select b3 q36 p20 L19 as the fastest measured cold Pixel 8 point below
+    the 2,500,000-byte ceiling.
 - [ ] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
   available ARM acceleration; keep only improvements that help the binding
   devices.
   - [x] Add and verify phase memory, effective-worker, stack, topology, and
     benchmark-only affinity records.
-  - [ ] Emit the Android benchmark summary and each phase as separate bounded
+  - [x] Emit the Android benchmark summary and each phase as separate bounded
     JSON records so Firebase preserves the complete result.
     - Update the source-bound SDK README with the next circuit artifact.
   - [x] Run the preliminary desktop worker sweep at the P4+P5 checkpoint.

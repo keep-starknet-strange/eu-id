@@ -2,7 +2,7 @@
 
 Date: 2026-08-01
 
-Status: in progress. One of ten eligible points is complete.
+Status: complete. All ten eligible points ran on the three binding phones.
 
 The privacy claim is `public-input unlinkable; transcript zero knowledge pending`.
 This run used the canonical `proveIdentity` and `verifyIdentity` APIs.
@@ -38,6 +38,56 @@ The downloaded objects matched the two local APKs byte for byte. Their sizes
 were 18,361,258 bytes and 711,119 bytes.
 
 ## Results
+
+The first matrix measured the selected blowup-three point. A second batch
+measured the other nine eligible points. Every matrix contained the Pixel 8,
+Galaxy S24 Ultra, and Galaxy A54. All 30 executions used six effective Rayon
+workers, a 67,108,864-byte proof-thread stack, and a 67,108,864-byte worker
+stack. All 30 tests passed.
+
+Each result cell below is `prove / verify / peak HWM`. Times are milliseconds.
+Peak HWM is KiB.
+
+| Point | Envelope | Pixel 8 | Galaxy S24 Ultra | Galaxy A54 |
+| --- | ---: | ---: | ---: | ---: |
+| b3 q36 p20 L19 | 1,572,910 B | **5,664 / 218 / 1,646,140** | 3,884 / 126 / 1,744,896 | 6,062 / 202 / 1,643,952 |
+| b3 q36 p20 none | 1,507,374 B | 6,103 / 250 / 1,648,576 | 3,193 / 126 / 1,742,544 | 6,680 / 226 / 1,646,404 |
+| b3 q35 p23 none | 1,507,374 B | 7,864 / 224 / 1,648,428 | 4,220 / 194 / 1,742,868 | 7,754 / 217 / 1,640,656 |
+| b3 q35 p23 L19 | 1,507,374 B | 6,002 / 241 / 1,644,716 | 3,479 / 137 / 1,739,536 | 6,925 / 211 / 1,642,656 |
+| b2 q54 p20 none | 2,097,198 B | 6,816 / 185 / 1,329,304 | 3,037 / 121 / 1,360,840 | 6,056 / 206 / 1,328,120 |
+| b2 q53 p22 none | 2,097,198 B | 7,881 / 226 / 1,326,932 | 3,748 / 148 / 1,415,620 | 6,275 / 168 / 1,325,168 |
+| b2 q52 p24 none | 2,031,662 B | 6,254 / 283 / 1,329,928 | 2,936 / 103 / 1,358,804 | 7,808 / 223 / 1,325,576 |
+| b2 q54 p20 L18 | 2,162,734 B | 5,674 / 165 / 1,329,616 | 3,082 / 130 / 1,354,708 | 6,161 / 207 / 1,328,520 |
+| b2 q53 p22 L18 | 2,097,198 B | 5,842 / 165 / 1,328,824 | **2,807 / 100 / 1,351,672** | **6,007 / 154 / 1,327,088** |
+| b2 q52 p24 L18 | 2,097,198 B | 6,147 / 193 / 1,330,728 | 2,883 / 122 / 1,355,504 | 6,488 / 187 / 1,326,560 |
+
+The P4 rule selects the fastest cold Pixel 8 point below 2,500,000 bytes.
+Therefore, b3 q36 p20 L19 is the selected point. It was 10 ms faster than b2
+q54 p20 L18 and 178 ms faster than b2 q53 p22 L18 on the measured Pixel 8
+runs. These are single cold samples, so the 10 ms difference does not show a
+statistically stable latency difference. The selection follows the fixed P4
+rule. The b2 points use about 300 MiB less peak memory, so P5 must still test
+the selected point after the accepted memory changes.
+
+## Matrix ledger
+
+The nine-matrix batch used Firebase history `bh.f5f036aa81c4230a`. Each result
+directory has the form
+`ts13-unlinkable-v1-p4-POINT-parallel-20260801-1`.
+
+| Point | Matrix | Firebase result |
+| --- | --- | --- |
+| b2 q54 p20 none | `matrix-35xmau16v926s` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/8443270135214076375) |
+| b2 q53 p22 none | `matrix-3vgyygf2gp83j` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/7042888661643877956) |
+| b2 q52 p24 none | `matrix-4rynkcka9pria` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/7930663969798119170) |
+| b2 q54 p20 L18 | `matrix-2awr547qute2x` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/6737387365524353565) |
+| b2 q53 p22 L18 | `matrix-3pppp4p874lzz` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/7462187008022372517) |
+| b2 q52 p24 L18 | `matrix-1t6z4w9860aex` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/8407152352610883493) |
+| b3 q36 p20 none | `matrix-3vwamft2u02ca` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/7034138664012766539) |
+| b3 q35 p23 none | `matrix-28kq2afs7fje6` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/8556809219106842983) |
+| b3 q35 p23 L19 | `matrix-12m4qavwjib9w` | [result](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/6767644777596927510) |
+
+## Selected-point phase detail
 
 | Firebase model | Device | Prove | Verify | Peak RSS | AIR core | Witness |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -105,16 +155,18 @@ current point reduces these values by 30.1% and 11.5%, respectively.
 
 ## Log limit
 
-The uploaded harness wrote one JSON value with the complete phase array. Each
-device log contains exactly 4,100 bytes for this value. Android cut the value
-during the phase array. The top-level latency, size, memory, runtime, stack,
-affinity, and topology fields are complete. The product branch now writes one
-bounded summary record and one bounded record for each phase. The selected P4
-package must use this new format for the P5 and final gate runs.
+The ten uploaded packages used the old one-record harness. Each of the 30
+device logs contains exactly 4,100 bytes for this record. Android cut every
+record during the phase array. The top-level latency, size, memory, runtime,
+stack, affinity, and topology fields are complete. The records do not contain
+the circuit hash or phase count. The package ledger and matrix object path bind
+each result to its configuration. The product branch now writes one bounded
+summary record and one bounded record for each phase. The selected P5 and final
+packages must use this format.
 
-## Remaining work
+## Gate status
 
-Nine eligible source-bound APK pairs still need a cold Pixel 8 measurement.
-The product point is the fastest eligible Pixel 8 result below the approved
-2,500,000-byte envelope ceiling. This checkpoint does not meet the 2,000 ms
-final prove gate on any binding phone.
+All ten points meet the 2,500,000-byte envelope ceiling. Every verification is
+at most 283 ms and meets the 350 ms gate. No point meets the 2,000 ms prove
+gate on a binding phone. P5 must reduce memory and latency on the selected
+point before the final three-phone gate.
