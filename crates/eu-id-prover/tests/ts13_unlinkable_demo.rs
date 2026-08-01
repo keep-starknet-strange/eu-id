@@ -269,7 +269,12 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 "physical column-order drift must reject even when its histogram is unchanged"
             );
             let mut drifted = shape.clone();
-            drifted.queried_values[0][0] -= 1;
+            let common_query_count = drifted.queried_values[0][0];
+            drifted.queried_values[0][0] = if common_query_count == 1 {
+                2
+            } else {
+                common_query_count - 1
+            };
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     &artifact_input,
@@ -277,7 +282,19 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     &drifted,
                 )
                 .is_err(),
-                "per-column query-count drift must reject"
+                "an in-cap per-column queried-value count mismatch must reject"
+            );
+            let mut drifted = shape.clone();
+            drifted.queried_values[0][0] =
+                eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_QUERY_COUNT + 1;
+            assert!(
+                eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
+                    &artifact_input,
+                    geometry,
+                    &drifted,
+                )
+                .is_err(),
+                "a per-column queried-value count above the configured cap must reject"
             );
             let mut drifted = shape.clone();
             drifted.decommitment_hash_counts[0] =
@@ -389,11 +406,17 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .collect::<Vec<_>>(),
                 [334, 4_285, 2_380, 8, 16]
             );
+            let common_query_count = shape.queried_values[0][0];
+            assert!(common_query_count > 0);
+            assert!(
+                common_query_count
+                    <= eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_QUERY_COUNT
+            );
             assert!(shape
                 .queried_values
                 .iter()
                 .flatten()
-                .all(|&query_count| query_count == 36));
+                .all(|&query_count| query_count == common_query_count));
             let mut expected_post_payloads = vec![0; 20];
             expected_post_payloads[2] = 18_464;
             assert_eq!(shape.post_interaction_payload_bytes, expected_post_payloads);

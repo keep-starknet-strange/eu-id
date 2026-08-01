@@ -1390,6 +1390,7 @@ impl MdocProof {
         }
 
         let stark = &self.stark_proof.0;
+        let queried_value_count = stark.queried_values.iter().flatten().next().map(Vec::len);
         stark.config == mdoc_ts13_pcs_config()
             && stark.commitments.len() == TS13_DEMO_TREE_COLUMN_COUNTS.len()
             && stark.sampled_values.len() == TS13_DEMO_TREE_COLUMN_COUNTS.len()
@@ -1409,12 +1410,16 @@ impl MdocProof {
                 .queried_values
                 .iter()
                 .zip(TS13_DEMO_TREE_COLUMN_COUNTS)
-                .all(|(columns, count)| {
-                    columns.len() == count
-                        && columns
-                            .iter()
-                            .all(|values| values.len() == TS13_DEMO_QUERY_COUNT)
-                })
+                .all(|(columns, count)| columns.len() == count)
+            && queried_value_count.is_some_and(|query_count| {
+                query_count > 0
+                    && query_count <= TS13_DEMO_QUERY_COUNT
+                    && stark
+                        .queried_values
+                        .iter()
+                        .flatten()
+                        .all(|values| values.len() == query_count)
+            })
             && stark.fri_proof.first_layer.fri_witness.len() <= TS13_DEMO_FRI_FIRST_WITNESS_CAP
             && stark.fri_proof.first_layer.decommitment.hash_witness.len()
                 <= TS13_DEMO_FRI_FIRST_HASH_CAP
@@ -3290,12 +3295,12 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
 }
 
 const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
-const TS13_PCS_QUERIES: usize = 54;
-const TS13_PCS_POW_BITS: u32 = 20;
+const TS13_PCS_QUERIES: usize = 53;
+const TS13_PCS_POW_BITS: u32 = 22;
 const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = None;
 
 pub(crate) fn mdoc_ts13_pcs_config() -> PcsConfig {
-    // PCS query and proof-of-work label: 54×2 + 20 = 128 bits.
+    // PCS query and proof-of-work label: 53×2 + 22 = 128 bits.
     // This exceeds the 108-bit OODS bound that dominates the TS13 STARK.
     // The verifier pins this configuration and rejects other configurations.
     // TS13 accounts for OODS and binding-hash limits separately.

@@ -16695,9 +16695,9 @@
     "merkleHash": "Blake2s-256",
     "friLogLastLayerDegreeBound": 1,
     "friLogBlowupFactor": 2,
-    "friQueryCount": 54,
+    "friQueryCount": 53,
     "friFoldStep": 2,
-    "powBits": 20,
+    "powBits": 22,
     "liftingLogSize": null,
     "merkleTrees": [
       {
@@ -16798,49 +16798,49 @@
         "inputLogSize": 18,
         "outputLogSize": 16,
         "merkleDepth": 16,
-        "maximumOpenedValues": 162
+        "maximumOpenedValues": 159
       },
       {
         "inputLogSize": 16,
         "outputLogSize": 14,
         "merkleDepth": 14,
-        "maximumOpenedValues": 162
+        "maximumOpenedValues": 159
       },
       {
         "inputLogSize": 14,
         "outputLogSize": 12,
         "merkleDepth": 12,
-        "maximumOpenedValues": 162
+        "maximumOpenedValues": 159
       },
       {
         "inputLogSize": 12,
         "outputLogSize": 10,
         "merkleDepth": 10,
-        "maximumOpenedValues": 162
+        "maximumOpenedValues": 159
       },
       {
         "inputLogSize": 10,
         "outputLogSize": 8,
         "merkleDepth": 8,
-        "maximumOpenedValues": 162
+        "maximumOpenedValues": 159
       },
       {
         "inputLogSize": 8,
         "outputLogSize": 6,
         "merkleDepth": 6,
-        "maximumOpenedValues": 162
+        "maximumOpenedValues": 159
       },
       {
         "inputLogSize": 6,
         "outputLogSize": 4,
         "merkleDepth": 4,
-        "maximumOpenedValues": 162
+        "maximumOpenedValues": 159
       },
       {
         "inputLogSize": 4,
         "outputLogSize": 3,
         "merkleDepth": 4,
-        "maximumOpenedValues": 54
+        "maximumOpenedValues": 53
       }
     ]
   },

@@ -79,7 +79,7 @@ const CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 3] = [1, 2, 3];
 const CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256: &str =
     "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
 const CANONICAL_GENERATION_INPUT_SHA256: &str =
-    "4e3b62806dea3f165778be0f1796f4a4360816775c3823fc0a0e0edc94c6ee84";
+    "bab85201dd14862e8f95732fd8462622638a2a0cde8f77f2dbff36c6903425bb";
 const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
 const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
 const CANONICAL_RELATION_COUNT: usize = 87;
@@ -4255,11 +4255,16 @@ fn validate_live_profile_input(
                 value_histogram(live)
                     == declared_value_histogram(&expected.sampled_value_length_histogram)
             });
-    let queried_value_shape_matches = proof
-        .queried_values
-        .iter()
-        .flatten()
-        .all(|&count| count == query_count);
+    let queried_value_count = proof.queried_values.iter().flatten().next().copied();
+    let queried_value_shape_matches = queried_value_count.is_some_and(|count| {
+        count > 0
+            && count <= query_count
+            && proof
+                .queried_values
+                .iter()
+                .flatten()
+                .all(|&candidate| candidate == count)
+    });
     let decommitment_shape_matches = proof.decommitment_hash_counts.len()
         == input.proof_system.merkle_trees.len()
         && proof
