@@ -67,12 +67,10 @@ make check-quantum-only-deps
 ```
 
 All proof tests must use a release build. Run one expensive test at a time.
-`--test-threads=1` serializes the test harness. The prover still uses the 12
-Rayon workers selected by `RAYON_NUM_THREADS=12`. The SDK sets the proof-thread
-and worker stacks to 64 MiB.
+`--test-threads=1` serializes the test harness. The SDK uses six proof workers,
+a 2 MiB proof-thread stack, and 16 MiB worker stacks.
 
 ```bash
-RAYON_NUM_THREADS=12 \
 cargo test --locked --release -p sdk --test ts13_e2e \
   -- --test-threads=1
 ```

@@ -44,7 +44,7 @@ fmt:
 	cargo fmt
 
 perf:
-	RAYON_NUM_THREADS=$(RAYON_NUM_THREADS) cargo run --locked --release -p sdk --example ts13_sdk_perf_probe
+	cargo run --locked --release -p sdk --example ts13_sdk_perf_probe
 
 # Build the Android AAR and publish it to the local Maven repository.
 publish-android-local:

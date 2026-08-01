@@ -9,6 +9,9 @@ The public Kotlin API contains these functions:
 - `proveIdentity(IdentityStatement, IdentityWitness)`
 - `verifyIdentity(IdentityStatement, ByteArray)`
 
+The SDK uses six proof workers. It sets the proof-thread stack to 2 MiB and
+each worker stack to 16 MiB. The public API has no runtime controls.
+
 The Maven coordinate is `com.kss:eu-id-zk-sdk:0.1.0`. The Kotlin
 package is `com.kss.euid.zk.sdk`.
 
@@ -66,8 +69,9 @@ Run this test target:
 class com.kss.euid.zk.sdk.Ts13MobileBenchmarkInstrumentedTest#proveIdentity_emitsBenchmarkResult
 ```
 
-The test writes one JSON result with the `Ts13MobileBenchmark` log tag. The
-result contains prove time, verify time, proof size, and peak process memory.
+The test writes one summary and one bounded record for each proof phase with
+the `Ts13MobileBenchmark` log tag. The summary contains prove time, verify
+time, proof size, runtime settings, and peak process memory.
 
 ## Use the AAR
 

@@ -224,8 +224,7 @@ fn run(config: Config) {
     }
 
     println!(
-        "TS13_SDK_PERF_PROBE privacy_claim=public-input_unlinkable_transcript_zero_knowledge_pending fixture={FIXTURE_NAME} verify_scope=first_verification_is_tree0_cache_miss_after_prover_warmed_process iterations={iterations} rayon_threads={} prove_identity_ms={} verify_identity_first_ms={} verify_identity_median_ms={} final_envelope_bytes={final_proof_envelope_bytes} final_body_capacity={final_proof_body_capacity} envelope_median_bytes={} fixture_document_bytes={} fixture_issuer_sig_structure_bytes={} fixture_device_sig_structure_bytes={} session_transcript_bytes={}",
-        rayon::current_num_threads(),
+        "TS13_SDK_PERF_PROBE privacy_claim=public-input_unlinkable_transcript_zero_knowledge_pending fixture={FIXTURE_NAME} verify_scope=first_verification_is_tree0_cache_miss_after_prover_warmed_process iterations={iterations} prove_identity_ms={} verify_identity_first_ms={} verify_identity_median_ms={} final_envelope_bytes={final_proof_envelope_bytes} final_body_capacity={final_proof_body_capacity} envelope_median_bytes={} fixture_document_bytes={} fixture_issuer_sig_structure_bytes={} fixture_device_sig_structure_bytes={} session_transcript_bytes={}",
         median(&mut prove_ms),
         first_verify_ms.expect("at least one probe iteration"),
         median(&mut verify_ms),

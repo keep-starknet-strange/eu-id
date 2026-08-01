@@ -28,38 +28,11 @@ gcloud firebase test android run \
   --test-targets class com.kss.euid.zk.sdk.Ts13MobileBenchmarkInstrumentedTest
 ```
 
-Use private test arguments to request a worker count or an explicit CPU mask.
-Firebase names the flag `--environment-variables`. It sends the values to
-AndroidJUnitRunner. Use `+` between CPU identifiers because the flag uses
-commas between arguments:
-
-```bash
---environment-variables rayon_threads=6,affinity_cpu_ids=4+5+6+7
-```
-
-Use this argument to test the affinity policy:
-
-```bash
---environment-variables affinity_policy=exclude_min_cluster
-```
-
-Do not use `affinity_cpu_ids` and `affinity_policy` in the same test. The
-policy reads `cpu_capacity` for each allowed CPU. If this data is incomplete,
-the policy reads `cpuinfo_max_freq` for each allowed CPU. It removes the
-minimum tier and selects a maximum of six CPUs. If the topology or the affinity
-system call is not available, the test keeps the original CPU mask.
-
-When the policy is active, the test sets the worker count to the smaller of
-the requested count and the selected CPU count. It uses the selected CPU count
-when no count is requested. The worker count cannot exceed six. If the policy
-is not active, the test uses only the requested worker count.
-
-The CPU mask applies only to the benchmark thread. The proof thread and its
-workers inherit the mask. The SDK API does not expose affinity controls.
+The harness accepts no runtime controls. It measures the SDK with its fixed
+six-worker pool, 2 MiB proof-thread stack, and 16 MiB worker stacks.
 
 The test logs one `Ts13MobileBenchmark` summary record and one bounded record
 for each proof phase. The summary includes prove time, verify time, proof size,
-requested, configured, and actual worker counts, the worker-count source,
-proof and worker stack sizes, CPU topology, the policy decision, the effective
-CPU mask, and peak resident memory. Each phase record includes its timing and
-memory sample. No record can exceed 3,000 UTF-8 bytes.
+actual worker count, proof and worker stack sizes, and peak resident memory.
+Each phase record includes its timing and memory sample. No record can exceed
+3,000 UTF-8 bytes.

@@ -1,18 +1,13 @@
 package com.kss.euid.zk.sdk
 
-// Firebase Test Lab runs one host APK and one test APK.
 import android.os.Build
 import android.os.SystemClock
 import android.system.Os
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.sun.jna.Library
-import com.sun.jna.Memory
-import com.sun.jna.Native
 import java.io.File
 import java.util.concurrent.TimeUnit
-import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -39,13 +34,14 @@ class Ts13MobileBenchmarkInstrumentedTest {
         assertEquals("verifyIdentity", fixture.getString("verifyApi"))
         assertEquals("IdentityStatement", fixture.getString("statementType"))
         assertEquals("IdentityWitness", fixture.getString("witnessType"))
+
         val statementFixture = fixture.getJSONObject("statement")
         val witnessFixture = fixture.getJSONObject("witness")
         val circuitHashHex = statementFixture.getString("circuitHash")
         val circuitHash = circuitHashHex.decodeHex()
-
         val revocationEpoch = statementFixture.getLong("revocationEpoch")
         require(revocationEpoch in 0L..UInt.MAX_VALUE.toLong())
+
         val statement = IdentityStatement(
             circuitHash = circuitHash,
             zkSystemId = statementFixture.getString("zkSystemId"),
@@ -65,245 +61,106 @@ class Ts13MobileBenchmarkInstrumentedTest {
             document = witnessFixture.getString("document").decodeHex(),
             revocationIdLo = witnessFixture.getString("revocationIdLo").toULong(),
             revocationIdHi = witnessFixture.getString("revocationIdHi").toULong(),
-            revocationSignature =
-                witnessFixture.getString("revocationSignature").decodeHex(),
+            revocationSignature = witnessFixture.getString("revocationSignature").decodeHex(),
         )
 
-        val arguments = InstrumentationRegistry.getArguments()
-        val requestedRayonThreads = arguments.getString(RAYON_THREADS_ARGUMENT)?.let {
-            parseRayonThreads(it)
-        }
-        val affinityRequest = parseBenchmarkAffinityRequest(
-            arguments.getString(AFFINITY_CPU_IDS_ARGUMENT),
-            arguments.getString(AFFINITY_POLICY_ARGUMENT),
+        val timingFile = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            PROVE_TIMING_FILE,
         )
-        val requestedAffinity = affinityRequest.explicitCpuIds
-        val topology = readCpuTopology()
-        require(
-            requestedAffinity == null || topology.allowed.cpuIds.containsAll(requestedAffinity),
-        ) { "Requested affinity contains a CPU that is not allowed" }
-        val policySelection = affinityRequest.policy?.let {
-            selectExcludeMinimumCluster(topology.allowed.cpuIds, topology.cpus)
-        }
-        val selectedAffinity = requestedAffinity ?: policySelection?.selectedCpuIds
-        val affinityTarget = when {
-            requestedAffinity != null -> requestedAffinity
-            policySelection?.canApply == true -> policySelection.selectedCpuIds
-            else -> null
-        }
-        val excludedAffinity = when {
-            requestedAffinity != null -> topology.allowed.cpuIds - requestedAffinity.toSet()
-            policySelection != null -> policySelection.excludedCpuIds
-            else -> emptyList()
-        }
-        val topologySource = when {
-            requestedAffinity != null -> AFFINITY_TOPOLOGY_EXPLICIT_CPU_IDS
-            else -> policySelection?.topologySource
-        }
-
-        val previousRayonThreads = Os.getenv(RAYON_THREADS_ENV)
-        var affinityApplied = false
-        var affinityChanged = false
-        var affinityReason = policySelection?.reason ?: AFFINITY_REASON_NOT_REQUESTED
-        var workerSelection = selectBenchmarkWorkerCount(requestedRayonThreads, null)
-        var rayonEnvironmentChanged = false
-        try {
-            if (requestedAffinity != null) {
-                setCurrentThreadAffinity(requestedAffinity)
-                affinityApplied = true
-                affinityChanged = true
-                affinityReason = AFFINITY_REASON_APPLIED
-            } else if (affinityTarget != null) {
-                try {
-                    setCurrentThreadAffinity(affinityTarget)
-                    affinityApplied = true
-                    affinityChanged = true
-                    affinityReason = AFFINITY_REASON_APPLIED
-                } catch (failure: Throwable) {
-                    affinityReason = AFFINITY_REASON_SCHED_SETAFFINITY_FAILED
-                    Log.w(LOG_TAG, "The affinity policy was not applied", failure)
-                }
-            }
-            var effectiveAffinity = readCurrentThreadAllowedCpus()
-            requestedAffinity?.let { assertEquals(it, effectiveAffinity.cpuIds) }
-            if (
-                affinityRequest.policy != null &&
-                affinityApplied &&
-                affinityTarget != effectiveAffinity.cpuIds
-            ) {
-                affinityApplied = false
-                affinityReason = AFFINITY_REASON_EFFECTIVE_MASK_MISMATCH
-                setCurrentThreadAffinity(topology.allowed.cpuIds)
-                effectiveAffinity = readCurrentThreadAllowedCpus()
-                require(effectiveAffinity.cpuIds == topology.allowed.cpuIds) {
-                    "The original CPU mask was not restored"
-                }
-            }
-            val appliedPolicyCpuCount =
-                if (affinityRequest.policy != null && affinityApplied) {
-                    checkNotNull(affinityTarget).size
-                } else {
-                    null
-                }
-            workerSelection =
-                selectBenchmarkWorkerCount(requestedRayonThreads, appliedPolicyCpuCount)
-            workerSelection.configuredThreads?.let {
-                Os.setenv(RAYON_THREADS_ENV, it.toString(), true)
-                rayonEnvironmentChanged = true
-            }
-
-            val timingFile = File(
-                InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
-                PROVE_TIMING_FILE,
+        assertTrue(!timingFile.exists() || timingFile.delete())
+        val previousProveTiming = Os.getenv(PROVE_TIMING_ENV)
+        val previousProveTimingFile = Os.getenv(PROVE_TIMING_FILE_ENV)
+        val proveStarted = SystemClock.elapsedRealtimeNanos()
+        val proof = try {
+            Os.setenv(PROVE_TIMING_ENV, "1", true)
+            Os.setenv(PROVE_TIMING_FILE_ENV, timingFile.absolutePath, true)
+            proveIdentity(statement, witness)
+        } finally {
+            runCleanup(
+                { restoreEnvironment(PROVE_TIMING_FILE_ENV, previousProveTimingFile) },
+                { restoreEnvironment(PROVE_TIMING_ENV, previousProveTiming) },
             )
-            assertTrue(!timingFile.exists() || timingFile.delete())
-            val previousProveTiming = Os.getenv(PROVE_TIMING_ENV)
-            val previousProveTimingFile = Os.getenv(PROVE_TIMING_FILE_ENV)
-            val proveStarted = SystemClock.elapsedRealtimeNanos()
-            val proof = try {
-                Os.setenv(PROVE_TIMING_ENV, "1", true)
-                Os.setenv(PROVE_TIMING_FILE_ENV, timingFile.absolutePath, true)
-                proveIdentity(statement, witness)
-            } finally {
-                runCleanup(
-                    { restoreEnvironment(PROVE_TIMING_FILE_ENV, previousProveTimingFile) },
-                    { restoreEnvironment(PROVE_TIMING_ENV, previousProveTiming) },
-                )
-            }
-            val proveMs = elapsedMilliseconds(proveStarted)
-            val phaseTimings = timingFile.useLines { lines ->
-                lines
-                    .filter { it.isNotBlank() }
-                    .map { line ->
-                        require(line.startsWith(PROVE_TIMING_PREFIX))
-                        JSONObject(line.removePrefix(PROVE_TIMING_PREFIX))
-                    }.toList()
-            }
-            val runtimeConfiguration = phaseTimings.single {
-                it.getString("scope") == "sdk" &&
-                    it.getString("phase") == "runtime_configuration"
-            }
-            val actualRayonThreads = runtimeConfiguration.getInt("rayon_threads")
-            val proofThreadStackBytes =
-                runtimeConfiguration.getLong("proof_thread_stack_bytes")
-            val proofWorkerStackBytes =
-                runtimeConfiguration.getLong("proof_worker_stack_bytes")
-            assertTrue(actualRayonThreads > 0)
-            assertTrue(proofThreadStackBytes > 0)
-            assertTrue(proofWorkerStackBytes > 0)
-            workerSelection.configuredThreads?.let { assertEquals(it, actualRayonThreads) }
-            if (workerSelection.derivedFromAffinity) {
-                assertTrue(affinityApplied)
-                assertTrue(actualRayonThreads <= MAX_POLICY_CPU_COUNT)
-            }
-            assertTrue(
-                phaseTimings.any {
-                    it.getString("scope") == "sdk" && it.getString("phase") == "total"
-                },
-            )
-            assertTrue(
-                phaseTimings.any {
-                    it.getString("scope") == "eu_id_prover" &&
-                        it.getString("phase") == "witness_generation"
-                },
-            )
-            val airCoreTimings = phaseTimings.filter {
-                it.getString("scope") == "air_core"
-            }
-            assertTrue(airCoreTimings.any { it.getString("phase") == "total" })
-            assertTrue(
-                airCoreTimings.all {
-                    !it.isNull("vm_rss_kib") && !it.isNull("vm_hwm_kib")
-                },
-            )
+        }
+        val proveMs = elapsedMilliseconds(proveStarted)
+        val phaseTimings = timingFile.useLines { lines ->
+            lines
+                .filter { it.isNotBlank() }
+                .map { line ->
+                    require(line.startsWith(PROVE_TIMING_PREFIX))
+                    JSONObject(line.removePrefix(PROVE_TIMING_PREFIX))
+                }.toList()
+        }
+        assertEquals(EXPECTED_PHASE_COUNT, phaseTimings.size)
 
-            assertTrue(proof.size >= ENVELOPE_HEADER_BYTES)
-            assertArrayEquals(ENVELOPE_MAGIC, proof.copyOfRange(0, ENVELOPE_MAGIC.size))
-            assertEquals(ENVELOPE_VERSION, readU16Le(proof, 8))
-            assertArrayEquals(circuitHash, proof.copyOfRange(10, 42))
-            val bodyCapacity = readU32Le(proof, 42)
-            assertEquals(ENVELOPE_HEADER_BYTES.toLong() + bodyCapacity, proof.size.toLong())
+        val runtimeConfiguration = phaseTimings.single {
+            it.getString("scope") == "sdk" &&
+                it.getString("phase") == "runtime_configuration"
+        }
+        val actualRayonThreads = runtimeConfiguration.getInt("rayon_threads")
+        val proofThreadStackBytes = runtimeConfiguration.getLong("proof_thread_stack_bytes")
+        val proofWorkerStackBytes = runtimeConfiguration.getLong("proof_worker_stack_bytes")
+        assertEquals(PROOF_WORKER_COUNT, actualRayonThreads)
+        assertEquals(PROOF_THREAD_STACK_BYTES, proofThreadStackBytes)
+        assertEquals(PROOF_WORKER_STACK_BYTES, proofWorkerStackBytes)
+        assertTrue(
+            phaseTimings.any {
+                it.getString("scope") == "sdk" && it.getString("phase") == "total"
+            },
+        )
+        assertTrue(
+            phaseTimings.any {
+                it.getString("scope") == "eu_id_prover" &&
+                    it.getString("phase") == "witness_generation"
+            },
+        )
+        val airCoreTimings = phaseTimings.filter { it.getString("scope") == "air_core" }
+        assertTrue(airCoreTimings.any { it.getString("phase") == "total" })
+        assertTrue(
+            airCoreTimings.all {
+                !it.isNull("vm_rss_kib") && !it.isNull("vm_hwm_kib")
+            },
+        )
 
-            val verifyStarted = SystemClock.elapsedRealtimeNanos()
-            verifyIdentity(statement, proof)
-            val verifyMs = elapsedMilliseconds(verifyStarted)
-            val vmHwmKib = vmHwmKib()
-            assertTrue(vmHwmKib > 0)
+        assertTrue(proof.size >= ENVELOPE_HEADER_BYTES)
+        assertArrayEquals(ENVELOPE_MAGIC, proof.copyOfRange(0, ENVELOPE_MAGIC.size))
+        assertEquals(ENVELOPE_VERSION, readU16Le(proof, 8))
+        assertArrayEquals(circuitHash, proof.copyOfRange(10, 42))
+        val bodyCapacity = readU32Le(proof, 42)
+        assertEquals(ENVELOPE_HEADER_BYTES.toLong() + bodyCapacity, proof.size.toLong())
 
-            val result = JSONObject()
+        val verifyStarted = SystemClock.elapsedRealtimeNanos()
+        verifyIdentity(statement, proof)
+        val verifyMs = elapsedMilliseconds(verifyStarted)
+        val vmHwmKib = vmHwmKib()
+        assertTrue(vmHwmKib > 0)
+
+        logJson(
+            JSONObject()
                 .put("event", "ts13_mobile_benchmark_v1")
                 .put("circuit_hash", circuitHashHex)
                 .put("model", Build.MODEL)
                 .put("api", Build.VERSION.SDK_INT)
                 .put("available_processors", Runtime.getRuntime().availableProcessors())
-                .put("requested_rayon_threads", requestedRayonThreads ?: JSONObject.NULL)
-                .put(
-                    "configured_rayon_threads",
-                    workerSelection.configuredThreads ?: JSONObject.NULL,
-                )
-                .put(
-                    "rayon_threads_derived_from_affinity",
-                    workerSelection.derivedFromAffinity,
-                )
                 .put("actual_rayon_threads", actualRayonThreads)
                 .put("proof_thread_stack_bytes", proofThreadStackBytes)
                 .put("proof_worker_stack_bytes", proofWorkerStackBytes)
-                .put(
-                    "requested_affinity_cpu_ids",
-                    requestedAffinity?.let { JSONArray(it) } ?: JSONObject.NULL,
-                )
-                .put(
-                    "requested_affinity_policy",
-                    affinityRequest.policy ?: JSONObject.NULL,
-                )
-                .put("affinity_applied", affinityApplied)
-                .put("affinity_reason", affinityReason)
-                .put(
-                    "affinity_selected_cpu_ids",
-                    JSONArray(selectedAffinity ?: emptyList<Int>()),
-                )
-                .put("affinity_excluded_cpu_ids", JSONArray(excludedAffinity))
-                .put("affinity_topology_source", topologySource ?: JSONObject.NULL)
-                .put("effective_affinity_cpu_ids", JSONArray(effectiveAffinity.cpuIds))
-                .put("cpu_topology", topology.toJson(effectiveAffinity))
                 .put("prove_ms", proveMs)
                 .put("verify_ms", verifyMs)
                 .put("envelope_bytes", proof.size)
                 .put("vm_hwm_kib", vmHwmKib)
-                .put("phase_count", phaseTimings.size)
-            logJson(result)
-            phaseTimings.forEachIndexed { index, timing ->
-                logJson(
-                    JSONObject()
-                        .put("event", "ts13_mobile_benchmark_phase_v1")
-                        .put("phase_index", index)
-                        .put("phase_count", phaseTimings.size)
-                        .put("timing", timing),
-                )
-            }
-            assertTrue(timingFile.delete())
-        } finally {
-            runCleanup(
-                {
-                    if (rayonEnvironmentChanged) {
-                        restoreEnvironment(RAYON_THREADS_ENV, previousRayonThreads)
-                    }
-                },
-                {
-                    if (affinityChanged) {
-                        if (affinityRequest.policy == null) {
-                            setCurrentThreadAffinity(topology.allowed.cpuIds)
-                        } else {
-                            try {
-                                setCurrentThreadAffinity(topology.allowed.cpuIds)
-                            } catch (failure: Throwable) {
-                                Log.w(LOG_TAG, "The original CPU mask was not restored", failure)
-                            }
-                        }
-                    }
-                },
+                .put("phase_count", phaseTimings.size),
+        )
+        phaseTimings.forEachIndexed { index, timing ->
+            logJson(
+                JSONObject()
+                    .put("event", "ts13_mobile_benchmark_phase_v1")
+                    .put("phase_index", index)
+                    .put("phase_count", phaseTimings.size)
+                    .put("timing", timing),
             )
         }
+        assertTrue(timingFile.delete())
     }
 
     private fun restoreEnvironment(name: String, previousValue: String?) {
@@ -338,120 +195,6 @@ class Ts13MobileBenchmarkInstrumentedTest {
         firstFailure?.let { throw it }
     }
 
-    private data class AllowedCpus(
-        val statusPath: String,
-        val specification: String,
-        val cpuIds: List<Int>,
-    )
-
-    private data class CpuTopology(
-        val onlineSource: String,
-        val onlineSpecification: String,
-        val onlineCpuIds: List<Int>,
-        val allowed: AllowedCpus,
-        val cpus: List<BenchmarkCpuInfo>,
-    ) {
-        fun toJson(effectiveAffinity: AllowedCpus): JSONObject = JSONObject()
-            .put("online_source", onlineSource)
-            .put("online_specification", onlineSpecification)
-            .put("online_cpu_ids", JSONArray(onlineCpuIds))
-            .put("allowed_status_path", allowed.statusPath)
-            .put("allowed_before_specification", allowed.specification)
-            .put("allowed_before_cpu_ids", JSONArray(allowed.cpuIds))
-            .put("allowed_during_specification", effectiveAffinity.specification)
-            .put("allowed_during_cpu_ids", JSONArray(effectiveAffinity.cpuIds))
-            .put(
-                "cpus",
-                JSONArray().apply {
-                    cpus.forEach { cpu ->
-                        put(
-                            JSONObject()
-                                .put("id", cpu.id)
-                                .put("capacity", cpu.capacity ?: JSONObject.NULL)
-                                .put(
-                                    "maximum_frequency_khz",
-                                    cpu.maximumFrequencyKhz ?: JSONObject.NULL,
-                                ),
-                        )
-                    }
-                },
-            )
-    }
-
-    private fun readCpuTopology(): CpuTopology {
-        val allowed = readCurrentThreadAllowedCpus()
-        val onlineFile = File(CPU_ONLINE_PATH)
-        val sysfsOnline = runCatching {
-            val specification = onlineFile.readText().trim()
-            require(specification.isNotEmpty())
-            specification to parseCpuList(specification)
-        }.getOrNull()
-        val onlineSpecification = sysfsOnline?.first ?: allowed.specification
-        val onlineCpuIds = sysfsOnline?.second ?: allowed.cpuIds
-        return CpuTopology(
-            onlineSource =
-                if (sysfsOnline != null) {
-                    CPU_ONLINE_PATH
-                } else {
-                    allowed.statusPath
-                },
-            onlineSpecification = onlineSpecification,
-            onlineCpuIds = onlineCpuIds,
-            allowed = allowed,
-            cpus = (onlineCpuIds + allowed.cpuIds).distinct().sorted().map { cpu ->
-                BenchmarkCpuInfo(
-                    id = cpu,
-                    capacity = readLong("/sys/devices/system/cpu/cpu$cpu/cpu_capacity"),
-                    maximumFrequencyKhz =
-                        readLong(
-                            "/sys/devices/system/cpu/cpu$cpu/cpufreq/cpuinfo_max_freq",
-                        ),
-                )
-            },
-        )
-    }
-
-    private fun readCurrentThreadAllowedCpus(): AllowedCpus {
-        val paths = listOf(
-            "/proc/thread-self/status",
-            "/proc/self/task/${Os.gettid()}/status",
-            "/proc/self/status",
-        )
-        for (path in paths) {
-            val status = runCatching { File(path).readLines() }.getOrNull() ?: continue
-            val specification = status.firstNotNullOfOrNull { line ->
-                line
-                    .takeIf { it.startsWith("Cpus_allowed_list:") }
-                    ?.substringAfter(':')
-                    ?.trim()
-            } ?: continue
-            return AllowedCpus(path, specification, parseCpuList(specification))
-        }
-        error("Cpus_allowed_list is absent from the current thread status")
-    }
-
-    private fun readLong(path: String): Long? =
-        runCatching { File(path).readText().trim().toLong() }.getOrNull()
-
-    private fun setCurrentThreadAffinity(cpus: List<Int>) {
-        require(cpus.isNotEmpty()) { "Affinity CPU list must not be empty" }
-        check(Native.SIZE_T_SIZE == java.lang.Long.BYTES) {
-            "The benchmark supports only a 64-bit size_t"
-        }
-        Memory(CPU_SET_BYTES.toLong()).use { mask ->
-            mask.clear()
-            for (cpu in cpus) {
-                val offset = (cpu / 8).toLong()
-                val bit = 1 shl (cpu % 8)
-                mask.setByte(offset, ((mask.getByte(offset).toInt() and 0xff) or bit).toByte())
-            }
-            val result = libc.sched_setaffinity(0, CPU_SET_BYTES.toLong(), mask)
-            check(result == 0) {
-                "sched_setaffinity failed with errno ${Native.getLastError()}"
-            }
-        }
-    }
-
     private fun String.decodeHex(): ByteArray {
         require(length % 2 == 0) { "hex value must have an even length" }
         return ByteArray(length / 2) { index ->
@@ -483,25 +226,19 @@ class Ts13MobileBenchmarkInstrumentedTest {
     }
 
     private companion object {
-        const val AFFINITY_CPU_IDS_ARGUMENT = "affinity_cpu_ids"
-        const val AFFINITY_POLICY_ARGUMENT = "affinity_policy"
-        const val AFFINITY_REASON_APPLIED = "applied"
-        const val AFFINITY_REASON_EFFECTIVE_MASK_MISMATCH = "effective_mask_mismatch"
-        const val AFFINITY_REASON_NOT_REQUESTED = "not_requested"
-        const val AFFINITY_REASON_SCHED_SETAFFINITY_FAILED = "sched_setaffinity_failed"
-        const val AFFINITY_TOPOLOGY_EXPLICIT_CPU_IDS = "explicit_cpu_ids"
-        const val CPU_ONLINE_PATH = "/sys/devices/system/cpu/online"
-        const val CPU_SET_BYTES = CPU_SET_MAX_CPUS / 8
         const val FIXTURE_ASSET = "ts13_mobile_benchmark_fixture_v1.json"
         const val FIXTURE_SCHEMA = "euid-ts13-mobile-fixture-v1"
         const val LOG_TAG = "Ts13MobileBenchmark"
         const val MAX_LOG_RECORD_BYTES = 3_000
+        const val EXPECTED_PHASE_COUNT = 25
+        const val PROOF_WORKER_COUNT = 6
+        const val MEBIBYTE_BYTES = 1024L * 1024L
+        const val PROOF_THREAD_STACK_BYTES = 2L * MEBIBYTE_BYTES
+        const val PROOF_WORKER_STACK_BYTES = 16L * MEBIBYTE_BYTES
         const val PROVE_TIMING_ENV = "EUID_PROVE_TIMING"
         const val PROVE_TIMING_FILE_ENV = "EUID_PROVE_TIMING_FILE"
         const val PROVE_TIMING_FILE = "ts13-prove-timing.jsonl"
         const val PROVE_TIMING_PREFIX = "EUID_PROVE_TIMING "
-        const val RAYON_THREADS_ARGUMENT = "rayon_threads"
-        const val RAYON_THREADS_ENV = "RAYON_NUM_THREADS"
         const val PRIVACY_CLAIM =
             "public-input unlinkable; transcript zero knowledge pending"
         const val TS13_PROFILE = "ts13-pid-age-over-18-unlinkable-demo-v1"
@@ -509,10 +246,5 @@ class Ts13MobileBenchmarkInstrumentedTest {
         const val ENVELOPE_HEADER_BYTES = 46
         const val ENVELOPE_VERSION = 4
         val ENVELOPE_MAGIC = "EUIDTS13".toByteArray(Charsets.US_ASCII)
-        val libc: LibC by lazy { Native.load("c", LibC::class.java) }
-    }
-
-    private interface LibC : Library {
-        fun sched_setaffinity(pid: Int, cpuSetSize: Long, mask: Memory): Int
     }
 }
