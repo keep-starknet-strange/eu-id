@@ -5204,14 +5204,14 @@
             "postInteractionM31LogSizes": []
           },
           "maxLogSize": 9,
-          "maxConstraintLogDegreeBound": 12,
+          "maxConstraintLogDegreeBound": 11,
           "components": [
             {
               "name": "private_item_cbor_parsers_air_0_component_0",
               "traceRows": 512,
               "activeRows": 512,
-              "constraintCount": 275,
-              "maxConstraintLogDegreeBound": 12,
+              "constraintCount": 267,
+              "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 3,
                 117,
@@ -5355,14 +5355,14 @@
             "postInteractionM31LogSizes": []
           },
           "maxLogSize": 9,
-          "maxConstraintLogDegreeBound": 12,
+          "maxConstraintLogDegreeBound": 11,
           "components": [
             {
               "name": "private_item_cbor_parsers_air_1_component_1",
               "traceRows": 512,
               "activeRows": 512,
-              "constraintCount": 276,
-              "maxConstraintLogDegreeBound": 12,
+              "constraintCount": 268,
+              "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 3,
                 117,
@@ -17144,11 +17144,11 @@
         "name": "tree_4_composition",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 32,
+        "maximumOpenedColumns": 16,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 32
+            "count": 16
           }
         ]
       }
