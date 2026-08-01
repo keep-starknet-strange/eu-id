@@ -206,6 +206,51 @@ impl TableMultiplicities {
         Self { per_table }
     }
 
+    /// Count only the 24 round rows in each 25-row carrier block. Header and
+    /// padding lookup numerators are zero, so the table must not count them.
+    pub fn from_carrier_round(data: &RoundData, n_perms: usize) -> Self {
+        let mut per_table: Vec<Vec<Vec<u32>>> = TableKind::ALL
+            .iter()
+            .map(|kind| vec![vec![0u32; 1 << kind.log_size()]; kind.n_relations()])
+            .collect();
+        let active = |row: usize| {
+            row < n_perms * crate::carrier::ROWS_PER_PERMUTATION
+                && !row.is_multiple_of(crate::carrier::ROWS_PER_PERMUTATION)
+        };
+
+        for lookup in &data.lookup_data.xor3 {
+            for (vector_row, tuple) in lookup.iter().enumerate() {
+                for (lane, key) in tuple[0].to_array().iter().enumerate() {
+                    if active(vector_row * N_LANES + lane) {
+                        per_table[DENSE_I][0][key.0 as usize] += 1;
+                    }
+                }
+            }
+        }
+        for lookup in &data.lookup_data.andnot {
+            for (vector_row, tuple) in lookup.iter().enumerate() {
+                for (lane, value) in tuple[0].to_array().iter().enumerate() {
+                    if active(vector_row * N_LANES + lane) {
+                        per_table[DENSE_I][1][value.0 as usize] += 1;
+                    }
+                }
+            }
+        }
+        for lookup in &data.lookup_data.split {
+            for (vector_row, tuple) in lookup.iter().enumerate() {
+                let shift = tuple[0].to_array()[0].0;
+                let table_index = split_table_index(shift);
+                for (lane, value) in tuple[1].to_array().iter().enumerate() {
+                    if active(vector_row * N_LANES + lane) {
+                        per_table[table_index][0][unspread_u32(value.0) as usize] += 1;
+                    }
+                }
+            }
+        }
+
+        Self { per_table }
+    }
+
     /// Fold in the sponge's lane-0 lookups: the multi-block absorb XOR3 (dense
     /// relation 0) and the byte↔spread conv uses. Counted once (lane 0 only).
     pub fn add_sponge(&mut self, xor_blocks: &[Vec<[PackedM31; 2]>], conv: &[[PackedM31; 2]]) {

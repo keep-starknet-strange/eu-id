@@ -107,6 +107,12 @@ pub const KECCAK_ROUND_RC_START: usize = 3;
 pub const KECCAK_ROUND_STATE_START: usize = KECCAK_ROUND_RC_START + IOTA_RC_BYTE_INDICES.len();
 relation!(KeccakRound, KECCAK_ROUND_ARITY);
 
+/// Arity of [`RoundScheduleRelation`]: position, row roles, and eight Iota
+/// constant bytes. The fixed schedule table provides each valid position once
+/// per permutation.
+pub const ROUND_SCHEDULE_ARITY: usize = 4 + 8;
+relation!(RoundScheduleRelation, ROUND_SCHEDULE_ARITY);
+
 /// Shared handle for the ONE drawn [`KeccakRelations`] of a composed proof.
 ///
 /// The [`crate::service::KeccakServiceProver`] / `Verifier` module draws the
@@ -128,6 +134,7 @@ pub struct KeccakRelations {
     pub andnot: AndNot,
     pub conv: Conv,
     pub split: [SplitRelation; 7],
+    pub round_schedule: RoundScheduleRelation,
 }
 
 /// A type-erasing wrapper over the seven `Split*` channels so the round
@@ -200,6 +207,7 @@ impl KeccakRelations {
                 SplitRelation::S6(Split6::draw(channel)),
                 SplitRelation::S7(Split7::draw(channel)),
             ],
+            round_schedule: RoundScheduleRelation::draw(channel),
         }
     }
 
@@ -222,6 +230,7 @@ impl KeccakRelations {
                 SplitRelation::S6(Split6::dummy()),
                 SplitRelation::S7(Split7::dummy()),
             ],
+            round_schedule: RoundScheduleRelation::dummy(),
         }
     }
 }

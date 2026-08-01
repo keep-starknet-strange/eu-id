@@ -91,6 +91,13 @@ pub const ROUND_CHI_TRACE_START: usize = ROUND_CONSTANT_TRACE_START
     + N_HI_WITNESS                 // spread-hi witnesses for all rotations
     + N_XOR3_THETA_APPLY; // theta-apply outputs (res_S)
 
+/// First committed trace column for the round input state.
+pub const ROUND_INPUT_TRACE_START: usize =
+    ROUND_CONSTANT_TRACE_START + IOTA_RC_BYTE_INDICES.len() + 2;
+
+/// Number of committed arithmetic columns between the input state and Chi.
+pub const ROUND_PRE_CHI_COLUMNS: usize = N_XOR3_C + N_HI_WITNESS + N_XOR3_THETA_APPLY;
+
 /// Return the trace column for one spread byte of the round output.
 pub const fn round_output_trace_index(byte_index: usize) -> usize {
     ROUND_CHI_TRACE_START + 2 * byte_index + 1
@@ -918,14 +925,6 @@ impl RoundFractions {
         debug_assert_eq!(self.numerators.len(), self.denominators.len());
         debug_assert_eq!(self.numerators.len() % self.n_vec_rows, 0);
         self.numerators.len() / self.n_vec_rows
-    }
-
-    pub(crate) fn numerators(&self) -> &[PackedQM31] {
-        &self.numerators
-    }
-
-    pub(crate) fn denominators(&self) -> &[PackedQM31] {
-        &self.denominators
     }
 
     pub(crate) fn slot(&self, slot: usize) -> (&[PackedQM31], &[PackedQM31]) {

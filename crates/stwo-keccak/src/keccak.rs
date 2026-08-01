@@ -174,37 +174,10 @@ impl Claim {
         let claim = Self { n_perms };
         let log_size = claim.log_size();
         let n_rows = 1usize << log_size;
-
-        let per_permutation_rows: Vec<Vec<RowLook>> = perm_inputs
-            .par_iter()
-            .map(|prow| {
-                let perm_id = prow[N_BYTES_IN_STATE].to_array()[0];
-                // Lane 0 contains the real spread state. Keep byte and spread
-                // forms while this permutation generates its boundary rows.
-                let mut bytes = [0u8; N_BYTES_IN_STATE];
-                let mut spread = [M31::zero(); N_BYTES_IN_STATE];
-                for i in 0..N_BYTES_IN_STATE {
-                    spread[i] = prow[i].to_array()[0];
-                    bytes[i] = unspread_u32(spread[i].0) as u8;
-                }
-                let mut rows = Vec::with_capacity(ROWS_PER_PERM);
-                rows.push(RowLook {
-                    perm_id,
-                    state: spread,
-                });
-                for round in 0..N_ROUNDS {
-                    keccak_round_bytes(&mut bytes, round);
-                    let state = std::array::from_fn(|i| M31::from(spread_u32(bytes[i] as u32)));
-                    rows.push(RowLook { perm_id, state });
-                }
-                rows
-            })
-            .collect();
-        let rows: Vec<RowLook> = per_permutation_rows.into_iter().flatten().collect();
-        debug_assert_eq!(rows.len(), n_perms * ROWS_PER_PERM);
+        let data = generate_rows(perm_inputs);
 
         let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); n_rows]; N_COLUMNS];
-        for (row_index, row) in rows.iter().enumerate() {
+        for (row_index, row) in data.rows.iter().enumerate() {
             cols[0][row_index] = row.perm_id;
             for i in 0..N_BYTES_IN_STATE {
                 cols[1 + i][row_index] = row.state[i];
@@ -212,8 +185,40 @@ impl Claim {
         }
         let trace = cols.into_iter().map(|c| col_eval(log_size, c)).collect();
 
-        (claim, trace, InteractionClaimData { n_perms, rows })
+        (claim, trace, data)
     }
+}
+
+/// Generate the 25 scalar boundary rows for each permutation without building
+/// the wrapper trace. The carrier service uses these rows as witness input.
+pub fn generate_rows(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> InteractionClaimData {
+    let n_perms = perm_inputs.len();
+    let per_permutation_rows: Vec<Vec<RowLook>> = perm_inputs
+        .par_iter()
+        .map(|prow| {
+            let perm_id = prow[N_BYTES_IN_STATE].to_array()[0];
+            let mut bytes = [0u8; N_BYTES_IN_STATE];
+            let mut spread = [M31::zero(); N_BYTES_IN_STATE];
+            for i in 0..N_BYTES_IN_STATE {
+                spread[i] = prow[i].to_array()[0];
+                bytes[i] = unspread_u32(spread[i].0) as u8;
+            }
+            let mut rows = Vec::with_capacity(ROWS_PER_PERM);
+            rows.push(RowLook {
+                perm_id,
+                state: spread,
+            });
+            for round in 0..N_ROUNDS {
+                keccak_round_bytes(&mut bytes, round);
+                let state = std::array::from_fn(|i| M31::from(spread_u32(bytes[i] as u32)));
+                rows.push(RowLook { perm_id, state });
+            }
+            rows
+        })
+        .collect();
+    let rows: Vec<RowLook> = per_permutation_rows.into_iter().flatten().collect();
+    debug_assert_eq!(rows.len(), n_perms * ROWS_PER_PERM);
+    InteractionClaimData { n_perms, rows }
 }
 
 /// One Keccak-f[1600] round over a byte-form state (scalar).

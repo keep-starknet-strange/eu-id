@@ -1,14 +1,14 @@
-//! GKR offload for `keccak_round` LogUp interactions.
+//! GKR offload for carrier LogUp interactions.
 //!
-//! A LogUp GKR proof replaces the round component's interaction columns. One
+//! A LogUp GKR proof replaces the carrier component's interaction columns. One
 //! `MleEval` tie-back component binds the GKR input claims to the committed
 //! base trace. The component uses eight committed tree-3 columns.
 //!
 //! ## Layout
 //!
-//! The proof puts all four relation families in one `Layer::LogUpGeneric`
+//! The proof puts all five relation families in one `Layer::LogUpGeneric`
 //! instance. It uses the order from
-//! [`keccak_round::collect_round_lookups`]. The lookup slot uses the high index
+//! [`crate::carrier::collect_lookups`]. The lookup slot uses the high index
 //! bits. The trace row uses the low index bits. The GKR OOD point splits as
 //! `r = (r_slot ‖ r_row)`. Each `Relation::combine` is an affine form with
 //! row-independent coefficients. Thus, the input MLEs decompose as follows:
@@ -30,6 +30,17 @@
 //! Commit tree 2. Then, run `prove_batch` or `partially_verify_batch` on the
 //! shared channel. Draw δ and commit the tree-3 tie-back trace. This sequence
 //! binds the GKR proof to trees 0-2, the relations, and the claimed sums.
+//!
+//! ## TS13 demo soundness contribution
+//!
+//! The n=163 profile has 10 slot variables and 12 row variables. Its 22 GKR
+//! layers contain 231 sumcheck rounds. Each round has degree at most three.
+//! Let `q = (2^31 - 1)^4`, the size of QM31. A conservative union bound is
+//! `693/q` for sumcheck, `22/q` for the layer column folds, `1/q` for δ, and
+//! `4095/q` for the outer log12 MLE identity. The total is `4811/q`, which is
+//! about `2^-111.8`. The demo's existing 108-bit algebraic OODS bound remains
+//! the limiting algebraic bound. Its 128-bit PCS query and proof-of-work bound
+//! also remains stronger than the 108-bit bound.
 
 use num_traits::{One, Zero};
 use stwo::core::air::accumulation::PointEvaluationAccumulator;
@@ -52,13 +63,12 @@ use stwo_constraint_framework::{PointEvaluator, Relation};
 
 use air_core::gkr::{decode_gkr_batch_proof, encode_gkr_batch_proof};
 
-use crate::keccak_round::{
-    build_fracs, collect_round_lookups, data_log_size, InteractionClaimData, RoundFractions,
-    RoundLookupKind, N_TOTAL_LOOKUPS,
+use crate::carrier::{
+    build_fractions, collect_lookups, Fractions, InteractionData, LookupKind, N_TOTAL_LOOKUPS,
 };
 use crate::relations::KeccakRelations;
 
-/// Slot-index bits of the flattened GKR instance (898 real slots → 1024).
+/// Slot-index bits of the flattened GKR instance (899 real slots to 1024).
 pub const LOG_SLOTS: u32 = 10;
 const _: () = assert!(
     N_TOTAL_LOOKUPS <= 1 << LOG_SLOTS && N_TOTAL_LOOKUPS > 1 << (LOG_SLOTS - 1),
@@ -68,6 +78,7 @@ const _: () = assert!(
 /// Committed tree-3 columns of the tie-back trace (eq evals + shifted prefix
 /// sums, each one QM31 column = 4 M31 columns).
 pub const N_TIEBACK_COLUMNS: usize = 2 * SECURE_EXTENSION_DEGREE;
+const _: () = assert!(N_TIEBACK_COLUMNS == 8);
 
 /// Everything both sides derive from the GKR transcript for the tie-back.
 pub struct RoundTieBack {
@@ -104,7 +115,7 @@ fn tieback_from_artifact(
     delta: SecureField,
     log_size: u32,
 ) -> Result<RoundTieBack, VerificationError> {
-    let bad = |msg: &str| VerificationError::InvalidStructure(format!("round GKR: {msg}"));
+    let bad = |msg: &str| VerificationError::InvalidStructure(format!("carrier GKR: {msg}"));
     if artifact.n_variables_by_instance.as_slice() != [(LOG_SLOTS + log_size) as usize] {
         return Err(bad("wrong instance count or variable count"));
     }
@@ -131,17 +142,16 @@ fn tieback_from_artifact(
 
 // Prover side.
 
-/// Prover state: the per-slot fraction columns (the single witness source for
-/// the claimed sum, the GKR leaves and the tie-back coeff column).
+/// Prover state for the fraction columns, GKR leaves, and tie-back column.
 pub struct RoundGkrProver {
-    fracs: RoundFractions,
+    fracs: Fractions,
     log_size: u32,
     claimed_sum: SecureField,
 }
 
 /// Sum every packed fraction in canonical slot/row order. One global batch
 /// lets Stwo split the inversion work across its fixed-size Rayon chunks.
-fn global_claimed_sum(fracs: &RoundFractions) -> SecureField {
+fn global_claimed_sum(fracs: &Fractions) -> SecureField {
     let inverses = PackedQM31::batch_inverse(fracs.denominators());
     let mut total = PackedQM31::zero();
     for (numerator, denominator_inverse) in fracs.numerators().iter().zip(&inverses) {
@@ -153,18 +163,18 @@ fn global_claimed_sum(fracs: &RoundFractions) -> SecureField {
 
 /// Materialize the canonical slot-high/row-low GKR leaves without unpacking
 /// QM31 SIMD lanes. The trailing slots are the neutral fraction 0/1.
-fn gkr_input_layer(fracs: &RoundFractions, log_size: u32) -> Layer<SimdBackend> {
+fn gkr_input_layer(fracs: &Fractions, log_size: u32) -> Layer<SimdBackend> {
     let n_rows = 1usize << log_size;
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     assert_eq!(
-        fracs.n_vec_rows(),
+        fracs.n_vector_rows(),
         n_vec_rows,
-        "round fraction stride must match its trace log size"
+        "carrier fraction stride must match its trace log size"
     );
     assert_eq!(
         fracs.n_slots(),
         N_TOTAL_LOOKUPS,
-        "round GKR must contain every canonical lookup slot"
+        "carrier GKR must contain every canonical lookup slot"
     );
 
     let packed_size = (1usize << LOG_SLOTS) * n_vec_rows;
@@ -192,12 +202,12 @@ fn gkr_input_layer(fracs: &RoundFractions, log_size: u32) -> Layer<SimdBackend> 
 impl RoundGkrProver {
     /// Build the fraction multiset and its exact sum (== the columnar
     /// `claimed_sum` the offloaded interaction trace would have produced).
-    pub fn new(rel: &KeccakRelations, data: &InteractionClaimData) -> Self {
-        let fracs = build_fracs(rel, data);
+    pub fn new(rel: &KeccakRelations, data: &InteractionData) -> Self {
+        let fracs = build_fractions(rel, data);
         let claimed_sum = global_claimed_sum(&fracs);
         Self {
             fracs,
-            log_size: data_log_size(data),
+            log_size: data.log_size,
             claimed_sum,
         }
     }
@@ -220,7 +230,7 @@ impl RoundGkrProver {
         debug_assert_eq!(
             proof.output_claims_by_instance[0][0],
             self.claimed_sum * proof.output_claims_by_instance[0][1],
-            "GKR output claim != round claimed sum"
+            "GKR output claim != carrier claimed sum"
         );
         let delta = channel.draw_secure_felt();
         let tie_back = tieback_from_artifact(&artifact, delta, self.log_size)
@@ -246,15 +256,15 @@ impl RoundGkrProver {
 
 // Verifier side.
 
-/// Replay the GKR proof against the shared channel, bind its output claim to
-/// the round's claimed sum (fail-closed), draw δ, and derive the tie-back.
+/// Replay the GKR proof, bind its output to the carrier sum, and derive the
+/// tie-back.
 pub fn verify_round_gkr(
     blob: &[u8],
     claimed_sum: SecureField,
     log_size: u32,
     channel: &mut impl Channel,
 ) -> Result<RoundTieBack, VerificationError> {
-    let bad = |msg: String| VerificationError::InvalidStructure(format!("round GKR: {msg}"));
+    let bad = |msg: String| VerificationError::InvalidStructure(format!("carrier GKR: {msg}"));
     let proof =
         decode_gkr_batch_proof(blob).map_err(|e| bad(format!("blob decode failed: {e}")))?;
     let [output] = proof.output_claims_by_instance.as_slice() else {
@@ -279,20 +289,19 @@ pub fn verify_round_gkr(
     tieback_from_artifact(&artifact, delta, log_size)
 }
 
-// The MLE coefficient-column oracle over the committed round columns.
+// The MLE coefficient-column oracle over the committed carrier columns.
 
-/// Reconstructs the δ-folded coeff column at the STARK OODS point from the
-/// round component's base-column mask values: replays
-/// [`collect_round_lookups`] through a [`PointEvaluator`] over the component's
-/// trace sub-tree, combines each tuple through its relation, and folds with
-/// the verifier-computed `eq(slot, r_slot)` weights.
+/// Reconstruct the folded coefficient at the STARK OODS point from committed
+/// carrier masks. The oracle replays [`collect_lookups`] and folds each lookup
+/// with the verifier-computed slot weight.
 pub struct RoundCoeffOracle {
-    /// The round `FrameworkComponent`'s trace locations in the shared trees.
+    /// The carrier component's trace locations in the shared trees.
     pub locations: Vec<TreeSubspan>,
     pub relations: KeccakRelations,
     pub log_size: u32,
     pub delta: SecureField,
     pub eq_ws: Vec<SecureField>,
+    pub n_perms: usize,
 }
 
 impl MleCoeffColumnOracle for RoundCoeffOracle {
@@ -310,14 +319,16 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
             self.log_size,
             SecureField::zero(),
         );
-        let lookups = collect_round_lookups(&mut eval);
+        let lookups = collect_lookups(&mut eval, self.n_perms);
+        assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
         let mut out = SecureField::zero();
         for (s, lk) in lookups.iter().enumerate() {
             let den: SecureField = match lk.kind {
-                RoundLookupKind::Kr => self.relations.keccak_round.combine(&lk.tuple),
-                RoundLookupKind::Xor3 => self.relations.xor3.combine(&lk.tuple),
-                RoundLookupKind::Andnot => self.relations.andnot.combine(&lk.tuple),
-                RoundLookupKind::Split(r) => self.relations.split[r - 1].combine(&lk.tuple),
+                LookupKind::Schedule => self.relations.round_schedule.combine(&lk.tuple),
+                LookupKind::State => self.relations.keccak_state.combine(&lk.tuple),
+                LookupKind::Xor3 => self.relations.xor3.combine(&lk.tuple),
+                LookupKind::Andnot => self.relations.andnot.combine(&lk.tuple),
+                LookupKind::Split(r) => self.relations.split[r - 1].combine(&lk.tuple),
             };
             out += self.eq_ws[s] * (self.delta * lk.num + den);
         }
@@ -328,21 +339,25 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
 #[cfg(test)]
 mod tests {
     use stwo::core::channel::Blake2sChannel;
+    use stwo::core::fields::m31::M31;
     use stwo::prover::backend::simd::m31::PackedM31;
     use stwo::prover::backend::Column;
 
     use super::*;
     use crate::constants::N_BYTES_IN_STATE;
-    use crate::keccak_round::{generate_interaction_trace, Claim};
+    use crate::{carrier, keccak};
 
-    fn round_data(invocations: usize) -> InteractionClaimData {
-        let input = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 2]];
-        let (_, _, data) = Claim::generate_trace(input, invocations);
-        data
+    fn carrier_data(n_perms: usize) -> InteractionData {
+        let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; n_perms];
+        for (permutation, input) in inputs.iter_mut().enumerate() {
+            input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
+        }
+        let boundaries = keccak::generate_rows(&inputs);
+        carrier::generate(&boundaries).interaction
     }
 
     /// Scalar reference: invert each slot, then add the fractions.
-    fn slotwise_claimed_sum_reference(fracs: &RoundFractions) -> SecureField {
+    fn slotwise_claimed_sum_reference(fracs: &Fractions) -> SecureField {
         let mut total = PackedQM31::zero();
         for slot in 0..fracs.n_slots() {
             let (numerators, denominators) = fracs.slot(slot);
@@ -355,10 +370,7 @@ mod tests {
     }
 
     /// Scalar reference for the packed GKR input layer.
-    fn scalar_gkr_input_layer_reference(
-        fracs: &RoundFractions,
-        log_size: u32,
-    ) -> Layer<SimdBackend> {
+    fn scalar_gkr_input_layer_reference(fracs: &Fractions, log_size: u32) -> Layer<SimdBackend> {
         let n_rows = 1usize << log_size;
         let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
         let scalar_size = (1usize << LOG_SLOTS) * n_rows;
@@ -390,18 +402,18 @@ mod tests {
             denominators,
         } = layer
         else {
-            panic!("round GKR input must be a generic LogUp layer");
+            panic!("carrier GKR input must be a generic LogUp layer");
         };
         (numerators.to_cpu(), denominators.to_cpu())
     }
 
     #[test]
     fn packed_leaves_and_global_sum_match_scalar_reference() {
-        let data = round_data(33);
-        let log_size = data_log_size(&data);
+        let data = carrier_data(2);
+        let log_size = data.log_size;
         let mut relation_channel = Blake2sChannel::default();
         let relations = KeccakRelations::draw(&mut relation_channel);
-        let fracs = build_fracs(&relations, &data);
+        let fracs = build_fractions(&relations, &data);
 
         let packed_values = layer_values(gkr_input_layer(&fracs, log_size));
         let scalar_values = layer_values(scalar_gkr_input_layer_reference(&fracs, log_size));
@@ -416,7 +428,7 @@ mod tests {
             slotwise_claimed_sum_reference(&fracs),
             "global inversion must match the slotwise reference sum"
         );
-        let (columnar_claim, _) = generate_interaction_trace(&relations, &data);
+        let (columnar_claim, _) = carrier::generate_interaction_trace(&relations, &data);
         assert_eq!(
             packed_sum, columnar_claim.claimed_sum,
             "GKR claimed sum must remain identical to the columnar LogUp"
@@ -425,16 +437,16 @@ mod tests {
 
     #[test]
     fn packed_and_scalar_layers_produce_the_same_seeded_gkr_transcript() {
-        let data = round_data(33);
-        let log_size = data_log_size(&data);
+        let data = carrier_data(2);
+        let log_size = data.log_size;
 
         // Draw the relations and mix the claimed sum at the protocol channel
-        // position before the round GKR block.
+        // position before the carrier GKR block.
         let mut packed_channel = Blake2sChannel::default();
         let relations = KeccakRelations::draw(&mut packed_channel);
         let mut scalar_channel = Blake2sChannel::default();
         let _ = KeccakRelations::draw(&mut scalar_channel);
-        let fracs = build_fracs(&relations, &data);
+        let fracs = build_fractions(&relations, &data);
         let sum = global_claimed_sum(&fracs);
         packed_channel.mix_felts(&[sum]);
         scalar_channel.mix_felts(&[sum]);
@@ -486,17 +498,17 @@ mod tests {
         let padded_packed_len = (1usize << LOG_SLOTS) * n_vec_rows;
 
         assert_eq!(n_vec_rows, 256);
-        assert_eq!(active_packed_len, 229_888);
+        assert_eq!(active_packed_len, 230_144);
         assert_eq!(padded_packed_len, 262_144);
         assert_eq!(
             (N_TOTAL_LOOKUPS - 1) * n_vec_rows + (n_vec_rows - 1),
             active_packed_len - 1,
-            "slot 897 row 255 must be the final active packed leaf"
+            "slot 898 row 255 must be the final active packed leaf"
         );
         assert_eq!(
             ((N_TOTAL_LOOKUPS - 1) * n_vec_rows + (n_vec_rows - 1)) * N_LANES + (N_LANES - 1),
             N_TOTAL_LOOKUPS * n_rows - 1,
-            "the final SIMD lane must remain the final row of slot 897"
+            "the final SIMD lane must remain the final row of slot 898"
         );
         assert_eq!(
             padded_packed_len * N_LANES,

@@ -10,6 +10,7 @@
 // stay as indexed loops for parity with the spec's little-endian layout.
 #![allow(clippy::needless_range_loop, clippy::manual_memcpy)]
 
+pub mod carrier;
 pub mod constants;
 pub mod keccak;
 pub mod keccak_round;
