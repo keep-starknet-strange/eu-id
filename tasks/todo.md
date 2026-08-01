@@ -125,6 +125,10 @@ Privacy claim:
   - [x] Verify NEON dispatch in the exact AArch64 library from the current AAR.
   - [ ] Sweep private Android worker and proof-thread stack sizes, then remove
     the temporary controls and hard-code the selected sizes.
+  - [x] Reject the isolated Android jemalloc candidate.
+    - [x] Test the maintained jemallocator releases with NDK 27.
+    - [x] Remove the candidate after the AAR cross-build failed.
+    - [x] Record the toolchain errors and the absence of candidate artifacts.
   - [ ] Run the final worker, affinity, allocator, RSS, and NEON device sweep
     on the selected P4 circuit.
 - [ ] P6: Add witness-generation parallelism only if it remains a binding
@@ -157,3 +161,5 @@ The canonical implementation and its first desktop baseline are complete.
 The full performance campaign is in progress. The final review must record each
 accepted optimization, the rejected frontier points, source and artifact hashes,
 desktop results, Firebase results, and the complete verification matrix.
+The Android jemalloc candidate is rejected because the maintained bindings do
+not build with NDK 27 without a local patch or linker shim.
