@@ -2,8 +2,8 @@
 // This path is the only in-tree circuit-identity recursion exclusion.
 
 pub const TS13_DEMO_CIRCUIT_HASH: [u8; 32] = [
-    0xee, 0xfd, 0x48, 0x00, 0x7d, 0x9f, 0x07, 0x60, 0x52, 0xb7, 0x27, 0x7b, 0x2d, 0xe2, 0xc0, 0x5e,
-    0xd6, 0xa1, 0x18, 0xad, 0xaa, 0x54, 0x5b, 0x2b, 0x00, 0x99, 0x52, 0x8c, 0x68, 0xe4, 0xc0, 0x71,
+    0xaf, 0xfe, 0x42, 0x96, 0x51, 0x22, 0x19, 0x09, 0xe4, 0x6b, 0x8a, 0x92, 0x5a, 0xba, 0x02, 0xf0,
+    0xbe, 0x09, 0x43, 0xee, 0x6d, 0x4e, 0x15, 0x2e, 0x6c, 0x69, 0x1f, 0x25, 0xb9, 0xef, 0xeb, 0x14,
 ];
 
 pub const TS13_DEMO_SHAPE_MANIFEST_SHA256: [u8; 32] = [
@@ -12,14 +12,14 @@ pub const TS13_DEMO_SHAPE_MANIFEST_SHA256: [u8; 32] = [
 ];
 
 pub const TS13_DEMO_SOUNDNESS_SOURCE_TREE_SHA256: [u8; 32] = [
-    0xe4, 0x59, 0x69, 0x6e, 0xd0, 0x8f, 0x8e, 0xfe, 0xe7, 0x6f, 0x8a, 0xf4, 0xab, 0xd7, 0x45, 0x9e,
-    0x48, 0x26, 0xc7, 0x2b, 0xb1, 0x81, 0xc0, 0x64, 0x00, 0x6c, 0xd6, 0x0e, 0x0c, 0x18, 0x5b, 0x4a,
+    0xb7, 0x3b, 0x2b, 0x08, 0x46, 0x3f, 0xb4, 0xed, 0x06, 0x1e, 0xda, 0x43, 0x1f, 0x17, 0x3a, 0xca,
+    0xcd, 0x0a, 0x36, 0x66, 0xcf, 0x66, 0xb4, 0x6c, 0xcc, 0x50, 0xfb, 0x4e, 0x2e, 0x4a, 0x75, 0xbf,
 ];
 
-pub const TS13_DEMO_PROOF_BODY_CAPACITY: u32 = 2162688;
-pub const TS13_DEMO_QUERY_COUNT: usize = 54;
+pub const TS13_DEMO_PROOF_BODY_CAPACITY: u32 = 2097152;
+pub const TS13_DEMO_QUERY_COUNT: usize = 53;
 pub const TS13_DEMO_TREE_COLUMN_COUNTS: [usize; 5] = [334, 4285, 2380, 8, 16];
-pub const TS13_DEMO_TREE_MERKLE_HASH_CAPS: [usize; 5] = [972, 972, 972, 972, 972];
+pub const TS13_DEMO_TREE_MERKLE_HASH_CAPS: [usize; 5] = [954, 954, 954, 954, 954];
 pub const TS13_DEMO_SAMPLED_VALUE_LENGTH_HISTOGRAMS: [&[(usize, usize)]; 5] = [
     &[(1, 334)],
     &[
@@ -36,9 +36,9 @@ pub const TS13_DEMO_SAMPLED_VALUE_LENGTH_HISTOGRAMS: [&[(usize, usize)]; 5] = [
     &[(2, 8)],
     &[(1, 16)],
 ];
-pub const TS13_DEMO_FRI_FIRST_WITNESS_CAP: usize = 162;
-pub const TS13_DEMO_FRI_FIRST_HASH_CAP: usize = 864;
-pub const TS13_DEMO_FRI_INNER_WITNESS_CAPS: [usize; 7] = [162, 162, 162, 162, 162, 162, 54];
-pub const TS13_DEMO_FRI_INNER_HASH_CAPS: [usize; 7] = [756, 648, 540, 432, 324, 216, 216];
+pub const TS13_DEMO_FRI_FIRST_WITNESS_CAP: usize = 159;
+pub const TS13_DEMO_FRI_FIRST_HASH_CAP: usize = 848;
+pub const TS13_DEMO_FRI_INNER_WITNESS_CAPS: [usize; 7] = [159, 159, 159, 159, 159, 159, 53];
+pub const TS13_DEMO_FRI_INNER_HASH_CAPS: [usize; 7] = [742, 636, 530, 424, 318, 212, 212];
 pub const TS13_DEMO_FRI_LAST_LAYER_COEFFICIENT_COUNT: usize = 2;
 pub const TS13_DEMO_POST_INTERACTION_PAYLOAD_COUNT: usize = 20;
