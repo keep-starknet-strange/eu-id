@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{composed_pcs_config as pcs_config, oracle_input, oracle_input44};
+use common::{composed_pcs_config as pcs_config, oracle_input};
 
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -54,7 +54,7 @@ use stwo_mldsa::expand_a::{
     ExpandAVerifier,
 };
 use stwo_mldsa::private_key_eval::PrivateKeyEvalBindings;
-use stwo_mldsa::profile::{ML_DSA_44, ML_DSA_65};
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
     hosted_claimed_sums_len, hosted_private_key_claimed_sums_len,
@@ -280,8 +280,8 @@ const T1_BIND_LOG_SIZE: u32 = 9;
 const T1_GROUP_BYTES: usize = 5;
 const T1_GROUP_COEFFS: usize = 4;
 const T1_GROUPS_PER_POLY: usize = N / T1_GROUP_COEFFS;
-const DEVICE_K: usize = ML_DSA_44.k();
-const DEVICE_PK_BYTES: usize = ML_DSA_44.pk_bytes();
+const DEVICE_K: usize = ML_DSA_65.k();
+const DEVICE_PK_BYTES: usize = ML_DSA_65.pk_bytes();
 const T1_ACTIVE_ROWS: usize = DEVICE_K * T1_GROUPS_PER_POLY;
 const RHO_TRACE_COLS: usize = 8;
 const T1_TRACE_COLS: usize = T1_GROUP_BYTES * 8;
@@ -666,7 +666,7 @@ impl PrivateKeySource {
 impl Air for PrivateKeySource {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(PRIVATE_KEY_BINDER_TAG);
-        channel.mix_u64(ML_DSA_44.transcript_tag());
+        channel.mix_u64(ML_DSA_65.transcript_tag());
         channel.mix_u64(DEVICE_PK_BYTES as u64);
     }
 
@@ -956,9 +956,9 @@ struct HostedPrivateKeyProof {
 /// `[range, keccak, ExpandA(rho -> NttCell), packed-key source
 /// (pkEncode -> FieldBytes + rho + T1Cell), hosted private-key ML-DSA]`.
 fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedPrivateKeyProof {
-    let input = oracle_input44(seed, msg);
-    let witness = generate_witness(ML_DSA_44, &input).expect("ML-DSA-44 witness");
-    let pk_bytes = input.encode_pk(ML_DSA_44);
+    let input = oracle_input(seed, msg);
+    let witness = generate_witness(ML_DSA_65, &input).expect("ML-DSA-65 witness");
+    let pk_bytes = input.encode_pk(ML_DSA_65);
 
     let field_handle = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
@@ -968,8 +968,8 @@ fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedPrivateKeyProof {
     let private_key_bindings =
         PrivateKeyEvalBindings::new(expand_bindings.ntt.clone(), t1_handle.clone());
     let mut expand_a = ExpandAProver::new(
-        ML_DSA_44,
-        derive_expand_a_witness(ML_DSA_44, input.rho).expect("ExpandA witness"),
+        ML_DSA_65,
+        derive_expand_a_witness(ML_DSA_65, input.rho).expect("ExpandA witness"),
         EXPAND_A_NAMESPACE,
         EXPAND_A_STREAM_BASE,
         range_handle.clone(),
@@ -1043,7 +1043,7 @@ fn verify_hosted_private_key_with_shapes(
     let private_key_bindings =
         PrivateKeyEvalBindings::new(expand_bindings.ntt.clone(), t1_handle.clone());
     let mut job_shapes =
-        shake128_job_shapes(ML_DSA_44, EXPAND_A_STREAM_BASE).expect("valid ExpandA service shapes");
+        shake128_job_shapes(ML_DSA_65, EXPAND_A_STREAM_BASE).expect("valid ExpandA service shapes");
     job_shapes.extend(mldsa_job_shapes);
     let mut service = KeccakServiceVerifier::new(
         job_shapes,
@@ -1053,7 +1053,7 @@ fn verify_hosted_private_key_with_shapes(
     let mut range_table =
         SharedRangeTable::verifier(proof.range_table_claimed_sum, range_handle.clone());
     let mut expand_a = ExpandAVerifier::new(
-        ML_DSA_44,
+        ML_DSA_65,
         proof.expand_a_claim.clone(),
         EXPAND_A_NAMESPACE,
         EXPAND_A_STREAM_BASE,
@@ -1124,17 +1124,17 @@ fn hosted_public_native_mu_proves_and_verifies() {
 
 #[test]
 fn hosted_private_key_shapes_kat_and_layout_are_exact() {
-    const EXPECTED_PREPROCESSED_COLUMNS: usize = 84;
+    const EXPECTED_PREPROCESSED_COLUMNS: usize = 85;
     const EXPECTED_TRACE_COLUMNS: usize = 189;
     const EXPECTED_INTERACTION_COLUMNS: usize = 344;
-    const EXPECTED_PREPROCESSED_CELLS: usize = 461_376;
-    const EXPECTED_TRACE_CELLS: usize = 1_580_224;
-    const EXPECTED_INTERACTION_M31_CELLS: usize = 1_640_896;
+    const EXPECTED_PREPROCESSED_CELLS: usize = 461_472;
+    const EXPECTED_TRACE_CELLS: usize = 1_580_256;
+    const EXPECTED_INTERACTION_M31_CELLS: usize = 1_641_152;
 
     let msg = b"private device key tr reference vector".to_vec();
-    let input = oracle_input44(4_260, &msg);
-    let witness = generate_witness(ML_DSA_44, &input).expect("ML-DSA-44 witness");
-    let pk_bytes = input.encode_pk(ML_DSA_44);
+    let input = oracle_input(4_260, &msg);
+    let witness = generate_witness(ML_DSA_65, &input).expect("ML-DSA-65 witness");
+    let pk_bytes = input.encode_pk(ML_DSA_65);
     let expected_mu_absorbed = witness.sponge.mu_absorbed.clone();
     assert_eq!(pk_bytes.len(), DEVICE_PK_BYTES);
 
@@ -1161,7 +1161,7 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
 
     let tr = job_shapes[0];
     assert_eq!(tr.message_len, DEVICE_PK_BYTES);
-    assert_eq!(tr.n_absorb, 10);
+    assert_eq!(tr.n_absorb, 15);
     assert_eq!(tr.n_squeeze, 1);
     assert_eq!(tr.absorb_stream_id, TR_ABSORB);
     assert_eq!(tr.squeeze_stream_id, TR_SQUEEZE);
@@ -1186,8 +1186,8 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
     assert_eq!(ct.squeeze_stream_id, CT_SQUEEZE);
 
     let sib = job_shapes[3];
-    assert_eq!(sib.message_len, ML_DSA_44.c_tilde_bytes());
-    assert_eq!(sib.n_squeeze, 1);
+    assert_eq!(sib.message_len, ML_DSA_65.c_tilde_bytes());
+    assert_eq!(sib.n_squeeze, 5);
     assert_eq!(sib.absorb_stream_id, SIB_ABSORB);
     assert_eq!(sib.squeeze_stream_id, STREAM_ID_SIB_SQUEEZE);
 
@@ -1261,7 +1261,7 @@ fn hosted_private_key_capacity_fixes_composed_layout_and_tree_zero() {
         let field_handle = SharedFieldRelation::new();
         let expand_bindings = ExpandABindings::new();
         let mut service_shapes =
-            shake128_job_shapes(ML_DSA_44, EXPAND_A_STREAM_BASE).expect("ExpandA service shapes");
+            shake128_job_shapes(ML_DSA_65, EXPAND_A_STREAM_BASE).expect("ExpandA service shapes");
         service_shapes.extend(hosted_private_key_keccak_job_shapes(message_len, 0));
         let mut service = KeccakServiceVerifier::new(
             service_shapes,
@@ -1391,11 +1391,11 @@ fn fixed_shape_wire_is_exact_and_capacity_shape_is_not_serialized() {
 #[test]
 fn hosted_private_key_public_mix_is_key_independent() {
     let msg = b"the public transcript exposes no stable device key".to_vec();
-    let input_a = oracle_input44(4_261, &msg);
-    let input_b = oracle_input44(4_262, &msg);
+    let input_a = oracle_input(4_261, &msg);
+    let input_b = oracle_input(4_262, &msg);
     assert_ne!(input_a.rho, input_b.rho);
-    let witness_a = generate_witness(ML_DSA_44, &input_a).expect("witness a");
-    let witness_b = generate_witness(ML_DSA_44, &input_b).expect("witness b");
+    let witness_a = generate_witness(ML_DSA_65, &input_a).expect("witness a");
+    let witness_b = generate_witness(ML_DSA_65, &input_b).expect("witness b");
     let bindings_a = ExpandABindings::new();
     let bindings_b = ExpandABindings::new();
     let first = MlDsaProver::hosted_private_key(
