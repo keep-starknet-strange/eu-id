@@ -127,6 +127,7 @@
 ## Scope
 
 - Apply a user scope change immediately.
+- Treat a checkpoint result as incomplete when the user authorizes the full campaign.
 - Stop cloud and device work when the user limits a benchmark to the computer.
 - Remove excluded work from the active plan.
 - Remove compatibility routes when the user selects one canonical API.
