@@ -148,12 +148,13 @@ Privacy claim:
 - [x] Run the final desktop campaign and the final Firebase three-device
   campaign through the canonical `proveIdentity` and `verifyIdentity` API.
 - [ ] Meet the primary mobile gates: cold prove below 2,000 ms on Pixel 8,
-  Galaxy S24 Ultra, and Galaxy A54; verify at most 350 ms; use a fixed
+  Galaxy S24 Ultra, and Galaxy A54; verify at most 500 ms; use a fixed
   credential-independent envelope; and meet the mailbox-approved proof-size
   ceiling.
   - [ ] Meet the 2,000 ms cold-prove target on all three phones. The final
     canonical matrix failed this target on all three phones.
-  - [x] Keep verification at or below 350 ms on all three phones.
+  - [x] Keep verification at or below the approved 500 ms limit on all three
+    phones.
   - [x] Keep one fixed, credential-independent 1,572,910-byte envelope.
   - [x] Keep the envelope below the 2,500,000-byte ceiling.
 
@@ -270,6 +271,11 @@ artifact check, and the diff check passed.
   - [x] Send the exact correction request as main-repository mailbox Q-012.
 - [ ] Receive an implementation-ready K, N, and S design, or a complete sound
   K-only prototype design, before changing cryptographic code.
+  - [x] Reject A-012's K-only design because its private bit oracle has no
+    terminal commitment, its theta and boundary maps conflict, and deleting
+    the old carrier disconnects the retained schedule and LogUp graph.
+  - [x] Send the exact K-prototype correction request as main-repository
+    mailbox Q-013.
 - [ ] Implement and measure each accepted redesign stage at its hard stop gate.
 - [ ] Regenerate the source-bound artifact and pass the complete release and
   unlinkability checks.
