@@ -5,6 +5,7 @@
 - Trace the exact prover entrypoint before you name a proof or benchmark.
 - Trace the exact verifier entrypoint.
 - Trace the fixture constructor.
+- Count composed job geometry after all size-dependent credential fields change.
 - Inspect every statement field.
 - Do not infer behavior from a function or benchmark name.
 - Treat comments and campaign prose as hypotheses.
