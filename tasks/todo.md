@@ -105,6 +105,7 @@ Privacy claim:
   - [x] Reject all ten blowup-one points with a live pinned-STWO proof attempt.
   - [x] Measure all ten valid blowup-two and blowup-three points in serial
     fresh desktop processes.
+  - [x] Package and verify all six blowup-two Android pairs.
   - [x] Package and verify all four blowup-three Android pairs.
   - [ ] Measure all ten valid points on Pixel 8 with source-bound artifacts.
   - [ ] Select the fastest cold Pixel 8 point below the 2,500,000-byte ceiling.

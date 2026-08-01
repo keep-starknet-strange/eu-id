@@ -132,6 +132,8 @@
 - Do not change transcript or domain-separator bytes during a terminology cleanup.
 - Remove generated Android build directories before hashing the source tree.
 - Freeze and record an exact checkpoint before parallel campaign edits begin.
+- Reuse one isolated Cargo target for a serial package frontier.
+- Copy each package out before you switch to the next source checkpoint.
 - After a geometry change, validate a live proof against the artifact input.
   Static artifact generation alone does not prove that the input is current.
 - Bind every GKR input vector before its randomized compression challenges.
