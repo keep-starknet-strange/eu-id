@@ -374,16 +374,16 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 committed_histogram.into_iter().collect::<Vec<_>>(),
                 [
                     (4, 5),
-                    (5, 20),
+                    (5, 19),
                     (6, 3),
-                    (7, 7),
-                    (8, 46),
-                    (9, 95),
+                    (7, 5),
+                    (8, 27),
+                    (9, 110),
                     (10, 92),
-                    (11, 20),
-                    (12, 2),
-                    (13, 31),
-                    (14, 2),
+                    (11, 8),
+                    (12, 14),
+                    (13, 18),
+                    (14, 7),
                     (15, 8),
                     (16, 3),
                 ]
@@ -395,7 +395,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [334, 4_285, 2_380, 8, 16]
+                [319, 4_285, 2_380, 8, 16]
             );
             assert_eq!(
                 shape
@@ -403,7 +403,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [334, 4_285, 2_380, 8, 16]
+                [319, 4_285, 2_380, 8, 16]
             );
             let common_query_count = shape.queried_values[0][0];
             assert!(common_query_count > 0);
@@ -463,7 +463,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 [
                     (8, 4, 12, 0),
                     (2, 1, 4, 0),
-                    (58, 1_963, 888, 8),
+                    (55, 1_963, 888, 8),
                     (0, 0, 0, 0),
                     (2, 2, 8, 0),
                     (63, 125, 192, 0),
@@ -477,7 +477,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     (4, 305, 92, 0),
                     (11, 13, 16, 0),
                     (5, 34, 52, 0),
-                    (84, 189, 344, 0),
+                    (85, 189, 344, 0),
                     (1, 336, 48, 0),
                     (63, 125, 192, 0),
                     (0, 0, 0, 0),
@@ -501,14 +501,14 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             );
             assert_eq!(
                 geometry.air_instances[2].post_interaction_log_sizes,
-                [12; 8]
+                [13; 8]
             );
             assert!(geometry
                 .air_instances
                 .iter()
                 .enumerate()
                 .all(|(index, air)| index == 2 || air.post_interaction_log_sizes.is_empty()));
-            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 334);
+            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 319);
             assert_eq!(
                 column_counts.iter().fold(
                     [0usize; 3],
