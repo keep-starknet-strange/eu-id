@@ -27,6 +27,7 @@ rayon = "1"
 [dev-dependencies]
 ciborium = "0.2.2"
 ml-dsa = "0.1.1"
+serde_json = "1"
 sha2 = "0.10"
 stwo-mldsa = { path = "../stwo-mldsa" }
 stwo-sha256 = { path = "../stwo-sha256" }

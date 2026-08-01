@@ -8,6 +8,8 @@
 #[path = "../../eu-id-prover/tests/support/mldsa_fixture.rs"]
 mod mldsa_fixture;
 
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use euid_zk_sdk::{prove_identity, verify_identity, IdentityStatement, IdentityWitness};
@@ -17,29 +19,61 @@ const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const DISTINCTIVE_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
 const VERIFICATION_TIMESTAMP_EPOCH_SECONDS: i64 = 20_637 * 86_400;
 const REVOCATION_EPOCH: u32 = 7;
+const FIXTURE_NAME: &str = "deterministic-rustcrypto-mldsa65-issuer-revocation-mldsa44-device-realistic-7-attribute-pid-demo-not-deployed-credential";
+
+struct Config {
+    iterations: usize,
+    fixture_out: Option<PathBuf>,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum FixtureWriteError {
+    #[error("cannot serialize the mobile fixture")]
+    Serialize(#[from] serde_json::Error),
+    #[error("cannot write the mobile fixture to {path}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
 
 fn main() {
-    let iterations = parse_iterations();
+    let config = parse_config();
     std::thread::Builder::new()
         .name("ts13-sdk-perf-probe".to_string())
         .stack_size(32 * 1024 * 1024)
-        .spawn(move || run(iterations))
+        .spawn(move || run(config))
         .expect("SDK TS13 probe worker starts")
         .join()
         .expect("SDK TS13 probe worker does not panic");
 }
 
-fn parse_iterations() -> usize {
+fn parse_config() -> Config {
     let mut args = std::env::args().skip(1);
-    match (args.next().as_deref(), args.next()) {
-        (None, None) => 1,
-        (Some("--iterations" | "-n"), Some(value)) => value
-            .parse::<usize>()
-            .ok()
-            .filter(|iterations| *iterations > 0)
-            .expect("--iterations must be a positive integer"),
-        _ => panic!("usage: ts13_sdk_perf_probe [--iterations N]"),
+    let mut config = Config {
+        iterations: 1,
+        fixture_out: None,
+    };
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--iterations" | "-n" => {
+                let value = args.next().expect("--iterations requires a value");
+                config.iterations = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|iterations| *iterations > 0)
+                    .expect("--iterations must be a positive integer");
+            }
+            "--fixture-out" => {
+                let path = args.next().expect("--fixture-out requires a path");
+                assert!(config.fixture_out.is_none(), "--fixture-out was repeated");
+                config.fixture_out = Some(PathBuf::from(path));
+            }
+            _ => panic!("usage: ts13_sdk_perf_probe [--iterations N] [--fixture-out PATH]"),
+        }
     }
+    config
 }
 
 fn median(values: &mut [u128]) -> u128 {
@@ -67,7 +101,65 @@ fn identity_statement(
     }
 }
 
-fn run(iterations: usize) {
+fn lower_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(&mut output, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    output
+}
+
+fn write_mobile_fixture(
+    path: &Path,
+    statement: &IdentityStatement,
+    witness: &IdentityWitness,
+) -> Result<(), FixtureWriteError> {
+    let fixture = serde_json::json!({
+        "byteEncoding": "lowercase-hex",
+        "fixture": FIXTURE_NAME,
+        "kotlinPackage": "com.kss.euid.zk.sdk",
+        "privacyClaim": "public-input unlinkable; transcript zero knowledge pending",
+        "profile": "ts13-pid-age-over-18-unlinkable-demo-v1",
+        "proofSystem": "stwo-euid-ts13-demo-v1",
+        "proveApi": "proveIdentity",
+        "schema": "euid-ts13-mobile-fixture-v1",
+        "statement": {
+            "circuitHash": lower_hex(&statement.circuit_hash),
+            "documentType": statement.document_type,
+            "elementIdentifier": statement.element_identifier,
+            "expectedValueCbor": lower_hex(&statement.expected_value_cbor),
+            "namespace": statement.namespace,
+            "revocationEpoch": statement.revocation_epoch,
+            "revocationPublicKey": lower_hex(&statement.revocation_public_key),
+            "sessionTranscript": lower_hex(&statement.session_transcript),
+            "timestampEpochSeconds": statement.timestamp_epoch_seconds,
+            "trustedIssuerPublicKey": lower_hex(&statement.trusted_issuer_public_key),
+            "zkSystemId": statement.zk_system_id,
+        },
+        "statementType": "IdentityStatement",
+        "u64Encoding": "decimal-string",
+        "verifyApi": "verifyIdentity",
+        "witness": {
+            "document": lower_hex(&witness.document),
+            "revocationIdHi": witness.revocation_id_hi.to_string(),
+            "revocationIdLo": witness.revocation_id_lo.to_string(),
+            "revocationSignature": lower_hex(&witness.revocation_signature),
+        },
+        "witnessType": "IdentityWitness",
+    });
+    let mut encoded = serde_json::to_vec_pretty(&fixture)?;
+    encoded.push(b'\n');
+    std::fs::write(path, encoded).map_err(|source| FixtureWriteError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn run(config: Config) {
+    let Config {
+        iterations,
+        fixture_out,
+    } = config;
     let session_transcript =
         eu_id_prover::mdoc::openid4vp_session_transcript(b"sdk-ts13-perf-equality-session");
     let fixture = mldsa_fixture::mldsa_realistic_pid_fixture_with_age_over_18(&session_transcript);
@@ -88,6 +180,12 @@ fn run(iterations: usize) {
         &fixture.issuer_pk,
         fixture.revocation_pk.clone(),
     );
+    let witness = IdentityWitness {
+        document: fixture.document.clone(),
+        revocation_id_lo: id_lo,
+        revocation_id_hi: id_hi,
+        revocation_signature: revocation_signature.clone(),
+    };
     println!(
         "TS13_SDK_FIXTURE document_bytes={} issuer_sig_structure_bytes={} mso_payload_bytes={} device_sig_structure_bytes={} requested_item_bytes={}",
         fixture.document.len(),
@@ -106,16 +204,8 @@ fn run(iterations: usize) {
 
     for _ in 0..iterations {
         let prove_start = Instant::now();
-        let identity_proof = prove_identity(
-            statement.clone(),
-            IdentityWitness {
-                document: fixture.document.clone(),
-                revocation_id_lo: id_lo,
-                revocation_id_hi: id_hi,
-                revocation_signature: revocation_signature.clone(),
-            },
-        )
-        .expect("SDK identity TS13 equality proof builds");
+        let identity_proof = prove_identity(statement.clone(), witness.clone())
+            .expect("SDK identity TS13 equality proof builds");
         prove_ms.push(prove_start.elapsed().as_millis());
 
         assert_eq!(&identity_proof[..8], b"EUIDTS13");
@@ -134,7 +224,7 @@ fn run(iterations: usize) {
     }
 
     println!(
-        "TS13_SDK_PERF_PROBE privacy_claim=public-input_unlinkable_transcript_zero_knowledge_pending fixture=deterministic_rustcrypto_mldsa65_realistic_7_attribute_pid_demo_not_deployed_credential verify_scope=first_verification_is_tree0_cache_miss_after_prover_warmed_process iterations={iterations} rayon_threads={} prove_identity_ms={} verify_identity_first_ms={} verify_identity_median_ms={} final_envelope_bytes={final_proof_envelope_bytes} final_body_capacity={final_proof_body_capacity} envelope_median_bytes={} fixture_document_bytes={} fixture_issuer_sig_structure_bytes={} fixture_device_sig_structure_bytes={} session_transcript_bytes={}",
+        "TS13_SDK_PERF_PROBE privacy_claim=public-input_unlinkable_transcript_zero_knowledge_pending fixture={FIXTURE_NAME} verify_scope=first_verification_is_tree0_cache_miss_after_prover_warmed_process iterations={iterations} rayon_threads={} prove_identity_ms={} verify_identity_first_ms={} verify_identity_median_ms={} final_envelope_bytes={final_proof_envelope_bytes} final_body_capacity={final_proof_body_capacity} envelope_median_bytes={} fixture_document_bytes={} fixture_issuer_sig_structure_bytes={} fixture_device_sig_structure_bytes={} session_transcript_bytes={}",
         rayon::current_num_threads(),
         median(&mut prove_ms),
         first_verify_ms.expect("at least one probe iteration"),
@@ -145,4 +235,18 @@ fn run(iterations: usize) {
         fixture.device_sig_structure.len(),
         statement.session_transcript.len(),
     );
+
+    if let Some(path) = fixture_out {
+        write_mobile_fixture(&path, &statement, &witness)
+            .unwrap_or_else(|error| panic!("{error}: {error:?}"));
+        println!("TS13_MOBILE_FIXTURE path={}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn lower_hex_is_canonical() {
+        assert_eq!(super::lower_hex(&[0, 1, 0xab, 0xff]), "0001abff");
+    }
 }
