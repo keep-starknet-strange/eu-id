@@ -1158,7 +1158,7 @@ offset  size       field
 ```
 
 For this circuit, `P` is 2,097,152 bytes.
-The total envelope is 2,162,734 bytes.
+The total envelope is 2,097,198 bytes.
 
 `P` is a circuit-artifact constant.
 It is not the used proof length.
