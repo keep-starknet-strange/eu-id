@@ -20,6 +20,10 @@
 
 ## Proof tests
 
+- Run a live composed proof for each PCS domain class before you report its frontier row.
+- Do not infer prover support from interpolation and envelope formulas.
+- Name both the source commit and artifact commit for each PCS frontier row.
+- Do not use a parameter-only commit with an uncommitted generated artifact as evidence.
 - Run all proof tests with `--release`.
 - Use a release profile with debug information when you need symbols.
 - Do not use a debug proof as final evidence.
@@ -86,6 +90,8 @@
 
 ## Mobile benchmarks
 
+- Do not run a latency sample while another build, proof, or benchmark uses the host.
+- Run final desktop performance samples in one serial campaign.
 - Identify the measured function before you reuse a mobile harness.
 - Benchmark only the canonical `proveIdentity` path.
 - Use the same APK for each physical-device comparison.
@@ -105,6 +111,8 @@
 ## Artifact provenance
 
 - Record the exact source commit for each artifact.
+- Build each benchmark executable in a fresh target directory, record its hash,
+  and run one proof before the timing campaign.
 - Record the fixture SHA-256.
 - Record each binary, AAR, and APK SHA-256.
 - Record the circuit hash.

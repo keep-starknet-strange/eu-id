@@ -101,15 +101,30 @@ Privacy claim:
     the canonical A1/A2/B proof path.
   - [x] Reject explicit lifting domains that cannot interpolate the live
     composition polynomial.
-  - [ ] Measure the final frontier only after P2 fixes the circuit geometry.
+  - [x] Derive the exact 20-point frontier from the final P2 geometry.
+  - [x] Reject all ten blowup-one points with a live pinned-STWO proof attempt.
+  - [x] Measure all ten valid blowup-two and blowup-three points in serial
+    fresh desktop processes.
+  - [ ] Measure all ten valid points on Pixel 8 with source-bound artifacts.
+  - [ ] Select the fastest cold Pixel 8 point below the 2,500,000-byte ceiling.
 - [ ] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
   available ARM acceleration; keep only improvements that help the binding
   devices.
   - [x] Add and verify phase memory, effective-worker, stack, topology, and
-    benchmark-only affinity records.
+  benchmark-only affinity records.
   - [x] Run the preliminary desktop worker sweep at the P4+P5 checkpoint.
+  - [x] Audit existing branches for reusable affinity and allocator work.
+  - [x] Trace the canonical proof memory lifetime and rank live allocations.
+  - [ ] Store Keccak GKR gate numerators in their canonical base-field form.
+    - Candidate `21c65fb5` passed independent soundness review and exact
+      proof-byte parity. Integrate it after P4 selects the product point.
+  - [ ] Bound the Keccak claimed-sum inverse scratch allocation.
+    - Candidate `f3d79527` passed the release Keccak suite and Clippy. Integrate
+      it with the base-field candidate after P4 selection.
+  - [x] Verify the private, fail-open Android affinity policy and its unit tests.
+  - [x] Verify NEON dispatch in the exact AArch64 library from the current AAR.
   - [ ] Run the final worker, affinity, allocator, RSS, and NEON device sweep
-    after P2 fixes the circuit geometry.
+    on the selected P4 circuit.
 - [ ] P6: Add witness-generation parallelism only if it remains a binding
   phase after P2 through P5.
 - [ ] Regenerate and verify the source-bound artifact after every accepted
