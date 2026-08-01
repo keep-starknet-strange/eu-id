@@ -261,6 +261,8 @@ artifact check, and the diff check passed.
 - [x] Obtain user direction to request a staged AIR redesign that preserves
   every theorem, unlinkability, soundness, API, and local-proving property.
 - [x] Send the complete redesign brief as main-repository mailbox Q-011.
+- [x] Receive A-010 authorization for an AIR-only redesign with the pinned
+  STWO backend and all theorem, security, privacy, and deployment invariants.
 - [ ] Review the Q-011 redesign and its property ledger before implementation.
 - [ ] Regenerate the source-bound artifact and pass the complete release and
   unlinkability checks.
