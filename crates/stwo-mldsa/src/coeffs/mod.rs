@@ -33,9 +33,10 @@
 //! |15   | `norm2_b_hi` | second z coefficient: 7-bit hi of `524_091 − cell` |
 //!
 //! ## Preprocessed columns
-//! `start, end, poly_id, active, live_mask_4, is_carry, is_norm, is_c, is_w,
-//!  w_bind_id, c_bind_id` — all row-index-deterministic. The AIR derives the
-//! other live masks and selectors from these columns.
+//! `start, end, poly_id, live_mask_4, is_carry, is_norm, is_c, is_w,
+//!  paired_continue, w_bind_id, c_bind_id, profile_active` — all
+//! row-index-deterministic. The AIR derives the other live masks and selectors
+//! from these columns.
 //!
 //! ## Constraint degrees
 //!
@@ -185,7 +186,6 @@ pub fn coeffs_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnI
         profile_pre_id(profile, "start"),
         pre_id("end"),
         pre_id("poly_id"),
-        pre_id("active"),
         profile_pre_id(profile, "live_mask_4"),
         profile_pre_id(profile, "is_carry"),
         profile_pre_id(profile, "is_norm"),
@@ -260,7 +260,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
     let mut start = vec![m31(0); rows];
     let mut end = vec![m31(0); rows];
     let mut poly_id = vec![m31(0); rows];
-    let mut active = vec![m31(0); rows];
     let mut live_mask_4 = vec![m31(0); rows];
     let mut is_carry = vec![m31(0); rows];
     let mut is_norm = vec![m31(0); rows];
@@ -274,7 +273,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
     for (row, info) in sched.iter().enumerate() {
         let g = info.group;
         poly_id[row] = m31(g.poly_id);
-        active[row] = m31(1);
         let group_active = group_is_active(profile, g);
         profile_active[row] = m31(u32::from(group_active));
         end[row] = m31(u32::from(info.in_group == g.rows() - 1));
@@ -310,7 +308,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
         start,
         end,
         poly_id,
-        active,
         live_mask_4,
         is_carry,
         is_norm,
@@ -497,7 +494,6 @@ impl FrameworkEval for CoeffsEval {
         // unconstrained.
         let end = eval.get_preprocessed_column(pre_id("end"));
         let poly_id = eval.get_preprocessed_column(pre_id("poly_id"));
-        let schedule_active = eval.get_preprocessed_column(pre_id("active"));
         let live_mask_4 = eval.get_preprocessed_column(profile_pre_id(self.profile, "live_mask_4"));
         let is_carry = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_carry"));
         let is_norm = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_norm"));
@@ -543,7 +539,7 @@ impl FrameworkEval for CoeffsEval {
         // The internal trace retains the maximum ML-DSA shape. Rows outside
         // the verifier-selected profile are fixed to zero and cannot affect
         // the live identity.
-        let inactive = schedule_active - profile_active;
+        let inactive = one.clone() - profile_active;
         for value in digit
             .iter()
             .chain(core::iter::once(&recomp_cell))
@@ -1352,6 +1348,10 @@ mod packed_tests {
             .into_iter()
             .map(|column| column.to_cpu().values)
             .collect();
+        let base: Vec<_> = gen_coeffs_base_trace(&witness, log_size)
+            .into_iter()
+            .map(|column| column.to_cpu().values)
+            .collect();
         let accumulator: Vec<_> = interaction.trace[..N_ACC_COORD_COLS]
             .iter()
             .map(|column| column.to_cpu().values)
@@ -1361,6 +1361,16 @@ mod packed_tests {
             .enumerate()
         {
             let Some(info) = schedule.get(coset) else {
+                assert!(
+                    preprocessed
+                        .iter()
+                        .all(|column| column[circle_row] == m31(0)),
+                    "padding selectors must be zero at coset row {coset}"
+                );
+                assert!(
+                    base.iter().all(|column| column[circle_row] == m31(0)),
+                    "padding base cells must be zero at coset row {coset}"
+                );
                 assert!(
                     accumulator
                         .iter()
@@ -1373,7 +1383,7 @@ mod packed_tests {
                 continue;
             }
 
-            for selector in [0, 4, 5, 6, 7, 8, 9, 12] {
+            for selector in [0, 3, 4, 5, 6, 7, 8, 11] {
                 assert_eq!(
                     preprocessed[selector][circle_row],
                     m31(0),
@@ -1385,6 +1395,11 @@ mod packed_tests {
                 preprocessed[1][circle_row],
                 m31(u32::from(info.in_group == info.group.rows() - 1)),
                 "raw group-end selector must retain the zero-evaluation yield"
+            );
+            assert!(
+                base.iter().all(|column| column[circle_row] == m31(0)),
+                "inactive base cells must be zero in group {}",
+                info.group.poly_id
             );
             assert!(
                 accumulator
