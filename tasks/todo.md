@@ -263,7 +263,14 @@ artifact check, and the diff check passed.
 - [x] Send the complete redesign brief as main-repository mailbox Q-011.
 - [x] Receive A-010 authorization for an AIR-only redesign with the pinned
   STWO backend and all theorem, security, privacy, and deployment invariants.
-- [ ] Review the Q-011 redesign and its property ledger before implementation.
+- [x] Review the Q-011 redesign and its property ledger before implementation.
+  - [x] Reject the v1 design because its Keccak proof is incomplete, its
+    inverse-NTT argument permits M31 aliases, and its NTT and SHA budgets do
+    not match their stated column layouts.
+  - [x] Send the exact correction request as main-repository mailbox Q-012.
+- [ ] Receive an implementation-ready K, N, and S design, or a complete sound
+  K-only prototype design, before changing cryptographic code.
+- [ ] Implement and measure each accepted redesign stage at its hard stop gate.
 - [ ] Regenerate the source-bound artifact and pass the complete release and
   unlinkability checks.
 - [ ] Run one final three-phone Firebase matrix with one exact APK pair.
