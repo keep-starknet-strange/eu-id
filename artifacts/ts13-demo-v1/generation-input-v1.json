@@ -16683,7 +16683,7 @@
       5,
       5
     ],
-    "root": "cb60a2c49ccce870c8cef2301e55dbba59b855c457a52c92e1aaf9bc8e5d48cf"
+    "root": "583c705632bcf16afa9873b270a739d963f6af7c166958fc273eb3decbded1b8"
   },
   "proofSystem": {
     "field": "M31",
@@ -16694,15 +16694,15 @@
     "commitmentHash": "Blake2s-256",
     "merkleHash": "Blake2s-256",
     "friLogLastLayerDegreeBound": 1,
-    "friLogBlowupFactor": 3,
-    "friQueryCount": 35,
+    "friLogBlowupFactor": 2,
+    "friQueryCount": 54,
     "friFoldStep": 2,
-    "powBits": 23,
+    "powBits": 20,
     "liftingLogSize": null,
     "merkleTrees": [
       {
         "name": "tree_0_preprocessed",
-        "depth": 19,
+        "depth": 18,
         "digestBytes": 32,
         "maximumOpenedColumns": 334,
         "sampledValueLengthHistogram": [
@@ -16714,7 +16714,7 @@
       },
       {
         "name": "tree_1_trace",
-        "depth": 19,
+        "depth": 18,
         "digestBytes": 32,
         "maximumOpenedColumns": 4285,
         "sampledValueLengthHistogram": [
@@ -16754,7 +16754,7 @@
       },
       {
         "name": "tree_2_interaction",
-        "depth": 19,
+        "depth": 18,
         "digestBytes": 32,
         "maximumOpenedColumns": 2380,
         "sampledValueLengthHistogram": [
@@ -16770,7 +16770,7 @@
       },
       {
         "name": "tree_3_post_interaction",
-        "depth": 15,
+        "depth": 14,
         "digestBytes": 32,
         "maximumOpenedColumns": 8,
         "sampledValueLengthHistogram": [
@@ -16782,7 +16782,7 @@
       },
       {
         "name": "tree_4_composition",
-        "depth": 19,
+        "depth": 18,
         "digestBytes": 32,
         "maximumOpenedColumns": 16,
         "sampledValueLengthHistogram": [
@@ -16795,52 +16795,52 @@
     ],
     "friLayers": [
       {
-        "inputLogSize": 19,
-        "outputLogSize": 17,
-        "merkleDepth": 17,
-        "maximumOpenedValues": 105
+        "inputLogSize": 18,
+        "outputLogSize": 16,
+        "merkleDepth": 16,
+        "maximumOpenedValues": 162
       },
       {
-        "inputLogSize": 17,
-        "outputLogSize": 15,
-        "merkleDepth": 15,
-        "maximumOpenedValues": 105
+        "inputLogSize": 16,
+        "outputLogSize": 14,
+        "merkleDepth": 14,
+        "maximumOpenedValues": 162
       },
       {
-        "inputLogSize": 15,
-        "outputLogSize": 13,
-        "merkleDepth": 13,
-        "maximumOpenedValues": 105
+        "inputLogSize": 14,
+        "outputLogSize": 12,
+        "merkleDepth": 12,
+        "maximumOpenedValues": 162
       },
       {
-        "inputLogSize": 13,
-        "outputLogSize": 11,
-        "merkleDepth": 11,
-        "maximumOpenedValues": 105
+        "inputLogSize": 12,
+        "outputLogSize": 10,
+        "merkleDepth": 10,
+        "maximumOpenedValues": 162
       },
       {
-        "inputLogSize": 11,
-        "outputLogSize": 9,
-        "merkleDepth": 9,
-        "maximumOpenedValues": 105
+        "inputLogSize": 10,
+        "outputLogSize": 8,
+        "merkleDepth": 8,
+        "maximumOpenedValues": 162
       },
       {
-        "inputLogSize": 9,
-        "outputLogSize": 7,
-        "merkleDepth": 7,
-        "maximumOpenedValues": 105
+        "inputLogSize": 8,
+        "outputLogSize": 6,
+        "merkleDepth": 6,
+        "maximumOpenedValues": 162
       },
       {
-        "inputLogSize": 7,
-        "outputLogSize": 5,
-        "merkleDepth": 5,
-        "maximumOpenedValues": 105
-      },
-      {
-        "inputLogSize": 5,
+        "inputLogSize": 6,
         "outputLogSize": 4,
-        "merkleDepth": 5,
-        "maximumOpenedValues": 35
+        "merkleDepth": 4,
+        "maximumOpenedValues": 162
+      },
+      {
+        "inputLogSize": 4,
+        "outputLogSize": 3,
+        "merkleDepth": 4,
+        "maximumOpenedValues": 54
       }
     ]
   },
