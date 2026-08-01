@@ -3294,13 +3294,13 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     }
 }
 
-const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
-const TS13_PCS_QUERIES: usize = 52;
-const TS13_PCS_POW_BITS: u32 = 24;
-const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = None;
+const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 3;
+const TS13_PCS_QUERIES: usize = 36;
+const TS13_PCS_POW_BITS: u32 = 20;
+const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = Some(19);
 
 pub(crate) fn mdoc_ts13_pcs_config() -> PcsConfig {
-    // PCS query and proof-of-work label: 52×2 + 24 = 128 bits.
+    // PCS query and proof-of-work label: 36×3 + 20 = 128 bits.
     // This exceeds the 108-bit OODS bound that dominates the TS13 STARK.
     // The verifier pins this configuration and rejects other configurations.
     // TS13 accounts for OODS and binding-hash limits separately.
