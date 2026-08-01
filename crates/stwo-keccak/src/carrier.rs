@@ -563,7 +563,8 @@ impl Fractions {
     fn new(n_vector_rows: usize) -> Self {
         let length = N_TOTAL_LOOKUPS * n_vector_rows;
         Self {
-            numerators: Vec::with_capacity(length),
+            // This allocation becomes the padded GKR numerator column.
+            numerators: Vec::with_capacity(N_TOTAL_LOOKUPS.next_power_of_two() * n_vector_rows),
             denominators: Vec::with_capacity(length),
             n_vector_rows,
         }
@@ -596,6 +597,10 @@ impl Fractions {
         let start = slot * self.n_vector_rows;
         let end = start + self.n_vector_rows;
         (&self.numerators[start..end], &self.denominators[start..end])
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<PackedM31>, Vec<PackedQM31>) {
+        (self.numerators, self.denominators)
     }
 }
 

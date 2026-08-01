@@ -84,6 +84,12 @@ const _: () = assert!(N_TIEBACK_COLUMNS == 8);
 /// Packed denominators inverted at one time for the global claimed sum.
 const CLAIMED_SUM_INVERSE_CHUNK_SIZE: usize = 1 << 11;
 
+const SCHEDULE_LOOKUP_SLOT: usize = 0;
+const INPUT_LOOKUP_SLOT: usize = 1;
+const FIRST_ARITHMETIC_LOOKUP_SLOT: usize = 2;
+const OUTPUT_LOOKUP_SLOT: usize = N_TOTAL_LOOKUPS - 1;
+const N_NUMERATOR_SCHEDULES: usize = 3;
+
 /// Everything both sides derive from the GKR transcript for the tie-back.
 pub struct RoundTieBack {
     /// The row half of the GKR OOD point. This is the MleEval evaluation point.
@@ -146,11 +152,41 @@ fn tieback_from_artifact(
 
 // Prover side.
 
-/// Prover state for the fraction columns, GKR leaves, and tie-back column.
+/// Prover state for the fractions, compact numerator schedules, and tie-back.
 pub struct RoundGkrProver {
     fracs: Fractions,
+    numerator_schedules: NumeratorSchedules,
     log_size: u32,
     claimed_sum: SecureField,
+}
+
+/// The three independent row schedules reconstruct every lookup numerator.
+struct NumeratorSchedules {
+    rows: Vec<[PackedM31; N_NUMERATOR_SCHEDULES]>,
+}
+
+impl NumeratorSchedules {
+    fn from_fractions(fracs: &Fractions) -> Self {
+        assert_eq!(fracs.n_slots(), N_TOTAL_LOOKUPS);
+        let input = fracs.slot(INPUT_LOOKUP_SLOT).0;
+        let round = fracs.slot(FIRST_ARITHMETIC_LOOKUP_SLOT).0;
+        let output = fracs.slot(OUTPUT_LOOKUP_SLOT).0;
+        let rows = (0..fracs.n_vector_rows())
+            .map(|row| [-input[row], round[row], output[row]])
+            .collect();
+        Self { rows }
+    }
+
+    fn value(&self, slot: usize, row: usize) -> PackedM31 {
+        let [header, round, final_round] = self.rows[row];
+        match slot {
+            SCHEDULE_LOOKUP_SLOT => header + round,
+            INPUT_LOOKUP_SLOT => -header,
+            OUTPUT_LOOKUP_SLOT => final_round,
+            FIRST_ARITHMETIC_LOOKUP_SLOT..OUTPUT_LOOKUP_SLOT => round,
+            _ => panic!("carrier numerator slot is outside the canonical layout"),
+        }
+    }
 }
 
 /// Sum every packed fraction in canonical slot/row order. Fixed-size inverse
@@ -171,9 +207,9 @@ fn global_claimed_sum(fracs: &Fractions) -> SecureField {
     total.to_array().iter().copied().sum()
 }
 
-/// Materialize the canonical slot-high/row-low GKR leaves without unpacking
-/// SIMD lanes. The trailing slots are the neutral fraction 0/1.
-fn gkr_input_layer(fracs: &Fractions, log_size: u32) -> Layer<SimdBackend> {
+/// Move the canonical slot-high/row-low values into the GKR input layer. The
+/// trailing slots are the neutral fraction 0/1.
+fn gkr_input_layer(fracs: Fractions, log_size: u32) -> (Layer<SimdBackend>, Vec<PackedQM31>) {
     let n_rows = 1usize << log_size;
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     assert_eq!(
@@ -189,24 +225,30 @@ fn gkr_input_layer(fracs: &Fractions, log_size: u32) -> Layer<SimdBackend> {
 
     let packed_size = (1usize << LOG_SLOTS) * n_vec_rows;
     let scalar_size = (1usize << LOG_SLOTS) * n_rows;
-    let mut numerators = Vec::with_capacity(packed_size);
-    numerators.extend_from_slice(fracs.numerators());
+    let (mut numerators, denominators) = fracs.into_parts();
+    assert!(
+        numerators.capacity() >= packed_size,
+        "carrier numerator allocation must include the padded GKR slots"
+    );
     numerators.resize(packed_size, PackedM31::zero());
-    let mut denominators = Vec::with_capacity(packed_size);
-    denominators.extend_from_slice(fracs.denominators());
-    denominators.resize(packed_size, PackedQM31::one());
+    let mut padded_denominators = Vec::with_capacity(packed_size);
+    padded_denominators.extend_from_slice(&denominators);
+    padded_denominators.resize(packed_size, PackedQM31::one());
     debug_assert_eq!(packed_size * N_LANES, scalar_size);
 
-    Layer::LogUpMultiplicities {
-        numerators: Mle::<SimdBackend, BaseField>::new(BaseColumn {
-            data: numerators,
-            length: scalar_size,
-        }),
-        denominators: Mle::<SimdBackend, SecureField>::new(SecureColumn {
-            data: denominators,
-            length: scalar_size,
-        }),
-    }
+    (
+        Layer::LogUpMultiplicities {
+            numerators: Mle::<SimdBackend, BaseField>::new(BaseColumn {
+                data: numerators,
+                length: scalar_size,
+            }),
+            denominators: Mle::<SimdBackend, SecureField>::new(SecureColumn {
+                data: padded_denominators,
+                length: scalar_size,
+            }),
+        },
+        denominators,
+    )
 }
 
 impl RoundGkrProver {
@@ -215,8 +257,10 @@ impl RoundGkrProver {
     pub fn new(rel: &KeccakRelations, data: &InteractionData) -> Self {
         let fracs = build_fractions(rel, data);
         let claimed_sum = global_claimed_sum(&fracs);
+        let numerator_schedules = NumeratorSchedules::from_fractions(&fracs);
         Self {
             fracs,
+            numerator_schedules,
             log_size: data.log_size,
             claimed_sum,
         }
@@ -233,27 +277,34 @@ impl RoundGkrProver {
         self,
         channel: &mut impl Channel,
     ) -> (Vec<u8>, RoundTieBack, Mle<SimdBackend, SecureField>) {
-        let n_rows = 1usize << self.log_size;
-        let n_vec_rows = 1usize << (self.log_size - LOG_N_LANES);
-        let layer = gkr_input_layer(&self.fracs, self.log_size);
+        let Self {
+            fracs,
+            numerator_schedules,
+            log_size,
+            claimed_sum,
+        } = self;
+        let n_rows = 1usize << log_size;
+        let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
+        let (layer, denominators) = gkr_input_layer(fracs, log_size);
         let (proof, artifact) = prove_batch(channel, vec![layer]);
         debug_assert_eq!(
             proof.output_claims_by_instance[0][0],
-            self.claimed_sum * proof.output_claims_by_instance[0][1],
+            claimed_sum * proof.output_claims_by_instance[0][1],
             "GKR output claim != carrier claimed sum"
         );
         let delta = channel.draw_secure_felt();
-        let tie_back = tieback_from_artifact(&artifact, delta, self.log_size)
+        let tie_back = tieback_from_artifact(&artifact, delta, log_size)
             .expect("prover-built GKR artifact has the canonical shape");
 
         // c(row) = Σ_slot eq(slot, r_slot) · (δ·num_slot(row) + den_slot(row)).
         let packed_delta = PackedQM31::broadcast(delta);
         let mut coeff = vec![PackedQM31::zero(); n_vec_rows];
-        for s in 0..self.fracs.n_slots() {
-            let (num, den) = self.fracs.slot(s);
-            let w = PackedQM31::broadcast(tie_back.eq_ws[s]);
+        for slot in 0..N_TOTAL_LOOKUPS {
+            let start = slot * n_vec_rows;
+            let den = &denominators[start..start + n_vec_rows];
+            let w = PackedQM31::broadcast(tie_back.eq_ws[slot]);
             for (vr, acc) in coeff.iter_mut().enumerate() {
-                *acc += w * (packed_delta * num[vr] + den[vr]);
+                *acc += w * (packed_delta * numerator_schedules.value(slot, vr) + den[vr]);
             }
         }
         let coeff_mle = Mle::<SimdBackend, SecureField>::new(SecureColumn {
@@ -356,6 +407,9 @@ mod tests {
 
     use super::*;
     use crate::constants::N_BYTES_IN_STATE;
+    use crate::keccak_round::{
+        N_ANDNOT_LOOKUPS, N_SPLIT_C_ROT, N_SPLIT_LOOKUPS, N_XOR3_C, N_XOR3_THETA_APPLY,
+    };
     use crate::utils::{circle_row_to_coset, ColEval};
     use crate::{carrier, keccak};
 
@@ -546,6 +600,61 @@ mod tests {
     }
 
     #[test]
+    fn compact_schedules_reconstruct_every_lookup_family() {
+        let data = carrier_data(2);
+        let mut relation_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut relation_channel);
+        let fracs = build_fractions(&relations, &data);
+        let schedules = NumeratorSchedules::from_fractions(&fracs);
+        let mut slot = 0;
+        let mut check_family = |family: &str, count: usize| {
+            for _ in 0..count {
+                let expected = fracs.slot(slot).0;
+                for (row, expected) in expected.iter().copied().enumerate() {
+                    assert_eq!(
+                        schedules.value(slot, row).to_array(),
+                        expected.to_array(),
+                        "{family} numerator changed at slot {slot}, packed row {row}"
+                    );
+                }
+                slot += 1;
+            }
+        };
+
+        check_family("schedule", 1);
+        check_family("input state", 1);
+        check_family("theta xor3", N_XOR3_C);
+        check_family("theta split", N_SPLIT_C_ROT);
+        check_family("theta apply xor3", N_XOR3_THETA_APPLY);
+        check_family("rho split", N_SPLIT_LOOKUPS - N_SPLIT_C_ROT);
+        for _ in 0..N_ANDNOT_LOOKUPS {
+            check_family("chi andnot", 1);
+            check_family("chi close xor3", 1);
+        }
+        check_family("output state", 1);
+        assert_eq!(slot, N_TOTAL_LOOKUPS);
+    }
+
+    #[test]
+    fn canonical_n261_numerator_overlap_reduction_is_28_mib() {
+        const CANONICAL_LOG_SIZE: u32 = 13;
+        const EXPECTED_FULL_BYTES: usize = 29_458_432;
+        const EXPECTED_COMPACT_BYTES: usize = 98_304;
+        const EXPECTED_REDUCTION_BYTES: usize = 29_360_128;
+
+        let n_vector_rows = 1usize << (CANONICAL_LOG_SIZE - LOG_N_LANES);
+        let packed_bytes = std::mem::size_of::<PackedM31>();
+        let full_bytes = N_TOTAL_LOOKUPS * n_vector_rows * packed_bytes;
+        let compact_bytes = N_NUMERATOR_SCHEDULES * n_vector_rows * packed_bytes;
+
+        assert_eq!(packed_bytes, 64);
+        assert_eq!(full_bytes, EXPECTED_FULL_BYTES);
+        assert_eq!(compact_bytes, EXPECTED_COMPACT_BYTES);
+        assert_eq!(full_bytes - compact_bytes, EXPECTED_REDUCTION_BYTES);
+        assert_eq!(EXPECTED_REDUCTION_BYTES, 28 * 1024 * 1024);
+    }
+
+    #[test]
     fn multiplicities_leaves_and_claimed_sum_match_generic_reference() {
         let data = carrier_data(2);
         let log_size = data.log_size;
@@ -557,14 +666,8 @@ mod tests {
             "the parity fixture must span more than one inverse chunk"
         );
 
-        let multiplicities_values = multiplicities_layer_values(gkr_input_layer(&fracs, log_size));
         let generic_values =
             generic_layer_values(generic_gkr_input_layer_reference(&fracs, log_size));
-        assert_eq!(
-            multiplicities_values, generic_values,
-            "base leaves must preserve the secure embedding and slot, row, lane, and padding order"
-        );
-
         let multiplicities_sum = global_claimed_sum(&fracs);
         assert_eq!(
             multiplicities_sum,
@@ -575,6 +678,12 @@ mod tests {
         assert_eq!(
             multiplicities_sum, columnar_claim.claimed_sum,
             "GKR claimed sum must remain identical to the columnar LogUp"
+        );
+        let (multiplicities_layer, _) = gkr_input_layer(fracs, log_size);
+        let multiplicities_values = multiplicities_layer_values(multiplicities_layer);
+        assert_eq!(
+            multiplicities_values, generic_values,
+            "base leaves must preserve the secure embedding and slot, row, lane, and padding order"
         );
     }
 
@@ -587,12 +696,10 @@ mod tests {
         let mut relation_channel = Blake2sChannel::default();
         let relations = KeccakRelations::draw(&mut relation_channel);
         let fractions = build_fractions(&relations, &witness.interaction);
+        let (gkr_layer, _) = gkr_input_layer(fractions, log_size);
 
         let mut gkr_channel = Blake2sChannel::default();
-        let (_, artifact) = prove_batch(
-            &mut gkr_channel,
-            vec![gkr_input_layer(&fractions, log_size)],
-        );
+        let (_, artifact) = prove_batch(&mut gkr_channel, vec![gkr_layer]);
         let [numerator_claim, denominator_claim] =
             artifact.claims_to_verify_by_instance[0].as_slice()
         else {
@@ -651,20 +758,22 @@ mod tests {
         let _ = KeccakRelations::draw(&mut generic_channel);
         let mut prover_channel = Blake2sChannel::default();
         let _ = KeccakRelations::draw(&mut prover_channel);
+        let mut verifier_channel = Blake2sChannel::default();
+        let _ = KeccakRelations::draw(&mut verifier_channel);
         let fracs = build_fractions(&relations, &data);
         let sum = global_claimed_sum(&fracs);
+        let generic_layer = generic_gkr_input_layer_reference(&fracs, log_size);
+        let generic_coeff_layer = generic_gkr_input_layer_reference(&fracs, log_size);
+        let (multiplicities_layer, _) = gkr_input_layer(fracs, log_size);
         multiplicities_channel.mix_felts(&[sum]);
         generic_channel.mix_felts(&[sum]);
         prover_channel.mix_felts(&[sum]);
+        verifier_channel.mix_felts(&[sum]);
 
-        let (multiplicities_proof, multiplicities_artifact) = prove_batch(
-            &mut multiplicities_channel,
-            vec![gkr_input_layer(&fracs, log_size)],
-        );
-        let (generic_proof, generic_artifact) = prove_batch(
-            &mut generic_channel,
-            vec![generic_gkr_input_layer_reference(&fracs, log_size)],
-        );
+        let (multiplicities_proof, multiplicities_artifact) =
+            prove_batch(&mut multiplicities_channel, vec![multiplicities_layer]);
+        let (generic_proof, generic_artifact) =
+            prove_batch(&mut generic_channel, vec![generic_layer]);
 
         let multiplicities_blob = encode_gkr_batch_proof(&multiplicities_proof);
         assert_eq!(
@@ -709,11 +818,15 @@ mod tests {
         assert_eq!(prover_tieback.eq_ws, multiplicities_tieback.eq_ws);
         assert_eq!(prover_tieback.mle_claim, multiplicities_tieback.mle_claim);
 
-        let generic_coefficients = generic_tieback_coefficients(
-            generic_gkr_input_layer_reference(&fracs, log_size),
-            &generic_tieback,
-            log_size,
-        );
+        let verifier_tieback =
+            verify_round_gkr(&prover_blob, sum, log_size, &mut verifier_channel).unwrap();
+        assert_eq!(verifier_tieback.r_row, prover_tieback.r_row);
+        assert_eq!(verifier_tieback.delta, prover_tieback.delta);
+        assert_eq!(verifier_tieback.eq_ws, prover_tieback.eq_ws);
+        assert_eq!(verifier_tieback.mle_claim, prover_tieback.mle_claim);
+
+        let generic_coefficients =
+            generic_tieback_coefficients(generic_coeff_layer, &generic_tieback, log_size);
         assert_eq!(coeff_mle.to_cpu(), generic_coefficients);
         assert_eq!(
             multilinear_eval(&generic_coefficients, &generic_tieback.r_row),
@@ -724,6 +837,7 @@ mod tests {
         let multiplicities_next = multiplicities_channel.draw_secure_felt();
         let generic_next = generic_channel.draw_secure_felt();
         let prover_next = prover_channel.draw_secure_felt();
+        let verifier_next = verifier_channel.draw_secure_felt();
         assert_eq!(
             multiplicities_next, generic_next,
             "the channel must remain identical after the folding challenge"
@@ -731,6 +845,10 @@ mod tests {
         assert_eq!(
             generic_next, prover_next,
             "RoundGkrProver must leave the channel at the same position"
+        );
+        assert_eq!(
+            prover_next, verifier_next,
+            "the prover and verifier must leave the channel at the same position"
         );
     }
 
