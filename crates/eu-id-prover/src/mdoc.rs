@@ -109,7 +109,6 @@ const ISSUER_SIGNED_ITEM_KEYS: [&str; 4] =
 /// COSE protected header `{1: -49}` (ML-DSA-65,
 /// `stwo_mldsa::constants::COSE_ALG_ML_DSA_65`): CBOR `A1 01 38 30`.
 pub(crate) const MLDSA_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x38, 0x30];
-pub(crate) const MLDSA44_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x38, 0x2F];
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const MDOC_ATTRIBUTE_FIELD_IDS: MdocPrivateItemFieldIds = MdocPrivateItemFieldIds {
     outer_stream: 0x4d49_0000,
@@ -118,7 +117,7 @@ const MDOC_ATTRIBUTE_FIELD_IDS: MdocPrivateItemFieldIds = MdocPrivateItemFieldId
     element_value: 20,
 };
 const MDOC_MSO_SHA_STREAM_FIELD_ID: u32 = 0x4d53_0000;
-const MDOC_MSO_SHA_LOG_SIZE: u32 = 11;
+const MDOC_MSO_SHA_LOG_SIZE: u32 = 12;
 const MDOC_MSO_SHA_NAMESPACE: &str = "mdoc/mso-sha";
 const MDOC_ATTRIBUTE_SHA_NAMESPACE: &str = "mdoc/attribute-sha/0";
 const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
@@ -161,7 +160,7 @@ pub(crate) fn ts13_demo_mldsa_keccak_job_shapes(
     );
     shapes.extend(
         stwo_mldsa::expand_a::shake128_job_shapes(
-            stwo_mldsa::profile::ML_DSA_44,
+            stwo_mldsa::profile::ML_DSA_65,
             MDOC_DEVICE_EXPAND_A_STREAM_BASE,
         )
         .expect("fixed TS13 ExpandA stream base is valid"),
@@ -270,7 +269,7 @@ pub struct ExtractedPidMdoc {
     pub mso: Vec<u8>,
     /// The ML-DSA-65 issuer-auth verification input.
     pub issuer_auth_input: Box<MlDsaVerifyInput>,
-    /// The ML-DSA-44 device-auth verification input.
+    /// The ML-DSA-65 device-auth verification input.
     pub device_auth_input: Box<MlDsaVerifyInput>,
 }
 
@@ -454,12 +453,12 @@ fn mldsa_issuer_input(
 
 /// Mirror of [`mldsa_issuer_input`] for the device role: native FIPS 204
 /// pre-check over the device `Sig_structure`, then the decoded in-circuit
-/// input. The verifier fixes this role to ML-DSA-44.
+/// input. The verifier fixes this role to ML-DSA-65.
 fn mldsa_device_auth_input(
     pk: &[u8],
     device_signature: &CoseSign1,
 ) -> Result<Box<MlDsaVerifyInput>, MdocError> {
-    let profile = stwo_mldsa::profile::ML_DSA_44;
+    let profile = stwo_mldsa::profile::ML_DSA_65;
     let trace = stwo_mldsa::reference::verify::verify_internals(
         profile,
         pk,
@@ -471,7 +470,7 @@ fn mldsa_device_auth_input(
         return Err(MdocError::InvalidSignature("deviceSignature"));
     }
     let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(profile, pk)
-        .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-44 public key"))?;
+        .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-65 public key"))?;
     let decoded_sig =
         stwo_mldsa::reference::encoding::sig_decode(profile, &device_signature.signature_bytes)
             .map_err(|_| MdocError::InvalidSignature("deviceSignature"))?;
@@ -610,12 +609,11 @@ fn mdoc_phase_error(phase: &'static str, message: String) -> Error {
 
 fn validate_single_mldsa_public_key(
     role: &'static str,
-    profile: stwo_mldsa::profile::MlDsaProfile,
     input: &MlDsaVerifyInput,
     phase: &'static str,
 ) -> Result<(), Error> {
     input
-        .validate_public_key(profile)
+        .validate_public_key(stwo_mldsa::profile::ML_DSA_65)
         .map_err(|message| mdoc_phase_error(phase, format!("mdoc {role} public key: {message}")))
 }
 
@@ -672,18 +670,8 @@ fn validate_extracted_profile(
     {
         return Err(Error::UnsupportedDemoCredentialShape);
     }
-    validate_single_mldsa_public_key(
-        "issuer",
-        stwo_mldsa::profile::ML_DSA_65,
-        &extracted.issuer_auth_input,
-        "prove",
-    )?;
-    validate_single_mldsa_public_key(
-        "device",
-        stwo_mldsa::profile::ML_DSA_44,
-        &extracted.device_auth_input,
-        "prove",
-    )?;
+    validate_single_mldsa_public_key("issuer", &extracted.issuer_auth_input, "prove")?;
+    validate_single_mldsa_public_key("device", &extracted.device_auth_input, "prove")?;
     if extracted
         .issuer_auth_input
         .encode_pk(stwo_mldsa::profile::ML_DSA_65)
@@ -787,22 +775,17 @@ fn encode_value(value: Value) -> Vec<u8> {
 }
 
 fn parse_cose_sign1(value: &Value) -> Result<CoseSign1, MdocError> {
-    parse_cose_sign1_inner(stwo_mldsa::profile::ML_DSA_65, value, None)
+    parse_cose_sign1_inner(value, None)
 }
 
 fn parse_cose_sign1_with_detached_payload(
     value: &Value,
     detached_payload: &[u8],
 ) -> Result<CoseSign1, MdocError> {
-    parse_cose_sign1_inner(
-        stwo_mldsa::profile::ML_DSA_44,
-        value,
-        Some(detached_payload),
-    )
+    parse_cose_sign1_inner(value, Some(detached_payload))
 }
 
 fn parse_cose_sign1_inner(
-    profile: stwo_mldsa::profile::MlDsaProfile,
     value: &Value,
     detached_payload: Option<&[u8]>,
 ) -> Result<CoseSign1, MdocError> {
@@ -814,15 +797,10 @@ fn parse_cose_sign1_inner(
     }
 
     let protected = expect_bytes(&items[0], "COSE_Sign1.protected")?.to_vec();
-    let expected_header = match profile {
-        stwo_mldsa::profile::MlDsaProfile::MlDsa44 => MLDSA44_PROTECTED_HEADER,
-        stwo_mldsa::profile::MlDsaProfile::MlDsa65 => MLDSA_PROTECTED_HEADER,
-    };
-    if protected != expected_header {
-        return Err(MdocError::InvalidCoseSign1(match profile {
-            stwo_mldsa::profile::MlDsaProfile::MlDsa44 => "protected header must be ML-DSA-44",
-            stwo_mldsa::profile::MlDsaProfile::MlDsa65 => "protected header must be ML-DSA-65",
-        }));
+    if protected != MLDSA_PROTECTED_HEADER {
+        return Err(MdocError::InvalidCoseSign1(
+            "protected header must be ML-DSA-65",
+        ));
     }
     expect_map(&items[1], "COSE_Sign1.unprotected")?;
     let unprotected = items[1].clone();
@@ -833,11 +811,8 @@ fn parse_cose_sign1_inner(
         _ => return Err(MdocError::WrongType("COSE_Sign1.payload")),
     };
     let signature_bytes = expect_bytes(&items[3], "COSE_Sign1.signature")?.to_vec();
-    if signature_bytes.len() != profile.sig_bytes() {
-        return Err(MdocError::InvalidCoseSign1(match profile {
-            stwo_mldsa::profile::MlDsaProfile::MlDsa44 => "ML-DSA-44 signature length",
-            stwo_mldsa::profile::MlDsaProfile::MlDsa65 => "ML-DSA-65 signature length",
-        }));
+    if signature_bytes.len() != stwo_mldsa::profile::ML_DSA_65.sig_bytes() {
+        return Err(MdocError::InvalidCoseSign1("ML-DSA-65 signature length"));
     }
     let sig_structure = sig_structure(&protected, &payload);
 
@@ -1111,10 +1086,10 @@ fn validate_item_digest(
     Ok(())
 }
 
-/// Parse the MSO ML-DSA-44 AKP `deviceKey`.
+/// Parse the MSO ML-DSA-65 AKP `deviceKey`.
 fn parse_device_cose_key(value: &Value) -> Result<Vec<u8>, MdocError> {
     let key = expect_map(value, "COSE_Key")?;
-    Ok(parse_akp_mldsa_cose_key_for(stwo_mldsa::profile::ML_DSA_44, key)?.to_vec())
+    Ok(parse_akp_mldsa_cose_key(key)?.to_vec())
 }
 
 /// ML-DSA-65 issuer key from the unprotected `issuerKey` COSE_Key: AKP key
@@ -1122,32 +1097,22 @@ fn parse_device_cose_key(value: &Value) -> Result<Vec<u8>, MdocError> {
 ///
 fn mldsa_issuer_pk_from_unprotected(unprotected: &[(Value, Value)]) -> Result<Vec<u8>, MdocError> {
     let key = expect_map(value_field(unprotected, "issuerKey")?, "COSE_Key")?;
-    Ok(parse_akp_mldsa_cose_key_for(stwo_mldsa::profile::ML_DSA_65, key)?.to_vec())
+    Ok(parse_akp_mldsa_cose_key(key)?.to_vec())
 }
 
-/// Parse an AKP ML-DSA COSE_Key for a verifier-selected profile.
-/// The map must contain `kty = 7`, the profile algorithm, and the exact raw
-/// public-key length in label `-1`.
-fn parse_akp_mldsa_cose_key_for(
-    profile: stwo_mldsa::profile::MlDsaProfile,
-    key: &[(Value, Value)],
-) -> Result<&[u8], MdocError> {
+/// Parse an AKP ML-DSA-65 COSE_Key.
+/// The map must contain `kty = 7`, `alg = -49`, and a 1,952-byte public key.
+fn parse_akp_mldsa_cose_key(key: &[(Value, Value)]) -> Result<&[u8], MdocError> {
     let kty = int_field(key, 1, "COSE_Key.kty")?;
     let alg = int_field(key, 3, "COSE_Key.alg")?;
     if kty != i128::from(stwo_mldsa::constants::COSE_KTY_AKP)
-        || alg != i128::from(profile.cose_alg())
+        || alg != i128::from(stwo_mldsa::constants::COSE_ALG_ML_DSA_65)
     {
-        return Err(MdocError::InvalidCoseKey(match profile {
-            stwo_mldsa::profile::MlDsaProfile::MlDsa44 => "expected ML-DSA-44 AKP key",
-            stwo_mldsa::profile::MlDsaProfile::MlDsa65 => "expected ML-DSA-65 AKP key",
-        }));
+        return Err(MdocError::InvalidCoseKey("expected ML-DSA-65 AKP key"));
     }
     let pk = bytes_int_field(key, -1, "COSE_Key.pub")?;
-    if pk.len() != profile.pk_bytes() {
-        return Err(MdocError::InvalidCoseKey(match profile {
-            stwo_mldsa::profile::MlDsaProfile::MlDsa44 => "ML-DSA-44 public key length",
-            stwo_mldsa::profile::MlDsaProfile::MlDsa65 => "ML-DSA-65 public key length",
-        }));
+    if pk.len() != stwo_mldsa::profile::ML_DSA_65.pk_bytes() {
+        return Err(MdocError::InvalidCoseKey("ML-DSA-65 public key length"));
     }
     Ok(pk)
 }
@@ -1185,8 +1150,8 @@ pub(crate) struct MdocRevocationRangeWitness {
     pub id_hi: u64,
 }
 
-pub const TS13_DEMO_ISSUER_MESSAGE_BYTES: usize = 1_894;
-pub const TS13_DEMO_MSO_PAYLOAD_BYTES: usize = 1_873;
+pub const TS13_DEMO_ISSUER_MESSAGE_BYTES: usize = 2_534;
+pub const TS13_DEMO_MSO_PAYLOAD_BYTES: usize = 2_513;
 pub const TS13_DEMO_ITEM_PADDED_BYTES: u16 = 128;
 const TS13_DEMO_ATTRIBUTE_SHA_LOG_N_ROWS: u32 = 8;
 pub const TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY: usize =
@@ -2539,17 +2504,16 @@ impl AirProver for MdocRevocationRangeBind {
 }
 
 fn prepare_mldsa_role(
-    profile: stwo_mldsa::profile::MlDsaProfile,
     mut input: MlDsaVerifyInput,
     witness_error_context: &'static str,
 ) -> Result<(stwo_mldsa::witness::MlDsaWitness, MlDsaVerifyInput), Error> {
-    let native_tr = stwo_mldsa::statement::native_tr(profile, &input);
+    let native_tr = stwo_mldsa::statement::native_tr(stwo_mldsa::profile::ML_DSA_65, &input);
     debug_assert_eq!(
         input.tr, native_tr,
         "{witness_error_context} tr must already match SHAKE256(pk)"
     );
     input.tr = native_tr;
-    let witness = stwo_mldsa::witness::generate_witness(profile, &input)
+    let witness = stwo_mldsa::witness::generate_witness(stwo_mldsa::profile::ML_DSA_65, &input)
         .map_err(|error| Error::Prove(format!("{witness_error_context}: {error:?}")))?;
     stwo_mldsa::sampleinball::validate_stream(&witness)
         .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
@@ -2634,12 +2598,12 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     .map_err(|error| Error::Prove(format!("private MSO binder: {error}")))?;
     let mut ts13_public_context = public.context_bind();
     let expand_a_witness = stwo_mldsa::expand_a::derive_expand_a_witness(
-        stwo_mldsa::profile::ML_DSA_44,
+        stwo_mldsa::profile::ML_DSA_65,
         device_input.rho,
     )
     .map_err(|error| Error::Prove(format!("TS13 private ExpandA: {error}")))?;
     let mut ts13_expand_a = ExpandAProver::new(
-        stwo_mldsa::profile::ML_DSA_44,
+        stwo_mldsa::profile::ML_DSA_65,
         expand_a_witness,
         MDOC_DEVICE_EXPAND_A_NAMESPACE,
         MDOC_DEVICE_EXPAND_A_STREAM_BASE,
@@ -2649,7 +2613,7 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     )
     .map_err(|error| Error::Prove(format!("TS13 private ExpandA: {error}")))?;
     let (mut ts13_device_key_bind, ts13_device_key_census) = MdocPrivateDeviceKeyBind::prover(
-        device_input.encode_pk(stwo_mldsa::profile::ML_DSA_44),
+        device_input.encode_pk(stwo_mldsa::profile::ML_DSA_65),
         private_device_pk_start,
         issuer_message.len(),
         issuer_message_field.clone(),
@@ -2764,29 +2728,11 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     let ((issuer_prepared, device_prepared), revocation_prepared) = rayon::join(
         || {
             rayon::join(
-                || {
-                    prepare_mldsa_role(
-                        stwo_mldsa::profile::ML_DSA_65,
-                        issuer_input,
-                        "mldsa witness",
-                    )
-                },
-                || {
-                    prepare_mldsa_role(
-                        stwo_mldsa::profile::ML_DSA_44,
-                        device_input,
-                        "mldsa device witness",
-                    )
-                },
+                || prepare_mldsa_role(issuer_input, "mldsa witness"),
+                || prepare_mldsa_role(device_input, "mldsa device witness"),
             )
         },
-        || {
-            prepare_mldsa_role(
-                stwo_mldsa::profile::ML_DSA_65,
-                *revocation_input,
-                "mldsa revocation witness",
-            )
-        },
+        || prepare_mldsa_role(*revocation_input, "mldsa revocation witness"),
     );
     // Report preparation errors in issuer, device, then revocation order.
     let issuer_prepared = issuer_prepared?;
@@ -2960,12 +2906,7 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     let expected_pcs_config = mdoc_ts13_pcs_config();
     let verification_date = validate_public_input_shape(public, "verify")?;
     let mut issuer_input = *private_issuer_verifier_input(&public.trusted_issuer_public_key)?;
-    validate_single_mldsa_public_key(
-        "issuer",
-        stwo_mldsa::profile::ML_DSA_65,
-        &issuer_input,
-        "verify",
-    )?;
+    validate_single_mldsa_public_key("issuer", &issuer_input, "verify")?;
     validate_public_issuer_projection(&issuer_input)?;
     let issuer_public_message = false;
     if !proof.mldsa.has_expected_shape(issuer_public_message) {
@@ -3154,7 +3095,7 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     .map_err(|error| Error::Verify(format!("TS13 private MSO bind: {error}")))?;
     let mut ts13_public_context = public.context_bind();
     let mut ts13_expand_a = ExpandAVerifier::new(
-        stwo_mldsa::profile::ML_DSA_44,
+        stwo_mldsa::profile::ML_DSA_65,
         proof.ts13_expand_a_claim.clone(),
         MDOC_DEVICE_EXPAND_A_NAMESPACE,
         MDOC_DEVICE_EXPAND_A_STREAM_BASE,
@@ -3503,14 +3444,14 @@ mod tests {
     }
 
     #[test]
-    fn mixed_profile_keccak_plan_has_exact_role_order_and_163_permutations() {
+    fn all_mldsa65_keccak_plan_has_exact_role_order_and_261_permutations() {
         const ISSUER_JOBS: std::ops::Range<usize> = 0..3;
-        const EXPAND_A_JOBS: std::ops::Range<usize> = 3..19;
-        const DEVICE_JOBS: std::ops::Range<usize> = 19..23;
-        const REVOCATION_JOBS: std::ops::Range<usize> = 23..26;
+        const EXPAND_A_JOBS: std::ops::Range<usize> = 3..33;
+        const DEVICE_JOBS: std::ops::Range<usize> = 33..37;
+        const REVOCATION_JOBS: std::ops::Range<usize> = 37..40;
 
         let shapes = ts13_demo_mldsa_keccak_job_shapes(TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY);
-        assert_eq!(shapes.len(), 26);
+        assert_eq!(shapes.len(), 40);
         let jobs = stwo_mldsa::stwo_keccak::sponge_v::JobList::new(shapes);
         let role_permutations: [usize; 4] = [
             jobs.jobs[ISSUER_JOBS]
@@ -3530,8 +3471,8 @@ mod tests {
                 .map(|shape| shape.n_perms())
                 .sum(),
         ];
-        assert_eq!(role_permutations, [27, 96, 27, 13]);
-        assert_eq!(jobs.n_perms_total(), 163);
+        assert_eq!(role_permutations, [32, 180, 36, 13]);
+        assert_eq!(jobs.n_perms_total(), 261);
 
         assert_eq!(
             jobs.jobs[0].absorb_stream_id,
@@ -3542,32 +3483,33 @@ mod tests {
             MDOC_DEVICE_EXPAND_A_STREAM_BASE + 16
         );
         assert_eq!(
-            jobs.jobs[19].absorb_stream_id,
+            jobs.jobs[33].absorb_stream_id,
             MDOC_DEVICE_MLDSA_STREAM_BASE + stwo_mldsa::statement::TR_ABSORB
         );
         assert_eq!(
-            jobs.jobs[23].absorb_stream_id,
+            jobs.jobs[37].absorb_stream_id,
             MDOC_REVOCATION_MLDSA_STREAM_BASE + stwo_mldsa::statement::MU_ABSORB
         );
         assert_eq!(
-            jobs.jobs[19].message_len,
-            stwo_mldsa::profile::ML_DSA_44.pk_bytes()
+            jobs.jobs[33].message_len,
+            stwo_mldsa::profile::ML_DSA_65.pk_bytes()
         );
-        assert_eq!(jobs.jobs[19].n_absorb, 10);
+        assert_eq!(jobs.jobs[33].n_absorb, 15);
         assert_eq!(
-            jobs.jobs[20].message_capacity,
+            jobs.jobs[34].message_capacity,
             Some(66 + TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY)
         );
-        assert_eq!(jobs.jobs[20].n_absorb, 9);
+        assert_eq!(jobs.jobs[34].n_absorb, 9);
         assert_eq!(
-            jobs.jobs[22].message_len,
-            stwo_mldsa::profile::ML_DSA_44.c_tilde_bytes()
+            jobs.jobs[36].message_len,
+            stwo_mldsa::profile::ML_DSA_65.c_tilde_bytes()
         );
-        assert_eq!(jobs.jobs[22].n_squeeze, 1);
+        assert_eq!(jobs.jobs[36].n_squeeze, 5);
     }
 
     #[test]
     fn device_cose_profile_rejects_algorithm_and_wire_length_substitution() {
+        const MLDSA44_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x38, 0x2F];
         let detached_payload = b"device authentication";
         let device_sign1 = |protected: &[u8], signature_len: usize| {
             Value::Array(vec![
@@ -3579,24 +3521,24 @@ mod tests {
         };
         assert!(parse_cose_sign1_with_detached_payload(
             &device_sign1(
-                MLDSA44_PROTECTED_HEADER,
-                stwo_mldsa::profile::ML_DSA_44.sig_bytes(),
+                MLDSA_PROTECTED_HEADER,
+                stwo_mldsa::profile::ML_DSA_65.sig_bytes(),
             ),
             detached_payload,
         )
         .is_ok());
         assert!(parse_cose_sign1_with_detached_payload(
             &device_sign1(
-                MLDSA_PROTECTED_HEADER,
-                stwo_mldsa::profile::ML_DSA_44.sig_bytes(),
+                MLDSA44_PROTECTED_HEADER,
+                stwo_mldsa::profile::ML_DSA_65.sig_bytes(),
             ),
             detached_payload,
         )
         .is_err());
         assert!(parse_cose_sign1_with_detached_payload(
             &device_sign1(
-                MLDSA44_PROTECTED_HEADER,
-                stwo_mldsa::profile::ML_DSA_65.sig_bytes(),
+                MLDSA_PROTECTED_HEADER,
+                stwo_mldsa::profile::ML_DSA_44.sig_bytes(),
             ),
             detached_payload,
         )
@@ -3613,18 +3555,18 @@ mod tests {
             ])
         };
         assert!(parse_device_cose_key(&device_key(
-            stwo_mldsa::constants::COSE_ALG_ML_DSA_44,
-            stwo_mldsa::profile::ML_DSA_44.pk_bytes(),
+            stwo_mldsa::constants::COSE_ALG_ML_DSA_65,
+            stwo_mldsa::profile::ML_DSA_65.pk_bytes(),
         ))
         .is_ok());
         assert!(parse_device_cose_key(&device_key(
-            stwo_mldsa::constants::COSE_ALG_ML_DSA_65,
-            stwo_mldsa::profile::ML_DSA_44.pk_bytes(),
+            stwo_mldsa::constants::COSE_ALG_ML_DSA_44,
+            stwo_mldsa::profile::ML_DSA_65.pk_bytes(),
         ))
         .is_err());
         assert!(parse_device_cose_key(&device_key(
-            stwo_mldsa::constants::COSE_ALG_ML_DSA_44,
-            stwo_mldsa::profile::ML_DSA_65.pk_bytes(),
+            stwo_mldsa::constants::COSE_ALG_ML_DSA_65,
+            stwo_mldsa::profile::ML_DSA_44.pk_bytes(),
         ))
         .is_err());
     }
@@ -3852,7 +3794,7 @@ mod tests {
                 let extracted_b = extract_pid_mdoc(&credential_b.document, &request_b)
                     .expect("second credential extracts");
                 stwo_mldsa::witness::generate_witness(
-                    stwo_mldsa::profile::ML_DSA_44,
+                    stwo_mldsa::profile::ML_DSA_65,
                     &extracted_b.device_auth_input,
                 )
                 .expect("second device signature is valid");
@@ -4172,23 +4114,23 @@ mod tests {
     }
 
     #[test]
-    fn sha_profile_uses_30_mso_blocks_at_log_11() {
+    fn sha_profile_uses_40_mso_blocks_at_log_12() {
         const BLOCK_BYTES: usize = stwo_sha256::constants::BLOCK_BYTES;
-        const MSO_BLOCKS: usize = 30;
+        const MSO_BLOCKS: usize = 40;
         const ITEM_BLOCKS: usize = 2;
         const ITEM_PADDED_BYTES: usize = TS13_DEMO_ITEM_PADDED_BYTES as usize;
-        const EXPECTED_MSO_CELLS: usize = 619_600;
+        const EXPECTED_MSO_CELLS: usize = 1_238_096;
         const EXPECTED_ITEM_CELLS: usize = 78_416;
         const EXPECTED_SHARED_TABLE_CELLS: usize = 4_128;
-        const EXPECTED_TOTAL_CELLS: usize = 702_144;
+        const EXPECTED_TOTAL_CELLS: usize = 1_320_640;
         const _: () = assert!(EXPECTED_TOTAL_CELLS <= 1_500_000);
 
         let mso_bytes = vec![0u8; TS13_DEMO_MSO_PAYLOAD_BYTES];
         let mso_witness = compute_sha256_witness(&mso_bytes);
         assert_eq!(mso_witness.padding.padded.len(), MSO_BLOCKS * BLOCK_BYTES);
         assert_eq!(mso_witness.blocks.len(), MSO_BLOCKS);
-        assert_eq!(min_log_size(mso_witness.blocks.len()), 11);
-        assert_eq!(MDOC_MSO_SHA_LOG_SIZE, 11);
+        assert_eq!(min_log_size(mso_witness.blocks.len()), 12);
+        assert_eq!(MDOC_MSO_SHA_LOG_SIZE, 12);
 
         let item_bytes = vec![0u8; BLOCK_BYTES];
         let item_witness = compute_sha256_witness(&item_bytes);
@@ -4220,9 +4162,9 @@ mod tests {
         );
 
         let mso_layout = mso_sha.layout();
-        assert_eq!(mso_layout.preprocessed, [vec![11; 10], vec![4]].concat());
-        assert_eq!(mso_layout.trace, [vec![11; 260], vec![4; 32]].concat());
-        assert_eq!(mso_layout.interaction, [vec![11; 32], vec![4; 36]].concat());
+        assert_eq!(mso_layout.preprocessed, [vec![12; 10], vec![4]].concat());
+        assert_eq!(mso_layout.trace, [vec![12; 260], vec![4; 32]].concat());
+        assert_eq!(mso_layout.interaction, [vec![12; 32], vec![4; 36]].concat());
         assert_eq!(committed_cells(&mso_layout), EXPECTED_MSO_CELLS);
 
         let item_cells = committed_cells(&item_sha.layout());

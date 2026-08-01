@@ -5,8 +5,8 @@ use crate::constants::{D, N, Q, T1_BITS};
 /// A fixed ML-DSA parameter set.
 ///
 /// This value is circuit configuration. It is never read from a proof or
-/// credential witness. The TS13 verifier selects ML-DSA-65 for issuer and
-/// revocation authentication and ML-DSA-44 for device authentication.
+/// credential witness. The TS13 verifier selects ML-DSA-65 for issuer,
+/// device, and revocation authentication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MlDsaProfile {
     MlDsa44,

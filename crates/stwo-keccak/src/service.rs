@@ -80,7 +80,7 @@ pub struct PermWitness {
 
 /// Build the carrier trace for all permutation requests.
 pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> PermWitness {
-    let boundaries = keccak::generate_rows(perm_inputs);
+    let boundaries = keccak::generate_boundary_witness(perm_inputs);
     let witness = carrier::generate(&boundaries);
     let table_mult =
         TableMultiplicities::from_carrier_round(&witness.interaction.round, boundaries.n_perms);

@@ -83,13 +83,18 @@ const CANONICAL_GENERATION_INPUT_SHA256: &str =
 const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
 const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
 const CANONICAL_RELATION_COUNT: usize = 87;
-const CANONICAL_RELATION_USE_COUNT: usize = 255;
+const CANONICAL_RELATION_USE_COUNT: usize = 251;
+const RESERVED_TRANSCRIPT_RELATION_NAMES: [&str; 1] = ["r07_keccak_round"];
 const CANONICAL_PUBLIC_MIX_COUNT: usize = 20;
 const CANONICAL_CHALLENGE_ENTRY_COUNT: usize = 96;
 const CANONICAL_RAW_MLDSA_CHALLENGE_COUNT: usize = 9;
-const CANONICAL_STREAM_ID_COUNT: usize = 55;
-const CANONICAL_HASH_STREAM_COUNT: usize = 26;
+const CANONICAL_EXPAND_A_JOB_COUNT: usize = stwo_mldsa::profile::ML_DSA_65.matrix_polys();
+const CANONICAL_HASH_STREAM_COUNT: usize = CANONICAL_EXPAND_A_JOB_COUNT + 10;
+const CANONICAL_STREAM_ID_COUNT: usize = CANONICAL_HASH_STREAM_COUNT * 2 + 3;
 const CANONICAL_RANGE_TABLE_COUNT: usize = 26;
+const CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS: usize =
+    crate::mdoc_private_device_key_bind::MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS;
+const CANONICAL_DEVICE_PUBLIC_KEY_BYTES: usize = stwo_mldsa::profile::ML_DSA_65.pk_bytes();
 const CANONICAL_SERIALIZED_CLAIM_NAMES: [&str; 19] = crate::mdoc::MDOC_PROOF_SERIALIZED_CLAIM_NAMES;
 const OUTER_CBOR_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,mode=outer,stream_id,log_size)";
 const INNER_CBOR_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,mode=inner,stream_id,log_size)";
@@ -108,9 +113,11 @@ const VALUE_DIGESTS_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,transcri
 issuer_message_len,mso_len,selected_attribute_count=1,namespace_len,each_namespace_byte,log_size,\
 max_scan_items,max_namespace_bytes,preprocessed_cols,trace_cols,relation_sites,interaction_cols,\
 digest_id_max)";
+const KECCAK_PUBLIC_MIX_ENCODING: &str = "mix_u64(job_count,service_log_size); for each of 40 jobs mix mode,rate,message_len,n_squeeze,absorb_stream,squeeze_stream,perm_id_base; device-mu additionally mixes CAPACITY_TAG,1090";
+const KECCAK_PUBLIC_MIX_FIXED_LENGTH: u32 = 2_272;
 const CLAIM_MIX_ORDER: &str = "After tree 1, mix claims in physical AIR order. ML-DSA roles mix group_evals before claimed_sums.";
 const TRANSCRIPT_PHASE_ORDER: &str = "Mix the PCS configuration and commit tree0. Mix 20 AIR public statements and commit tree1. Draw the secure fields in challengeOrder. Mix claims in physical AIR order and commit tree2. Run the shared_keccak_service GKR post-interaction and commit tree3. Then calculate the composition polynomial and FRI.";
-const KECCAK_JOB_ORDER: &str = "issuer_mu,issuer_ct,issuer_sib,expand_a_00..expand_a_15,device_tr,device_mu,device_ct,device_sib,revocation_mu,revocation_ct,revocation_sib";
+const KECCAK_JOB_ORDER: &str = "issuer_mu,issuer_ct,issuer_sib,expand_a_00..expand_a_29,device_tr,device_mu,device_ct,device_sib,revocation_mu,revocation_ct,revocation_sib";
 const HASH_STREAM_ID_SEMANTICS: &str = "HashStreamV1.streamId is the absorb stream ID. `streamIds` also contains the separate squeeze stream IDs.";
 const CANONICAL_BUILTIN_CONSTANT_NAMES: [&str; 40] = [
     "cbor.device_key_info_prefix",
@@ -1090,12 +1097,14 @@ impl GenerationInputV1 {
                 .air_instances
                 .iter()
                 .flat_map(|air| &air.components)
-                .any(|component| component.active_rows == 288)
+                .any(|component| {
+                    component.active_rows == CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS as u32
+                })
         {
-            return Err(ArtifactError::InvalidInput(
-                "the private device-key binder must be one AIR instance with a 288-active-row component"
-                    .to_owned(),
-            ));
+            return Err(ArtifactError::InvalidInput(format!(
+                "the private device-key binder must be one AIR instance with a \
+                     {CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS}-active-row component"
+            )));
         }
         if self.modules[15].air_instances.len() != 1 {
             return Err(ArtifactError::InvalidInput(
@@ -1143,7 +1152,6 @@ impl GenerationInputV1 {
                 || !relations.insert(relation.name.as_str())
                 || !modules.contains(relation.challenge_owner_module.as_str())
                 || relation.tuple.is_empty()
-                || relation.uses.is_empty()
             {
                 return Err(ArtifactError::InvalidInput(format!(
                     "relation {:?} has an invalid name, owner, tuple, or use list",
@@ -1178,6 +1186,18 @@ impl GenerationInputV1 {
                     )));
                 }
             }
+        }
+        let reserved_transcript_relations = self
+            .relations
+            .iter()
+            .filter(|relation| relation.uses.is_empty())
+            .map(|relation| relation.name.as_str())
+            .collect::<Vec<_>>();
+        if reserved_transcript_relations != RESERVED_TRANSCRIPT_RELATION_NAMES {
+            return Err(ArtifactError::InvalidInput(format!(
+                "relations without uses must be exactly {:?}",
+                RESERVED_TRANSCRIPT_RELATION_NAMES
+            )));
         }
         let relation_use_count = self.relations.iter().try_fold(0_usize, |sum, relation| {
             sum.checked_add(relation.uses.len()).ok_or_else(|| {
@@ -1280,6 +1300,12 @@ impl GenerationInputV1 {
             )));
         }
         for (ordinal, name, encoding, fixed_length) in [
+            (
+                2,
+                "p02_shared_keccak_job_list",
+                KECCAK_PUBLIC_MIX_ENCODING,
+                KECCAK_PUBLIC_MIX_FIXED_LENGTH,
+            ),
             (
                 8,
                 "p08_outer_private_item_cbor_parser",
@@ -1572,8 +1598,39 @@ impl GenerationInputV1 {
         for (name, expected) in [
             ("impl.air_instance_count", u64::from(air_instance_count)),
             ("impl.component_count", component_names.len() as u64),
-            ("impl.expand_a_job_count", 16),
+            (
+                "impl.expand_a_job_count",
+                CANONICAL_EXPAND_A_JOB_COUNT as u64,
+            ),
             ("impl.hash_job_count", CANONICAL_HASH_STREAM_COUNT as u64),
+            (
+                "impl.keccak_service_claimed_sum_count",
+                stwo_mldsa::stwo_keccak::service::service_claimed_sums_len() as u64,
+            ),
+            (
+                "impl.mldsa.device_claimed_sum_count",
+                stwo_mldsa::statement::hosted_private_key_claimed_sums_len() as u64,
+            ),
+            (
+                "impl.mldsa.device_group_eval_count",
+                stwo_mldsa::statement::n_private_key_group_evals() as u64,
+            ),
+            (
+                "impl.mldsa.issuer_claimed_sum_count",
+                stwo_mldsa::statement::hosted_claimed_sums_len() as u64,
+            ),
+            (
+                "impl.mldsa.issuer_group_eval_count",
+                stwo_mldsa::statement::n_group_evals() as u64,
+            ),
+            (
+                "impl.mldsa.revocation_claimed_sum_count",
+                stwo_mldsa::statement::hosted_claimed_sums_len() as u64,
+            ),
+            (
+                "impl.mldsa.revocation_group_eval_count",
+                stwo_mldsa::statement::n_group_evals() as u64,
+            ),
             (
                 "impl.issuer_cose_sig_structure_bytes",
                 u64::from(self.credential_shape.issuer_cose_sig_structure_bytes),
@@ -2422,7 +2479,7 @@ fn builtin_constants(normative_spec_digest: Digest32) -> Vec<ArtifactConstantV1>
             &[
                 0x6d, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x4b, 0x65, 0x79, 0x49, 0x6e, 0x66, 0x6f,
                 0xa1, 0x69, 0x64, 0x65, 0x76, 0x69, 0x63, 0x65, 0x4b, 0x65, 0x79, 0xa3, 0x01, 0x07,
-                0x03, 0x38, 0x2f, 0x20, 0x59, 0x05, 0x20,
+                0x03, 0x38, 0x30, 0x20, 0x59, 0x07, 0xa0,
             ],
         ),
         constant_text("context.domain", "EUDI-TS13-DEMO-CONTEXT-V1"),
@@ -2434,7 +2491,7 @@ fn builtin_constants(normative_spec_digest: Digest32) -> Vec<ArtifactConstantV1>
         constant_text("profile.format", "mso_mdoc_zk"),
         constant_text("profile.hash", "SHA-256"),
         constant_text("profile.issuer_authentication", "FIPS-204-ML-DSA-65"),
-        constant_text("profile.device_authentication", "FIPS-204-ML-DSA-44"),
+        constant_text("profile.device_authentication", "FIPS-204-ML-DSA-65"),
         constant_text("profile.revocation_authentication", "FIPS-204-ML-DSA-65"),
         constant_text(
             "profile.device_authentication_profile",
@@ -2456,7 +2513,7 @@ fn builtin_constants(normative_spec_digest: Digest32) -> Vec<ArtifactConstantV1>
         constant_bytes("spec.normative_document_sha256", &normative_spec_digest.0),
         constant_unsigned("expand_a.accepted_coefficients_per_polynomial", 256),
         constant_unsigned("expand_a.candidate_bits", 23),
-        constant_unsigned("expand_a.jobs", 16),
+        constant_unsigned("expand_a.jobs", CANONICAL_EXPAND_A_JOB_COUNT as u64),
         constant_unsigned("expand_a.modulus_q", 8_380_417),
         constant_unsigned("expand_a.squeeze_blocks_per_job", 6),
         constant_unsigned("private_key_evaluation.a_evaluation_count", 30),
@@ -2467,8 +2524,14 @@ fn builtin_constants(normative_spec_digest: Digest32) -> Vec<ArtifactConstantV1>
         constant_unsigned("private_key_evaluation.t1_evaluation_count", 6),
         constant_unsigned("private_key_evaluation.t1_hi_bits", 1),
         constant_unsigned("private_key_evaluation.t1_lo_bits", 9),
-        constant_unsigned("device_key_binding.active_rows", 288),
-        constant_unsigned("device_key_binding.public_key_bytes", 1_312),
+        constant_unsigned(
+            "device_key_binding.active_rows",
+            CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS as u64,
+        ),
+        constant_unsigned(
+            "device_key_binding.public_key_bytes",
+            CANONICAL_DEVICE_PUBLIC_KEY_BYTES as u64,
+        ),
         constant_unsigned("device_key_binding.rho_rows", 32),
         constant_unsigned("validity.maximum_year", 2099),
         constant_unsigned("validity.minimum_year", 2020),
@@ -3433,13 +3496,13 @@ fn required_shape_count(value: Option<usize>, name: &str) -> Result<u64, Artifac
 
 fn canonical_hash_stream_shapes(
 ) -> Result<BTreeMap<String, stwo_mldsa::stwo_keccak::sponge::Shape>, ArtifactError> {
-    use stwo_mldsa::profile::ML_DSA_44;
+    use stwo_mldsa::profile::ML_DSA_65;
 
     let mut names = ["issuer_mu_job", "issuer_ct_job", "issuer_sib_job"]
         .into_iter()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    names.extend((0..ML_DSA_44.matrix_polys()).map(|ordinal| format!("expand_a_{ordinal:02}_job")));
+    names.extend((0..ML_DSA_65.matrix_polys()).map(|ordinal| format!("expand_a_{ordinal:02}_job")));
     names.extend(
         [
             "device_tr_job",
@@ -3548,7 +3611,7 @@ fn hash_stream_geometry(
 
 fn canonical_relation_multiplicities() -> Result<Vec<(&'static str, usize, String)>, ArtifactError>
 {
-    use stwo_mldsa::{constants::N, profile::ML_DSA_44};
+    use stwo_mldsa::{constants::N, profile::ML_DSA_65};
 
     let mso_padded_len =
         crate::mdoc::checked_sha256_padded_len(crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES)
@@ -3569,18 +3632,18 @@ fn canonical_relation_multiplicities() -> Result<Vec<(&'static str, usize, Strin
             0,
             format!(
                 "+accept ({}*{N} stage-zero coefficients)",
-                ML_DSA_44.matrix_polys()
+                ML_DSA_65.matrix_polys()
             ),
         ),
         (
             "r53_private_t1_cell",
             0,
-            format!("-t1_row ({}*{N} coefficients)", ML_DSA_44.k()),
+            format!("-t1_row ({}*{N} coefficients)", ML_DSA_65.k()),
         ),
         (
             "r53_private_t1_cell",
             1,
-            format!("+active ({}*{N} coefficients)", ML_DSA_44.k()),
+            format!("+active ({}*{N} coefficients)", ML_DSA_65.k()),
         ),
     ])
 }
@@ -3618,31 +3681,42 @@ fn refresh_canonical_profile_semantics(input: &mut GenerationInputV1) -> Result<
 
     let hash_shapes = canonical_hash_stream_shapes()?;
     input.stream_ids = canonical_stream_ids(&hash_shapes)?;
-    input
-        .hash_streams
-        .retain(|stream| hash_shapes.contains_key(&stream.name));
-    for stream in &mut input.hash_streams {
-        let shape = hash_shapes.get(&stream.name).ok_or_else(|| {
-            ArtifactError::InvalidInput(format!(
-                "hash stream {:?} has no canonical job shape",
-                stream.name
-            ))
-        })?;
-        let (hash_function, input_capacity_bytes, output_bytes) = hash_stream_geometry(*shape)?;
-        stream.stream_id = u64::from(shape.absorb_stream_id);
-        stream.hash_function = hash_function.to_owned();
-        stream.domain_separator = HexBytes(vec![0x1f]);
-        stream.job_count = 1;
-        stream.input_capacity_bytes = input_capacity_bytes;
-        stream.output_bytes = output_bytes;
-    }
+    input.hash_streams = hash_shapes
+        .iter()
+        .map(|(name, shape)| {
+            let (hash_function, input_capacity_bytes, output_bytes) = hash_stream_geometry(*shape)?;
+            Ok(HashStreamV1 {
+                name: name.clone(),
+                stream_id: u64::from(shape.absorb_stream_id),
+                hash_function: hash_function.to_owned(),
+                domain_separator: HexBytes(vec![0x1f]),
+                job_count: 1,
+                input_capacity_bytes,
+                output_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>, ArtifactError>>()?;
     if input.stream_ids.len() != CANONICAL_STREAM_ID_COUNT
         || input.hash_streams.len() != CANONICAL_HASH_STREAM_COUNT
     {
-        return Err(ArtifactError::InvalidInput(
-            "canonical stream normalization did not produce 55 IDs and 26 jobs".to_owned(),
-        ));
+        return Err(ArtifactError::InvalidInput(format!(
+            "canonical stream normalization did not produce {CANONICAL_STREAM_ID_COUNT} IDs and \
+             {CANONICAL_HASH_STREAM_COUNT} jobs"
+        )));
     }
+
+    input
+        .relations
+        .iter_mut()
+        .find(|relation| relation.name == RESERVED_TRANSCRIPT_RELATION_NAMES[0])
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput(format!(
+                "missing reserved transcript relation {:?}",
+                RESERVED_TRANSCRIPT_RELATION_NAMES[0]
+            ))
+        })?
+        .uses
+        .clear();
 
     for (relation_name, use_ordinal, multiplicity) in canonical_relation_multiplicities()? {
         set_relation_use_multiplicity(input, relation_name, use_ordinal, multiplicity)?;
@@ -3651,8 +3725,8 @@ fn refresh_canonical_profile_semantics(input: &mut GenerationInputV1) -> Result<
     for (name, encoding, fixed_length) in [
         (
             "p02_shared_keccak_job_list",
-            "mix_u64(job_count,service_log_size); for each of 26 jobs mix mode,rate,message_len,n_squeeze,absorb_stream,squeeze_stream,perm_id_base; device-mu additionally mixes CAPACITY_TAG,1090",
-            Some(1_488),
+            KECCAK_PUBLIC_MIX_ENCODING,
+            Some(KECCAK_PUBLIC_MIX_FIXED_LENGTH),
         ),
         (
             "p05_issuer_private_message_mldsa",
@@ -3685,7 +3759,11 @@ fn refresh_canonical_profile_semantics(input: &mut GenerationInputV1) -> Result<
         entry.fixed_length = fixed_length;
     }
 
-    set_implementation_unsigned(input, "impl.expand_a_job_count", 16)?;
+    set_implementation_unsigned(
+        input,
+        "impl.expand_a_job_count",
+        CANONICAL_EXPAND_A_JOB_COUNT as u64,
+    )?;
     set_implementation_unsigned(
         input,
         "impl.hash_job_count",
@@ -3833,44 +3911,50 @@ fn refresh_claim_geometry(
         "pairs",
         proof.sha_table_pair_claim_count as u64,
     )?;
-    for (claim, group_evals, claimed_sums) in [
+    for (claim, group_evals, claimed_sums, group_evals_constant, claimed_sums_constant) in [
         (
             "mldsa",
             proof.issuer_mldsa_group_eval_count,
             proof.issuer_mldsa_claimed_sum_count,
+            "impl.mldsa.issuer_group_eval_count",
+            "impl.mldsa.issuer_claimed_sum_count",
         ),
         (
             "device_mldsa",
             proof.device_mldsa_group_eval_count,
             proof.device_mldsa_claimed_sum_count,
+            "impl.mldsa.device_group_eval_count",
+            "impl.mldsa.device_claimed_sum_count",
         ),
         (
             "revocation_mldsa",
             proof.revocation_mldsa_group_eval_count,
             proof.revocation_mldsa_claimed_sum_count,
+            "impl.mldsa.revocation_group_eval_count",
+            "impl.mldsa.revocation_claimed_sum_count",
         ),
     ] {
-        set_claim_vector(
-            input,
-            claim,
-            "group_evals",
-            required_shape_count(group_evals, "ML-DSA group-evaluation count")?,
-        )?;
-        set_claim_vector(
-            input,
-            claim,
-            "claimed_sums",
-            required_shape_count(claimed_sums, "ML-DSA claimed-sum count")?,
-        )?;
+        let group_evals = required_shape_count(group_evals, "ML-DSA group-evaluation count")?;
+        let claimed_sums = required_shape_count(claimed_sums, "ML-DSA claimed-sum count")?;
+        set_claim_vector(input, claim, "group_evals", group_evals)?;
+        set_claim_vector(input, claim, "claimed_sums", claimed_sums)?;
+        set_implementation_unsigned(input, group_evals_constant, group_evals)?;
+        set_implementation_unsigned(input, claimed_sums_constant, claimed_sums)?;
     }
+    let keccak_claimed_sums = required_shape_count(
+        proof.keccak_service_claimed_sum_count,
+        "Keccak claimed-sum count",
+    )?;
     set_claim_vector(
         input,
         "keccak_service_claimed_sums",
         "claimed_sums",
-        required_shape_count(
-            proof.keccak_service_claimed_sum_count,
-            "Keccak claimed-sum count",
-        )?,
+        keccak_claimed_sums,
+    )?;
+    set_implementation_unsigned(
+        input,
+        "impl.keccak_service_claimed_sum_count",
+        keccak_claimed_sums,
     )?;
     set_claim_vector(
         input,
@@ -4319,13 +4403,18 @@ fn validate_live_profile_input(
         || proof.sha_table_pair_claim_count != 3
         || proof.attribute_sha_range_claim_count != 0
         || proof.mso_sha_range_claim_count != Some(0)
-        || proof.issuer_mldsa_group_eval_count != Some(30)
-        || proof.issuer_mldsa_claimed_sum_count != Some(18)
-        || proof.device_mldsa_group_eval_count != Some(66)
-        || proof.device_mldsa_claimed_sum_count != Some(23)
-        || proof.revocation_mldsa_group_eval_count != Some(30)
-        || proof.revocation_mldsa_claimed_sum_count != Some(18)
-        || proof.keccak_service_claimed_sum_count != Some(12)
+        || proof.issuer_mldsa_group_eval_count != Some(stwo_mldsa::statement::n_group_evals())
+        || proof.issuer_mldsa_claimed_sum_count
+            != Some(stwo_mldsa::statement::hosted_claimed_sums_len())
+        || proof.device_mldsa_group_eval_count
+            != Some(stwo_mldsa::statement::n_private_key_group_evals())
+        || proof.device_mldsa_claimed_sum_count
+            != Some(stwo_mldsa::statement::hosted_private_key_claimed_sums_len())
+        || proof.revocation_mldsa_group_eval_count != Some(stwo_mldsa::statement::n_group_evals())
+        || proof.revocation_mldsa_claimed_sum_count
+            != Some(stwo_mldsa::statement::hosted_claimed_sums_len())
+        || proof.keccak_service_claimed_sum_count
+            != Some(stwo_mldsa::stwo_keccak::service::service_claimed_sums_len())
         || proof.private_item_claim_count != 1
         || proof.cbor_parser_claim_count != 2
     {
@@ -4418,7 +4507,7 @@ mod tests {
                                     name: format!("{name}_component_{air_instance_ordinal}"),
                                     trace_rows: 1_u32 << max_log_size,
                                     active_rows: if *name == "private_device_key_binder" {
-                                        288
+                                        CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS as u32
                                     } else {
                                         1
                                     },
@@ -4793,15 +4882,25 @@ mod tests {
 
     #[test]
     fn canonical_profile_semantic_refresh_is_idempotent() {
-        const EXPECTED_ISSUER_MU_INPUT_BYTES: u32 = 1_960;
+        const EXPECTED_ISSUER_MU_INPUT_BYTES: u32 = 2_600;
 
         let mut input = sample_input();
         refresh_canonical_profile_semantics(&mut input).expect("first refresh succeeds");
         let first = serde_json::to_vec(&input).expect("first refresh serializes");
         refresh_canonical_profile_semantics(&mut input).expect("second refresh succeeds");
         assert_eq!(first, serde_json::to_vec(&input).unwrap());
-        assert_eq!(input.stream_ids.len(), 55);
-        assert_eq!(input.hash_streams.len(), 26);
+        assert_eq!(CANONICAL_EXPAND_A_JOB_COUNT, 30);
+        assert_eq!(CANONICAL_HASH_STREAM_COUNT, 40);
+        assert_eq!(CANONICAL_STREAM_ID_COUNT, 83);
+        assert_eq!(input.stream_ids.len(), 83);
+        assert_eq!(input.hash_streams.len(), 40);
+        assert!(
+            input
+                .hash_streams
+                .iter()
+                .any(|stream| stream.name == "expand_a_29_job"),
+            "the ML-DSA-65 matrix requires all 30 ExpandA jobs"
+        );
         assert_eq!(
             input.stream_ids,
             canonical_stream_ids(
@@ -4831,6 +4930,63 @@ mod tests {
                 Some(expected.as_str())
             );
         }
+        let shapes = canonical_hash_stream_shapes().expect("canonical hash shapes derive");
+        assert_eq!(
+            shapes
+                .get("device_mu_job")
+                .expect("device mu job is present")
+                .message_capacity,
+            Some(1_090)
+        );
+        assert_eq!(
+            KECCAK_PUBLIC_MIX_FIXED_LENGTH,
+            ((2 + CANONICAL_HASH_STREAM_COUNT * 7 + 2) * std::mem::size_of::<u64>()) as u32
+        );
+    }
+
+    #[test]
+    fn canonical_device_constants_select_mldsa_65() {
+        let constants = builtin_constants(Digest32([0; 32]));
+        let value = |name: &str| {
+            &constants
+                .iter()
+                .find(|constant| constant.name == name)
+                .unwrap_or_else(|| panic!("missing built-in constant {name}"))
+                .value
+        };
+        assert!(matches!(
+            value("profile.device_authentication"),
+            ConstantValueV1::Text(profile) if profile == "FIPS-204-ML-DSA-65"
+        ));
+        assert!(matches!(
+            value("cbor.device_key_info_prefix"),
+            ConstantValueV1::Bytes(bytes)
+                if bytes.0.ends_with(&[0x03, 0x38, 0x30, 0x20, 0x59, 0x07, 0xa0])
+        ));
+        for (name, expected) in [
+            ("expand_a.jobs", 30),
+            ("device_key_binding.active_rows", 416),
+            ("device_key_binding.public_key_bytes", 1_952),
+        ] {
+            assert!(matches!(
+                value(name),
+                ConstantValueV1::Unsigned(actual) if *actual == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn canonical_gkr_bound_matches_the_sound_carrier() {
+        assert_eq!(air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES, 20_128);
+        let terms = ts13_demo_proof_bound_terms(&sample_input()).expect("proof bound derives");
+        assert_eq!(
+            terms
+                .iter()
+                .find(|term| term.name == "keccak_round_gkr")
+                .expect("GKR proof-bound term is present")
+                .maximum_serialized_bytes_per_item,
+            20_128
+        );
     }
 
     #[test]
@@ -4863,6 +5019,21 @@ mod tests {
     }
 
     #[test]
+    fn reserved_transcript_relation_allowlist_is_exact() {
+        assert_eq!(RESERVED_TRANSCRIPT_RELATION_NAMES, ["r07_keccak_round"]);
+        let input = sample_input();
+        assert_eq!(
+            input
+                .relations
+                .iter()
+                .filter(|relation| relation.uses.is_empty())
+                .map(|relation| relation.name.as_str())
+                .collect::<Vec<_>>(),
+            RESERVED_TRANSCRIPT_RELATION_NAMES
+        );
+    }
+
+    #[test]
     fn canonical_generation_input_rejects_census_and_cross_list_drift() {
         assert!(
             minimal_input().validate().is_err(),
@@ -4873,7 +5044,25 @@ mod tests {
         drifted.relations[0].uses.pop();
         assert!(
             drifted.validate().is_err(),
-            "the exact 255-use census is mandatory"
+            "the exact 251-use census is mandatory"
+        );
+
+        let mut drifted = sample_input();
+        let reserved = drifted
+            .relations
+            .iter()
+            .position(|relation| relation.name == "r07_keccak_round")
+            .expect("the reserved relation is present");
+        let active = drifted
+            .relations
+            .iter()
+            .position(|relation| relation.name == "r08_keccak_xor3")
+            .expect("the active relation is present");
+        drifted.relations[reserved].uses = drifted.relations[active].uses.clone();
+        drifted.relations[active].uses.clear();
+        assert!(
+            drifted.validate().is_err(),
+            "the reserved relation allowlist cannot move or grow"
         );
 
         let mut drifted = sample_input();

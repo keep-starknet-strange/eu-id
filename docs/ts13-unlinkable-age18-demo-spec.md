@@ -115,11 +115,11 @@ The profile has these fixed parameters:
 | comparison | equality |
 | public result | CBOR `true` (`0xf5`) |
 | issuer authentication | FIPS 204 ML-DSA-65 |
-| device authentication | FIPS 204 ML-DSA-44 |
-| device COSE algorithm | `-48` |
-| device protected header | `h'a101382f'` |
-| device public key | 1,312 bytes |
-| device signature | 2,420 bytes |
+| device authentication | FIPS 204 ML-DSA-65 |
+| device COSE algorithm | `-49` |
+| device protected header | `h'a1013830'` |
+| device public key | 1,952 bytes |
+| device signature | 3,309 bytes |
 | revocation authentication | FIPS 204 ML-DSA-65 |
 | digest algorithm | SHA-256 |
 | device authentication profile | ISO 18013-5 `DeviceAuthentication` |
@@ -149,8 +149,8 @@ The profile has these fixed shape values:
 
 | Value | Size |
 | --- | ---: |
-| issuer COSE `Sig_structure` | 1,894 bytes |
-| MSO payload | 1,873 bytes |
+| issuer COSE `Sig_structure` | 2,534 bytes |
+| MSO payload | 2,513 bytes |
 | padded `IssuerSignedItemBytes` | 128 bytes |
 | device COSE `Sig_structure` capacity | 1,024 bytes |
 | digest-identifier CBOR integer encoding | 1, 2, or 3 bytes |
@@ -239,18 +239,12 @@ The construction uses these assumptions:
 - The verifier supplies or validates a fresh timestamp.
 - The SessionTranscript contains a fresh verifier challenge.
 - The relying party enforces its replay policy.
-- ML-DSA-44 and ML-DSA-65 are secure.
+- ML-DSA-65 is secure.
 - SHA-256 is collision-resistant.
 - The STARK is sound.
 
-The circuit selects each ML-DSA profile.
-The witness cannot select a profile.
-The issuer and revocation instances use ML-DSA-65.
-The device instance uses ML-DSA-44.
-
-The ML-DSA-44 SampleInBall cap can reject an honest signature with negligible
-probability.
-Section 8.3 specifies this completeness limit.
+The circuit fixes ML-DSA-65 for the issuer, device, and revocation roles.
+The witness cannot select another profile.
 
 The issuer key partitions the anonymity set.
 The profile and claim also partition the anonymity set.
@@ -515,13 +509,13 @@ The verifier then constructs:
 ```text
 deviceCoseSigStructure = CBOR([
   "Signature1",
-  h'a101382f',
+  h'a1013830',
   h'',
   deviceAuthenticationBytes
 ])
 ```
 
-The protected header is `{ 1: -48 }`.
+The protected header is `{ 1: -49 }`.
 The external AAD is empty.
 The complete `Sig_structure` is the public ML-DSA message.
 The request-context digest also binds this complete message.
@@ -618,13 +612,13 @@ The verifier MUST accept that result only after proof verification.
 The circuit proves these facts:
 
 1. The private device key is the key in the authenticated MSO.
-2. The private device signature is a valid ML-DSA-44 signature.
+2. The private device signature is a valid ML-DSA-65 signature.
 3. The signed message is the message from Section 6.3.
 4. ML-DSA uses the key that the MSO contains.
 
-The private device `pkEncode` MUST contain 1,312 bytes.
-The private device signature MUST contain 2,420 bytes.
-The device profile MUST use COSE algorithm `-48`.
+The private device `pkEncode` MUST contain 1,952 bytes.
+The private device signature MUST contain 3,309 bytes.
+The device profile MUST use COSE algorithm `-49`.
 
 The proof MUST include the complete chain for matrix expansion, private-key
 evaluation, key hashing, ML-DSA verification, and MSO key binding.
@@ -679,6 +673,25 @@ These fixed components bind the private theorem:
 The Keccak service MUST bind its round GKR output claim to the global LogUp sum
 and the committed trace.
 
+The fixed all-ML-DSA-65 Keccak plan uses 261 permutations:
+
+- 32 issuer permutations;
+- 180 matrix-expansion permutations;
+- 36 device permutations;
+- 13 revocation permutations.
+
+The sound carrier uses 25 rows for each permutation.
+It has 910 committed columns at log size 13.
+The complete shared service commits these cells:
+
+- 211,104 preprocessed cells;
+- 8,121,376 trace cells;
+- 704,640 interaction cells;
+- 65,536 post-interaction cells;
+- 9,102,656 cells in total.
+
+The performance campaign gate for this service is 9,200,000 committed cells.
+
 ### 8.1 Private `rho` and matrix expansion
 
 The matrix-expansion component derives the ML-DSA matrix from private `rho`.
@@ -686,7 +699,7 @@ The verifier MUST NOT supply a matrix coefficient.
 
 The component uses:
 
-- 16 row-major SHAKE-128 jobs for `rho || j || i`;
+- 30 row-major SHAKE-128 jobs for `rho || j || i`;
 - six squeeze blocks for each job;
 - the FIPS rejection sampler;
 - three-byte candidates;
@@ -721,37 +734,28 @@ The private key-evaluation constraints MUST:
 - constrain each modular add and subtract reduction;
 - constrain each quotient;
 - constrain each output to `[0,q)`;
-- evaluate all 16 active A polynomials at `(r,s)`;
-- decode and scale the four private `t1` polynomials by `2^13`;
-- evaluate all four active scaled `t1` polynomials at `(r,s)`;
-- keep the fixed coefficient identifiers `0..29`;
-- keep the fixed A identifiers `30..59`;
-- keep the fixed t1 identifiers `60..65`;
-- serialize the fixed `[coeff 30, A 30, t1 6]` vector.
+- evaluate all 30 A polynomials at `(r,s)`;
+- decode and scale the six private `t1` polynomials by `2^13`;
+- evaluate all six scaled `t1` polynomials at `(r,s)`;
+- use coefficient identifiers `0..29`;
+- use A identifiers `30..59`;
+- use t1 identifiers `60..65`;
+- serialize `[coeff 30, A 30, t1 6]`.
 
 The private evaluation vector always contains 66 slots.
-ML-DSA-44 uses these coefficient slots:
+ML-DSA-65 uses these coefficient slots:
 
 ```text
-z_0..z_3       = 0..3
-w_0..w_3       = 5..8
-e_0..e_3       = 11..14
-v_0..v_3       = 17..20
+z_0..z_4       = 0..4
+w_0..w_5       = 5..10
+e_0..e_5       = 11..16
+v_0..v_5       = 17..22
 c               = 23
-C_0..C_3       = 24..27
+C_0..C_5       = 24..29
 ```
 
-The coefficient slots `4`, `9`, `10`, `15`, `16`, `21`, `22`, `28`, and `29`
-MUST equal canonical zero.
-The active A slots are `30..45`.
-The A tail slots `46..59` MUST equal canonical zero.
-The active scaled-t1 slots are `60..63`.
-The t1 tail slots `64..65` MUST equal canonical zero.
-
-The AIR MUST constrain each inactive trace to zero.
-It MUST also emit the zero evaluation for the slot relation.
+All coefficient, A, and scaled-t1 slots are active.
 The fold MUST consume every identifier in `0..65` exactly once.
-This rule binds the canonical zero tails to the fixed 66-slot proof shape.
 
 The transcript derives `(r,s)` after the prover commits the witness columns.
 The private A and t1 evaluation and the device fold use the same `(r,s)` pair.
@@ -784,21 +788,20 @@ Each emitted tuple has negative multiplicity.
 The device fold consumes all 66 evaluations.
 Each consumed evaluation has positive multiplicity.
 
-The active ML-DSA-44 fold uses these groups in order:
+The ML-DSA-65 fold uses these groups in order:
 
 ```text
-[z_0..z_3,w_0..w_3,e_0..e_3,v_0..v_3,c,C_0..C_3]
+[z_0..z_4,w_0..w_5,e_0..e_5,v_0..v_5,c,C_0..C_5]
 ```
 
-The 16 active A groups follow these groups.
-The four active scaled-t1 groups follow the A groups.
-The fixed zero tails remain in their slots.
+The 30 A groups follow these groups.
+The six scaled-t1 groups follow the A groups.
 
 The fold MUST constrain this complete identity:
 
 ```text
-sum_{i=0..3} rhoRlc^i * (
-    sum_{j=0..3} AHat[i][j] * zHat[j]
+sum_{i=0..5} rhoRlc^i * (
+    sum_{j=0..4} AHat[i][j] * zHat[j]
     - cHat * scaledT1Hat[i]
     - wHat[i]
     - (r^256 + 1) * vHat[i]
@@ -818,7 +821,7 @@ It is not the private ML-DSA seed `rho`.
 The AIR MUST construct `qHat(s)` from `[1,-16,32]`.
 The witness and verifier MUST NOT supply `qHat(s)`.
 The signs and correction factors are normative.
-All four active `v`, `e`, and carry evaluations are normative.
+All six `v`, `e`, and carry evaluations are normative.
 A bare congruence modulo `q` is not sufficient.
 
 No verifier-native A, t1, `qHat`, or key-fold value can remain.
@@ -862,32 +865,15 @@ The fixed bridge order is:
 [pk_tr, tr_mu, mu_ct, w1enc, ct_sib]
 ```
 
-The ML-DSA-44 device instance sets `tau = 39`.
-Its SampleInBall squeeze cap is one SHAKE-256 rate block of 136 bytes.
-The first eight bytes supply the sign bits.
-The remaining 128 bytes supply the placement candidates.
-
-The sampler MUST place all 39 coefficients in that block.
-If it cannot do this, witness generation MUST return the typed
-`SampleInBallExhausted` error.
-It MUST NOT squeeze a second block.
-It MUST NOT select another circuit shape.
-
-The estimated exhaustion probability is about `2^-202.929`.
-The cap therefore creates a negligible honest-prover failure mode.
-This limit affects completeness.
-It does not weaken soundness for a proof that the verifier accepts.
-The demo accepts this tradeoff to keep the device proof shape fixed.
-
-The issuer and revocation instances remain ML-DSA-65.
-Their selected SampleInBall cap is five SHAKE-256 rate blocks.
+Each ML-DSA-65 instance sets `tau = 49`.
+Each instance uses five SHAKE-256 squeeze blocks for SampleInBall.
 
 The verifier MUST NOT construct a placeholder key.
 The ML-DSA verifier receives no device-key bytes.
 
 ### 8.4 Private key and MSO binding
 
-The device-key binder binds the 1,312-byte FIPS `pkEncode` to the private COSE
+The device-key binder binds the 1,952-byte FIPS `pkEncode` to the private COSE
 key.
 The authenticated MSO contains that COSE key.
 
@@ -895,8 +881,8 @@ The fixed COSE key is:
 
 ```text
 kty = 7
-alg = -48
-label -1 = 1,312-byte ML-DSA-44 pkEncode
+alg = -49
+label -1 = 1,952-byte ML-DSA-65 pkEncode
 ```
 
 The circuit artifact contains this canonical MSO prefix:
@@ -904,12 +890,12 @@ The circuit artifact contains this canonical MSO prefix:
 ```text
 6d 64 65 76 69 63 65 4b 65 79 49 6e 66 6f
 a1 69 64 65 76 69 63 65 4b 65 79
-a3 01 07 03 38 2f 20 59 05 20
+a3 01 07 03 38 30 20 59 07 a0
 ```
 
-The binder uses 288 active rows.
+The binder uses 416 active rows.
 The first 32 rows contain `rho`.
-Each of the four `t1` polynomials uses 64 five-byte groups.
+Each of the six `t1` polynomials uses 64 five-byte groups.
 
 For bytes `b0..b4`, the binder proves:
 
@@ -937,17 +923,17 @@ Linear reconstruction alone is not sufficient.
 Each `u` uses the same `hi1` and `lo9` form as the private t1 evaluation.
 The first 32 bytes consume `RhoCell` tuples from the matrix-expansion
 component.
-The binder emits one normalized private 1,312-byte field for the private device
+The binder emits one normalized private 1,952-byte field for the private device
 ML-DSA component.
 
 The fixed binder lookup census is:
 
-- 1,312 normalized device-key byte uses;
+- 1,952 normalized device-key byte uses;
 - 32 `RhoCell` uses;
-- 1,024 `T1Cell` uses;
+- 1,536 `T1Cell` uses;
 - one device-key-start use;
-- 544 eight-bit range uses;
-- 1,024 nine-bit range uses;
+- 800 eight-bit range uses;
+- 1,536 nine-bit range uses;
 - zero seven-bit range uses.
 
 A change to any bound key value MUST invalidate the proof.
@@ -1000,11 +986,11 @@ The lookup graph is normative:
 | Tuple | Owner | Producer | Consumer |
 | --- | --- | --- | --- |
 | issuer `FieldBytes(field,index,byte)` | issuer-message provider | provider `-m` | each user `+1`; checked sum is `m` |
-| device key `FieldBytes(1,index,byte)` | issuer `FieldBytes` owner | device-key binder `-1` | device ML-DSA `+1` for 1,312 bytes |
+| device key `FieldBytes(1,index,byte)` | issuer `FieldBytes` owner | device-key binder `-1` | device ML-DSA `+1` for 1,952 bytes |
 | `RhoCell(position,byte)` | matrix expansion | matrix expansion `+1` | device-key binder `-1` for 32 bytes |
-| `NttCell(poly,stage,index,l0,l1,l2)` | matrix expansion | 16 active matrix polynomials and key-evaluation stages `+1` | prior key-evaluation stage or Horner evaluation `-1` |
-| `T1Cell(poly,index,lo9,hi1)` | device-key binder | private t1 evaluation `+1` | device-key binder `-1` for 1,024 coefficients |
-| `EvalAtRs(poly,e0,e1,e2,e3)` | device ML-DSA AIR | identifiers `0..65`, each `-1`; inactive tails contain canonical zero | device fold `+1` for all 66 values |
+| `NttCell(poly,stage,index,l0,l1,l2)` | matrix expansion | 30 matrix polynomials and key-evaluation stages `+1` | prior key-evaluation stage or Horner evaluation `-1` |
+| `T1Cell(poly,index,lo9,hi1)` | device-key binder | private t1 evaluation `+1` | device-key binder `-1` for 1,536 coefficients |
+| `EvalAtRs(poly,e0,e1,e2,e3)` | device ML-DSA AIR | identifiers `0..65`, each `-1` | device fold `+1` for all 66 values |
 | `MdocDevicePkStart(start)` | private MSO binder | MSO binder `-1` | device-key binder `+1` |
 
 The device-key binder draws the `T1Cell` challenge before the device AIR.
@@ -1366,12 +1352,12 @@ Proof verification MUST fail for these changes:
 
 The proof MUST reject:
 
-- an ML-DSA-65 protected header or profile tag in the device role;
-- a 1,952-byte device public key;
-- a 3,309-byte device signature;
+- an ML-DSA-44 protected header or profile tag in the device role;
+- a 1,312-byte device public key;
+- a 2,420-byte device signature;
 - a wrong matrix seed `rho`;
 - a wrong `(j,i)` domain;
-- an ExpandA stream count other than 16;
+- an ExpandA stream count other than 30;
 - a wrong ExpandA stream order;
 - a wrong squeeze block;
 - candidate `q` as an accepted value;
@@ -1393,11 +1379,6 @@ The proof MUST reject:
 - a wrong `(s - 512)` factor;
 - a reordered private evaluation vector;
 - a wrong private evaluation vector length;
-- a nonzero inactive coefficient slot in `4`, `9`, `10`, `15`, `16`, `21`,
-  `22`, `28`, or `29`;
-- a nonzero inactive A slot in `46..59`;
-- a nonzero inactive t1 slot in `64..65`;
-- a missing or extra relation counterpart for an inactive evaluation slot;
 - a substituted device key;
 - a wrong device-key start or field identifier;
 - a wrong device-key byte position or fragment;
@@ -1412,12 +1393,6 @@ The proof MUST reject:
 - a missing relation counterpart;
 - an extra relation counterpart;
 - a wrong claimed sum.
-
-A resource-cap test MUST force ML-DSA-44 SampleInBall exhaustion after one
-block.
-It MUST require the typed `SampleInBallExhausted` error.
-It MUST confirm that the prover does not add a second block or select another
-shape.
 
 This substitution MUST fail:
 

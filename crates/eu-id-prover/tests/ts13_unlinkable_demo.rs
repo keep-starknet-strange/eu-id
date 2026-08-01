@@ -14,7 +14,6 @@ use eu_id_prover::ts13_demo::{
 use eu_id_prover::{prove_mdoc_ts13_demo, verify_mdoc_ts13_demo, MdocTs13DemoCircuitPublicInput};
 use ml_dsa::signature::Signer;
 use ml_dsa::{EncodedSignature, MlDsa65, SigningKey};
-use stwo_mldsa::profile::ML_DSA_44;
 
 const VERIFY_AT: i64 = 1_798_761_600; // 2027-01-01T00:00:00Z
 const REVOCATION_EPOCH: u32 = 17;
@@ -201,7 +200,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 "2027-01-01T00:00:01Z",
             );
             assert_eq!(fixture.issuer_pk.len(), ML_DSA_65_PUBLIC_KEY_BYTES);
-            assert_eq!(fixture.device_pk.len(), ML_DSA_44.pk_bytes());
+            assert_eq!(fixture.device_pk.len(), ML_DSA_65_PUBLIC_KEY_BYTES);
             let public = public_input(
                 &transcript,
                 &fixture.issuer_pk,
@@ -418,7 +417,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 .flatten()
                 .all(|&query_count| query_count == common_query_count));
             let mut expected_post_payloads = vec![0; 20];
-            expected_post_payloads[2] = 18_464;
+            expected_post_payloads[2] = 20_128;
             assert_eq!(shape.post_interaction_payload_bytes, expected_post_payloads);
             assert_eq!(shape.fri_last_layer_coefficient_count, 2);
             assert_eq!(shape.sha_table_pair_claim_count, 3);

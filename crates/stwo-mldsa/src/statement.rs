@@ -69,7 +69,7 @@ use crate::private_key_eval::{
     self, PrivateDeviceEvals, PrivateKeyBase, PrivateKeyEvalBindings, PrivateKeyEvalClaims,
     PrivateKeyEvalError, PrivateKeyEvalRelations, PrivateKeyEvalWitness, PrivateKeyTraceComponents,
 };
-use crate::profile::{MlDsaProfile, ML_DSA_44, ML_DSA_65};
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::sponge_link::{
     bridge_preprocessed_column_count, BridgeEval, PublicPrefixEval, SqueezeSinkEval, SrcRelation,
     BRIDGE_BASE_COLS, BRIDGE_INTERACTION_COLS, PREFIX_BASE_COLS, SINK_BASE_COLS,
@@ -298,7 +298,7 @@ pub fn try_hosted_private_key_keccak_job_shapes(
     stream_base: u32,
 ) -> Result<Vec<Shape>, PrivateKeyEvalError> {
     validate_device_message_capacity(message_len)?;
-    let sh = shapes(ML_DSA_44, message_len, stream_base, false, true);
+    let sh = shapes(ML_DSA_65, message_len, stream_base, false, true);
     Ok(sh
         .tr
         .into_iter()
@@ -1845,10 +1845,10 @@ impl MlDsaProver {
         bindings: PrivateKeyEvalBindings,
     ) -> Result<Self, PrivateKeyEvalError> {
         validate_device_message_capacity(input.message.len())?;
-        let private_key_witness = PrivateKeyEvalWitness::from_input(ML_DSA_44, &input)?;
+        let private_key_witness = PrivateKeyEvalWitness::from_input(ML_DSA_65, &input)?;
         let private_key_base = private_key_eval::gen_private_key_base(&private_key_witness);
         let mut prover = Self::build(
-            ML_DSA_44,
+            ML_DSA_65,
             witness,
             input,
             Some(shared_field),
@@ -2690,7 +2690,7 @@ impl MlDsaVerifier {
         PrivateDeviceEvals::try_from_slice(&group_evals).map_err(|error| {
             VerificationError::InvalidStructure(format!("ML-DSA hosted private key: {error}"))
         })?;
-        let ctx = LayoutCtx::new(ML_DSA_44, input.message.len(), true, true, true);
+        let ctx = LayoutCtx::new(ML_DSA_65, input.message.len(), true, true, true);
         let claims = Claims::from_flat(&claimed_sums, &ctx);
         Ok(Self {
             input: VerifierStatementInput::PrivateKey(input),
@@ -2863,7 +2863,7 @@ pub fn try_hosted_private_key_layout(
     message_len: usize,
 ) -> Result<TreeLayout, PrivateKeyEvalError> {
     validate_device_message_capacity(message_len)?;
-    let ctx = LayoutCtx::new(ML_DSA_44, message_len, true, true, true);
+    let ctx = LayoutCtx::new(ML_DSA_65, message_len, true, true, true);
     Ok(layout_for(&ctx))
 }
 
@@ -2916,7 +2916,7 @@ pub fn hosted_public_claimed_sums_len() -> usize {
 
 /// Exact claimed-sum length for hosted public-message/private-public-key mode.
 pub fn hosted_private_key_claimed_sums_len() -> usize {
-    claimed_sums_len(ML_DSA_44, true, true, true)
+    claimed_sums_len(ML_DSA_65, true, true, true)
 }
 
 pub fn verify_mldsa(

@@ -75,23 +75,22 @@ Privacy claim:
   Firebase baseline on Pixel 8, Galaxy S24 Ultra, and Galaxy A54.
 - [x] P1: Reduce canonical-path overhead and prove that canonical
   `proveIdentity` is at most 1.15 times the AIR-core latency.
-- [ ] P2: Reduce the shared Keccak service to at most 6,000,000 committed
-  cells without weakening the round schedule, job binding, or Iota checks.
+- [ ] P2: Keep the sound 25-row carrier and reduce the all-ML-DSA-65 shared
+  Keccak service to at most 9,200,000 committed cells without weakening the
+  round schedule, job binding, or Iota checks.
   - [x] Reject the endpoint-GKR experiment: it takes about 100 seconds at the
     canonical geometry and weakens the conservative algebraic bound by about
     4.1 bits.
-  - [x] Find a sound fast design below the gate: device-only ML-DSA-44, a
-    one-block SampleInBall cap, a 25-row carrier, and the current GKR tie-back
-    use 4,855,360 shared-service committed cells.
-  - [x] Record the device-profile policy in main-repository mailbox Q-004 and
-    receive the user's authorization to implement the complete campaign.
-  - [x] Implement and prove the accepted mixed-profile design.
-  - [x] Pin 4,855,360 shared-service cells, the 108-bit algebraic bound, and
-    the 18,464-byte GKR payload.
+  - [x] Reject the mixed ML-DSA-44 profile and the two-repetition carrier.
+  - [x] Record the corrected all-ML-DSA-65 geometry in main-repository mailbox
+    A-007.
+  - [ ] Restore ML-DSA-65 for the issuer, device, and revocation roles.
+  - [ ] Pin 9,102,656 committed cells, 261 permutations, the soundness bound,
+    and the carrier payload.
   - [ ] Pin final release latency and peak memory.
 - [x] P3: Reduce private MSO and item SHA-256 to at most 1,500,000 committed
   cells without moving private-input checks outside the proof.
-  - [x] Reduce the SHA geometry to 702,144 committed cells.
+  - [x] Keep the all-ML-DSA-65 SHA geometry at 1,320,640 committed cells.
   - [x] Update and validate the live source-bound artifact profile.
   - [x] Pass the canonical `proveIdentity` and `verifyIdentity` release test.
   - [x] Record the seven-sample desktop result and the cold Pixel 8 delta.
@@ -119,9 +118,10 @@ Privacy claim:
   soundness-negative, and unlinkability-negative test matrix.
 - [ ] Run the final desktop campaign and the final Firebase three-device
   campaign through the canonical `proveIdentity` and `verifyIdentity` API.
-- [ ] Meet the primary mobile gates: cold prove below 2,000 ms on Pixel 8 and
-  Galaxy S24 Ultra, verify at most 350 ms, fixed credential-independent
-  envelope, and the mailbox-approved proof-size ceiling.
+- [ ] Meet the primary mobile gates: cold prove below 2,000 ms on Pixel 8,
+  Galaxy S24 Ultra, and Galaxy A54; verify at most 350 ms; use a fixed
+  credential-independent envelope; and meet the mailbox-approved proof-size
+  ceiling.
 
 ## Invariants
 

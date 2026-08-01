@@ -67,7 +67,7 @@ pub(crate) const MDOC_PRIVATE_MSO_BIND_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_MSO_BIND_ROWS: usize = 1usize << MDOC_PRIVATE_MSO_BIND_LOG_SIZE;
 pub(crate) const MDOC_PRIVATE_MSO_MAX_ACTIVE_ROWS: usize = 256;
 pub(crate) const MDOC_PRIVATE_MSO_MIN_BLIND_ROWS: usize = 256;
-pub(crate) const MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES: usize = 1_347;
+pub(crate) const MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES: usize = 1_987;
 pub(crate) const MDOC_PRIVATE_MSO_MAX_DOC_TYPE_BYTES: usize = 23;
 
 const BIND_VERSION: u64 = 4;
@@ -100,7 +100,7 @@ const DOC_TYPE_KEY: &[u8] = b"\x67docType";
 const VALID_FROM_ANCHOR: &[u8] = b"\x69validFrom\xc0\x74";
 const VALID_UNTIL_ANCHOR: &[u8] = b"\x6avalidUntil\xc0\x74";
 const DEVICE_KEY_INFO_PREFIX: &[u8; 35] =
-    b"\x6ddeviceKeyInfo\xa1\x69deviceKey\xa3\x01\x07\x03\x38\x2f\x20\x59\x05\x20";
+    b"\x6ddeviceKeyInfo\xa1\x69deviceKey\xa3\x01\x07\x03\x38\x30\x20\x59\x07\xa0";
 
 relation!(MdocMsoStartRelation, 1);
 relation!(MdocDevicePkStartRelation, 1);
@@ -2076,7 +2076,7 @@ impl Air for MdocPrivateMsoBind {
         }
         // Bind the fixed private-start layout and key length.
         channel.mix_u64(1);
-        channel.mix_u64(stwo_mldsa::profile::ML_DSA_44.pk_bytes() as u64);
+        channel.mix_u64(stwo_mldsa::profile::ML_DSA_65.pk_bytes() as u64);
         channel.mix_u64(u64::from(self.spec.sha_stream.field_id));
         channel.mix_u64(self.spec.sha_stream.padded_len as u64);
     }
@@ -2368,7 +2368,7 @@ mod tests {
 
     fn fixture_device_key_info() -> Vec<u8> {
         let mut run = DEVICE_KEY_INFO_PREFIX.to_vec();
-        run.extend((0..stwo_mldsa::profile::ML_DSA_44.pk_bytes()).map(|index| (index * 73) as u8));
+        run.extend((0..stwo_mldsa::profile::ML_DSA_65.pk_bytes()).map(|index| (index * 73) as u8));
         run
     }
 
@@ -3468,7 +3468,7 @@ mod tests {
         let mut second_message = first_message.clone();
         let mut second_mso = first_mso.clone();
         let key_offset = DEVICE_KEY_OFFSET + DEVICE_KEY_INFO_PREFIX.len();
-        for index in 0..stwo_mldsa::profile::ML_DSA_44.pk_bytes() {
+        for index in 0..stwo_mldsa::profile::ML_DSA_65.pk_bytes() {
             second_mso[key_offset + index] ^= 0x5a;
         }
         let mso_start = PAYLOAD_OFFSET + payload_anchor(spec.mso_len).len();

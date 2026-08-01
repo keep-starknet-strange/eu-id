@@ -1,7 +1,7 @@
 //! End-to-end timing probe for the canonical TS13 identity API.
 //!
-//! The deterministic data uses ML-DSA-65 for issuer and revocation signatures.
-//! It uses ML-DSA-44 for the device signature. It is not a deployed credential.
+//! The deterministic data uses ML-DSA-65 for all signatures.
+//! It is not a deployed credential.
 //! Timings include the fixed-capacity proof envelope, but not network or disk I/O.
 
 #[allow(dead_code)]
@@ -19,7 +19,7 @@ const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const DISTINCTIVE_BOUND_OFFSET: u64 = 0x1122_3344_5566_7788;
 const VERIFICATION_TIMESTAMP_EPOCH_SECONDS: i64 = 20_637 * 86_400;
 const REVOCATION_EPOCH: u32 = 7;
-const FIXTURE_NAME: &str = "deterministic-rustcrypto-mldsa65-issuer-revocation-mldsa44-device-realistic-7-attribute-pid-demo-not-deployed-credential";
+const FIXTURE_NAME: &str = "deterministic-rustcrypto-mldsa65-all-roles-realistic-7-attribute-pid-demo-not-deployed-credential";
 
 struct Config {
     iterations: usize,

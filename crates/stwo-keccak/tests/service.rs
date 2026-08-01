@@ -310,11 +310,11 @@ fn install_alternate_iota_witness(run: &mut SpongeVRun) -> PermWitness {
         ]
     }));
 
-    let boundary_data = keccak::InteractionClaimData {
+    let boundary_data = keccak::BoundaryWitness {
         n_perms: 1,
         rows: states
             .iter()
-            .map(|state| keccak::RowLook {
+            .map(|state| keccak::BoundaryRow {
                 perm_id,
                 state: std::array::from_fn(|index| M31::from(spread_u32(state[index] as u32))),
             })
@@ -649,25 +649,25 @@ fn fixed_capacity_geometry_and_tree_zero_ignore_actual_length() {
 }
 
 #[test]
-fn canonical_n163_carrier_geometry_is_pinned() {
-    const N_PERMUTATIONS: usize = 163;
-    const CAPACITY_PERMUTATIONS: usize = 155;
+fn canonical_n261_carrier_geometry_is_pinned() {
+    const N_PERMUTATIONS: usize = 261;
+    const CAPACITY_PERMUTATIONS: usize = 256;
     const SHAKE256_RATE: usize = 136;
-    const EXPECTED_SCHEDULE_COLUMNS: usize = 19;
-    const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 3_760_128;
-    const EXPECTED_SERVICE_CELLS: usize = 4_855_360;
+    const EXPECTED_SCHEDULE_COLUMNS: usize = 16;
+    const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 7_520_256;
+    const EXPECTED_SERVICE_CELLS: usize = 9_102_656;
 
     let capacity_bytes = (CAPACITY_PERMUTATIONS - 1) * SHAKE256_RATE;
     let mut shapes = vec![Shape::with_message_capacity(0, capacity_bytes, 1, 1, 2)
         .expect("valid fixed-capacity shape")];
-    for remainder in 16..24 {
+    for remainder in 16..21 {
         let stream = 10 + 2 * remainder as u32;
         shapes.push(Shape::new(remainder, 1, stream, stream + 1));
     }
 
     let jobs = JobList::new(shapes.clone());
     assert_eq!(jobs.n_perms_total(), N_PERMUTATIONS);
-    assert_eq!(jobs.log_size(), 8);
+    assert_eq!(jobs.log_size(), 9);
     assert_eq!(jobs.n_schedule_cols(), EXPECTED_SCHEDULE_COLUMNS);
     assert_eq!(jobs.n_base_cols(), 1_042);
     assert_eq!(stwo_keccak::sponge_v::n_interaction_cols(&jobs), 848);
@@ -675,10 +675,10 @@ fn canonical_n163_carrier_geometry_is_pinned() {
     let carrier_claim = stwo_keccak::carrier::Claim {
         n_perms: N_PERMUTATIONS,
     };
-    assert_eq!(carrier_claim.log_size(), 12);
+    assert_eq!(carrier_claim.log_size(), 13);
     assert_eq!(
         N_PERMUTATIONS * stwo_keccak::carrier::ROWS_PER_PERMUTATION,
-        4_075
+        6_525
     );
     assert_eq!(stwo_keccak::carrier::N_COLUMNS, 910);
     assert_eq!(stwo_keccak::carrier::N_TOTAL_LOOKUPS, 899);
@@ -686,7 +686,7 @@ fn canonical_n163_carrier_geometry_is_pinned() {
     assert_eq!(stwo_keccak::round_gkr::N_TIEBACK_COLUMNS, 8);
     assert_eq!(
         stwo_keccak::round_gkr::LOG_SLOTS + carrier_claim.log_size(),
-        22
+        23
     );
 
     let layout = stwo_keccak::service::debug_layout(shapes);
@@ -715,7 +715,7 @@ fn canonical_n163_carrier_geometry_is_pinned() {
     assert_eq!(service_cells, EXPECTED_SERVICE_CELLS);
     assert_eq!(
         service_cells - EXPECTED_CARRIER_AND_TIEBACK_CELLS,
-        1_095_232
+        1_582_400
     );
 }
 

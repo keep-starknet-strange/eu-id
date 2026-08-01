@@ -1,7 +1,7 @@
 //! Bind and normalize the private ML-DSA device public key in the MSO.
 //!
 //! The private MSO binder emits the first FIPS 204 `pkEncode` position.
-//! This component consumes the 1,312 ML-DSA-44 `pkEncode` bytes.
+//! This component consumes the 1,952 ML-DSA-65 `pkEncode` bytes.
 //! It emits the same bytes for the private-key evaluator.
 //! It consumes the `rho` cells from `ExpandA`.
 //! It also consumes the evaluator's split `t1` cells.
@@ -35,7 +35,7 @@ use stwo_mldsa::coeffs::relations::{RangeRelation, SharedRangeRelation};
 use stwo_mldsa::coeffs::tables::RcKind;
 use stwo_mldsa::coeffs::RcUses;
 use stwo_mldsa::constants::N;
-use stwo_mldsa::profile::ML_DSA_44;
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::statement::{HOSTED_DEVICE_PK_FIELD_ID, HOSTED_MSG_FIELD_ID};
 
 use crate::claimed_sum_blinder::{
@@ -46,8 +46,8 @@ use crate::mdoc_private_mso_bind::{MdocDevicePkStartRelation, SharedMdocDevicePk
 
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_ROWS: usize = 1usize << MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE;
-const DEVICE_K: usize = 4;
-const DEVICE_PK_BYTES: usize = 1_312;
+const DEVICE_K: usize = 6;
+const DEVICE_PK_BYTES: usize = 1_952;
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS: usize = 32 + DEVICE_K * 64;
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS: usize =
     MDOC_PRIVATE_DEVICE_KEY_ROWS - MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS;
@@ -79,10 +79,10 @@ const COL_B2_BITS: usize = COL_B1_BITS + 8;
 const COL_B3_BITS: usize = COL_B2_BITS + 8;
 const COL_T1_HI_START: usize = COL_B3_BITS + 8;
 
-const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS == 288);
-const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS == 224);
-const _: () = assert!(DEVICE_PK_BYTES == ML_DSA_44.pk_bytes());
-const _: () = assert!(DEVICE_K == ML_DSA_44.k());
+const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS == 416);
+const _: () = assert!(MDOC_PRIVATE_DEVICE_KEY_BLIND_ROWS == 96);
+const _: () = assert!(DEVICE_PK_BYTES == ML_DSA_65.pk_bytes());
+const _: () = assert!(DEVICE_K == ML_DSA_65.k());
 const _: () = assert!(N == 256);
 const _: () = assert!(COL_T1_HI_START + T1_COEFFICIENTS_PER_GROUP == TRACE_COLS);
 
@@ -885,7 +885,7 @@ impl Air for MdocPrivateDeviceKeyBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(DEVICE_KEY_BIND_DOMAIN);
         channel.mix_u64(DEVICE_KEY_BIND_VERSION);
-        channel.mix_u64(ML_DSA_44.transcript_tag());
+        channel.mix_u64(ML_DSA_65.transcript_tag());
         channel.mix_u64(self.issuer_message_len as u64);
         channel.mix_u64(DEVICE_PK_BYTES as u64);
         channel.mix_u64(MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE as u64);
@@ -1182,7 +1182,7 @@ mod tests {
     fn packing_matches_fips_decoder_for_every_t1_coefficient() {
         let pk = test_pk(11);
         let decoded =
-            stwo_mldsa::reference::encoding::pk_decode(stwo_mldsa::profile::ML_DSA_44, &pk)
+            stwo_mldsa::reference::encoding::pk_decode(stwo_mldsa::profile::ML_DSA_65, &pk)
                 .unwrap();
         for poly in 0..DEVICE_K {
             for group in 0..64 {
@@ -1226,11 +1226,11 @@ mod tests {
         assert_eq!(PREPROCESSED_COLS, 5);
         assert_eq!(TRACE_COLS, 34);
         assert_eq!(MAIN_INTERACTION_COLS + BLINDER_INTERACTION_COLS, 52);
-        assert_eq!(census.active_rows, 288);
-        assert_eq!(census.blind_rows, 224);
-        assert_eq!(census.normalized_uses, 1_312);
+        assert_eq!(census.active_rows, 416);
+        assert_eq!(census.blind_rows, 96);
+        assert_eq!(census.normalized_uses, 1_952);
         assert_eq!(census.rho_uses, 32);
-        assert_eq!(census.t1_uses, 1_024);
+        assert_eq!(census.t1_uses, 1_536);
         assert_eq!(census.device_pk_start_uses, 1);
         assert_eq!(
             census

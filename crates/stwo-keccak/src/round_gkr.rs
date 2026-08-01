@@ -33,12 +33,12 @@
 //!
 //! ## TS13 demo soundness contribution
 //!
-//! The n=163 profile has 10 slot variables and 12 row variables. Its 22 GKR
-//! layers contain 231 sumcheck rounds. Each round has degree at most three.
+//! The n=261 profile has 10 slot variables and 13 row variables. Its 23 GKR
+//! layers contain 253 sumcheck rounds. Each round has degree at most three.
 //! Let `q = (2^31 - 1)^4`, the size of QM31. A conservative union bound is
-//! `693/q` for sumcheck, `22/q` for the layer column folds, `1/q` for δ, and
-//! `4095/q` for the outer log12 MLE identity. The total is `4811/q`, which is
-//! about `2^-111.8`. The demo's existing 108-bit algebraic OODS bound remains
+//! `759/q` for sumcheck, `23/q` for the layer column folds, `1/q` for δ, and
+//! `8191/q` for the outer log13 MLE identity. The total is `8974/q`, which is
+//! about `2^-110.9`. The demo's existing 108-bit algebraic OODS bound remains
 //! the limiting algebraic bound. Its 128-bit PCS query and proof-of-work bound
 //! also remains stronger than the 108-bit bound.
 
@@ -342,18 +342,106 @@ mod tests {
     use stwo::core::fields::m31::M31;
     use stwo::prover::backend::simd::m31::PackedM31;
     use stwo::prover::backend::Column;
+    use stwo_constraint_framework::{EvalAtRow, ORIGINAL_TRACE_IDX};
 
     use super::*;
     use crate::constants::N_BYTES_IN_STATE;
+    use crate::utils::{circle_row_to_coset, ColEval};
     use crate::{carrier, keccak};
 
-    fn carrier_data(n_perms: usize) -> InteractionData {
+    fn carrier_witness(n_perms: usize) -> carrier::Witness {
         let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; n_perms];
         for (permutation, input) in inputs.iter_mut().enumerate() {
             input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
         }
-        let boundaries = keccak::generate_rows(&inputs);
-        carrier::generate(&boundaries).interaction
+        let boundaries = keccak::generate_boundary_witness(&inputs);
+        carrier::generate(&boundaries)
+    }
+
+    fn carrier_data(n_perms: usize) -> InteractionData {
+        carrier_witness(n_perms).interaction
+    }
+
+    fn multilinear_eval(values: &[SecureField], point: &[SecureField]) -> SecureField {
+        match point {
+            [] => values[0],
+            [coordinate, rest @ ..] => {
+                let (left, right) = values.split_at(values.len() / 2);
+                let left = multilinear_eval(left, rest);
+                let right = multilinear_eval(right, rest);
+                left + *coordinate * (right - left)
+            }
+        }
+    }
+
+    struct MleMaskEvaluator {
+        masks: Vec<[SecureField; 2]>,
+        column: usize,
+    }
+
+    impl MleMaskEvaluator {
+        fn new(trace: &[ColEval], point: &[SecureField], log_size: u32) -> Self {
+            let row_to_coset = circle_row_to_coset(log_size);
+            let mut coset_to_row = vec![0; row_to_coset.len()];
+            for (row, coset) in row_to_coset.iter().copied().enumerate() {
+                coset_to_row[coset] = row;
+            }
+
+            let masks = trace
+                .iter()
+                .map(|column| {
+                    let current: Vec<SecureField> = column
+                        .values
+                        .to_cpu()
+                        .into_iter()
+                        .map(SecureField::from)
+                        .collect();
+                    let previous: Vec<SecureField> = row_to_coset
+                        .iter()
+                        .map(|coset| {
+                            let previous_coset =
+                                (coset + row_to_coset.len() - 1) % row_to_coset.len();
+                            current[coset_to_row[previous_coset]]
+                        })
+                        .collect();
+                    [
+                        multilinear_eval(&previous, point),
+                        multilinear_eval(&current, point),
+                    ]
+                })
+                .collect();
+            Self { masks, column: 0 }
+        }
+    }
+
+    impl EvalAtRow for MleMaskEvaluator {
+        type F = SecureField;
+        type EF = SecureField;
+
+        fn next_interaction_mask<const N: usize>(
+            &mut self,
+            interaction: usize,
+            offsets: [isize; N],
+        ) -> [Self::F; N] {
+            assert_eq!(interaction, ORIGINAL_TRACE_IDX);
+            let mask = self.masks[self.column];
+            self.column += 1;
+            offsets.map(|offset| match offset {
+                -1 => mask[0],
+                0 => mask[1],
+                _ => panic!("unsupported carrier mask offset {offset}"),
+            })
+        }
+
+        fn add_constraint<G>(&mut self, _constraint: G)
+        where
+            Self::EF: std::ops::Mul<G, Output = Self::EF> + From<G>,
+        {
+        }
+
+        fn combine_ef(_values: [Self::F; SECURE_EXTENSION_DEGREE]) -> Self::EF {
+            unreachable!("the carrier lookup walk reads base-trace masks only")
+        }
     }
 
     /// Scalar reference: invert each slot, then add the fractions.
@@ -433,6 +521,66 @@ mod tests {
             packed_sum, columnar_claim.claimed_sum,
             "GKR claimed sum must remain identical to the columnar LogUp"
         );
+    }
+
+    #[test]
+    fn carrier_denominator_oracle_reconstructs_and_detects_tampering() {
+        const N_PERMUTATIONS: usize = 2;
+
+        let witness = carrier_witness(N_PERMUTATIONS);
+        let log_size = witness.interaction.log_size;
+        let mut relation_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut relation_channel);
+        let fractions = build_fractions(&relations, &witness.interaction);
+
+        let mut gkr_channel = Blake2sChannel::default();
+        let (_, artifact) = prove_batch(
+            &mut gkr_channel,
+            vec![gkr_input_layer(&fractions, log_size)],
+        );
+        let [numerator_claim, denominator_claim] =
+            artifact.claims_to_verify_by_instance[0].as_slice()
+        else {
+            panic!("carrier GKR input claims must contain a numerator and denominator");
+        };
+        let (slot_point, row_point) = artifact.ood_point.split_at(LOG_SLOTS as usize);
+        let weights = eq_weights(slot_point);
+
+        let mut evaluator = MleMaskEvaluator::new(&witness.trace, row_point, log_size);
+        let lookups = carrier::collect_lookups(&mut evaluator, N_PERMUTATIONS);
+        assert_eq!(evaluator.column, witness.trace.len());
+        assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
+
+        let mut reconstructed_numerator = SecureField::zero();
+        let mut reconstructed_denominator = SecureField::zero();
+        for (slot, lookup) in lookups.iter().enumerate() {
+            let denominator: SecureField = match lookup.kind {
+                LookupKind::Schedule => relations.round_schedule.combine(&lookup.tuple),
+                LookupKind::State => relations.keccak_state.combine(&lookup.tuple),
+                LookupKind::Xor3 => relations.xor3.combine(&lookup.tuple),
+                LookupKind::Andnot => relations.andnot.combine(&lookup.tuple),
+                LookupKind::Split(shift) => relations.split[shift - 1].combine(&lookup.tuple),
+            };
+            reconstructed_numerator += weights[slot] * lookup.num;
+            reconstructed_denominator += weights[slot] * denominator;
+        }
+        reconstructed_denominator += weights[N_TOTAL_LOOKUPS..]
+            .iter()
+            .copied()
+            .sum::<SecureField>();
+
+        assert_eq!(reconstructed_numerator, *numerator_claim);
+        assert_eq!(reconstructed_denominator, *denominator_claim);
+
+        let honest_schedule_denominator: SecureField =
+            relations.round_schedule.combine(&lookups[0].tuple);
+        let mut tampered_schedule_tuple = lookups[0].tuple.clone();
+        tampered_schedule_tuple[0] += SecureField::one();
+        let tampered_schedule_denominator: SecureField =
+            relations.round_schedule.combine(&tampered_schedule_tuple);
+        let tampered_reconstruction = reconstructed_denominator
+            + weights[0] * (tampered_schedule_denominator - honest_schedule_denominator);
+        assert_ne!(tampered_reconstruction, *denominator_claim);
     }
 
     #[test]

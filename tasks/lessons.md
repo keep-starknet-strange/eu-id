@@ -115,6 +115,8 @@
 - Use a closed allowlist for recursive generated-file exclusions.
 - Regenerate the artifact after each soundness-source change.
 - Reject artifact drift in verification.
+- Remove artifact relation-use records when their AIR components are deleted.
+- Mark a retained transcript-only relation as reserved instead of inventing uses.
 - Do not change transcript or domain-separator bytes during a terminology cleanup.
 - Remove generated Android build directories before hashing the source tree.
 - Freeze and record an exact checkpoint before parallel campaign edits begin.
@@ -127,6 +129,8 @@
 
 ## Scope
 
+- Re-read every new final mailbox answer before continuing dependent work.
+- Treat a final mailbox policy as superseding earlier measurements and checkpoints.
 - Apply a user scope change immediately.
 - Treat a checkpoint result as incomplete when the user authorizes the full campaign.
 - Stop cloud and device work when the user limits a benchmark to the computer.

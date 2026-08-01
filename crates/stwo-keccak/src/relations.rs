@@ -4,11 +4,10 @@
 //!
 //! 1. **Interface relations:** [`KeccakStateRelation`] and [`HashIoRelation`].
 //!    Downstream ML-DSA components use only these relations.
-//! 2. **Internal relations:** [`Xor3`], [`AndNot`], [`Conv`], the
-//!    seven `Split*` spread byte-split channels, and [`KeccakRound`]. These wire
-//!    the three compute components (`sponge_v` → `keccak` → `keccak_round`) to
-//!    their spread-form lookup tables and to each other. Downstream code never
-//!    names them.
+//! 2. **Internal relations:** [`Xor3`], [`AndNot`], [`Conv`], and the seven
+//!    `Split*` byte-split channels connect the carrier to its spread-form
+//!    lookup tables. [`KeccakRound`] keeps its fixed v1 transcript draw. No AIR
+//!    emits a `KeccakRound` tuple in this profile.
 //!
 //! Each `relation!(_, N)` declares a struct wrapping `LookupElements<N>`; `N`
 //! is the base-field arity of one lookup tuple. Stwo's macro implements
@@ -93,18 +92,12 @@ relation!(Split5, SPLIT_LOOKUP_ARITY);
 relation!(Split6, SPLIT_LOOKUP_ARITY);
 relation!(Split7, SPLIT_LOOKUP_ARITY);
 
-/// Arity of [`KeccakRound`]: permutation id, input/output direction, round
-/// index, four round-constant byte lanes, then the 200 state bytes. Input links
-/// carry the nonzero-capable Iota lanes. Output links carry zero in those four
-/// positions. The identity fields prevent LogUp's multiset semantics from
-/// swapping states across permutations, reordering rounds, or canceling a
-/// round input against an output without the fixed wrapper schedule.
+/// Arity of the reserved v1 [`KeccakRound`] transcript relation.
+///
+/// The removed standalone round wrapper used a permutation identifier, a
+/// direction, a round index, four Iota byte lanes, and 200 state bytes. The v1
+/// profile keeps this unused draw so later transcript challenges do not move.
 pub const KECCAK_ROUND_ARITY: usize = 3 + IOTA_RC_BYTE_INDICES.len() + N_BYTES_IN_STATE;
-pub const KECCAK_ROUND_PERM_ID_INDEX: usize = 0;
-pub const KECCAK_ROUND_DIRECTION_INDEX: usize = 1;
-pub const KECCAK_ROUND_INDEX_INDEX: usize = 2;
-pub const KECCAK_ROUND_RC_START: usize = 3;
-pub const KECCAK_ROUND_STATE_START: usize = KECCAK_ROUND_RC_START + IOTA_RC_BYTE_INDICES.len();
 relation!(KeccakRound, KECCAK_ROUND_ARITY);
 
 /// Arity of [`RoundScheduleRelation`]: position, row roles, and eight Iota

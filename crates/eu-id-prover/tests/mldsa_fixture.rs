@@ -3,7 +3,7 @@
 mod fixture;
 
 use fixture::*;
-use stwo_mldsa::profile::{MlDsaProfile, ML_DSA_44, ML_DSA_65};
+use stwo_mldsa::profile::{MlDsaProfile, ML_DSA_65};
 use stwo_mldsa::reference::verify::verify_internals;
 
 fn rejects(profile: MlDsaProfile, public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
@@ -82,7 +82,7 @@ fn identity_fixture_issuer_and_device_verify_natively() {
         issuer.reason
     );
     let device = verify_internals(
-        ML_DSA_44,
+        ML_DSA_65,
         &fixture.device_pk,
         &fixture.device_sig_structure,
         &fixture.device_signature,
@@ -126,7 +126,7 @@ fn identity_fixture_rejects_tampered_device_signature() {
     let mut fixture = mldsa_identity_fixture();
     fixture.device_signature[stwo_mldsa::constants::C_TILDE_BYTES + 200] ^= 1;
     assert!(rejects(
-        ML_DSA_44,
+        ML_DSA_65,
         &fixture.device_pk,
         &fixture.device_sig_structure,
         &fixture.device_signature

@@ -21,6 +21,8 @@ mod mldsa_fixture;
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const PRIVATE_FRAGMENT_BYTES: usize = 64;
+const DEVICE_T1_POLYNOMIAL_BYTES: usize =
+    (stwo_mldsa::constants::PK_BYTES - 32) / stwo_mldsa::constants::K;
 const ENVELOPE_HEADER_BYTES: usize = 46;
 const TS13_DEMO_VERIFY_AT: i64 = 1_798_761_600;
 const TS13_DEMO_REVOCATION_EPOCH: u32 = 17;
@@ -489,14 +491,17 @@ fn private_identity_markers(
             fixture.device_pk[..32].to_vec(),
         ),
         (
-            "device ML-DSA t1 fragment".to_string(),
-            fixture.device_pk[32..32 + PRIVATE_FRAGMENT_BYTES].to_vec(),
-        ),
-        (
             "independent MSO stable fragment".to_string(),
             mso_stable_fragment,
         ),
     ];
+    markers.extend((0..stwo_mldsa::constants::K).map(|polynomial| {
+        let start = 32 + polynomial * DEVICE_T1_POLYNOMIAL_BYTES;
+        (
+            format!("device ML-DSA t1 polynomial {polynomial} fragment"),
+            fixture.device_pk[start..start + PRIVATE_FRAGMENT_BYTES].to_vec(),
+        )
+    }));
     markers.extend(validity_markers(&fixture.mso));
     markers.extend(private_fragments(
         "issuer signature",

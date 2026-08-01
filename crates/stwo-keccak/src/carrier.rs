@@ -22,9 +22,7 @@ use stwo_constraint_framework::{
     ORIGINAL_TRACE_IDX,
 };
 
-use crate::constants::{
-    IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, N_ROUNDS, RHO_OFFSETS, SQRT_N_LANES,
-};
+use crate::constants::{IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS};
 use crate::keccak;
 use crate::keccak_round::{
     self, InteractionClaimData as RoundData, N_ANDNOT_LOOKUPS, N_SPLIT_C_ROT, N_SPLIT_LOOKUPS,
@@ -41,7 +39,7 @@ pub const N_CORE_COLUMNS: usize =
     N_BYTES_IN_STATE + keccak_round::ROUND_PRE_CHI_COLUMNS + N_ANDNOT_LOOKUPS;
 pub const N_COLUMNS: usize = N_SCHEDULE_COLUMNS + N_CORE_COLUMNS;
 
-pub const N_TOTAL_LOOKUPS: usize = 1 + 1 + (keccak_round::N_TOTAL_LOOKUPS - 2) + 1;
+pub const N_TOTAL_LOOKUPS: usize = 1 + 1 + keccak_round::N_ARITHMETIC_LOOKUPS + 1;
 
 const HEADER_COLUMN: usize = 0;
 const ROUND_COLUMN: usize = 1;
@@ -168,7 +166,7 @@ fn pack_round_inputs(
 }
 
 /// Build one carrier witness from scalar permutation boundary rows.
-pub fn generate(boundaries: &keccak::InteractionClaimData) -> Witness {
+pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
     assert!(boundaries.n_perms > 0, "carrier needs one permutation");
     assert_eq!(
         boundaries.rows.len(),
@@ -213,7 +211,8 @@ pub fn generate(boundaries: &keccak::InteractionClaimData) -> Witness {
         &positions,
         &permutation_ids,
     );
-    let (_, full_trace, mut round_data) = keccak_round::Claim::generate_trace(round_inputs, n_rows);
+    let (full_trace, mut round_data) =
+        keccak_round::generate_arithmetic_trace(round_inputs, n_rows);
 
     let pre_chi_start = keccak_round::ROUND_INPUT_TRACE_START + N_BYTES_IN_STATE;
     let pre_chi_target = CARRIER_START + N_BYTES_IN_STATE;
@@ -525,15 +524,22 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
         tuple: input_endpoint,
     });
 
-    let arithmetic_num = E::EF::from(round_active);
-    collect_arithmetic(
+    let arithmetic = keccak_round::collect_arithmetic_lookups(
         eval,
-        &mut lookups,
         &state,
         &carrier,
         &current_rc,
-        arithmetic_num,
+        E::EF::from(round_active),
     );
+    lookups.extend(arithmetic.into_iter().map(|lookup| Lookup {
+        kind: match lookup.kind {
+            keccak_round::ArithmeticLookupKind::Xor3 => LookupKind::Xor3,
+            keccak_round::ArithmeticLookupKind::Andnot => LookupKind::Andnot,
+            keccak_round::ArithmeticLookupKind::Split(shift) => LookupKind::Split(shift),
+        },
+        num: lookup.numerator,
+        tuple: lookup.tuple,
+    }));
 
     let mut output_endpoint = vec![permutation, E::F::from(BaseField::from(direction::OUT))];
     output_endpoint.extend(carrier);
@@ -545,186 +551,6 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
 
     debug_assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
     lookups
-}
-
-fn collect_arithmetic<E: EvalAtRow>(
-    eval: &mut E,
-    lookups: &mut Vec<Lookup<E>>,
-    state: &[E::F; N_BYTES_IN_STATE],
-    carrier: &[E::F; N_BYTES_IN_STATE],
-    current_rc: &[E::F; N_BYTES_IN_U64],
-    numerator: E::EF,
-) {
-    let S0: [[E::F; N_BYTES_IN_U64]; N_LANES_KECCAK] = std::array::from_fn(|lane| {
-        std::array::from_fn(|byte| state[lane * N_BYTES_IN_U64 + byte].clone())
-    });
-
-    let mut C: [[E::F; N_BYTES_IN_U64]; SQRT_N_LANES] =
-        std::array::from_fn(|_| std::array::from_fn(|_| E::F::zero()));
-    for x in 0..SQRT_N_LANES {
-        for byte in 0..N_BYTES_IN_U64 {
-            let t = eval.next_trace_mask();
-            push_xor3(
-                lookups,
-                &[
-                    S0[x][byte].clone(),
-                    S0[x + 5][byte].clone(),
-                    S0[x + 10][byte].clone(),
-                ],
-                &t,
-                numerator.clone(),
-            );
-            let c = eval.next_trace_mask();
-            push_xor3(
-                lookups,
-                &[t, S0[x + 15][byte].clone(), S0[x + 20][byte].clone()],
-                &c,
-                numerator.clone(),
-            );
-            C[x][byte] = c;
-        }
-    }
-
-    let Crot: [[E::F; N_BYTES_IN_U64]; SQRT_N_LANES] = std::array::from_fn(|x| {
-        collect_rotation(
-            eval,
-            lookups,
-            &C[(x + 1) % SQRT_N_LANES],
-            63,
-            numerator.clone(),
-        )
-    });
-
-    let mut S: [[E::F; N_BYTES_IN_U64]; N_LANES_KECCAK] =
-        std::array::from_fn(|_| std::array::from_fn(|_| E::F::zero()));
-    for y in 0..SQRT_N_LANES {
-        for x in 0..SQRT_N_LANES {
-            let lane = x + 5 * y;
-            let previous_x = (x + 4) % SQRT_N_LANES;
-            for byte in 0..N_BYTES_IN_U64 {
-                let result = eval.next_trace_mask();
-                push_xor3(
-                    lookups,
-                    &[
-                        S0[lane][byte].clone(),
-                        C[previous_x][byte].clone(),
-                        Crot[x][byte].clone(),
-                    ],
-                    &result,
-                    numerator.clone(),
-                );
-                S[lane][byte] = result;
-            }
-        }
-    }
-
-    let mut B: [[E::F; N_BYTES_IN_U64]; N_LANES_KECCAK] =
-        std::array::from_fn(|_| std::array::from_fn(|_| E::F::zero()));
-    for x in 0..SQRT_N_LANES {
-        for y in 0..SQRT_N_LANES {
-            let offset = RHO_OFFSETS[x][y];
-            let rotation = if offset == 0 { 0 } else { 64 - offset };
-            let destination = 5 * y + ((2 * x + 3 * y) % SQRT_N_LANES);
-            B[destination] =
-                collect_rotation(eval, lookups, &S[x + 5 * y], rotation, numerator.clone());
-        }
-    }
-
-    for y in 0..SQRT_N_LANES {
-        for x in 0..SQRT_N_LANES {
-            let a = 5 * x + y;
-            let b1 = 5 * ((x + 1) % SQRT_N_LANES) + y;
-            let b2 = 5 * ((x + 2) % SQRT_N_LANES) + y;
-            let output_lane = x + 5 * y;
-            for byte in 0..N_BYTES_IN_U64 {
-                let andnot = eval.next_trace_mask();
-                push_andnot(
-                    lookups,
-                    &B[b1][byte],
-                    &B[b2][byte],
-                    &andnot,
-                    numerator.clone(),
-                );
-                let output = carrier[output_lane * N_BYTES_IN_U64 + byte].clone();
-                let round_constant = if output_lane == 0 {
-                    current_rc[byte].clone()
-                } else {
-                    E::F::zero()
-                };
-                push_xor3(
-                    lookups,
-                    &[B[a][byte].clone(), andnot, round_constant],
-                    &output,
-                    numerator.clone(),
-                );
-            }
-        }
-    }
-}
-
-fn push_xor3<E: EvalAtRow>(
-    lookups: &mut Vec<Lookup<E>>,
-    values: &[E::F; 3],
-    output: &E::F,
-    numerator: E::EF,
-) {
-    lookups.push(Lookup {
-        kind: LookupKind::Xor3,
-        num: numerator,
-        tuple: vec![
-            values[0].clone() + values[1].clone() + values[2].clone(),
-            output.clone(),
-        ],
-    });
-}
-
-fn push_andnot<E: EvalAtRow>(
-    lookups: &mut Vec<Lookup<E>>,
-    b1: &E::F,
-    b2: &E::F,
-    output: &E::F,
-    numerator: E::EF,
-) {
-    lookups.push(Lookup {
-        kind: LookupKind::Andnot,
-        num: numerator,
-        tuple: vec![b1.clone() + b2.clone() + b2.clone(), output.clone()],
-    });
-}
-
-fn collect_rotation<E: EvalAtRow>(
-    eval: &mut E,
-    lookups: &mut Vec<Lookup<E>>,
-    input: &[E::F; N_BYTES_IN_U64],
-    rotation: usize,
-    numerator: E::EF,
-) -> [E::F; N_BYTES_IN_U64] {
-    let whole_bytes = rotation / 8;
-    let bits = rotation % 8;
-    let rotated: [E::F; N_BYTES_IN_U64] =
-        std::array::from_fn(|index| input[(index + whole_bytes) % N_BYTES_IN_U64].clone());
-    if bits == 0 {
-        return rotated;
-    }
-    let four_pow_bits = M31::from(1u32 << (2 * bits));
-    let four_pow_remaining = M31::from(1u32 << (2 * (8 - bits)));
-    let high: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|_| eval.next_trace_mask());
-    let low: [E::F; N_BYTES_IN_U64] =
-        std::array::from_fn(|index| rotated[index].clone() - high[index].clone() * four_pow_bits);
-    for index in 0..N_BYTES_IN_U64 {
-        lookups.push(Lookup {
-            kind: LookupKind::Split(bits),
-            num: numerator.clone(),
-            tuple: vec![
-                rotated[index].clone(),
-                high[index].clone(),
-                low[index].clone(),
-            ],
-        });
-    }
-    std::array::from_fn(|index| {
-        high[index].clone() + low[(index + 1) % N_BYTES_IN_U64].clone() * four_pow_remaining
-    })
 }
 
 pub(crate) struct Fractions {

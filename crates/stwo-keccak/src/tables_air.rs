@@ -1,9 +1,8 @@
 //! Table-provider components for the spread-form Keccak AIR. Each preprocessed
 //! lookup table gets a component that holds the table as preprocessed columns
-//! plus multiplicity trace column(s), and *yields* its relation(s) with
-//! `-multiplicity`. The consumers (`keccak_round`, `sponge`) *use* the same
-//! relations with `+1`, so the LogUp balance holds iff every used tuple is a
-//! genuine table row.
+//! plus multiplicity trace columns. It yields each relation with a negative
+//! multiplicity. The carrier and sponge use the same relations with positive
+//! multiplicities. Thus, the LogUp balance holds only for valid table rows.
 //!
 //! Three table families:
 //! - **Dense:** one `2^16`-row table `(key, spread(xor), andnot)` that serves both
@@ -167,45 +166,6 @@ const DENSE_I: usize = 0;
 const CONV_I: usize = 1;
 
 impl TableMultiplicities {
-    pub fn from_round(data: &RoundData) -> Self {
-        let mut per_table: Vec<Vec<Vec<u32>>> = TableKind::ALL
-            .iter()
-            .map(|k| vec![vec![0u32; 1 << k.log_size()]; k.n_relations()])
-            .collect();
-
-        // Dense/xor3: relation 0, row index = key.
-        for lk in &data.lookup_data.xor3 {
-            for tuple in lk {
-                let key = tuple[0].to_array();
-                for k in key.iter().take(N_LANES) {
-                    per_table[DENSE_I][0][k.0 as usize] += 1;
-                }
-            }
-        }
-        // Dense/andnot: relation 1, row index = u.
-        for lk in &data.lookup_data.andnot {
-            for tuple in lk {
-                let u = tuple[0].to_array();
-                for uu in u.iter().take(N_LANES) {
-                    per_table[DENSE_I][1][uu.0 as usize] += 1;
-                }
-            }
-        }
-        // split_r: row index = byte = unspread(spread_byte); table by shift tag.
-        for lk in &data.lookup_data.split {
-            for tuple in lk {
-                let shift = tuple[0].to_array()[0].0; // constant across lanes
-                let table_i = split_table_index(shift);
-                let sb = tuple[1].to_array();
-                for s in sb.iter().take(N_LANES) {
-                    per_table[table_i][0][unspread_u32(s.0) as usize] += 1;
-                }
-            }
-        }
-
-        Self { per_table }
-    }
-
     /// Count only the 24 round rows in each 25-row carrier block. Header and
     /// padding lookup numerators are zero, so the table must not count them.
     pub fn from_carrier_round(data: &RoundData, n_perms: usize) -> Self {
