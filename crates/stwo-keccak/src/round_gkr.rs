@@ -81,6 +81,9 @@ const _: () = assert!(
 pub const N_TIEBACK_COLUMNS: usize = 2 * SECURE_EXTENSION_DEGREE;
 const _: () = assert!(N_TIEBACK_COLUMNS == 8);
 
+/// Packed denominators inverted at one time for the global claimed sum.
+const CLAIMED_SUM_INVERSE_CHUNK_SIZE: usize = 1 << 11;
+
 /// Everything both sides derive from the GKR transcript for the tie-back.
 pub struct RoundTieBack {
     /// The row half of the GKR OOD point. This is the MleEval evaluation point.
@@ -150,13 +153,19 @@ pub struct RoundGkrProver {
     claimed_sum: SecureField,
 }
 
-/// Sum every packed fraction in canonical slot/row order. One global batch
-/// lets Stwo split the inversion work across its fixed-size Rayon chunks.
+/// Sum every packed fraction in canonical slot/row order. Fixed-size inverse
+/// batches bound scratch memory without changing the addition order.
 fn global_claimed_sum(fracs: &Fractions) -> SecureField {
-    let inverses = PackedQM31::batch_inverse(fracs.denominators());
     let mut total = PackedQM31::zero();
-    for (numerator, denominator_inverse) in fracs.numerators().iter().zip(&inverses) {
-        total += *denominator_inverse * *numerator;
+    for (numerators, denominators) in fracs
+        .numerators()
+        .chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE)
+        .zip(fracs.denominators().chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE))
+    {
+        let inverses = PackedQM31::batch_inverse(denominators);
+        for (numerator, denominator_inverse) in numerators.iter().zip(&inverses) {
+            total += *denominator_inverse * *numerator;
+        }
     }
     // Reduce the lanes in the fixed order that defines the claimed sum.
     total.to_array().iter().copied().sum()
@@ -543,6 +552,10 @@ mod tests {
         let mut relation_channel = Blake2sChannel::default();
         let relations = KeccakRelations::draw(&mut relation_channel);
         let fracs = build_fractions(&relations, &data);
+        assert!(
+            fracs.denominators().len() > CLAIMED_SUM_INVERSE_CHUNK_SIZE,
+            "the parity fixture must span more than one inverse chunk"
+        );
 
         let multiplicities_values = multiplicities_layer_values(gkr_input_layer(&fracs, log_size));
         let generic_values =
