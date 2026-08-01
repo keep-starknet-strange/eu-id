@@ -323,7 +323,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 "FRI last-layer coefficient drift must reject"
             );
             let mut drifted = shape.clone();
-            drifted.proof_bytes = 1_538_473;
+            drifted.proof_bytes = 1_535_657;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
                     artifact_input,

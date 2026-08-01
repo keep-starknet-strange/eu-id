@@ -3490,7 +3490,7 @@ mod tests {
         assert_eq!(first.circuit_hash, second.circuit_hash);
         assert_eq!(
             deterministic_proof_bound(&ts13_demo_proof_bound_terms()).unwrap(),
-            (1_538_472, 1_572_864)
+            (1_535_656, 1_572_864)
         );
         assert_eq!(first.proof_body_capacity, 1_572_864);
 
