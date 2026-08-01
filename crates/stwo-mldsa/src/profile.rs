@@ -2,11 +2,6 @@
 
 use crate::constants::{D, N, Q, T1_BITS};
 
-/// Maximum dimensions used by the shared in-memory representation.
-pub const MAX_K: usize = 6;
-pub const MAX_L: usize = 5;
-pub const MAX_C_TILDE_BYTES: usize = 48;
-
 /// A fixed ML-DSA parameter set.
 ///
 /// This value is circuit configuration. It is never read from a proof or

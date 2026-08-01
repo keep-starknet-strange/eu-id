@@ -18,7 +18,8 @@ use stwo_mldsa::coeffs::{gen_coeffs_interaction, gen_coeffs_rc_uses, layout as c
 use stwo_mldsa::constants::{K, N};
 use stwo_mldsa::decomp::relations::DecompRelations;
 use stwo_mldsa::decomp::tables::RcKind as DecompRcKind;
-use stwo_mldsa::decomp::{gen_decomp_interaction, gen_decomp_metadata, N_PAIRS};
+use stwo_mldsa::decomp::{gen_decomp_interaction, gen_decomp_metadata, N_ROWS};
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::sampleinball::relations::SibRelations;
@@ -30,12 +31,12 @@ use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
 use stwo_mldsa::MlDsaVerifyInput;
 
 fn input_from_wire(pk_bytes: &[u8], message: Vec<u8>, signature: &[u8]) -> MlDsaVerifyInput {
-    let pk = pk_decode(pk_bytes).expect("pk_decode");
-    let signature = sig_decode(signature).expect("sig_decode");
+    let pk = pk_decode(ML_DSA_65, pk_bytes).expect("pk_decode");
+    let signature = sig_decode(ML_DSA_65, signature).expect("sig_decode");
     let (tr, _) = shake256(&[pk_bytes], 64);
     let mut tr_array = [0u8; 64];
     tr_array.copy_from_slice(&tr);
-    MlDsaVerifyInput::from_decoded(&pk, &signature, tr_array, message)
+    MlDsaVerifyInput::from_decoded(ML_DSA_65, &pk, &signature, tr_array, message)
 }
 
 #[derive(Deserialize)]
@@ -65,7 +66,7 @@ fn acvp_witness() -> MlDsaWitness {
     let pk = hex::decode(case.pk).expect("ACVP pk hex");
     let message = hex::decode(case.message).expect("ACVP message hex");
     let signature = hex::decode(case.signature).expect("ACVP signature hex");
-    generate_witness(&input_from_wire(&pk, message, &signature)).expect("ACVP witness")
+    generate_witness(ML_DSA_65, &input_from_wire(&pk, message, &signature)).expect("ACVP witness")
 }
 
 fn seeded_oracle_witness() -> MlDsaWitness {
@@ -78,11 +79,10 @@ fn seeded_oracle_witness() -> MlDsaWitness {
     let signature = signing_key.sign(&message);
     let pk: EncodedVerifyingKey<MlDsa65> = verifying_key.encode();
     let signature: EncodedSignature<MlDsa65> = signature.encode();
-    generate_witness(&input_from_wire(
-        pk.as_slice(),
-        message,
-        signature.as_slice(),
-    ))
+    generate_witness(
+        ML_DSA_65,
+        &input_from_wire(pk.as_slice(), message, signature.as_slice()),
+    )
     .expect("seeded oracle witness")
 }
 
@@ -117,7 +117,7 @@ fn direct_metadata_matches_full_dry_interactions() {
         let direct = gen_decomp_metadata(&witness);
         let interaction = gen_decomp_interaction(
             &witness,
-            padded_log_size(N_PAIRS),
+            padded_log_size(N_ROWS),
             STREAM_ID_CTILDE_ABSORB,
             &DecompRelations::dummy(),
         );

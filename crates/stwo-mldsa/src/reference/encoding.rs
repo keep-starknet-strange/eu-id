@@ -12,7 +12,9 @@
 use crate::constants::{C_TILDE_BYTES, K, L, N, T1_BITS};
 #[cfg(test)]
 use crate::constants::{GAMMA1, OMEGA, PK_BYTES, SIG_BYTES};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
+#[cfg(test)]
+use crate::profile::ML_DSA_65;
 use crate::reference::error::MlDsaError;
 
 /// Decoded public key: seed `ρ` and the vector `t1` (`k` polynomials).
@@ -61,14 +63,9 @@ impl BitWriter {
     }
 }
 
-/// FIPS 204 Algorithm 22 `pkEncode`: inverse of [`pk_decode`]. Packs `ρ` then
-/// each `t1` coefficient at `T1_BITS` bits, LSB-first.
-pub fn pk_encode(rho: &[u8; 32], t1: &[[u32; N]; K]) -> Vec<u8> {
-    pk_encode_for(ML_DSA_65, rho, t1)
-}
-
-/// FIPS 204 `pkEncode` for a verifier-selected parameter set.
-pub fn pk_encode_for(profile: MlDsaProfile, rho: &[u8; 32], t1: &[[u32; N]; K]) -> Vec<u8> {
+/// FIPS 204 Algorithm 22 `pkEncode` for the selected profile. It packs `ρ`
+/// followed by each `t1` coefficient at `T1_BITS` bits, least-significant bit first.
+pub fn pk_encode(profile: MlDsaProfile, rho: &[u8; 32], t1: &[[u32; N]; K]) -> Vec<u8> {
     let poly_bytes = N * T1_BITS / 8;
     let mut out = Vec::with_capacity(profile.pk_bytes());
     out.extend_from_slice(rho);
@@ -83,15 +80,9 @@ pub fn pk_encode_for(profile: MlDsaProfile, rho: &[u8; 32], t1: &[[u32; N]; K]) 
     out
 }
 
-/// FIPS 204 Algorithm 26 `sigEncode`: inverse of [`sig_decode`]. `c̃ ‖ z ‖ h`,
-/// where `z` uses `BitPack(·, γ1−1, γ1)` (`raw = γ1 − coeff`) and `h` uses
-/// `HintBitPack` (Algorithm 20).
-pub fn sig_encode(c_tilde: &[u8; C_TILDE_BYTES], z: &[[i32; N]; L], h: &[[u8; N]; K]) -> Vec<u8> {
-    sig_encode_for(ML_DSA_65, c_tilde, z, h)
-}
-
-/// FIPS 204 `sigEncode` for a verifier-selected parameter set.
-pub fn sig_encode_for(
+/// FIPS 204 Algorithm 26 `sigEncode` for the selected profile. It encodes
+/// `c̃ ‖ z ‖ h`, where `z` uses `BitPack` and `h` uses `HintBitPack`.
+pub fn sig_encode(
     profile: MlDsaProfile,
     c_tilde: &[u8; C_TILDE_BYTES],
     z: &[[i32; N]; L],
@@ -154,13 +145,8 @@ impl<'a> BitReader<'a> {
     }
 }
 
-/// FIPS 204 Algorithm 23 `pkDecode`.
-pub fn pk_decode(pk: &[u8]) -> Result<PublicKey, MlDsaError> {
-    pk_decode_for(ML_DSA_65, pk)
-}
-
-/// FIPS 204 `pkDecode` for a verifier-selected parameter set.
-pub fn pk_decode_for(profile: MlDsaProfile, pk: &[u8]) -> Result<PublicKey, MlDsaError> {
+/// FIPS 204 Algorithm 23 `pkDecode` for the selected profile.
+pub fn pk_decode(profile: MlDsaProfile, pk: &[u8]) -> Result<PublicKey, MlDsaError> {
     if pk.len() != profile.pk_bytes() {
         return Err(MlDsaError::BadPublicKeyLength {
             expected: profile.pk_bytes(),
@@ -183,14 +169,9 @@ pub fn pk_decode_for(profile: MlDsaProfile, pk: &[u8]) -> Result<PublicKey, MlDs
     Ok(PublicKey { rho, t1 })
 }
 
-/// FIPS 204 Algorithm 27 `sigDecode`. Returns `None`-style error on a malformed
-/// hint (Algorithm 21 `HintBitUnpack` rejection).
-pub fn sig_decode(sig: &[u8]) -> Result<SignatureParts, MlDsaError> {
-    sig_decode_for(ML_DSA_65, sig)
-}
-
-/// FIPS 204 `sigDecode` for a verifier-selected parameter set.
-pub fn sig_decode_for(profile: MlDsaProfile, sig: &[u8]) -> Result<SignatureParts, MlDsaError> {
+/// FIPS 204 Algorithm 27 `sigDecode` for the selected profile. It rejects a
+/// malformed Algorithm 21 `HintBitUnpack` encoding.
+pub fn sig_decode(profile: MlDsaProfile, sig: &[u8]) -> Result<SignatureParts, MlDsaError> {
     if sig.len() != profile.sig_bytes() {
         return Err(MlDsaError::BadSignatureLength {
             expected: profile.sig_bytes(),
@@ -260,7 +241,7 @@ mod tests {
     #[test]
     fn pk_decode_rejects_bad_length() {
         assert!(matches!(
-            pk_decode(&[0u8; 10]),
+            pk_decode(ML_DSA_65, &[0u8; 10]),
             Err(MlDsaError::BadPublicKeyLength { .. })
         ));
     }
@@ -268,7 +249,7 @@ mod tests {
     #[test]
     fn sig_decode_rejects_bad_length() {
         assert!(matches!(
-            sig_decode(&[0u8; 10]),
+            sig_decode(ML_DSA_65, &[0u8; 10]),
             Err(MlDsaError::BadSignatureLength { .. })
         ));
     }
@@ -293,11 +274,11 @@ mod tests {
         for (i, b) in pk.iter_mut().enumerate() {
             *b = (i as u32 * 131 + 7) as u8;
         }
-        let decoded = pk_decode(&pk).unwrap();
-        let re = pk_encode(&decoded.rho, &decoded.t1);
+        let decoded = pk_decode(ML_DSA_65, &pk).unwrap();
+        let re = pk_encode(ML_DSA_65, &decoded.rho, &decoded.t1);
         // t1 is only 10 of the low bits per coeff; the encoding is canonical, so
         // decode∘encode∘decode is stable and rho survives verbatim.
-        let decoded2 = pk_decode(&re).unwrap();
+        let decoded2 = pk_decode(ML_DSA_65, &re).unwrap();
         assert_eq!(decoded.rho, decoded2.rho);
         assert_eq!(decoded.t1, decoded2.t1);
         assert_eq!(re.len(), PK_BYTES);
@@ -323,9 +304,9 @@ mod tests {
                 poly[r * 5 + t * 7] = 1;
             }
         }
-        let sig = sig_encode(&c_tilde, &z, &h);
+        let sig = sig_encode(ML_DSA_65, &c_tilde, &z, &h);
         assert_eq!(sig.len(), SIG_BYTES);
-        let decoded = sig_decode(&sig).unwrap();
+        let decoded = sig_decode(ML_DSA_65, &sig).unwrap();
         assert_eq!(decoded.c_tilde, c_tilde);
         assert_eq!(decoded.z, z);
         assert_eq!(decoded.h, h);
@@ -355,9 +336,9 @@ mod tests {
         for (index, coefficient) in t1[..ML_DSA_44.k()].iter_mut().flatten().enumerate() {
             *coefficient = (index as u32 * 17) & 0x3ff;
         }
-        let pk = pk_encode_for(ML_DSA_44, &rho, &t1);
+        let pk = pk_encode(ML_DSA_44, &rho, &t1);
         assert_eq!(pk.len(), 1_312);
-        let decoded_pk = pk_decode_for(ML_DSA_44, &pk).unwrap();
+        let decoded_pk = pk_decode(ML_DSA_44, &pk).unwrap();
         assert_eq!(decoded_pk.rho, rho);
         assert_eq!(decoded_pk.t1, t1);
 
@@ -369,9 +350,9 @@ mod tests {
         let mut h = [[0u8; N]; K];
         h[0][3] = 1;
         h[3][200] = 1;
-        let signature = sig_encode_for(ML_DSA_44, &c_tilde, &z, &h);
+        let signature = sig_encode(ML_DSA_44, &c_tilde, &z, &h);
         assert_eq!(signature.len(), 2_420);
-        let decoded_signature = sig_decode_for(ML_DSA_44, &signature).unwrap();
+        let decoded_signature = sig_decode(ML_DSA_44, &signature).unwrap();
         assert_eq!(decoded_signature.c_tilde, c_tilde);
         assert_eq!(decoded_signature.z, z);
         assert_eq!(decoded_signature.h, h);

@@ -22,7 +22,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::constants::{C_TILDE_BYTES, K, L, N};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::reference::encoding::{PublicKey, SignatureParts};
 
 /// A ring polynomial with signed coefficients (the response `z`), serialized as
@@ -87,11 +87,7 @@ pub struct MlDsaVerifyInput {
 impl MlDsaVerifyInput {
     /// Reject non-canonical decoded public keys before they reach transcript
     /// mixing or verifier-native public-polynomial evaluation.
-    pub fn validate_public_key(&self) -> Result<(), &'static str> {
-        self.validate_public_key_for(ML_DSA_65)
-    }
-
-    pub fn validate_public_key_for(&self, profile: MlDsaProfile) -> Result<(), &'static str> {
+    pub fn validate_public_key(&self, profile: MlDsaProfile) -> Result<(), &'static str> {
         if self.t1[..profile.k()]
             .iter()
             .flatten()
@@ -110,7 +106,7 @@ impl MlDsaVerifyInput {
     }
 
     /// Reject hidden values outside the selected parameter set's wire image.
-    pub fn validate_signature_for(&self, profile: MlDsaProfile) -> Result<(), &'static str> {
+    pub fn validate_signature(&self, profile: MlDsaProfile) -> Result<(), &'static str> {
         if self.c_tilde[profile.c_tilde_bytes()..]
             .iter()
             .any(|&byte| byte != 0)
@@ -139,15 +135,6 @@ impl MlDsaVerifyInput {
     /// the message and `tr`. This is the natural constructor once you have run
     /// `pk_decode` / `sig_decode`.
     pub fn from_decoded(
-        pk: &PublicKey,
-        sig: &SignatureParts,
-        tr: [u8; 64],
-        message: Vec<u8>,
-    ) -> Self {
-        Self::from_decoded_for(ML_DSA_65, pk, sig, tr, message)
-    }
-
-    pub fn from_decoded_for(
         profile: MlDsaProfile,
         pk: &PublicKey,
         sig: &SignatureParts,
@@ -174,22 +161,14 @@ impl MlDsaVerifyInput {
     /// Re-encode the public key to FIPS 204 `pkEncode` bytes so the reference
     /// verifier, which ingests raw bytes, can use this
     /// decoded input. Inverse of `pk_decode`.
-    pub fn encode_pk(&self) -> Vec<u8> {
-        self.encode_pk_for(ML_DSA_65)
-    }
-
-    pub fn encode_pk_for(&self, profile: MlDsaProfile) -> Vec<u8> {
-        crate::reference::encoding::pk_encode_for(profile, &self.rho, &self.t1)
+    pub fn encode_pk(&self, profile: MlDsaProfile) -> Vec<u8> {
+        crate::reference::encoding::pk_encode(profile, &self.rho, &self.t1)
     }
 
     /// Re-encode the signature to FIPS 204 `sigEncode` wire bytes. Inverse of
     /// `sig_decode`.
-    pub fn encode_sig(&self) -> Vec<u8> {
-        self.encode_sig_for(ML_DSA_65)
-    }
-
-    pub fn encode_sig_for(&self, profile: MlDsaProfile) -> Vec<u8> {
-        crate::reference::encoding::sig_encode_for(profile, &self.c_tilde, &self.z, &self.hint)
+    pub fn encode_sig(&self, profile: MlDsaProfile) -> Vec<u8> {
+        crate::reference::encoding::sig_encode(profile, &self.c_tilde, &self.z, &self.hint)
     }
 }
 

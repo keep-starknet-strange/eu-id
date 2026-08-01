@@ -9,7 +9,9 @@ use crate::air_util::{col_eval, enc_signed, m31, ColEval};
 use crate::coeffs::tables::RcKind;
 use crate::coeffs::RcUses;
 use crate::constants::{D, K, N};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
+#[cfg(test)]
+use crate::profile::ML_DSA_65;
 use crate::types::T1Poly;
 use crate::witness::B;
 
@@ -68,11 +70,7 @@ fn active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
     }
 }
 
-pub fn t1_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    t1_preprocessed_ids_for(ML_DSA_65)
-}
-
-pub fn t1_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
+pub fn t1_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     core::iter::once(active_id(profile))
         .chain(PRE_NAMES[1..].iter().map(|name| pre_id(name)))
         .collect()
@@ -82,11 +80,7 @@ pub fn t1_preprocessed_log_sizes() -> Vec<u32> {
     vec![T1_LOG_SIZE; PRE_NAMES.len()]
 }
 
-pub fn gen_t1_preprocessed() -> Vec<ColEval> {
-    gen_t1_preprocessed_for(ML_DSA_65)
-}
-
-pub fn gen_t1_preprocessed_for(profile: MlDsaProfile) -> Vec<ColEval> {
+pub fn gen_t1_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
     let mut columns = vec![vec![m31(0); 1usize << T1_LOG_SIZE]; PRE_NAMES.len()];
     for (row, item) in schedule().iter().enumerate() {
         columns[0][row] = m31(u32::from(item.poly < profile.k()));
@@ -122,11 +116,7 @@ pub struct T1Base {
     pub range_uses: RcUses,
 }
 
-pub fn gen_t1_base(t1: &[T1Poly; K]) -> T1Base {
-    gen_t1_base_for(ML_DSA_65, t1)
-}
-
-pub fn gen_t1_base_for(profile: MlDsaProfile, t1: &[T1Poly; K]) -> T1Base {
+pub fn gen_t1_base(profile: MlDsaProfile, t1: &[T1Poly; K]) -> T1Base {
     let mut columns = vec![vec![m31(0); 1usize << T1_LOG_SIZE]; T1_BASE_COLS];
     let mut range_uses = RcUses::new();
     for (row, item) in schedule().iter().enumerate() {
@@ -281,15 +271,6 @@ pub struct T1Interaction {
 }
 
 pub fn gen_t1_interaction(
-    t1: &[T1Poly; K],
-    r: SecureField,
-    s: SecureField,
-    relations: &PrivateKeyEvalRelations,
-) -> T1Interaction {
-    gen_t1_interaction_for(ML_DSA_65, t1, r, s, relations)
-}
-
-pub fn gen_t1_interaction_for(
     profile: MlDsaProfile,
     t1: &[T1Poly; K],
     r: SecureField,
@@ -847,7 +828,8 @@ mod tests {
         }
         let r = SecureField::from(m31(17));
         let s = SecureField::from(m31(31));
-        let interaction = gen_t1_interaction(&t1, r, s, &PrivateKeyEvalRelations::dummy());
+        let interaction =
+            gen_t1_interaction(ML_DSA_65, &t1, r, s, &PrivateKeyEvalRelations::dummy());
         for (poly, coefficients) in t1.iter().enumerate() {
             let mut expected = SecureField::zero();
             for &value in coefficients.iter().rev() {
@@ -864,7 +846,7 @@ mod tests {
     #[test]
     fn base_range_census_has_exact_lookup_count() {
         let t1 = [[1023u32; N]; K];
-        let base = gen_t1_base(&t1);
+        let base = gen_t1_base(ML_DSA_65, &t1);
         assert_eq!(
             base.range_uses.for_kind(RcKind::Rc9).iter().sum::<u32>(),
             (4 * T1_ACTIVE_ROWS) as u32

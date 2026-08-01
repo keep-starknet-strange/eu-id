@@ -3,10 +3,11 @@
 mod fixture;
 
 use fixture::*;
+use stwo_mldsa::profile::{MlDsaProfile, ML_DSA_44, ML_DSA_65};
 use stwo_mldsa::reference::verify::verify_internals;
 
-fn rejects(public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
-    match verify_internals(public_key, message, signature) {
+fn rejects(profile: MlDsaProfile, public_key: &[u8], message: &[u8], signature: &[u8]) -> bool {
+    match verify_internals(profile, public_key, message, signature) {
         Ok(trace) => !trace.accepted,
         Err(_) => true,
     }
@@ -69,6 +70,7 @@ fn identity_fixture_issuer_and_device_verify_natively() {
     );
 
     let issuer = verify_internals(
+        ML_DSA_65,
         &fixture.issuer_pk,
         &fixture.issuer_sig_structure,
         &fixture.issuer_signature,
@@ -80,6 +82,7 @@ fn identity_fixture_issuer_and_device_verify_natively() {
         issuer.reason
     );
     let device = verify_internals(
+        ML_DSA_44,
         &fixture.device_pk,
         &fixture.device_sig_structure,
         &fixture.device_signature,
@@ -111,6 +114,7 @@ fn identity_fixture_rejects_tampered_issuer_signature() {
     let mut fixture = mldsa_identity_fixture();
     fixture.issuer_signature[stwo_mldsa::constants::C_TILDE_BYTES + 200] ^= 1;
     assert!(rejects(
+        ML_DSA_65,
         &fixture.issuer_pk,
         &fixture.issuer_sig_structure,
         &fixture.issuer_signature
@@ -122,6 +126,7 @@ fn identity_fixture_rejects_tampered_device_signature() {
     let mut fixture = mldsa_identity_fixture();
     fixture.device_signature[stwo_mldsa::constants::C_TILDE_BYTES + 200] ^= 1;
     assert!(rejects(
+        ML_DSA_44,
         &fixture.device_pk,
         &fixture.device_sig_structure,
         &fixture.device_signature
@@ -145,8 +150,8 @@ fn revocation_fixture_verifies_and_rejects_tamper() {
     assert_eq!(public_key, mldsa_identity_fixture().revocation_pk);
 
     let message = eu_id_prover::ts13::ts13_revocation_message(41, 4141, 7);
-    let trace =
-        verify_internals(&public_key, &message, &signature).expect("revocation signature decodes");
+    let trace = verify_internals(ML_DSA_65, &public_key, &message, &signature)
+        .expect("revocation signature decodes");
     assert!(
         trace.accepted,
         "ML-DSA revocation signature must verify: {:?}",
@@ -155,8 +160,14 @@ fn revocation_fixture_verifies_and_rejects_tamper() {
 
     let mut changed_signature = signature.clone();
     changed_signature[stwo_mldsa::constants::C_TILDE_BYTES + 200] ^= 1;
-    assert!(rejects(&public_key, &message, &changed_signature));
     assert!(rejects(
+        ML_DSA_65,
+        &public_key,
+        &message,
+        &changed_signature
+    ));
+    assert!(rejects(
+        ML_DSA_65,
         &public_key,
         &eu_id_prover::ts13::ts13_revocation_message(41, 4141, 8),
         &signature

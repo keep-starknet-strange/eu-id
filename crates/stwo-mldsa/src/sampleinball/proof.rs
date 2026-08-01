@@ -30,6 +30,7 @@ use crate::balancer::{
 };
 use crate::binding::{CCELL_ARITY, HASH_IO_ARITY, STREAM_ID_SIB_SQUEEZE};
 use crate::constants::N;
+use crate::profile::ML_DSA_65;
 use crate::witness::MlDsaWitness;
 
 use super::relations::{RcRelation, SibRelations};
@@ -84,7 +85,7 @@ fn all_preprocessed_log_sizes(log_size: u32) -> Vec<u32> {
 }
 
 fn gen_all_preprocessed(log_size: u32) -> Vec<ColEval> {
-    let mut cols = gen_sib_preprocessed(log_size);
+    let mut cols = gen_sib_preprocessed(ML_DSA_65, log_size);
     for kind in RcKind::ALL {
         cols.push(gen_table_preprocessed(kind));
     }

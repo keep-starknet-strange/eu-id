@@ -17,14 +17,14 @@
 //! empty, so the prefix is `tr ‖ 0x00 ‖ 0x00 ‖ M`. A wrong prefix does not
 //! interoperate with a conforming signer.
 
-use crate::constants::{C_TILDE_BYTES, D, K, L, N, TAU};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
-use crate::reference::decompose::{use_hint_poly_for, w1_encode_for};
-use crate::reference::encoding::{pk_decode_for, sig_decode_for, PublicKey, SignatureParts};
+use crate::constants::{C_TILDE_BYTES, D, K, L, N};
+use crate::profile::MlDsaProfile;
+use crate::reference::decompose::{use_hint_poly, w1_encode};
+use crate::reference::encoding::{pk_decode, sig_decode, PublicKey, SignatureParts};
 use crate::reference::error::{MlDsaError, RejectReason};
-use crate::reference::expand_a::expand_a_for;
+use crate::reference::expand_a::expand_a;
 use crate::reference::ntt::{ntt, ntt_inverse, pointwise, NttPoly, Poly};
-use crate::reference::sample_in_ball::sample_in_ball_for;
+use crate::reference::sample_in_ball::sample_in_ball;
 use crate::reference::sponge::{shake256, SpongeTranscript};
 
 /// Domain separator byte for *pure* (non pre-hash) ML-DSA (Algorithm 3).
@@ -74,34 +74,19 @@ pub struct VerifyTrace {
     pub accepted: bool,
 }
 
-/// Verify an ML-DSA-65 signature in pure mode with empty context (the mdoc
-/// path). Thin wrapper over [`verify_internals_with_context`].
-pub fn verify_internals(pk: &[u8], msg: &[u8], sig: &[u8]) -> Result<VerifyTrace, MlDsaError> {
-    verify_internals_for(ML_DSA_65, pk, msg, sig)
-}
-
-pub fn verify_internals_for(
+/// Verify a signature for the selected profile in pure mode with an empty context.
+pub fn verify_internals(
     profile: MlDsaProfile,
     pk: &[u8],
     msg: &[u8],
     sig: &[u8],
 ) -> Result<VerifyTrace, MlDsaError> {
-    verify_internals_with_context_for(profile, pk, msg, &[], sig)
+    verify_internals_with_context(profile, pk, msg, &[], sig)
 }
 
-/// Verify an ML-DSA-65 signature in pure mode (FIPS 204 Algorithm 3), with an
-/// explicit signing context `ctx`. `ctx` empty is the common case; ACVP
-/// external+pure vectors may carry a non-empty context.
+/// Verify a signature for the selected profile in pure mode with a signing
+/// context. An empty context is the common case.
 pub fn verify_internals_with_context(
-    pk: &[u8],
-    msg: &[u8],
-    ctx: &[u8],
-    sig: &[u8],
-) -> Result<VerifyTrace, MlDsaError> {
-    verify_internals_with_context_for(ML_DSA_65, pk, msg, ctx, sig)
-}
-
-pub fn verify_internals_with_context_for(
     profile: MlDsaProfile,
     pk: &[u8],
     msg: &[u8],
@@ -111,8 +96,8 @@ pub fn verify_internals_with_context_for(
     if ctx.len() > 255 {
         return Err(MlDsaError::ContextTooLong { got: ctx.len() });
     }
-    let PublicKey { rho, t1 } = pk_decode_for(profile, pk)?;
-    let SignatureParts { c_tilde, z, h } = sig_decode_for(profile, sig)?;
+    let PublicKey { rho, t1 } = pk_decode(profile, pk)?;
+    let SignatureParts { c_tilde, z, h } = sig_decode(profile, sig)?;
 
     // tr = H(pk, 512).
     let (tr_vec, _) = shake256(&[pk], HASH64);
@@ -126,7 +111,7 @@ pub fn verify_internals_with_context_for(
     mu.copy_from_slice(&mu_vec);
 
     // c = SampleInBall(c̃); ĉ = NTT(c).
-    let sib = sample_in_ball_for(profile, &c_tilde[..profile.c_tilde_bytes()])?;
+    let sib = sample_in_ball(profile, &c_tilde[..profile.c_tilde_bytes()])?;
     let c = sib.c;
     let c_poly = signed_to_zq(&c);
     let c_hat = ntt(&c_poly);
@@ -138,7 +123,7 @@ pub fn verify_internals_with_context_for(
     }
 
     // Â = ExpandA(ρ).
-    let a = expand_a_for(profile, &rho);
+    let a = expand_a(profile, &rho);
 
     // t1·2^d in the NTT domain, per row.
     let two_d = 1u32 << D;
@@ -169,11 +154,11 @@ pub fn verify_internals_with_context_for(
     // w1' = UseHint(h, w'approx).
     let mut w1 = [[0u32; N]; K];
     for r in 0..profile.k() {
-        w1[r] = use_hint_poly_for(profile, &h[r], &w_approx[r]);
+        w1[r] = use_hint_poly(profile, &h[r], &w_approx[r]);
     }
 
     // c̃' = H(µ ‖ w1Encode(w1'), 2λ).
-    let w1_bytes = w1_encode_for(profile, &w1);
+    let w1_bytes = w1_encode(profile, &w1);
     let (ctp_vec, c_tilde_transcript) = shake256(&[&mu, &w1_bytes], profile.c_tilde_bytes());
     let mut c_tilde_prime = [0u8; C_TILDE_BYTES];
     c_tilde_prime[..profile.c_tilde_bytes()].copy_from_slice(&ctp_vec);
@@ -210,9 +195,9 @@ pub fn verify_internals_with_context_for(
     })
 }
 
-/// Boolean-only verification, discarding the trace. Convenience wrapper.
-pub fn verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
-    verify_internals(pk, msg, sig)
+/// Verify a signature and discard the trace.
+pub fn verify(profile: MlDsaProfile, pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    verify_internals(profile, pk, msg, sig)
         .map(|t| t.accepted)
         .unwrap_or(false)
 }
@@ -256,23 +241,34 @@ fn sub_ntt(a: &NttPoly, b: &NttPoly) -> NttPoly {
     signed_to_zq(&lifted)
 }
 
-// TAU pins the SampleInBall contract this module relies on.
-const _: () = assert!(TAU == 49);
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::ML_DSA_65;
 
     #[test]
     fn wrong_length_inputs_are_hard_errors() {
-        assert!(verify_internals(&[0u8; 5], b"m", &[0u8; crate::constants::SIG_BYTES]).is_err());
-        assert!(verify_internals(&[0u8; crate::constants::PK_BYTES], b"m", &[0u8; 5]).is_err());
+        assert!(verify_internals(
+            ML_DSA_65,
+            &[0u8; 5],
+            b"m",
+            &[0u8; crate::constants::SIG_BYTES]
+        )
+        .is_err());
+        assert!(verify_internals(
+            ML_DSA_65,
+            &[0u8; crate::constants::PK_BYTES],
+            b"m",
+            &[0u8; 5]
+        )
+        .is_err());
     }
 
     #[test]
     fn context_over_255_rejected() {
         let ctx = [0u8; 256];
         let e = verify_internals_with_context(
+            ML_DSA_65,
             &[0u8; crate::constants::PK_BYTES],
             b"m",
             &ctx,

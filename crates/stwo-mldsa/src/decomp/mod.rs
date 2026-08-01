@@ -42,10 +42,10 @@
 //! | boundary zero test `b + v·v_inv − 1` | `v·v_inv` | 2 |
 //! | boundary selector `b·v` | product of cells | 2 |
 //! | FIPS boundary gate `b·w1` | product of cells | 2 |
-//! | wrap16 ternary `w16(w16−1)(w16+1)` | — LOOKUP (`w16+1 ∈ {0,1,2}`) | 1 |
+//! | modular-wrap ternary `u(u−1)(u+1)` | — LOOKUP (`u+1 ∈ {0,1,2}`) | 1 |
 //! | decomp recon `w1·α + w0 − w + wrap_k·q` | linear in cells | 1 |
 //! | s0 · w0 sign link (see C-DECOMP-S0) | `s0·(…)` | 2 |
-//! | UseHint `w1' − (w1 + h·(2s0−1) + 16·w16)` | `h·s0` deg 2 | 2 |
+//! | UseHint `w1' − (w1 + h·(2s0−1) + m·u)` | `h·s0` deg 2 | 2 |
 //! | hint_acc transition (interaction `[-1,0]`) | linear | 1 |
 //! | final base/interaction hint_acc tie | `is_last·(hint_acc−acc_cur)` | 2 |
 //! | w0 / w1 / w1' / byte / hint_acc rc uses | linear | 1 |
@@ -71,23 +71,20 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
-use crate::constants::{GAMMA2, K, N, Q};
+#[cfg(test)]
+use crate::constants::GAMMA2;
+use crate::constants::{K, N, Q};
 use crate::profile::{MlDsaProfile, ML_DSA_44, ML_DSA_65};
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
 use tables::RcUses;
 
-/// Default ML-DSA-65 decomposition modulus `α = 2·γ2`.
-pub const ALPHA: i64 = 2 * GAMMA2 as i64;
-/// Default ML-DSA-65 number of `w1` values.
-pub const W1_MODULUS: i64 = 16;
 const LANES_PER_ROW: usize = 4;
-const N_ROWS: usize = K * N / LANES_PER_ROW;
 /// Active rows: four coefficients per row.
-pub const N_PAIRS: usize = N_ROWS;
+pub const N_ROWS: usize = K * N / LANES_PER_ROW;
 
 // --- Base column indices (four lanes) ----------------------------------------
-// Per lane: w, w1, w0, hint, wrap_k, s0, w1p, wrap16, a_hi, b_hi, sign_val,
+// Per lane: w, w1, w0, hint, wrap_k, s0, w1p, wrap_m, a_hi, b_hi, sign_val,
 // sign_hi. The boundary zero flags/inverses are appended after hint_acc so all
 // existing lane indices remain stable.
 const PER_LANE: usize = 12;
@@ -100,7 +97,7 @@ const L_HINT: usize = 3;
 const L_WRAPK: usize = 4;
 const L_S0: usize = 5;
 const L_W1P: usize = 6;
-const L_WRAP16: usize = 7;
+const L_WRAP_M: usize = 7;
 const L_A_HI: usize = 8;
 const L_B_HI: usize = 9;
 /// `sign_val = s0·(w0−1) + (1−s0)·(−w0) ∈ [0, γ2]`, witnessed so the rc value
@@ -149,12 +146,8 @@ fn hash_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
     }
 }
 
-/// Preprocessed column ids in commit order.
-pub fn decomp_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    decomp_preprocessed_ids_for(ML_DSA_65)
-}
-
-pub fn decomp_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
+/// Preprocessed column IDs for the selected profile, in commit order.
+pub fn decomp_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     vec![
         pre_id("enabler_pre"),
         pre_id("start"),
@@ -179,11 +172,7 @@ fn row_schedule() -> Vec<(usize, usize)> {
 // Preprocessed trace.
 // =============================================================================
 
-pub fn gen_decomp_preprocessed(log_size: u32) -> Vec<ColEval> {
-    gen_decomp_preprocessed_for(ML_DSA_65, log_size)
-}
-
-pub fn gen_decomp_preprocessed_for(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
+pub fn gen_decomp_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
 
@@ -215,7 +204,7 @@ mod schedule_tests {
 
     #[test]
     fn byte_position_derives_all_wcell_keys() {
-        assert_eq!(decomp_preprocessed_ids().len(), 5);
+        assert_eq!(decomp_preprocessed_ids(ML_DSA_65).len(), 5);
         for (row, (i, p)) in row_schedule().into_iter().enumerate() {
             let byte_pos = row as u32;
             for lane in 0..LANES_PER_ROW {
@@ -240,8 +229,8 @@ struct LaneVals {
     hint: i64,
     wrap_k: i64, // ∈ {0,1}: w1·α + w0 = w − wrap_k·q
     s0: i64,     // [w0 > 0]
-    w1p: i64,    // UseHint output ∈ [0,16)
-    wrap16: i64, // ∈ {−1,0,1}: w1p = w1 + h·(2s0−1) + 16·wrap16
+    w1p: i64,    // UseHint output in the selected high-bit range.
+    wrap_m: i64, // ∈ {−1,0,1}: w1p = w1 + h·(2s0−1) + m·wrap_m
 }
 
 fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
@@ -249,7 +238,7 @@ fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
     let w = witness.rows[i].w[m] as i64;
     // `decomp.w1` is the reference's `trace.w1` = w1' (POST-UseHint). The pre-hint
     // high bits `w1 = Decompose(w).0` are recomputed from the reference oracle.
-    let (w1_pre, w0_ref) = crate::reference::decompose::decompose_for(profile, w as u32);
+    let (w1_pre, w0_ref) = crate::reference::decompose::decompose(profile, w as u32);
     let w1 = w1_pre as i64;
     let w0 = witness.decomp.w0[i][m] as i64;
     debug_assert_eq!(w0, w0_ref as i64, "w0 matches reference decompose");
@@ -262,9 +251,9 @@ fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
     debug_assert_eq!(w1 * alpha + w0 - w + wrap_k * Q as i64, 0);
     let s0 = i64::from(w0 > 0);
     let delta = hint * (2 * s0 - 1);
-    let wrap16 = (w1p - (w1 + delta)) / modulus;
-    debug_assert!((-1..=1).contains(&wrap16), "wrap16∈{{-1,0,1}} got {wrap16}");
-    debug_assert_eq!(w1 + delta + modulus * wrap16, w1p);
+    let wrap_m = (w1p - (w1 + delta)) / modulus;
+    debug_assert!((-1..=1).contains(&wrap_m), "wrap_m∈{{-1,0,1}} got {wrap_m}");
+    debug_assert_eq!(w1 + delta + modulus * wrap_m, w1p);
     LaneVals {
         w,
         w1,
@@ -273,7 +262,7 @@ fn lane_vals(witness: &MlDsaWitness, i: usize, m: usize) -> LaneVals {
         wrap_k,
         s0,
         w1p,
-        wrap16,
+        wrap_m,
     }
 }
 
@@ -300,7 +289,7 @@ pub(super) struct PokedLane {
     pub wrap_k: i64,
     pub s0: i64,
     pub w1p: i64,
-    pub wrap16: i64,
+    pub wrap_m: i64,
     pub a_hi: i64,
     pub b_hi: i64,
     pub sign_val: i64,
@@ -324,7 +313,7 @@ impl DecompTracePoke {
                 wrap_k: 0,
                 s0: 0,
                 w1p: 1,
-                wrap16: 0,
+                wrap_m: 0,
                 a_hi: 0,
                 b_hi: (2 * gamma2) >> 13,
                 sign_val: gamma2,
@@ -342,7 +331,7 @@ impl DecompTracePoke {
                 wrap_k: 1,
                 s0: 0,
                 w1p: 0,
-                wrap16: 0,
+                wrap_m: 0,
                 a_hi: 0,
                 b_hi: (2 * gamma2 + 1) >> 13,
                 sign_val: gamma2 + 1,
@@ -362,10 +351,10 @@ impl PokedLane {
         let b = gamma2 - self.w0;
         match field {
             RcField::W1 => self.w1,
-            RcField::W1Room => W1_MODULUS - 1 - self.w1,
+            RcField::W1Room => ML_DSA_65.w1_values() as i64 - 1 - self.w1,
             RcField::W1P => self.w1p,
-            RcField::W1PRoom => W1_MODULUS - 1 - self.w1p,
-            RcField::W16 => self.wrap16 + 1,
+            RcField::W1PRoom => ML_DSA_65.w1_values() as i64 - 1 - self.w1p,
+            RcField::WrapM => self.wrap_m + 1,
             RcField::ALo => a - (1 << 13) * self.a_hi,
             RcField::AHi => self.a_hi,
             RcField::BLo => b - (1 << 13) * self.b_hi,
@@ -405,7 +394,7 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
             cols[base + L_WRAPK][row] = m31(v.wrap_k as u32);
             cols[base + L_S0][row] = m31(v.s0 as u32);
             cols[base + L_W1P][row] = m31(v.w1p as u32);
-            cols[base + L_WRAP16][row] = enc_signed(v.wrap16);
+            cols[base + L_WRAP_M][row] = enc_signed(v.wrap_m);
             let shifted_v = v.w0 + gamma2;
             let v_is_zero = i64::from(shifted_v == 0);
             cols[COL_V_ZERO[lane]][row] = m31(v_is_zero as u32);
@@ -515,7 +504,7 @@ impl FrameworkEval for DecompEval {
             let wrap_k = c[L_WRAPK].clone();
             let s0 = c[L_S0].clone();
             let w1p = c[L_W1P].clone();
-            let wrap16 = c[L_WRAP16].clone();
+            let wrap_m = c[L_WRAP_M].clone();
             let a_hi = c[L_A_HI].clone();
             let b_hi = c[L_B_HI].clone();
             let sign_val = c[L_SIGN_VAL].clone();
@@ -614,15 +603,15 @@ impl FrameworkEval for DecompEval {
                 w1p.clone()
                     - (w1.clone()
                         + hint.clone() * delta_sign
-                        + w1_modulus.clone() * wrap16.clone()),
+                        + w1_modulus.clone() * wrap_m.clone()),
             );
 
-            // Check wrap16 ∈ {−1,0,1} with a `{0,1,2}` lookup on wrap16+1.
-            let w16_plus1 = wrap16.clone() + one.clone();
+            // Check wrap_m ∈ {−1,0,1} with a `{0,1,2}` lookup on wrap_m+1.
+            let wrap_plus_one = wrap_m.clone() + one.clone();
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.rc4, // rc4 ⊇ {0,1,2}; the value is always < 16
                 enabler_pre.clone(),
-                core::slice::from_ref(&w16_plus1),
+                core::slice::from_ref(&wrap_plus_one),
             ));
 
             // Range-check w1' in the selected profile's exact interval.
@@ -816,7 +805,7 @@ fn gen_decomp_metadata_inner(
             rc_uses.rc8[profile.w1_values() as usize - 1 - v.w1 as usize] += 1;
             rc_uses.rc8[v.w1p as usize] += 1;
             rc_uses.rc8[profile.w1_values() as usize - 1 - v.w1p as usize] += 1;
-            rc_uses.rc4[(v.wrap16 + 1) as usize] += 1;
+            rc_uses.rc4[(v.wrap_m + 1) as usize] += 1;
             let a = shifted_lower_range_value(profile, v.w0);
             let b = gamma2 - v.w0;
             let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
@@ -880,7 +869,7 @@ fn honest_lane_rc_integer(profile: MlDsaProfile, v: &LaneVals, field: RcField) -
         RcField::W1Room => profile.w1_values() as i64 - 1 - v.w1,
         RcField::W1P => v.w1p,
         RcField::W1PRoom => profile.w1_values() as i64 - 1 - v.w1p,
-        RcField::W16 => v.wrap16 + 1,
+        RcField::WrapM => v.wrap_m + 1,
         RcField::ALo => a & ((1 << 13) - 1),
         RcField::AHi => a >> 13,
         RcField::BLo => b & ((1 << 13) - 1),
@@ -894,7 +883,7 @@ fn honest_lane_rc_integer(profile: MlDsaProfile, v: &LaneVals, field: RcField) -
 fn rc_uses_for_field_mut(uses: &mut RcUses, field: RcField) -> &mut [u32] {
     match field {
         RcField::W1 | RcField::W1Room | RcField::W1P | RcField::W1PRoom => &mut uses.rc8,
-        RcField::W16 => &mut uses.rc4,
+        RcField::WrapM => &mut uses.rc4,
         RcField::ALo | RcField::BLo | RcField::SignLo => &mut uses.rc13,
         RcField::AHi | RcField::BHi | RcField::SignHi => &mut uses.rc7,
     }
@@ -915,7 +904,7 @@ fn apply_trace_poke_to_metadata(
         RcField::BHi,
         RcField::SignLo,
         RcField::SignHi,
-        RcField::W16,
+        RcField::WrapM,
         RcField::W1P,
         RcField::W1PRoom,
     ];
@@ -1067,11 +1056,9 @@ fn gen_decomp_interaction_inner(
     };
 
     // --- Build the logup fraction streams in AIR emission order ---
-    // Per row there are 23 fractions total: 10 per lane, one byte yield, and
-    // two final-row rc8 hint-accumulator checks. Keep each use explicit so this
-    // mirrors N_LOGUP_ENTRIES and the AIR emission order.
-    // AIR per-lane emission order: w1, a_lo, b_lo, a_hi, b_hi, sign_lo, sign_hi,
-    // w16+1, w1', wcell. Mirror it EXACTLY (kind arg is documentation-only).
+    // Each row has 55 fractions. Each of four lanes has 11 range uses and one
+    // WCell use. Two ML-DSA-44 split checks, three hash-byte slots, and two
+    // final hint-sum checks follow. Keep this order equal to the AIR order.
     for lane in 0..LANES_PER_ROW {
         for field in [
             RcField::W1,
@@ -1082,7 +1069,7 @@ fn gen_decomp_interaction_inner(
             RcField::BHi,
             RcField::SignLo,
             RcField::SignHi,
-            RcField::W16,
+            RcField::WrapM,
             RcField::W1P,
             RcField::W1PRoom,
         ] {
@@ -1234,7 +1221,7 @@ enum RcField {
     W1Room,
     W1P,
     W1PRoom,
-    W16,
+    WrapM,
     ALo,
     AHi,
     BLo,
@@ -1273,7 +1260,7 @@ fn lane_rc(
                         RcField::W1 | RcField::W1Room | RcField::W1P | RcField::W1PRoom => {
                             &relations.rc8
                         }
-                        RcField::W16 => &relations.rc4,
+                        RcField::WrapM => &relations.rc4,
                         RcField::ALo | RcField::BLo | RcField::SignLo => &relations.rc13,
                         RcField::AHi | RcField::BHi | RcField::SignHi => &relations.rc7,
                     };
@@ -1299,7 +1286,7 @@ fn lane_rc(
                     witness.profile.w1_values() - 1 - v.w1p as u32,
                     &relations.rc8,
                 ),
-                RcField::W16 => ((v.wrap16 + 1) as u32, &relations.rc4),
+                RcField::WrapM => ((v.wrap_m + 1) as u32, &relations.rc4),
                 RcField::ALo => ((a & ((1 << 13) - 1)) as u32, &relations.rc13),
                 RcField::AHi => ((a >> 13) as u32, &relations.rc7),
                 RcField::BLo => ((b & ((1 << 13) - 1)) as u32, &relations.rc13),

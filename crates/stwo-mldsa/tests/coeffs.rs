@@ -11,6 +11,7 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::PcsConfig;
 
 use stwo_mldsa::coeffs::layout::N_GROUPS;
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::proof::{prove_coeffs, verify_coeffs, CoeffsProof};
 use stwo_mldsa::MlDsaVerifyInput;
 
@@ -200,7 +201,7 @@ fn negative_packed_second_wcell_is_bound() {
 /// test isolates the norm gate at the same arithmetic level as the AIR.
 #[test]
 fn z_norm_gate_is_exact() {
-    let bound = stwo_mldsa::coeffs::Z_NORM_BOUND as i128; // 524_091
+    let bound = stwo_mldsa::coeffs::z_norm_bound(ML_DSA_65) as i128; // 524_091
     let in_range = |v: i128| (0..(1i128 << 20)).contains(&v);
     let accepts = |z: i128| in_range(z + bound) && in_range(bound - z);
 
@@ -240,7 +241,7 @@ fn paired_zw_shape_is_log13_and_batch4_legal() {
         N_BASE_COLS, 16,
         "z/w reuse six digit columns; two dedicated norm highs prevent carry-stream aliasing"
     );
-    assert_eq!(coeffs_preprocessed_ids().len(), 13);
+    assert_eq!(coeffs_preprocessed_ids(ML_DSA_65).len(), 13);
     assert_eq!(N_RANGE_STREAMS, 14);
     assert_eq!(N_LOGUP_ENTRIES, 18);
     assert_eq!(LOGUP_BATCH, 4);
@@ -248,7 +249,7 @@ fn paired_zw_shape_is_log13_and_batch4_legal() {
     assert_eq!(N_LOGUP_COLS, 5);
     assert_eq!(N_INTERACTION_COLS, 24);
     assert_eq!(
-        (coeffs_preprocessed_ids().len() + N_BASE_COLS + N_INTERACTION_COLS) * rows,
+        (coeffs_preprocessed_ids(ML_DSA_65).len() + N_BASE_COLS + N_INTERACTION_COLS) * rows,
         434_176
     );
 }

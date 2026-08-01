@@ -38,6 +38,7 @@ use stwo_mldsa::expand_a::{
     TRACE_COL_ACCEPT_SLACK1, TRACE_COL_ACCEPT_SLACK2, TRACE_COL_B0, TRACE_COL_B1, TRACE_COL_B2,
     TRACE_COL_INDEX, TRACE_COL_LOW7, TRACE_COL_REJECT_DELTA, TRACE_COL_SAMPLE, TRACE_COL_TOP,
 };
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::sponge::shake128;
 
 const NAMESPACE: &str = "expand-a-test";
@@ -327,7 +328,7 @@ fn rho_tuples(rho: &[u8; 32]) -> Vec<Vec<u32>> {
 }
 
 fn ntt_tuples(rho: &[u8; 32]) -> Vec<Vec<u32>> {
-    let expanded = stwo_mldsa::reference::expand_a::expand_a(rho);
+    let expanded = stwo_mldsa::reference::expand_a::expand_a(ML_DSA_65, rho);
     let mut tuples = Vec::with_capacity(MATRIX_POLYS * N);
     for poly in 0..MATRIX_POLYS {
         for (index, &value) in expanded.matrix[poly / L][poly % L].iter().enumerate() {
@@ -345,13 +346,13 @@ fn ntt_tuples(rho: &[u8; 32]) -> Vec<Vec<u32>> {
 }
 
 fn hash_tuples(rho: &[u8; 32]) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
-    let messages = shake128_absorb_streams(rho);
+    let messages = shake128_absorb_streams(ML_DSA_65, rho);
     let mut absorb = Vec::with_capacity(MATRIX_POLYS * 34);
     let mut squeeze = Vec::with_capacity(MATRIX_POLYS * MAX_EXPAND_A_SQUEEZE_BYTES);
     for (poly, message) in messages.iter().enumerate() {
         for (position, &byte) in message.iter().enumerate() {
             absorb.push(vec![
-                absorb_stream_id(STREAM_BASE, poly).expect("valid absorb stream id"),
+                absorb_stream_id(ML_DSA_65, STREAM_BASE, poly).expect("valid absorb stream id"),
                 position as u32,
                 byte as u32,
             ]);
@@ -359,7 +360,7 @@ fn hash_tuples(rho: &[u8; 32]) -> (Vec<Vec<u32>>, Vec<Vec<u32>>) {
         let output = shake128(&[message], MAX_EXPAND_A_SQUEEZE_BYTES).0;
         for (position, &byte) in output.iter().enumerate() {
             squeeze.push(vec![
-                squeeze_stream_id(STREAM_BASE, poly).expect("valid squeeze stream id"),
+                squeeze_stream_id(ML_DSA_65, STREAM_BASE, poly).expect("valid squeeze stream id"),
                 position as u32,
                 byte as u32,
             ]);
@@ -385,8 +386,9 @@ fn prove_core(
     let range_handle = SharedRangeRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
     let bindings = ExpandABindings::new();
-    let witness = derive_expand_a_witness(rho).expect("canonical witness");
+    let witness = derive_expand_a_witness(ML_DSA_65, rho).expect("canonical witness");
     let mut expand = ExpandAProver::new(
+        ML_DSA_65,
         witness,
         NAMESPACE,
         STREAM_BASE,
@@ -421,8 +423,10 @@ fn expected_core_preprocessed_root() -> CommitmentRoot {
         let range_handle = SharedRangeRelation::new();
         let keccak_handle = SharedKeccakRelations::new();
         let bindings = ExpandABindings::new();
-        let witness = derive_expand_a_witness([0u8; 32]).expect("canonical root witness");
+        let witness =
+            derive_expand_a_witness(ML_DSA_65, [0u8; 32]).expect("canonical root witness");
         let mut expand = ExpandAProver::new(
+            ML_DSA_65,
             witness,
             NAMESPACE,
             STREAM_BASE,
@@ -452,6 +456,7 @@ fn verify_core_with_config(
         handle: keccak_handle.clone(),
     };
     let mut expand = ExpandAVerifier::new(
+        ML_DSA_65,
         proof.expand_claim.clone(),
         namespace,
         stream_base,
@@ -474,7 +479,7 @@ fn verify_core(proof: &CoreProof) -> Result<(), VerifyError> {
 }
 
 fn candidate_rows(rho: &[u8; 32]) -> (usize, usize, usize) {
-    let messages = shake128_absorb_streams(rho);
+    let messages = shake128_absorb_streams(ML_DSA_65, rho);
     let mut first_accept = None;
     let mut first_reject = None;
     let mut done = None;
@@ -769,8 +774,9 @@ fn prove_with_service(rho: [u8; 32], service_rho: [u8; 32]) -> Result<ServicePro
     let range_handle = SharedRangeRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
     let bindings = ExpandABindings::new();
-    let witness = derive_expand_a_witness(rho).expect("canonical witness");
+    let witness = derive_expand_a_witness(ML_DSA_65, rho).expect("canonical witness");
     let mut expand = ExpandAProver::new(
+        ML_DSA_65,
         witness,
         NAMESPACE,
         STREAM_BASE,
@@ -780,8 +786,8 @@ fn prove_with_service(rho: [u8; 32], service_rho: [u8; 32]) -> Result<ServicePro
     )
     .expect("validated ExpandA");
     let mut range = SharedRangeTable::prover(&[expand.range_uses().clone()], range_handle);
-    let shapes = shake128_job_shapes(STREAM_BASE).expect("valid ExpandA service shapes");
-    let messages = shake128_absorb_streams(&service_rho);
+    let shapes = shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid ExpandA service shapes");
+    let messages = shake128_absorb_streams(ML_DSA_65, &service_rho);
     let mut service = KeccakServiceProver::new(shapes, messages, keccak_handle.clone());
     let mut balancers = TestBalancers::new(&rho, &rho, false, keccak_handle, bindings);
     let (stark, payloads) = air_core::prove_with_post_interaction(
@@ -805,8 +811,9 @@ fn expected_service_preprocessed_root() -> CommitmentRoot {
         let keccak_handle = SharedKeccakRelations::new();
         let bindings = ExpandABindings::new();
         let rho = [0u8; 32];
-        let witness = derive_expand_a_witness(rho).expect("canonical root witness");
+        let witness = derive_expand_a_witness(ML_DSA_65, rho).expect("canonical root witness");
         let mut expand = ExpandAProver::new(
+            ML_DSA_65,
             witness,
             NAMESPACE,
             STREAM_BASE,
@@ -816,8 +823,9 @@ fn expected_service_preprocessed_root() -> CommitmentRoot {
         )
         .expect("canonical root ExpandA");
         let mut range = SharedRangeTable::prover(&[expand.range_uses().clone()], range_handle);
-        let shapes = shake128_job_shapes(STREAM_BASE).expect("canonical root service shapes");
-        let messages = shake128_absorb_streams(&rho);
+        let shapes =
+            shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("canonical root service shapes");
+        let messages = shake128_absorb_streams(ML_DSA_65, &rho);
         let mut service = KeccakServiceProver::new(shapes, messages, keccak_handle);
         compute_preprocessed_root_uncached(
             &mut [&mut range, &mut service, &mut expand],
@@ -829,7 +837,7 @@ fn expected_service_preprocessed_root() -> CommitmentRoot {
 fn verify_with_service(proof: &ServiceProof) -> Result<(), VerifyError> {
     verify_with_service_shapes(
         proof,
-        shake128_job_shapes(STREAM_BASE).expect("valid ExpandA service shapes"),
+        shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid ExpandA service shapes"),
     )
 }
 
@@ -841,6 +849,7 @@ fn verify_with_service_shapes(proof: &ServiceProof, shapes: Vec<Shape>) -> Resul
     let mut service =
         KeccakServiceVerifier::new(shapes, proof.service_claims.clone(), keccak_handle.clone());
     let mut expand = ExpandAVerifier::new(
+        ML_DSA_65,
         proof.expand_claim.clone(),
         NAMESPACE,
         STREAM_BASE,
@@ -869,7 +878,8 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
     let proof = prove_with_service(rho, rho).expect("real service proof");
     verify_with_service(&proof).expect("real service verify");
     assert_eq!(proof.service_claims.len(), 12);
-    let canonical = shake128_job_shapes(STREAM_BASE).expect("valid canonical service shapes");
+    let canonical =
+        shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid canonical service shapes");
     let mut shape_attacks = Vec::new();
     for n_squeeze in [3, 5, 7] {
         let mut shapes = canonical.clone();
@@ -919,7 +929,8 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
         shapes[0].squeeze_stream_id + 128,
     );
     shape_attacks.push(("wrong stream ids".to_owned(), shapes));
-    let mut shapes = shake128_job_shapes(STREAM_BASE).expect("valid canonical service shapes");
+    let mut shapes =
+        shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid canonical service shapes");
     shapes[0] = Shape::shake128(
         34,
         6,
@@ -927,7 +938,8 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
         shapes[0].squeeze_stream_id,
     );
     shape_attacks.push(("wrong absorb stream id".to_owned(), shapes));
-    let mut shapes = shake128_job_shapes(STREAM_BASE).expect("valid canonical service shapes");
+    let mut shapes =
+        shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid canonical service shapes");
     shapes[0] = Shape::shake128(
         34,
         6,
@@ -970,7 +982,7 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
 #[test]
 fn proof_shape_constants_are_fixed() {
     assert_eq!(REJECTION_BASE_COLS, 12);
-    let shapes = shake128_job_shapes(STREAM_BASE).expect("valid ExpandA service shapes");
+    let shapes = shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid ExpandA service shapes");
     assert_eq!(shapes.len(), 30);
     assert!(shapes
         .iter()

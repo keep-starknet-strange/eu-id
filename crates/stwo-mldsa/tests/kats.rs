@@ -9,6 +9,7 @@
 //! The file is vendored, so these tests do not use the network.
 
 use serde::Deserialize;
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::verify::verify_internals_with_context;
 
 #[derive(Deserialize)]
@@ -52,7 +53,7 @@ fn acvp_ml_dsa_65_sigver_matches_reference() {
 
         // A well-formed signature that fails to verify → verdict `false`; a
         // malformed one → decode error, which is also a reject for ACVP.
-        let verdict = match verify_internals_with_context(&pk, &msg, &ctx, &sig) {
+        let verdict = match verify_internals_with_context(ML_DSA_65, &pk, &msg, &ctx, &sig) {
             Ok(trace) => trace.accepted,
             Err(_) => false,
         };

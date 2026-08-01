@@ -32,6 +32,7 @@ use air_core::{
 
 use crate::air_util::{padded_log_size, ColEval};
 use crate::binding::STREAM_ID_CTILDE_ABSORB;
+use crate::profile::ML_DSA_65;
 use crate::witness::MlDsaWitness;
 
 #[cfg(not(test))]
@@ -43,13 +44,13 @@ use super::tables::{
 };
 use super::{
     decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction,
-    gen_decomp_preprocessed, DecompEval, DecompMetadata, N_BASE_COLS, N_INTERACTION_COLS, N_PAIRS,
+    gen_decomp_preprocessed, DecompEval, DecompMetadata, N_BASE_COLS, N_INTERACTION_COLS, N_ROWS,
 };
 #[cfg(test)]
 use super::{
     gen_decomp_interaction_with_test_options, gen_decomp_metadata_with_test_options,
     DecompTracePoke, COL_HINT_ACC, COL_LANE0, COL_V_INV, COL_V_ZERO, L_A_HI, L_B_HI, L_HINT, L_S0,
-    L_SIGN_HI, L_SIGN_VAL, L_W, L_W0, L_W1, L_W1P, L_WRAP16, L_WRAPK,
+    L_SIGN_HI, L_SIGN_VAL, L_W, L_W0, L_W1, L_W1P, L_WRAPK, L_WRAP_M,
 };
 use crate::balancer::{
     gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
@@ -68,11 +69,11 @@ pub struct DecompProof {
 }
 
 fn decomp_log_size() -> u32 {
-    padded_log_size(N_PAIRS)
+    padded_log_size(N_ROWS)
 }
 
 fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    let mut ids = decomp_preprocessed_ids();
+    let mut ids = decomp_preprocessed_ids(ML_DSA_65);
     for kind in RcKind::ALL {
         ids.push(kind.value_column_id());
     }
@@ -80,7 +81,7 @@ fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
 }
 
 fn all_preprocessed_log_sizes() -> Vec<u32> {
-    let mut sizes = vec![decomp_log_size(); decomp_preprocessed_ids().len()];
+    let mut sizes = vec![decomp_log_size(); decomp_preprocessed_ids(ML_DSA_65).len()];
     for kind in RcKind::ALL {
         sizes.push(kind.log_size());
     }
@@ -88,7 +89,7 @@ fn all_preprocessed_log_sizes() -> Vec<u32> {
 }
 
 fn gen_all_preprocessed() -> Vec<ColEval> {
-    let mut cols = gen_decomp_preprocessed(decomp_log_size());
+    let mut cols = gen_decomp_preprocessed(ML_DSA_65, decomp_log_size());
     for kind in RcKind::ALL {
         cols.push(gen_table_preprocessed(kind));
     }
@@ -227,7 +228,7 @@ fn apply_trace_poke(evals: &mut [ColEval], poke: DecompTracePoke) {
     set_lane0(L_WRAPK, lane.wrap_k);
     set_lane0(L_S0, lane.s0);
     set_lane0(L_W1P, lane.w1p);
-    set_lane0(L_WRAP16, lane.wrap16);
+    set_lane0(L_WRAP_M, lane.wrap_m);
     set_lane0(L_A_HI, lane.a_hi);
     set_lane0(L_B_HI, lane.b_hi);
     set_lane0(L_SIGN_VAL, lane.sign_val);
@@ -412,7 +413,7 @@ impl AirProver for DecompProver {
         if let Some(checked_hint_total) = self.checked_hint_total {
             let final_row = crate::air_util::circle_row_to_coset(decomp_log_size())
                 .iter()
-                .position(|&coset| coset == N_PAIRS - 1)
+                .position(|&coset| coset == N_ROWS - 1)
                 .expect("final decomp row");
             evals[COL_HINT_ACC]
                 .values
@@ -592,6 +593,7 @@ mod tests {
 
     use super::*;
     use crate::constants::{GAMMA2, K, N, OMEGA, Q};
+    use crate::profile::ML_DSA_65;
     use crate::reference::decompose::{decompose, use_hint};
     use crate::reference::encoding::{pk_decode, sig_decode};
     use crate::reference::sponge::shake256;
@@ -611,18 +613,19 @@ mod tests {
         let sig = sk.sign(b"mldsa-forged-hint-accumulator");
         let vk_bytes: EncodedVerifyingKey<MlDsa65> = vk.encode();
         let sig_bytes: EncodedSignature<MlDsa65> = sig.encode();
-        let pk = pk_decode(vk_bytes.as_slice()).expect("pk_decode");
-        let sig = sig_decode(sig_bytes.as_slice()).expect("sig_decode");
+        let pk = pk_decode(ML_DSA_65, vk_bytes.as_slice()).expect("pk_decode");
+        let sig = sig_decode(ML_DSA_65, sig_bytes.as_slice()).expect("sig_decode");
         let (tr, _) = shake256(&[vk_bytes.as_slice()], 64);
         let mut tr_array = [0u8; 64];
         tr_array.copy_from_slice(&tr);
         let input = MlDsaVerifyInput::from_decoded(
+            ML_DSA_65,
             &pk,
             &sig,
             tr_array,
             b"mldsa-forged-hint-accumulator".to_vec(),
         );
-        generate_witness(&input).expect("honest witness")
+        generate_witness(ML_DSA_65, &input).expect("honest witness")
     }
 
     fn witness44() -> MlDsaWitness {
@@ -632,26 +635,26 @@ mod tests {
         let sig = sk.sign(b"mldsa44-decomp-constraints");
         let vk_bytes: EncodedVerifyingKey<MlDsa44> = vk.encode();
         let sig_bytes: EncodedSignature<MlDsa44> = sig.encode();
-        let pk = crate::reference::encoding::pk_decode_for(profile, vk_bytes.as_slice())
+        let pk = crate::reference::encoding::pk_decode(profile, vk_bytes.as_slice())
             .expect("ML-DSA-44 pk_decode");
-        let sig = crate::reference::encoding::sig_decode_for(profile, sig_bytes.as_slice())
+        let sig = crate::reference::encoding::sig_decode(profile, sig_bytes.as_slice())
             .expect("ML-DSA-44 sig_decode");
         let (tr, _) = shake256(&[vk_bytes.as_slice()], 64);
-        let input = MlDsaVerifyInput::from_decoded_for(
+        let input = MlDsaVerifyInput::from_decoded(
             profile,
             &pk,
             &sig,
             tr.try_into().expect("64-byte tr"),
             b"mldsa44-decomp-constraints".to_vec(),
         );
-        crate::witness::generate_witness_for(profile, &input).expect("honest ML-DSA-44 witness")
+        crate::witness::generate_witness(profile, &input).expect("honest ML-DSA-44 witness")
     }
 
     fn witness_with_first_w(w_value: u32, hint: u8) -> MlDsaWitness {
         let mut witness = witness();
         for i in 0..K {
             for m in 0..N {
-                let (w1, w0) = decompose(witness.rows[i].w[m]);
+                let (w1, w0) = decompose(ML_DSA_65, witness.rows[i].w[m]);
                 witness.decomp.w0[i][m] = w0;
                 witness.decomp.hint[i][m] = 0;
                 witness.decomp.w1[i][m] = w1 as u32;
@@ -659,19 +662,22 @@ mod tests {
             witness.decomp.hint_weight[i] = 0;
         }
 
-        let (w1, w0) = decompose(w_value);
+        let (w1, w0) = decompose(ML_DSA_65, w_value);
         witness.rows[0].w[0] = w_value;
         witness.decomp.w0[0][0] = w0;
         witness.decomp.hint[0][0] = hint;
-        witness.decomp.w1[0][0] = use_hint(hint, w_value) as u32;
+        witness.decomp.w1[0][0] = use_hint(ML_DSA_65, hint, w_value) as u32;
         witness.decomp.hint_weight[0] = hint as usize;
-        assert_eq!(w1, decompose(witness.rows[0].w[0]).0);
+        assert_eq!(w1, decompose(ML_DSA_65, witness.rows[0].w[0]).0);
         witness
     }
 
     fn boundary_witness() -> MlDsaWitness {
         let witness = witness_with_first_w(Q - GAMMA2, 1);
-        assert_eq!(decompose(witness.rows[0].w[0]), (0, -(GAMMA2 as i32)));
+        assert_eq!(
+            decompose(ML_DSA_65, witness.rows[0].w[0]),
+            (0, -(GAMMA2 as i32))
+        );
         assert_eq!(witness.decomp.w0[0][0], -(GAMMA2 as i32));
         assert_eq!(witness.decomp.w1[0][0], 15);
         witness
@@ -689,7 +695,7 @@ mod tests {
             &relations,
         );
         let trace = TreeVec::new(vec![
-            crate::decomp::gen_decomp_preprocessed_for(profile, decomp_log_size()),
+            crate::decomp::gen_decomp_preprocessed(profile, decomp_log_size()),
             gen_decomp_base_trace(witness, decomp_log_size()),
             interaction.trace,
         ]);
@@ -801,7 +807,7 @@ mod tests {
                 }
                 if witness.decomp.hint[i][m] == 0 {
                     witness.decomp.hint[i][m] = 1;
-                    witness.decomp.w1[i][m] = use_hint(1, witness.rows[i].w[m]) as u32;
+                    witness.decomp.w1[i][m] = use_hint(ML_DSA_65, 1, witness.rows[i].w[m]) as u32;
                     total += 1;
                 }
             }

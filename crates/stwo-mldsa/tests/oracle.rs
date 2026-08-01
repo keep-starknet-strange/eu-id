@@ -9,8 +9,8 @@ use ml_dsa::signature::{Keypair, Signer, Verifier};
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa44, MlDsa65, SigningKey};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use stwo_mldsa::profile::{ML_DSA_44, ML_DSA_65};
-use stwo_mldsa::reference::encoding::{pk_decode_for, sig_decode_for};
-use stwo_mldsa::reference::verify::{verify, verify_internals, verify_internals_for};
+use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
+use stwo_mldsa::reference::verify::{verify, verify_internals};
 
 /// N random keypairs + signatures; the reference accepts all.
 const N: usize = 200;
@@ -51,7 +51,7 @@ fn reference_interoperates_with_rustcrypto_mldsa44() {
     let message = b"RustCrypto ML-DSA-44 device authentication";
     let (public_key, signature) = oracle_sign44(&key, message);
 
-    let trace = verify_internals_for(ML_DSA_44, &public_key, message, &signature)
+    let trace = verify_internals(ML_DSA_44, &public_key, message, &signature)
         .expect("decode RustCrypto ML-DSA-44 signature");
     assert!(trace.accepted, "accept RustCrypto ML-DSA-44 signature");
     assert_eq!(trace.c_tilde_prime, trace.c_tilde);
@@ -69,10 +69,10 @@ fn profile_specific_decoders_reject_cross_profile_wires() {
     let (pk44, sig44) = oracle_sign44(&key44, b"profile 44");
     let (pk65, sig65) = oracle_sign(&key65, b"profile 65");
 
-    assert!(pk_decode_for(ML_DSA_65, &pk44).is_err());
-    assert!(sig_decode_for(ML_DSA_65, &sig44).is_err());
-    assert!(pk_decode_for(ML_DSA_44, &pk65).is_err());
-    assert!(sig_decode_for(ML_DSA_44, &sig65).is_err());
+    assert!(pk_decode(ML_DSA_65, &pk44).is_err());
+    assert!(sig_decode(ML_DSA_65, &sig44).is_err());
+    assert!(pk_decode(ML_DSA_44, &pk65).is_err());
+    assert!(sig_decode(ML_DSA_44, &sig65).is_err());
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn reference_accepts_all_oracle_signatures() {
         rng.fill(msg.as_mut_slice());
         let (pk, sig) = oracle_sign(&sk, &msg);
 
-        let trace = verify_internals(&pk, &msg, &sig)
+        let trace = verify_internals(ML_DSA_65, &pk, &msg, &sig)
             .unwrap_or_else(|e| panic!("case {i}: decode error {e}"));
         assert!(
             trace.accepted,
@@ -105,14 +105,17 @@ fn reference_rejects_mutations() {
         let mut msg = vec![0u8; 8 + (i % 40)];
         rng.fill(msg.as_mut_slice());
         let (pk, sig) = oracle_sign(&sk, &msg);
-        assert!(verify(&pk, &msg, &sig), "baseline must verify (case {i})");
+        assert!(
+            verify(ML_DSA_65, &pk, &msg, &sig),
+            "baseline must verify (case {i})"
+        );
 
         // (a) flip a byte deep in the signature's z region (past c̃).
         let mut bad_sig = sig.clone();
         let z_off = stwo_mldsa::constants::C_TILDE_BYTES + 100;
         bad_sig[z_off] ^= 0x01;
         assert!(
-            !verify(&pk, &msg, &bad_sig),
+            !verify(ML_DSA_65, &pk, &msg, &bad_sig),
             "case {i}: mutated signature verified"
         );
         mutations += 1;
@@ -121,7 +124,7 @@ fn reference_rejects_mutations() {
         let mut bad_msg = msg.clone();
         bad_msg[0] ^= 0x80;
         assert!(
-            !verify(&pk, &bad_msg, &sig),
+            !verify(ML_DSA_65, &pk, &bad_msg, &sig),
             "case {i}: mutated message verified"
         );
         mutations += 1;
@@ -130,7 +133,7 @@ fn reference_rejects_mutations() {
         let mut bad_pk = pk.clone();
         bad_pk[40] ^= 0x01;
         assert!(
-            !verify(&bad_pk, &msg, &sig),
+            !verify(ML_DSA_65, &bad_pk, &msg, &sig),
             "case {i}: mutated public key verified"
         );
         mutations += 1;

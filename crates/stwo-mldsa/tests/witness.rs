@@ -24,6 +24,7 @@ use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 
 use stwo_mldsa::constants::{D, K, N, Q};
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::expand_a::expand_a;
 use stwo_mldsa::reference::ntt::ntt_inverse;
@@ -65,14 +66,14 @@ fn oracle_input(sk: &SigningKey<MlDsa65>, msg: &[u8]) -> MlDsaVerifyInput {
     let pk_slice: &[u8] = vk_bytes.as_slice();
     let sig_slice: &[u8] = sig_bytes.as_slice();
 
-    let pk = pk_decode(pk_slice).expect("pk_decode");
-    let sp = sig_decode(sig_slice).expect("sig_decode");
+    let pk = pk_decode(ML_DSA_65, pk_slice).expect("pk_decode");
+    let sp = sig_decode(ML_DSA_65, sig_slice).expect("sig_decode");
     // tr = H(pk, 512).
     let (tr_vec, _) = shake256(&[pk_slice], 64);
     let mut tr = [0u8; 64];
     tr.copy_from_slice(&tr_vec);
 
-    MlDsaVerifyInput::from_decoded(&pk, &sp, tr, msg.to_vec())
+    MlDsaVerifyInput::from_decoded(ML_DSA_65, &pk, &sp, tr, msg.to_vec())
 }
 
 /// Message length for case `i`: mostly small, but every 7th is 1–2 KB to
@@ -91,7 +92,7 @@ fn msg_len(i: usize) -> usize {
 fn independent_check(input: &MlDsaVerifyInput, w: &stwo_mldsa::witness::MlDsaWitness) {
     let q = Q as i128;
     let two_d = 1i128 << D;
-    let a_hat = expand_a(&input.rho);
+    let a_hat = expand_a(ML_DSA_65, &input.rho);
 
     // Decoded integer A, z, c, t1·2^d.
     let mut a_int = vec![vec![[0i128; N]; 5]; K];
@@ -103,7 +104,9 @@ fn independent_check(input: &MlDsaVerifyInput, w: &stwo_mldsa::witness::MlDsaWit
             }
         }
     }
-    let c = sample_in_ball(&input.c_tilde).c;
+    let c = sample_in_ball(ML_DSA_65, &input.c_tilde)
+        .expect("sample in ball")
+        .c;
     let c_int: Vec<i128> = c.iter().map(|&x| x as i128).collect();
 
     for i in 0..K {
@@ -169,7 +172,7 @@ fn witness_property_over_1000_signatures() {
         rng.fill(msg.as_mut_slice());
         let input = oracle_input(&sk, &msg);
 
-        let witness = generate_witness(&input)
+        let witness = generate_witness(ML_DSA_65, &input)
             .unwrap_or_else(|e| panic!("case {i}: generate_witness failed: {e}"));
 
         // Aggregate observed maxima.

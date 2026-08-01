@@ -52,6 +52,7 @@ use crate::coeffs::{
     coeffs_preprocessed_ids, gen_coeffs_base_trace, gen_coeffs_interaction,
     gen_coeffs_preprocessed, gen_coeffs_rc_uses, CoeffsEval, N_BASE_COLS, N_INTERACTION_COLS,
 };
+use crate::profile::ML_DSA_65;
 use crate::types::MlDsaVerifyInput;
 use crate::verifier_native::{compute_public_evals, folded_check, ClaimedEvals};
 use crate::witness::MlDsaWitness;
@@ -82,7 +83,7 @@ fn coeffs_interaction_layout() -> Vec<u32> {
 }
 
 fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    let mut ids = coeffs_preprocessed_ids();
+    let mut ids = coeffs_preprocessed_ids(ML_DSA_65);
     for kind in RcKind::ALL {
         ids.push(kind.value_column_id());
     }
@@ -90,7 +91,7 @@ fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
 }
 
 fn all_preprocessed_log_sizes() -> Vec<u32> {
-    let mut sizes = vec![coeffs_log_size(); coeffs_preprocessed_ids().len()];
+    let mut sizes = vec![coeffs_log_size(); coeffs_preprocessed_ids(ML_DSA_65).len()];
     for kind in RcKind::ALL {
         sizes.push(kind.log_size());
     }
@@ -98,7 +99,7 @@ fn all_preprocessed_log_sizes() -> Vec<u32> {
 }
 
 fn gen_all_preprocessed() -> Vec<ColEval> {
-    let mut cols = gen_coeffs_preprocessed(coeffs_log_size());
+    let mut cols = gen_coeffs_preprocessed(ML_DSA_65, coeffs_log_size());
     for kind in RcKind::ALL {
         cols.push(gen_table_preprocessed(kind));
     }

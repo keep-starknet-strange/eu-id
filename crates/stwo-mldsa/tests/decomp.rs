@@ -89,7 +89,7 @@ fn negative_dropped_w1_digit() {
 }
 
 /// Flip one hint bit: UseHint output diverges from w1' ⇒ the UseHint constraint
-/// (w1' = w1 + h·δ + 16·wrap16) cannot be satisfied with the honest w1'.
+/// (`w1' = w1 + h·δ + m·wrap_m`) cannot be satisfied with the honest `w1'`.
 #[test]
 fn negative_flip_hint_bit() {
     let (mut w, _) = witness_and_input(6002, b"flip-hint");

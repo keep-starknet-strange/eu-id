@@ -77,7 +77,7 @@ use stwo_constraint_framework::{
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 use crate::constants::{N, TAU};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::witness::MlDsaWitness;
 use relations::SibRelations;
 use tables::RcUses;
@@ -658,11 +658,7 @@ fn mem_trace(witness: &MlDsaWitness) -> MemTrace {
 // =============================================================================
 
 /// Reconstruct the canonical, signature-independent SampleInBall schedule.
-pub fn gen_sib_preprocessed(log_size: u32) -> Vec<ColEval> {
-    gen_sib_preprocessed_for(ML_DSA_65, log_size)
-}
-
-pub fn gen_sib_preprocessed_for(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
+pub fn gen_sib_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let stream_bytes = squeeze_bytes(profile);
     let core = n_core(profile);

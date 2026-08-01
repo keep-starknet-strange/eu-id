@@ -8,7 +8,7 @@
 //! from a 3-byte little-endian value masked to 23 bits, accepted iff `< q`.
 
 use crate::constants::{K, L, N, Q};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::reference::ntt::NttPoly;
 use crate::reference::sponge::{Shake128Reader, SpongeTranscript};
 
@@ -42,11 +42,7 @@ fn rej_ntt_poly(rho_prime: &[&[u8]]) -> (NttPoly, SpongeTranscript) {
 }
 
 /// FIPS 204 Algorithm 32 `ExpandA(ρ)`.
-pub fn expand_a(rho: &[u8; 32]) -> ExpandedA {
-    expand_a_for(ML_DSA_65, rho)
-}
-
-pub fn expand_a_for(profile: MlDsaProfile, rho: &[u8; 32]) -> ExpandedA {
+pub fn expand_a(profile: MlDsaProfile, rho: &[u8; 32]) -> ExpandedA {
     let mut matrix = [[[0u32; N]; L]; K];
     let mut transcripts = vec![vec![SpongeTranscript::default(); L]; K];
     for r in 0..profile.k() {
@@ -67,11 +63,12 @@ pub fn expand_a_for(profile: MlDsaProfile, rho: &[u8; 32]) -> ExpandedA {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::ML_DSA_65;
 
     #[test]
     fn expand_a_shapes_and_ranges() {
         let rho = [3u8; 32];
-        let a = expand_a(&rho);
+        let a = expand_a(ML_DSA_65, &rho);
         for r in 0..K {
             for s in 0..L {
                 assert!(a.matrix[r][s].iter().all(|&c| c < Q));
@@ -85,8 +82,8 @@ mod tests {
     #[test]
     fn expand_a_is_deterministic() {
         let rho = [9u8; 32];
-        let a = expand_a(&rho);
-        let b = expand_a(&rho);
+        let a = expand_a(ML_DSA_65, &rho);
+        let b = expand_a(ML_DSA_65, &rho);
         assert_eq!(a.matrix, b.matrix);
     }
 }

@@ -45,7 +45,7 @@
 #![allow(clippy::manual_is_multiple_of)]
 
 use crate::constants::{D, K, L, N, Q};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::reference::ntt::ntt_inverse;
 use crate::reference::verify::VerifyTrace;
 use crate::types::MlDsaVerifyInput;
@@ -129,7 +129,7 @@ pub struct DigitTables {
 /// Decompose and hint witness from `VerifyTrace`.
 #[derive(Clone, Debug)]
 pub struct DecompWitness {
-    /// `w1[i][m] ∈ [0,16)` — high bits recovered via `UseHint`.
+    /// `w1[i][m]` is in the selected profile's high-bit range.
     pub w1: [[u32; N]; K],
     /// `w0[i][m]` — centered low part in `(−γ2, γ2]`, plus the FIPS wrap
     /// special case `−γ2` when the pre-hint high part is zero.
@@ -262,23 +262,19 @@ fn recompose(digits: &[i128]) -> i128 {
 ///
 /// Check each integer invariant over ℤ (`i128`). Return
 /// [`WitnessError`] on a decode error or a non-accepted signature.
-pub fn generate_witness(input: &MlDsaVerifyInput) -> Result<MlDsaWitness, WitnessError> {
-    generate_witness_for(ML_DSA_65, input)
-}
-
-pub fn generate_witness_for(
+pub fn generate_witness(
     profile: MlDsaProfile,
     input: &MlDsaVerifyInput,
 ) -> Result<MlDsaWitness, WitnessError> {
     input
-        .validate_public_key_for(profile)
+        .validate_public_key(profile)
         .map_err(WitnessError::InvalidInput)?;
     input
-        .validate_signature_for(profile)
+        .validate_signature(profile)
         .map_err(WitnessError::InvalidInput)?;
-    let pk = input.encode_pk_for(profile);
-    let sig = input.encode_sig_for(profile);
-    let trace = crate::reference::verify::verify_internals_for(profile, &pk, &input.message, &sig)
+    let pk = input.encode_pk(profile);
+    let sig = input.encode_sig(profile);
+    let trace = crate::reference::verify::verify_internals(profile, &pk, &input.message, &sig)
         .map_err(WitnessError::Reference)?;
     if !trace.accepted {
         return Err(WitnessError::NotAccepted(trace.reason));
@@ -297,7 +293,7 @@ fn build_from_trace(
 
     // --- Public integer matrix A_ij = NTT⁻¹(Â_ij), coeffs in [0,q) --------
     // Recompute Â = ExpandA(ρ) and invert each entry into the integer domain.
-    let a_hat = crate::reference::expand_a::expand_a_for(profile, &trace.rho);
+    let a_hat = crate::reference::expand_a::expand_a(profile, &trace.rho);
     let mut a_int = vec![vec![[0i128; N]; L]; K];
     for i in 0..K {
         for j in 0..L {
@@ -666,7 +662,7 @@ fn build_decomp(profile: MlDsaProfile, trace: &VerifyTrace) -> DecompWitness {
     for i in 0..profile.k() {
         for m in 0..N {
             let r = trace.w_approx[i][m];
-            let (r1, r0) = crate::reference::decompose::decompose_for(profile, r);
+            let (r1, r0) = crate::reference::decompose::decompose(profile, r);
             w0[i][m] = r0;
             let h = if trace.w1[i][m] as i32 != r1 { 1 } else { 0 };
             hint[i][m] = h;

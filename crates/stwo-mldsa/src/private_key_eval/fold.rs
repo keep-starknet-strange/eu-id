@@ -566,14 +566,13 @@ mod tests {
         let key = SigningKey::<MlDsa44>::from_seed(&[0x44; 32].into());
         let public_key: EncodedVerifyingKey<MlDsa44> = key.verifying_key().encode();
         let signature: EncodedSignature<MlDsa44> = key.sign(message).encode();
-        let decoded_key =
-            crate::reference::encoding::pk_decode_for(ML_DSA_44, public_key.as_slice())
-                .expect("decode ML-DSA-44 public key");
+        let decoded_key = crate::reference::encoding::pk_decode(ML_DSA_44, public_key.as_slice())
+            .expect("decode ML-DSA-44 public key");
         let decoded_signature =
-            crate::reference::encoding::sig_decode_for(ML_DSA_44, signature.as_slice())
+            crate::reference::encoding::sig_decode(ML_DSA_44, signature.as_slice())
                 .expect("decode ML-DSA-44 signature");
         let (tr, _) = crate::reference::sponge::shake256(&[public_key.as_slice()], 64);
-        let input = crate::types::MlDsaVerifyInput::from_decoded_for(
+        let input = crate::types::MlDsaVerifyInput::from_decoded(
             ML_DSA_44,
             &decoded_key,
             &decoded_signature,
@@ -581,10 +580,9 @@ mod tests {
             message.to_vec(),
         );
         let witness =
-            crate::witness::generate_witness_for(ML_DSA_44, &input).expect("ML-DSA-44 witness");
-        let private_witness =
-            super::super::PrivateKeyEvalWitness::from_input_for(ML_DSA_44, &input)
-                .expect("ML-DSA-44 private-key witness");
+            crate::witness::generate_witness(ML_DSA_44, &input).expect("ML-DSA-44 witness");
+        let private_witness = super::super::PrivateKeyEvalWitness::from_input(ML_DSA_44, &input)
+            .expect("ML-DSA-44 private-key witness");
         let r = SecureField::from(m31(7));
         let s = SecureField::from(m31(11));
         let rho_rlc = SecureField::from(m31(13));
@@ -599,7 +597,7 @@ mod tests {
             &coeffs_relations,
         );
         let coeffs_trace = TreeVec::new(vec![
-            crate::coeffs::gen_coeffs_preprocessed_for(ML_DSA_44, coeffs_log_size),
+            crate::coeffs::gen_coeffs_preprocessed(ML_DSA_44, coeffs_log_size),
             crate::coeffs::gen_coeffs_base_trace(&witness, coeffs_log_size),
             coeffs.trace.clone(),
         ]);

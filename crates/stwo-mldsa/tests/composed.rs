@@ -20,6 +20,7 @@ use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::service::KeccakServiceVerifier;
 use stwo_keccak::sponge::Shape;
 
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
     native_public_mu, native_tr, prove_mldsa, verify_mldsa, MlDsaVerifier, PermIdPlan,
@@ -37,7 +38,7 @@ fn native_tr_and_role_mu_match_reference() {
     ] {
         let message = format!("{role} native hash equivalence").into_bytes();
         let input = oracle_input(seed, &message);
-        assert_eq!(native_tr(&input), input.tr, "{role} tr mismatch");
+        assert_eq!(native_tr(ML_DSA_65, &input), input.tr, "{role} tr mismatch");
 
         let mut absorbed = Vec::with_capacity(66 + message.len());
         absorbed.extend_from_slice(&input.tr);
@@ -46,12 +47,12 @@ fn native_tr_and_role_mu_match_reference() {
         let (reference_mu, _) = shake256(&[&absorbed], 64);
         if use_native_mu {
             assert_eq!(
-                native_public_mu(&input).as_slice(),
+                native_public_mu(ML_DSA_65, &input).as_slice(),
                 reference_mu.as_slice(),
                 "{role} native µ mismatch"
             );
         } else {
-            let witness = generate_witness(&input).expect("revocation witness");
+            let witness = generate_witness(ML_DSA_65, &input).expect("revocation witness");
             assert_eq!(
                 &witness.sponge.mu_squeezed[..64],
                 reference_mu.as_slice(),
@@ -99,10 +100,10 @@ fn composed_proves_and_verifies_10_sigs() {
             &input.c_tilde[..],
             "case {i}: KAT c̃ mismatch"
         );
-        let pk = input.encode_pk();
-        let sig = input.encode_sig();
+        let pk = input.encode_pk(ML_DSA_65);
+        let sig = input.encode_sig(ML_DSA_65);
         assert!(
-            stwo_mldsa::verify(&pk, &msg, &sig),
+            stwo_mldsa::verify(ML_DSA_65, &pk, &msg, &sig),
             "case {i}: native reference verify must accept"
         );
 
@@ -253,7 +254,7 @@ fn composed_derives_tr_from_the_public_key() {
     let (w, mut input) = witness_and_input(8007, &msg);
     input.tr[0] ^= 1;
     let proof = prove_mldsa(w, input, pcs_config()).expect("prove with an untrusted tr value");
-    assert_eq!(proof.input.tr, native_tr(&proof.input));
+    assert_eq!(proof.input.tr, native_tr(ML_DSA_65, &proof.input));
     verify_mldsa(&proof, pcs_config()).expect("derived tr must replace the supplied value");
 }
 
@@ -340,7 +341,7 @@ fn repeated_instance_job_shapes(input: &MlDsaVerifyInput, sib_stream_len: usize)
         .into_iter()
         .flat_map(|base| {
             [
-                Shape::new(input.encode_pk().len(), 1, base + 8, base + 9),
+                Shape::new(input.encode_pk(ML_DSA_65).len(), 1, base + 8, base + 9),
                 Shape::new(66 + input.message.len(), 1, base + 10, base + 11),
                 Shape::new(832, 1, base + 12, base + 13),
                 Shape::new(48, n_sib_squeezes, base + 14, base + 1),

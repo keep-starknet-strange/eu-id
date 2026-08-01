@@ -27,6 +27,7 @@ use crate::coeffs::layout::{
     POLY_ID_C, POLY_ID_CARRY0, POLY_ID_E0, POLY_ID_V0, POLY_ID_W0, POLY_ID_Z0,
 };
 use crate::constants::{D, K, L, N};
+use crate::profile::ML_DSA_65;
 use crate::reference::ntt::ntt_inverse;
 use crate::types::MlDsaVerifyInput;
 use crate::witness::{balanced_digits, B, Q_DIGITS, T_A, T_T1};
@@ -110,7 +111,7 @@ pub fn compute_public_evals(
     r: SecureField,
     s: SecureField,
 ) -> PublicEvals {
-    let a_hat_matrix = crate::reference::expand_a::expand_a(&input.rho);
+    let a_hat_matrix = crate::reference::expand_a::expand_a(ML_DSA_65, &input.rho);
     let mut a_evals = Vec::with_capacity(K * L);
     for i in 0..K {
         for j in 0..L {

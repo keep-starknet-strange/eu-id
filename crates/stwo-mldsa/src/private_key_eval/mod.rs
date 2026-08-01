@@ -20,7 +20,7 @@ use crate::binding::{SharedNttCellRelation, SharedT1CellRelation};
 use crate::coeffs::relations::{EvalAtRsRelation, RangeRelation};
 use crate::coeffs::RcUses;
 use crate::constants::{K, L};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::reference::ntt::NttPoly;
 use crate::types::{MlDsaVerifyInput, T1Poly};
 
@@ -29,15 +29,14 @@ pub use fold::{
     gen_fold_interaction, gen_fold_preprocessed, PrivateFoldEval,
 };
 pub use ntt::{
-    gen_ntt_base, gen_ntt_base_for, gen_ntt_interaction, gen_ntt_interaction_for,
-    gen_ntt_preprocessed, gen_ntt_preprocessed_for, ntt_interaction_layout, ntt_preprocessed_ids,
-    ntt_preprocessed_ids_for, ntt_preprocessed_log_sizes, ntt_trace_layout, NttBase,
-    NttButterflyEval, NttClaims, NttScalingEval, NTT_BUTTERFLY_LOG_SIZE, NTT_SCALING_LOG_SIZE,
+    gen_ntt_base, gen_ntt_interaction, gen_ntt_preprocessed, ntt_interaction_layout,
+    ntt_preprocessed_ids, ntt_preprocessed_log_sizes, ntt_trace_layout, NttBase, NttButterflyEval,
+    NttClaims, NttScalingEval, NTT_BUTTERFLY_LOG_SIZE, NTT_SCALING_LOG_SIZE,
 };
 pub use t1::{
-    gen_t1_base, gen_t1_base_for, gen_t1_interaction, gen_t1_interaction_for, gen_t1_preprocessed,
-    gen_t1_preprocessed_for, t1_interaction_layout, t1_preprocessed_ids, t1_preprocessed_ids_for,
-    t1_preprocessed_log_sizes, t1_trace_layout, T1Base, T1Eval, T1Interaction, T1_LOG_SIZE,
+    gen_t1_base, gen_t1_interaction, gen_t1_preprocessed, t1_interaction_layout,
+    t1_preprocessed_ids, t1_preprocessed_log_sizes, t1_trace_layout, T1Base, T1Eval, T1Interaction,
+    T1_LOG_SIZE,
 };
 
 /// Maximum-shape relation layout. Active counts come from `MlDsaProfile`.
@@ -110,18 +109,14 @@ pub struct PrivateKeyEvalWitness {
 }
 
 impl PrivateKeyEvalWitness {
-    pub fn from_input(input: &MlDsaVerifyInput) -> Result<Self, PrivateKeyEvalError> {
-        Self::from_input_for(ML_DSA_65, input)
-    }
-
-    pub fn from_input_for(
+    pub fn from_input(
         profile: MlDsaProfile,
         input: &MlDsaVerifyInput,
     ) -> Result<Self, PrivateKeyEvalError> {
         input
-            .validate_public_key_for(profile)
+            .validate_public_key(profile)
             .map_err(PrivateKeyEvalError::InvalidPublicKey)?;
-        let expanded = crate::reference::expand_a::expand_a_for(profile, &input.rho);
+        let expanded = crate::reference::expand_a::expand_a(profile, &input.rho);
         let mut a_hat = vec![[0; crate::constants::N]; A_EVAL_COUNT];
         let mut poly = 0;
         for i in 0..profile.k() {
@@ -248,11 +243,11 @@ pub fn gen_private_key_base(witness: &PrivateKeyEvalWitness) -> PrivateKeyBase {
     let NttBase {
         mut trace,
         mut range_uses,
-    } = gen_ntt_base_for(witness.profile, &witness.a_hat);
+    } = gen_ntt_base(witness.profile, &witness.a_hat);
     let T1Base {
         trace: t1_trace,
         range_uses: t1_uses,
-    } = gen_t1_base_for(witness.profile, &witness.t1);
+    } = gen_t1_base(witness.profile, &witness.t1);
     range_uses.add_assign(&t1_uses);
     trace.extend(t1_trace);
     PrivateKeyBase { trace, range_uses }
@@ -272,8 +267,8 @@ pub fn gen_private_key_interaction(
     s: SecureField,
     relations: &PrivateKeyEvalRelations,
 ) -> PrivateKeyInteraction {
-    let ntt = gen_ntt_interaction_for(witness.profile, &witness.a_hat, r, s, relations);
-    let t1 = gen_t1_interaction_for(witness.profile, &witness.t1, r, s, relations);
+    let ntt = gen_ntt_interaction(witness.profile, &witness.a_hat, r, s, relations);
+    let t1 = gen_t1_interaction(witness.profile, &witness.t1, r, s, relations);
     let mut trace = ntt.trace;
     trace.extend(t1.trace);
     PrivateKeyInteraction {
@@ -286,15 +281,10 @@ pub fn gen_private_key_interaction(
 }
 
 pub fn preprocessed_ids(
-) -> Vec<stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId> {
-    preprocessed_ids_for(ML_DSA_65)
-}
-
-pub fn preprocessed_ids_for(
     profile: MlDsaProfile,
 ) -> Vec<stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId> {
-    let mut ids = ntt_preprocessed_ids_for(profile);
-    ids.extend(t1_preprocessed_ids_for(profile));
+    let mut ids = ntt_preprocessed_ids(profile);
+    ids.extend(t1_preprocessed_ids(profile));
     ids.extend(fold_preprocessed_ids());
     ids
 }
@@ -306,13 +296,9 @@ pub fn preprocessed_log_sizes() -> Vec<u32> {
     sizes
 }
 
-pub fn gen_preprocessed() -> Vec<crate::air_util::ColEval> {
-    gen_preprocessed_for(ML_DSA_65)
-}
-
-pub fn gen_preprocessed_for(profile: MlDsaProfile) -> Vec<crate::air_util::ColEval> {
-    let mut columns = gen_ntt_preprocessed_for(profile);
-    columns.extend(gen_t1_preprocessed_for(profile));
+pub fn gen_preprocessed(profile: MlDsaProfile) -> Vec<crate::air_util::ColEval> {
+    let mut columns = gen_ntt_preprocessed(profile);
+    columns.extend(gen_t1_preprocessed(profile));
     columns.extend(gen_fold_preprocessed());
     columns
 }
@@ -592,6 +578,7 @@ pub(crate) mod proof_test {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::ML_DSA_65;
 
     #[test]
     fn private_eval_order_is_exact_and_length_checked() {

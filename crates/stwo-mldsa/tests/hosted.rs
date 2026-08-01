@@ -50,11 +50,11 @@ use stwo_mldsa::coeffs::relations::SharedRangeRelation;
 use stwo_mldsa::coeffs::tables::SharedRangeTable;
 use stwo_mldsa::constants::N;
 use stwo_mldsa::expand_a::{
-    derive_expand_a_witness_for, shake128_job_shapes_for, ExpandABindings, ExpandAClaim,
-    ExpandAProver, ExpandAVerifier,
+    derive_expand_a_witness, shake128_job_shapes, ExpandABindings, ExpandAClaim, ExpandAProver,
+    ExpandAVerifier,
 };
 use stwo_mldsa::private_key_eval::PrivateKeyEvalBindings;
-use stwo_mldsa::profile::ML_DSA_44;
+use stwo_mldsa::profile::{ML_DSA_44, ML_DSA_65};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::statement::{
     hosted_claimed_sums_len, hosted_private_key_claimed_sums_len,
@@ -65,7 +65,7 @@ use stwo_mldsa::statement::{
     HOSTED_MSG_FIELD_ID, MU_ABSORB, MU_SQUEEZE, SIB_ABSORB, STREAM_BASE_STRIDE, TR_ABSORB,
     TR_SQUEEZE,
 };
-use stwo_mldsa::witness::{generate_witness, generate_witness_for};
+use stwo_mldsa::witness::generate_witness;
 use stwo_mldsa::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 
 // =====================================================================
@@ -804,7 +804,7 @@ struct HostedProof {
 /// preimage).
 fn prove_hosted(seed: u64, msg: &[u8], producer_bytes: Vec<u8>) -> HostedProof {
     let input = oracle_input(seed, msg);
-    let witness = generate_witness(&input).expect("witness");
+    let witness = generate_witness(ML_DSA_65, &input).expect("witness");
 
     let handle = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
@@ -881,7 +881,7 @@ fn verify_hosted(
 
 fn prove_hosted_public(seed: u64, msg: &[u8]) -> HostedProof {
     let input = oracle_input(seed, msg);
-    let witness = generate_witness(&input).expect("witness");
+    let witness = generate_witness(ML_DSA_65, &input).expect("witness");
     let keccak_handle = SharedKeccakRelations::new();
     let range_handle = SharedRangeRelation::new();
     let mut mldsa =
@@ -957,8 +957,8 @@ struct HostedPrivateKeyProof {
 /// (pkEncode -> FieldBytes + rho + T1Cell), hosted private-key ML-DSA]`.
 fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedPrivateKeyProof {
     let input = oracle_input44(seed, msg);
-    let witness = generate_witness_for(ML_DSA_44, &input).expect("ML-DSA-44 witness");
-    let pk_bytes = input.encode_pk_for(ML_DSA_44);
+    let witness = generate_witness(ML_DSA_44, &input).expect("ML-DSA-44 witness");
+    let pk_bytes = input.encode_pk(ML_DSA_44);
 
     let field_handle = SharedFieldRelation::new();
     let keccak_handle = SharedKeccakRelations::new();
@@ -967,9 +967,9 @@ fn prove_hosted_private_key(seed: u64, msg: &[u8]) -> HostedPrivateKeyProof {
     let t1_handle = SharedT1CellRelation::new();
     let private_key_bindings =
         PrivateKeyEvalBindings::new(expand_bindings.ntt.clone(), t1_handle.clone());
-    let mut expand_a = ExpandAProver::new_for(
+    let mut expand_a = ExpandAProver::new(
         ML_DSA_44,
-        derive_expand_a_witness_for(ML_DSA_44, input.rho).expect("ExpandA witness"),
+        derive_expand_a_witness(ML_DSA_44, input.rho).expect("ExpandA witness"),
         EXPAND_A_NAMESPACE,
         EXPAND_A_STREAM_BASE,
         range_handle.clone(),
@@ -1042,8 +1042,8 @@ fn verify_hosted_private_key_with_shapes(
     let t1_handle = SharedT1CellRelation::new();
     let private_key_bindings =
         PrivateKeyEvalBindings::new(expand_bindings.ntt.clone(), t1_handle.clone());
-    let mut job_shapes = shake128_job_shapes_for(ML_DSA_44, EXPAND_A_STREAM_BASE)
-        .expect("valid ExpandA service shapes");
+    let mut job_shapes =
+        shake128_job_shapes(ML_DSA_44, EXPAND_A_STREAM_BASE).expect("valid ExpandA service shapes");
     job_shapes.extend(mldsa_job_shapes);
     let mut service = KeccakServiceVerifier::new(
         job_shapes,
@@ -1052,7 +1052,7 @@ fn verify_hosted_private_key_with_shapes(
     );
     let mut range_table =
         SharedRangeTable::verifier(proof.range_table_claimed_sum, range_handle.clone());
-    let mut expand_a = ExpandAVerifier::new_for(
+    let mut expand_a = ExpandAVerifier::new(
         ML_DSA_44,
         proof.expand_a_claim.clone(),
         EXPAND_A_NAMESPACE,
@@ -1133,8 +1133,8 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
 
     let msg = b"private device key tr reference vector".to_vec();
     let input = oracle_input44(4_260, &msg);
-    let witness = generate_witness_for(ML_DSA_44, &input).expect("ML-DSA-44 witness");
-    let pk_bytes = input.encode_pk_for(ML_DSA_44);
+    let witness = generate_witness(ML_DSA_44, &input).expect("ML-DSA-44 witness");
+    let pk_bytes = input.encode_pk(ML_DSA_44);
     let expected_mu_absorbed = witness.sponge.mu_absorbed.clone();
     assert_eq!(pk_bytes.len(), DEVICE_PK_BYTES);
 
@@ -1260,8 +1260,8 @@ fn hosted_private_key_capacity_fixes_composed_layout_and_tree_zero() {
         let range_handle = SharedRangeRelation::new();
         let field_handle = SharedFieldRelation::new();
         let expand_bindings = ExpandABindings::new();
-        let mut service_shapes = shake128_job_shapes_for(ML_DSA_44, EXPAND_A_STREAM_BASE)
-            .expect("ExpandA service shapes");
+        let mut service_shapes =
+            shake128_job_shapes(ML_DSA_44, EXPAND_A_STREAM_BASE).expect("ExpandA service shapes");
         service_shapes.extend(hosted_private_key_keccak_job_shapes(message_len, 0));
         let mut service = KeccakServiceVerifier::new(
             service_shapes,
@@ -1394,8 +1394,8 @@ fn hosted_private_key_public_mix_is_key_independent() {
     let input_a = oracle_input44(4_261, &msg);
     let input_b = oracle_input44(4_262, &msg);
     assert_ne!(input_a.rho, input_b.rho);
-    let witness_a = generate_witness_for(ML_DSA_44, &input_a).expect("witness a");
-    let witness_b = generate_witness_for(ML_DSA_44, &input_b).expect("witness b");
+    let witness_a = generate_witness(ML_DSA_44, &input_a).expect("witness a");
+    let witness_b = generate_witness(ML_DSA_44, &input_b).expect("witness b");
     let bindings_a = ExpandABindings::new();
     let bindings_b = ExpandABindings::new();
     let first = MlDsaProver::hosted_private_key(
@@ -1574,7 +1574,7 @@ fn hosted_public_message_tamper_rejects_native_mu_prefix() {
 fn hosted_public_native_mu_mismatch_returns_error_not_panic() {
     let msg = b"native mu mismatch is an AIR rejection".to_vec();
     let mut input = oracle_input(4247, &msg);
-    let witness = generate_witness(&input).expect("honest witness");
+    let witness = generate_witness(ML_DSA_65, &input).expect("honest witness");
     input.message[0] ^= 1;
 
     let handle = SharedKeccakRelations::new();
@@ -1683,8 +1683,8 @@ fn prove_two_hosted(
 ) -> TwoHostedProof {
     let input_a = oracle_input(seed_a, msg_a);
     let input_b = oracle_input(seed_b, msg_b);
-    let witness_a = generate_witness(&input_a).expect("witness a");
-    let witness_b = generate_witness(&input_b).expect("witness b");
+    let witness_a = generate_witness(ML_DSA_65, &input_a).expect("witness a");
+    let witness_b = generate_witness(ML_DSA_65, &input_b).expect("witness b");
 
     let handle_a = SharedFieldRelation::new();
     let handle_b = SharedFieldRelation::new();

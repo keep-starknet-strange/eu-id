@@ -36,7 +36,7 @@ use crate::coeffs::relations::{RangeRelation, SharedRangeRelation};
 use crate::coeffs::tables::RcKind;
 use crate::coeffs::RcUses;
 use crate::constants::{K, L, N, Q};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::sponge_link::ns_prefix;
 use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::sponge::Shape;
@@ -333,37 +333,29 @@ pub fn validate_stream_base(stream_base: u32) -> Result<(), ExpandAError> {
     Ok(())
 }
 
-fn validate_poly_for(profile: MlDsaProfile, poly: usize) -> Result<u32, ExpandAError> {
+fn validate_poly(profile: MlDsaProfile, poly: usize) -> Result<u32, ExpandAError> {
     if poly >= profile.matrix_polys() {
         return Err(ExpandAError::PolynomialOutOfRange { poly });
     }
     Ok(poly as u32)
 }
 
-pub fn absorb_stream_id(stream_base: u32, poly: usize) -> Result<u32, ExpandAError> {
-    absorb_stream_id_for(ML_DSA_65, stream_base, poly)
-}
-
-pub fn absorb_stream_id_for(
+pub fn absorb_stream_id(
     profile: MlDsaProfile,
     stream_base: u32,
     poly: usize,
 ) -> Result<u32, ExpandAError> {
     validate_stream_base(stream_base)?;
-    let poly = validate_poly_for(profile, poly)?;
+    let poly = validate_poly(profile, poly)?;
     Ok(stream_base + EXPAND_STREAM_OFFSET + EXPAND_STREAM_STRIDE * poly)
 }
 
-pub fn squeeze_stream_id(stream_base: u32, poly: usize) -> Result<u32, ExpandAError> {
-    squeeze_stream_id_for(ML_DSA_65, stream_base, poly)
-}
-
-pub fn squeeze_stream_id_for(
+pub fn squeeze_stream_id(
     profile: MlDsaProfile,
     stream_base: u32,
     poly: usize,
 ) -> Result<u32, ExpandAError> {
-    Ok(absorb_stream_id_for(profile, stream_base, poly)? + 1)
+    Ok(absorb_stream_id(profile, stream_base, poly)? + 1)
 }
 
 fn validated_absorb_stream_id(stream_base: u32, poly: usize) -> u32 {
@@ -428,12 +420,8 @@ fn canonical_stream(
     canonical_stream_from_full(fixed_squeeze_stream(profile, rho, poly), poly)
 }
 
-/// Construct the canonical, block-aligned ML-DSA-65 witness.
-pub fn derive_expand_a_witness(rho: [u8; 32]) -> Result<ExpandAWitness, ExpandAError> {
-    derive_expand_a_witness_for(ML_DSA_65, rho)
-}
-
-pub fn derive_expand_a_witness_for(
+/// Construct the canonical block-aligned witness for the selected profile.
+pub fn derive_expand_a_witness(
     profile: MlDsaProfile,
     rho: [u8; 32],
 ) -> Result<ExpandAWitness, ExpandAError> {
@@ -499,11 +487,7 @@ pub fn validate_stream(witness: &ExpandAWitness) -> Result<Vec<usize>, ExpandAEr
 }
 
 /// Public fixed service shapes in exact row-major matrix order.
-pub fn shake128_job_shapes(stream_base: u32) -> Result<Vec<Shape>, ExpandAError> {
-    shake128_job_shapes_for(ML_DSA_65, stream_base)
-}
-
-pub fn shake128_job_shapes_for(
+pub fn shake128_job_shapes(
     profile: MlDsaProfile,
     stream_base: u32,
 ) -> Result<Vec<Shape>, ExpandAError> {
@@ -513,19 +497,15 @@ pub fn shake128_job_shapes_for(
             Ok(Shape::shake128(
                 34,
                 MAX_EXPAND_A_SQUEEZE_BLOCKS,
-                absorb_stream_id_for(profile, stream_base, poly)?,
-                squeeze_stream_id_for(profile, stream_base, poly)?,
+                absorb_stream_id(profile, stream_base, poly)?,
+                squeeze_stream_id(profile, stream_base, poly)?,
             ))
         })
         .collect()
 }
 
 /// Witness absorb messages paired positionally with [`shake128_job_shapes`].
-pub fn shake128_absorb_streams(rho: &[u8; 32]) -> Vec<Vec<u8>> {
-    shake128_absorb_streams_for(ML_DSA_65, rho)
-}
-
-pub fn shake128_absorb_streams_for(profile: MlDsaProfile, rho: &[u8; 32]) -> Vec<Vec<u8>> {
+pub fn shake128_absorb_streams(profile: MlDsaProfile, rho: &[u8; 32]) -> Vec<Vec<u8>> {
     (0..profile.matrix_polys())
         .map(|poly| absorb_input(profile, rho, poly).to_vec())
         .collect()
@@ -631,11 +611,7 @@ fn gen_rejection_preprocessed(
         .collect()
 }
 
-pub fn gen_expand_a_preprocessed(ns: &str) -> Vec<ColEval> {
-    gen_expand_a_preprocessed_for(ML_DSA_65, ns)
-}
-
-pub fn gen_expand_a_preprocessed_for(profile: MlDsaProfile, ns: &str) -> Vec<ColEval> {
+pub fn gen_expand_a_preprocessed(profile: MlDsaProfile, ns: &str) -> Vec<ColEval> {
     gen_expand_a_preprocessed_with_attack(profile, ns, None)
 }
 
@@ -1258,26 +1234,6 @@ pub struct ExpandAProver {
 impl ExpandAProver {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        witness: ExpandAWitness,
-        namespace: impl Into<String>,
-        stream_base: u32,
-        range_handle: SharedRangeRelation,
-        keccak_handle: SharedKeccakRelations,
-        bindings: ExpandABindings,
-    ) -> Result<Self, ExpandAError> {
-        Self::new_for(
-            ML_DSA_65,
-            witness,
-            namespace,
-            stream_base,
-            range_handle,
-            keccak_handle,
-            bindings,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_for(
         profile: MlDsaProfile,
         witness: ExpandAWitness,
         namespace: impl Into<String>,
@@ -1323,8 +1279,8 @@ impl ExpandAProver {
 
     pub fn keccak_jobs(&self) -> Result<(Vec<Shape>, Vec<Vec<u8>>), ExpandAError> {
         Ok((
-            shake128_job_shapes_for(self.profile, self.stream_base)?,
-            shake128_absorb_streams_for(self.profile, &self.witness.rho),
+            shake128_job_shapes(self.profile, self.stream_base)?,
+            shake128_absorb_streams(self.profile, &self.witness.rho),
         ))
     }
 
@@ -1371,7 +1327,7 @@ impl Air for ExpandAProver {
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
-        Ok(gen_expand_a_preprocessed_for(self.profile, &self.namespace))
+        Ok(gen_expand_a_preprocessed(self.profile, &self.namespace))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -1467,25 +1423,6 @@ pub struct ExpandAVerifier {
 
 impl ExpandAVerifier {
     pub fn new(
-        claim: ExpandAClaim,
-        namespace: impl Into<String>,
-        stream_base: u32,
-        range_handle: SharedRangeRelation,
-        keccak_handle: SharedKeccakRelations,
-        bindings: ExpandABindings,
-    ) -> Result<Self, ExpandAError> {
-        Self::new_for(
-            ML_DSA_65,
-            claim,
-            namespace,
-            stream_base,
-            range_handle,
-            keccak_handle,
-            bindings,
-        )
-    }
-
-    pub fn new_for(
         profile: MlDsaProfile,
         claim: ExpandAClaim,
         namespace: impl Into<String>,
@@ -1545,7 +1482,7 @@ impl Air for ExpandAVerifier {
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, VerificationError> {
-        Ok(gen_expand_a_preprocessed_for(self.profile, &self.namespace))
+        Ok(gen_expand_a_preprocessed(self.profile, &self.namespace))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -1567,6 +1504,7 @@ impl Air for ExpandAVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::ML_DSA_65;
 
     use stwo::core::fields::m31::M31;
     use stwo::core::utils::{
@@ -1587,7 +1525,7 @@ mod tests {
         assert_eq!(REJECTION_PRE_NAMES.len(), 5);
         let preprocessed_ids = expand_a_preprocessed_ids("shape-test");
         assert_eq!(preprocessed_ids.len(), 11);
-        assert_eq!(gen_expand_a_preprocessed("shape-test").len(), 11);
+        assert_eq!(gen_expand_a_preprocessed(ML_DSA_65, "shape-test").len(), 11);
         assert!(preprocessed_ids
             .iter()
             .all(|id| !id.id.ends_with("_absorb_poly")));
@@ -1608,8 +1546,8 @@ mod tests {
         assert_eq!(ABSORB_INTERACTION_COLS, 4);
         assert_eq!(REJECTION_INTERACTION_COLS, 12);
         let rho = [17u8; 32];
-        let streams = shake128_absorb_streams(&rho);
-        let shapes = shake128_job_shapes(256).unwrap();
+        let streams = shake128_absorb_streams(ML_DSA_65, &rho);
+        let shapes = shake128_job_shapes(ML_DSA_65, 256).unwrap();
         assert_eq!(streams.len(), MATRIX_POLYS);
         assert_eq!(shapes.len(), MATRIX_POLYS);
         for poly in 0..MATRIX_POLYS {
@@ -1620,11 +1558,11 @@ mod tests {
             assert_eq!(shapes[poly].n_squeeze, 6);
             assert_eq!(
                 shapes[poly].absorb_stream_id,
-                absorb_stream_id(256, poly).unwrap()
+                absorb_stream_id(ML_DSA_65, 256, poly).unwrap()
             );
             assert_eq!(
                 shapes[poly].squeeze_stream_id,
-                squeeze_stream_id(256, poly).unwrap()
+                squeeze_stream_id(ML_DSA_65, 256, poly).unwrap()
             );
         }
     }
@@ -1632,9 +1570,9 @@ mod tests {
     #[test]
     fn canonical_witness_validates_and_matches_reference() {
         let rho = core::array::from_fn(|i| (17 * i + 3) as u8);
-        let witness = derive_expand_a_witness(rho).unwrap();
+        let witness = derive_expand_a_witness(ML_DSA_65, rho).unwrap();
         let counts = validate_stream(&witness).unwrap();
-        let reference = crate::reference::expand_a::expand_a(&rho);
+        let reference = crate::reference::expand_a::expand_a(ML_DSA_65, &rho);
         let rows = build_rejection_rows(&witness);
         for poly in 0..MATRIX_POLYS {
             assert!((N..=MAX_CANDIDATES).contains(&counts[poly]));
@@ -1820,7 +1758,7 @@ mod tests {
 
     #[test]
     fn rejection_air_accepts_q_minus_one_and_rejects_q() {
-        let witness = derive_expand_a_witness([42u8; 32]).unwrap();
+        let witness = derive_expand_a_witness(ML_DSA_65, [42u8; 32]).unwrap();
         let mut rows = build_rejection_rows(&witness);
         let accept_rows: Vec<_> = rows
             .iter()
@@ -1857,7 +1795,7 @@ mod tests {
 
     #[test]
     fn rejection_air_rejects_q_marked_accepted() {
-        let witness = derive_expand_a_witness([42u8; 32]).unwrap();
+        let witness = derive_expand_a_witness(ML_DSA_65, [42u8; 32]).unwrap();
         let mut rows = build_rejection_rows(&witness);
         let row = rows.iter().position(|row| row.accept).unwrap();
         rows[row].bytes = split_u23(Q);
@@ -1875,7 +1813,7 @@ mod tests {
 
     #[test]
     fn rejection_air_rejects_q_minus_one_marked_rejected() {
-        let witness = derive_expand_a_witness([42u8; 32]).unwrap();
+        let witness = derive_expand_a_witness(ML_DSA_65, [42u8; 32]).unwrap();
         let mut rows = build_rejection_rows(&witness);
         let row = rows
             .iter()
@@ -1896,7 +1834,7 @@ mod tests {
 
     #[test]
     fn fast_air_adversarial_matrix_rejects() {
-        let witness = derive_expand_a_witness([42u8; 32]).unwrap();
+        let witness = derive_expand_a_witness(ML_DSA_65, [42u8; 32]).unwrap();
         let rows = build_rejection_rows(&witness);
         let accept_row = rows.iter().position(|row| row.accept).unwrap();
         let reject_row = rows
@@ -2040,7 +1978,7 @@ mod tests {
 
     #[test]
     fn validator_is_typed_and_fail_closed() {
-        let witness = derive_expand_a_witness([9u8; 32]).unwrap();
+        let witness = derive_expand_a_witness(ML_DSA_65, [9u8; 32]).unwrap();
 
         let mut bad = witness.clone();
         bad.squeeze_streams.pop();
@@ -2109,7 +2047,7 @@ mod tests {
 
     #[test]
     fn injected_six_block_overflow_is_typed_and_fail_closed() {
-        let witness = derive_expand_a_witness([31u8; 32]).unwrap();
+        let witness = derive_expand_a_witness(ML_DSA_65, [31u8; 32]).unwrap();
         let rejected = [0xff, 0xff, 0x7f];
         let stream: Vec<u8> = rejected
             .into_iter()
@@ -2136,7 +2074,7 @@ mod tests {
     #[test]
     fn stream_base_and_polynomial_ids_are_typed_and_field_safe() {
         assert_eq!(
-            squeeze_stream_id(MAX_EXPAND_STREAM_BASE, MATRIX_POLYS - 1).unwrap(),
+            squeeze_stream_id(ML_DSA_65, MAX_EXPAND_STREAM_BASE, MATRIX_POLYS - 1).unwrap(),
             M31_MODULUS - 1
         );
         for stream_base in [MAX_EXPAND_STREAM_BASE + 1, u32::MAX] {
@@ -2148,18 +2086,19 @@ mod tests {
                 })
             );
             assert!(matches!(
-                shake128_job_shapes(stream_base),
+                shake128_job_shapes(ML_DSA_65, stream_base),
                 Err(ExpandAError::InvalidStreamBase { .. })
             ));
         }
         assert_eq!(
-            absorb_stream_id(0, MATRIX_POLYS),
+            absorb_stream_id(ML_DSA_65, 0, MATRIX_POLYS),
             Err(ExpandAError::PolynomialOutOfRange { poly: MATRIX_POLYS })
         );
 
         let invalid_base = MAX_EXPAND_STREAM_BASE + 1;
         let prover = ExpandAProver::new(
-            derive_expand_a_witness([7u8; 32]).unwrap(),
+            ML_DSA_65,
+            derive_expand_a_witness(ML_DSA_65, [7u8; 32]).unwrap(),
             "invalid-base",
             invalid_base,
             SharedRangeRelation::new(),
@@ -2174,6 +2113,7 @@ mod tests {
             }) if stream_base == invalid_base
         ));
         let verifier = ExpandAVerifier::new(
+            ML_DSA_65,
             ExpandAClaim::default(),
             "invalid-base",
             invalid_base,

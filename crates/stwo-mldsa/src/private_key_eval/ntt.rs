@@ -10,7 +10,9 @@ use crate::air_util::{col_eval, enc_signed, m31, ColEval};
 use crate::coeffs::tables::RcKind;
 use crate::coeffs::RcUses;
 use crate::constants::{K, L, N, Q, ZETA};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
+#[cfg(test)]
+use crate::profile::ML_DSA_65;
 use crate::reference::ntt::NttPoly;
 use crate::witness::B;
 
@@ -130,11 +132,7 @@ fn scaling_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
     }
 }
 
-pub fn ntt_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    ntt_preprocessed_ids_for(ML_DSA_65)
-}
-
-pub fn ntt_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
+pub fn ntt_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     core::iter::once(butterfly_active_id(profile))
         .chain(
             BUTTERFLY_PRE_NAMES[1..]
@@ -156,11 +154,7 @@ pub fn ntt_preprocessed_log_sizes() -> Vec<u32> {
     sizes
 }
 
-pub fn gen_ntt_preprocessed() -> Vec<ColEval> {
-    gen_ntt_preprocessed_for(ML_DSA_65)
-}
-
-pub fn gen_ntt_preprocessed_for(profile: MlDsaProfile) -> Vec<ColEval> {
+pub fn gen_ntt_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
     let mut result = Vec::with_capacity(BUTTERFLY_PRE_NAMES.len() + SCALING_PRE_NAMES.len());
     let mut columns =
         vec![vec![m31(0); 1usize << NTT_BUTTERFLY_LOG_SIZE]; BUTTERFLY_PRE_NAMES.len()];
@@ -327,11 +321,7 @@ pub struct NttBase {
     pub range_uses: RcUses,
 }
 
-pub fn gen_ntt_base(a_hat: &[NttPoly]) -> NttBase {
-    gen_ntt_base_for(ML_DSA_65, a_hat)
-}
-
-pub fn gen_ntt_base_for(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
+pub fn gen_ntt_base(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
     assert_eq!(a_hat.len(), MATRIX_POLYS);
     let mut states = a_hat.to_vec();
     let mut range_uses = RcUses::new();
@@ -852,15 +842,6 @@ fn push_range_entries(
 }
 
 pub fn gen_ntt_interaction(
-    a_hat: &[NttPoly],
-    r: SecureField,
-    s: SecureField,
-    relations: &PrivateKeyEvalRelations,
-) -> NttInteraction {
-    gen_ntt_interaction_for(ML_DSA_65, a_hat, r, s, relations)
-}
-
-pub fn gen_ntt_interaction_for(
     profile: MlDsaProfile,
     a_hat: &[NttPoly],
     r: SecureField,
@@ -1221,7 +1202,7 @@ mod tests {
 
     #[test]
     fn inverse_ntt_and_horner_match_independent_reference() {
-        let expanded = crate::reference::expand_a::expand_a(&[9; 32]);
+        let expanded = crate::reference::expand_a::expand_a(ML_DSA_65, &[9; 32]);
         let mut a_hat = Vec::new();
         for i in 0..K {
             for j in 0..L {
@@ -1230,7 +1211,8 @@ mod tests {
         }
         let r = SecureField::from(m31(13));
         let s = SecureField::from(m31(29));
-        let interaction = gen_ntt_interaction(&a_hat, r, s, &PrivateKeyEvalRelations::dummy());
+        let interaction =
+            gen_ntt_interaction(ML_DSA_65, &a_hat, r, s, &PrivateKeyEvalRelations::dummy());
         for (poly, source) in a_hat.iter().enumerate() {
             let coefficients = crate::reference::ntt::ntt_inverse(source);
             let mut expected = SecureField::zero();
@@ -1265,10 +1247,11 @@ mod tests {
 
     #[test]
     fn base_range_census_and_interaction_shape_are_exact() {
-        let expanded = crate::reference::expand_a::expand_a(&[42; 32]);
+        let expanded = crate::reference::expand_a::expand_a(ML_DSA_65, &[42; 32]);
         let a_hat: Vec<_> = expanded.matrix.into_iter().flatten().collect();
-        let base = gen_ntt_base(&a_hat);
+        let base = gen_ntt_base(ML_DSA_65, &a_hat);
         let interaction = gen_ntt_interaction(
+            ML_DSA_65,
             &a_hat,
             SecureField::from(m31(7)),
             SecureField::from(m31(11)),

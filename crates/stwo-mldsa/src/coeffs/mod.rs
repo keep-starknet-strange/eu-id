@@ -75,7 +75,7 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::witness::{MlDsaWitness, B};
 use layout::{groups, Group, Kind, CARRY_DIGITS, MAX_DIGITS};
 use relations::CoeffsRelations;
@@ -124,10 +124,8 @@ fn attacked_stream_value<E: EvalAtRow>(stream: usize, value: E::F) -> E::F {
     attacked_stream_boundary(stream).map_or(value, |boundary| E::F::from(m31(boundary)))
 }
 
-// Norm bound: γ1 − β − 1 = 524_091.
-/// `γ1 − β − 1` for ML-DSA-65 (`γ1 = 2^19`, `β = τ·η = 49·4 = 196`).
-pub const Z_NORM_BOUND: i64 = 524_091;
-fn z_norm_bound(profile: MlDsaProfile) -> i64 {
+/// Exact inclusive response norm bound for the selected profile.
+pub const fn z_norm_bound(profile: MlDsaProfile) -> i64 {
     (profile.gamma1() - profile.beta() - 1) as i64
 }
 /// Carry offset `2^20`.
@@ -167,11 +165,6 @@ fn pre_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
-/// All preprocessed column ids for the coeffs component, in commit order.
-pub fn coeffs_preprocessed_ids() -> Vec<PreProcessedColumnId> {
-    coeffs_preprocessed_ids_for(ML_DSA_65)
-}
-
 fn profile_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("mldsa_coeffs_{profile:?}_profile_active"),
@@ -184,7 +177,8 @@ fn profile_pre_id(profile: MlDsaProfile, name: &str) -> PreProcessedColumnId {
     }
 }
 
-pub fn coeffs_preprocessed_ids_for(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
+/// All preprocessed column IDs for the selected profile, in commit order.
+pub fn coeffs_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     // On a paired w row, `w_bind_id` is the first WCell key and the otherwise
     // idle `c_bind_id` is the second key. On c rows, `c_bind_id = m`.
     vec![
@@ -247,10 +241,6 @@ fn row_schedule() -> Vec<RowInfo> {
 // Preprocessed trace.
 // =============================================================================
 
-pub fn gen_coeffs_preprocessed(log_size: u32) -> Vec<ColEval> {
-    gen_coeffs_preprocessed_for(ML_DSA_65, log_size)
-}
-
 fn group_is_active(profile: MlDsaProfile, group: Group) -> bool {
     let index = group.poly_id as usize;
     match group.kind {
@@ -263,7 +253,7 @@ fn group_is_active(profile: MlDsaProfile, group: Group) -> bool {
     }
 }
 
-pub fn gen_coeffs_preprocessed_for(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
+pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
 
@@ -1212,9 +1202,9 @@ fn seed_rc_uses(rc: &mut RcUses, info: &RowInfo, digits: &[i128; MAX_DIGITS], no
 #[cfg(test)]
 mod packed_tests {
     use super::*;
-    use crate::profile::ML_DSA_44;
+    use crate::profile::{ML_DSA_44, ML_DSA_65};
     use crate::proof::{prove_coeffs, verify_coeffs};
-    use crate::reference::encoding::{pk_decode, pk_decode_for, sig_decode, sig_decode_for};
+    use crate::reference::encoding::{pk_decode, sig_decode};
     use crate::reference::sponge::shake256;
     use crate::{generate_witness, MlDsaVerifyInput};
     use ml_dsa::signature::{Keypair, Signer};
@@ -1232,10 +1222,13 @@ mod packed_tests {
         let signature = signing_key.sign(message);
         let public_key: EncodedVerifyingKey<MlDsa65> = verifying_key.encode();
         let signature: EncodedSignature<MlDsa65> = signature.encode();
-        let public_key_decoded = pk_decode(public_key.as_slice()).expect("public key decodes");
-        let signature_decoded = sig_decode(signature.as_slice()).expect("signature decodes");
+        let public_key_decoded =
+            pk_decode(ML_DSA_65, public_key.as_slice()).expect("public key decodes");
+        let signature_decoded =
+            sig_decode(ML_DSA_65, signature.as_slice()).expect("signature decodes");
         let (tr, _) = shake256(&[public_key.as_slice()], 64);
         MlDsaVerifyInput::from_decoded(
+            ML_DSA_65,
             &public_key_decoded,
             &signature_decoded,
             tr.try_into().expect("tr has 64 bytes"),
@@ -1246,7 +1239,7 @@ mod packed_tests {
     fn boundary_proof_rejects(kind: RcKind, seed: u64, message: &[u8]) {
         let _guard = install_range_boundary_attack(kind);
         let input = boundary_input(seed, message);
-        let witness = generate_witness(&input).expect("witness builds");
+        let witness = generate_witness(ML_DSA_65, &input).expect("witness builds");
         let rejected =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 match prove_coeffs(witness, input, PcsConfig::default()) {
@@ -1318,11 +1311,11 @@ mod packed_tests {
         let key = SigningKey::<MlDsa44>::from_seed(&[0x44; 32].into());
         let public_key: EncodedVerifyingKey<MlDsa44> = key.verifying_key().encode();
         let signature: EncodedSignature<MlDsa44> = key.sign(message).encode();
-        let decoded_key = pk_decode_for(ML_DSA_44, public_key.as_slice()).expect("decode key");
+        let decoded_key = pk_decode(ML_DSA_44, public_key.as_slice()).expect("decode key");
         let decoded_signature =
-            sig_decode_for(ML_DSA_44, signature.as_slice()).expect("decode signature");
+            sig_decode(ML_DSA_44, signature.as_slice()).expect("decode signature");
         let (tr, _) = shake256(&[public_key.as_slice()], 64);
-        let input = MlDsaVerifyInput::from_decoded_for(
+        let input = MlDsaVerifyInput::from_decoded(
             ML_DSA_44,
             &decoded_key,
             &decoded_signature,
@@ -1330,7 +1323,7 @@ mod packed_tests {
             message.to_vec(),
         );
         let witness =
-            crate::witness::generate_witness_for(ML_DSA_44, &input).expect("generate witness");
+            crate::witness::generate_witness(ML_DSA_44, &input).expect("generate witness");
         let log_size = crate::air_util::padded_log_size(layout::active_rows());
         let interaction = gen_coeffs_interaction(
             &witness,
@@ -1355,7 +1348,7 @@ mod packed_tests {
             );
         }
 
-        let preprocessed: Vec<_> = gen_coeffs_preprocessed_for(ML_DSA_44, log_size)
+        let preprocessed: Vec<_> = gen_coeffs_preprocessed(ML_DSA_44, log_size)
             .into_iter()
             .map(|column| column.to_cpu().values)
             .collect();

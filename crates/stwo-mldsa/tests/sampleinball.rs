@@ -19,6 +19,7 @@ fn current_schedule_has_the_audited_fifteen_column_basis() {
     use stwo::core::fields::m31::M31;
     use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
     use stwo_mldsa::constants::{N, TAU};
+    use stwo_mldsa::profile::ML_DSA_65;
     use stwo_mldsa::sampleinball::{
         gen_sib_preprocessed, sib_preprocessed_ids, MAX_SIB_SQUEEZE_BYTES, N_CORE, SIGN_BIT_COLS,
         SIGN_BYTES,
@@ -28,7 +29,7 @@ fn current_schedule_has_the_audited_fifteen_column_basis() {
     let rows = 1usize << log_size;
     let columns: HashMap<_, _> = sib_preprocessed_ids()
         .into_iter()
-        .zip(gen_sib_preprocessed(log_size))
+        .zip(gen_sib_preprocessed(ML_DSA_65, log_size))
         .map(|(id, column)| (id.id, column.to_cpu().values))
         .collect();
     let row_value = |name: &str, row: usize| {

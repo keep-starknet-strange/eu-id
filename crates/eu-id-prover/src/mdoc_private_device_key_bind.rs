@@ -1181,7 +1181,9 @@ mod tests {
     #[test]
     fn packing_matches_fips_decoder_for_every_t1_coefficient() {
         let pk = test_pk(11);
-        let decoded = stwo_mldsa::reference::encoding::pk_decode(&pk).unwrap();
+        let decoded =
+            stwo_mldsa::reference::encoding::pk_decode(stwo_mldsa::profile::ML_DSA_44, &pk)
+                .unwrap();
         for poly in 0..DEVICE_K {
             for group in 0..64 {
                 let start = 32 + (poly * 64 + group) * T1_GROUP_BYTES;

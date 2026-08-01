@@ -315,7 +315,7 @@ fn coeffs_log_size() -> u32 {
     padded_log_size(coeffs::layout::active_rows())
 }
 fn decomp_log_size() -> u32 {
-    padded_log_size(decomp::N_PAIRS)
+    padded_log_size(decomp::N_ROWS)
 }
 fn sib_log_size(profile: MlDsaProfile) -> u32 {
     let stream_bytes = RATE * profile.sample_in_ball_squeeze_blocks();
@@ -471,12 +471,8 @@ fn bridge_log_size(len: usize) -> u32 {
 /// Public-key constructors write this value to `input.tr` before they mix the
 /// transcript or build a component. Hosted private-key mode computes `tr` only
 /// as a private service witness.
-pub fn native_tr(input: &MlDsaVerifyInput) -> [u8; 64] {
-    native_tr_for(ML_DSA_65, input)
-}
-
-pub fn native_tr_for(profile: MlDsaProfile, input: &MlDsaVerifyInput) -> [u8; 64] {
-    let bytes = full_squeeze(&input.encode_pk_for(profile), 1);
+pub fn native_tr(profile: MlDsaProfile, input: &MlDsaVerifyInput) -> [u8; 64] {
+    let bytes = full_squeeze(&input.encode_pk(profile), 1);
     let mut tr = [0u8; 64];
     tr.copy_from_slice(&bytes[..64]);
     tr
@@ -484,13 +480,9 @@ pub fn native_tr_for(profile: MlDsaProfile, input: &MlDsaVerifyInput) -> [u8; 64
 
 /// Verifier-native public-message `µ = SHAKE256(tr ‖ 0x00 ‖ 0x00 ‖ M, 64)`.
 /// This function derives `tr` from `pkEncode`.
-pub fn native_public_mu(input: &MlDsaVerifyInput) -> [u8; 64] {
-    native_public_mu_for(ML_DSA_65, input)
-}
-
-fn native_public_mu_for(profile: MlDsaProfile, input: &MlDsaVerifyInput) -> [u8; 64] {
+pub fn native_public_mu(profile: MlDsaProfile, input: &MlDsaVerifyInput) -> [u8; 64] {
     let mut absorbed = Vec::with_capacity(66 + input.message.len());
-    absorbed.extend_from_slice(&native_tr_for(profile, input));
+    absorbed.extend_from_slice(&native_tr(profile, input));
     absorbed.extend_from_slice(&[0x00, 0x00]);
     absorbed.extend_from_slice(&input.message);
     let bytes = full_squeeze(&absorbed, 1);
@@ -524,7 +516,7 @@ fn prefix_eval(
         (
             stream_base + CT_ABSORB,
             0,
-            native_public_mu_for(profile, input).to_vec(),
+            native_public_mu(profile, input).to_vec(),
         )
     } else {
         let input = input.expect("private-message prefix requires the public key");
@@ -739,15 +731,15 @@ fn all_preprocessed_ids(
     let mut ids = Vec::new();
     // coeffs + its unified range table (standalone only; hosted uses the
     // proof-wide provider module).
-    ids.extend(coeffs::coeffs_preprocessed_ids_for(profile));
+    ids.extend(coeffs::coeffs_preprocessed_ids(profile));
     if !hosted {
         ids.extend(coeffs_tables::range_table_preprocessed_ids());
     }
     if private_key {
-        ids.extend(private_key_eval::preprocessed_ids_for(profile));
+        ids.extend(private_key_eval::preprocessed_ids(profile));
     }
     // decomp (+ its rc kinds).
-    ids.extend(decomp::decomp_preprocessed_ids_for(profile));
+    ids.extend(decomp::decomp_preprocessed_ids(profile));
     for kind in decomp_tables::RcKind::ALL {
         ids.push(kind.value_column_id());
     }
@@ -797,10 +789,7 @@ fn all_preprocessed_log_sizes(
     let native_mu = public_message && !private_key;
     let mut sizes = Vec::new();
     let cls = coeffs_log_size();
-    sizes.extend(vec![
-        cls;
-        coeffs::coeffs_preprocessed_ids_for(profile).len()
-    ]);
+    sizes.extend(vec![cls; coeffs::coeffs_preprocessed_ids(profile).len()]);
     if !hosted {
         sizes.extend(vec![
             coeffs_tables::range_table_log_size();
@@ -811,7 +800,7 @@ fn all_preprocessed_log_sizes(
         sizes.extend(private_key_eval::preprocessed_log_sizes());
     }
     let dls = decomp_log_size();
-    sizes.extend(vec![dls; decomp::decomp_preprocessed_ids().len()]);
+    sizes.extend(vec![dls; decomp::decomp_preprocessed_ids(profile).len()]);
     for kind in decomp_tables::RcKind::ALL {
         sizes.push(kind.log_size());
     }
@@ -889,20 +878,20 @@ fn gen_all_preprocessed(
     let native_mu = public_message && !private_key;
     let mut cols = Vec::new();
     let cls = coeffs_log_size();
-    cols.extend(coeffs::gen_coeffs_preprocessed_for(profile, cls));
+    cols.extend(coeffs::gen_coeffs_preprocessed(profile, cls));
     if !hosted {
         cols.extend(coeffs_tables::gen_range_table_preprocessed());
     }
     if private_key {
-        cols.extend(private_key_eval::gen_preprocessed_for(profile));
+        cols.extend(private_key_eval::gen_preprocessed(profile));
     }
     let dls = decomp_log_size();
-    cols.extend(decomp::gen_decomp_preprocessed_for(profile, dls));
+    cols.extend(decomp::gen_decomp_preprocessed(profile, dls));
     for kind in decomp_tables::RcKind::ALL {
         cols.push(decomp_tables::gen_table_preprocessed(kind));
     }
     let sls = sib_log_size(profile);
-    cols.extend(sampleinball::gen_sib_preprocessed_for(profile, sls));
+    cols.extend(sampleinball::gen_sib_preprocessed(profile, sls));
     for kind in sib_tables::RcKind::ALL {
         cols.push(sib_tables::gen_table_preprocessed(kind));
     }
@@ -1392,7 +1381,7 @@ fn sponge_outputs(
     private_key: bool,
 ) -> SpongeOutputs {
     SpongeOutputs {
-        tr: private_key.then(|| full_squeeze(&input.encode_pk_for(profile), 1)),
+        tr: private_key.then(|| full_squeeze(&input.encode_pk(profile), 1)),
         mu: (!native_mu).then(|| full_squeeze(&witness.sponge.mu_absorbed, 1)),
         ct: full_squeeze(&witness.sponge.c_tilde_absorbed, 1),
     }
@@ -1751,7 +1740,7 @@ impl MlDsaProver {
         input.tr = if private_key {
             [0; 64]
         } else {
-            native_tr_for(profile, &input)
+            native_tr(profile, &input)
         };
         let hosted = shared_field.is_some() || public_message;
         let ctx = LayoutCtx::new(
@@ -1856,7 +1845,7 @@ impl MlDsaProver {
         bindings: PrivateKeyEvalBindings,
     ) -> Result<Self, PrivateKeyEvalError> {
         validate_device_message_capacity(input.message.len())?;
-        let private_key_witness = PrivateKeyEvalWitness::from_input_for(ML_DSA_44, &input)?;
+        let private_key_witness = PrivateKeyEvalWitness::from_input(ML_DSA_44, &input)?;
         let private_key_base = private_key_eval::gen_private_key_base(&private_key_witness);
         let mut prover = Self::build(
             ML_DSA_44,
@@ -1910,7 +1899,7 @@ impl MlDsaProver {
             .collect();
         let mut streams = Vec::with_capacity(shapes.len());
         if self.ctx.private_key {
-            streams.push(self.input.encode_pk_for(self.ctx.profile));
+            streams.push(self.input.encode_pk(self.ctx.profile));
         }
         if !self.ctx.native_mu() {
             streams.push(self.witness.sponge.mu_absorbed.clone());
@@ -2263,7 +2252,7 @@ impl AirProver for MlDsaProver {
         let pk_bytes = self
             .ctx
             .private_key
-            .then(|| self.input.encode_pk_for(self.ctx.profile));
+            .then(|| self.input.encode_pk(self.ctx.profile));
         let dummy_field = self.ctx.private_key.then(FieldBytesRelation::dummy);
         let bbytes = bridge_bytes(
             self.ctx.profile,
@@ -2451,7 +2440,7 @@ impl AirProver for MlDsaProver {
         let pk_bytes = self
             .ctx
             .private_key
-            .then(|| self.input.encode_pk_for(self.ctx.profile));
+            .then(|| self.input.encode_pk(self.ctx.profile));
         let bbytes = bridge_bytes(
             self.ctx.profile,
             outputs,
@@ -2603,7 +2592,7 @@ impl MlDsaVerifier {
         shared_range: Option<SharedRangeRelation>,
         keccak_handle: SharedKeccakRelations,
     ) -> Self {
-        input.tr = native_tr(&input);
+        input.tr = native_tr(ML_DSA_65, &input);
         let hosted = shared_field.is_some() || public_message;
         let ctx = LayoutCtx::new(
             ML_DSA_65,
@@ -2828,7 +2817,7 @@ pub fn prove_mldsa(
     config: PcsConfig,
 ) -> Result<MlDsaProof, ProvingError> {
     input
-        .validate_public_key()
+        .validate_public_key(ML_DSA_65)
         .map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
     sampleinball::validate_stream(&witness).map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
     // The standalone path instantiates a PRIVATE keccak service for this one
@@ -2939,9 +2928,12 @@ pub fn verify_mldsa(
             "ML-DSA statement: unexpected PCS config".to_string(),
         ));
     }
-    proof.input.validate_public_key().map_err(|message| {
-        VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
-    })?;
+    proof
+        .input
+        .validate_public_key(ML_DSA_65)
+        .map_err(|message| {
+            VerificationError::InvalidStructure(format!("ML-DSA statement: {message}"))
+        })?;
     if proof.group_evals.len() != n_group_evals()
         || proof.claimed_sums.len() != claimed_sums_len(ML_DSA_65, false, false, false)
     {
@@ -3012,14 +3004,19 @@ mod tests {
         let signature = signing_key.sign(&message);
         let pk: EncodedVerifyingKey<MlDsa65> = verifying_key.encode();
         let signature: EncodedSignature<MlDsa65> = signature.encode();
-        let decoded_pk = pk_decode(pk.as_slice()).expect("pk_decode");
-        let decoded_signature = sig_decode(signature.as_slice()).expect("sig_decode");
+        let decoded_pk = pk_decode(ML_DSA_65, pk.as_slice()).expect("pk_decode");
+        let decoded_signature = sig_decode(ML_DSA_65, signature.as_slice()).expect("sig_decode");
         let (tr, _) = shake256(&[pk.as_slice()], 64);
         let mut tr_array = [0u8; 64];
         tr_array.copy_from_slice(&tr);
-        let input =
-            MlDsaVerifyInput::from_decoded(&decoded_pk, &decoded_signature, tr_array, message);
-        let witness = generate_witness(&input).expect("witness");
+        let input = MlDsaVerifyInput::from_decoded(
+            ML_DSA_65,
+            &decoded_pk,
+            &decoded_signature,
+            tr_array,
+            message,
+        );
+        let witness = generate_witness(ML_DSA_65, &input).expect("witness");
         (witness, input)
     }
 

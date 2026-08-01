@@ -7,9 +7,7 @@
 //! `s`. Later bytes drive Fisher-Yates placement.
 
 use crate::constants::N;
-#[cfg(test)]
-use crate::constants::TAU;
-use crate::profile::{MlDsaProfile, ML_DSA_65};
+use crate::profile::MlDsaProfile;
 use crate::reference::error::MlDsaError;
 use crate::reference::sponge::{Shake256Reader, SpongeTranscript};
 
@@ -33,18 +31,13 @@ pub struct SampleInBallResult {
 /// Squeezes an unbounded SHAKE-256 stream: the first 8 bytes are the sign bits
 /// `s`, then for each `i ∈ [n−τ, n)` a rejection-sampled index `j ≤ i` is drawn
 /// and `c[i] ← c[j]; c[j] ← (−1)^{bit}`.
-pub fn sample_in_ball(c_tilde: &[u8]) -> SampleInBallResult {
-    sample_in_ball_for(ML_DSA_65, c_tilde)
-        .expect("ML-DSA-65 SampleInBall exceeded its circuit resource cap")
-}
-
 /// Profiled SampleInBall with the circuit's explicit squeeze resource cap.
 ///
 /// ML-DSA-44 uses one 136-byte block. The probability that the 128 candidate
 /// bytes after the sign source fail to place all 39 coefficients is
 /// approximately 2^-202.929. Exhaustion is a typed error, not an implicit
 /// extension of the proof geometry.
-pub fn sample_in_ball_for(
+pub fn sample_in_ball(
     profile: MlDsaProfile,
     c_tilde: &[u8],
 ) -> Result<SampleInBallResult, MlDsaError> {
@@ -96,13 +89,14 @@ pub fn sample_in_ball_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::ML_DSA_65;
 
     #[test]
     fn sampled_challenge_has_tau_nonzero_pm1() {
         let c_tilde = [0x42u8; crate::constants::C_TILDE_BYTES];
-        let res = sample_in_ball(&c_tilde);
+        let res = sample_in_ball(ML_DSA_65, &c_tilde).unwrap();
         let nonzero = res.c.iter().filter(|&&x| x != 0).count();
-        assert_eq!(nonzero, TAU, "exactly τ nonzero coefficients");
+        assert_eq!(nonzero, ML_DSA_65.tau(), "exactly τ nonzero coefficients");
         assert!(
             res.c.iter().all(|&x| x == -1 || x == 0 || x == 1),
             "coefficients are in {{-1,0,1}}"
@@ -112,9 +106,9 @@ mod tests {
 
     #[test]
     fn deterministic_in_the_seed() {
-        let a = sample_in_ball(&[1u8; crate::constants::C_TILDE_BYTES]);
-        let b = sample_in_ball(&[1u8; crate::constants::C_TILDE_BYTES]);
-        let c = sample_in_ball(&[2u8; crate::constants::C_TILDE_BYTES]);
+        let a = sample_in_ball(ML_DSA_65, &[1u8; crate::constants::C_TILDE_BYTES]).unwrap();
+        let b = sample_in_ball(ML_DSA_65, &[1u8; crate::constants::C_TILDE_BYTES]).unwrap();
+        let c = sample_in_ball(ML_DSA_65, &[2u8; crate::constants::C_TILDE_BYTES]).unwrap();
         assert_eq!(a.c, b.c);
         assert_ne!(a.c, c.c);
     }

@@ -160,7 +160,7 @@ fn ts13_demo_mldsa_keccak_job_shapes(
         false,
     );
     shapes.extend(
-        stwo_mldsa::expand_a::shake128_job_shapes_for(
+        stwo_mldsa::expand_a::shake128_job_shapes(
             stwo_mldsa::profile::ML_DSA_44,
             MDOC_DEVICE_EXPAND_A_STREAM_BASE,
         )
@@ -245,14 +245,16 @@ impl MdocPidRequest {
 }
 
 fn private_issuer_verifier_input(public_key: &[u8]) -> Result<Box<MlDsaVerifyInput>, Error> {
-    let decoded_key = stwo_mldsa::reference::encoding::pk_decode(public_key)
-        .map_err(|error| Error::Verify(format!("mdoc issuer public key decode: {error:?}")))?;
+    let decoded_key =
+        stwo_mldsa::reference::encoding::pk_decode(stwo_mldsa::profile::ML_DSA_65, public_key)
+            .map_err(|error| Error::Verify(format!("mdoc issuer public key decode: {error:?}")))?;
     let zero_signature = stwo_mldsa::reference::encoding::SignatureParts {
         c_tilde: [0; stwo_mldsa::constants::C_TILDE_BYTES],
         z: [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::L],
         h: [[0; stwo_mldsa::constants::N]; stwo_mldsa::constants::K],
     };
     Ok(Box::new(MlDsaVerifyInput::from_decoded(
+        stwo_mldsa::profile::ML_DSA_65,
         &decoded_key,
         &zero_signature,
         [0; 64],
@@ -424,6 +426,7 @@ fn mldsa_issuer_input(
 ) -> Result<MlDsaVerifyInput, MdocError> {
     let pk = mldsa_issuer_pk_from_unprotected(issuer_unprotected)?;
     let trace = stwo_mldsa::reference::verify::verify_internals(
+        stwo_mldsa::profile::ML_DSA_65,
         &pk,
         &issuer_auth.sig_structure,
         &issuer_auth.signature_bytes,
@@ -432,11 +435,16 @@ fn mldsa_issuer_input(
     if !trace.accepted {
         return Err(MdocError::InvalidSignature("issuerAuth"));
     }
-    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(&pk)
-        .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-65 public key"))?;
-    let decoded_sig = stwo_mldsa::reference::encoding::sig_decode(&issuer_auth.signature_bytes)
-        .map_err(|_| MdocError::InvalidSignature("issuerAuth"))?;
+    let decoded_pk =
+        stwo_mldsa::reference::encoding::pk_decode(stwo_mldsa::profile::ML_DSA_65, &pk)
+            .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-65 public key"))?;
+    let decoded_sig = stwo_mldsa::reference::encoding::sig_decode(
+        stwo_mldsa::profile::ML_DSA_65,
+        &issuer_auth.signature_bytes,
+    )
+    .map_err(|_| MdocError::InvalidSignature("issuerAuth"))?;
     Ok(MlDsaVerifyInput::from_decoded(
+        stwo_mldsa::profile::ML_DSA_65,
         &decoded_pk,
         &decoded_sig,
         trace.tr,
@@ -452,7 +460,7 @@ fn mldsa_device_auth_input(
     device_signature: &CoseSign1,
 ) -> Result<Box<MlDsaVerifyInput>, MdocError> {
     let profile = stwo_mldsa::profile::ML_DSA_44;
-    let trace = stwo_mldsa::reference::verify::verify_internals_for(
+    let trace = stwo_mldsa::reference::verify::verify_internals(
         profile,
         pk,
         &device_signature.sig_structure,
@@ -462,12 +470,12 @@ fn mldsa_device_auth_input(
     if !trace.accepted {
         return Err(MdocError::InvalidSignature("deviceSignature"));
     }
-    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode_for(profile, pk)
+    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(profile, pk)
         .map_err(|_| MdocError::InvalidCoseKey("ML-DSA-44 public key"))?;
     let decoded_sig =
-        stwo_mldsa::reference::encoding::sig_decode_for(profile, &device_signature.signature_bytes)
+        stwo_mldsa::reference::encoding::sig_decode(profile, &device_signature.signature_bytes)
             .map_err(|_| MdocError::InvalidSignature("deviceSignature"))?;
-    let input = MlDsaVerifyInput::from_decoded_for(
+    let input = MlDsaVerifyInput::from_decoded(
         profile,
         &decoded_pk,
         &decoded_sig,
@@ -607,7 +615,7 @@ fn validate_single_mldsa_public_key(
     phase: &'static str,
 ) -> Result<(), Error> {
     input
-        .validate_public_key_for(profile)
+        .validate_public_key(profile)
         .map_err(|message| mdoc_phase_error(phase, format!("mdoc {role} public key: {message}")))
 }
 
@@ -676,7 +684,10 @@ fn validate_extracted_profile(
         &extracted.device_auth_input,
         "prove",
     )?;
-    if extracted.issuer_auth_input.encode_pk() != public.trusted_issuer_public_key
+    if extracted
+        .issuer_auth_input
+        .encode_pk(stwo_mldsa::profile::ML_DSA_65)
+        != public.trusted_issuer_public_key
         || extracted.device_auth_input.message != public.device_cose_sig_structure
     {
         return Err(Error::Prove(
@@ -704,10 +715,13 @@ fn ts13_revocation_mldsa_prover_input(
     message: Vec<u8>,
 ) -> Result<Box<MlDsaVerifyInput>, Error> {
     let pk = revocation.revocation_public_key.as_bytes();
-    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(pk)
+    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(stwo_mldsa::profile::ML_DSA_65, pk)
         .map_err(|error| Error::Prove(format!("TS13 revocation pk decode: {error:?}")))?;
-    let decoded_sig = stwo_mldsa::reference::encoding::sig_decode(signature.as_bytes())
-        .map_err(|error| Error::Prove(format!("TS13 revocation sig decode: {error:?}")))?;
+    let decoded_sig = stwo_mldsa::reference::encoding::sig_decode(
+        stwo_mldsa::profile::ML_DSA_65,
+        signature.as_bytes(),
+    )
+    .map_err(|error| Error::Prove(format!("TS13 revocation sig decode: {error:?}")))?;
     // `tr` depends only on the public key. The prover and verifier compute the
     // same value without access to the private message.
     let (tr_bytes, _) = stwo_mldsa::reference::sponge::shake256(&[pk], 64);
@@ -715,6 +729,7 @@ fn ts13_revocation_mldsa_prover_input(
         .try_into()
         .expect("shake256 returns the requested 64 bytes");
     Ok(Box::new(MlDsaVerifyInput::from_decoded(
+        stwo_mldsa::profile::ML_DSA_65,
         &decoded_pk,
         &decoded_sig,
         tr,
@@ -731,7 +746,7 @@ fn ts13_revocation_mldsa_verifier_input(
     message: Vec<u8>,
 ) -> Result<Box<MlDsaVerifyInput>, Error> {
     let pk = revocation.revocation_public_key.as_bytes();
-    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(pk)
+    let decoded_pk = stwo_mldsa::reference::encoding::pk_decode(stwo_mldsa::profile::ML_DSA_65, pk)
         .map_err(|error| Error::Verify(format!("TS13 revocation pk decode: {error:?}")))?;
     let zero_signature = stwo_mldsa::reference::encoding::SignatureParts {
         c_tilde: [0; stwo_mldsa::constants::C_TILDE_BYTES],
@@ -743,6 +758,7 @@ fn ts13_revocation_mldsa_verifier_input(
         .try_into()
         .expect("shake256 returns the requested 64 bytes");
     Ok(Box::new(MlDsaVerifyInput::from_decoded(
+        stwo_mldsa::profile::ML_DSA_65,
         &decoded_pk,
         &zero_signature,
         tr,
@@ -2502,13 +2518,13 @@ fn prepare_mldsa_role(
     mut input: MlDsaVerifyInput,
     witness_error_context: &'static str,
 ) -> Result<(stwo_mldsa::witness::MlDsaWitness, MlDsaVerifyInput), Error> {
-    let native_tr = stwo_mldsa::statement::native_tr_for(profile, &input);
+    let native_tr = stwo_mldsa::statement::native_tr(profile, &input);
     debug_assert_eq!(
         input.tr, native_tr,
         "{witness_error_context} tr must already match SHAKE256(pk)"
     );
     input.tr = native_tr;
-    let witness = stwo_mldsa::witness::generate_witness_for(profile, &input)
+    let witness = stwo_mldsa::witness::generate_witness(profile, &input)
         .map_err(|error| Error::Prove(format!("{witness_error_context}: {error:?}")))?;
     stwo_mldsa::sampleinball::validate_stream(&witness)
         .map_err(|error| Error::Prove(format!("mldsa SIB resource cap: {error}")))?;
@@ -2592,12 +2608,12 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     )
     .map_err(|error| Error::Prove(format!("private MSO binder: {error}")))?;
     let mut ts13_public_context = public.context_bind();
-    let expand_a_witness = stwo_mldsa::expand_a::derive_expand_a_witness_for(
+    let expand_a_witness = stwo_mldsa::expand_a::derive_expand_a_witness(
         stwo_mldsa::profile::ML_DSA_44,
         device_input.rho,
     )
     .map_err(|error| Error::Prove(format!("TS13 private ExpandA: {error}")))?;
-    let mut ts13_expand_a = ExpandAProver::new_for(
+    let mut ts13_expand_a = ExpandAProver::new(
         stwo_mldsa::profile::ML_DSA_44,
         expand_a_witness,
         MDOC_DEVICE_EXPAND_A_NAMESPACE,
@@ -2608,7 +2624,7 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     )
     .map_err(|error| Error::Prove(format!("TS13 private ExpandA: {error}")))?;
     let (mut ts13_device_key_bind, ts13_device_key_census) = MdocPrivateDeviceKeyBind::prover(
-        device_input.encode_pk_for(stwo_mldsa::profile::ML_DSA_44),
+        device_input.encode_pk(stwo_mldsa::profile::ML_DSA_44),
         private_device_pk_start,
         issuer_message.len(),
         issuer_message_field.clone(),
@@ -3011,7 +3027,8 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     // The verifier knows only the issuer message length. Its zero bytes are
     // layout placeholders; the provider/hosted bridge relation carries the
     // signed private Sig_structure.
-    issuer_input.tr = stwo_mldsa::statement::native_tr(&issuer_input);
+    issuer_input.tr =
+        stwo_mldsa::statement::native_tr(stwo_mldsa::profile::ML_DSA_65, &issuer_input);
     issuer_input.message.fill(0);
     let issuer_claims = &proof.mldsa;
     let mut issuer_mldsa = MlDsaStatementVerifier::hosted(
@@ -3111,7 +3128,7 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     )
     .map_err(|error| Error::Verify(format!("TS13 private MSO bind: {error}")))?;
     let mut ts13_public_context = public.context_bind();
-    let mut ts13_expand_a = ExpandAVerifier::new_for(
+    let mut ts13_expand_a = ExpandAVerifier::new(
         stwo_mldsa::profile::ML_DSA_44,
         proof.ts13_expand_a_claim.clone(),
         MDOC_DEVICE_EXPAND_A_NAMESPACE,
@@ -3596,7 +3613,8 @@ mod tests {
             request_context_digest: [0x22; 32],
             timestamp_epoch_seconds: 1_775_001_600,
             verification_timestamp_rfc3339_utc: *b"2026-04-01T00:00:00Z",
-            trusted_issuer_public_key: input(Vec::new(), 0).encode_pk(),
+            trusted_issuer_public_key: input(Vec::new(), 0)
+                .encode_pk(stwo_mldsa::profile::ML_DSA_65),
             device_cose_sig_structure: vec![0; 64],
             revocation: MdocRevocationPublicInputs {
                 revocation_public_key: MdocRevocationKey(vec![0; stwo_mldsa::constants::PK_BYTES]),
@@ -3706,7 +3724,7 @@ mod tests {
 
     #[test]
     fn canonical_verifier_reconstructs_zero_private_witnesses() {
-        let encoded_key = input(Vec::new(), 0).encode_pk();
+        let encoded_key = input(Vec::new(), 0).encode_pk(stwo_mldsa::profile::ML_DSA_65);
         let issuer = private_issuer_verifier_input(&encoded_key).expect("valid issuer key");
 
         assert_eq!(issuer.message, vec![0; TS13_DEMO_ISSUER_MESSAGE_BYTES]);
@@ -3750,8 +3768,11 @@ mod tests {
                     .expect("first credential extracts");
                 let extracted_b = extract_pid_mdoc(&credential_b.document, &request_b)
                     .expect("second credential extracts");
-                stwo_mldsa::witness::generate_witness(&extracted_b.device_auth_input)
-                    .expect("second device signature is valid");
+                stwo_mldsa::witness::generate_witness(
+                    stwo_mldsa::profile::ML_DSA_44,
+                    &extracted_b.device_auth_input,
+                )
+                .expect("second device signature is valid");
                 hybrid.device_auth_input = extracted_b.device_auth_input;
 
                 let public = test_public_input(
@@ -3812,9 +3833,13 @@ mod tests {
                     wrong_id_hi,
                     TEST_REVOCATION_EPOCH,
                 );
-                let signature_trace =
-                    stwo_mldsa::verify_internals(&revocation_pk, &signed_message, &signature)
-                        .expect("changed endpoints decode");
+                let signature_trace = stwo_mldsa::verify_internals(
+                    stwo_mldsa::profile::ML_DSA_65,
+                    &revocation_pk,
+                    &signed_message,
+                    &signature,
+                )
+                .expect("changed endpoints decode");
                 assert!(signature_trace.accepted);
 
                 let public = test_public_input(
@@ -3882,9 +3907,13 @@ mod tests {
                     assert_eq!(revocation_pk, fixture.revocation_pk, "{label}");
                     let signed_message =
                         crate::ts13::ts13_revocation_message(id_lo, id_hi, TEST_REVOCATION_EPOCH);
-                    let signature_trace =
-                        stwo_mldsa::verify_internals(&revocation_pk, &signed_message, &signature)
-                            .expect("revocation signature decodes");
+                    let signature_trace = stwo_mldsa::verify_internals(
+                        stwo_mldsa::profile::ML_DSA_65,
+                        &revocation_pk,
+                        &signed_message,
+                        &signature,
+                    )
+                    .expect("revocation signature decodes");
                     assert!(signature_trace.accepted, "{label}");
                     let _attack = attack.map(install_revocation_endpoint_attack);
                     prove_mdoc_ts13_demo_circuit(
