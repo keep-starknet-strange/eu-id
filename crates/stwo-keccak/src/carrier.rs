@@ -554,7 +554,7 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
 }
 
 pub(crate) struct Fractions {
-    numerators: Vec<PackedQM31>,
+    numerators: Vec<PackedM31>,
     denominators: Vec<PackedQM31>,
     n_vector_rows: usize,
 }
@@ -569,7 +569,7 @@ impl Fractions {
         }
     }
 
-    fn push_slot(&mut self, numerator: Vec<PackedQM31>, denominator: Vec<PackedQM31>) {
+    fn push_slot(&mut self, numerator: Vec<PackedM31>, denominator: Vec<PackedQM31>) {
         assert_eq!(numerator.len(), self.n_vector_rows);
         assert_eq!(denominator.len(), self.n_vector_rows);
         self.numerators.extend(numerator);
@@ -584,7 +584,7 @@ impl Fractions {
         self.numerators.len() / self.n_vector_rows
     }
 
-    pub(crate) fn numerators(&self) -> &[PackedQM31] {
+    pub(crate) fn numerators(&self) -> &[PackedM31] {
         &self.numerators
     }
 
@@ -592,7 +592,7 @@ impl Fractions {
         &self.denominators
     }
 
-    pub(crate) fn slot(&self, slot: usize) -> (&[PackedQM31], &[PackedQM31]) {
+    pub(crate) fn slot(&self, slot: usize) -> (&[PackedM31], &[PackedQM31]) {
         let start = slot * self.n_vector_rows;
         let end = start + self.n_vector_rows;
         (&self.numerators[start..end], &self.denominators[start..end])
@@ -611,6 +611,18 @@ fn circle_order(values: &[PackedQM31], log_size: u32) -> Vec<PackedQM31> {
         .collect()
 }
 
+fn circle_order_base(values: &[PackedM31], log_size: u32) -> Vec<PackedM31> {
+    let row_lookup = circle_row_to_coset(log_size);
+    (0..values.len())
+        .map(|vector_row| {
+            PackedM31::from_array(std::array::from_fn(|lane| {
+                let coset = row_lookup[vector_row * N_LANES + lane];
+                values[coset / N_LANES].to_array()[coset % N_LANES]
+            }))
+        })
+        .collect()
+}
+
 fn push_dense_fraction<R: Relation<PackedM31, PackedQM31>>(
     fractions: &mut Fractions,
     relation: &R,
@@ -618,17 +630,13 @@ fn push_dense_fraction<R: Relation<PackedM31, PackedQM31>>(
     gate: &[PackedM31],
     log_size: u32,
 ) {
-    let numerator = gate
-        .iter()
-        .copied()
-        .map(PackedQM31::from)
-        .collect::<Vec<_>>();
+    let numerator = gate.to_vec();
     let denominator = lookup[..gate.len()]
         .iter()
         .map(|tuple| relation.combine(tuple))
         .collect::<Vec<_>>();
     fractions.push_slot(
-        circle_order(&numerator, log_size),
+        circle_order_base(&numerator, log_size),
         circle_order(&denominator, log_size),
     );
 }
@@ -661,7 +669,7 @@ pub(crate) fn build_fractions(relations: &KeccakRelations, data: &InteractionDat
             final_round[vector_row],
         ];
         tuple.extend(round_constants.iter().map(|column| column[vector_row]));
-        schedule_numerator.push(PackedQM31::from(active));
+        schedule_numerator.push(active);
         schedule_denominator.push(relations.round_schedule.combine(&tuple));
 
         let mut endpoint = vec![
@@ -669,31 +677,27 @@ pub(crate) fn build_fractions(relations: &KeccakRelations, data: &InteractionDat
             PackedM31::from(M31::from(direction::IN)),
         ];
         endpoint.extend(carrier.iter().map(|column| column[vector_row]));
-        input_numerator.push(-PackedQM31::from(header[vector_row]));
+        input_numerator.push(-header[vector_row]);
         input_denominator.push(relations.keccak_state.combine(&endpoint));
     }
     fractions.push_slot(
-        circle_order(&schedule_numerator, data.log_size),
+        circle_order_base(&schedule_numerator, data.log_size),
         circle_order(&schedule_denominator, data.log_size),
     );
     fractions.push_slot(
-        circle_order(&input_numerator, data.log_size),
+        circle_order_base(&input_numerator, data.log_size),
         circle_order(&input_denominator, data.log_size),
     );
 
     let push_split = |fractions: &mut Fractions, lookup: &[[PackedM31; 4]]| {
         let shift = lookup[0][0].to_array()[0].0 as usize;
-        let numerator = round_active
-            .iter()
-            .copied()
-            .map(PackedQM31::from)
-            .collect::<Vec<_>>();
+        let numerator = round_active.to_vec();
         let denominator = lookup[..n_vector_rows]
             .iter()
             .map(|row| relations.split[shift - 1].combine(&[row[1], row[2], row[3]]))
             .collect::<Vec<_>>();
         fractions.push_slot(
-            circle_order(&numerator, data.log_size),
+            circle_order_base(&numerator, data.log_size),
             circle_order(&denominator, data.log_size),
         );
     };
@@ -747,11 +751,11 @@ pub(crate) fn build_fractions(relations: &KeccakRelations, data: &InteractionDat
             PackedM31::from(M31::from(direction::OUT)),
         ];
         endpoint.extend(carrier.iter().map(|column| column[vector_row]));
-        output_numerator.push(PackedQM31::from(final_round[vector_row]));
+        output_numerator.push(final_round[vector_row]);
         output_denominator.push(relations.keccak_state.combine(&endpoint));
     }
     fractions.push_slot(
-        circle_order(&output_numerator, data.log_size),
+        circle_order_base(&output_numerator, data.log_size),
         circle_order(&output_denominator, data.log_size),
     );
 
@@ -774,12 +778,12 @@ pub(crate) fn generate_interaction_trace(
         let mut column = generator.new_col();
         let (first_numerator, first_denominator) = fractions.slot(first);
         for vector_row in 0..fractions.n_vector_rows() {
-            let mut numerator = first_numerator[vector_row];
+            let mut numerator = PackedQM31::from(first_numerator[vector_row]);
             let mut denominator = first_denominator[vector_row];
             for slot in first + 1..last {
                 let (next_numerator, next_denominator) = fractions.slot(slot);
                 numerator = next_denominator[vector_row] * numerator
-                    + next_numerator[vector_row] * denominator;
+                    + denominator * next_numerator[vector_row];
                 denominator *= next_denominator[vector_row];
             }
             column.write_frac(vector_row, numerator, denominator);
