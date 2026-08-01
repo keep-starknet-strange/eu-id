@@ -71,3 +71,41 @@ The planned Firebase package prefix is
 `ts13-unlinkable-v1-p5-runtime-sweep-package-20260801-1`. Every matrix will
 reuse these exact two APK objects. Each matrix will run Pixel 8 (`shiba`),
 Galaxy S24 Ultra (`e3q`), and Galaxy A54 (`a54x`) together on API 34.
+
+## Planned matrices
+
+The sweep uses no explicit CPU identifier. The first seven matrices use a
+64 MiB proof thread stack and no affinity policy:
+
+1. six workers and a 64 MiB worker stack;
+2. four workers and a 64 MiB worker stack;
+3. eight workers and a 64 MiB worker stack;
+4. six workers and a 48 MiB worker stack;
+5. six workers and a 32 MiB worker stack;
+6. six workers and a 24 MiB worker stack;
+7. six workers and a 16 MiB worker stack.
+
+The campaign selects the smallest worker stack that completes proof and
+verification on all three devices. It rejects a row after a crash, an invalid
+result, a runtime-configuration mismatch, an envelope change, or a verification
+failure.
+
+The next two matrices use six workers and the selected worker stack:
+
+8. an 8 MiB proof thread stack;
+9. a 2 MiB proof thread stack.
+
+The campaign selects the smallest proof thread stack that passes the same
+checks. It then runs four fresh matrices in A/B/B/A order with the selected
+stacks:
+
+10. A1: six workers and no affinity policy;
+11. B1: `exclude_min_cluster` affinity;
+12. B2: `exclude_min_cluster` affinity;
+13. A2: six workers and no affinity policy.
+
+The affinity policy wins only when its mean prove time improves by more than
+the larger within-pair difference on Pixel 8 and Galaxy S24 Ultra. Galaxy A54
+must not regress by more than its within-pair difference. Each accepted row
+must also keep verification at or below 350 ms and the proof envelope below
+2,500,000 bytes.
