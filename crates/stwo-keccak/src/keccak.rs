@@ -484,6 +484,30 @@ mod tests {
     }
 
     #[test]
+    fn active_round_input_and_output_fractions_do_not_cancel() {
+        let relations = KeccakRelations::dummy();
+        let row = RowLook {
+            perm_id: M31::from(7_u32),
+            state: [M31::zero(); N_BYTES_IN_STATE],
+        };
+
+        for round in 1..N_ROUNDS {
+            let [input, output, _, _] = row_fracs(&relations, round, &row);
+            assert_eq!(input.0, SecureField::one());
+            assert_eq!(output.0, -SecureField::one());
+            assert_ne!(
+                input.1, output.1,
+                "round {round} input and output links have distinct tuples"
+            );
+            assert_ne!(
+                input.0 * output.1 + output.0 * input.1,
+                SecureField::zero(),
+                "round {round} active multiplicities must not cancel"
+            );
+        }
+    }
+
+    #[test]
     fn omitted_iota_byte_lanes_are_always_zero() {
         for round_constant in IOTA_RC {
             let bytes = round_constant.to_le_bytes();
