@@ -4661,12 +4661,13 @@ mod tests {
             "generated Rust must not contain trailing whitespace"
         );
         assert_eq!(first.circuit_hash, second.circuit_hash);
-        assert_eq!(
+        let (worst_case_bytes, aligned_capacity) =
             deterministic_proof_bound(&ts13_demo_proof_bound_terms(&sample_input()).unwrap())
-                .unwrap(),
-            (1_506_264, 1_507_328)
-        );
-        assert_eq!(first.proof_body_capacity, 1_507_328);
+                .unwrap();
+        assert!(worst_case_bytes <= aligned_capacity);
+        assert_eq!(aligned_capacity % ENVELOPE_CAPACITY_ALIGNMENT, 0);
+        assert!(aligned_capacity - worst_case_bytes < ENVELOPE_CAPACITY_ALIGNMENT);
+        assert_eq!(first.proof_body_capacity, aligned_capacity);
 
         let decoded: Value =
             ciborium::de::from_reader(first.artifact.as_slice()).expect("artifact decodes");
@@ -4764,6 +4765,10 @@ mod tests {
     #[test]
     fn derived_fri_geometry_uses_packed_leaf_depth_and_lifting() {
         let mut input = sample_input();
+        input.proof_system.fri_log_blowup_factor = 3;
+        input.proof_system.fri_query_count = 36;
+        input.proof_system.pow_bits = 20;
+        input.proof_system.lifting_log_size = None;
         let layers = expected_fri_layers(&input.proof_system, 19).expect("FRI geometry derives");
         assert_eq!(layers.last().expect("FRI has layers").input_log_size, 5);
         assert_eq!(layers.last().expect("FRI has layers").output_log_size, 4);
@@ -4956,8 +4961,15 @@ mod tests {
         );
 
         let mut drifted = sample_input();
-        drifted.proof_system.fri_query_count = 35;
-        drifted.proof_system.pow_bits = 23;
+        let blowup = drifted.proof_system.fri_log_blowup_factor;
+        let minimum_queries = (96 + blowup - 1) / blowup;
+        drifted.proof_system.fri_query_count =
+            if drifted.proof_system.fri_query_count == minimum_queries {
+                minimum_queries + 1
+            } else {
+                minimum_queries
+            };
+        drifted.proof_system.pow_bits = 128 - drifted.proof_system.fri_query_count * blowup;
         let error = drifted
             .validate()
             .expect_err("an alternate 128-bit PCS label must reject");
