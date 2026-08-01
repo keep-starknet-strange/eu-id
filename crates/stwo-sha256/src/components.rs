@@ -150,10 +150,9 @@ pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessed
 
 /// Preprocessed-column ID of the single-cell `is_first_row` selector
 /// committed at the main `Sha256Eval` trace's `log_n_rows`. The selector
-/// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
-/// `0` elsewhere. `Sha256Eval` reads it via `eval.get_preprocessed_column`
-/// and pins `is_first_block ≡ is_first_row`. This anchors the block chain
-/// on the IV of block 0.
+/// is `1` at natural row zero and `0` elsewhere. `Sha256Eval` reads it via
+/// `eval.get_preprocessed_column`. It anchors the enabled row prefix at block
+/// zero.
 pub fn is_first_row_column_id() -> PreProcessedColumnId {
     is_first_row_column_id_ns("")
 }
@@ -162,29 +161,44 @@ pub(crate) fn is_first_row_column_id_ns(instance_namespace: &str) -> PreProcesse
     consumer_id(instance_namespace, "is_first_row")
 }
 
-/// IDs of the 9 round-cyclic preprocessed columns of the rotated
-/// one-row-per-round layout, all at the main trace's `log_n_rows` and all
-/// functions of `t = natural_row mod 64` alone: `k_lo`/`k_hi` (the round
-/// constant `K[t]`'s 16-bit limbs), the `is_round_{0,1,2,3,15,63}`
-/// indicators (working-state boundary selects, padding-row gate,
-/// finalization gate), and `is_schedule` (`t ≥ 16` — the schedule-family
-/// gate). Emission order here matches
+/// Preprocessed-column ID of the first round-row selector. The selector is
+/// one at natural row [`crate::trace::STATE_SEED_ROWS`] and zero elsewhere.
+pub fn is_first_round_column_id() -> PreProcessedColumnId {
+    is_first_round_column_id_ns("")
+}
+
+pub(crate) fn is_first_round_column_id_ns(instance_namespace: &str) -> PreProcessedColumnId {
+    consumer_id(instance_namespace, "is_first_round")
+}
+
+/// Preprocessed active-row selector for the 16-row digest bridge.
+pub fn digest_bridge_active_column_id() -> PreProcessedColumnId {
+    digest_bridge_active_column_id_ns("")
+}
+
+pub(crate) fn digest_bridge_active_column_id_ns(instance_namespace: &str) -> PreProcessedColumnId {
+    consumer_id(instance_namespace, "digest_bridge_active")
+}
+
+/// IDs of the eight block-cyclic preprocessed columns, all at the main
+/// trace's `log_n_rows`. A block has three seed rows followed by 64 round
+/// rows. Round constants and selectors are zero on seed rows. Emission order
+/// here matches
 /// `crate::preprocessed::generate_preprocessed_trace`.
-pub fn round_cyclic_column_ids() -> [PreProcessedColumnId; 9] {
+pub fn round_cyclic_column_ids() -> [PreProcessedColumnId; 8] {
     round_cyclic_column_ids_ns("")
 }
 
-pub(crate) fn round_cyclic_column_ids_ns(instance_namespace: &str) -> [PreProcessedColumnId; 9] {
+pub(crate) fn round_cyclic_column_ids_ns(instance_namespace: &str) -> [PreProcessedColumnId; 8] {
     [
         consumer_id(instance_namespace, "k_lo"),
         consumer_id(instance_namespace, "k_hi"),
         consumer_id(instance_namespace, "is_round_0"),
-        consumer_id(instance_namespace, "is_round_1"),
-        consumer_id(instance_namespace, "is_round_2"),
-        consumer_id(instance_namespace, "is_round_3"),
         consumer_id(instance_namespace, "is_round_15"),
         consumer_id(instance_namespace, "is_round_63"),
         consumer_id(instance_namespace, "is_schedule"),
+        consumer_id(instance_namespace, "is_round"),
+        consumer_id(instance_namespace, "round_index"),
     ]
 }
 
@@ -247,8 +261,7 @@ fn emit_blind<E: EvalAtRow, R: Relation<E::F, E::EF>>(
 /// **Soundness role.** Together with the consumer-side
 /// `add_to_relation(rel, +1, &[carry])` calls inside
 /// `crate::constraints::emit_mod_2_32_add_linear` and the terminal
-/// `Range_8` lookups on every real-block `h_out` byte (inlined in
-/// `Sha256Eval::evaluate` via `wire_range_check`), this component
+/// `Range_8` lookups on the final digest bytes in `crate::digest_bridge`, this component
 /// completes the LogUp loop that pins each carry into `[0, k)` and the
 /// digest bytes into `[0, 2⁸)` — closing the soundness gap the headroom
 /// audit (`crate::headroom`) reduces to.
@@ -436,15 +449,17 @@ pub(crate) fn all_preprocessed_column_ids_ns(
     for &kind in RANGE_TABLES {
         out.push(range_column_id(kind));
     }
-    // 1 `is_first_row` selector sized to the main `Sha256Eval` trace. Read
+    // Two boundary selectors sized to the main `Sha256Eval` trace. Read
     // by the consumer eval via `get_preprocessed_column` (not by any
     // producer component), so it lives at the tail of the ID list and is
     // not allocated to a producer component.
     out.push(is_first_row_column_id_ns(instance_namespace));
-    // 9 round-cyclic columns of the rotated layout (K limbs + round
-    // indicators + schedule gate), also consumer-read via
+    out.push(is_first_round_column_id_ns(instance_namespace));
+    // Eight block-cyclic columns (K limbs, round indicators, schedule and
+    // round gates, and round index), also consumer-read via
     // `get_preprocessed_column` and sized to the main trace.
     out.extend(round_cyclic_column_ids_ns(instance_namespace));
+    out.push(digest_bridge_active_column_id_ns(instance_namespace));
     out
 }
 
@@ -457,7 +472,9 @@ pub(crate) fn consumer_preprocessed_column_ids_ns(
 ) -> Vec<PreProcessedColumnId> {
     let mut out = Vec::new();
     out.push(is_first_row_column_id_ns(instance_namespace));
+    out.push(is_first_round_column_id_ns(instance_namespace));
     out.extend(round_cyclic_column_ids_ns(instance_namespace));
+    out.push(digest_bridge_active_column_id_ns(instance_namespace));
     out
 }
 
@@ -498,15 +515,16 @@ mod tests {
             "sha256_range_5",
             "sha256_range_8",
             "sha256_is_first_row",
+            "sha256_is_first_round",
             "sha256_k_lo",
             "sha256_k_hi",
             "sha256_is_round_0",
-            "sha256_is_round_1",
-            "sha256_is_round_2",
-            "sha256_is_round_3",
             "sha256_is_round_15",
             "sha256_is_round_63",
             "sha256_is_schedule",
+            "sha256_is_round",
+            "sha256_round_index",
+            "sha256_digest_bridge_active",
         ];
         assert_eq!(
             all_preprocessed_column_ids_ns("")
@@ -525,6 +543,11 @@ mod tests {
         );
         assert_eq!(round_cyclic_column_ids_ns(""), round_cyclic_column_ids());
         assert_eq!(is_first_row_column_id_ns(""), is_first_row_column_id());
+        assert_eq!(is_first_round_column_id_ns(""), is_first_round_column_id());
+        assert_eq!(
+            digest_bridge_active_column_id_ns(""),
+            digest_bridge_active_column_id()
+        );
     }
 
     #[test]
@@ -533,7 +556,8 @@ mod tests {
         let other = all_preprocessed_column_ids_ns("A_/\0");
         assert_ne!(namespaced, other);
         assert_eq!(namespaced[4].id, "sha256_instance_3_412f00_is_first_row");
-        assert_eq!(namespaced[5].id, "sha256_instance_3_412f00_k_lo");
+        assert_eq!(namespaced[5].id, "sha256_instance_3_412f00_is_first_round");
+        assert_eq!(namespaced[6].id, "sha256_instance_3_412f00_k_lo");
 
         let unnamespaced = all_preprocessed_column_ids();
         assert_eq!(

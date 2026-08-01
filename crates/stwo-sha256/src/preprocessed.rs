@@ -19,12 +19,11 @@
 //! The standalone trace commits these preprocessed columns:
 //!
 //! - 4 range-table value columns (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
-//! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
-//!   Value `1` is at storage index `Layout::block_slot(0, log_n_rows) = 0`.
-//!   All other values are zero. The AIR pins `is_first_block ≡ is_first_row`.
-//!   This equality
-//!   anchors the block chain at the IV of block 0.
-//! - 9 round-cyclic columns at the main trace's `log_n_rows`
+//! - 2 boundary selectors at the main `Sha256Eval` trace's `log_n_rows`:
+//!   `is_first_row` marks the first seed row and `is_first_round` marks round
+//!   zero of block zero.
+//! - 8 block-cyclic columns at the main trace's `log_n_rows`.
+//! - 1 active-row selector for the 16-row digest bridge.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -40,15 +39,13 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use crate::components::{
     all_preprocessed_column_ids, range_log_size, shared_table_preprocessed_column_ids, RANGE_TABLES,
 };
+use crate::constants::N_ROUNDS;
 use crate::tables_local::{range_2, range_4, range_5, range_8};
-use crate::trace::Layout;
-
-/// `log2` of the row count for every 2¹⁶-row table.
-pub const LOG_SIZE_16: u32 = 16;
+use crate::trace::{Layout, ROWS_PER_BLOCK, STATE_SEED_ROWS};
 
 /// Aggregate of one preprocessed-tree commit input: the column
 /// evaluations, their stable IDs, and their log sizes — all three of
-/// length 14 (see [`tests::total_preprocessed_columns_is_14`]) and aligned
+/// length 15 (see [`tests::total_preprocessed_columns_is_15`]) and aligned
 /// index-for-index.
 pub type PreprocessedTrace = (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
@@ -116,10 +113,9 @@ pub fn preprocessed_log_sizes(log_n_rows: u32) -> Vec<u32> {
     for &kind in RANGE_TABLES {
         log_sizes.push(range_log_size(kind));
     }
-    // 1 is_first_row selector at the main trace's log_n_rows.
-    log_sizes.push(log_n_rows);
-    // 9 round-cyclic columns at the main trace's log_n_rows.
-    log_sizes.extend(std::iter::repeat_n(log_n_rows, 9));
+    // Two boundary selectors and eight block-cyclic columns.
+    log_sizes.extend(std::iter::repeat_n(log_n_rows, 10));
+    log_sizes.push(crate::digest_bridge::DIGEST_BRIDGE_LOG_SIZE);
     log_sizes
 }
 
@@ -130,9 +126,8 @@ pub fn preprocessed_log_sizes(log_n_rows: u32) -> Vec<u32> {
 /// The returned `Vec`s line up index-for-index:
 /// `trace[i]`'s column ID is `ids[i]` and its log size is `log_sizes[i]`.
 ///
-/// `log_n_rows` is the main `Sha256Eval` trace's `log_size`; the
-/// `is_first_row` selector column is sized to it and is `1` at storage
-/// index `Layout::block_slot(0, log_n_rows) = 0`, `0` elsewhere.
+/// `log_n_rows` is the main `Sha256Eval` trace's `log_size`. Both boundary
+/// selector columns use the main trace domain.
 pub fn generate_preprocessed_trace(log_n_rows: u32) -> PreprocessedTrace {
     let cache = PREPROCESSED_TRACE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     {
@@ -174,44 +169,22 @@ fn generate_preprocessed_trace_uncached(log_n_rows: u32) -> PreprocessedTrace {
         log_sizes.push(log_size);
     }
 
-    // ---- 1 `is_first_row` selector at the main trace's log_size ----
-    //
-    // Value `1` at the storage index that block 0 occupies (which is `0`
-    // by `Layout::block_slot(0, log_n_rows)`), `0` elsewhere. The AIR
-    // consumes this in `Sha256Eval::evaluate` to pin
-    // `is_first_block ≡ is_first_row`. This anchors the block chain on
-    // the IV of block 0.
-    {
-        let domain = CanonicCoset::new(log_n_rows).circle_domain();
-        let n_rows = 1usize << log_n_rows;
-        let first_slot = Layout::row_slot(0, log_n_rows);
-        debug_assert_eq!(first_slot, 0);
-        let col: BaseColumn = (0..n_rows)
-            .map(|i| {
-                if i == first_slot {
-                    BaseField::from(1u32)
-                } else {
-                    BaseField::from(0u32)
-                }
-            })
-            .collect();
-        evals.push(CircleEvaluation::new(domain, col));
+    for natural_hot in [0, STATE_SEED_ROWS] {
+        evals.push(selector_eval(log_n_rows, natural_hot));
         log_sizes.push(log_n_rows);
     }
 
-    // ---- 9 round-cyclic columns at the main trace's log_n_rows ----
-    //
-    // Each is a function of `t = natural_row mod 64` alone. Values are laid
-    // out in storage order: storage slot `s` holds `f(natural(s) mod 64)`,
-    // where `natural ↔ storage` is the same `Layout::row_slot` bijection the
-    // trace writer uses — computed here by filling a natural-order buffer
-    // and scattering through `row_slot`. Order matches
-    // `components::round_cyclic_column_ids`:
-    // `k_lo, k_hi, is_round_0, _1, _2, _3, _15, _63, is_schedule`.
+    // ---- 8 block-cyclic columns at the main trace's log_n_rows ----
     for col in round_cyclic_evals(log_n_rows) {
         evals.push(col);
         log_sizes.push(log_n_rows);
     }
+
+    evals.push(selector_eval(
+        crate::digest_bridge::DIGEST_BRIDGE_LOG_SIZE,
+        0,
+    ));
+    log_sizes.push(crate::digest_bridge::DIGEST_BRIDGE_LOG_SIZE);
 
     let ids = all_preprocessed_column_ids();
     debug_assert_eq!(
@@ -224,34 +197,43 @@ fn generate_preprocessed_trace_uncached(log_n_rows: u32) -> PreprocessedTrace {
     (evals, ids, log_sizes)
 }
 
-/// The 9 round-cyclic columns of the rotated layout at `log_n_rows`, in
-/// [`crate::components::round_cyclic_column_ids`] order. Each is a function
-/// of `t = natural_row mod 64` alone, scattered into storage order via
-/// [`Layout::row_slot`] — shared by the single-instance preprocessed trace
-/// and each namespaced consumer trace.
+fn selector_eval(
+    log_n_rows: u32,
+    natural_hot: usize,
+) -> CircleEvaluation<SimdBackend, BaseField, BitReversedOrder> {
+    let domain = CanonicCoset::new(log_n_rows).circle_domain();
+    let n_rows = 1usize << log_n_rows;
+    let hot_slot = Layout::row_slot(natural_hot, log_n_rows);
+    let col: BaseColumn = (0..n_rows)
+        .map(|slot| BaseField::from(u32::from(slot == hot_slot)))
+        .collect();
+    CircleEvaluation::new(domain, col)
+}
+
+/// The eight block-cyclic columns at `log_n_rows`, in
+/// [`crate::components::round_cyclic_column_ids`] order.
 fn round_cyclic_evals(
     log_n_rows: u32,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
     use crate::constants::{K, N_ROUNDS};
     let domain = CanonicCoset::new(log_n_rows).circle_domain();
     let n_rows = 1usize << log_n_rows;
-    let fns: [Box<dyn Fn(usize) -> u32>; 9] = [
-        Box::new(|t| K[t] & 0xFFFF),
-        Box::new(|t| K[t] >> 16),
-        Box::new(|t| u32::from(t == 0)),
-        Box::new(|t| u32::from(t == 1)),
-        Box::new(|t| u32::from(t == 2)),
-        Box::new(|t| u32::from(t == 3)),
-        Box::new(|t| u32::from(t == 15)),
-        Box::new(|t| u32::from(t == N_ROUNDS - 1)),
-        Box::new(|t| u32::from(t >= 16)),
+    let fns: [Box<dyn Fn(usize) -> u32>; 8] = [
+        Box::new(|position| round_at(position).map_or(0, |t| K[t] & 0xFFFF)),
+        Box::new(|position| round_at(position).map_or(0, |t| K[t] >> 16)),
+        Box::new(|position| u32::from(round_at(position) == Some(0))),
+        Box::new(|position| u32::from(round_at(position) == Some(15))),
+        Box::new(|position| u32::from(round_at(position) == Some(N_ROUNDS - 1))),
+        Box::new(|position| u32::from(round_at(position).is_some_and(|t| t >= 16))),
+        Box::new(|position| u32::from(round_at(position).is_some())),
+        Box::new(|position| round_at(position).unwrap_or(0) as u32),
     ];
     fns.into_iter()
         .map(|f| {
             let mut vals = vec![BaseField::from(0u32); n_rows];
             for natural in 0..n_rows {
                 vals[Layout::row_slot(natural, log_n_rows)] =
-                    BaseField::from(f(natural % N_ROUNDS));
+                    BaseField::from(f(natural % ROWS_PER_BLOCK));
             }
             let col: BaseColumn = vals.into_iter().collect();
             CircleEvaluation::new(domain, col)
@@ -259,8 +241,13 @@ fn round_cyclic_evals(
         .collect()
 }
 
-/// One selector column at `log_n_rows`: `1` exactly at the natural rows for
-/// which `hot` returns true, scattered into storage order.
+#[inline]
+fn round_at(position: usize) -> Option<usize> {
+    position
+        .checked_sub(STATE_SEED_ROWS)
+        .filter(|&round| round < N_ROUNDS)
+}
+
 /// Reserved dummy-key base for the Class-D blinded upper half. Must equal
 /// `shared_tables::DUMMY_KEY_BASE` so the preprocessed value column matches the
 /// interaction fraction's row content (identical denominators). Honest range
@@ -336,21 +323,21 @@ mod tests {
     use stwo::prover::backend::simd::m31::LOG_N_LANES;
     use stwo::prover::backend::Column;
 
-    /// Total column count: 4·1 + 1 + 9 = 14. Catches any regression in the
-    /// per-table layout. The trailing `+ 1` is the
-    /// `is_first_row` selector emitted at the main trace's `log_n_rows`.
+    /// Total column count: 4 table columns + 10 main selectors + 1 digest
+    /// bridge selector.
     #[test]
-    fn total_preprocessed_columns_is_14() {
+    fn total_preprocessed_columns_is_15() {
         let log_n_rows = LOG_N_LANES;
         let (evals, ids, log_sizes) = generate_preprocessed_trace(log_n_rows);
-        assert_eq!(evals.len(), 14);
-        assert_eq!(ids.len(), 14);
-        assert_eq!(log_sizes.len(), 14);
+        assert_eq!(evals.len(), 15);
+        assert_eq!(ids.len(), 15);
+        assert_eq!(log_sizes.len(), 15);
     }
 
     /// The first four columns are `Range_k`: three at `LOG_N_LANES = 4`
     /// (for Range_2/4/5, padded to 16 rows) and one at log size 8
-    /// (Range_8). The trailing ten columns use the main trace log size.
+    /// (Range_8). The next ten columns use the main trace log size. The final
+    /// column uses the 16-row digest bridge size.
     #[test]
     fn log_sizes_lay_out_correctly() {
         let log_n_rows = LOG_N_LANES;
@@ -358,6 +345,8 @@ mod tests {
         for (i, &ls) in log_sizes.iter().enumerate() {
             let expected = if i < 3 {
                 LOG_N_LANES
+            } else if i == 14 {
+                crate::digest_bridge::DIGEST_BRIDGE_LOG_SIZE
             } else if i >= 4 {
                 log_n_rows
             } else {
@@ -367,15 +356,13 @@ mod tests {
         }
     }
 
-    /// The `is_first_row` selector is `1` at storage index 0 and `0`
-    /// elsewhere. This pins the `is_first_block ≡ is_first_row` constraint
-    /// in `Sha256Eval` to a single anchor at block 0's slot (which
-    /// `Layout::block_slot(0, log_n_rows)` resolves to index 0).
+    /// The `is_first_row` selector is `1` at storage index zero and `0`
+    /// elsewhere. This anchors the enabled row prefix at block zero.
     #[test]
     fn is_first_row_selector_is_one_at_index_zero() {
         let log_n_rows = LOG_N_LANES;
         let (evals, _, _) = generate_preprocessed_trace(log_n_rows);
-        // The selector is column 4 (followed by the 9 round-cyclic columns).
+        // The selector is column 4. The first-round selector follows it.
         let selector = &evals[4];
         let n_rows = 1usize << log_n_rows;
         for i in 0..n_rows {
@@ -384,6 +371,29 @@ mod tests {
                 selector.values.at(i),
                 BaseField::from(expected),
                 "is_first_row[{i}] mismatch",
+            );
+        }
+    }
+
+    #[test]
+    fn first_round_and_digest_bridge_selectors_have_one_active_row() {
+        let log_n_rows = 8;
+        let (evals, _, _) = generate_preprocessed_trace(log_n_rows);
+        let first_round = &evals[5];
+        let hot = Layout::row_slot(STATE_SEED_ROWS, log_n_rows);
+        for slot in 0..(1usize << log_n_rows) {
+            assert_eq!(
+                first_round.values.at(slot),
+                BaseField::from(u32::from(slot == hot)),
+                "first-round selector at slot {slot}",
+            );
+        }
+        let bridge = &evals[14];
+        for slot in 0..(1usize << crate::digest_bridge::DIGEST_BRIDGE_LOG_SIZE) {
+            assert_eq!(
+                bridge.values.at(slot),
+                BaseField::from(u32::from(slot == 0)),
+                "digest-bridge selector at slot {slot}",
             );
         }
     }
@@ -418,9 +428,9 @@ mod tests {
     fn metadata_log_sizes_shape() {
         for log_n_rows in [LOG_N_LANES, 20, 30] {
             let meta = preprocessed_log_sizes(log_n_rows);
-            assert_eq!(meta.len(), 14, "l={log_n_rows}");
+            assert_eq!(meta.len(), 15, "l={log_n_rows}");
             assert_eq!(
-                meta[4..].iter().filter(|&&l| l == log_n_rows).count(),
+                meta[4..14].iter().filter(|&&l| l == log_n_rows).count(),
                 10,
                 "selector + cyclic log_sizes"
             );

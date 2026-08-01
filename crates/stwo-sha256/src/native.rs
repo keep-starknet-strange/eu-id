@@ -191,7 +191,7 @@ mod tests {
     fn boundary_lengths_match_sha2() {
         // Lengths that exercise the padding boundary cases.
         for n in [
-            0usize, 1, 55, 56, 63, 64, 65, 85, 92, 127, 128, 129, 200, 511, 512, 1000,
+            0usize, 1, 55, 56, 63, 64, 65, 85, 92, 100, 127, 128, 129, 200, 511, 512, 1000, 2513,
         ] {
             let msg: Vec<u8> = (0..n).map(|i| (i * 7) as u8).collect();
             let ours = hash(&msg);

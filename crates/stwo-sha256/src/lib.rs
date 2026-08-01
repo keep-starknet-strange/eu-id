@@ -8,6 +8,7 @@ pub mod air;
 pub mod components;
 pub mod constants;
 pub mod constraints;
+pub mod digest_bridge;
 pub mod field_exposure;
 pub mod headroom;
 pub mod interaction;

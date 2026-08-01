@@ -114,6 +114,10 @@ impl SharedShaTableRelations {
 
 /// Number of bytes in the digest relation.
 pub const DIGEST_REL_SIZE: usize = crate::constants::DIGEST_BYTES;
+/// Number of 16-bit limbs in one SHA-256 digest.
+pub const DIGEST_LIMB_REL_SIZE: usize = 2 * crate::constants::N_STATE_WORDS;
+
+relation!(Sha256DigestLimbs, DIGEST_LIMB_REL_SIZE);
 
 /// Shared digest relation for the provider and the consumer.
 pub use air_core::relations::DigestBytesRelation as Sha256Digest;
@@ -128,18 +132,24 @@ const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY
 /// limb to two big-endian bytes. It also checks each byte with `Range_8`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DigestRelation {
+    /// Internal bridge from the main SHA trace to the byte-canonicalization
+    /// component. Values are `(lo, hi)` for each of the eight state words.
+    pub limbs: Sha256DigestLimbs,
+    /// External 32-byte digest channel shared with composed consumers.
     pub digest: Sha256Digest,
 }
 
 impl DigestRelation {
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
+            limbs: Sha256DigestLimbs::draw(channel),
             digest: Sha256Digest::draw(channel),
         }
     }
 
     pub fn dummy() -> Self {
         Self {
+            limbs: Sha256DigestLimbs::dummy(),
             digest: Sha256Digest::dummy(),
         }
     }
@@ -197,8 +207,8 @@ impl Default for FieldRelation {
 pub struct Sha256Relations {
     pub range: RangeRelations,
     /// Cross-component digest channel — provider side. Always drawn so the
-    /// relation bundle is uniform; only *used* when `Sha256Eval::expose_digest`
-    /// is set (the combined-proof path). See [`DigestRelation`].
+    /// relation bundle is uniform. The digest bridge uses the external channel
+    /// only when digest exposure is active. See [`DigestRelation`].
     pub digest: DigestRelation,
     /// Cross-component credential-field channel — provider side. Always drawn so
     /// the relation bundle is uniform; only *used* when a non-empty field
@@ -288,6 +298,11 @@ mod tests {
             DIGEST_REL_SIZE
         );
         assert_eq!(DIGEST_REL_SIZE, 32);
+        assert_eq!(
+            <Sha256DigestLimbs as Relation<BaseField, SecureField>>::get_size(&r.digest.limbs),
+            DIGEST_LIMB_REL_SIZE
+        );
+        assert_eq!(DIGEST_LIMB_REL_SIZE, 16);
     }
 
     /// The field relation has three values.

@@ -19,7 +19,7 @@ use stwo_sha256::witness::compute_sha256_witness;
 /// engine the `Sha256Eval` batch-4 LogUp raises the composition split to K=2,
 /// and K > log_blowup requires stored coefficients these SHA-only modules do
 /// not opt into. Blowup-2 keeps K ≤ log_blowup (SubDomain mode), matching
-/// production (log_blowup=2). See interaction::SHA_CONSUMER_LOGUP_BATCH.
+/// production (log_blowup=2). See `constraints::LOGUP_BATCH`.
 fn pcs_config() -> PcsConfig {
     PcsConfig {
         fri_config: stwo::core::fri::FriConfig::new(0, 2, 3, 1),

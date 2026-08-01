@@ -1,7 +1,7 @@
 //! Prover and verifier entry points for the standalone SHA-256 component.
 //!
-//! The proof contains the preprocessed trace, base trace, multiplicity columns,
-//! interaction trace, and the four `Range_k` producer components.
+//! The proof contains the preprocessed trace, the main SHA trace, the digest
+//! bridge, the interaction trace, and the four `Range_k` producer components.
 //!
 //! The prover and verifier must call each `mix_into` operation in the same
 //! order. A different order produces different transcript challenges.
@@ -14,6 +14,7 @@ use stwo::core::verifier::VerificationError as StwoVerificationError;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 use crate::air::{Sha256Prover, Sha256Verifier};
+use crate::components::RANGE_TABLES;
 use crate::constants::DIGEST_BYTES;
 use crate::interaction::InteractionClaim;
 use crate::types::{Digest, Sha256Witness};
@@ -26,8 +27,8 @@ use crate::witness::compute_sha256_witness;
 /// `log_n_rows`.
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
-    /// `log2` of the SHA-256 component's trace row count. Each row is one
-    /// round of one padded block (64 rows per block).
+    /// `log2` of the SHA-256 component's trace row count. Each padded block
+    /// uses three seed rows and 64 round rows.
     ///
     /// **Must satisfy `log_n_rows ≥ trace::min_log_size(witness.blocks.len())`**
     /// or [`prove_sha256`] returns [`Sha256ProveError::TraceTooSmall`]. The
@@ -48,8 +49,8 @@ pub struct ProverConfig {
     /// lengths.
     ///
     /// `Default` sets this to `min_log_size(1) = 7`. This size contains one
-    /// padded block and one padding block. Larger messages must set a larger
-    /// value.
+    /// padded block and at least one disabled row. Larger messages need a
+    /// larger value.
     pub log_n_rows: u32,
     /// Stwo PCS configuration for FRI and proof of work.
     pub pcs_config: PcsConfig,
@@ -138,6 +139,8 @@ pub enum Sha256VerifyError {
     /// out-of-memory allocation on the verify path (the trace row count is
     /// `2^log_n_rows`).
     UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
+    /// The standalone claim does not contain one claim per range table.
+    InvalidRangeClaimCount { expected: usize, actual: usize },
 }
 
 impl core::fmt::Display for Sha256VerifyError {
@@ -155,6 +158,10 @@ impl core::fmt::Display for Sha256VerifyError {
             } => write!(
                 f,
                 "proof.log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
+            ),
+            Self::InvalidRangeClaimCount { expected, actual } => write!(
+                f,
+                "proof contains {actual} range claims; expected {expected}"
             ),
         }
     }
@@ -222,7 +229,7 @@ fn prove_sha256_inner(
 
 /// Largest `log_n_rows` that the verifier accepts.
 ///
-/// Each padded block uses 64 rows. The limit permits about 1 GiB of padded
+/// Each padded block uses 67 rows. The limit permits about 1 GiB of padded
 /// preimage data. This limit prevents excessive allocation from an untrusted
 /// proof. It is not a protocol limit.
 pub const MAX_LOG_N_ROWS: u32 = 30;
@@ -242,10 +249,21 @@ fn validate_log_n_rows(log_n_rows: u32) -> Result<(), Sha256VerifyError> {
     Ok(())
 }
 
+/// Validate the standalone component-claim shape before component creation.
+fn validate_interaction_claim_shape(claim: &InteractionClaim) -> Result<(), Sha256VerifyError> {
+    let expected = RANGE_TABLES.len();
+    let actual = claim.range.len();
+    if actual != expected {
+        return Err(Sha256VerifyError::InvalidRangeClaimCount { expected, actual });
+    }
+    Ok(())
+}
+
 /// Verify a `Sha256Proof`.
 pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError> {
     // Reject invalid sizes before allocation.
     validate_log_n_rows(proof.log_n_rows)?;
+    validate_interaction_claim_shape(&proof.interaction_claim)?;
 
     // Return the specific balance error before generic proof verification.
     if !proof.interaction_claim.total().is_zero() {
@@ -426,5 +444,33 @@ mod tests {
             validate_log_n_rows(63),
             Err(Sha256VerifyError::UnsupportedLogNRows { .. })
         ));
+    }
+
+    #[test]
+    fn interaction_claim_shape_rejects_missing_or_extra_range_claims() {
+        use stwo::core::fields::qm31::SecureField;
+
+        fn claim_with_range_count(range_count: usize) -> InteractionClaim {
+            let zero = crate::interaction::ComponentClaim {
+                claimed_sum: SecureField::zero(),
+            };
+            InteractionClaim {
+                sha256: zero.clone(),
+                digest_bridge: zero.clone(),
+                range: vec![zero; range_count],
+            }
+        }
+
+        let expected = RANGE_TABLES.len();
+        assert_eq!(
+            validate_interaction_claim_shape(&claim_with_range_count(expected)),
+            Ok(())
+        );
+        for actual in [expected - 1, expected + 1] {
+            assert_eq!(
+                validate_interaction_claim_shape(&claim_with_range_count(actual)),
+                Err(Sha256VerifyError::InvalidRangeClaimCount { expected, actual })
+            );
+        }
     }
 }

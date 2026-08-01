@@ -34,7 +34,7 @@ pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> 
 /// lookups on carry values `c ∈ [0, k)` increment the row indexed by `c`.
 ///
 /// Firing rule (mirrors `crate::constraints::emit_mod_2_32_add_linear` and
-/// the terminal `Range_8` wiring in `Sha256Eval::evaluate`):
+/// the final digest-byte wiring in `crate::digest_bridge`):
 ///   - One `Range_4` increment per schedule-recurrence carry-limb pair (2
 ///     limbs × 48 entries per block).
 ///   - One `Range_5` increment per `T1` carry-limb pair (2 limbs × 64
@@ -42,8 +42,7 @@ pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> 
 ///   - One `Range_2` increment per `T2`/`e_new`/`a_new` carry-limb pair (2
 ///     limbs × 3 families × 64 rounds per block) plus per finalization
 ///     carry-limb pair (2 limbs × 8 words per block).
-///   - One `Range_8` increment per terminal `h_out` byte (4 bytes × 8
-///     words per block).
+///   - One `Range_8` increment per final digest byte (32 total).
 pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u32> {
     let log_size = range_log_size(kind);
     let mut mults = vec![0u32; 1usize << log_size];
@@ -79,12 +78,18 @@ pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u
                     bump(&mut mults, c.hi);
                 }
             }
-            RangeKind::Range8 => {
-                for j in 0..N_STATE_WORDS {
-                    for b in word_be_bytes(block.h_out[j].lo, block.h_out[j].hi) {
-                        bump(&mut mults, b);
-                    }
-                }
+            RangeKind::Range8 => {}
+        }
+    }
+
+    if kind == RangeKind::Range8 {
+        let final_block = witness
+            .blocks
+            .last()
+            .expect("SHA witness has a final block");
+        for word in &final_block.h_out {
+            for byte in word_be_bytes(word.lo, word.hi) {
+                bump(&mut mults, byte);
             }
         }
     }

@@ -27,8 +27,11 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
 use crate::components::{range_log_size, RangeKind, RANGE_TABLES};
-use crate::constants::DIGEST_BYTES;
+use crate::constants::{DIGEST_BYTES, N_STATE_WORDS};
 use crate::constraints::LOGUP_BATCH;
+use crate::digest_bridge::{
+    digest_bridge_lookups, DIGEST_BRIDGE_LOG_SIZE, DIGEST_BRIDGE_LOOKUPS_BASE,
+};
 use crate::field_exposure::{word_be_bytes, FieldExposure, FULL_PADDED_STREAM_SITES_PER_ROW};
 use crate::multiplicities::range_k_multiplicities;
 use crate::relations::Sha256Relations;
@@ -41,22 +44,21 @@ use crate::types::Sha256Witness;
 ///
 /// ```text
 ///   2 (schedule `Range_4` carry pair; t ≥ 16 rows)
-/// +  8 (round carry range-checks; every row)
+/// +  8 (round carry range-checks; every round row)
 /// + 16 (finalization carries, t = 63 rows)
-/// + 32 (terminal `Range_8` digest bytes, t = 63 rows)
-/// = 58
+/// +  1 (final-state limb bridge, final t = 63 row)
+/// = 27
 /// ```
 ///
 /// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
-pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 58;
+pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 27;
 
 /// Return the lookup sites that `Sha256Eval` fires on each row.
 ///
-/// The optional digest provider adds one site. The padded-stream provider adds
-/// 64 field sites.
+/// The padded-stream provider adds four field sites.
 #[inline]
-pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
-    SHA_LOOKUPS_PER_ROW_BASE + usize::from(expose_digest) + field_exposure.n_yields()
+pub fn sha_lookups_per_row(field_exposure: &FieldExposure) -> usize {
+    SHA_LOOKUPS_PER_ROW_BASE + field_exposure.n_yields()
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +86,10 @@ impl ComponentClaim {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub sha256: ComponentClaim,
-    pub range: Vec<ComponentClaim>, // 4: Range_2, Range_4, Range_5, Range_8
+    pub digest_bridge: ComponentClaim,
+    /// Claims for `Range_2`, `Range_4`, `Range_5`, and `Range_8`, in that
+    /// order. A standalone proof must contain one claim per range table.
+    pub range: Vec<ComponentClaim>,
 }
 
 impl InteractionClaim {
@@ -92,6 +97,7 @@ impl InteractionClaim {
     /// A composed verifier balances this sum with cross-module claims.
     pub fn total(&self) -> SecureField {
         let mut s = self.sha256.claimed_sum;
+        s += self.digest_bridge.claimed_sum;
         for c in &self.range {
             s += c.claimed_sum;
         }
@@ -103,6 +109,7 @@ impl InteractionClaim {
     /// agree.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         self.sha256.mix_into(channel);
+        self.digest_bridge.mix_into(channel);
         for c in &self.range {
             c.mix_into(channel);
         }
@@ -291,7 +298,6 @@ fn sha256_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     log_size: u32,
-    expose_digest: bool,
     field_exposure: &FieldExposure,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
@@ -302,8 +308,6 @@ fn sha256_interaction(
     // `is_last_block` matches the AIR gate `enabler · is_round_63 ·
     // (1 − enabler_next)`: set on the final block's t = 63 row only when a
     // padding successor exists (guaranteed by `crate::trace::min_log_size`).
-    // The field provider gates on the symmetric `is_first_block` (block 0),
-    // which needs no padding successor.
     let has_padding = n_blocks * crate::trace::ROWS_PER_BLOCK < n_rows;
     let last_block_idx = n_blocks.saturating_sub(1);
 
@@ -311,7 +315,7 @@ fn sha256_interaction(
     // `n_rows`, default-filled with the neutral `(0, 1)`; real rows
     // overwrite the sites that fire on them. See
     // [`SHA_LOOKUPS_PER_ROW_BASE`] for the per-row site breakdown.
-    let lookups_per_row = sha_lookups_per_row(expose_digest, field_exposure);
+    let lookups_per_row = sha_lookups_per_row(field_exposure);
     let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_row)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
         .collect();
@@ -328,7 +332,6 @@ fn sha256_interaction(
                 block,
                 t,
                 relations,
-                expose_digest,
                 is_last_block,
                 field_exposure,
                 block_idx,
@@ -338,6 +341,57 @@ fn sha256_interaction(
     }
 
     build_interaction_columns(log_size, LOGUP_BATCH, all_lookups)
+}
+
+fn digest_bridge_interaction(
+    relations: &Sha256Relations,
+    witness: &Sha256Witness,
+    expose_digest: bool,
+) -> (
+    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
+    let n_rows = 1usize << DIGEST_BRIDGE_LOG_SIZE;
+    let mut lookups: Vec<Vec<Frac>> = (0..digest_bridge_lookups(expose_digest))
+        .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
+        .collect();
+    let block = witness
+        .blocks
+        .last()
+        .expect("SHA witness has a final block");
+    let bytes = h_out_digest_bytes(&block.h_out);
+    let mut cursor = 0;
+    for byte in bytes {
+        lookups[cursor][0] = (
+            SecureField::one(),
+            combine_range(relations, RangeKind::Range8, byte),
+        );
+        cursor += 1;
+    }
+
+    let limbs: [BaseField; 2 * N_STATE_WORDS] = std::array::from_fn(|index| {
+        let word = index / 2;
+        BaseField::from(if index.is_multiple_of(2) {
+            block.h_out[word].lo
+        } else {
+            block.h_out[word].hi
+        })
+    });
+    lookups[cursor][0] = (SecureField::one(), relations.digest.limbs.combine(&limbs));
+    cursor += 1;
+
+    if expose_digest {
+        let values: [BaseField; DIGEST_BYTES] =
+            std::array::from_fn(|index| BaseField::from(bytes[index]));
+        lookups[cursor][0] = (
+            -SecureField::one(),
+            relations.digest.digest.combine(&values),
+        );
+        cursor += 1;
+    }
+    debug_assert_eq!(cursor, digest_bridge_lookups(expose_digest));
+    debug_assert_eq!(DIGEST_BRIDGE_LOOKUPS_BASE, DIGEST_BYTES + 1);
+    build_interaction_columns(DIGEST_BRIDGE_LOG_SIZE, LOGUP_BATCH, lookups)
 }
 
 /// Write every lookup site for one `(block, round t)` row at its trace
@@ -353,7 +407,6 @@ fn write_round_row_lookups(
     block: &crate::types::BlockWitness,
     t: usize,
     relations: &Sha256Relations,
-    expose_digest: bool,
     is_last_block: bool,
     field_exposure: &FieldExposure,
     block_idx: usize,
@@ -373,7 +426,7 @@ fn write_round_row_lookups(
         *cursor += 2;
     }
 
-    // ---- 2. Round carry range-checks (8 sites; every real row) ----
+    // ---- 2. Round carry range-checks (8 sites; every round row) ----
     let round = &block.rounds[t];
 
     // Carry range-checks for the four mod-2³² adds of this round.
@@ -410,68 +463,65 @@ fn write_round_row_lookups(
         round.a_new_carries,
     );
 
-    // ---- 3/4. Finalization carries + terminal `Range_8` bytes (t = 63 rows) ----
+    // ---- 3. Finalization carries (t = 63 rows) ----
     if t == crate::constants::N_ROUNDS - 1 {
         for c in &block.finalization_carries {
             write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
         }
-        for byte in h_out_digest_bytes(&block.h_out) {
-            write_range_check(all, cursor, slot, relations, RangeKind::Range8, byte);
-        }
     } else {
-        *cursor += 16 + DIGEST_BYTES;
+        *cursor += 16;
     }
 
-    // ---- 5. Digest yield (provider side, final block's t = 63 row) ----
-    if expose_digest {
-        if t == crate::constants::N_ROUNDS - 1 {
-            let bytes = h_out_digest_bytes(&block.h_out);
-            let values: [BaseField; DIGEST_BYTES] =
-                std::array::from_fn(|i| BaseField::from(bytes[i]));
-            let denom = relations.digest.digest.combine(&values);
-            let num = -SecureField::from(BaseField::from(u32::from(is_last_block)));
-            all[*cursor][slot] = (num, denom);
-        }
-        *cursor += 1;
+    // ---- 4. Final-state limb bridge ----
+    if t == crate::constants::N_ROUNDS - 1 && is_last_block {
+        let values: [BaseField; 2 * N_STATE_WORDS] = std::array::from_fn(|index| {
+            let word = index / 2;
+            if index.is_multiple_of(2) {
+                BaseField::from(block.h_out[word].lo)
+            } else {
+                BaseField::from(block.h_out[word].hi)
+            }
+        });
+        let denom = relations.digest.limbs.combine(&values);
+        let num = -SecureField::from(BaseField::from(u32::from(is_last_block)));
+        all[*cursor][slot] = (num, denom);
     }
+    *cursor += 1;
 
-    // ---- 6. Complete padded-stream yields (t = 15 rows) ----
+    // ---- 5. Four padded-stream bytes on each input-word row ----
     if !field_exposure.is_empty() {
-        if t == 15 {
+        if t < crate::trace::WORDS_PER_BLOCK {
+            let (field_id, _) = field_exposure
+                .full_padded_stream()
+                .expect("field lookups require an active padded-stream provider");
             write_field_row_lookups(
                 all,
                 cursor,
                 slot,
-                block,
-                block_idx,
-                field_exposure,
+                block.schedule[t],
+                block_idx * crate::constants::BLOCK_BYTES + t * crate::constants::WORD_BYTES,
+                field_id,
                 &relations.field.field,
             );
         } else {
-            *cursor += sha_lookups_per_row(false, field_exposure) - SHA_LOOKUPS_PER_ROW_BASE;
+            *cursor += field_exposure.n_yields();
         }
     }
 }
 
-/// Write the 64 padded-stream field yields for one block.
+/// Write one input word's four padded-stream field yields.
 fn write_field_row_lookups(
     all: &mut [Vec<Frac>],
     cursor: &mut usize,
     slot: usize,
-    block: &crate::types::BlockWitness,
-    block_idx: usize,
-    field_exposure: &FieldExposure,
+    word: crate::types::WordLimbs,
+    byte_start: usize,
+    field_id: u32,
     field_rel: &crate::relations::Sha256Field,
 ) {
-    let (field_id, _) = field_exposure
-        .full_padded_stream()
-        .expect("field lookups require an active padded-stream provider");
-    for byte_in_block in 0..FULL_PADDED_STREAM_SITES_PER_ROW {
-        let word_idx = byte_in_block / crate::constants::WORD_BYTES;
-        let byte_in_word = byte_in_block % crate::constants::WORD_BYTES;
-        let limb = block.schedule[word_idx];
-        let value = word_be_bytes(limb.lo, limb.hi)[byte_in_word];
-        let byte_index = block_idx * FULL_PADDED_STREAM_SITES_PER_ROW + byte_in_block;
+    for byte_in_word in 0..FULL_PADDED_STREAM_SITES_PER_ROW {
+        let value = word_be_bytes(word.lo, word.hi)[byte_in_word];
+        let byte_index = byte_start + byte_in_word;
         let tuple = [
             BaseField::from(field_id),
             BaseField::from(byte_index as u32),
@@ -585,23 +635,22 @@ fn generate_interaction_trace_inner(
     let mut combined = Vec::new();
 
     // Sha256Eval consumer first — its slot in the proof's component list.
-    // `expose_digest` adds the cross-component digest yield to this component's
-    // fractions; `field_exposure` adds one credential-field yield per exposed
-    // byte (and hence to its claimed sum).
-    let (sha_trace, sha_sum) = sha256_interaction(
-        relations,
-        witness,
-        sha256_log_size,
-        expose_digest,
-        field_exposure,
-    );
+    // `field_exposure` adds one credential-field yield per exposed byte.
+    let (sha_trace, sha_sum) =
+        sha256_interaction(relations, witness, sha256_log_size, field_exposure);
     combined.extend(sha_trace);
     let sha256 = ComponentClaim {
         claimed_sum: sha_sum,
     };
 
-    // 4 range producers (Range_2, Range_4, Range_5, Range_8).
-    let mut range = Vec::with_capacity(4);
+    let (bridge_trace, bridge_sum) = digest_bridge_interaction(relations, witness, expose_digest);
+    combined.extend(bridge_trace);
+    let digest_bridge = ComponentClaim {
+        claimed_sum: bridge_sum,
+    };
+
+    // Range producers in the canonical `RANGE_TABLES` order.
+    let mut range = Vec::with_capacity(RANGE_TABLES.len());
     if include_table_providers {
         for &kind in RANGE_TABLES {
             let (t, s) = range_k_interaction(relations, witness, kind);
@@ -610,7 +659,11 @@ fn generate_interaction_trace_inner(
         }
     }
 
-    let claim = InteractionClaim { sha256, range };
+    let claim = InteractionClaim {
+        sha256,
+        digest_bridge,
+        range,
+    };
     (combined, claim)
 }
 
@@ -809,7 +862,7 @@ mod tests {
         assert_eq!(
             exposure.n_yields(),
             FULL_PADDED_STREAM_SITES_PER_ROW,
-            "interaction width stays at 64 sites regardless of block count",
+            "interaction width stays at four sites regardless of block count",
         );
 
         let log_size = min_log_size(witness.blocks.len());

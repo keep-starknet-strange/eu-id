@@ -6,16 +6,16 @@
 
 use crate::constants::{BLOCK_BYTES, WORD_BYTES};
 
-/// Number of field-relation sites on each enabled block's `t = 15` row.
-pub const FULL_PADDED_STREAM_SITES_PER_ROW: usize = BLOCK_BYTES;
+/// Number of field-relation sites on each input-word row (`t < 16`).
+pub const FULL_PADDED_STREAM_SITES_PER_ROW: usize = WORD_BYTES;
 
 /// M31's modulus. Byte indices and field IDs must be canonical M31 values.
 const M31_MODULUS: usize = (1usize << 31) - 1;
 
 /// The optional complete padded-stream provider.
 ///
-/// The active mode adds one block-counter column. It emits 64 field-relation
-/// tuples on each enabled block's `t = 15` row.
+/// The active mode adds one block-counter column. It emits four field-relation
+/// tuples on each enabled input-word row, for 64 tuples per block.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FieldExposure {
     full_padded_stream: Option<(u32, usize)>,
@@ -65,7 +65,7 @@ impl FieldExposure {
         self.full_padded_stream
     }
 
-    /// Return the fixed number of relation sites on each row.
+    /// Return the fixed number of relation sites on each input-word row.
     pub fn n_yields(&self) -> usize {
         usize::from(!self.is_empty()) * FULL_PADDED_STREAM_SITES_PER_ROW
     }

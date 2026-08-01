@@ -119,7 +119,7 @@ const MDOC_ATTRIBUTE_FIELD_IDS: MdocPrivateItemFieldIds = MdocPrivateItemFieldId
     element_value: 20,
 };
 const MDOC_MSO_SHA_STREAM_FIELD_ID: u32 = 0x4d53_0000;
-const MDOC_MSO_SHA_LOG_SIZE: u32 = 13;
+const MDOC_MSO_SHA_LOG_SIZE: u32 = 12;
 const MDOC_MSO_SHA_NAMESPACE: &str = "mdoc/mso-sha";
 const MDOC_ATTRIBUTE_SHA_NAMESPACE: &str = "mdoc/attribute-sha/0";
 const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
@@ -2732,7 +2732,8 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     }
     let mut mldsa_keccak_service =
         KeccakServiceProver::new(keccak_shapes, keccak_streams, mldsa_keccak_handle.clone());
-    // The fixed-width padded stream uses one namespaced SHA instance.
+    // The fixed-width padded stream uses one namespaced SHA proof instance and
+    // its fixed digest bridge.
     let mut attribute_sha =
         Sha256Prover::new(&attribute_sha_witness, TS13_DEMO_ATTRIBUTE_SHA_LOG_N_ROWS)
             .with_instance_namespace(MDOC_ATTRIBUTE_SHA_NAMESPACE)
@@ -2855,6 +2856,14 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     if expected_log != TS13_DEMO_ATTRIBUTE_SHA_LOG_N_ROWS {
         return Err(Error::Verify(
             "mdoc attribute SHA schedule does not match the fixed profile".to_string(),
+        ));
+    }
+    let mso_sha_padded_len = checked_sha256_padded_len(TS13_DEMO_MSO_PAYLOAD_BYTES)
+        .ok_or_else(|| Error::Verify("mdoc private MSO SHA padded length overflows".to_string()))?;
+    let mso_sha_blocks = mso_sha_padded_len / stwo_sha256::constants::BLOCK_BYTES;
+    if min_log_size(mso_sha_blocks) != MDOC_MSO_SHA_LOG_SIZE {
+        return Err(Error::Verify(
+            "mdoc MSO SHA schedule does not match the fixed profile".to_string(),
         ));
     }
     if !proof.revocation_mldsa.has_expected_shape(false) {
@@ -3004,8 +3013,6 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     .with_digest_handle(attribute_digest.clone())
     .with_field_handle(attribute_exposure(), attribute_field.clone())
     .with_shared_tables(sha_table_relations.clone());
-    let mso_sha_padded_len = checked_sha256_padded_len(TS13_DEMO_MSO_PAYLOAD_BYTES)
-        .ok_or_else(|| Error::Verify("mdoc private MSO SHA padded length overflows".to_string()))?;
     let mut mso_sha = Sha256Verifier::new(
         MDOC_MSO_SHA_LOG_SIZE,
         proof.mso_sha_interaction_claim.clone(),
@@ -3308,6 +3315,16 @@ mod tests {
     const TEST_VERIFY_AT: i64 = 1_798_761_600;
     const TEST_REVOCATION_EPOCH: u32 = 17;
     const TEST_CIRCUIT_HASH: [u8; 32] = crate::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH;
+
+    fn committed_cells(layout: &TreeLayout) -> usize {
+        layout
+            .preprocessed
+            .iter()
+            .chain(&layout.trace)
+            .chain(&layout.interaction)
+            .map(|log_size| 1usize << log_size)
+            .sum()
+    }
 
     fn test_public_input(
         transcript: &[u8],
@@ -3837,5 +3854,69 @@ mod tests {
             layout.interaction,
             vec![MDOC_REVOCATION_RANGE_LOG_SIZE; 12 * SECURE_EXTENSION_DEGREE]
         );
+    }
+
+    #[test]
+    fn sha_profile_uses_40_mso_blocks_at_log_12() {
+        const BLOCK_BYTES: usize = stwo_sha256::constants::BLOCK_BYTES;
+        const MSO_BLOCKS: usize = 40;
+        const ITEM_BLOCKS: usize = 2;
+        const ITEM_PADDED_BYTES: usize = TS13_DEMO_ITEM_PADDED_BYTES as usize;
+        const EXPECTED_MSO_CELLS: usize = 1_238_096;
+        const EXPECTED_ITEM_CELLS: usize = 78_416;
+        const EXPECTED_SHARED_TABLE_CELLS: usize = 4_128;
+        const EXPECTED_TOTAL_CELLS: usize = 1_320_640;
+
+        let mso_bytes = vec![0u8; TS13_DEMO_MSO_PAYLOAD_BYTES];
+        let mso_witness = compute_sha256_witness(&mso_bytes);
+        assert_eq!(mso_witness.padding.padded.len(), MSO_BLOCKS * BLOCK_BYTES);
+        assert_eq!(mso_witness.blocks.len(), MSO_BLOCKS);
+        assert_eq!(min_log_size(mso_witness.blocks.len()), 12);
+        assert_eq!(MDOC_MSO_SHA_LOG_SIZE, 12);
+
+        let item_bytes = vec![0u8; BLOCK_BYTES];
+        let item_witness = compute_sha256_witness(&item_bytes);
+        assert_eq!(item_witness.padding.padded.len(), ITEM_PADDED_BYTES);
+        assert_eq!(item_witness.blocks.len(), ITEM_BLOCKS);
+        assert_eq!(min_log_size(item_witness.blocks.len()), 8);
+        assert_eq!(TS13_DEMO_ATTRIBUTE_SHA_LOG_N_ROWS, 8);
+
+        let shared = SharedShaTableRelations::new();
+        let mso_sha = Sha256Prover::new(&mso_witness, MDOC_MSO_SHA_LOG_SIZE)
+            .with_instance_namespace(MDOC_MSO_SHA_NAMESPACE)
+            .with_digest_handle(SharedDigestRelation::new())
+            .with_field_handle(
+                FieldExposure::from_full_padded_stream(
+                    MDOC_MSO_SHA_STREAM_FIELD_ID,
+                    mso_witness.padding.padded.len(),
+                ),
+                SharedFieldRelation::new(),
+            )
+            .with_shared_tables(shared.clone());
+        let item_sha = Sha256Prover::new(&item_witness, TS13_DEMO_ATTRIBUTE_SHA_LOG_N_ROWS)
+            .with_instance_namespace(MDOC_ATTRIBUTE_SHA_NAMESPACE)
+            .with_digest_handle(SharedDigestRelation::new())
+            .with_field_handle(attribute_exposure(), SharedFieldRelation::new())
+            .with_shared_tables(shared.clone());
+        let tables = ShaTablesProver::new(
+            ShaTableMultiplicities::from_consumers(&[&item_witness, &mso_witness]),
+            shared,
+        );
+
+        let mso_layout = mso_sha.layout();
+        assert_eq!(mso_layout.preprocessed, [vec![12; 10], vec![4]].concat());
+        assert_eq!(mso_layout.trace, [vec![12; 260], vec![4; 32]].concat());
+        assert_eq!(mso_layout.interaction, [vec![12; 32], vec![4; 36]].concat());
+        assert_eq!(committed_cells(&mso_layout), EXPECTED_MSO_CELLS);
+
+        let item_cells = committed_cells(&item_sha.layout());
+        let table_cells = committed_cells(&tables.layout());
+        assert_eq!(item_cells, EXPECTED_ITEM_CELLS);
+        assert_eq!(table_cells, EXPECTED_SHARED_TABLE_CELLS);
+        assert_eq!(
+            committed_cells(&mso_layout) + item_cells + table_cells,
+            EXPECTED_TOTAL_CELLS
+        );
+        assert!(EXPECTED_TOTAL_CELLS <= 1_500_000);
     }
 }

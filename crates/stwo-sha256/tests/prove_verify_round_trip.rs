@@ -2,11 +2,11 @@
 //!
 //! Each test in this file exercises the full pipeline end-to-end:
 //!
-//! - The entire 5-component composition (`Sha256Eval` consumer +
-//!   4 `Range_k` producers).
-//! - The preprocessed-trace commitment (14 columns).
-//! - The base-trace commitment (`Layout::TOTAL_COLS` SHA-256 columns +
-//!   4 producer multiplicity columns).
+//! - The six-component composition: the main SHA evaluator, the digest
+//!   bridge, and four `Range_k` producers.
+//! - The preprocessed-trace commitment (15 columns).
+//! - The base-trace commitment: `Layout::TOTAL_COLS` main columns, 32 digest
+//!   bridge columns, and four producer multiplicity columns.
 //! - The LogUp interaction trace across every component, with
 //!   consumer ⇄ producer sums totalling zero — the soundness backbone.
 //! - The Blake2s channel + PCS commitment scheme + FRI proof flow.
@@ -68,31 +68,17 @@ fn prove_and_verify_multi_block() {
     assert!(n_blocks >= 2, "test message must span multiple blocks");
 }
 
-/// Long-message round-trip — the only end-to-end test whose SHA-256
-/// component trace exceeds the SIMD floor (`log_n_rows > LOG_N_LANES`).
+/// Long-message round-trip at log size 13.
 ///
-/// All other round-trip tests fit inside `2^LOG_N_LANES = 16` rows so they
-/// run at the SIMD minimum. A regression that only fires past the floor
-/// — for example, a cross-row mask computation that mis-handles the
-/// `bit_reverse_index` walk when `log_n_rows ≠ LOG_N_LANES`, or a
-/// component allocator that mis-orders preprocessed IDs when the SHA-256
-/// component is larger than the smaller producer tables — would slip
-/// through the other coverage. A 4 096-byte message produces ~65 padded
-/// blocks ⇒ `log_n_rows = 7`, three bits above the floor.
+/// This case checks cross-row masks and component allocation when the main
+/// trace is much larger than the range tables and digest bridge.
 #[ignore = "slow: builds a real release STARK proof; run in release with --ignored"]
 #[test]
 fn prove_and_verify_long_message() {
-    // 4 096 bytes ⇒ 4 096 + 9 = 4 105 padding bytes ⇒ ceil(4 105 / 64) =
-    // 65 padded blocks ⇒ min_log_size = 7 (next power of two ≥ 65 is 128).
+    // The message needs 65 padded blocks. Each block uses 67 rows. The
+    // strictly larger trace domain has 8 192 rows, so its log size is 13.
     let n_blocks = prove_and_verify(&[0x55u8; 4096]);
-    // SIMD floor is `LOG_N_LANES = 4`. `min_log_size` clamps to that
-    // floor, so a strict inequality pins that this message genuinely
-    // exceeds the floor rather than being clamped up to it.
-    const SIMD_FLOOR_LOG: u32 = 4;
-    assert!(
-        min_log_size(n_blocks) > SIMD_FLOOR_LOG,
-        "long-message test must exceed the SIMD-floor log size (n_blocks = {n_blocks})",
-    );
+    assert_eq!(min_log_size(n_blocks), 13);
 }
 
 /// Padding-boundary round-trips — every FIPS 180-4 §5.1.1 edge case that
@@ -211,7 +197,7 @@ fn rejects_out_of_range_carry_witness_mutation() {
     }
 }
 
-/// Carry-out-of-range soundness coverage for the four new `Range_k`
+/// Carry-out-of-range soundness coverage for the four `Range_k`
 /// channels (`Range_2`/`Range_4`/`Range_5`/`Range_8`). Bumping any one
 /// producer's claimed sum makes the per-component sums no longer total zero,
 /// so the `LogupSumNonZero` gate rejects.
@@ -238,7 +224,7 @@ fn verify_rejects_range_k_claimed_sum_mutations() {
     // range mutations.
     verify_sha256_proof(&proof).expect("baseline proof must verify");
 
-    // For each of the four `Range_k` producers (index 0..4 corresponds
+    // For each of the four `Range_k` producers (indexes 0 through 3 correspond
     // to `RANGE_TABLES` order: Range_2, Range_4, Range_5, Range_8),
     // bump that producer's claimed sum and assert the soundness gate
     // rejects. Iterating in-place catches a regression on any one

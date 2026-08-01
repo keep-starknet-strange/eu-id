@@ -33,15 +33,13 @@ fn sha_air_uses_typed_relation_multiplicities() {
 
 /// Pin `Layout::TOTAL_COLS` to the documented total.
 ///
-/// Algebraic one-row-per-round layout: enabler (1) + `W` limbs (2) +
-/// W bits (32) + round family (216) + schedule family (70) +
-/// `is_first_block` (1) + `h_in` (16) + finalization
-/// carries (16) + `h_out` (16) + `is_last_block` (1) + digest bytes (32) +
-/// padding-role (33) + `enabler_step` (1) = 437.
+/// Three-seed-row layout: enabler (1) + `W` limbs (2) + W bits (32) +
+/// round family (88) + schedule family (70) + finalization carries (16) +
+/// `h_out` (16) + `is_last_block` (1) + padding-role (33) = 259.
 #[test]
-fn total_cols_equals_437() {
+fn total_cols_equals_259() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 437);
+    assert_eq!(Layout::TOTAL_COLS, 259);
     assert_eq!(PADDING_ROW_COLS, 33);
     assert_eq!(DIGEST_BYTES, 32);
 }

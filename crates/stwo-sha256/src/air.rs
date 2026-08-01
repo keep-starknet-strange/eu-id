@@ -32,13 +32,16 @@ use crate::components::{
     RangeKEval, Sha256Relations, RANGE_TABLES,
 };
 use crate::constraints::{Sha256Eval, LOGUP_BATCH};
+use crate::digest_bridge::{
+    digest_bridge_lookups, DigestBridgeEval, DIGEST_BRIDGE_BASE_COLS, DIGEST_BRIDGE_LOG_SIZE,
+};
 use crate::field_exposure::FieldExposure;
 use crate::interaction::{
     generate_consumer_interaction_trace, generate_interaction_trace, sha_lookups_per_row,
     InteractionClaim,
 };
 use crate::multiplicities::range_k_multiplicities;
-use crate::preprocessed::{generate_preprocessed_trace, preprocessed_log_sizes, LOG_SIZE_16};
+use crate::preprocessed::{generate_preprocessed_trace, preprocessed_log_sizes};
 use crate::relations::SharedShaTableRelations;
 use crate::trace::Layout;
 use crate::types::Sha256Witness;
@@ -75,6 +78,7 @@ fn layout(
 pub fn flatten_claimed_sums(claim: &InteractionClaim) -> Vec<QM31> {
     let mut out = Vec::new();
     out.push(claim.sha256.claimed_sum);
+    out.push(claim.digest_bridge.claimed_sum);
     out.extend(claim.range.iter().map(|c| c.claimed_sum));
     out
 }
@@ -286,7 +290,12 @@ impl Air for Sha256Prover<'_> {
 
 impl AirProver for Sha256Prover<'_> {
     fn max_log_size(&self) -> u32 {
-        LOG_SIZE_16.max(self.log_n_rows)
+        let table_max = if self.uses_shared_tables() {
+            DIGEST_BRIDGE_LOG_SIZE
+        } else {
+            range_log_size(crate::components::RangeKind::Range8)
+        };
+        table_max.max(self.log_n_rows)
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
@@ -654,10 +663,8 @@ fn mix_instance_namespace(channel: &mut Blake2sChannel, instance_namespace: &str
 
 struct Stmt0 {
     log_n_rows: u32,
-    /// Whether the cross-component digest provider is active. Mixed into the
-    /// transcript so the prover and verifier agree on the lookup count (and
-    /// hence the interaction-column layout); a mismatch reshapes the
-    /// interaction tree and the verifier rejects.
+    /// Whether the cross-component digest provider is active. The transcript
+    /// binds the digest relation topology and its claim.
     expose_digest: bool,
     n_field_columns: u32,
     n_field_yields: u32,
@@ -720,9 +727,8 @@ fn mult_col_to_eval(
     CircleEvaluation::new(domain, col)
 }
 
-/// Build the base trace: the `Sha256Eval` columns first
-/// (`TOTAL_COLS` × `log_n_rows`), then one producer multiplicity column per
-/// table, in `component_provers` order.
+/// Build the base trace in component order: the `Sha256Eval` columns, the
+/// fixed digest bridge, and one producer multiplicity column per range table.
 fn build_base_trace(
     witness: &Sha256Witness,
     log_n_rows: u32,
@@ -743,6 +749,11 @@ fn build_base_trace(
         base_trace.push(CircleEvaluation::new(sha_domain, col));
     }
 
+    let bridge_domain = CanonicCoset::new(DIGEST_BRIDGE_LOG_SIZE).circle_domain();
+    for col in crate::digest_bridge::generate_digest_bridge_trace(witness) {
+        base_trace.push(CircleEvaluation::new(bridge_domain, col));
+    }
+
     if !include_table_providers {
         return base_trace;
     }
@@ -755,9 +766,8 @@ fn build_base_trace(
     base_trace
 }
 
-/// log_sizes of every base-trace column in commit order. The Sha256Eval
-/// block first (`TOTAL_COLS` × `log_n_rows`), then one mult col per
-/// producer component.
+/// Return each base-trace log size in commit order. The order is the main SHA
+/// trace, the fixed digest bridge, and the range-table producer columns.
 fn base_trace_log_sizes(
     log_n_rows: u32,
     n_field_cols: usize,
@@ -766,6 +776,10 @@ fn base_trace_log_sizes(
     // Base columns + the dynamic credential-field byte tail, all at the
     // trace's `log_n_rows`. Empty exposure leaves this at `Layout::TOTAL_COLS`.
     let mut out = vec![log_n_rows; Layout::total_cols_with_fields(n_field_cols)];
+    out.extend(std::iter::repeat_n(
+        DIGEST_BRIDGE_LOG_SIZE,
+        DIGEST_BRIDGE_BASE_COLS,
+    ));
     if !include_table_providers {
         return out;
     }
@@ -793,13 +807,14 @@ fn interaction_trace_log_sizes(
     // base-field columns at the same log_size.
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
-    // The SHA consumer has 58 base sites. The optional digest provider adds
-    // one site. The padded-stream provider adds 64 sites.
-    let sha_cols = num_batched_cols(
-        sha_lookups_per_row(expose_digest, field_exposure),
-        LOGUP_BATCH,
-    );
+    // Main SHA consumer, then the fixed 16-row digest bridge.
+    let sha_cols = num_batched_cols(sha_lookups_per_row(field_exposure), LOGUP_BATCH);
     out.extend(std::iter::repeat_n(log_n_rows, sha_cols * EXT));
+    let bridge_cols = num_batched_cols(digest_bridge_lookups(expose_digest), LOGUP_BATCH);
+    out.extend(std::iter::repeat_n(
+        DIGEST_BRIDGE_LOG_SIZE,
+        bridge_cols * EXT,
+    ));
     if !include_table_providers {
         return out;
     }
@@ -814,7 +829,9 @@ fn interaction_trace_log_sizes(
 }
 
 fn consumer_preprocessed_log_sizes(log_n_rows: u32) -> Vec<u32> {
-    std::iter::repeat_n(log_n_rows, 10).collect()
+    let mut out: Vec<_> = std::iter::repeat_n(log_n_rows, 10).collect();
+    out.push(DIGEST_BRIDGE_LOG_SIZE);
+    out
 }
 
 fn generated_preprocessed_for_ids(
@@ -850,7 +867,8 @@ const fn num_batched_cols(n_lookups: usize, batch: usize) -> usize {
 /// Aggregate of every `FrameworkComponent` in the proof, in commit order.
 struct Sha256Components {
     sha256: FrameworkComponent<Sha256Eval>,
-    range: Vec<FrameworkComponent<RangeKEval>>, // 4
+    digest_bridge: FrameworkComponent<DigestBridgeEval>,
+    range: Vec<FrameworkComponent<RangeKEval>>,
 }
 
 impl Sha256Components {
@@ -875,7 +893,6 @@ impl Sha256Components {
             Sha256Eval {
                 log_size: log_n_rows,
                 relations: relations.clone(),
-                expose_digest,
                 field_exposure: field_exposure.clone(),
                 instance_namespace: instance_namespace.to_string(),
                 claim_mask_beta,
@@ -883,7 +900,17 @@ impl Sha256Components {
             claim.sha256.claimed_sum,
         );
 
-        let mut range = Vec::with_capacity(4);
+        let digest_bridge = FrameworkComponent::new(
+            allocator,
+            DigestBridgeEval {
+                relations: relations.clone(),
+                expose_digest,
+                instance_namespace: instance_namespace.to_string(),
+            },
+            claim.digest_bridge.claimed_sum,
+        );
+
+        let mut range = Vec::with_capacity(RANGE_TABLES.len());
         if include_table_providers {
             for (i, &kind) in RANGE_TABLES.iter().enumerate() {
                 range.push(FrameworkComponent::new(
@@ -899,7 +926,11 @@ impl Sha256Components {
             }
         }
 
-        Self { sha256, range }
+        Self {
+            sha256,
+            digest_bridge,
+            range,
+        }
     }
 
     /// Borrow every component as `dyn Component`, in commit order — the
@@ -907,6 +938,7 @@ impl Sha256Components {
     fn components(&self) -> Vec<&dyn Component> {
         let mut out: Vec<&dyn Component> = Vec::new();
         out.push(&self.sha256);
+        out.push(&self.digest_bridge);
         out.extend(self.range.iter().map(|c| c as &dyn Component));
         out
     }
@@ -916,6 +948,7 @@ impl Sha256Components {
     fn component_provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         let mut out: Vec<&dyn ComponentProver<SimdBackend>> = Vec::new();
         out.push(&self.sha256);
+        out.push(&self.digest_bridge);
         out.extend(
             self.range
                 .iter()
@@ -955,10 +988,13 @@ mod tests {
         assert_eq!(first.interaction, second.interaction);
         assert_eq!(
             first.trace.len(),
-            Layout::TOTAL_COLS + 1 + crate::components::RANGE_TABLES.len()
+            Layout::TOTAL_COLS
+                + 1
+                + crate::constants::DIGEST_BYTES
+                + crate::components::RANGE_TABLES.len()
         );
         assert_eq!(
-            crate::interaction::sha_lookups_per_row(false, &one_block),
+            crate::interaction::sha_lookups_per_row(&one_block),
             crate::interaction::SHA_LOOKUPS_PER_ROW_BASE
                 + crate::field_exposure::FULL_PADDED_STREAM_SITES_PER_ROW,
         );
