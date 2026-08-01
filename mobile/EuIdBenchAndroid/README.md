@@ -28,5 +28,19 @@ gcloud firebase test android run \
   --test-targets class com.kss.euid.zk.sdk.Ts13MobileBenchmarkInstrumentedTest
 ```
 
+Use Firebase instrumentation arguments to request a worker count or an explicit
+CPU mask. Firebase names the flag `--environment-variables` and passes its
+values to AndroidJUnitRunner. Use `+` between CPU identifiers because the flag
+uses commas between arguments:
+
+```bash
+--environment-variables rayon_threads=6,affinity_cpu_ids=4+5+6+7
+```
+
+The CPU mask applies only to the benchmark thread. The proof thread and its
+workers inherit the mask. The SDK API does not expose affinity controls.
+
 The test logs one `Ts13MobileBenchmark` JSON record. The record includes prove
-time, verify time, proof size, processor count, and peak resident memory.
+time, verify time, proof size, the requested and actual worker counts, proof and
+worker stack sizes, phase memory samples, CPU topology, the effective CPU mask,
+and peak resident memory.

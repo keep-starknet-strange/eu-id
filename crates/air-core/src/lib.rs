@@ -406,6 +406,15 @@ enum ProveTimingMode {
     Json,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct ProcessMemoryKib {
+    /// Current resident memory on Linux, in KiB.
+    pub vm_rss: Option<u64>,
+    /// Peak resident memory on Linux, in KiB.
+    pub vm_hwm: Option<u64>,
+}
+
 fn prove_timing_mode() -> ProveTimingMode {
     prove_timing_mode_for(
         std::env::var_os("EUID_PROVE_TIMING").is_some(),
@@ -423,9 +432,49 @@ fn prove_timing_mode_for(json: bool, legacy: bool) -> ProveTimingMode {
     }
 }
 
-fn timing_json(scope: &str, phase: &str, elapsed_us: u128) -> String {
+fn parse_process_memory_kib(status: &str) -> ProcessMemoryKib {
+    fn field(status: &str, name: &str) -> Option<u64> {
+        status.lines().find_map(|line| {
+            let (field_name, value) = line.split_once(':')?;
+            if field_name != name {
+                return None;
+            }
+            let mut parts = value.split_whitespace();
+            let kib = parts.next()?.parse().ok()?;
+            if parts.next() == Some("kB") && parts.next().is_none() {
+                Some(kib)
+            } else {
+                None
+            }
+        })
+    }
+
+    ProcessMemoryKib {
+        vm_rss: field(status, "VmRSS"),
+        vm_hwm: field(status, "VmHWM"),
+    }
+}
+
+/// Read current and peak resident memory from Linux process status.
+///
+/// Both values are absent on other systems or when the status file is not
+/// readable.
+#[doc(hidden)]
+pub fn process_memory_kib() -> ProcessMemoryKib {
+    std::fs::read_to_string("/proc/self/status")
+        .map(|status| parse_process_memory_kib(&status))
+        .unwrap_or_default()
+}
+
+fn optional_number(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_string(), |value| value.to_string())
+}
+
+fn timing_json(scope: &str, phase: &str, elapsed_us: u128, memory: ProcessMemoryKib) -> String {
+    let vm_rss_kib = optional_number(memory.vm_rss);
+    let vm_hwm_kib = optional_number(memory.vm_hwm);
     format!(
-        r#"EUID_PROVE_TIMING {{"scope":"{scope}","phase":"{phase}","elapsed_us":{elapsed_us}}}"#
+        r#"EUID_PROVE_TIMING {{"scope":"{scope}","phase":"{phase}","elapsed_us":{elapsed_us},"vm_rss_kib":{vm_rss_kib},"vm_hwm_kib":{vm_hwm_kib}}}"#
     )
 }
 
@@ -454,7 +503,12 @@ fn report_prove_phase(timing: ProveTimingMode, name: &str, t_last: &mut std::tim
             eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
         }
         ProveTimingMode::Json => {
-            emit_timing_line(&timing_json("air_core", name, t_last.elapsed().as_micros()));
+            emit_timing_line(&timing_json(
+                "air_core",
+                name,
+                t_last.elapsed().as_micros(),
+                process_memory_kib(),
+            ));
         }
     }
     *t_last = std::time::Instant::now();
@@ -485,13 +539,21 @@ fn report_stwo_spans(csv: &str, stark_total_us: u128) {
         .filter(|(phase, _)| *phase != "composition_polynomial_generation")
         .map(|(_, elapsed_us)| *elapsed_us)
         .sum::<u128>();
+    // STWO exports these spans after proof generation. A span cannot include a
+    // memory sample from its phase.
     for (phase, elapsed_us) in spans {
-        emit_timing_line(&timing_json("stwo", phase, elapsed_us));
+        emit_timing_line(&timing_json(
+            "stwo",
+            phase,
+            elapsed_us,
+            ProcessMemoryKib::default(),
+        ));
     }
     emit_timing_line(&timing_json(
         "stwo",
         "fri_opening_and_unspanned_remainder",
         stark_total_us.saturating_sub(separated_us),
+        ProcessMemoryKib::default(),
     ));
 }
 
@@ -670,6 +732,7 @@ pub fn prove_with_post_interaction(
             "air_core",
             "total",
             t_start.elapsed().as_micros(),
+            process_memory_kib(),
         )),
     }
     result.map(|proof| (proof, post_interaction_payloads))
@@ -1157,8 +1220,16 @@ mod tests {
             ProveTimingMode::Disabled
         );
         assert_eq!(
-            timing_json("air_core", "tree0_write", 17),
-            r#"EUID_PROVE_TIMING {"scope":"air_core","phase":"tree0_write","elapsed_us":17}"#
+            timing_json(
+                "air_core",
+                "tree0_write",
+                17,
+                ProcessMemoryKib {
+                    vm_rss: Some(1024),
+                    vm_hwm: Some(2048),
+                },
+            ),
+            r#"EUID_PROVE_TIMING {"scope":"air_core","phase":"tree0_write","elapsed_us":17,"vm_rss_kib":1024,"vm_hwm_kib":2048}"#
         );
         let spans = parse_stwo_span_csv(
             "Label,Duration_ms\nComposition,2.5\nEvaluateOutOfDomain,1\nFRIQuotients,3.25\nQueries POW,0.5\n",
@@ -1174,6 +1245,21 @@ mod tests {
         );
         let separated_us: u128 = spans.iter().map(|(_, elapsed)| elapsed).sum();
         assert_eq!(10_000u128.saturating_sub(separated_us), 2_750);
+    }
+
+    #[test]
+    fn process_memory_parser_accepts_linux_status_units() {
+        assert_eq!(
+            parse_process_memory_kib("Name:\ttest\nVmHWM:\t2048 kB\nVmRSS:\t1024 kB\n"),
+            ProcessMemoryKib {
+                vm_rss: Some(1024),
+                vm_hwm: Some(2048),
+            }
+        );
+        assert_eq!(
+            parse_process_memory_kib("VmRSS:\tinvalid kB\nVmHWM:\t7 MB\nVmRSS:\t1024 kB extra\n"),
+            ProcessMemoryKib::default()
+        );
     }
 
     struct FingerprintOnlyProver {

@@ -6,7 +6,8 @@ pub use ts13_demo::{IdentityError, IdentityStatement, IdentityWitness};
 
 uniffi::setup_scaffolding!();
 
-const PROOF_STACK_SIZE: usize = 64 * 1024 * 1024;
+const PROOF_THREAD_STACK_SIZE_BYTES: usize = 64 * 1024 * 1024;
+const PROOF_WORKER_STACK_SIZE_BYTES: usize = 64 * 1024 * 1024;
 
 fn with_proof_stack<T, F>(failure: IdentityError, work: F) -> Result<T, IdentityError>
 where
@@ -15,10 +16,10 @@ where
 {
     let handle = std::thread::Builder::new()
         .name("euid-zk".to_string())
-        .stack_size(PROOF_STACK_SIZE)
+        .stack_size(PROOF_THREAD_STACK_SIZE_BYTES)
         .spawn(move || {
             let pool = rayon::ThreadPoolBuilder::new()
-                .stack_size(PROOF_STACK_SIZE)
+                .stack_size(PROOF_WORKER_STACK_SIZE_BYTES)
                 .thread_name(|index| format!("euid-zk-worker-{index}"))
                 .build()
                 .map_err(|_| failure)?;
@@ -35,6 +36,10 @@ pub fn prove_identity(
     witness: IdentityWitness,
 ) -> Result<Vec<u8>, IdentityError> {
     with_proof_stack(IdentityError::ProofGenerationFailed, move || {
+        eu_id_prover::report_prove_runtime_configuration(
+            PROOF_THREAD_STACK_SIZE_BYTES,
+            PROOF_WORKER_STACK_SIZE_BYTES,
+        );
         ts13_demo::prove_identity_inner(&statement, &witness)
     })
 }

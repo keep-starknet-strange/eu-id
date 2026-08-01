@@ -7,8 +7,12 @@ import android.system.Os
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.sun.jna.Library
+import com.sun.jna.Memory
+import com.sun.jna.Native
 import java.io.File
 import java.util.concurrent.TimeUnit
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -64,75 +68,282 @@ class Ts13MobileBenchmarkInstrumentedTest {
                 witnessFixture.getString("revocationSignature").decodeHex(),
         )
 
-        val timingFile = File(
-            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
-            PROVE_TIMING_FILE,
-        )
-        assertTrue(!timingFile.exists() || timingFile.delete())
-        Os.setenv(PROVE_TIMING_ENV, "1", true)
-        Os.setenv(PROVE_TIMING_FILE_ENV, timingFile.absolutePath, true)
-        val proveStarted = SystemClock.elapsedRealtimeNanos()
-        val proof = try {
-            proveIdentity(statement, witness)
+        val arguments = InstrumentationRegistry.getArguments()
+        val requestedRayonThreads = arguments.getString(RAYON_THREADS_ARGUMENT)?.let {
+            parseRayonThreads(it)
+        }
+        val requestedAffinity = arguments.getString(AFFINITY_CPU_IDS_ARGUMENT)?.let {
+            parseCpuList(it)
+        }
+        val topology = readCpuTopology()
+        require(
+            requestedAffinity == null || topology.allowed.cpuIds.containsAll(requestedAffinity),
+        ) { "Requested affinity contains a CPU that is not allowed" }
+
+        val previousRayonThreads = Os.getenv(RAYON_THREADS_ENV)
+        var affinityApplied = false
+        try {
+            requestedRayonThreads?.let {
+                Os.setenv(RAYON_THREADS_ENV, it.toString(), true)
+            }
+            requestedAffinity?.let {
+                setCurrentThreadAffinity(it)
+                affinityApplied = true
+            }
+            val effectiveAffinity = readCurrentThreadAllowedCpus()
+            requestedAffinity?.let { assertEquals(it, effectiveAffinity.cpuIds) }
+
+            val timingFile = File(
+                InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+                PROVE_TIMING_FILE,
+            )
+            assertTrue(!timingFile.exists() || timingFile.delete())
+            val previousProveTiming = Os.getenv(PROVE_TIMING_ENV)
+            val previousProveTimingFile = Os.getenv(PROVE_TIMING_FILE_ENV)
+            val proveStarted = SystemClock.elapsedRealtimeNanos()
+            val proof = try {
+                Os.setenv(PROVE_TIMING_ENV, "1", true)
+                Os.setenv(PROVE_TIMING_FILE_ENV, timingFile.absolutePath, true)
+                proveIdentity(statement, witness)
+            } finally {
+                runCleanup(
+                    { restoreEnvironment(PROVE_TIMING_FILE_ENV, previousProveTimingFile) },
+                    { restoreEnvironment(PROVE_TIMING_ENV, previousProveTiming) },
+                )
+            }
+            val proveMs = elapsedMilliseconds(proveStarted)
+            val phaseTimings = timingFile.useLines { lines ->
+                lines
+                    .filter { it.isNotBlank() }
+                    .map { line ->
+                        require(line.startsWith(PROVE_TIMING_PREFIX))
+                        JSONObject(line.removePrefix(PROVE_TIMING_PREFIX))
+                    }.toList()
+            }
+            val runtimeConfiguration = phaseTimings.single {
+                it.getString("scope") == "sdk" &&
+                    it.getString("phase") == "runtime_configuration"
+            }
+            val actualRayonThreads = runtimeConfiguration.getInt("rayon_threads")
+            val proofThreadStackBytes =
+                runtimeConfiguration.getLong("proof_thread_stack_bytes")
+            val proofWorkerStackBytes =
+                runtimeConfiguration.getLong("proof_worker_stack_bytes")
+            assertTrue(actualRayonThreads > 0)
+            assertTrue(proofThreadStackBytes > 0)
+            assertTrue(proofWorkerStackBytes > 0)
+            requestedRayonThreads?.let { assertEquals(it, actualRayonThreads) }
+            assertTrue(
+                phaseTimings.any {
+                    it.getString("scope") == "sdk" && it.getString("phase") == "total"
+                },
+            )
+            assertTrue(
+                phaseTimings.any {
+                    it.getString("scope") == "eu_id_prover" &&
+                        it.getString("phase") == "witness_generation"
+                },
+            )
+            val airCoreTimings = phaseTimings.filter {
+                it.getString("scope") == "air_core"
+            }
+            assertTrue(airCoreTimings.any { it.getString("phase") == "total" })
+            assertTrue(
+                airCoreTimings.all {
+                    !it.isNull("vm_rss_kib") && !it.isNull("vm_hwm_kib")
+                },
+            )
+
+            assertTrue(proof.size >= ENVELOPE_HEADER_BYTES)
+            assertArrayEquals(ENVELOPE_MAGIC, proof.copyOfRange(0, ENVELOPE_MAGIC.size))
+            assertEquals(ENVELOPE_VERSION, readU16Le(proof, 8))
+            assertArrayEquals(circuitHash, proof.copyOfRange(10, 42))
+            val bodyCapacity = readU32Le(proof, 42)
+            assertEquals(ENVELOPE_HEADER_BYTES.toLong() + bodyCapacity, proof.size.toLong())
+
+            val verifyStarted = SystemClock.elapsedRealtimeNanos()
+            verifyIdentity(statement, proof)
+            val verifyMs = elapsedMilliseconds(verifyStarted)
+            val vmHwmKib = vmHwmKib()
+            assertTrue(vmHwmKib > 0)
+
+            val result = JSONObject()
+                .put("event", "ts13_mobile_benchmark_v1")
+                .put("model", Build.MODEL)
+                .put("api", Build.VERSION.SDK_INT)
+                .put("available_processors", Runtime.getRuntime().availableProcessors())
+                .put("requested_rayon_threads", requestedRayonThreads ?: JSONObject.NULL)
+                .put("actual_rayon_threads", actualRayonThreads)
+                .put("proof_thread_stack_bytes", proofThreadStackBytes)
+                .put("proof_worker_stack_bytes", proofWorkerStackBytes)
+                .put(
+                    "requested_affinity_cpu_ids",
+                    requestedAffinity?.let { JSONArray(it) } ?: JSONObject.NULL,
+                )
+                .put("cpu_topology", topology.toJson(effectiveAffinity))
+                .put("prove_ms", proveMs)
+                .put("verify_ms", verifyMs)
+                .put("envelope_bytes", proof.size)
+                .put("vm_hwm_kib", vmHwmKib)
+                .put("phase_timings", JSONArray(phaseTimings))
+            Log.i(LOG_TAG, result.toString())
+            assertTrue(timingFile.delete())
         } finally {
-            Os.unsetenv(PROVE_TIMING_ENV)
-            Os.unsetenv(PROVE_TIMING_FILE_ENV)
+            runCleanup(
+                {
+                    if (requestedRayonThreads != null) {
+                        restoreEnvironment(RAYON_THREADS_ENV, previousRayonThreads)
+                    }
+                },
+                {
+                    if (affinityApplied) {
+                        setCurrentThreadAffinity(topology.allowed.cpuIds)
+                    }
+                },
+            )
         }
-        val proveMs = elapsedMilliseconds(proveStarted)
-        val phaseTimings = timingFile.useLines { lines ->
-            lines
-                .filter { it.isNotBlank() }
-                .map { line ->
-                    require(line.startsWith(PROVE_TIMING_PREFIX))
-                    JSONObject(line.removePrefix(PROVE_TIMING_PREFIX))
-                }.toList()
+    }
+
+    private fun restoreEnvironment(name: String, previousValue: String?) {
+        if (previousValue == null) {
+            Os.unsetenv(name)
+        } else {
+            Os.setenv(name, previousValue, true)
         }
-        assertTrue(
-            phaseTimings.any {
-                it.getString("scope") == "sdk" && it.getString("phase") == "total"
+    }
+
+    private fun runCleanup(vararg actions: () -> Unit) {
+        var firstFailure: Throwable? = null
+        for (action in actions) {
+            try {
+                action()
+            } catch (failure: Throwable) {
+                if (firstFailure == null) {
+                    firstFailure = failure
+                } else {
+                    firstFailure.addSuppressed(failure)
+                }
+            }
+        }
+        firstFailure?.let { throw it }
+    }
+
+    private data class AllowedCpus(
+        val statusPath: String,
+        val specification: String,
+        val cpuIds: List<Int>,
+    )
+
+    private data class CpuInfo(
+        val id: Int,
+        val capacity: Long?,
+        val maximumFrequencyKhz: Long?,
+    )
+
+    private data class CpuTopology(
+        val onlineSource: String,
+        val onlineSpecification: String,
+        val onlineCpuIds: List<Int>,
+        val allowed: AllowedCpus,
+        val cpus: List<CpuInfo>,
+    ) {
+        fun toJson(effectiveAffinity: AllowedCpus): JSONObject = JSONObject()
+            .put("online_source", onlineSource)
+            .put("online_specification", onlineSpecification)
+            .put("online_cpu_ids", JSONArray(onlineCpuIds))
+            .put("allowed_status_path", allowed.statusPath)
+            .put("allowed_before_specification", allowed.specification)
+            .put("allowed_before_cpu_ids", JSONArray(allowed.cpuIds))
+            .put("allowed_during_specification", effectiveAffinity.specification)
+            .put("allowed_during_cpu_ids", JSONArray(effectiveAffinity.cpuIds))
+            .put(
+                "cpus",
+                JSONArray().apply {
+                    cpus.forEach { cpu ->
+                        put(
+                            JSONObject()
+                                .put("id", cpu.id)
+                                .put("capacity", cpu.capacity ?: JSONObject.NULL)
+                                .put(
+                                    "maximum_frequency_khz",
+                                    cpu.maximumFrequencyKhz ?: JSONObject.NULL,
+                                ),
+                        )
+                    }
+                },
+            )
+    }
+
+    private fun readCpuTopology(): CpuTopology {
+        val allowed = readCurrentThreadAllowedCpus()
+        val onlineFile = File(CPU_ONLINE_PATH)
+        val sysfsOnlineSpecification = runCatching { onlineFile.readText().trim() }
+            .getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+        val onlineSpecification = sysfsOnlineSpecification ?: allowed.specification
+        val onlineCpuIds = parseCpuList(onlineSpecification)
+        return CpuTopology(
+            onlineSource =
+                if (sysfsOnlineSpecification != null) {
+                    CPU_ONLINE_PATH
+                } else {
+                    allowed.statusPath
+                },
+            onlineSpecification = onlineSpecification,
+            onlineCpuIds = onlineCpuIds,
+            allowed = allowed,
+            cpus = onlineCpuIds.map { cpu ->
+                CpuInfo(
+                    id = cpu,
+                    capacity = readLong("/sys/devices/system/cpu/cpu$cpu/cpu_capacity"),
+                    maximumFrequencyKhz =
+                        readLong(
+                            "/sys/devices/system/cpu/cpu$cpu/cpufreq/cpuinfo_max_freq",
+                        ),
+                )
             },
         )
-        assertTrue(
-            phaseTimings.any {
-                it.getString("scope") == "eu_id_prover" &&
-                    it.getString("phase") == "witness_generation"
-            },
+    }
+
+    private fun readCurrentThreadAllowedCpus(): AllowedCpus {
+        val paths = listOf(
+            "/proc/thread-self/status",
+            "/proc/self/task/${Os.gettid()}/status",
+            "/proc/self/status",
         )
-        assertTrue(
-            phaseTimings.any {
-                it.getString("scope") == "air_core" && it.getString("phase") == "total"
-            },
-        )
-
-        assertTrue(proof.size >= ENVELOPE_HEADER_BYTES)
-        assertArrayEquals(ENVELOPE_MAGIC, proof.copyOfRange(0, ENVELOPE_MAGIC.size))
-        assertEquals(ENVELOPE_VERSION, readU16Le(proof, 8))
-        assertArrayEquals(circuitHash, proof.copyOfRange(10, 42))
-        val bodyCapacity = readU32Le(proof, 42)
-        assertEquals(ENVELOPE_HEADER_BYTES.toLong() + bodyCapacity, proof.size.toLong())
-
-        val verifyStarted = SystemClock.elapsedRealtimeNanos()
-        verifyIdentity(statement, proof)
-        val verifyMs = elapsedMilliseconds(verifyStarted)
-        val vmHwmKib = vmHwmKib()
-        assertTrue(vmHwmKib > 0)
-
-        val result = buildString {
-            append("{\"event\":\"ts13_mobile_benchmark_v1\"")
-            append(",\"model\":").append(JSONObject.quote(Build.MODEL))
-            append(",\"api\":").append(Build.VERSION.SDK_INT)
-            append(",\"available_processors\":")
-                .append(Runtime.getRuntime().availableProcessors())
-            append(",\"prove_ms\":").append(proveMs)
-            append(",\"verify_ms\":").append(verifyMs)
-            append(",\"envelope_bytes\":").append(proof.size)
-            append(",\"vm_hwm_kib\":").append(vmHwmKib)
-            append(",\"phase_timings\":")
-            append(phaseTimings.joinToString(prefix = "[", postfix = "]"))
-            append('}')
+        for (path in paths) {
+            val status = runCatching { File(path).readLines() }.getOrNull() ?: continue
+            val specification = status.firstNotNullOfOrNull { line ->
+                line
+                    .takeIf { it.startsWith("Cpus_allowed_list:") }
+                    ?.substringAfter(':')
+                    ?.trim()
+            } ?: continue
+            return AllowedCpus(path, specification, parseCpuList(specification))
         }
-        Log.i(LOG_TAG, result)
-        assertTrue(timingFile.delete())
+        error("Cpus_allowed_list is absent from the current thread status")
+    }
+
+    private fun readLong(path: String): Long? =
+        runCatching { File(path).readText().trim().toLong() }.getOrNull()
+
+    private fun setCurrentThreadAffinity(cpus: List<Int>) {
+        require(cpus.isNotEmpty()) { "Affinity CPU list must not be empty" }
+        check(Native.SIZE_T_SIZE == java.lang.Long.BYTES) {
+            "The benchmark supports only a 64-bit size_t"
+        }
+        Memory(CPU_SET_BYTES.toLong()).use { mask ->
+            mask.clear()
+            for (cpu in cpus) {
+                val offset = (cpu / 8).toLong()
+                val bit = 1 shl (cpu % 8)
+                mask.setByte(offset, ((mask.getByte(offset).toInt() and 0xff) or bit).toByte())
+            }
+            val result = libc.sched_setaffinity(0, CPU_SET_BYTES.toLong(), mask)
+            check(result == 0) {
+                "sched_setaffinity failed with errno ${Native.getLastError()}"
+            }
+        }
     }
 
     private fun String.decodeHex(): ByteArray {
@@ -166,6 +377,9 @@ class Ts13MobileBenchmarkInstrumentedTest {
     }
 
     private companion object {
+        const val AFFINITY_CPU_IDS_ARGUMENT = "affinity_cpu_ids"
+        const val CPU_ONLINE_PATH = "/sys/devices/system/cpu/online"
+        const val CPU_SET_BYTES = CPU_SET_MAX_CPUS / 8
         const val FIXTURE_ASSET = "ts13_mobile_benchmark_fixture_v1.json"
         const val FIXTURE_SCHEMA = "euid-ts13-mobile-fixture-v1"
         const val LOG_TAG = "Ts13MobileBenchmark"
@@ -173,6 +387,8 @@ class Ts13MobileBenchmarkInstrumentedTest {
         const val PROVE_TIMING_FILE_ENV = "EUID_PROVE_TIMING_FILE"
         const val PROVE_TIMING_FILE = "ts13-prove-timing.jsonl"
         const val PROVE_TIMING_PREFIX = "EUID_PROVE_TIMING "
+        const val RAYON_THREADS_ARGUMENT = "rayon_threads"
+        const val RAYON_THREADS_ENV = "RAYON_NUM_THREADS"
         const val PRIVACY_CLAIM =
             "public-input unlinkable; transcript zero knowledge pending"
         const val TS13_PROFILE = "ts13-pid-age-over-18-unlinkable-demo-v1"
@@ -180,5 +396,10 @@ class Ts13MobileBenchmarkInstrumentedTest {
         const val ENVELOPE_HEADER_BYTES = 46
         const val ENVELOPE_VERSION = 4
         val ENVELOPE_MAGIC = "EUIDTS13".toByteArray(Charsets.US_ASCII)
+        val libc: LibC by lazy { Native.load("c", LibC::class.java) }
+    }
+
+    private interface LibC : Library {
+        fun sched_setaffinity(pid: Int, cpuSetSize: Long, mask: Memory): Int
     }
 }

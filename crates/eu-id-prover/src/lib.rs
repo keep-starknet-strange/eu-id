@@ -30,14 +30,56 @@ pub mod ts13_demo_artifact_constants {
     include!("generated/ts13_demo_artifact.rs");
 }
 
+use air_core::{process_memory_kib, ProcessMemoryKib};
 use stwo::core::pcs::PcsConfig;
 
-fn timing_json(enabled: bool, scope: &str, phase: &str, elapsed_us: u128) -> Option<String> {
-    enabled.then(|| {
-        format!(
-            r#"EUID_PROVE_TIMING {{"scope":"{scope}","phase":"{phase}","elapsed_us":{elapsed_us}}}"#
-        )
-    })
+fn optional_number(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_string(), |value| value.to_string())
+}
+
+fn timing_json(
+    scope: &str,
+    phase: &str,
+    elapsed_us: u128,
+    rayon_threads: usize,
+    memory: ProcessMemoryKib,
+) -> String {
+    let vm_rss_kib = optional_number(memory.vm_rss);
+    let vm_hwm_kib = optional_number(memory.vm_hwm);
+    format!(
+        r#"EUID_PROVE_TIMING {{"scope":"{scope}","phase":"{phase}","elapsed_us":{elapsed_us},"rayon_threads":{rayon_threads},"vm_rss_kib":{vm_rss_kib},"vm_hwm_kib":{vm_hwm_kib}}}"#
+    )
+}
+
+fn runtime_configuration_json(
+    proof_thread_stack_bytes: usize,
+    proof_worker_stack_bytes: usize,
+    rayon_threads: usize,
+    memory: ProcessMemoryKib,
+) -> String {
+    let vm_rss_kib = optional_number(memory.vm_rss);
+    let vm_hwm_kib = optional_number(memory.vm_hwm);
+    format!(
+        r#"EUID_PROVE_TIMING {{"scope":"sdk","phase":"runtime_configuration","elapsed_us":0,"rayon_threads":{rayon_threads},"proof_thread_stack_bytes":{proof_thread_stack_bytes},"proof_worker_stack_bytes":{proof_worker_stack_bytes},"vm_rss_kib":{vm_rss_kib},"vm_hwm_kib":{vm_hwm_kib}}}"#
+    )
+}
+
+fn emit_timing_line(line: &str) {
+    eprintln!("{line}");
+    let Some(path) = std::env::var_os("EUID_PROVE_TIMING_FILE") else {
+        return;
+    };
+    let result = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| {
+            use std::io::Write as _;
+            writeln!(file, "{line}")
+        });
+    if let Err(error) = result {
+        eprintln!("EUID_PROVE_TIMING_WRITE_ERROR {error}");
+    }
 }
 
 /// Emit one opt-in machine-readable proving-time record.
@@ -46,28 +88,35 @@ fn timing_json(enabled: bool, scope: &str, phase: &str, elapsed_us: u128) -> Opt
 /// part of the UniFFI API.
 #[doc(hidden)]
 pub fn report_prove_timing(scope: &str, phase: &str, elapsed: std::time::Duration) {
-    if let Some(line) = timing_json(
-        std::env::var_os("EUID_PROVE_TIMING").is_some(),
+    if std::env::var_os("EUID_PROVE_TIMING").is_none() {
+        return;
+    }
+    emit_timing_line(&timing_json(
         scope,
         phase,
         elapsed.as_micros(),
-    ) {
-        eprintln!("{line}");
-        let Some(path) = std::env::var_os("EUID_PROVE_TIMING_FILE") else {
-            return;
-        };
-        let result = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut file| {
-                use std::io::Write as _;
-                writeln!(file, "{line}")
-            });
-        if let Err(error) = result {
-            eprintln!("EUID_PROVE_TIMING_WRITE_ERROR {error}");
-        }
+        rayon::current_num_threads(),
+        process_memory_kib(),
+    ));
+}
+
+/// Emit the opt-in SDK proof runtime configuration.
+///
+/// This function is public only for the SDK. It is not part of the UniFFI API.
+#[doc(hidden)]
+pub fn report_prove_runtime_configuration(
+    proof_thread_stack_bytes: usize,
+    proof_worker_stack_bytes: usize,
+) {
+    if std::env::var_os("EUID_PROVE_TIMING").is_none() {
+        return;
     }
+    emit_timing_line(&runtime_configuration_json(
+        proof_thread_stack_bytes,
+        proof_worker_stack_bytes,
+        rayon::current_num_threads(),
+        process_memory_kib(),
+    ));
 }
 
 pub use mdoc::{MdocPidRequest, MdocProof, MdocTs13DemoCircuitPublicInput};
@@ -104,17 +153,21 @@ pub fn prove_mdoc_ts13_demo(
 
 #[cfg(test)]
 mod timing_tests {
-    use super::timing_json;
+    use super::{runtime_configuration_json, timing_json, ProcessMemoryKib};
 
     #[test]
-    fn timing_output_is_opt_in_and_machine_readable() {
-        assert_eq!(timing_json(false, "scope", "phase", 17), None);
+    fn timing_output_is_machine_readable() {
+        let memory = ProcessMemoryKib {
+            vm_rss: Some(1024),
+            vm_hwm: Some(2048),
+        };
         assert_eq!(
-            timing_json(true, "eu_id_prover", "witness_generation", 17),
-            Some(
-                r#"EUID_PROVE_TIMING {"scope":"eu_id_prover","phase":"witness_generation","elapsed_us":17}"#
-                    .to_string()
-            )
+            timing_json("eu_id_prover", "witness_generation", 17, 6, memory),
+            r#"EUID_PROVE_TIMING {"scope":"eu_id_prover","phase":"witness_generation","elapsed_us":17,"rayon_threads":6,"vm_rss_kib":1024,"vm_hwm_kib":2048}"#
+        );
+        assert_eq!(
+            runtime_configuration_json(64, 32, 6, ProcessMemoryKib::default()),
+            r#"EUID_PROVE_TIMING {"scope":"sdk","phase":"runtime_configuration","elapsed_us":0,"rayon_threads":6,"proof_thread_stack_bytes":64,"proof_worker_stack_bytes":32,"vm_rss_kib":null,"vm_hwm_kib":null}"#
         );
     }
 }
