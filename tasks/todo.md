@@ -256,6 +256,8 @@ artifact check, and the diff check passed.
   soundness-preserving work.
 - [x] Reject another fixed-scope implementation because no measured candidate
   can materially reduce the binding phone times.
+- [x] Quantify the proof-identical backend ceiling and the minimum geometry
+  budget for a structural AIR redesign.
 - [ ] Obtain a scope decision for an AIR redesign or a pinned-STWO backend
   optimization.
 - [ ] Regenerate the source-bound artifact and pass the complete release and
