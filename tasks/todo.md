@@ -102,6 +102,11 @@ Privacy claim:
 - [ ] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
   available ARM acceleration; keep only improvements that help the binding
   devices.
+  - [x] Add and verify phase memory, effective-worker, stack, topology, and
+    benchmark-only affinity records.
+  - [x] Run the preliminary desktop worker sweep at the P4+P5 checkpoint.
+  - [ ] Run the final worker, affinity, allocator, RSS, and NEON device sweep
+    after P2 fixes the circuit geometry.
 - [ ] P6: Add witness-generation parallelism only if it remains a binding
   phase after P2 through P5.
 - [ ] Regenerate and verify the source-bound artifact after every accepted
