@@ -3297,7 +3297,7 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
 const TS13_PCS_LOG_BLOWUP_FACTOR: u32 = 2;
 const TS13_PCS_QUERIES: usize = 52;
 const TS13_PCS_POW_BITS: u32 = 24;
-const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = Some(18);
+const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = None;
 
 pub(crate) fn mdoc_ts13_pcs_config() -> PcsConfig {
     // PCS query and proof-of-work label: 52×2 + 24 = 128 bits.

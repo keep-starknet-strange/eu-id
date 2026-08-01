@@ -16698,7 +16698,7 @@
     "friQueryCount": 52,
     "friFoldStep": 2,
     "powBits": 24,
-    "liftingLogSize": 18,
+    "liftingLogSize": null,
     "merkleTrees": [
       {
         "name": "tree_0_preprocessed",
@@ -16770,7 +16770,7 @@
       },
       {
         "name": "tree_3_post_interaction",
-        "depth": 18,
+        "depth": 14,
         "digestBytes": 32,
         "maximumOpenedColumns": 8,
         "sampledValueLengthHistogram": [
