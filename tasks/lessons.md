@@ -97,6 +97,8 @@
 - Identify the measured function before you reuse a mobile harness.
 - Benchmark only the canonical `proveIdentity` path.
 - Use the same APK for each physical-device comparison.
+- Put all binding phones in one Firebase matrix with the same APK pair and
+  environment.
 - Measure the final source revision.
 - Use counter-ordered A/B runs for an optimization comparison.
 - Select performance-core CPU identifiers explicitly.
