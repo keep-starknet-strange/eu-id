@@ -43,12 +43,13 @@
 //! also remains stronger than the 108-bit bound.
 
 use num_traits::{One, Zero};
+use rayon::prelude::*;
 use stwo::core::air::accumulation::PointEvaluationAccumulator;
 use stwo::core::channel::Channel;
 use stwo::core::circle::CirclePoint;
+use stwo::core::fields::batch_inverse_in_place;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
-use stwo::core::fields::FieldExpOps;
 use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::verifier::VerificationError;
 use stwo::core::ColumnVec;
@@ -189,22 +190,40 @@ impl NumeratorSchedules {
     }
 }
 
-/// Sum every packed fraction in canonical slot/row order. Fixed-size inverse
-/// batches bound scratch memory without changing the addition order.
-fn global_claimed_sum(fracs: &Fractions) -> SecureField {
-    let mut total = PackedQM31::zero();
-    for (numerators, denominators) in fracs
-        .numerators()
-        .chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE)
-        .zip(fracs.denominators().chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE))
-    {
-        let inverses = PackedQM31::batch_inverse(denominators);
-        for (numerator, denominator_inverse) in numerators.iter().zip(&inverses) {
-            total += *denominator_inverse * *numerator;
-        }
-    }
+/// Sum packed fractions in canonical slot and row order. Each Rayon job uses
+/// one fixed-size inverse buffer. Indexed collection keeps the chunk order.
+fn claimed_sum_from_parts(numerators: &[PackedM31], denominators: &[PackedQM31]) -> SecureField {
+    assert_eq!(
+        numerators.len(),
+        denominators.len(),
+        "carrier numerator and denominator counts must match"
+    );
+    let partials = numerators
+        .par_chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE)
+        .zip(denominators.par_chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE))
+        .map_init(
+            || vec![PackedQM31::zero(); CLAIMED_SUM_INVERSE_CHUNK_SIZE],
+            |inverses, (numerators, denominators)| {
+                let inverses = &mut inverses[..denominators.len()];
+                batch_inverse_in_place(denominators, inverses);
+                numerators
+                    .iter()
+                    .zip(inverses)
+                    .fold(PackedQM31::zero(), |sum, (numerator, inverse)| {
+                        sum + *inverse * *numerator
+                    })
+            },
+        )
+        .collect::<Vec<_>>();
+    let total = partials
+        .into_iter()
+        .fold(PackedQM31::zero(), |sum, partial| sum + partial);
     // Reduce the lanes in the fixed order that defines the claimed sum.
     total.to_array().iter().copied().sum()
+}
+
+fn global_claimed_sum(fracs: &Fractions) -> SecureField {
+    claimed_sum_from_parts(fracs.numerators(), fracs.denominators())
 }
 
 /// Move the canonical slot-high/row-low values into the GKR input layer. The
@@ -399,8 +418,10 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
 
 #[cfg(test)]
 mod tests {
+    use rayon::ThreadPoolBuilder;
     use stwo::core::channel::Blake2sChannel;
     use stwo::core::fields::m31::M31;
+    use stwo::core::fields::FieldExpOps;
     use stwo::prover::backend::simd::m31::PackedM31;
     use stwo::prover::backend::Column;
     use stwo_constraint_framework::{EvalAtRow, ORIGINAL_TRACE_IDX};
@@ -521,6 +542,24 @@ mod tests {
         total.to_array().iter().copied().sum()
     }
 
+    fn serial_chunked_claimed_sum_reference(
+        numerators: &[PackedM31],
+        denominators: &[PackedQM31],
+    ) -> SecureField {
+        assert_eq!(numerators.len(), denominators.len());
+        let mut total = PackedQM31::zero();
+        for (numerators, denominators) in numerators
+            .chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE)
+            .zip(denominators.chunks(CLAIMED_SUM_INVERSE_CHUNK_SIZE))
+        {
+            let inverses = PackedQM31::batch_inverse(denominators);
+            for (numerator, inverse) in numerators.iter().zip(&inverses) {
+                total += *inverse * *numerator;
+            }
+        }
+        total.to_array().iter().copied().sum()
+    }
+
     /// Secure-field reference for the multiplicities GKR input layer.
     fn generic_gkr_input_layer_reference(fracs: &Fractions, log_size: u32) -> Layer<SimdBackend> {
         let n_rows = 1usize << log_size;
@@ -597,6 +636,128 @@ mod tests {
                     .sum()
             })
             .collect()
+    }
+
+    #[test]
+    fn parallel_claimed_sum_preserves_serial_chunk_behavior() {
+        let data = carrier_data(2);
+        let mut relation_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut relation_channel);
+        let fracs = build_fractions(&relations, &data);
+        let expected =
+            serial_chunked_claimed_sum_reference(fracs.numerators(), fracs.denominators());
+
+        for workers in [1, 2, 4, 12] {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            assert_eq!(
+                pool.install(|| {
+                    claimed_sum_from_parts(fracs.numerators(), fracs.denominators())
+                }),
+                expected,
+                "claimed sum changed with {workers} workers"
+            );
+        }
+
+        let length = 2 * CLAIMED_SUM_INVERSE_CHUNK_SIZE + 17;
+        let numerators = vec![PackedM31::one(); length];
+        let mut denominators = vec![PackedQM31::one(); length];
+        let mut lanes = [SecureField::one(); N_LANES];
+        lanes[0] = SecureField::zero();
+        denominators[CLAIMED_SUM_INVERSE_CHUNK_SIZE + 7] = PackedQM31::from_array(lanes);
+        let expected = serial_chunked_claimed_sum_reference(&numerators, &denominators);
+        for workers in [1, 2, 4, 12] {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            assert_eq!(
+                pool.install(|| claimed_sum_from_parts(&numerators, &denominators)),
+                expected,
+                "partial zero behavior changed with {workers} workers"
+            );
+        }
+
+        denominators[CLAIMED_SUM_INVERSE_CHUNK_SIZE + 7] = PackedQM31::zero();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                serial_chunked_claimed_sum_reference(&numerators, &denominators)
+            }))
+            .is_err(),
+            "the serial reference must reject an all-lane zero denominator"
+        );
+        for workers in [1, 2, 4, 12] {
+            let pool = ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    pool.install(|| claimed_sum_from_parts(&numerators, &denominators))
+                }))
+                .is_err(),
+                "all-lane zero behavior changed with {workers} workers"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_round_proof_is_worker_count_invariant() {
+        let run = |workers| {
+            ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let data = carrier_data(2);
+                    let mut prover_channel = Blake2sChannel::default();
+                    let relations = KeccakRelations::draw(&mut prover_channel);
+                    let prover = RoundGkrProver::new(&relations, &data);
+                    let claimed_sum = prover.claimed_sum();
+                    prover_channel.mix_felts(&[claimed_sum]);
+                    let (blob, tie_back, coeff_mle) = prover.prove(&mut prover_channel);
+
+                    let mut verifier_channel = Blake2sChannel::default();
+                    let _ = KeccakRelations::draw(&mut verifier_channel);
+                    verifier_channel.mix_felts(&[claimed_sum]);
+                    let verified =
+                        verify_round_gkr(&blob, claimed_sum, data.log_size, &mut verifier_channel)
+                            .unwrap();
+                    assert_eq!(verified.r_row, tie_back.r_row);
+                    assert_eq!(verified.delta, tie_back.delta);
+                    assert_eq!(verified.eq_ws, tie_back.eq_ws);
+                    assert_eq!(verified.mle_claim, tie_back.mle_claim);
+
+                    let prover_next = prover_channel.draw_secure_felt();
+                    let verifier_next = verifier_channel.draw_secure_felt();
+                    (
+                        claimed_sum,
+                        blob,
+                        tie_back.r_row,
+                        tie_back.delta,
+                        tie_back.eq_ws,
+                        tie_back.mle_claim,
+                        coeff_mle.to_cpu(),
+                        prover_next,
+                        verifier_next,
+                    )
+                })
+        };
+
+        let expected = run(1);
+        assert_eq!(
+            expected.7, expected.8,
+            "prover and verifier channels differ"
+        );
+        for workers in [2, 4, 12] {
+            assert_eq!(
+                run(workers),
+                expected,
+                "proof or transcript changed with {workers} workers"
+            );
+        }
     }
 
     #[test]
