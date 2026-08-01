@@ -247,3 +247,17 @@ All normal release workspace tests passed. All 18 ignored release tests
 passed. Release Clippy passed with warnings denied. Formatting, the release
 build for all targets, the quantum-only dependency check, the source-bound
 artifact check, and the diff check passed.
+
+## Mobile prove-gate continuation
+
+- [x] Reconstruct the final per-phase phone profile and quantify the gap to
+  2,000 ms.
+- [x] Audit the active prover and existing branches for reusable,
+  soundness-preserving work.
+- [x] Reject another fixed-scope implementation because no measured candidate
+  can materially reduce the binding phone times.
+- [ ] Obtain a scope decision for an AIR redesign or a pinned-STWO backend
+  optimization.
+- [ ] Regenerate the source-bound artifact and pass the complete release and
+  unlinkability checks.
+- [ ] Run one final three-phone Firebase matrix with one exact APK pair.

@@ -1,66 +1,97 @@
-# P6 feasibility checkpoint
+# P6 feasibility result
 
 Date: 2026-08-01
 
+Status: complete. P6 has no implementation in the fixed campaign scope. The
+final phone data proves that witness parallelism cannot meet the 2,000 ms
+prove target.
+
 Privacy claim: `public-input unlinkable; transcript zero knowledge pending`
 
-This checkpoint decides whether more witness-generation parallelism can meet
-the mobile proving target after P5. It uses measured P4 phone phases and
-measured P5 desktop results. The P5 phone sweep is still pending.
+## Final evidence
 
-## Measured P4 limit
+- Final circuit hash:
+  `2eff9e073151b4bce733516f4b6dd411b6d48ef5425fd93d41c64bedf524fea9`
+- Firebase matrix: `matrix-92u1aei93c81a`
+- Numeric matrix ID: `4904946063125125660`
+- Firebase history: `bh.f5f036aa81c4230a`
+- API: `proveIdentity`
+- Runtime: six workers, 2 MiB proof-thread stack, 16 MiB worker stacks
 
-| Device | Prove | Reduction needed for 2,000 ms | Tree 2 write | GKR | Witness |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Pixel 8 | 5,664 ms | 64.7% | 1,535 ms | 1,029 ms | 559 ms |
-| Galaxy S24 Ultra | 3,884 ms | 48.5% | 1,090 ms | 849 ms | 316 ms |
-| Galaxy A54 | 6,062 ms | 67.0% | 1,595 ms | 1,210 ms | 632 ms |
+Each phone log contains one summary and 25 ordered phase records. The phase
+records are hierarchical. The STWO phase records are inside the STARK total,
+and the AIR and SDK totals contain the earlier phase records. The analysis
+does not add nested records together.
 
-P5 directly targets Tree 2 construction, GKR memory, and runtime controls.
-Even if Tree 2 construction and GKR took no time, the remaining totals would
-be 3,100 ms, 1,945 ms, and 3,257 ms. This impossible lower bound still misses
-the Pixel 8 and Galaxy A54 target.
+## Measured limit
 
-If witness generation also took no time, the remaining totals would be
-2,541 ms, 1,629 ms, and 2,625 ms. Therefore, P5 and P6 cannot meet the Pixel 8
-or Galaxy A54 target inside the fixed campaign scope, even under complete
-phase deletion.
+Times are milliseconds. The residual deletes witness generation, Tree 2
+interaction generation, and the complete post-interaction GKR phase. This is
+an impossible best case, not an optimization projection.
 
-## P5 evidence
+| Device | Prove | Cut needed | Total speedup needed | Witness | Tree 2 write | GKR | Residual after all three are free |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Pixel 8 | 5,450 | 3,450 (63.30%) | 2.725x | 933.999 | 1,157.870 | 786.518 | 2,571.613 |
+| Galaxy S24 Ultra | 2,755 | 755 (27.40%) | 1.378x | 313.930 | 731.030 | 395.741 | 1,314.299 |
+| Galaxy A54 | 5,853 | 3,853 (65.83%) | 2.927x | 687.940 | 1,195.288 | 1,023.495 | 2,946.277 |
 
-The accepted numerator and claimed-sum work reduced a seven-run desktop median
-from 1,236 ms to 1,126 ms. The final denominator-move comparison measured
-1,155 ms against an exact 1,146 ms predecessor median. This 0.8 percent change
-is not material. The same comparison reduced median peak RSS by 68.25 MiB.
+The impossible residual is still 571.613 ms above the gate on Pixel 8 and
+946.277 ms above the gate on Galaxy A54. Therefore, complete removal of P6
+witness work cannot meet the target on the two binding phones.
 
-Applying desktop ratios to phones would be a projection, not a phone result.
-The expected range after P5 is about 4.2 to 5.2 seconds on Pixel 8, 3.0 to
-3.5 seconds on Galaxy S24 Ultra, and 4.7 to 5.5 seconds on Galaxy A54. The
-Firebase sweep must replace these projections with measurements.
+The other dominant phases are also structural:
 
-## P6 decision
+| Phase | Pixel 8 | Galaxy S24 Ultra | Galaxy A54 |
+| --- | ---: | ---: | ---: |
+| Tree 1 commit | 481.873 | 309.932 | 694.408 |
+| Tree 2 commit | 220.230 | 103.707 | 264.563 |
+| STARK prove total | 1,515.155 | 679.530 | 1,636.499 |
 
-Do not add more witness-generation parallelism at this checkpoint.
+On Pixel 8 and Galaxy A54, the required cut is almost equal to the complete
+Tree 2 write, GKR, and STARK time combined. A solution must remove almost all
+three phases. Any remaining time must be offset by witness or commitment work.
+Runtime tuning, serialization, and more witness threads cannot do this.
 
-- Witness generation is 8.1 to 10.4 percent of the measured phone total.
-- The canonical witness path already runs the issuer, device, and revocation
-  ML-DSA work in parallel.
+## Final P6 decision
+
+Do not add more witness-generation parallelism.
+
+- The canonical witness path already runs independent ML-DSA role work in
+  parallel.
 - Keccak witness construction and SHA trace work already use parallel paths.
-- Removing the complete witness phase cannot close the fixed-scope gap on two
-  binding devices.
+- Serialization is 2.306 ms or less and is not material.
+- Even zero-cost witness generation cannot close the Pixel 8 or Galaxy A54
+  gap after zero-cost Tree 2 generation and GKR.
 
-P6 becomes applicable only if the final P5 phone measurements make witness
-generation a binding phase and prove that its removal could cross the target.
-Otherwise, P6 remains intentionally empty.
+This decision preserves the theorem, all ML-DSA-65 roles, transcript order,
+PCS security, local proving, and public-input unlinkability.
 
-## Audited alternatives
+## Existing-work audit
 
-The existing branches contain no compatible two-fold or three-fold proving
-improvement. The remaining material alternatives require at least one forbidden
-scope change: a new STWO backend or pin, lower circuit geometry, weaker PCS
-parameters, a different ML-DSA profile, or a weaker device target. Reusing a
-presentation commitment is not acceptable because it would harm unlinkability.
+The audit covered 66 local branches and 34 registered worktrees. It found no
+unmerged compatible candidate with a material Android gain.
 
-The campaign will still complete P5 and report the best measured phone result.
-It will not weaken the theorem, transcript binding, ML-DSA-65 role set, or
-unlinkability to claim the 2,000 ms target.
+- All five accepted P5 Keccak changes are already in the canonical branch.
+- The measured claimed-sum parallelism gain is already present.
+- Fat LTO and one code-generation unit are already active.
+- The final SDK already uses the Firebase-selected fixed worker pool.
+- The affinity experiment failed its fixed A/B/B/A rule.
+- The allocator experiment produced no valid Android candidate.
+- The remaining commitment-overlap experiment can save at most the complete
+  59 to 88 ms Tree 0 commit. It increases live memory, targets an obsolete
+  STWO API, and has no benchmark evidence.
+- Other SHA-channel branches change transcript semantics and are outside the
+  fixed scope.
+
+## Scope boundary
+
+The 2,000 ms gate remains unmet. A credible next attempt requires at least one
+material scope expansion:
+
+- redesign the AIR to reduce trace and interaction geometry;
+- change or optimize the pinned STWO prover backend; or
+- change the phone target or use non-local proving.
+
+The last option changes the product trust or deployment model. Weakening PCS
+security, dropping a required proof check, changing ML-DSA-65 roles, or reusing
+a credential proof is not acceptable.
