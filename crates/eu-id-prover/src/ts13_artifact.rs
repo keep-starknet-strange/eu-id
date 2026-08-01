@@ -5152,7 +5152,7 @@ mod tests {
 
         let mut drifted = sample_input();
         let blowup = drifted.proof_system.fri_log_blowup_factor;
-        let minimum_queries = (96 + blowup - 1) / blowup;
+        let minimum_queries = 96u32.div_ceil(blowup);
         drifted.proof_system.fri_query_count =
             if drifted.proof_system.fri_query_count == minimum_queries {
                 minimum_queries + 1
