@@ -7,6 +7,60 @@ import org.junit.Test
 class BenchmarkCpuListTest {
 
     @Test
+    fun derivesTheDefaultWorkerCountFromTheAppliedPolicy() {
+        assertEquals(
+            BenchmarkWorkerSelection(configuredThreads = 4, derivedFromAffinity = true),
+            selectBenchmarkWorkerCount(requestedThreads = null, appliedPolicyCpuCount = 4),
+        )
+    }
+
+    @Test
+    fun capsAnExplicitWorkerCountForTheAppliedPolicy() {
+        assertEquals(
+            BenchmarkWorkerSelection(configuredThreads = 4, derivedFromAffinity = true),
+            selectBenchmarkWorkerCount(requestedThreads = 8, appliedPolicyCpuCount = 4),
+        )
+        assertEquals(
+            BenchmarkWorkerSelection(configuredThreads = 6, derivedFromAffinity = true),
+            selectBenchmarkWorkerCount(requestedThreads = 8, appliedPolicyCpuCount = 8),
+        )
+    }
+
+    @Test
+    fun keepsOnlyTheExplicitWorkerCountAfterTopologyFailure() {
+        assertEquals(
+            BenchmarkWorkerSelection(configuredThreads = 8, derivedFromAffinity = false),
+            selectBenchmarkWorkerCount(requestedThreads = 8, appliedPolicyCpuCount = null),
+        )
+        assertEquals(
+            BenchmarkWorkerSelection(configuredThreads = null, derivedFromAffinity = false),
+            selectBenchmarkWorkerCount(requestedThreads = null, appliedPolicyCpuCount = null),
+        )
+    }
+
+    @Test
+    fun keepsOrdinaryNonPolicyWorkerBehavior() {
+        assertEquals(
+            BenchmarkWorkerSelection(configuredThreads = 4, derivedFromAffinity = false),
+            selectBenchmarkWorkerCount(requestedThreads = 4, appliedPolicyCpuCount = null),
+        )
+        assertEquals(
+            BenchmarkWorkerSelection(configuredThreads = null, derivedFromAffinity = false),
+            selectBenchmarkWorkerCount(requestedThreads = null, appliedPolicyCpuCount = null),
+        )
+    }
+
+    @Test
+    fun rejectsInvalidWorkerSelectionInputs() {
+        assertThrows(IllegalArgumentException::class.java) {
+            selectBenchmarkWorkerCount(requestedThreads = 0, appliedPolicyCpuCount = null)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            selectBenchmarkWorkerCount(requestedThreads = null, appliedPolicyCpuCount = 0)
+        }
+    }
+
+    @Test
     fun parsesOneAffinityRequestType() {
         assertEquals(
             BenchmarkAffinityRequest(listOf(2, 3), null),

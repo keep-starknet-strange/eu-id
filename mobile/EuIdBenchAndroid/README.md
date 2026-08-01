@@ -49,10 +49,16 @@ the policy reads `cpuinfo_max_freq` for each allowed CPU. It removes the
 minimum tier and selects a maximum of six CPUs. If the topology or the affinity
 system call is not available, the test keeps the original CPU mask.
 
+When the policy is active, the test sets the worker count to the smaller of
+the requested count and the selected CPU count. It uses the selected CPU count
+when no count is requested. The worker count cannot exceed six. If the policy
+is not active, the test uses only the requested worker count.
+
 The CPU mask applies only to the benchmark thread. The proof thread and its
 workers inherit the mask. The SDK API does not expose affinity controls.
 
 The test logs one `Ts13MobileBenchmark` JSON record. The record includes prove
-time, verify time, proof size, requested and actual worker counts, proof and
-worker stack sizes, phase memory samples, CPU topology, the policy decision,
-the effective CPU mask, and peak resident memory.
+time, verify time, proof size, requested, configured, and actual worker counts,
+the worker-count source, proof and worker stack sizes, phase memory samples,
+CPU topology, the policy decision, the effective CPU mask, and peak resident
+memory.

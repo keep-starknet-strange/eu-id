@@ -32,6 +32,31 @@ internal data class AffinityPolicySelection(
         get() = reason == AFFINITY_REASON_READY
 }
 
+internal data class BenchmarkWorkerSelection(
+    val configuredThreads: Int?,
+    val derivedFromAffinity: Boolean,
+)
+
+internal fun selectBenchmarkWorkerCount(
+    requestedThreads: Int?,
+    appliedPolicyCpuCount: Int?,
+): BenchmarkWorkerSelection {
+    require(requestedThreads == null || requestedThreads in 1..MAX_BENCHMARK_RAYON_THREADS) {
+        "The requested worker count is invalid"
+    }
+    require(appliedPolicyCpuCount == null || appliedPolicyCpuCount > 0) {
+        "The applied affinity policy CPU count is invalid"
+    }
+    if (appliedPolicyCpuCount == null) {
+        return BenchmarkWorkerSelection(requestedThreads, false)
+    }
+    val workerLimit = minOf(appliedPolicyCpuCount, MAX_POLICY_CPU_COUNT)
+    return BenchmarkWorkerSelection(
+        configuredThreads = minOf(requestedThreads ?: workerLimit, workerLimit),
+        derivedFromAffinity = true,
+    )
+}
+
 internal fun parseBenchmarkAffinityRequest(
     explicitCpuIds: String?,
     policy: String?,

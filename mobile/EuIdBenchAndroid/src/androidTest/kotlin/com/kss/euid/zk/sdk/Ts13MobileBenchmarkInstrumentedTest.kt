@@ -104,10 +104,9 @@ class Ts13MobileBenchmarkInstrumentedTest {
         var affinityApplied = false
         var affinityChanged = false
         var affinityReason = policySelection?.reason ?: AFFINITY_REASON_NOT_REQUESTED
+        var workerSelection = selectBenchmarkWorkerCount(requestedRayonThreads, null)
+        var rayonEnvironmentChanged = false
         try {
-            requestedRayonThreads?.let {
-                Os.setenv(RAYON_THREADS_ENV, it.toString(), true)
-            }
             if (requestedAffinity != null) {
                 setCurrentThreadAffinity(requestedAffinity)
                 affinityApplied = true
@@ -133,12 +132,23 @@ class Ts13MobileBenchmarkInstrumentedTest {
             ) {
                 affinityApplied = false
                 affinityReason = AFFINITY_REASON_EFFECTIVE_MASK_MISMATCH
-                try {
-                    setCurrentThreadAffinity(topology.allowed.cpuIds)
-                } catch (failure: Throwable) {
-                    Log.w(LOG_TAG, "The original CPU mask was not restored", failure)
-                }
+                setCurrentThreadAffinity(topology.allowed.cpuIds)
                 effectiveAffinity = readCurrentThreadAllowedCpus()
+                require(effectiveAffinity.cpuIds == topology.allowed.cpuIds) {
+                    "The original CPU mask was not restored"
+                }
+            }
+            val appliedPolicyCpuCount =
+                if (affinityRequest.policy != null && affinityApplied) {
+                    checkNotNull(affinityTarget).size
+                } else {
+                    null
+                }
+            workerSelection =
+                selectBenchmarkWorkerCount(requestedRayonThreads, appliedPolicyCpuCount)
+            workerSelection.configuredThreads?.let {
+                Os.setenv(RAYON_THREADS_ENV, it.toString(), true)
+                rayonEnvironmentChanged = true
             }
 
             val timingFile = File(
@@ -180,7 +190,11 @@ class Ts13MobileBenchmarkInstrumentedTest {
             assertTrue(actualRayonThreads > 0)
             assertTrue(proofThreadStackBytes > 0)
             assertTrue(proofWorkerStackBytes > 0)
-            requestedRayonThreads?.let { assertEquals(it, actualRayonThreads) }
+            workerSelection.configuredThreads?.let { assertEquals(it, actualRayonThreads) }
+            if (workerSelection.derivedFromAffinity) {
+                assertTrue(affinityApplied)
+                assertTrue(actualRayonThreads <= MAX_POLICY_CPU_COUNT)
+            }
             assertTrue(
                 phaseTimings.any {
                     it.getString("scope") == "sdk" && it.getString("phase") == "total"
@@ -221,6 +235,14 @@ class Ts13MobileBenchmarkInstrumentedTest {
                 .put("api", Build.VERSION.SDK_INT)
                 .put("available_processors", Runtime.getRuntime().availableProcessors())
                 .put("requested_rayon_threads", requestedRayonThreads ?: JSONObject.NULL)
+                .put(
+                    "configured_rayon_threads",
+                    workerSelection.configuredThreads ?: JSONObject.NULL,
+                )
+                .put(
+                    "rayon_threads_derived_from_affinity",
+                    workerSelection.derivedFromAffinity,
+                )
                 .put("actual_rayon_threads", actualRayonThreads)
                 .put("proof_thread_stack_bytes", proofThreadStackBytes)
                 .put("proof_worker_stack_bytes", proofWorkerStackBytes)
@@ -252,7 +274,7 @@ class Ts13MobileBenchmarkInstrumentedTest {
         } finally {
             runCleanup(
                 {
-                    if (requestedRayonThreads != null) {
+                    if (rayonEnvironmentChanged) {
                         restoreEnvironment(RAYON_THREADS_ENV, previousRayonThreads)
                     }
                 },
