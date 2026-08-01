@@ -41,7 +41,8 @@ class Ts13MobileBenchmarkInstrumentedTest {
         assertEquals("IdentityWitness", fixture.getString("witnessType"))
         val statementFixture = fixture.getJSONObject("statement")
         val witnessFixture = fixture.getJSONObject("witness")
-        val circuitHash = statementFixture.getString("circuitHash").decodeHex()
+        val circuitHashHex = statementFixture.getString("circuitHash")
+        val circuitHash = circuitHashHex.decodeHex()
 
         val revocationEpoch = statementFixture.getLong("revocationEpoch")
         require(revocationEpoch in 0L..UInt.MAX_VALUE.toLong())
@@ -231,6 +232,7 @@ class Ts13MobileBenchmarkInstrumentedTest {
 
             val result = JSONObject()
                 .put("event", "ts13_mobile_benchmark_v1")
+                .put("circuit_hash", circuitHashHex)
                 .put("model", Build.MODEL)
                 .put("api", Build.VERSION.SDK_INT)
                 .put("available_processors", Runtime.getRuntime().availableProcessors())
@@ -268,8 +270,17 @@ class Ts13MobileBenchmarkInstrumentedTest {
                 .put("verify_ms", verifyMs)
                 .put("envelope_bytes", proof.size)
                 .put("vm_hwm_kib", vmHwmKib)
-                .put("phase_timings", JSONArray(phaseTimings))
-            Log.i(LOG_TAG, result.toString())
+                .put("phase_count", phaseTimings.size)
+            logJson(result)
+            phaseTimings.forEachIndexed { index, timing ->
+                logJson(
+                    JSONObject()
+                        .put("event", "ts13_mobile_benchmark_phase_v1")
+                        .put("phase_index", index)
+                        .put("phase_count", phaseTimings.size)
+                        .put("timing", timing),
+                )
+            }
             assertTrue(timingFile.delete())
         } finally {
             runCleanup(
@@ -301,6 +312,14 @@ class Ts13MobileBenchmarkInstrumentedTest {
         } else {
             Os.setenv(name, previousValue, true)
         }
+    }
+
+    private fun logJson(record: JSONObject) {
+        val message = record.toString()
+        require(message.toByteArray(Charsets.UTF_8).size <= MAX_LOG_RECORD_BYTES) {
+            "The benchmark JSON record exceeds the safe Android log size"
+        }
+        Log.i(LOG_TAG, message)
     }
 
     private fun runCleanup(vararg actions: () -> Unit) {
@@ -476,6 +495,7 @@ class Ts13MobileBenchmarkInstrumentedTest {
         const val FIXTURE_ASSET = "ts13_mobile_benchmark_fixture_v1.json"
         const val FIXTURE_SCHEMA = "euid-ts13-mobile-fixture-v1"
         const val LOG_TAG = "Ts13MobileBenchmark"
+        const val MAX_LOG_RECORD_BYTES = 3_000
         const val PROVE_TIMING_ENV = "EUID_PROVE_TIMING"
         const val PROVE_TIMING_FILE_ENV = "EUID_PROVE_TIMING_FILE"
         const val PROVE_TIMING_FILE = "ts13-prove-timing.jsonl"

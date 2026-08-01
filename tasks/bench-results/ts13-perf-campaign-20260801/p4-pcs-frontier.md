@@ -136,18 +136,21 @@ envelope bound is valid, and no source change is needed.
 
 ## Phone measurements
 
-No all-ML-DSA-65 frontier phone row is complete yet.
-
-The current blowup-3, q36, PoW20, lift-19 checkpoint has a verified Android
-build:
+The blowup-3, q36, PoW20, lift-19 point completed one cold Pixel 8 run. The
+same Firebase matrix also ran the S24 Ultra and A54 with the same APK pair and
+environment.
 
 - circuit hash: `4d55b4e5cb6d4fab102395d3647d267d3f3116e6cabae9e33f3c957f7e07c2b2`;
 - fixture SHA-256: `ad775e87c9369b85e707025bf8f909715e2fc4de97e3db8005e10317bdbf8863`;
 - AAR SHA-256: `8e53ecfddb047e0be8a958a71eee2472b8a1f3d5d367238d3c83922b9dd318bd`;
 - benchmark-harness commit: `5562c33c`;
-- host APK SHA-256: `748cc8af40b057ebff0831ba3629cfb4dd1957bfc673b47894aac6756374a013`;
+- host APK SHA-256: `372ccb129256e479a61f53bae3305c424c11c0c905f4fdda2320f5f7de86d1be`;
 - test APK SHA-256: `287be0265632bec74bd450edc53fdc96475329316e54d936016e9b07ef115ca0`.
 
-All 16 release host unit tests and both APK builds passed. The test APK contains
-the current circuit-bound fixture. The Firebase upload waits for explicit
-approval to send these proprietary APKs to project `exploration-dev-503108`.
+| Matrix | Pixel 8 prove | Verify | Peak RSS | Envelope |
+| --- | ---: | ---: | ---: | ---: |
+| `matrix-t75o13p0yobva` | 5,664 ms | 218 ms | 1,646,140 KiB | 1,572,910 B |
+
+All three executions passed. The complete three-phone phase and memory record
+is in `p4-firebase-frontier.md`. Nine Pixel 8 frontier points remain before
+selection.

@@ -99,6 +99,7 @@
 - Use the same APK for each physical-device comparison.
 - Put all binding phones in one Firebase matrix with the same APK pair and
   environment.
+- Keep each Android benchmark log record below 3,000 UTF-8 bytes.
 - Measure the final source revision.
 - Use counter-ordered A/B runs for an optimization comparison.
 - Select performance-core CPU identifiers explicitly.

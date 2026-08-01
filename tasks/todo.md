@@ -113,7 +113,10 @@ Privacy claim:
   available ARM acceleration; keep only improvements that help the binding
   devices.
   - [x] Add and verify phase memory, effective-worker, stack, topology, and
-  benchmark-only affinity records.
+    benchmark-only affinity records.
+  - [ ] Emit the Android benchmark summary and each phase as separate bounded
+    JSON records so Firebase preserves the complete result.
+    - Update the source-bound SDK README with the next circuit artifact.
   - [x] Run the preliminary desktop worker sweep at the P4+P5 checkpoint.
   - [x] Audit existing branches for reusable affinity and allocator work.
   - [x] Trace the canonical proof memory lifetime and rank live allocations.

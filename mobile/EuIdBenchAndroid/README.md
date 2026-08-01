@@ -57,8 +57,9 @@ is not active, the test uses only the requested worker count.
 The CPU mask applies only to the benchmark thread. The proof thread and its
 workers inherit the mask. The SDK API does not expose affinity controls.
 
-The test logs one `Ts13MobileBenchmark` JSON record. The record includes prove
-time, verify time, proof size, requested, configured, and actual worker counts,
-the worker-count source, proof and worker stack sizes, phase memory samples,
-CPU topology, the policy decision, the effective CPU mask, and peak resident
-memory.
+The test logs one `Ts13MobileBenchmark` summary record and one bounded record
+for each proof phase. The summary includes prove time, verify time, proof size,
+requested, configured, and actual worker counts, the worker-count source,
+proof and worker stack sizes, CPU topology, the policy decision, the effective
+CPU mask, and peak resident memory. Each phase record includes its timing and
+memory sample. No record can exceed 3,000 UTF-8 bytes.
