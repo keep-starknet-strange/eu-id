@@ -82,12 +82,13 @@ Privacy claim:
     4.1 bits.
   - [x] Find a sound fast design below the gate: device-only ML-DSA-44, a
     one-block SampleInBall cap, a 25-row carrier, and the current GKR tie-back
-    use 4,855,360 shared-service cells and 10,187,984 total cells.
+    use 4,855,360 shared-service committed cells.
   - [x] Record the device-profile policy in main-repository mailbox Q-004 and
     receive the user's authorization to implement the complete campaign.
-  - [ ] Implement and prove the accepted mixed-profile design.
-  - [ ] Pin the accepted design's exact cells, algebraic bound, payload,
-    release latency, and peak memory.
+  - [x] Implement and prove the accepted mixed-profile design.
+  - [x] Pin 4,855,360 shared-service cells, the 108-bit algebraic bound, and
+    the 18,464-byte GKR payload.
+  - [ ] Pin final release latency and peak memory.
 - [x] P3: Reduce private MSO and item SHA-256 to at most 1,500,000 committed
   cells without moving private-input checks outside the proof.
   - [x] Reduce the SHA geometry to 1,320,640 committed cells.
@@ -99,6 +100,8 @@ Privacy claim:
   - [x] Reduce the canonical CBOR maximum constraint degree from eight to four.
   - [x] Regenerate the live composition profile and pass artifact drift plus
     the canonical A1/A2/B proof path.
+  - [x] Reject explicit lifting domains that cannot interpolate the live
+    composition polynomial.
   - [ ] Measure the final frontier only after P2 fixes the circuit geometry.
 - [ ] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
   available ARM acceleration; keep only improvements that help the binding

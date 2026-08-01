@@ -118,7 +118,7 @@ const MDOC_ATTRIBUTE_FIELD_IDS: MdocPrivateItemFieldIds = MdocPrivateItemFieldId
     element_value: 20,
 };
 const MDOC_MSO_SHA_STREAM_FIELD_ID: u32 = 0x4d53_0000;
-const MDOC_MSO_SHA_LOG_SIZE: u32 = 12;
+const MDOC_MSO_SHA_LOG_SIZE: u32 = 11;
 const MDOC_MSO_SHA_NAMESPACE: &str = "mdoc/mso-sha";
 const MDOC_ATTRIBUTE_SHA_NAMESPACE: &str = "mdoc/attribute-sha/0";
 const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
@@ -151,7 +151,7 @@ const _: () = assert!(
             .is_multiple_of(stwo_mldsa::statement::STREAM_BASE_STRIDE)
 );
 
-fn ts13_demo_mldsa_keccak_job_shapes(
+pub(crate) fn ts13_demo_mldsa_keccak_job_shapes(
     device_message_len: usize,
 ) -> Vec<stwo_mldsa::stwo_keccak::sponge::Shape> {
     let mut shapes = keccak_job_shapes(
@@ -1461,13 +1461,16 @@ impl MdocProof {
     }
 }
 
-/// Values that can change the fixed circuit's preprocessed tree.
+/// Values that identify the fixed PCS and its preprocessed tree cache entry.
 #[derive(Clone, Debug, Serialize)]
 struct MdocTree0CacheKeyMaterial {
     version: u8,
+    pcs_log_last_layer_degree_bound: u32,
     pcs_log_blowup_factor: u32,
     pcs_queries: usize,
+    pcs_fold_step: u32,
     pcs_pow_bits: u32,
+    pcs_lifting_log_size: Option<u32>,
     attribute_sha_log_n_rows: u32,
     device_mldsa_message_bytes: usize,
 }
@@ -1496,10 +1499,13 @@ fn mdoc_tree0_cache_key(
     expected_pcs_config: PcsConfig,
 ) -> Result<MdocTree0CacheKey, Error> {
     let material = MdocTree0CacheKeyMaterial {
-        version: 1,
+        version: 2,
+        pcs_log_last_layer_degree_bound: expected_pcs_config.fri_config.log_last_layer_degree_bound,
         pcs_log_blowup_factor: expected_pcs_config.fri_config.log_blowup_factor,
         pcs_queries: expected_pcs_config.fri_config.n_queries,
+        pcs_fold_step: expected_pcs_config.fri_config.fold_step,
         pcs_pow_bits: expected_pcs_config.pow_bits,
+        pcs_lifting_log_size: expected_pcs_config.lifting_log_size,
         attribute_sha_log_n_rows: TS13_DEMO_ATTRIBUTE_SHA_LOG_N_ROWS,
         device_mldsa_message_bytes: device_message_len,
     };
@@ -1555,6 +1561,12 @@ pub struct MdocTs13DemoProofShape {
     pub stark_proof_bytes: usize,
     pub outer_claims_and_framing_bytes: usize,
     pub serialized_non_stark_field_lengths: Vec<usize>,
+    pub fri_log_last_layer_degree_bound: u32,
+    pub fri_log_blowup_factor: u32,
+    pub fri_query_count: usize,
+    pub fri_fold_step: u32,
+    pub pow_bits: u32,
+    pub lifting_log_size: Option<u32>,
     pub commitment_count: usize,
     pub tree_zero_root: Option<[u8; 32]>,
     pub sampled_values: Vec<Vec<usize>>,
@@ -1586,7 +1598,7 @@ pub struct MdocFriLayerShape {
     pub hash_count: usize,
 }
 
-/// Exact prover-constructed Air/component geometry. This metadata is retained
+/// Exact prover-constructed AIR/component geometry. This metadata is retained
 /// only in memory for circuit-artifact generation and drift tests.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1603,6 +1615,7 @@ pub struct MdocAirInstanceGeometry {
     pub trace_log_sizes: Vec<u32>,
     pub interaction_log_sizes: Vec<u32>,
     pub post_interaction_log_sizes: Vec<u32>,
+    pub claimed_sum_count: usize,
     pub max_log_size: u32,
     pub max_constraint_log_degree_bound: u32,
     pub components: Vec<MdocComponentGeometry>,
@@ -1657,6 +1670,7 @@ fn capture_ts13_demo_circuit_geometry(
                     trace_log_sizes: layout.trace,
                     interaction_log_sizes: layout.interaction,
                     post_interaction_log_sizes: module.post_interaction_log_sizes(),
+                    claimed_sum_count: module.claimed_sums().len(),
                     max_log_size: module.max_log_size(),
                     max_constraint_log_degree_bound: module.max_constraint_log_degree_bound(),
                     components: module
@@ -1738,6 +1752,12 @@ impl MdocProof {
                 .into_iter()
                 .map(|(_, length)| length)
                 .collect(),
+            fri_log_last_layer_degree_bound: stark.config.fri_config.log_last_layer_degree_bound,
+            fri_log_blowup_factor: stark.config.fri_config.log_blowup_factor,
+            fri_query_count: stark.config.fri_config.n_queries,
+            fri_fold_step: stark.config.fri_config.fold_step,
+            pow_bits: stark.config.pow_bits,
+            lifting_log_size: stark.config.lifting_log_size,
             commitment_count: stark.commitments.len(),
             tree_zero_root: stark.commitments.first().map(|root| root.0),
             sampled_values: stark
@@ -1794,7 +1814,7 @@ fn bincode_len<T: Serialize>(value: &T) -> usize {
         .len()
 }
 
-fn checked_sha256_padded_len(message_len: usize) -> Option<usize> {
+pub(crate) fn checked_sha256_padded_len(message_len: usize) -> Option<usize> {
     message_len
         .checked_add(9)?
         .checked_add(stwo_sha256::constants::BLOCK_BYTES - 1)
@@ -3420,6 +3440,63 @@ mod tests {
     }
 
     #[test]
+    fn tree_zero_cache_key_binds_the_complete_pcs_configuration() {
+        let base = mdoc_ts13_pcs_config();
+        let base_key = mdoc_tree0_cache_key(TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY, base).unwrap();
+        let variants = [
+            PcsConfig {
+                fri_config: FriConfig::new(
+                    2,
+                    base.fri_config.log_blowup_factor,
+                    base.fri_config.n_queries,
+                    base.fri_config.fold_step,
+                ),
+                ..base
+            },
+            PcsConfig {
+                fri_config: FriConfig::new(
+                    base.fri_config.log_last_layer_degree_bound,
+                    2,
+                    base.fri_config.n_queries,
+                    base.fri_config.fold_step,
+                ),
+                ..base
+            },
+            PcsConfig {
+                fri_config: FriConfig::new(
+                    base.fri_config.log_last_layer_degree_bound,
+                    base.fri_config.log_blowup_factor,
+                    base.fri_config.n_queries + 1,
+                    base.fri_config.fold_step,
+                ),
+                ..base
+            },
+            PcsConfig {
+                fri_config: FriConfig::new(
+                    base.fri_config.log_last_layer_degree_bound,
+                    base.fri_config.log_blowup_factor,
+                    base.fri_config.n_queries,
+                    1,
+                ),
+                ..base
+            },
+            PcsConfig {
+                pow_bits: base.pow_bits + 1,
+                ..base
+            },
+            PcsConfig {
+                lifting_log_size: Some(20),
+                ..base
+            },
+        ];
+        for variant in variants {
+            let key =
+                mdoc_tree0_cache_key(TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY, variant).unwrap();
+            assert_ne!(key.material, base_key.material);
+        }
+    }
+
+    #[test]
     fn mixed_profile_keccak_plan_has_exact_role_order_and_163_permutations() {
         const ISSUER_JOBS: std::ops::Range<usize> = 0..3;
         const EXPAND_A_JOBS: std::ops::Range<usize> = 3..19;
@@ -4089,23 +4166,23 @@ mod tests {
     }
 
     #[test]
-    fn sha_profile_uses_40_mso_blocks_at_log_12() {
+    fn sha_profile_uses_30_mso_blocks_at_log_11() {
         const BLOCK_BYTES: usize = stwo_sha256::constants::BLOCK_BYTES;
-        const MSO_BLOCKS: usize = 40;
+        const MSO_BLOCKS: usize = 30;
         const ITEM_BLOCKS: usize = 2;
         const ITEM_PADDED_BYTES: usize = TS13_DEMO_ITEM_PADDED_BYTES as usize;
-        const EXPECTED_MSO_CELLS: usize = 1_238_096;
+        const EXPECTED_MSO_CELLS: usize = 619_600;
         const EXPECTED_ITEM_CELLS: usize = 78_416;
         const EXPECTED_SHARED_TABLE_CELLS: usize = 4_128;
-        const EXPECTED_TOTAL_CELLS: usize = 1_320_640;
+        const EXPECTED_TOTAL_CELLS: usize = 702_144;
         const _: () = assert!(EXPECTED_TOTAL_CELLS <= 1_500_000);
 
         let mso_bytes = vec![0u8; TS13_DEMO_MSO_PAYLOAD_BYTES];
         let mso_witness = compute_sha256_witness(&mso_bytes);
         assert_eq!(mso_witness.padding.padded.len(), MSO_BLOCKS * BLOCK_BYTES);
         assert_eq!(mso_witness.blocks.len(), MSO_BLOCKS);
-        assert_eq!(min_log_size(mso_witness.blocks.len()), 12);
-        assert_eq!(MDOC_MSO_SHA_LOG_SIZE, 12);
+        assert_eq!(min_log_size(mso_witness.blocks.len()), 11);
+        assert_eq!(MDOC_MSO_SHA_LOG_SIZE, 11);
 
         let item_bytes = vec![0u8; BLOCK_BYTES];
         let item_witness = compute_sha256_witness(&item_bytes);
@@ -4137,9 +4214,9 @@ mod tests {
         );
 
         let mso_layout = mso_sha.layout();
-        assert_eq!(mso_layout.preprocessed, [vec![12; 10], vec![4]].concat());
-        assert_eq!(mso_layout.trace, [vec![12; 260], vec![4; 32]].concat());
-        assert_eq!(mso_layout.interaction, [vec![12; 32], vec![4; 36]].concat());
+        assert_eq!(mso_layout.preprocessed, [vec![11; 10], vec![4]].concat());
+        assert_eq!(mso_layout.trace, [vec![11; 260], vec![4; 32]].concat());
+        assert_eq!(mso_layout.interaction, [vec![11; 32], vec![4; 36]].concat());
         assert_eq!(committed_cells(&mso_layout), EXPECTED_MSO_CELLS);
 
         let item_cells = committed_cells(&item_sha.layout());

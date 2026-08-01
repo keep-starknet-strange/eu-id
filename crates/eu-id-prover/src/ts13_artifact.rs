@@ -18,6 +18,7 @@ use sha2::{Digest as _, Sha256};
 pub const ARTIFACT_PATH: &str = "artifacts/ts13-demo-v1/circuit-artifact-v1.cbor";
 pub const SHAPE_MANIFEST_PATH: &str = "artifacts/ts13-demo-v1/shape-manifest.cbor";
 pub const HASH_EMBED_PATH: &str = "crates/eu-id-prover/src/generated/ts13_demo_artifact.rs";
+pub const GENERATION_INPUT_PATH: &str = "artifacts/ts13-demo-v1/generation-input-v1.json";
 pub const NORMATIVE_SPEC_PATH: &str = "docs/ts13-unlinkable-age18-demo-spec.md";
 
 /// Generated files that the soundness source-tree digest omits.
@@ -70,39 +71,22 @@ const PROFILE_ID: &str = "ts13-pid-age-over-18-unlinkable-demo-v1";
 const PROOF_SYSTEM_ID: &str = "stwo-euid-ts13-demo-v1";
 const CONSTRAINT_SYSTEM_VERSION: &str = "ts13-unlinkable-air-v1";
 const ARTIFACT_SCHEMA_VERSION: u64 = 1;
-const SHAPE_SCHEMA_VERSION: u64 = 1;
+const SHAPE_SCHEMA_VERSION: u64 = 2;
 const ENVELOPE_VERSION: u64 = 4;
 const ENVELOPE_HEADER_BYTES: u64 = 46;
 const ENVELOPE_CAPACITY_ALIGNMENT: u64 = 65_536;
-const CANONICAL_ISSUER_COSE_SIG_STRUCTURE_BYTES: u32 = 2_534;
-const CANONICAL_MSO_PAYLOAD_BYTES: u32 = 2_513;
-const CANONICAL_PADDED_ISSUER_SIGNED_ITEM_BYTES: u32 = 128;
 const CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 3] = [1, 2, 3];
 const CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256: &str =
     "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
-const CANONICAL_NORMATIVE_SPEC_SHA256: &str =
-    "423edeeebd5c62844db646e8f362dc3b3b53bbf885275b97269106607f32190e";
 const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
 const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
-const CANONICAL_DEVICE_SIG_STRUCTURE_CAPACITY: u32 = 1_024;
-const CANONICAL_TREE_COLUMN_COUNTS: [u64; 5] = [312, 4_576, 2_288, 8, 16];
-const CANONICAL_TREE_DEPTHS: [u32; 5] = [19, 19, 19, 16, 19];
-const CANONICAL_FRI_LAYER_INPUT_LOGS: [u32; 8] = [19, 17, 15, 13, 11, 9, 7, 5];
-const CANONICAL_FRI_LAYER_OUTPUT_LOGS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
-const CANONICAL_FRI_WITNESS_CAPS: [u64; 8] = [108, 108, 108, 108, 108, 108, 108, 36];
-const CANONICAL_FRI_MERKLE_DEPTHS: [u32; 8] = [17, 15, 13, 11, 9, 7, 5, 4];
-const CANONICAL_SAMPLED_SECURE_FIELD_COUNT: u64 = 9_171;
-const CANONICAL_OUTER_CLAIMS_AND_FRAMING_BYTES: u64 = 3_872;
-const CANONICAL_COMPONENT_COUNT: usize = 98;
 const CANONICAL_RELATION_COUNT: usize = 87;
 const CANONICAL_RELATION_USE_COUNT: usize = 255;
 const CANONICAL_PUBLIC_MIX_COUNT: usize = 20;
 const CANONICAL_CHALLENGE_ENTRY_COUNT: usize = 96;
 const CANONICAL_RAW_MLDSA_CHALLENGE_COUNT: usize = 9;
-const CANONICAL_SERIALIZED_CLAIM_COUNT: usize = 19;
-const CANONICAL_SERIALIZED_CLAIM_BYTES: u64 = 24_168;
-const CANONICAL_STREAM_ID_COUNT: usize = 83;
-const CANONICAL_HASH_STREAM_COUNT: usize = 40;
+const CANONICAL_STREAM_ID_COUNT: usize = 55;
+const CANONICAL_HASH_STREAM_COUNT: usize = 26;
 const CANONICAL_RANGE_TABLE_COUNT: usize = 26;
 const CANONICAL_SERIALIZED_CLAIM_NAMES: [&str; 19] = crate::mdoc::MDOC_PROOF_SERIALIZED_CLAIM_NAMES;
 const OUTER_CBOR_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,mode=outer,stream_id,log_size)";
@@ -122,6 +106,10 @@ const VALUE_DIGESTS_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,transcri
 issuer_message_len,mso_len,selected_attribute_count=1,namespace_len,each_namespace_byte,log_size,\
 max_scan_items,max_namespace_bytes,preprocessed_cols,trace_cols,relation_sites,interaction_cols,\
 digest_id_max)";
+const CLAIM_MIX_ORDER: &str = "After tree 1, mix claims in physical AIR order. ML-DSA roles mix group_evals before claimed_sums.";
+const TRANSCRIPT_PHASE_ORDER: &str = "Mix the PCS configuration and commit tree0. Mix 20 AIR public statements and commit tree1. Draw the secure fields in challengeOrder. Mix claims in physical AIR order and commit tree2. Run the shared_keccak_service GKR post-interaction and commit tree3. Then calculate the composition polynomial and FRI.";
+const KECCAK_JOB_ORDER: &str = "issuer_mu,issuer_ct,issuer_sib,expand_a_00..expand_a_15,device_tr,device_mu,device_ct,device_sib,revocation_mu,revocation_ct,revocation_sib";
+const HASH_STREAM_ID_SEMANTICS: &str = "HashStreamV1.streamId is the absorb stream ID. `streamIds` also contains the separate squeeze stream IDs.";
 const CANONICAL_BUILTIN_CONSTANT_NAMES: [&str; 40] = [
     "cbor.device_key_info_prefix",
     "context.domain",
@@ -462,6 +450,7 @@ struct ModuleLayoutV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AirInstanceLayoutV1 {
     columns: AirColumnLayoutV1,
+    claimed_sum_count: u32,
     max_log_size: u32,
     max_constraint_log_degree_bound: u32,
     components: Vec<AirComponentLayoutV1>,
@@ -681,7 +670,7 @@ struct ValueCountV1 {
     count: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FriLayerParametersV1 {
     input_log_size: u32,
@@ -754,6 +743,7 @@ struct ShapeAirInstanceV1 {
     air_instance_ordinal: u32,
     columns: ColumnCountsV1,
     column_log_sizes: AirColumnLayoutV1,
+    claimed_sum_count: u32,
     max_log_size: u32,
     max_constraint_log_degree_bound: u32,
 }
@@ -941,10 +931,11 @@ fn checked_name_list<'a>(
 impl GenerationInputV1 {
     fn validate(&self) -> Result<(), ArtifactError> {
         if self.credential_shape.issuer_cose_sig_structure_bytes
-            != CANONICAL_ISSUER_COSE_SIG_STRUCTURE_BYTES
-            || self.credential_shape.mso_payload_bytes != CANONICAL_MSO_PAYLOAD_BYTES
+            != crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES as u32
+            || self.credential_shape.mso_payload_bytes
+                != crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES as u32
             || self.credential_shape.padded_issuer_signed_item_bytes
-                != CANONICAL_PADDED_ISSUER_SIGNED_ITEM_BYTES
+                != u32::from(crate::mdoc::TS13_DEMO_ITEM_PADDED_BYTES)
             || self.credential_shape.digest_identifier_integer_widths
                 != CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS
         {
@@ -959,7 +950,7 @@ impl GenerationInputV1 {
                 .observed_max_device_cose_sig_structure_bytes
                 != CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES
             || self.request_context_corpus.device_sig_structure_capacity
-                != CANONICAL_DEVICE_SIG_STRUCTURE_CAPACITY
+                != crate::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY as u32
         {
             return Err(ArtifactError::InvalidInput(
                 "request-context corpus does not match the canonical corpus measurement".to_owned(),
@@ -1075,12 +1066,6 @@ impl GenerationInputV1 {
                     }
                 }
             }
-        }
-        if component_names.len() != CANONICAL_COMPONENT_COUNT {
-            return Err(ArtifactError::InvalidInput(format!(
-                "the canonical profile must contain exactly {CANONICAL_COMPONENT_COUNT} components, got {}",
-                component_names.len()
-            )));
         }
         let public_context = &self.modules[3];
         if public_context.air_instances.len() != 1
@@ -1205,6 +1190,19 @@ impl GenerationInputV1 {
                  {CANONICAL_RELATION_USE_COUNT} uses, got {} and {relation_use_count}",
                 self.relations.len()
             )));
+        }
+        for (relation_name, use_ordinal, expected) in canonical_relation_multiplicities()? {
+            let actual = self
+                .relations
+                .iter()
+                .find(|relation| relation.name == relation_name)
+                .and_then(|relation| relation.uses.get(use_ordinal))
+                .map(|relation_use| relation_use.multiplicity.as_str());
+            if actual != Some(expected.as_str()) {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "relation {relation_name:?} use {use_ordinal} has stale multiplicity metadata"
+                )));
+            }
         }
         for (name, expected_fields) in [
             (
@@ -1398,6 +1396,19 @@ impl GenerationInputV1 {
                  {CANONICAL_RAW_MLDSA_CHALLENGE_COUNT} raw ML-DSA challenges, got {raw_challenges}"
             )));
         }
+        let relation_secure_field_draws =
+            relation_challenge_count.checked_mul(2).ok_or_else(|| {
+                ArtifactError::InvalidInput(
+                    "relation secure-field draw count exceeds usize".to_owned(),
+                )
+            })?;
+        let total_secure_field_draws = relation_secure_field_draws
+            .checked_add(raw_challenges)
+            .ok_or_else(|| {
+                ArtifactError::InvalidInput(
+                    "total secure-field draw count exceeds usize".to_owned(),
+                )
+            })?;
         checked_name_list(
             "challenge",
             self.transcript
@@ -1406,12 +1417,6 @@ impl GenerationInputV1 {
                 .map(|entry| entry.name.as_str()),
         )?;
 
-        if self.serialized_claims.len() != CANONICAL_SERIALIZED_CLAIM_COUNT {
-            return Err(ArtifactError::InvalidInput(format!(
-                "serialized claim order must contain exactly \
-                 {CANONICAL_SERIALIZED_CLAIM_COUNT} entries"
-            )));
-        }
         if self
             .serialized_claims
             .iter()
@@ -1424,7 +1429,6 @@ impl GenerationInputV1 {
             ));
         }
         let mut claim_names = BTreeSet::new();
-        let mut serialized_claim_bytes = 0_u64;
         for claim in &self.serialized_claims {
             if claim.name.is_empty()
                 || !claim_names.insert(claim.name.as_str())
@@ -1436,13 +1440,6 @@ impl GenerationInputV1 {
                         .to_owned(),
                 ));
             }
-            serialized_claim_bytes = serialized_claim_bytes
-                .checked_add(u64::from(claim.fixed_length))
-                .ok_or_else(|| {
-                    ArtifactError::InvalidInput(
-                        "serialized claim byte count exceeds u64".to_owned(),
-                    )
-                })?;
             checked_name_list(
                 "claim fixed-vector",
                 claim
@@ -1451,13 +1448,6 @@ impl GenerationInputV1 {
                     .map(|entry| entry.name.as_str()),
             )?;
         }
-        if serialized_claim_bytes != CANONICAL_SERIALIZED_CLAIM_BYTES {
-            return Err(ArtifactError::InvalidInput(format!(
-                "serialized claims must occupy exactly {CANONICAL_SERIALIZED_CLAIM_BYTES} bytes \
-                 excluding StarkProof, got {serialized_claim_bytes}"
-            )));
-        }
-
         checked_named_values("stream ID", &self.stream_ids)?;
         if self.stream_ids.len() != CANONICAL_STREAM_ID_COUNT {
             return Err(ArtifactError::InvalidInput(format!(
@@ -1473,14 +1463,8 @@ impl GenerationInputV1 {
             .iter()
             .map(|entry| entry.value)
             .collect::<BTreeSet<_>>();
+        let hash_shapes = canonical_hash_stream_shapes()?;
         if self.hash_streams.len() != CANONICAL_HASH_STREAM_COUNT
-            || self.hash_streams.iter().any(|stream| {
-                stream.hash_function.is_empty()
-                    || stream.job_count == 0
-                    || stream.input_capacity_bytes == 0
-                    || stream.output_bytes == 0
-                    || !declared_stream_ids.contains(&stream.stream_id)
-            })
             || self
                 .hash_streams
                 .iter()
@@ -1490,9 +1474,29 @@ impl GenerationInputV1 {
                 != self.hash_streams.len()
         {
             return Err(ArtifactError::InvalidInput(
-                "hash streams require sorted unique names and IDs plus complete non-zero geometry"
-                    .to_owned(),
+                "hash streams require the exact count and unique stream IDs".to_owned(),
             ));
+        }
+        for stream in &self.hash_streams {
+            let shape = hash_shapes.get(&stream.stream_id).ok_or_else(|| {
+                ArtifactError::InvalidInput(format!(
+                    "hash stream {:?} has no canonical job shape",
+                    stream.name
+                ))
+            })?;
+            let (hash_function, input_capacity_bytes, output_bytes) = hash_stream_geometry(*shape)?;
+            if stream.hash_function != hash_function
+                || stream.domain_separator.0 != [0x1f]
+                || stream.job_count != 1
+                || stream.input_capacity_bytes != input_capacity_bytes
+                || stream.output_bytes != output_bytes
+                || !declared_stream_ids.contains(&stream.stream_id)
+            {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "hash stream {:?} differs from its live circuit job shape",
+                    stream.name
+                )));
+            }
         }
         checked_name_list(
             "range table",
@@ -1561,11 +1565,86 @@ impl GenerationInputV1 {
                 "digest identifier widths differ from the canonical profile".to_owned(),
             ));
         }
+        for (name, expected) in [
+            ("impl.air_instance_count", u64::from(air_instance_count)),
+            ("impl.component_count", component_names.len() as u64),
+            ("impl.expand_a_job_count", 16),
+            ("impl.hash_job_count", CANONICAL_HASH_STREAM_COUNT as u64),
+            (
+                "impl.issuer_cose_sig_structure_bytes",
+                u64::from(self.credential_shape.issuer_cose_sig_structure_bytes),
+            ),
+            (
+                "impl.mso_payload_bytes",
+                u64::from(self.credential_shape.mso_payload_bytes),
+            ),
+            (
+                "impl.padded_issuer_signed_item_bytes",
+                u64::from(self.credential_shape.padded_issuer_signed_item_bytes),
+            ),
+            (
+                "impl.challenge.raw_mldsa_secure_field_draws",
+                raw_challenges as u64,
+            ),
+            (
+                "impl.challenge.relation_instances",
+                relation_challenge_count as u64,
+            ),
+            (
+                "impl.challenge.relation_secure_field_draws",
+                relation_secure_field_draws as u64,
+            ),
+            (
+                "impl.challenge.total_secure_field_draws",
+                total_secure_field_draws as u64,
+            ),
+        ] {
+            if implementation_unsigned(&self.implementation_constants, name)? != expected {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "implementation constant {name:?} differs from its typed source"
+                )));
+            }
+        }
+        let claimed_sum_count = self
+            .modules
+            .iter()
+            .flat_map(|module| &module.air_instances)
+            .try_fold(0_u64, |sum, air| {
+                sum.checked_add(u64::from(air.claimed_sum_count))
+                    .ok_or_else(|| {
+                        ArtifactError::InvalidInput(
+                            "global claimed-sum count exceeds u64".to_owned(),
+                        )
+                    })
+            })?;
+        if implementation_unsigned(
+            &self.implementation_constants,
+            "impl.transcript.global_claimed_sum_count",
+        )? != claimed_sum_count
+            || implementation_text(
+                &self.implementation_constants,
+                "impl.transcript.claim_mix_order",
+            )? != CLAIM_MIX_ORDER
+            || implementation_text(
+                &self.implementation_constants,
+                "impl.transcript.phase_order",
+            )? != TRANSCRIPT_PHASE_ORDER
+            || implementation_text(&self.implementation_constants, "impl.keccak.job_order")?
+                != KECCAK_JOB_ORDER
+            || implementation_text(
+                &self.implementation_constants,
+                "impl.hash_stream_record_stream_id_semantics",
+            )? != HASH_STREAM_ID_SEMANTICS
+        {
+            return Err(ArtifactError::InvalidInput(
+                "transcript or hash-job descriptions differ from typed geometry".to_owned(),
+            ));
+        }
 
+        let tree_column_counts = expected_tree_column_counts(self)?;
         if self.tree_zero.derivation.is_empty()
             || self.tree_zero.hash != "Blake2s-256"
-            || self.tree_zero.preprocessed_column_order.len()
-                != CANONICAL_TREE_COLUMN_COUNTS[0] as usize
+            || self.tree_zero.preprocessed_column_order.len() != tree_column_counts[0] as usize
             || self
                 .tree_zero
                 .preprocessed_column_order
@@ -1573,8 +1652,7 @@ impl GenerationInputV1 {
                 .collect::<BTreeSet<_>>()
                 .len()
                 != self.tree_zero.preprocessed_column_order.len()
-            || self.tree_zero.committed_column_log_sizes.len()
-                != CANONICAL_TREE_COLUMN_COUNTS[0] as usize
+            || self.tree_zero.committed_column_log_sizes.len() != tree_column_counts[0] as usize
             || self
                 .tree_zero
                 .committed_column_log_sizes
@@ -1583,9 +1661,17 @@ impl GenerationInputV1 {
         {
             return Err(ArtifactError::InvalidInput(format!(
                 "tree zero must carry the exact {}-column deduplicated order and log geometry",
-                CANONICAL_TREE_COLUMN_COUNTS[0]
+                tree_column_counts[0]
             )));
         }
+        let security_bits = self
+            .proof_system
+            .fri_query_count
+            .checked_mul(self.proof_system.fri_log_blowup_factor)
+            .and_then(|bits| bits.checked_add(self.proof_system.pow_bits))
+            .ok_or_else(|| {
+                ArtifactError::InvalidInput("PCS security label exceeds u32".to_owned())
+            })?;
         if self.proof_system.field != "M31"
             || self.proof_system.field_modulus != 2_147_483_647
             || self.proof_system.secure_extension_field != "QM31"
@@ -1594,16 +1680,14 @@ impl GenerationInputV1 {
             || self.proof_system.commitment_hash != "Blake2s-256"
             || self.proof_system.merkle_hash != "Blake2s-256"
             || self.proof_system.fri_log_last_layer_degree_bound != 1
-            || self.proof_system.fri_log_blowup_factor != 3
-            || self.proof_system.fri_query_count != 36
+            || !(1..=16).contains(&self.proof_system.fri_log_blowup_factor)
+            || self.proof_system.fri_query_count == 0
             || self.proof_system.fri_fold_step != 2
-            || self.proof_system.pow_bits != 20
-            || self.proof_system.lifting_log_size.is_some()
+            || self.proof_system.pow_bits > 32
+            || security_bits < 128
         {
             return Err(ArtifactError::InvalidInput(
-                "proof-system field, PCS, hash, FRI, query, PoW, and lifting parameters differ \
-                 from the canonical demo"
-                    .to_owned(),
+                "proof-system field, hash, FRI shape, or 128-bit PCS label is invalid".to_owned(),
             ));
         }
         checked_name_list(
@@ -1624,13 +1708,16 @@ impl GenerationInputV1 {
                 "Merkle-tree order must be exactly {CANONICAL_MERKLE_TREE_ORDER:?}"
             )));
         }
+        let tree_depths = expected_tree_depths(self)?;
+        let fri_input_log_size = self.proof_system.lifting_log_size.unwrap_or(tree_depths[4]);
+        let fri_layers = expected_fri_layers(&self.proof_system, fri_input_log_size)?;
         if self.proof_system.merkle_trees.len() != 5
             || self
                 .proof_system
                 .merkle_trees
                 .iter()
-                .zip(CANONICAL_TREE_DEPTHS)
-                .zip(CANONICAL_TREE_COLUMN_COUNTS)
+                .zip(tree_depths)
+                .zip(tree_column_counts)
                 .any(|((tree, depth), columns)| {
                     tree.depth != depth
                         || tree.digest_bytes != 32
@@ -1651,27 +1738,14 @@ impl GenerationInputV1 {
                             .windows(2)
                             .any(|pair| pair[0].value >= pair[1].value)
                 })
-            || self.proof_system.fri_layers.len() != 8
-            || self
-                .proof_system
-                .fri_layers
-                .iter()
-                .zip(CANONICAL_FRI_LAYER_INPUT_LOGS)
-                .zip(CANONICAL_FRI_LAYER_OUTPUT_LOGS)
-                .zip(CANONICAL_FRI_MERKLE_DEPTHS)
-                .zip(CANONICAL_FRI_WITNESS_CAPS)
-                .any(|((((layer, input), output), depth), witness_cap)| {
-                    layer.input_log_size != input
-                        || layer.output_log_size != output
-                        || layer.merkle_depth != depth
-                        || u64::from(layer.maximum_opened_values) != witness_cap
-                })
+            || self.proof_system.fri_layers != fri_layers
         {
             return Err(ArtifactError::InvalidInput(
-                "Merkle-tree and FRI-layer geometry differs from the canonical demo".to_owned(),
+                "Merkle-tree or FRI-layer geometry differs from the typed circuit and PCS"
+                    .to_owned(),
             ));
         }
-        validate_proof_bound(&ts13_demo_proof_bound_terms())?;
+        validate_proof_bound(&ts13_demo_proof_bound_terms(self)?)?;
 
         let expected_packages: Vec<_> = SOURCE_PACKAGE_ROOTS
             .iter()
@@ -1739,6 +1813,7 @@ impl GenerationInputV1 {
                     air_instance_ordinal,
                     columns: air.columns.counts()?,
                     column_log_sizes: air.columns.clone(),
+                    claimed_sum_count: air.claimed_sum_count,
                     max_log_size: air.max_log_size,
                     max_constraint_log_degree_bound: air.max_constraint_log_degree_bound,
                 });
@@ -1791,30 +1866,361 @@ fn checked_named_values(kind: &str, values: &[NamedU64V1]) -> Result<(), Artifac
     checked_name_list(kind, values.iter().map(|entry| entry.name.as_str()))
 }
 
-fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
-    let committed_columns = CANONICAL_TREE_COLUMN_COUNTS.iter().sum::<u64>();
-    let queried_base_fields = committed_columns * 36;
-    let tree_hashes = CANONICAL_TREE_DEPTHS
+fn implementation_unsigned(
+    constants: &[ArtifactConstantV1],
+    name: &str,
+) -> Result<u64, ArtifactError> {
+    let constant = constants
         .iter()
-        .map(|depth| u64::from(*depth) * 36)
-        .sum::<u64>();
-    let fri_hashes = CANONICAL_FRI_MERKLE_DEPTHS
+        .find(|constant| constant.name == name)
+        .ok_or_else(|| ArtifactError::InvalidInput(format!("missing constant {name:?}")))?;
+    let ConstantValueV1::Unsigned(value) = constant.value else {
+        return Err(ArtifactError::InvalidInput(format!(
+            "constant {name:?} must be unsigned"
+        )));
+    };
+    Ok(value)
+}
+
+fn implementation_text<'a>(
+    constants: &'a [ArtifactConstantV1],
+    name: &str,
+) -> Result<&'a str, ArtifactError> {
+    let constant = constants
         .iter()
-        .map(|depth| u64::from(*depth) * 36)
-        .sum::<u64>();
-    let fri_witnesses = CANONICAL_FRI_WITNESS_CAPS.iter().sum::<u64>();
-    let tree_vector_framing = 8 + 5 * 8 + committed_columns * 8;
+        .find(|constant| constant.name == name)
+        .ok_or_else(|| ArtifactError::InvalidInput(format!("missing constant {name:?}")))?;
+    let ConstantValueV1::Text(value) = &constant.value else {
+        return Err(ArtifactError::InvalidInput(format!(
+            "constant {name:?} must be text"
+        )));
+    };
+    Ok(value)
+}
+
+fn expected_tree_column_counts(input: &GenerationInputV1) -> Result<[u64; 5], ArtifactError> {
+    let air_instances = input
+        .modules
+        .iter()
+        .flat_map(|module| &module.air_instances)
+        .collect::<Vec<_>>();
+    let count = |value: usize| {
+        u64::try_from(value)
+            .map_err(|_| ArtifactError::InvalidInput("tree column count exceeds u64".to_owned()))
+    };
+    let sum_columns = |select: fn(&AirColumnLayoutV1) -> &[u32]| {
+        air_instances.iter().try_fold(0_u64, |total, air| {
+            total
+                .checked_add(count(select(&air.columns).len())?)
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput("tree column count exceeds u64".to_owned())
+                })
+        })
+    };
+    let composition_split = composition_log_split(input)?;
+    let composition_columns = 1_u64
+        .checked_shl(composition_split)
+        .and_then(|parts| parts.checked_mul(u64::from(input.proof_system.secure_extension_degree)))
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput("composition column count exceeds u64".to_owned())
+        })?;
+    Ok([
+        count(input.tree_zero.committed_column_log_sizes.len())?,
+        sum_columns(|columns| &columns.trace_m31_log_sizes)?,
+        sum_columns(|columns| &columns.interaction_m31_log_sizes)?,
+        sum_columns(|columns| &columns.post_interaction_m31_log_sizes)?,
+        composition_columns,
+    ])
+}
+
+fn composition_log_split(input: &GenerationInputV1) -> Result<u32, ArtifactError> {
+    input
+        .modules
+        .iter()
+        .flat_map(|module| &module.air_instances)
+        .flat_map(|air| &air.components)
+        .map(|component| {
+            if component.trace_rows == 0 {
+                return Err(ArtifactError::InvalidInput(
+                    "composition component has no trace rows".to_owned(),
+                ));
+            }
+            Ok(component
+                .max_constraint_log_degree_bound
+                .saturating_sub(component.trace_rows.ilog2()))
+        })
+        .try_fold(1, |maximum, split| split.map(|split| maximum.max(split)))
+}
+
+fn composition_evaluation_log_size(input: &GenerationInputV1) -> Result<u32, ArtifactError> {
+    let maximum_trace_log_size = input
+        .modules
+        .iter()
+        .flat_map(|module| &module.air_instances)
+        .flat_map(|air| &air.components)
+        .map(|component| {
+            if component.trace_rows == 0 {
+                return Err(ArtifactError::InvalidInput(
+                    "composition component has no trace rows".to_owned(),
+                ));
+            }
+            Ok(component.trace_rows.ilog2())
+        })
+        .try_fold(None, |maximum, log_size| {
+            log_size
+                .map(|log_size| Some(maximum.map_or(log_size, |value: u32| value.max(log_size))))
+        })?
+        .ok_or_else(|| ArtifactError::InvalidInput("circuit has no AIR components".to_owned()))?;
+    maximum_trace_log_size
+        .checked_add(composition_log_split(input)?)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput("composition evaluation log size exceeds u32".to_owned())
+        })
+}
+
+fn expected_tree_depths(input: &GenerationInputV1) -> Result<[u32; 5], ArtifactError> {
+    let maximum = |logs: Vec<u32>, tree: &str| {
+        logs.into_iter()
+            .max()
+            .ok_or_else(|| ArtifactError::InvalidInput(format!("{tree} has no committed columns")))
+    };
+    let air_instances = input
+        .modules
+        .iter()
+        .flat_map(|module| &module.air_instances)
+        .collect::<Vec<_>>();
+    let base_logs = [
+        maximum(
+            input.tree_zero.committed_column_log_sizes.clone(),
+            "preprocessed tree",
+        )?,
+        maximum(
+            air_instances
+                .iter()
+                .flat_map(|air| air.columns.trace_m31_log_sizes.iter().copied())
+                .collect(),
+            "trace tree",
+        )?,
+        maximum(
+            air_instances
+                .iter()
+                .flat_map(|air| air.columns.interaction_m31_log_sizes.iter().copied())
+                .collect(),
+            "interaction tree",
+        )?,
+        maximum(
+            air_instances
+                .iter()
+                .flat_map(|air| air.columns.post_interaction_m31_log_sizes.iter().copied())
+                .collect(),
+            "post-interaction tree",
+        )?,
+        maximum(
+            air_instances.iter().map(|air| air.max_log_size).collect(),
+            "composition tree",
+        )?,
+    ];
+    if let Some(lifting_log_size) = input.proof_system.lifting_log_size {
+        let mut minimum_lifting_log_size = composition_evaluation_log_size(input)?;
+        for base_log in base_logs {
+            let minimum = base_log
+                .checked_add(input.proof_system.fri_log_blowup_factor)
+                .ok_or_else(|| ArtifactError::InvalidInput("tree depth exceeds u32".to_owned()))?;
+            minimum_lifting_log_size = minimum_lifting_log_size.max(minimum);
+        }
+        if lifting_log_size < minimum_lifting_log_size {
+            return Err(ArtifactError::InvalidInput(format!(
+                "lifting log size {lifting_log_size} is below the required interpolation or \
+                 commitment domain {minimum_lifting_log_size}"
+            )));
+        }
+        return Ok([lifting_log_size; 5]);
+    }
+    let mut depths = [0; 5];
+    for (depth, base_log) in depths.iter_mut().zip(base_logs) {
+        *depth = base_log
+            .checked_add(input.proof_system.fri_log_blowup_factor)
+            .ok_or_else(|| ArtifactError::InvalidInput("tree depth exceeds u32".to_owned()))?;
+    }
+    Ok(depths)
+}
+
+fn expected_fri_layers(
+    proof_system: &ProofSystemV1,
+    first_input_log_size: u32,
+) -> Result<Vec<FriLayerParametersV1>, ArtifactError> {
+    let last_input_log_size = proof_system
+        .fri_log_last_layer_degree_bound
+        .checked_add(proof_system.fri_log_blowup_factor)
+        .ok_or_else(|| ArtifactError::InvalidInput("FRI last-layer log exceeds u32".to_owned()))?;
+    if proof_system.fri_fold_step == 0 || first_input_log_size <= last_input_log_size {
+        return Err(ArtifactError::InvalidInput(
+            "FRI requires a positive fold step and at least one layer".to_owned(),
+        ));
+    }
+    let mut input_log_size = first_input_log_size;
+    let mut layers = Vec::new();
+    while input_log_size > last_input_log_size {
+        let step = proof_system
+            .fri_fold_step
+            .min(input_log_size - last_input_log_size);
+        let output_log_size = input_log_size - step;
+        let merkle_depth = if step > 1 && input_log_size >= 2 {
+            input_log_size - 2
+        } else {
+            input_log_size
+        };
+        let opened_per_query = 1_u32
+            .checked_shl(step)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or_else(|| ArtifactError::InvalidInput("FRI fold step exceeds u32".to_owned()))?;
+        let maximum_opened_values = proof_system
+            .fri_query_count
+            .checked_mul(opened_per_query)
+            .ok_or_else(|| {
+                ArtifactError::InvalidInput("FRI witness bound exceeds u32".to_owned())
+            })?;
+        layers.push(FriLayerParametersV1 {
+            input_log_size,
+            output_log_size,
+            merkle_depth,
+            maximum_opened_values,
+        });
+        input_log_size = output_log_size;
+    }
+    Ok(layers)
+}
+
+fn ts13_demo_proof_bound_terms(
+    input: &GenerationInputV1,
+) -> Result<Vec<ProofBoundTermV1>, ArtifactError> {
+    let trees = &input.proof_system.merkle_trees;
+    let query_count = u64::from(input.proof_system.fri_query_count);
+    let committed_columns = trees.iter().try_fold(0_u64, |sum, tree| {
+        sum.checked_add(u64::from(tree.maximum_opened_columns))
+            .ok_or_else(|| ArtifactError::InvalidInput("tree column total exceeds u64".to_owned()))
+    })?;
+    let queried_base_fields = committed_columns.checked_mul(query_count).ok_or_else(|| {
+        ArtifactError::InvalidInput("queried base-field bound exceeds u64".to_owned())
+    })?;
+    let tree_hashes = trees.iter().try_fold(0_u64, |sum, tree| {
+        let hashes = u64::from(tree.depth)
+            .checked_mul(query_count)
+            .ok_or_else(|| {
+                ArtifactError::InvalidInput("Merkle hash bound exceeds u64".to_owned())
+            })?;
+        sum.checked_add(hashes)
+            .ok_or_else(|| ArtifactError::InvalidInput("Merkle hash bound exceeds u64".to_owned()))
+    })?;
+    let fri_hashes = input
+        .proof_system
+        .fri_layers
+        .iter()
+        .try_fold(0_u64, |sum, layer| {
+            let hashes = u64::from(layer.merkle_depth)
+                .checked_mul(query_count)
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput("FRI hash bound exceeds u64".to_owned())
+                })?;
+            sum.checked_add(hashes)
+                .ok_or_else(|| ArtifactError::InvalidInput("FRI hash bound exceeds u64".to_owned()))
+        })?;
+    let fri_witnesses = input
+        .proof_system
+        .fri_layers
+        .iter()
+        .try_fold(0_u64, |sum, layer| {
+            sum.checked_add(u64::from(layer.maximum_opened_values))
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput("FRI witness bound exceeds u64".to_owned())
+                })
+        })?;
+    let sampled_secure_fields = trees.iter().try_fold(0_u64, |tree_sum, tree| {
+        let tree_fields =
+            tree.sampled_value_length_histogram
+                .iter()
+                .try_fold(0_u64, |sum, entry| {
+                    let fields = u64::from(entry.value)
+                        .checked_mul(u64::from(entry.count))
+                        .ok_or_else(|| {
+                            ArtifactError::InvalidInput(
+                                "sampled secure-field bound exceeds u64".to_owned(),
+                            )
+                        })?;
+                    sum.checked_add(fields).ok_or_else(|| {
+                        ArtifactError::InvalidInput(
+                            "sampled secure-field bound exceeds u64".to_owned(),
+                        )
+                    })
+                })?;
+        tree_sum.checked_add(tree_fields).ok_or_else(|| {
+            ArtifactError::InvalidInput("sampled secure-field bound exceeds u64".to_owned())
+        })
+    })?;
+    let outer_claim_bytes = input
+        .serialized_claims
+        .iter()
+        .filter(|claim| claim.name != "post_interaction_payloads")
+        .try_fold(0_u64, |sum, claim| {
+            sum.checked_add(u64::from(claim.fixed_length))
+                .ok_or_else(|| {
+                    ArtifactError::InvalidInput("outer claim bound exceeds u64".to_owned())
+                })
+        })?;
+    let tree_count = u64::try_from(trees.len())
+        .map_err(|_| ArtifactError::InvalidInput("tree count exceeds u64".to_owned()))?;
+    let fri_layer_count = u64::try_from(input.proof_system.fri_layers.len())
+        .map_err(|_| ArtifactError::InvalidInput("FRI layer count exceeds u64".to_owned()))?;
+    let air_count = u64::try_from(
+        input
+            .modules
+            .iter()
+            .map(|module| module.air_instances.len())
+            .sum::<usize>(),
+    )
+    .map_err(|_| ArtifactError::InvalidInput("AIR count exceeds u64".to_owned()))?;
+    let tree_vector_framing = 8_u64
+        .checked_add(tree_count.checked_mul(8).ok_or_else(|| {
+            ArtifactError::InvalidInput("tree vector framing exceeds u64".to_owned())
+        })?)
+        .and_then(|bytes| bytes.checked_add(committed_columns.checked_mul(8)?))
+        .ok_or_else(|| ArtifactError::InvalidInput("tree vector framing exceeds u64".to_owned()))?;
+    let tree_decommitment_framing = 8_u64
+        .checked_add(tree_count.checked_mul(8).ok_or_else(|| {
+            ArtifactError::InvalidInput("tree decommitment framing exceeds u64".to_owned())
+        })?)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput("tree decommitment framing exceeds u64".to_owned())
+        })?;
+    let fri_vector_framing = 20_u64
+        .checked_add(fri_layer_count.checked_mul(16).ok_or_else(|| {
+            ArtifactError::InvalidInput("FRI vector framing exceeds u64".to_owned())
+        })?)
+        .ok_or_else(|| ArtifactError::InvalidInput("FRI vector framing exceeds u64".to_owned()))?;
+    let post_payload_framing = 8_u64
+        .checked_add(air_count.checked_mul(8).ok_or_else(|| {
+            ArtifactError::InvalidInput("post-payload framing exceeds u64".to_owned())
+        })?)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput("post-payload framing exceeds u64".to_owned())
+        })?;
+    let last_layer_coefficients = 1_u64
+        .checked_shl(input.proof_system.fri_log_last_layer_degree_bound)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput("FRI last-layer coefficient count exceeds u64".to_owned())
+        })?;
+    let pcs_config_bytes = 28 + 4 * u64::from(input.proof_system.lifting_log_size.is_some());
     let terms = vec![
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::ProofHeader,
-            name: "pcs_config_and_none_tag".to_owned(),
+            name: "pcs_config".to_owned(),
             maximum_item_count: 1,
-            maximum_serialized_bytes_per_item: 28,
+            maximum_serialized_bytes_per_item: pcs_config_bytes,
         },
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::Commitments,
             name: "blake2s_roots".to_owned(),
-            maximum_item_count: 5,
+            maximum_item_count: tree_count,
             maximum_serialized_bytes_per_item: 32,
         },
         ProofBoundTermV1 {
@@ -1839,12 +2245,12 @@ fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
             section: ProofBoundSectionV1::MerkleDecommitments,
             name: "vector_framing".to_owned(),
             maximum_item_count: 1,
-            maximum_serialized_bytes_per_item: 8 + 5 * 8,
+            maximum_serialized_bytes_per_item: tree_decommitment_framing,
         },
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::FriLayers,
             name: "commitments".to_owned(),
-            maximum_item_count: 8,
+            maximum_item_count: fri_layer_count,
             maximum_serialized_bytes_per_item: 32,
         },
         ProofBoundTermV1 {
@@ -1856,7 +2262,7 @@ fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::FriLayers,
             name: "last_layer_coefficients".to_owned(),
-            maximum_item_count: 2,
+            maximum_item_count: last_layer_coefficients,
             maximum_serialized_bytes_per_item: 16,
         },
         ProofBoundTermV1 {
@@ -1869,13 +2275,13 @@ fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
             section: ProofBoundSectionV1::FriLayers,
             name: "vector_framing".to_owned(),
             maximum_item_count: 1,
-            maximum_serialized_bytes_per_item: 148,
+            maximum_serialized_bytes_per_item: fri_vector_framing,
         },
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::Claims,
             name: "fixed_outer_claims_and_framing".to_owned(),
             maximum_item_count: 1,
-            maximum_serialized_bytes_per_item: CANONICAL_OUTER_CLAIMS_AND_FRAMING_BYTES,
+            maximum_serialized_bytes_per_item: outer_claim_bytes,
         },
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::ColumnValues,
@@ -1886,7 +2292,7 @@ fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::ColumnValues,
             name: "sampled_secure_fields".to_owned(),
-            maximum_item_count: CANONICAL_SAMPLED_SECURE_FIELD_COUNT,
+            maximum_item_count: sampled_secure_fields,
             maximum_serialized_bytes_per_item: 16,
         },
         ProofBoundTermV1 {
@@ -1912,11 +2318,11 @@ fn ts13_demo_proof_bound_terms() -> Vec<ProofBoundTermV1> {
             section: ProofBoundSectionV1::SerializationOverhead,
             name: "post_payload_vector_framing".to_owned(),
             maximum_item_count: 1,
-            maximum_serialized_bytes_per_item: 8 + 20 * 8,
+            maximum_serialized_bytes_per_item: post_payload_framing,
         },
     ];
-    debug_assert!(validate_proof_bound(&terms).is_ok());
-    terms
+    validate_proof_bound(&terms)?;
+    Ok(terms)
 }
 
 fn validate_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(), ArtifactError> {
@@ -1977,6 +2383,11 @@ fn deterministic_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(u64, u32), A
         .checked_add(ENVELOPE_CAPACITY_ALIGNMENT - 1)
         .map(|value| value / ENVELOPE_CAPACITY_ALIGNMENT * ENVELOPE_CAPACITY_ALIGNMENT)
         .ok_or_else(|| ArtifactError::InvalidInput("proof capacity overflows u64".to_owned()))?;
+    if !capacity.is_multiple_of(ENVELOPE_CAPACITY_ALIGNMENT) {
+        return Err(ArtifactError::InvalidInput(
+            "proof capacity does not meet the independent alignment rail".to_owned(),
+        ));
+    }
     let capacity = u32::try_from(capacity).map_err(|_| {
         ArtifactError::InvalidInput(
             "envelope capacity does not fit its u32 header field".to_owned(),
@@ -1985,9 +2396,7 @@ fn deterministic_proof_bound(terms: &[ProofBoundTermV1]) -> Result<(u64, u32), A
     Ok((worst_case, capacity))
 }
 
-fn builtin_constants() -> Vec<ArtifactConstantV1> {
-    let normative_spec_digest = decode_hex(CANONICAL_NORMATIVE_SPEC_SHA256)
-        .expect("canonical specification digest is valid hex");
+fn builtin_constants(normative_spec_digest: Digest32) -> Vec<ArtifactConstantV1> {
     let mut constants = vec![
         constant_bytes(
             "cbor.device_key_info_prefix",
@@ -2025,7 +2434,7 @@ fn builtin_constants() -> Vec<ArtifactConstantV1> {
             "spec.eudi_arf_ts13_path",
             "docs/technical-specifications/ts13-zksnarks.md",
         ),
-        constant_bytes("spec.normative_document_sha256", &normative_spec_digest),
+        constant_bytes("spec.normative_document_sha256", &normative_spec_digest.0),
         constant_unsigned("expand_a.accepted_coefficients_per_polynomial", 256),
         constant_unsigned("expand_a.candidate_bits", 23),
         constant_unsigned("expand_a.jobs", 16),
@@ -2247,10 +2656,17 @@ fn collect_directory_files(
 
 fn collect_source_tree(workspace: &Path) -> Result<SourceTreeManifestV1, ArtifactError> {
     let cargo_toml = workspace.join("Cargo.toml");
-    let mut files = vec![SourceFileEntryV1 {
-        path: "Cargo.toml".to_owned(),
-        sha256: Digest32::of(&read(&cargo_toml)?),
-    }];
+    let normative_spec = workspace.join(NORMATIVE_SPEC_PATH);
+    let mut files = vec![
+        SourceFileEntryV1 {
+            path: "Cargo.toml".to_owned(),
+            sha256: Digest32::of(&read(&cargo_toml)?),
+        },
+        SourceFileEntryV1 {
+            path: NORMATIVE_SPEC_PATH.to_owned(),
+            sha256: Digest32::of(&read(&normative_spec)?),
+        },
+    ];
     for root in SOURCE_PACKAGE_ROOTS {
         collect_directory_files(workspace, &workspace.join(root), &mut files)?;
     }
@@ -2262,7 +2678,7 @@ fn collect_source_tree(workspace: &Path) -> Result<SourceTreeManifestV1, Artifac
     }
     Ok(SourceTreeManifestV1 {
         schema_version: 1,
-        workspace_files: vec!["Cargo.toml".to_owned()],
+        workspace_files: vec!["Cargo.toml".to_owned(), NORMATIVE_SPEC_PATH.to_owned()],
         package_roots: SOURCE_PACKAGE_ROOTS
             .iter()
             .map(|path| (*path).to_owned())
@@ -2406,6 +2822,7 @@ fn git_path_arguments(prefix: &[&'static str]) -> Vec<&'static str> {
     let mut arguments = prefix.to_vec();
     arguments.push("--");
     arguments.push("Cargo.toml");
+    arguments.push(NORMATIVE_SPEC_PATH);
     arguments.extend(SOURCE_PACKAGE_ROOTS);
     arguments.push(":(exclude)artifacts/ts13-demo-v1/shape-manifest.cbor");
     arguments.push(":(exclude)artifacts/ts13-demo-v1/circuit-artifact-v1.cbor");
@@ -2554,19 +2971,7 @@ fn toolchain_metadata(workspace: &Path) -> Result<RustToolchainV1, ArtifactError
     })
 }
 
-fn checked_normative_spec(workspace: &Path) -> Result<(), ArtifactError> {
-    let normative_spec_digest = Digest32::of(&read(&workspace.join(NORMATIVE_SPEC_PATH))?);
-    if normative_spec_digest.to_string() != CANONICAL_NORMATIVE_SPEC_SHA256 {
-        return Err(ArtifactError::InvalidInput(format!(
-            "normative specification digest differs: expected {CANONICAL_NORMATIVE_SPEC_SHA256}, \
-             got {normative_spec_digest}"
-        )));
-    }
-    Ok(())
-}
-
 fn generation_environment(workspace: &Path) -> Result<GenerationEnvironmentV1, ArtifactError> {
-    checked_normative_spec(workspace)?;
     let source_manifest = collect_source_tree(workspace)?;
     checked_git_source_paths(workspace, &source_manifest)?;
     checked_git_source_clean(workspace)?;
@@ -2579,6 +2984,22 @@ fn generation_environment(workspace: &Path) -> Result<GenerationEnvironmentV1, A
         source_manifest,
         source_manifest_sha256,
     })
+}
+
+fn source_file_digest(
+    manifest: &SourceTreeManifestV1,
+    path: &str,
+) -> Result<Digest32, ArtifactError> {
+    manifest
+        .files
+        .iter()
+        .find(|file| file.path == path)
+        .map(|file| file.sha256)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput(format!(
+                "soundness source manifest omitted required file {path:?}"
+            ))
+        })
 }
 
 fn build_outputs(
@@ -2594,10 +3015,12 @@ fn build_outputs(
     }
     let shape_manifest = canonical_cbor(&input.shape_manifest()?)?;
     let shape_manifest_sha256 = Digest32::of(&shape_manifest);
-    let proof_serialization_bound = ts13_demo_proof_bound_terms();
+    let proof_serialization_bound = ts13_demo_proof_bound_terms(input)?;
     let (worst_case, proof_body_capacity) = deterministic_proof_bound(&proof_serialization_bound)?;
 
-    let mut constants = builtin_constants();
+    let normative_spec_digest =
+        source_file_digest(&environment.source_manifest, NORMATIVE_SPEC_PATH)?;
+    let mut constants = builtin_constants(normative_spec_digest);
     if constants
         .iter()
         .map(|constant| constant.name.as_str())
@@ -2816,7 +3239,7 @@ fn render_hash_embedding(
     render_usize_array(
         &mut output,
         "TS13_DEMO_FRI_INNER_WITNESS_CAPS",
-        7,
+        input.proof_system.fri_layers.len() - 1,
         input.proof_system.fri_layers[1..]
             .iter()
             .map(|layer| u64::from(layer.maximum_opened_values)),
@@ -2824,7 +3247,7 @@ fn render_hash_embedding(
     render_usize_array(
         &mut output,
         "TS13_DEMO_FRI_INNER_HASH_CAPS",
-        7,
+        input.proof_system.fri_layers.len() - 1,
         input.proof_system.fri_layers[1..].iter().map(|layer| {
             u64::from(input.proof_system.fri_query_count) * u64::from(layer.merkle_depth)
         }),
@@ -2934,6 +3357,623 @@ pub fn generate_from_json(
     })
 }
 
+fn set_named_value(values: &mut [NamedU64V1], name: &str, value: u64) -> Result<(), ArtifactError> {
+    let entry = values
+        .iter_mut()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| ArtifactError::InvalidInput(format!("missing value {name:?}")))?;
+    entry.value = value;
+    Ok(())
+}
+
+fn set_implementation_unsigned(
+    input: &mut GenerationInputV1,
+    name: &str,
+    value: u64,
+) -> Result<(), ArtifactError> {
+    let constant = input
+        .implementation_constants
+        .iter_mut()
+        .find(|constant| constant.name == name)
+        .ok_or_else(|| ArtifactError::InvalidInput(format!("missing constant {name:?}")))?;
+    constant.value = ConstantValueV1::Unsigned(value);
+    Ok(())
+}
+
+fn set_implementation_text(
+    input: &mut GenerationInputV1,
+    name: &str,
+    value: &str,
+) -> Result<(), ArtifactError> {
+    let constant = input
+        .implementation_constants
+        .iter_mut()
+        .find(|constant| constant.name == name)
+        .ok_or_else(|| ArtifactError::InvalidInput(format!("missing constant {name:?}")))?;
+    constant.value = ConstantValueV1::Text(value.to_owned());
+    Ok(())
+}
+
+fn expand_a_ordinal(name: &str, suffix: &str) -> Option<usize> {
+    let ordinal = name.strip_prefix("expand_a_")?.strip_suffix(suffix)?;
+    (ordinal.len() == 2).then(|| ordinal.parse().ok()).flatten()
+}
+
+fn required_shape_count(value: Option<usize>, name: &str) -> Result<u64, ArtifactError> {
+    value
+        .map(|value| value as u64)
+        .ok_or_else(|| ArtifactError::InvalidInput(format!("live proof omitted {name}")))
+}
+
+fn canonical_hash_stream_shapes(
+) -> Result<BTreeMap<u64, stwo_mldsa::stwo_keccak::sponge::Shape>, ArtifactError> {
+    let mut shapes = BTreeMap::new();
+    for shape in crate::mdoc::ts13_demo_mldsa_keccak_job_shapes(
+        crate::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY,
+    ) {
+        if shapes
+            .insert(u64::from(shape.absorb_stream_id), shape)
+            .is_some()
+        {
+            return Err(ArtifactError::InvalidInput(
+                "canonical hash jobs reuse an absorb stream ID".to_owned(),
+            ));
+        }
+    }
+    if shapes.len() != CANONICAL_HASH_STREAM_COUNT {
+        return Err(ArtifactError::InvalidInput(format!(
+            "canonical circuit has {} hash jobs instead of {CANONICAL_HASH_STREAM_COUNT}",
+            shapes.len()
+        )));
+    }
+    Ok(shapes)
+}
+
+fn hash_stream_geometry(
+    shape: stwo_mldsa::stwo_keccak::sponge::Shape,
+) -> Result<(&'static str, u32, u32), ArtifactError> {
+    use stwo_mldsa::stwo_keccak::sponge::XofMode;
+
+    let hash_function = match shape.xof_mode {
+        XofMode::Shake256 => "SHAKE-256",
+        XofMode::Shake128 => "SHAKE-128",
+    };
+    let input_capacity_bytes = u32::try_from(shape.geometry_message_len())
+        .map_err(|_| ArtifactError::InvalidInput("hash input capacity exceeds u32".to_owned()))?;
+    let output_bytes = u32::try_from(shape.output_len())
+        .map_err(|_| ArtifactError::InvalidInput("hash output length exceeds u32".to_owned()))?;
+    Ok((hash_function, input_capacity_bytes, output_bytes))
+}
+
+fn canonical_relation_multiplicities() -> Result<Vec<(&'static str, usize, String)>, ArtifactError>
+{
+    use stwo_mldsa::{constants::N, profile::ML_DSA_44};
+
+    let mso_padded_len =
+        crate::mdoc::checked_sha256_padded_len(crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES)
+            .ok_or_else(|| {
+                ArtifactError::InvalidInput("MSO SHA-256 padded length exceeds usize".to_owned())
+            })?;
+    Ok(vec![
+        (
+            "r37_private_mso_field_bytes",
+            0,
+            format!(
+                "-gate_input at four bytes per input-word row for all {mso_padded_len} padded \
+                 stream bytes"
+            ),
+        ),
+        (
+            "r52_expand_a_ntt_cell",
+            0,
+            format!(
+                "+accept ({}*{N} stage-zero coefficients)",
+                ML_DSA_44.matrix_polys()
+            ),
+        ),
+        (
+            "r53_private_t1_cell",
+            0,
+            format!("-t1_row ({}*{N} coefficients)", ML_DSA_44.k()),
+        ),
+        (
+            "r53_private_t1_cell",
+            1,
+            format!("+active ({}*{N} coefficients)", ML_DSA_44.k()),
+        ),
+    ])
+}
+
+fn set_relation_use_multiplicity(
+    input: &mut GenerationInputV1,
+    relation_name: &str,
+    use_ordinal: usize,
+    multiplicity: String,
+) -> Result<(), ArtifactError> {
+    let relation = input
+        .relations
+        .iter_mut()
+        .find(|relation| relation.name == relation_name)
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput(format!("missing relation {relation_name:?}"))
+        })?;
+    let relation_use = relation.uses.get_mut(use_ordinal).ok_or_else(|| {
+        ArtifactError::InvalidInput(format!(
+            "relation {relation_name:?} has no use {use_ordinal}"
+        ))
+    })?;
+    relation_use.multiplicity = multiplicity;
+    Ok(())
+}
+
+fn refresh_canonical_profile_semantics(input: &mut GenerationInputV1) -> Result<(), ArtifactError> {
+    use stwo_mldsa::profile::ML_DSA_44;
+
+    input.credential_shape.issuer_cose_sig_structure_bytes =
+        crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES as u32;
+    input.credential_shape.mso_payload_bytes = crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES as u32;
+    input.credential_shape.padded_issuer_signed_item_bytes =
+        u32::from(crate::mdoc::TS13_DEMO_ITEM_PADDED_BYTES);
+    input.request_context_corpus.device_sig_structure_capacity =
+        crate::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY as u32;
+
+    input.stream_ids.retain(|entry| {
+        expand_a_ordinal(&entry.name, "_absorb")
+            .or_else(|| expand_a_ordinal(&entry.name, "_squeeze"))
+            .is_none_or(|ordinal| ordinal < ML_DSA_44.matrix_polys())
+    });
+    input.hash_streams.retain(|stream| {
+        expand_a_ordinal(&stream.name, "_job")
+            .is_none_or(|ordinal| ordinal < ML_DSA_44.matrix_polys())
+    });
+    let hash_shapes = canonical_hash_stream_shapes()?;
+    for stream in &mut input.hash_streams {
+        let shape = hash_shapes.get(&stream.stream_id).ok_or_else(|| {
+            ArtifactError::InvalidInput(format!(
+                "hash stream {:?} has no canonical job shape",
+                stream.name
+            ))
+        })?;
+        let (hash_function, input_capacity_bytes, output_bytes) = hash_stream_geometry(*shape)?;
+        stream.hash_function = hash_function.to_owned();
+        stream.domain_separator = HexBytes(vec![0x1f]);
+        stream.job_count = 1;
+        stream.input_capacity_bytes = input_capacity_bytes;
+        stream.output_bytes = output_bytes;
+    }
+    if input.stream_ids.len() != CANONICAL_STREAM_ID_COUNT
+        || input.hash_streams.len() != CANONICAL_HASH_STREAM_COUNT
+    {
+        return Err(ArtifactError::InvalidInput(
+            "canonical stream normalization did not produce 55 IDs and 26 jobs".to_owned(),
+        ));
+    }
+
+    for (relation_name, use_ordinal, multiplicity) in canonical_relation_multiplicities()? {
+        set_relation_use_multiplicity(input, relation_name, use_ordinal, multiplicity)?;
+    }
+
+    for (name, encoding, fixed_length) in [
+        (
+            "p02_shared_keccak_job_list",
+            "mix_u64(job_count,service_log_size); for each of 26 jobs mix mode,rate,message_len,n_squeeze,absorb_stream,squeeze_stream,perm_id_base; device-mu additionally mixes CAPACITY_TAG,1090",
+            Some(1_488),
+        ),
+        (
+            "p05_issuer_private_message_mldsa",
+            "mix_u64(profile_tag,namespace_len,namespace_bytes,rho[32],t1[6][256],tr[64],private_message_len,stream_base); private message bytes omitted",
+            Some(13_176),
+        ),
+        (
+            "p14_private_expand_a",
+            "mix_u64(domain_tag,profile_tag,namespace_len,namespace_bytes,stream_base,max_squeeze_blocks,matrix_polys)",
+            Some(248),
+        ),
+        (
+            "p16_private_device_mldsa",
+            "mix_u64(profile_tag,namespace_len,namespace_bytes,HOSTED_PRIVATE_KEY_MODE_TAG,message_len,public_message_bytes,stream_base)",
+            None,
+        ),
+        (
+            "p18_private_revocation_mldsa",
+            "mix_u64(profile_tag,namespace_len,namespace_bytes,rho[32],t1[6][256],tr[64],private_message_len,stream_base); private message bytes omitted",
+            Some(13_248),
+        ),
+    ] {
+        let entry = input
+            .transcript
+            .public_mix_order
+            .iter_mut()
+            .find(|entry| entry.name == name)
+            .ok_or_else(|| ArtifactError::InvalidInput(format!("missing public mix {name:?}")))?;
+        entry.encoding = encoding.to_owned();
+        entry.fixed_length = fixed_length;
+    }
+
+    set_implementation_unsigned(input, "impl.expand_a_job_count", 16)?;
+    set_implementation_unsigned(
+        input,
+        "impl.hash_job_count",
+        CANONICAL_HASH_STREAM_COUNT as u64,
+    )?;
+    set_implementation_unsigned(
+        input,
+        "impl.issuer_cose_sig_structure_bytes",
+        crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES as u64,
+    )?;
+    set_implementation_unsigned(
+        input,
+        "impl.mso_payload_bytes",
+        crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES as u64,
+    )?;
+    set_implementation_text(input, "impl.keccak.job_order", KECCAK_JOB_ORDER)?;
+    set_implementation_text(
+        input,
+        "impl.hash_stream_record_stream_id_semantics",
+        HASH_STREAM_ID_SEMANTICS,
+    )?;
+    set_implementation_unsigned(
+        input,
+        "impl.challenge.raw_mldsa_secure_field_draws",
+        CANONICAL_RAW_MLDSA_CHALLENGE_COUNT as u64,
+    )?;
+    set_implementation_unsigned(
+        input,
+        "impl.challenge.relation_instances",
+        CANONICAL_RELATION_COUNT as u64,
+    )?;
+    set_implementation_unsigned(
+        input,
+        "impl.challenge.relation_secure_field_draws",
+        (CANONICAL_RELATION_COUNT * 2) as u64,
+    )?;
+    set_implementation_unsigned(
+        input,
+        "impl.challenge.total_secure_field_draws",
+        (CANONICAL_RELATION_COUNT * 2 + CANONICAL_RAW_MLDSA_CHALLENGE_COUNT) as u64,
+    )?;
+    set_implementation_text(input, "impl.transcript.claim_mix_order", CLAIM_MIX_ORDER)?;
+    set_implementation_text(input, "impl.transcript.phase_order", TRANSCRIPT_PHASE_ORDER)?;
+    Ok(())
+}
+
+fn set_claim_vector(
+    input: &mut GenerationInputV1,
+    claim_name: &str,
+    vector_name: &str,
+    value: u64,
+) -> Result<(), ArtifactError> {
+    let claim = input
+        .serialized_claims
+        .iter_mut()
+        .find(|claim| claim.name == claim_name)
+        .ok_or_else(|| ArtifactError::InvalidInput(format!("missing claim {claim_name:?}")))?;
+    set_named_value(&mut claim.fixed_vector_lengths, vector_name, value)
+}
+
+fn refresh_air_geometry(
+    input: &mut GenerationInputV1,
+    geometry: &crate::mdoc::MdocTs13DemoCircuitGeometry,
+) -> Result<(), ArtifactError> {
+    let declared_air_count = input
+        .modules
+        .iter()
+        .map(|module| module.air_instances.len())
+        .sum::<usize>();
+    if declared_air_count != geometry.air_instances.len() {
+        return Err(ArtifactError::InvalidInput(format!(
+            "cannot refresh a different AIR skeleton: input {declared_air_count}, live {}",
+            geometry.air_instances.len()
+        )));
+    }
+    let mut air_ordinal = 0;
+    for module in &mut input.modules {
+        for air in &mut module.air_instances {
+            let live = &geometry.air_instances[air_ordinal];
+            if air.components.len() != live.components.len() {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "cannot refresh a different component skeleton at AIR {air_ordinal}"
+                )));
+            }
+            air.columns.preprocessed_m31_log_sizes = live.preprocessed_log_sizes.clone();
+            air.columns.trace_m31_log_sizes = live.trace_log_sizes.clone();
+            air.columns.interaction_m31_log_sizes = live.interaction_log_sizes.clone();
+            air.columns.post_interaction_m31_log_sizes = live.post_interaction_log_sizes.clone();
+            air.claimed_sum_count = u32::try_from(live.claimed_sum_count).map_err(|_| {
+                ArtifactError::InvalidInput("AIR claimed-sum count exceeds u32".to_owned())
+            })?;
+            air.max_log_size = live.max_log_size;
+            air.max_constraint_log_degree_bound = live.max_constraint_log_degree_bound;
+            for (component, live) in air.components.iter_mut().zip(&live.components) {
+                component.trace_rows = live.trace_rows;
+                component.active_rows = live.active_rows;
+                component.constraint_count =
+                    u32::try_from(live.constraint_count).map_err(|_| {
+                        ArtifactError::InvalidInput(
+                            "component constraint count exceeds u32".to_owned(),
+                        )
+                    })?;
+                component.max_constraint_log_degree_bound = live.max_constraint_log_degree_bound;
+                component.trace_mask_column_counts = live
+                    .trace_log_degree_bounds
+                    .iter()
+                    .map(|tree| {
+                        u32::try_from(tree.len()).map_err(|_| {
+                            ArtifactError::InvalidInput(
+                                "component mask column count exceeds u32".to_owned(),
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
+            air_ordinal += 1;
+        }
+    }
+    input.tree_zero.preprocessed_column_order = geometry.committed_preprocessed_ids.clone();
+    input.tree_zero.committed_column_log_sizes = geometry.committed_preprocessed_log_sizes.clone();
+    Ok(())
+}
+
+fn refresh_claim_geometry(
+    input: &mut GenerationInputV1,
+    proof: &crate::mdoc::MdocTs13DemoProofShape,
+) -> Result<(u64, u64, u64), ArtifactError> {
+    if input.serialized_claims.len() != proof.serialized_non_stark_field_lengths.len() {
+        return Err(ArtifactError::InvalidInput(
+            "cannot refresh a different serialized-claim skeleton".to_owned(),
+        ));
+    }
+    for (claim, &length) in input
+        .serialized_claims
+        .iter_mut()
+        .zip(&proof.serialized_non_stark_field_lengths)
+    {
+        claim.fixed_length = u32::try_from(length).map_err(|_| {
+            ArtifactError::InvalidInput("serialized claim length exceeds u32".to_owned())
+        })?;
+    }
+    set_claim_vector(
+        input,
+        "sha_tables_interaction_claim",
+        "pairs",
+        proof.sha_table_pair_claim_count as u64,
+    )?;
+    for (claim, group_evals, claimed_sums) in [
+        (
+            "mldsa",
+            proof.issuer_mldsa_group_eval_count,
+            proof.issuer_mldsa_claimed_sum_count,
+        ),
+        (
+            "device_mldsa",
+            proof.device_mldsa_group_eval_count,
+            proof.device_mldsa_claimed_sum_count,
+        ),
+        (
+            "revocation_mldsa",
+            proof.revocation_mldsa_group_eval_count,
+            proof.revocation_mldsa_claimed_sum_count,
+        ),
+    ] {
+        set_claim_vector(
+            input,
+            claim,
+            "group_evals",
+            required_shape_count(group_evals, "ML-DSA group-evaluation count")?,
+        )?;
+        set_claim_vector(
+            input,
+            claim,
+            "claimed_sums",
+            required_shape_count(claimed_sums, "ML-DSA claimed-sum count")?,
+        )?;
+    }
+    set_claim_vector(
+        input,
+        "keccak_service_claimed_sums",
+        "claimed_sums",
+        required_shape_count(
+            proof.keccak_service_claimed_sum_count,
+            "Keccak claimed-sum count",
+        )?,
+    )?;
+    set_claim_vector(
+        input,
+        "attribute_sha_interaction_claim",
+        "range",
+        proof.attribute_sha_range_claim_count as u64,
+    )?;
+    set_claim_vector(
+        input,
+        "mso_sha_interaction_claim",
+        "range",
+        required_shape_count(proof.mso_sha_range_claim_count, "MSO SHA range count")?,
+    )?;
+
+    let payload_count = proof.post_interaction_payload_bytes.len() as u64;
+    let nonempty_payloads = proof
+        .post_interaction_payload_bytes
+        .iter()
+        .filter(|&&bytes| bytes != 0)
+        .count() as u64;
+    let payload_bytes = proof
+        .post_interaction_payload_bytes
+        .iter()
+        .try_fold(0_u64, |sum, &bytes| sum.checked_add(bytes as u64))
+        .ok_or_else(|| ArtifactError::InvalidInput("post payload bytes exceed u64".to_owned()))?;
+    for (name, value) in [
+        ("nonempty_payloads", nonempty_payloads),
+        ("payload_bytes", payload_bytes),
+        ("payload_count", payload_count),
+    ] {
+        set_claim_vector(input, "post_interaction_payloads", name, value)?;
+    }
+    let serialized_claim_bytes = proof
+        .serialized_non_stark_field_lengths
+        .iter()
+        .try_fold(0_u64, |sum, &bytes| sum.checked_add(bytes as u64))
+        .ok_or_else(|| ArtifactError::InvalidInput("serialized claims exceed u64".to_owned()))?;
+    let post_payload_wire_bytes = 8 + payload_count * 8 + payload_bytes;
+    if serialized_claim_bytes
+        != proof.outer_claims_and_framing_bytes as u64 + post_payload_wire_bytes
+    {
+        return Err(ArtifactError::InvalidInput(
+            "live serialized claim totals are internally inconsistent".to_owned(),
+        ));
+    }
+    Ok((
+        payload_bytes,
+        post_payload_wire_bytes,
+        serialized_claim_bytes,
+    ))
+}
+
+fn refresh_pcs_geometry(
+    input: &mut GenerationInputV1,
+    proof: &crate::mdoc::MdocTs13DemoProofShape,
+) -> Result<(), ArtifactError> {
+    input.proof_system.fri_log_last_layer_degree_bound = proof.fri_log_last_layer_degree_bound;
+    input.proof_system.fri_log_blowup_factor = proof.fri_log_blowup_factor;
+    input.proof_system.fri_query_count = u32::try_from(proof.fri_query_count)
+        .map_err(|_| ArtifactError::InvalidInput("FRI query count exceeds u32".to_owned()))?;
+    input.proof_system.fri_fold_step = proof.fri_fold_step;
+    input.proof_system.pow_bits = proof.pow_bits;
+    input.proof_system.lifting_log_size = proof.lifting_log_size;
+    if input.proof_system.merkle_trees.len() != CANONICAL_MERKLE_TREE_ORDER.len()
+        || proof.sampled_values.len() != CANONICAL_MERKLE_TREE_ORDER.len()
+    {
+        return Err(ArtifactError::InvalidInput(
+            "live proof must contain the five canonical commitment trees".to_owned(),
+        ));
+    }
+    let tree_depths = expected_tree_depths(input)?;
+    for ((tree, sampled_columns), depth) in input
+        .proof_system
+        .merkle_trees
+        .iter_mut()
+        .zip(&proof.sampled_values)
+        .zip(tree_depths)
+    {
+        tree.depth = depth;
+        tree.maximum_opened_columns = u32::try_from(sampled_columns.len()).map_err(|_| {
+            ArtifactError::InvalidInput("sampled column count exceeds u32".to_owned())
+        })?;
+        let mut histogram = BTreeMap::<u32, u32>::new();
+        for &length in sampled_columns {
+            let length = u32::try_from(length).map_err(|_| {
+                ArtifactError::InvalidInput("sampled value length exceeds u32".to_owned())
+            })?;
+            *histogram.entry(length).or_default() += 1;
+        }
+        tree.sampled_value_length_histogram = histogram
+            .into_iter()
+            .map(|(value, count)| ValueCountV1 { value, count })
+            .collect();
+    }
+    let fri_input_log_size = input
+        .proof_system
+        .lifting_log_size
+        .unwrap_or(tree_depths[4]);
+    input.proof_system.fri_layers = expected_fri_layers(&input.proof_system, fri_input_log_size)?;
+    if proof.fri_inner_layers.len() + 1 != input.proof_system.fri_layers.len() {
+        return Err(ArtifactError::InvalidInput(format!(
+            "live FRI layer count differs: proof {}, derived {}",
+            proof.fri_inner_layers.len() + 1,
+            input.proof_system.fri_layers.len()
+        )));
+    }
+    Ok(())
+}
+
+fn refresh_live_profile_input(
+    input: &mut GenerationInputV1,
+    geometry: &crate::mdoc::MdocTs13DemoCircuitGeometry,
+    proof: &crate::mdoc::MdocTs13DemoProofShape,
+) -> Result<(), ArtifactError> {
+    refresh_air_geometry(input, geometry)?;
+    input.tree_zero.root = Digest32(proof.tree_zero_root.ok_or_else(|| {
+        ArtifactError::InvalidInput("live proof has no tree-zero commitment".to_owned())
+    })?);
+    let (payload_bytes, post_payload_wire_bytes, serialized_claim_bytes) =
+        refresh_claim_geometry(input, proof)?;
+    refresh_pcs_geometry(input, proof)?;
+    let component_count = geometry
+        .air_instances
+        .iter()
+        .map(|air| air.components.len())
+        .sum::<usize>() as u64;
+    let claimed_sum_count = geometry.air_instances.iter().try_fold(0_u64, |sum, air| {
+        sum.checked_add(air.claimed_sum_count as u64)
+            .ok_or_else(|| {
+                ArtifactError::InvalidInput("global claimed-sum count exceeds u64".to_owned())
+            })
+    })?;
+    for (name, value) in [
+        (
+            "impl.air_instance_count",
+            geometry.air_instances.len() as u64,
+        ),
+        ("impl.component_count", component_count),
+        (
+            "impl.outer_claim_bytes_excluding_stark_and_post_payloads",
+            proof.outer_claims_and_framing_bytes as u64,
+        ),
+        (
+            "impl.post_interaction_nonempty_payload_bytes",
+            payload_bytes,
+        ),
+        (
+            "impl.post_interaction_payload_vector_wire_bytes",
+            post_payload_wire_bytes,
+        ),
+        (
+            "impl.serialized_claim_bytes_excluding_stark",
+            serialized_claim_bytes,
+        ),
+        (
+            "impl.transcript.global_claimed_sum_count",
+            claimed_sum_count,
+        ),
+    ] {
+        set_implementation_unsigned(input, name, value)?;
+    }
+    Ok(())
+}
+
+/// Render canonical generation input from one verified composed proof.
+#[doc(hidden)]
+pub fn render_refreshed_live_ts13_demo_input(
+    input_json: &[u8],
+    geometry: &crate::mdoc::MdocTs13DemoCircuitGeometry,
+    proof: &crate::mdoc::MdocTs13DemoProofShape,
+) -> Result<Vec<u8>, ArtifactError> {
+    let mut input = serde_json::from_slice::<GenerationInputV1>(input_json).map_err(|error| {
+        ArtifactError::InvalidInput(format!("live artifact input is not valid JSON: {error}"))
+    })?;
+    refresh_canonical_profile_semantics(&mut input)?;
+    refresh_live_profile_input(&mut input, geometry, proof)?;
+    input.validate()?;
+    validate_live_profile_input(&input, geometry, proof)?;
+    let mut rendered = serde_json::to_vec_pretty(&input).map_err(|error| {
+        ArtifactError::InvalidInput(format!("cannot render generation input: {error}"))
+    })?;
+    rendered.push(b'\n');
+    Ok(rendered)
+}
+
+/// Atomically replace the checked-in generation input with live verified geometry.
+#[doc(hidden)]
+pub fn refresh_live_ts13_demo_generation_input(
+    workspace: &Path,
+    geometry: &crate::mdoc::MdocTs13DemoCircuitGeometry,
+    proof: &crate::mdoc::MdocTs13DemoProofShape,
+) -> Result<(), ArtifactError> {
+    let path = workspace.join(GENERATION_INPUT_PATH);
+    let current = read(&path)?;
+    let rendered = render_refreshed_live_ts13_demo_input(&current, geometry, proof)?;
+    write_atomic(&path, &rendered)
+}
+
 /// Compare artifact input with geometry from a composed TS13 demo proof.
 ///
 /// This CI check compares dimensions. It does not compare witness values.
@@ -2953,9 +3993,23 @@ pub fn validate_live_ts13_demo_profile(
         .flatten()
         .copied()
         .sum::<usize>();
-    let (proof_worst_case, _) = deterministic_proof_bound(&ts13_demo_proof_bound_terms())?;
-    if sampled_secure_fields != CANONICAL_SAMPLED_SECURE_FIELD_COUNT as usize
-        || proof.outer_claims_and_framing_bytes != CANONICAL_OUTER_CLAIMS_AND_FRAMING_BYTES as usize
+    let proof_bound_terms = ts13_demo_proof_bound_terms(&input)?;
+    let (proof_worst_case, _) = deterministic_proof_bound(&proof_bound_terms)?;
+    let declared_sampled_secure_fields = input
+        .proof_system
+        .merkle_trees
+        .iter()
+        .flat_map(|tree| &tree.sampled_value_length_histogram)
+        .map(|entry| entry.value as usize * entry.count as usize)
+        .sum::<usize>();
+    let declared_outer_claim_bytes = input
+        .serialized_claims
+        .iter()
+        .filter(|claim| claim.name != "post_interaction_payloads")
+        .map(|claim| claim.fixed_length as usize)
+        .sum::<usize>();
+    if sampled_secure_fields != declared_sampled_secure_fields
+        || proof.outer_claims_and_framing_bytes != declared_outer_claim_bytes
         || proof.proof_bytes > proof_worst_case as usize
     {
         return Err(ArtifactError::InvalidInput(
@@ -2990,6 +4044,18 @@ fn validate_live_profile_input(
         .iter()
         .flat_map(|module| &module.air_instances)
         .collect::<Vec<_>>();
+    let pcs_shape_matches = proof.fri_log_last_layer_degree_bound
+        == input.proof_system.fri_log_last_layer_degree_bound
+        && proof.fri_log_blowup_factor == input.proof_system.fri_log_blowup_factor
+        && proof.fri_query_count == input.proof_system.fri_query_count as usize
+        && proof.fri_fold_step == input.proof_system.fri_fold_step
+        && proof.pow_bits == input.proof_system.pow_bits
+        && proof.lifting_log_size == input.proof_system.lifting_log_size;
+    if !pcs_shape_matches {
+        return Err(ArtifactError::InvalidInput(
+            "live PCS configuration differs from the artifact input".to_owned(),
+        ));
+    }
     if input
         .serialized_claims
         .iter()
@@ -3031,6 +4097,7 @@ fn validate_live_profile_input(
         .into_iter()
         .all(|(expected, actual)| expected == actual);
         if !layouts_match
+            || declared.claimed_sum_count as usize != live.claimed_sum_count
             || declared.max_log_size != live.max_log_size
             || declared.max_constraint_log_degree_bound != live.max_constraint_log_degree_bound
             || declared.components.len() != live.components.len()
@@ -3128,7 +4195,7 @@ fn validate_live_profile_input(
         .ok_or_else(|| {
             ArtifactError::InvalidInput("FRI last-layer coefficient count exceeds usize".to_owned())
         })?;
-    if proof.commitment_count != 5
+    if proof.commitment_count != input.proof_system.merkle_trees.len()
         || proof.tree_zero_root != Some(input.tree_zero.root.0)
         || sampled_tree_columns != expected_tree_columns
         || queried_tree_columns != expected_tree_columns
@@ -3137,7 +4204,7 @@ fn validate_live_profile_input(
         || !decommitment_shape_matches
         || !fri_shape_matches
         || proof.fri_last_layer_coefficient_count != expected_last_layer_coefficients
-        || proof.post_interaction_payload_bytes.len() != 20
+        || proof.post_interaction_payload_bytes.len() != declared_airs.len()
         || proof
             .post_interaction_payload_bytes
             .iter()
@@ -3195,6 +4262,10 @@ mod tests {
     fn source_workspace() -> PathBuf {
         let workspace = temporary_directory("source");
         write_fixture(&workspace.join("Cargo.toml"), b"[workspace]\n");
+        write_fixture(
+            &workspace.join(NORMATIVE_SPEC_PATH),
+            include_bytes!("../../../docs/ts13-unlinkable-age18-demo-spec.md"),
+        );
         for root in SOURCE_PACKAGE_ROOTS {
             write_fixture(
                 &workspace.join(root).join("src/lib.rs"),
@@ -3239,6 +4310,7 @@ mod tests {
                                     .then_some(vec![1; 8])
                                     .unwrap_or_default(),
                             },
+                            claimed_sum_count: if zero_component { 0 } else { 1 },
                             max_log_size,
                             max_constraint_log_degree_bound: max_log_size + 1,
                             components: (!zero_component)
@@ -3268,9 +4340,11 @@ mod tests {
             .expect("canonical corpus digest is 32 bytes");
         GenerationInputV1 {
             credential_shape: CredentialShapeV1 {
-                issuer_cose_sig_structure_bytes: CANONICAL_ISSUER_COSE_SIG_STRUCTURE_BYTES,
-                mso_payload_bytes: CANONICAL_MSO_PAYLOAD_BYTES,
-                padded_issuer_signed_item_bytes: CANONICAL_PADDED_ISSUER_SIGNED_ITEM_BYTES,
+                issuer_cose_sig_structure_bytes: crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES as u32,
+                mso_payload_bytes: crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES as u32,
+                padded_issuer_signed_item_bytes: u32::from(
+                    crate::mdoc::TS13_DEMO_ITEM_PADDED_BYTES,
+                ),
                 digest_identifier_integer_widths: CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS
                     .to_vec(),
             },
@@ -3278,7 +4352,8 @@ mod tests {
                 corpus_sha256: Digest32(corpus_sha256),
                 observed_max_device_cose_sig_structure_bytes:
                     CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES,
-                device_sig_structure_capacity: CANONICAL_DEVICE_SIG_STRUCTURE_CAPACITY,
+                device_sig_structure_capacity: crate::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY
+                    as u32,
             },
             modules,
             relations: vec![RelationLayoutV1 {
@@ -3349,10 +4424,8 @@ mod tests {
             tree_zero: TreeZeroV1 {
                 derivation: "fixture".to_owned(),
                 hash: "Blake2s-256".to_owned(),
-                preprocessed_column_order: (0..CANONICAL_TREE_COLUMN_COUNTS[0])
-                    .map(|index| format!("fixture_{index}"))
-                    .collect(),
-                committed_column_log_sizes: vec![1; CANONICAL_TREE_COLUMN_COUNTS[0] as usize],
+                preprocessed_column_order: vec!["fixture_0".to_owned()],
+                committed_column_log_sizes: vec![1],
                 root: Digest32([2; 32]),
             },
             proof_system: ProofSystemV1 {
@@ -3371,35 +4444,27 @@ mod tests {
                 lifting_log_size: None,
                 merkle_trees: CANONICAL_MERKLE_TREE_ORDER
                     .iter()
-                    .zip(CANONICAL_TREE_DEPTHS)
-                    .zip(CANONICAL_TREE_COLUMN_COUNTS)
-                    .map(|((name, depth), columns)| MerkleTreeParametersV1 {
-                        name: (*name).to_owned(),
-                        depth,
-                        digest_bytes: 32,
-                        maximum_opened_columns: columns as u32,
-                        sampled_value_length_histogram: vec![ValueCountV1 {
-                            value: 1,
-                            count: columns as u32,
-                        }],
+                    .enumerate()
+                    .map(|(index, name)| {
+                        let columns = [1, 18, 0, 8, 8][index];
+                        MerkleTreeParametersV1 {
+                            name: (*name).to_owned(),
+                            depth: 4,
+                            digest_bytes: 32,
+                            maximum_opened_columns: columns,
+                            sampled_value_length_histogram: vec![ValueCountV1 {
+                                value: 1,
+                                count: columns,
+                            }],
+                        }
                     })
                     .collect(),
-                fri_layers: CANONICAL_FRI_LAYER_INPUT_LOGS
-                    .into_iter()
-                    .zip(CANONICAL_FRI_LAYER_OUTPUT_LOGS)
-                    .zip(CANONICAL_FRI_MERKLE_DEPTHS)
-                    .zip(CANONICAL_FRI_WITNESS_CAPS)
-                    .map(
-                        |(((input_log_size, output_log_size), merkle_depth), witness_cap)| {
-                            FriLayerParametersV1 {
-                                input_log_size,
-                                output_log_size,
-                                merkle_depth,
-                                maximum_opened_values: witness_cap as u32,
-                            }
-                        },
-                    )
-                    .collect(),
+                fri_layers: vec![FriLayerParametersV1 {
+                    input_log_size: 4,
+                    output_log_size: 3,
+                    merkle_depth: 4,
+                    maximum_opened_values: 36,
+                }],
             },
             enabled_cargo_features: SOURCE_PACKAGE_ROOTS
                 .iter()
@@ -3421,7 +4486,7 @@ mod tests {
     fn sample_environment() -> GenerationEnvironmentV1 {
         let source_manifest = SourceTreeManifestV1 {
             schema_version: 1,
-            workspace_files: vec!["Cargo.toml".to_owned()],
+            workspace_files: vec!["Cargo.toml".to_owned(), NORMATIVE_SPEC_PATH.to_owned()],
             package_roots: SOURCE_PACKAGE_ROOTS
                 .iter()
                 .map(|root| (*root).to_owned())
@@ -3431,10 +4496,18 @@ mod tests {
                 .iter()
                 .map(|path| (*path).to_owned())
                 .collect(),
-            files: vec![SourceFileEntryV1 {
-                path: "Cargo.toml".to_owned(),
-                sha256: Digest32([3; 32]),
-            }],
+            files: vec![
+                SourceFileEntryV1 {
+                    path: "Cargo.toml".to_owned(),
+                    sha256: Digest32([3; 32]),
+                },
+                SourceFileEntryV1 {
+                    path: NORMATIVE_SPEC_PATH.to_owned(),
+                    sha256: Digest32::of(include_bytes!(
+                        "../../../docs/ts13-unlinkable-age18-demo-spec.md"
+                    )),
+                },
+            ],
         };
         GenerationEnvironmentV1 {
             cargo_lock_sha256: Digest32([4; 32]),
@@ -3489,10 +4562,11 @@ mod tests {
         );
         assert_eq!(first.circuit_hash, second.circuit_hash);
         assert_eq!(
-            deterministic_proof_bound(&ts13_demo_proof_bound_terms()).unwrap(),
-            (1_535_656, 1_572_864)
+            deterministic_proof_bound(&ts13_demo_proof_bound_terms(&sample_input()).unwrap())
+                .unwrap(),
+            (1_506_264, 1_507_328)
         );
-        assert_eq!(first.proof_body_capacity, 1_572_864);
+        assert_eq!(first.proof_body_capacity, 1_507_328);
 
         let decoded: Value =
             ciborium::de::from_reader(first.artifact.as_slice()).expect("artifact decodes");
@@ -3567,23 +4641,83 @@ mod tests {
     }
 
     #[test]
-    fn normative_specification_digest_is_pinned() {
-        let workspace = temporary_directory("normative-spec");
-        let path = workspace.join(NORMATIVE_SPEC_PATH);
-        write_fixture(
-            &path,
-            include_bytes!("../../../docs/ts13-unlinkable-age18-demo-spec.md"),
+    fn normative_spec_bytes_change_the_circuit_hash() {
+        let input = sample_input();
+        let first_environment = sample_environment();
+        let mut second_environment = first_environment.clone();
+        let specification = second_environment
+            .source_manifest
+            .files
+            .iter_mut()
+            .find(|file| file.path == NORMATIVE_SPEC_PATH)
+            .expect("fixture provenance contains the normative specification");
+        specification.sha256.0[0] ^= 1;
+        second_environment.source_manifest_sha256 = Digest32::of(
+            &canonical_cbor(&second_environment.source_manifest)
+                .expect("changed source manifest encodes"),
         );
-        checked_normative_spec(&workspace).expect("checked-in normative specification matches");
-        let mut changed = read(&path).expect("fixture specification is readable");
-        changed.push(b'\n');
-        write_fixture(&path, &changed);
-        assert!(matches!(
-            checked_normative_spec(&workspace),
-            Err(ArtifactError::InvalidInput(detail))
-                if detail.contains("normative specification digest differs")
-        ));
-        fs::remove_dir_all(workspace).expect("temporary workspace is removable");
+        let first = build_outputs(&input, first_environment).expect("first artifact builds");
+        let second = build_outputs(&input, second_environment).expect("second artifact builds");
+        assert_ne!(first.circuit_hash, second.circuit_hash);
+    }
+
+    #[test]
+    fn derived_fri_geometry_uses_packed_leaf_depth_and_lifting() {
+        let mut input = sample_input();
+        let layers = expected_fri_layers(&input.proof_system, 19).expect("FRI geometry derives");
+        assert_eq!(layers.last().expect("FRI has layers").input_log_size, 5);
+        assert_eq!(layers.last().expect("FRI has layers").output_log_size, 4);
+        assert_eq!(layers.last().expect("FRI has layers").merkle_depth, 5);
+        assert_eq!(
+            layers.last().expect("FRI has layers").maximum_opened_values,
+            36
+        );
+
+        input.proof_system.lifting_log_size = Some(20);
+        assert_eq!(expected_tree_depths(&input).unwrap(), [20; 5]);
+        let lifted = expected_fri_layers(&input.proof_system, 20).unwrap();
+        assert_eq!(lifted.first().unwrap().input_log_size, 20);
+
+        input.proof_system.fri_log_blowup_factor = 1;
+        input.proof_system.lifting_log_size = Some(17);
+        assert!(expected_tree_depths(&input).is_err());
+        input.proof_system.lifting_log_size = Some(18);
+        assert_eq!(expected_tree_depths(&input).unwrap(), [18; 5]);
+    }
+
+    #[test]
+    fn canonical_profile_semantic_refresh_is_idempotent() {
+        const EXPECTED_ISSUER_MU_INPUT_BYTES: u32 = 1_960;
+
+        let mut input = sample_input();
+        refresh_canonical_profile_semantics(&mut input).expect("first refresh succeeds");
+        let first = serde_json::to_vec(&input).expect("first refresh serializes");
+        refresh_canonical_profile_semantics(&mut input).expect("second refresh succeeds");
+        assert_eq!(first, serde_json::to_vec(&input).unwrap());
+        assert_eq!(input.stream_ids.len(), 55);
+        assert_eq!(input.hash_streams.len(), 26);
+        assert_eq!(
+            input
+                .hash_streams
+                .iter()
+                .find(|stream| stream.name == "issuer_mu_job")
+                .expect("issuer mu job is present")
+                .input_capacity_bytes,
+            EXPECTED_ISSUER_MU_INPUT_BYTES
+        );
+        for (relation_name, use_ordinal, expected) in
+            canonical_relation_multiplicities().expect("canonical multiplicities derive")
+        {
+            assert_eq!(
+                input
+                    .relations
+                    .iter()
+                    .find(|relation| relation.name == relation_name)
+                    .and_then(|relation| relation.uses.get(use_ordinal))
+                    .map(|relation_use| relation_use.multiplicity.as_str()),
+                Some(expected.as_str())
+            );
+        }
     }
 
     #[test]
@@ -3650,6 +4784,36 @@ mod tests {
             drifted.validate().is_err(),
             "every hash stream must reference a declared stream ID"
         );
+
+        let mut drifted = sample_input();
+        drifted
+            .hash_streams
+            .iter_mut()
+            .find(|stream| stream.name == "issuer_mu_job")
+            .expect("issuer mu job is present")
+            .input_capacity_bytes += 1;
+        assert!(
+            drifted.validate().is_err(),
+            "each hash stream must match its live circuit job shape"
+        );
+
+        for (relation_name, use_ordinal, _) in
+            canonical_relation_multiplicities().expect("canonical multiplicities derive")
+        {
+            let mut drifted = sample_input();
+            drifted
+                .relations
+                .iter_mut()
+                .find(|relation| relation.name == relation_name)
+                .expect("canonical relation is present")
+                .uses[use_ordinal]
+                .multiplicity
+                .push_str(" stale");
+            assert!(
+                drifted.validate().is_err(),
+                "relation {relation_name} use {use_ordinal} must reject stale multiplicity metadata"
+            );
+        }
 
         let mut drifted = sample_input();
         drifted.implementation_constants.pop();

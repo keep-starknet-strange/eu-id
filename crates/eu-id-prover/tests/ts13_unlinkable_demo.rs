@@ -229,11 +229,23 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             let geometry = proof
                 .ts13_demo_circuit_geometry()
                 .expect("live circuit geometry is captured");
-            assert!(proof.has_ts13_demo_shape());
+            let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let artifact_input_path =
+                workspace.join(eu_id_prover::ts13_artifact::GENERATION_INPUT_PATH);
             let artifact_input =
-                include_bytes!("../../../artifacts/ts13-demo-v1/generation-input-v1.json");
+                std::fs::read(&artifact_input_path).expect("generation input is readable");
+            if std::env::var("TS13_REFRESH_GENERATION_INPUT").as_deref() == Ok("1") {
+                verify_mdoc_ts13_demo(&proof, &public)
+                    .expect("the proof used to refresh the artifact input verifies");
+                eu_id_prover::ts13_artifact::refresh_live_ts13_demo_generation_input(
+                    &workspace, geometry, &shape,
+                )
+                .expect("live generation input refreshes atomically");
+                return;
+            }
+            assert!(proof.has_ts13_demo_shape());
             eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                artifact_input,
+                &artifact_input,
                 geometry,
                 &shape,
             )
@@ -249,7 +261,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 .swap(5, 6);
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     &drifted_geometry,
                     &shape,
                 )
@@ -260,7 +272,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             drifted.queried_values[0][0] -= 1;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     geometry,
                     &drifted,
                 )
@@ -268,10 +280,11 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 "per-column query-count drift must reject"
             );
             let mut drifted = shape.clone();
-            drifted.decommitment_hash_counts[0] = 36 * 19 + 1;
+            drifted.decommitment_hash_counts[0] =
+                eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_TREE_MERKLE_HASH_CAPS[0] + 1;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     geometry,
                     &drifted,
                 )
@@ -279,10 +292,11 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 "Merkle decommitment-bound drift must reject"
             );
             let mut drifted = shape.clone();
-            drifted.fri_first_layer_witness_count = 109;
+            drifted.fri_first_layer_witness_count =
+                eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_FRI_FIRST_WITNESS_CAP + 1;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     geometry,
                     &drifted,
                 )
@@ -293,7 +307,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             drifted.sampled_values[0][0] += 1;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     geometry,
                     &drifted,
                 )
@@ -305,7 +319,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             drifted.sampled_values[0][1] -= 1;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     geometry,
                     &drifted,
                 )
@@ -316,7 +330,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             drifted.fri_last_layer_coefficient_count += 1;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     geometry,
                     &drifted,
                 )
@@ -324,10 +338,12 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 "FRI last-layer coefficient drift must reject"
             );
             let mut drifted = shape.clone();
-            drifted.proof_bytes = 1_535_657;
+            drifted.proof_bytes =
+                eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_PROOF_BODY_CAPACITY as usize
+                    + 1;
             assert!(
                 eu_id_prover::ts13_artifact::validate_live_ts13_demo_profile(
-                    artifact_input,
+                    &artifact_input,
                     geometry,
                     &drifted,
                 )
@@ -342,16 +358,16 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 committed_histogram.into_iter().collect::<Vec<_>>(),
                 [
                     (4, 5),
-                    (5, 6),
+                    (5, 20),
                     (6, 3),
-                    (7, 5),
-                    (8, 27),
-                    (9, 105),
-                    (10, 96),
-                    (11, 8),
-                    (12, 14),
-                    (13, 25),
-                    (14, 7),
+                    (7, 7),
+                    (8, 46),
+                    (9, 95),
+                    (10, 92),
+                    (11, 20),
+                    (12, 2),
+                    (13, 31),
+                    (14, 2),
                     (15, 8),
                     (16, 3),
                 ]
@@ -363,7 +379,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [312, 4_576, 2_288, 8, 16]
+                [334, 4_285, 2_380, 8, 16]
             );
             assert_eq!(
                 shape
@@ -371,7 +387,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [312, 4_576, 2_288, 8, 16]
+                [334, 4_285, 2_380, 8, 16]
             );
             assert!(shape
                 .queried_values
@@ -379,7 +395,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 .flatten()
                 .all(|&query_count| query_count == 36));
             let mut expected_post_payloads = vec![0; 20];
-            expected_post_payloads[2] = 20_128;
+            expected_post_payloads[2] = 18_464;
             assert_eq!(shape.post_interaction_payload_bytes, expected_post_payloads);
             assert_eq!(shape.fri_last_layer_coefficient_count, 2);
             assert_eq!(shape.sha_table_pair_claim_count, 3);
@@ -425,10 +441,10 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 [
                     (8, 4, 12, 0),
                     (2, 1, 4, 0),
-                    (50, 2_356, 892, 8),
+                    (58, 1_963, 888, 8),
                     (0, 0, 0, 0),
                     (2, 2, 8, 0),
-                    (61, 91, 160, 0),
+                    (63, 125, 192, 0),
                     (11, 292, 68, 0),
                     (11, 292, 68, 0),
                     (3, 117, 4, 0),
@@ -439,9 +455,9 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     (4, 305, 92, 0),
                     (11, 13, 16, 0),
                     (5, 34, 52, 0),
-                    (83, 155, 312, 0),
+                    (84, 189, 344, 0),
                     (1, 336, 48, 0),
-                    (61, 91, 160, 0),
+                    (63, 125, 192, 0),
                     (0, 0, 0, 0),
                 ]
             );
@@ -454,15 +470,23 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 [3, 1, 13, 0, 2, 18, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 23, 2, 18, 0]
             );
             assert_eq!(
+                geometry
+                    .air_instances
+                    .iter()
+                    .map(|air| air.claimed_sum_count)
+                    .collect::<Vec<_>>(),
+                [3, 1, 12, 0, 2, 18, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 23, 2, 18, 0]
+            );
+            assert_eq!(
                 geometry.air_instances[2].post_interaction_log_sizes,
-                [13; 8]
+                [12; 8]
             );
             assert!(geometry
                 .air_instances
                 .iter()
                 .enumerate()
                 .all(|(index, air)| index == 2 || air.post_interaction_log_sizes.is_empty()));
-            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 312);
+            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 334);
             assert_eq!(
                 column_counts.iter().fold(
                     [0usize; 3],
@@ -472,7 +496,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                         post + air_post,
                     ]
                 ),
-                [4_576, 2_288, 8]
+                [4_285, 2_380, 8]
             );
             let reject_proof_without_panic = |label: &str, candidate: &eu_id_prover::MdocProof| {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
