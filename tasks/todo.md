@@ -81,9 +81,10 @@ Privacy claim:
     canonical geometry and weakens the conservative algebraic bound by about
     4.1 bits.
   - [x] Find a sound fast design below the gate: device-only ML-DSA-44, a
-    one-block SampleInBall cap, the existing carrier chain, and the current GKR
-    tie-back use 4,855,360 shared-service cells and 10,187,984 total cells.
-  - [ ] Resolve the device-profile policy in main-repository mailbox Q-004.
+    one-block SampleInBall cap, a 24-round-row carrier, and the current GKR
+    tie-back use 5,674,560 shared-service cells.
+  - [x] Record the device-profile policy in main-repository mailbox Q-004 and
+    receive the user's authorization to implement the complete campaign.
   - [ ] Implement and prove the accepted mixed-profile design.
   - [ ] Pin the accepted design's exact cells, algebraic bound, payload,
     release latency, and peak memory.
