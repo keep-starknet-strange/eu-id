@@ -1,8 +1,8 @@
 //! End-to-end timing probe for the canonical TS13 identity API.
 //!
-//! The input is deterministic RustCrypto ML-DSA-65 conformance/demo data. It
-//! is not a credential issued by a deployed PQ issuer. Timings include the
-//! fixed-capacity proof envelope, but not network or disk I/O.
+//! The deterministic data uses ML-DSA-65 for issuer and revocation signatures.
+//! It uses ML-DSA-44 for the device signature. It is not a deployed credential.
+//! Timings include the fixed-capacity proof envelope, but not network or disk I/O.
 
 #[allow(dead_code)]
 #[path = "../../eu-id-prover/tests/support/mldsa_fixture.rs"]
