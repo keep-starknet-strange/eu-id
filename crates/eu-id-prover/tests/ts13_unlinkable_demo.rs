@@ -362,7 +362,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [312, 4_576, 2_288, 8, 32]
+                [312, 4_576, 2_288, 8, 16]
             );
             assert_eq!(
                 shape
@@ -370,7 +370,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [312, 4_576, 2_288, 8, 32]
+                [312, 4_576, 2_288, 8, 16]
             );
             assert!(shape
                 .queried_values
