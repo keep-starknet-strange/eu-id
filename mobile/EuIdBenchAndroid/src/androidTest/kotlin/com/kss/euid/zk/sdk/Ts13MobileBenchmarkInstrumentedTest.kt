@@ -72,26 +72,74 @@ class Ts13MobileBenchmarkInstrumentedTest {
         val requestedRayonThreads = arguments.getString(RAYON_THREADS_ARGUMENT)?.let {
             parseRayonThreads(it)
         }
-        val requestedAffinity = arguments.getString(AFFINITY_CPU_IDS_ARGUMENT)?.let {
-            parseCpuList(it)
-        }
+        val affinityRequest = parseBenchmarkAffinityRequest(
+            arguments.getString(AFFINITY_CPU_IDS_ARGUMENT),
+            arguments.getString(AFFINITY_POLICY_ARGUMENT),
+        )
+        val requestedAffinity = affinityRequest.explicitCpuIds
         val topology = readCpuTopology()
         require(
             requestedAffinity == null || topology.allowed.cpuIds.containsAll(requestedAffinity),
         ) { "Requested affinity contains a CPU that is not allowed" }
+        val policySelection = affinityRequest.policy?.let {
+            selectExcludeMinimumCluster(topology.allowed.cpuIds, topology.cpus)
+        }
+        val selectedAffinity = requestedAffinity ?: policySelection?.selectedCpuIds
+        val affinityTarget = when {
+            requestedAffinity != null -> requestedAffinity
+            policySelection?.canApply == true -> policySelection.selectedCpuIds
+            else -> null
+        }
+        val excludedAffinity = when {
+            requestedAffinity != null -> topology.allowed.cpuIds - requestedAffinity.toSet()
+            policySelection != null -> policySelection.excludedCpuIds
+            else -> emptyList()
+        }
+        val topologySource = when {
+            requestedAffinity != null -> AFFINITY_TOPOLOGY_EXPLICIT_CPU_IDS
+            else -> policySelection?.topologySource
+        }
 
         val previousRayonThreads = Os.getenv(RAYON_THREADS_ENV)
         var affinityApplied = false
+        var affinityChanged = false
+        var affinityReason = policySelection?.reason ?: AFFINITY_REASON_NOT_REQUESTED
         try {
             requestedRayonThreads?.let {
                 Os.setenv(RAYON_THREADS_ENV, it.toString(), true)
             }
-            requestedAffinity?.let {
-                setCurrentThreadAffinity(it)
+            if (requestedAffinity != null) {
+                setCurrentThreadAffinity(requestedAffinity)
                 affinityApplied = true
+                affinityChanged = true
+                affinityReason = AFFINITY_REASON_APPLIED
+            } else if (affinityTarget != null) {
+                try {
+                    setCurrentThreadAffinity(affinityTarget)
+                    affinityApplied = true
+                    affinityChanged = true
+                    affinityReason = AFFINITY_REASON_APPLIED
+                } catch (failure: Throwable) {
+                    affinityReason = AFFINITY_REASON_SCHED_SETAFFINITY_FAILED
+                    Log.w(LOG_TAG, "The affinity policy was not applied", failure)
+                }
             }
-            val effectiveAffinity = readCurrentThreadAllowedCpus()
+            var effectiveAffinity = readCurrentThreadAllowedCpus()
             requestedAffinity?.let { assertEquals(it, effectiveAffinity.cpuIds) }
+            if (
+                affinityRequest.policy != null &&
+                affinityApplied &&
+                affinityTarget != effectiveAffinity.cpuIds
+            ) {
+                affinityApplied = false
+                affinityReason = AFFINITY_REASON_EFFECTIVE_MASK_MISMATCH
+                try {
+                    setCurrentThreadAffinity(topology.allowed.cpuIds)
+                } catch (failure: Throwable) {
+                    Log.w(LOG_TAG, "The original CPU mask was not restored", failure)
+                }
+                effectiveAffinity = readCurrentThreadAllowedCpus()
+            }
 
             val timingFile = File(
                 InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
@@ -180,6 +228,19 @@ class Ts13MobileBenchmarkInstrumentedTest {
                     "requested_affinity_cpu_ids",
                     requestedAffinity?.let { JSONArray(it) } ?: JSONObject.NULL,
                 )
+                .put(
+                    "requested_affinity_policy",
+                    affinityRequest.policy ?: JSONObject.NULL,
+                )
+                .put("affinity_applied", affinityApplied)
+                .put("affinity_reason", affinityReason)
+                .put(
+                    "affinity_selected_cpu_ids",
+                    JSONArray(selectedAffinity ?: emptyList<Int>()),
+                )
+                .put("affinity_excluded_cpu_ids", JSONArray(excludedAffinity))
+                .put("affinity_topology_source", topologySource ?: JSONObject.NULL)
+                .put("effective_affinity_cpu_ids", JSONArray(effectiveAffinity.cpuIds))
                 .put("cpu_topology", topology.toJson(effectiveAffinity))
                 .put("prove_ms", proveMs)
                 .put("verify_ms", verifyMs)
@@ -196,8 +257,16 @@ class Ts13MobileBenchmarkInstrumentedTest {
                     }
                 },
                 {
-                    if (affinityApplied) {
-                        setCurrentThreadAffinity(topology.allowed.cpuIds)
+                    if (affinityChanged) {
+                        if (affinityRequest.policy == null) {
+                            setCurrentThreadAffinity(topology.allowed.cpuIds)
+                        } else {
+                            try {
+                                setCurrentThreadAffinity(topology.allowed.cpuIds)
+                            } catch (failure: Throwable) {
+                                Log.w(LOG_TAG, "The original CPU mask was not restored", failure)
+                            }
+                        }
                     }
                 },
             )
@@ -234,18 +303,12 @@ class Ts13MobileBenchmarkInstrumentedTest {
         val cpuIds: List<Int>,
     )
 
-    private data class CpuInfo(
-        val id: Int,
-        val capacity: Long?,
-        val maximumFrequencyKhz: Long?,
-    )
-
     private data class CpuTopology(
         val onlineSource: String,
         val onlineSpecification: String,
         val onlineCpuIds: List<Int>,
         val allowed: AllowedCpus,
-        val cpus: List<CpuInfo>,
+        val cpus: List<BenchmarkCpuInfo>,
     ) {
         fun toJson(effectiveAffinity: AllowedCpus): JSONObject = JSONObject()
             .put("online_source", onlineSource)
@@ -277,14 +340,16 @@ class Ts13MobileBenchmarkInstrumentedTest {
     private fun readCpuTopology(): CpuTopology {
         val allowed = readCurrentThreadAllowedCpus()
         val onlineFile = File(CPU_ONLINE_PATH)
-        val sysfsOnlineSpecification = runCatching { onlineFile.readText().trim() }
-            .getOrNull()
-            ?.takeIf { it.isNotEmpty() }
-        val onlineSpecification = sysfsOnlineSpecification ?: allowed.specification
-        val onlineCpuIds = parseCpuList(onlineSpecification)
+        val sysfsOnline = runCatching {
+            val specification = onlineFile.readText().trim()
+            require(specification.isNotEmpty())
+            specification to parseCpuList(specification)
+        }.getOrNull()
+        val onlineSpecification = sysfsOnline?.first ?: allowed.specification
+        val onlineCpuIds = sysfsOnline?.second ?: allowed.cpuIds
         return CpuTopology(
             onlineSource =
-                if (sysfsOnlineSpecification != null) {
+                if (sysfsOnline != null) {
                     CPU_ONLINE_PATH
                 } else {
                     allowed.statusPath
@@ -292,8 +357,8 @@ class Ts13MobileBenchmarkInstrumentedTest {
             onlineSpecification = onlineSpecification,
             onlineCpuIds = onlineCpuIds,
             allowed = allowed,
-            cpus = onlineCpuIds.map { cpu ->
-                CpuInfo(
+            cpus = (onlineCpuIds + allowed.cpuIds).distinct().sorted().map { cpu ->
+                BenchmarkCpuInfo(
                     id = cpu,
                     capacity = readLong("/sys/devices/system/cpu/cpu$cpu/cpu_capacity"),
                     maximumFrequencyKhz =
@@ -378,6 +443,12 @@ class Ts13MobileBenchmarkInstrumentedTest {
 
     private companion object {
         const val AFFINITY_CPU_IDS_ARGUMENT = "affinity_cpu_ids"
+        const val AFFINITY_POLICY_ARGUMENT = "affinity_policy"
+        const val AFFINITY_REASON_APPLIED = "applied"
+        const val AFFINITY_REASON_EFFECTIVE_MASK_MISMATCH = "effective_mask_mismatch"
+        const val AFFINITY_REASON_NOT_REQUESTED = "not_requested"
+        const val AFFINITY_REASON_SCHED_SETAFFINITY_FAILED = "sched_setaffinity_failed"
+        const val AFFINITY_TOPOLOGY_EXPLICIT_CPU_IDS = "explicit_cpu_ids"
         const val CPU_ONLINE_PATH = "/sys/devices/system/cpu/online"
         const val CPU_SET_BYTES = CPU_SET_MAX_CPUS / 8
         const val FIXTURE_ASSET = "ts13_mobile_benchmark_fixture_v1.json"
