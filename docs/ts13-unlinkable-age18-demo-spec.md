@@ -1055,6 +1055,7 @@ The source-tree digest covers:
 
 The digest input is a sorted path and SHA-256 manifest.
 The generator encodes the manifest deterministically.
+The generator MUST reject generation-input bytes that differ from the audited source hash.
 
 The generator excludes build output such as `target/`.
 It also excludes three recursive generated files:

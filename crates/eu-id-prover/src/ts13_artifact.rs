@@ -78,6 +78,8 @@ const ENVELOPE_CAPACITY_ALIGNMENT: u64 = 65_536;
 const CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 3] = [1, 2, 3];
 const CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256: &str =
     "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
+const CANONICAL_GENERATION_INPUT_SHA256: &str =
+    "278e0a3bd10a8b8ebd579793335cca3910ad85829d2f7a2c2e116f8f34a7e233";
 const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
 const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
 const CANONICAL_RELATION_COUNT: usize = 87;
@@ -3347,6 +3349,17 @@ fn apply_outputs(
     }
 }
 
+fn validate_generation_input_digest(input_bytes: &[u8]) -> Result<(), ArtifactError> {
+    let input_digest = Digest32::of(input_bytes);
+    if input_digest.to_string() != CANONICAL_GENERATION_INPUT_SHA256 {
+        return Err(ArtifactError::InvalidInput(format!(
+            "generation input SHA-256 {input_digest} differs from the audited source pin \
+             {CANONICAL_GENERATION_INPUT_SHA256}"
+        )));
+    }
+    Ok(())
+}
+
 pub fn generate_from_json(
     workspace: &Path,
     input_path: &Path,
@@ -3360,6 +3373,7 @@ pub fn generate_from_json(
         workspace.join(input_path)
     };
     let input_bytes = read(&input_path)?;
+    validate_generation_input_digest(&input_bytes)?;
     let input = serde_json::from_slice::<GenerationInputV1>(&input_bytes).map_err(|source| {
         ArtifactError::Json {
             path: input_path,
@@ -4814,6 +4828,27 @@ mod tests {
         input
             .validate()
             .expect("committed generation input matches the canonical profile");
+    }
+
+    #[test]
+    fn artifact_generation_input_bytes_are_source_pinned() {
+        let input = include_bytes!("../../../artifacts/ts13-demo-v1/generation-input-v1.json");
+        assert_eq!(
+            Digest32::of(input).to_string(),
+            CANONICAL_GENERATION_INPUT_SHA256
+        );
+        validate_generation_input_digest(input).expect("committed generation input is pinned");
+
+        let mut drifted = input.to_vec();
+        let byte = drifted
+            .iter_mut()
+            .find(|byte| **byte == b' ')
+            .expect("formatted input contains whitespace");
+        *byte = b'\t';
+        assert!(
+            validate_generation_input_digest(&drifted).is_err(),
+            "even valid JSON byte drift requires a reviewed source-pin update"
+        );
     }
 
     #[test]
