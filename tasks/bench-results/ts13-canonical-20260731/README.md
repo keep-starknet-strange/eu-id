@@ -29,7 +29,8 @@ The operating system was macOS 26.5.2, build 25F84.
 The Rust compiler was `rustc 1.94.0-nightly (86a49fd71 2026-01-14)`.
 
 Each cold sample used a fresh process and one `proveIdentity` call.
-Each process used `RAYON_NUM_THREADS=12` and `RUST_MIN_STACK=536870912`.
+Each process set `RAYON_NUM_THREADS=12` and `RUST_MIN_STACK=536870912`. The SDK
+used its explicit 64 MiB proof-thread and worker-stack sizes.
 The sample order was counter-ordered between timing enabled and timing disabled.
 `/usr/bin/time -l` measured the process peak resident set size.
 The benchmark invoked the release binary directly, so it did not include Cargo or link time.

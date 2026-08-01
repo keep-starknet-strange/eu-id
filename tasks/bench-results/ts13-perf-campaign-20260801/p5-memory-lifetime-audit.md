@@ -76,3 +76,23 @@ The current AAR contains a stripped AArch64 `libeuid_zk_sdk.so`. A disassembly
 of that exact library contains 5,589 NEON multiply instructions. One observed
 instruction is `umull v4.2d, v1.2s, v2.2s`. This proves that the current mobile
 artifact uses NEON. No scalar-fallback change is needed.
+
+## Stack and P6 audit
+
+The SDK fixes both the outer proof-thread stack and each local Rayon worker
+stack at 64 MiB. `RUST_MIN_STACK` does not change these values. The proof work
+runs on a Rayon worker, so the worker stack is the safety-critical value. An
+old 2 MiB worker stack overflowed. A 32 MiB stack passed an older 202-permutation
+test, but this does not prove that it is safe for the current all-ML-DSA-65
+circuit.
+
+After P4 selection, use temporary private Android arguments to sweep worker
+stacks of 64, 48, 32, 24, and 16 MiB. Keep the outer stack at 64 MiB. Then
+sweep outer stacks of 64, 8, and 2 MiB with the smallest stable worker stack.
+Use the same APK, fresh processes, and counterordered runs on all three phones.
+Remove the temporary controls and hard-code the selected values.
+
+Current phase evidence does not activate P6. Witness generation is 4.8% to
+5.9% of the available phone runs and about 6% on desktop. The AIR core is the
+binding phase. Recheck the final selected-circuit phase record before closing
+P6.

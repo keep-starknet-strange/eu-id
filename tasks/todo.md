@@ -123,6 +123,8 @@ Privacy claim:
       it with the base-field candidate after P4 selection.
   - [x] Verify the private, fail-open Android affinity policy and its unit tests.
   - [x] Verify NEON dispatch in the exact AArch64 library from the current AAR.
+  - [ ] Sweep private Android worker and proof-thread stack sizes, then remove
+    the temporary controls and hard-code the selected sizes.
   - [ ] Run the final worker, affinity, allocator, RSS, and NEON device sweep
     on the selected P4 circuit.
 - [ ] P6: Add witness-generation parallelism only if it remains a binding

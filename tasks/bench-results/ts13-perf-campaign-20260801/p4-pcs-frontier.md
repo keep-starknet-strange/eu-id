@@ -87,8 +87,9 @@ before the final timing campaign.
 
 The host is an Apple M2 Max with 12 CPU cores and 32 GB of memory. The campaign
 ran seven fresh processes for each point. It ran one process at a time. Each
-process used 12 Rayon workers and a 512 MiB minimum Rayon stack. The order
-rotated after each round and reversed on alternate rounds.
+process used 12 Rayon workers. The process environment set `RUST_MIN_STACK` to
+512 MiB, but the SDK used its explicit 64 MiB proof and worker stacks. The
+order rotated after each round and reversed on alternate rounds.
 
 | Blowup | Queries | PoW | Lift | Prove median (range) | Verify median | Peak RSS median | Envelope |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

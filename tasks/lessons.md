@@ -29,6 +29,8 @@
 - Do not use a debug proof as final evidence.
 - Set `RAYON_NUM_THREADS` explicitly.
 - Record the effective Rayon thread count in each result.
+- Record effective thread stacks; an explicit builder stack overrides
+  `RUST_MIN_STACK`.
 - On the 12-core demo host, set `RAYON_NUM_THREADS=12`.
 - Run one memory-heavy test harness thread with `--test-threads=1`.
 - Do not confuse the harness thread count with the Rayon worker count.

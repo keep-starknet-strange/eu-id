@@ -17,7 +17,7 @@ their input order.
 - Proof envelope: 1,638,446 bytes
 - Host: Apple M2 Max, 12 CPU cores, 32 GB RAM
 - Build: native AArch64 release, fat LTO, one code-generation unit
-- Runtime: 12 Rayon workers and a 512 MiB minimum stack limit
+- Runtime: 12 Rayon workers and explicit 64 MiB proof and worker stacks
 
 The circuit geometry is unchanged. The source-bound circuit and source-tree
 hashes changed because the prover source changed.

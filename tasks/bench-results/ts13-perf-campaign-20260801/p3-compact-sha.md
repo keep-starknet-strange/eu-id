@@ -17,7 +17,7 @@ other state lanes from row offsets. The canonical item and MSO paths now use
 - Benchmark binary SHA-256: `74b92eb429423bec665e279a48d7e9e6a3ab4dbd6b502c39c583674963ae5c9d`
 - Fixed proof envelope: 1,572,910 bytes
 - Host: Apple M2 Max, 12 CPU cores, 32 GB RAM
-- Runtime: 12 Rayon workers and a 512 MiB minimum stack limit
+- Runtime: 12 Rayon workers and explicit 64 MiB proof and worker stacks
 
 ## Cold desktop samples
 
