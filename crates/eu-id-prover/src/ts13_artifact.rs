@@ -70,7 +70,7 @@ const CANONICAL_MERKLE_TREE_ORDER: [&str; 5] = [
 const PROFILE_ID: &str = "ts13-pid-age-over-18-unlinkable-demo-v1";
 const PROOF_SYSTEM_ID: &str = "stwo-euid-ts13-demo-v1";
 const CONSTRAINT_SYSTEM_VERSION: &str = "ts13-unlinkable-air-v1";
-const ARTIFACT_SCHEMA_VERSION: u64 = 1;
+const ARTIFACT_SCHEMA_VERSION: u64 = 2;
 const SHAPE_SCHEMA_VERSION: u64 = 2;
 const ENVELOPE_VERSION: u64 = 4;
 const ENVELOPE_HEADER_BYTES: u64 = 46;
@@ -1688,6 +1688,21 @@ impl GenerationInputV1 {
         {
             return Err(ArtifactError::InvalidInput(
                 "proof-system field, hash, FRI shape, or 128-bit PCS label is invalid".to_owned(),
+            ));
+        }
+        let executable_pcs = crate::mdoc::mdoc_ts13_pcs_config();
+        if self.proof_system.fri_log_last_layer_degree_bound
+            != executable_pcs.fri_config.log_last_layer_degree_bound
+            || self.proof_system.fri_log_blowup_factor
+                != executable_pcs.fri_config.log_blowup_factor
+            || usize::try_from(self.proof_system.fri_query_count).ok()
+                != Some(executable_pcs.fri_config.n_queries)
+            || self.proof_system.fri_fold_step != executable_pcs.fri_config.fold_step
+            || self.proof_system.pow_bits != executable_pcs.pow_bits
+            || self.proof_system.lifting_log_size != executable_pcs.lifting_log_size
+        {
+            return Err(ArtifactError::InvalidInput(
+                "artifact PCS configuration differs from the executable verifier".to_owned(),
             ));
         }
         checked_name_list(
@@ -4783,6 +4798,19 @@ mod tests {
         assert!(
             drifted.validate().is_err(),
             "every hash stream must reference a declared stream ID"
+        );
+
+        let mut drifted = sample_input();
+        drifted.proof_system.fri_query_count = 35;
+        drifted.proof_system.pow_bits = 23;
+        let error = drifted
+            .validate()
+            .expect_err("an alternate 128-bit PCS label must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("differs from the executable verifier"),
+            "the executable PCS pin must reject before derived-geometry checks: {error}"
         );
 
         let mut drifted = sample_input();
