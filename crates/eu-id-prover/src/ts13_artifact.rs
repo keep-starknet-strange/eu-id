@@ -4664,9 +4664,10 @@ mod tests {
         let (worst_case_bytes, aligned_capacity) =
             deterministic_proof_bound(&ts13_demo_proof_bound_terms(&sample_input()).unwrap())
                 .unwrap();
-        assert!(worst_case_bytes <= aligned_capacity);
-        assert_eq!(aligned_capacity % ENVELOPE_CAPACITY_ALIGNMENT, 0);
-        assert!(aligned_capacity - worst_case_bytes < ENVELOPE_CAPACITY_ALIGNMENT);
+        let aligned_capacity_bytes = u64::from(aligned_capacity);
+        assert!(worst_case_bytes <= aligned_capacity_bytes);
+        assert_eq!(aligned_capacity_bytes % ENVELOPE_CAPACITY_ALIGNMENT, 0);
+        assert!(aligned_capacity_bytes - worst_case_bytes < ENVELOPE_CAPACITY_ALIGNMENT);
         assert_eq!(first.proof_body_capacity, aligned_capacity);
 
         let decoded: Value =
