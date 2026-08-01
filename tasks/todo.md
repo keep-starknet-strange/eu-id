@@ -121,12 +121,11 @@ Privacy claim:
   - [x] Run the preliminary desktop worker sweep at the P4+P5 checkpoint.
   - [x] Audit existing branches for reusable affinity and allocator work.
   - [x] Trace the canonical proof memory lifetime and rank live allocations.
-  - [ ] Store Keccak GKR gate numerators in their canonical base-field form.
-    - Candidate `21c65fb5` passed independent soundness review and exact
-      proof-byte parity. Integrate it after P4 selects the product point.
-  - [ ] Bound the Keccak claimed-sum inverse scratch allocation.
-    - Candidate `f3d79527` passed the release Keccak suite and Clippy. Integrate
-      it with the base-field candidate after P4 selection.
+  - [x] Store Keccak GKR gate numerators in their canonical base-field form.
+  - [x] Bound and parallelize the Keccak claimed-sum inverse scratch allocation.
+  - [x] Move the padded GKR input allocations without a denominator copy.
+  - [x] Replay the canonical carrier lookups from an independent trace source
+    after GKR, and bind that source to the committed trace.
   - [x] Verify the private, fail-open Android affinity policy and its unit tests.
   - [x] Verify NEON dispatch in the exact AArch64 library from the current AAR.
   - [ ] Sweep private Android worker and proof-thread stack sizes, then remove
@@ -169,3 +168,12 @@ accepted optimization, the rejected frontier points, source and artifact hashes,
 desktop results, Firebase results, and the complete verification matrix.
 The Android jemalloc candidate is rejected because the maintained bindings do
 not build with NDK 27 without a local patch or linker shim.
+
+The accepted P5 memory changes are commits `fff7a631` through `c3e4ff58`.
+They keep the proof, transcript, verifier, PCS parameters, and public API
+unchanged. The exact-tree review passed 21 unit tests and 35 service tests in
+release mode. It also passed release Clippy, formatting, and diff checks.
+Tests confirmed exact leaf, GKR proof, coefficient MLE, transcript, and worker
+parity. The final desktop comparison measured a 68.25 MiB peak-RSS reduction
+and a 0.8 percent proving-time increase. The proof envelope stayed at
+1,572,910 bytes. The Android runtime sweep remains open.
