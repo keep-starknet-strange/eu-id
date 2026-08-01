@@ -110,14 +110,15 @@ Privacy claim:
   - [x] Measure all ten valid points on Pixel 8 with source-bound artifacts.
   - [x] Select b3 q36 p20 L19 as the fastest measured cold Pixel 8 point below
     the 2,500,000-byte ceiling.
-- [ ] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
+- [x] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
   available ARM acceleration; keep only improvements that help the binding
   devices.
   - [x] Add and verify phase memory, effective-worker, stack, topology, and
     benchmark-only affinity records.
   - [x] Emit the Android benchmark summary and each phase as separate bounded
     JSON records so Firebase preserves the complete result.
-    - Update the source-bound SDK README with the next circuit artifact.
+    - [x] Update the source-bound SDK README with the final canonical runtime
+      after cleanup.
   - [x] Run the preliminary desktop worker sweep at the P4+P5 checkpoint.
   - [x] Audit existing branches for reusable affinity and allocator work.
   - [x] Trace the canonical proof memory lifetime and rank live allocations.
@@ -128,26 +129,33 @@ Privacy claim:
     after GKR, and bind that source to the committed trace.
   - [x] Verify the private, fail-open Android affinity policy and its unit tests.
   - [x] Verify NEON dispatch in the exact AArch64 library from the current AAR.
-  - [ ] Sweep private Android worker and proof-thread stack sizes, then remove
-    the temporary controls and hard-code the selected sizes.
+  - [x] Sweep private Android worker and proof-thread stack sizes.
+  - [x] Select six workers, a 2 MiB proof-thread stack, a 16 MiB proof-worker
+    stack, and no affinity policy.
+  - [x] Remove the temporary controls and hard-code the selected sizes.
   - [x] Reject the isolated Android jemalloc candidate.
     - [x] Test the maintained jemallocator releases with NDK 27.
     - [x] Remove the candidate after the AAR cross-build failed.
     - [x] Record the toolchain errors and the absence of candidate artifacts.
-  - [ ] Run the final worker, affinity, allocator, RSS, and NEON device sweep
+  - [x] Run the worker, affinity, allocator, RSS, and NEON device sweep
     on the selected P4 circuit.
-- [ ] P6: Add witness-generation parallelism only if it remains a binding
-  phase after P2 through P5.
-- [ ] Regenerate and verify the source-bound artifact after every accepted
+- [x] P6: Skip witness-generation parallelism because the fixed-scope
+  feasibility analysis showed that it cannot meet the three-phone target.
+- [x] Regenerate and verify the source-bound artifact after every accepted
   soundness-affecting change.
-- [ ] Run the complete release, Clippy, formatting, artifact-drift,
+- [x] Run the complete release, Clippy, formatting, artifact-drift,
   soundness-negative, and unlinkability-negative test matrix.
-- [ ] Run the final desktop campaign and the final Firebase three-device
+- [x] Run the final desktop campaign and the final Firebase three-device
   campaign through the canonical `proveIdentity` and `verifyIdentity` API.
 - [ ] Meet the primary mobile gates: cold prove below 2,000 ms on Pixel 8,
   Galaxy S24 Ultra, and Galaxy A54; verify at most 350 ms; use a fixed
   credential-independent envelope; and meet the mailbox-approved proof-size
   ceiling.
+  - [ ] Meet the 2,000 ms cold-prove target on all three phones. The final
+    canonical matrix failed this target on all three phones.
+  - [x] Keep verification at or below 350 ms on all three phones.
+  - [x] Keep one fixed, credential-independent 1,572,910-byte envelope.
+  - [x] Keep the envelope below the 2,500,000-byte ceiling.
 
 ## Invariants
 
@@ -162,10 +170,9 @@ Privacy claim:
 
 ## Review
 
-The canonical implementation and its first desktop baseline are complete.
-The full performance campaign is in progress. The final review must record each
-accepted optimization, the rejected frontier points, source and artifact hashes,
-desktop results, Firebase results, and the complete verification matrix.
+The canonical implementation and the performance campaign are complete. The
+2,000 ms cold-prove target failed on all three phones. P6 was infeasible in the
+fixed campaign scope and remains skipped.
 The Android jemalloc candidate is rejected because the maintained bindings do
 not build with NDK 27 without a local patch or linker shim.
 
@@ -176,4 +183,67 @@ release mode. It also passed release Clippy, formatting, and diff checks.
 Tests confirmed exact leaf, GKR proof, coefficient MLE, transcript, and worker
 parity. The final desktop comparison measured a 68.25 MiB peak-RSS reduction
 and a 0.8 percent proving-time increase. The proof envelope stayed at
-1,572,910 bytes. The Android runtime sweep remains open.
+1,572,910 bytes.
+
+The P5 mobile runtime sweep completed 13 Firebase matrices and 39 phone
+executions. All executions passed the exact circuit-hash, envelope, runtime,
+stack, phase, verification, and target-log checks. The sweep selected six
+workers, a 2 MiB proof-thread stack, a 16 MiB proof-worker stack, and no
+affinity policy. The fixed A/B/B/A rule rejected the affinity policy because
+Galaxy S24 Ultra did not improve by more than the measured pair spread.
+The campaign retained six workers because neither four nor eight workers
+improved all three binding phones. This selection is not a statistical
+optimum.
+
+The no-affinity A-row mean reduced peak HWM by 18.2 percent on Pixel 8, 19.9
+percent on Galaxy S24 Ultra, and 18.5 percent on Galaxy A54 relative to the P4
+selected-point matrix. The cold proving results had high variation and did
+not show a stable latency improvement. No P5 row met the 2,000 ms prove gate.
+The fastest measured values were 4,986 ms on Pixel 8, 2,618 ms on Galaxy S24
+Ultra, and 5,638 ms on Galaxy A54. Product cleanup, final artifact
+regeneration, the full verification matrix, and the final canonical
+three-phone gate are complete.
+
+The final soundness-source checkpoint is `13a1a51d`. The source-bound artifact
+commit is `a34ac578`. The final package source and mobile fixture commit is
+`a91085dc`. The final circuit hash is
+`2eff9e073151b4bce733516f4b6dd411b6d48ef5425fd93d41c64bedf524fea9`.
+The product has no temporary runtime controls.
+
+Final package 3 has these SHA-256 values:
+
+- AAR:
+  `cdd744130c540f8ba910843b2a0fafe482714b864c200c06ee375c7aa6f242fa`
+- Host APK:
+  `b126d7693abb8079b2412a0ba1590124f16252ed61449d96e0b86f5aec3e6766`
+- Test APK:
+  `050ddfca27695d32c1c6e1d563ec76a1f16ad2d9551f497e877e5cd839678ae3`
+- Fixture:
+  `c9fe96c76b13a884afb324e68dd939561c8d4664fe59e8cdfc85e8bf0625ea52`
+- AAR and host APK arm64 library:
+  `aedf9b1e6213e6d0bc7bf5b2cd20e51a5908eee5cee844b7e11bbcf87533dc38`
+
+The final desktop campaign ran seven serial samples. It measured a 1,162 ms
+median prove time and a 17 ms median verify time. The first verify time was
+42 ms. The proof envelope was 1,572,910 bytes.
+
+The final Firebase run was matrix `matrix-92u1aei93c81a`, numeric ID
+`4904946063125125660`, in history `bh.f5f036aa81c4230a`. All phones used API
+34, six actual Rayon workers, a 2,097,152-byte proof-thread stack, a
+16,777,216-byte proof-worker stack, and 25 phase records. The exact final
+results were:
+
+| Phone | Prove | Verify | Peak HWM |
+| --- | ---: | ---: | ---: |
+| Pixel 8 | 5,450 ms | 239 ms | 1,346,468 KiB |
+| Galaxy S24 Ultra | 2,755 ms | 140 ms | 1,414,276 KiB |
+| Galaxy A54 | 5,853 ms | 255 ms | 1,338,168 KiB |
+
+Each execution returned `OK (1 test)` with a 1,572,910-byte envelope. No
+execution had an OOM, crash, or ANR. The verification and envelope gates
+passed. The 2,000 ms prove target failed on all three phones.
+
+All normal release workspace tests passed. All 18 ignored release tests
+passed. Release Clippy passed with warnings denied. Formatting, the release
+build for all targets, the quantum-only dependency check, the source-bound
+artifact check, and the diff check passed.
