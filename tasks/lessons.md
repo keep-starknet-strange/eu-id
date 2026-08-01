@@ -97,6 +97,9 @@
 - Use all-core scheduling only when the user requests it.
 - Stop performance work when the user defers performance.
 - Do not add an optimization after that instruction.
+- Resume a deferred benchmark only after the user explicitly reauthorizes it.
+- Prove and verify a regenerated mobile fixture locally before uploading it.
+- Regenerate the signed credential fixture when the canonical mdoc profile changes.
 
 ## Artifact provenance
 
@@ -112,6 +115,14 @@
 - Regenerate the artifact after each soundness-source change.
 - Reject artifact drift in verification.
 - Do not change transcript or domain-separator bytes during a terminology cleanup.
+- Remove generated Android build directories before hashing the source tree.
+- Freeze and record an exact checkpoint before parallel campaign edits begin.
+- After a geometry change, validate a live proof against the artifact input.
+  Static artifact generation alone does not prove that the input is current.
+- Bind every GKR input vector before its randomized compression challenges.
+  Transcript messages do not create a missing global input oracle.
+- Compare complete relation denominators before you cancel lookup numerators.
+  Equal-looking coefficients do not cancel across different tuples.
 
 ## Scope
 

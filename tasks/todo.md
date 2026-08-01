@@ -77,10 +77,28 @@ Privacy claim:
   `proveIdentity` is at most 1.15 times the AIR-core latency.
 - [ ] P2: Reduce the shared Keccak service to at most 6,000,000 committed
   cells without weakening the round schedule, job binding, or Iota checks.
-- [ ] P3: Reduce private MSO and item SHA-256 to at most 1,500,000 committed
+  - [x] Reject the endpoint-GKR experiment: it takes about 100 seconds at the
+    canonical geometry and weakens the conservative algebraic bound by about
+    4.1 bits.
+  - [x] Find a sound fast design below the gate: device-only ML-DSA-44, a
+    one-block SampleInBall cap, the existing carrier chain, and the current GKR
+    tie-back use 4,855,360 shared-service cells and 10,187,984 total cells.
+  - [ ] Resolve the device-profile policy in main-repository mailbox Q-004.
+  - [ ] Implement and prove the accepted mixed-profile design.
+  - [ ] Pin the accepted design's exact cells, algebraic bound, payload,
+    release latency, and peak memory.
+- [x] P3: Reduce private MSO and item SHA-256 to at most 1,500,000 committed
   cells without moving private-input checks outside the proof.
+  - [x] Reduce the SHA geometry to 1,320,640 committed cells.
+  - [x] Update and validate the live source-bound artifact profile.
+  - [x] Pass the canonical `proveIdentity` and `verifyIdentity` release test.
+  - [x] Record the seven-sample desktop result and the cold Pixel 8 delta.
 - [ ] P4: Measure the fixed-security PCS and FRI frontier and select the point
   that meets the mailbox-approved proof-envelope ceiling.
+  - [x] Reduce the canonical CBOR maximum constraint degree from eight to four.
+  - [x] Regenerate the live composition profile and pass artifact drift plus
+    the canonical A1/A2/B proof path.
+  - [ ] Measure the final frontier only after P2 fixes the circuit geometry.
 - [ ] P5: Measure Android worker counts, peak RSS, affinity, allocator, and
   available ARM acceleration; keep only improvements that help the binding
   devices.
