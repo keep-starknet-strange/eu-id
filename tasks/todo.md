@@ -75,7 +75,7 @@ Privacy claim:
   Firebase baseline on Pixel 8, Galaxy S24 Ultra, and Galaxy A54.
 - [x] P1: Reduce canonical-path overhead and prove that canonical
   `proveIdentity` is at most 1.15 times the AIR-core latency.
-- [ ] P2: Keep the sound 25-row carrier and reduce the all-ML-DSA-65 shared
+- [x] P2: Keep the sound 25-row carrier and reduce the all-ML-DSA-65 shared
   Keccak service to at most 9,200,000 committed cells without weakening the
   round schedule, job binding, or Iota checks.
   - [x] Reject the endpoint-GKR experiment: it takes about 100 seconds at the
@@ -84,10 +84,10 @@ Privacy claim:
   - [x] Reject the mixed ML-DSA-44 profile and the two-repetition carrier.
   - [x] Record the corrected all-ML-DSA-65 geometry in main-repository mailbox
     A-007.
-  - [ ] Restore ML-DSA-65 for the issuer, device, and revocation roles.
-  - [ ] Pin 9,102,656 committed cells, 261 permutations, the soundness bound,
+  - [x] Restore ML-DSA-65 for the issuer, device, and revocation roles.
+  - [x] Pin 9,102,656 committed cells, 261 permutations, the soundness bound,
     and the carrier payload.
-  - [ ] Pin final release latency and peak memory.
+  - [x] Pin final release latency and peak memory.
 - [x] P3: Reduce private MSO and item SHA-256 to at most 1,500,000 committed
   cells without moving private-input checks outside the proof.
   - [x] Keep the all-ML-DSA-65 SHA geometry at 1,320,640 committed cells.
