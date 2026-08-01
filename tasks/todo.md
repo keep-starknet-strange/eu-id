@@ -258,8 +258,10 @@ artifact check, and the diff check passed.
   can materially reduce the binding phone times.
 - [x] Quantify the proof-identical backend ceiling and the minimum geometry
   budget for a structural AIR redesign.
-- [ ] Obtain a scope decision for an AIR redesign or a pinned-STWO backend
-  optimization.
+- [x] Obtain user direction to request a staged AIR redesign that preserves
+  every theorem, unlinkability, soundness, API, and local-proving property.
+- [x] Send the complete redesign brief as main-repository mailbox Q-011.
+- [ ] Review the Q-011 redesign and its property ledger before implementation.
 - [ ] Regenerate the source-bound artifact and pass the complete release and
   unlinkability checks.
 - [ ] Run one final three-phone Firebase matrix with one exact APK pair.
