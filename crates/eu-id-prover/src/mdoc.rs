@@ -3866,6 +3866,7 @@ mod tests {
         const EXPECTED_ITEM_CELLS: usize = 78_416;
         const EXPECTED_SHARED_TABLE_CELLS: usize = 4_128;
         const EXPECTED_TOTAL_CELLS: usize = 1_320_640;
+        const _: () = assert!(EXPECTED_TOTAL_CELLS <= 1_500_000);
 
         let mso_bytes = vec![0u8; TS13_DEMO_MSO_PAYLOAD_BYTES];
         let mso_witness = compute_sha256_witness(&mso_bytes);
@@ -3917,6 +3918,5 @@ mod tests {
             committed_cells(&mso_layout) + item_cells + table_cells,
             EXPECTED_TOTAL_CELLS
         );
-        assert!(EXPECTED_TOTAL_CELLS <= 1_500_000);
     }
 }
