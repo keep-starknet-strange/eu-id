@@ -1,6 +1,6 @@
 {
   "byteEncoding": "lowercase-hex",
-  "fixture": "deterministic-rustcrypto-mldsa65-realistic-7-attribute-pid-demo-not-deployed-credential",
+  "fixture": "deterministic-rustcrypto-mldsa65-all-roles-realistic-7-attribute-pid-demo-not-deployed-credential",
   "kotlinPackage": "com.kss.euid.zk.sdk",
   "privacyClaim": "public-input unlinkable; transcript zero knowledge pending",
   "profile": "ts13-pid-age-over-18-unlinkable-demo-v1",
@@ -8,7 +8,7 @@
   "proveApi": "proveIdentity",
   "schema": "euid-ts13-mobile-fixture-v1",
   "statement": {
-    "circuitHash": "cc4c00d4fa753641afb2a9a3b08635f8a7ee35bd1bccb708e0d0dd8a8619b729",
+    "circuitHash": "4d55b4e5cb6d4fab102395d3647d267d3f3116e6cabae9e33f3c957f7e07c2b2",
     "documentType": "eu.europa.ec.eudi.pid.1",
     "elementIdentifier": "age_over_18",
     "expectedValueCbor": "f5",
