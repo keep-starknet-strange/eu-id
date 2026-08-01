@@ -751,14 +751,6 @@ fn boolean_constraint<E: EvalAtRow>(eval: &mut E, gate: E::F, value: E::F) {
     eval.add_constraint(gate * value.clone() * (value - m31_const::<E>(1)));
 }
 
-fn eq_bit<E: EvalAtRow>(bit: E::F, expected: bool) -> E::F {
-    if expected {
-        bit
-    } else {
-        m31_const::<E>(1) - bit
-    }
-}
-
 #[derive(Clone)]
 struct MdocCborStreamEval {
     log_size: u32,
@@ -774,9 +766,7 @@ impl FrameworkEval for MdocCborStreamEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Five-bit additional-info equality, gated by header/CBOR, reaches
-        // degree seven; the next power-of-two degree bound is eight.
-        self.log_size + 3
+        self.log_size + 2
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -854,7 +844,7 @@ impl FrameworkEval for MdocCborStreamEval {
 
         boolean_constraint(&mut eval, one.clone(), root_end.clone());
         eval.add_constraint(root_end.clone() * (one.clone() - cbor.clone()));
-        let not_last = one.clone() - last;
+        let not_last = one.clone() - last.clone();
         match self.mode {
             MdocCborInputMode::ShaPadded => {
                 eval.add_constraint(
@@ -949,19 +939,26 @@ impl FrameworkEval for MdocCborStreamEval {
         );
 
         // Decode major type and additional-info width from the header byte.
-        for (major_value, flag) in major_flags.iter().enumerate() {
+        for flag in &major_flags {
             boolean_constraint(&mut eval, cbor.clone(), flag.clone());
-            let eq = eq_bit::<E>(byte_bits[5].clone(), major_value & 1 != 0)
-                * eq_bit::<E>(byte_bits[6].clone(), major_value & 2 != 0)
-                * eq_bit::<E>(byte_bits[7].clone(), major_value & 4 != 0);
-            eval.add_constraint(cbor.clone() * (flag.clone() - header.clone() * eq));
         }
+        let major_flag_sum = major_flags
+            .iter()
+            .cloned()
+            .fold(zero.clone(), |sum, flag| sum + flag);
         let decoded_major = major_flags
             .iter()
             .enumerate()
             .fold(zero.clone(), |sum, (value, flag)| {
                 sum + m31_const::<E>(value as u32) * flag.clone()
             });
+        let major_from_bits = byte_bits[5].clone()
+            + m31_const::<E>(2) * byte_bits[6].clone()
+            + m31_const::<E>(4) * byte_bits[7].clone();
+        eval.add_constraint(cbor.clone() * (major_flag_sum - header.clone()));
+        eval.add_constraint(
+            cbor.clone() * (decoded_major.clone() - header.clone() * major_from_bits),
+        );
         eval.add_constraint(cbor.clone() * (major.clone() - decoded_major));
 
         let ai = byte_bits
@@ -971,18 +968,27 @@ impl FrameworkEval for MdocCborStreamEval {
             .fold(zero.clone(), |sum, (bit, value)| {
                 sum + m31_const::<E>(1u32 << bit) * value.clone()
             });
-        for (offset, flag) in ext_flags.iter().enumerate() {
+        for flag in &ext_flags {
             boolean_constraint(&mut eval, cbor.clone(), flag.clone());
-            let value = 24 + offset;
-            let eq = (0..5).fold(one.clone(), |product, bit| {
-                product * eq_bit::<E>(byte_bits[bit].clone(), value & (1 << bit) != 0)
-            });
-            eval.add_constraint(cbor.clone() * (flag.clone() - header.clone() * eq));
         }
         let ext_sum = ext_flags
             .iter()
             .cloned()
             .fold(zero.clone(), |sum, flag| sum + flag);
+        let decoded_ext_offset = ext_flags
+            .iter()
+            .enumerate()
+            .fold(zero.clone(), |sum, (offset, flag)| {
+                sum + m31_const::<E>(offset as u32) * flag.clone()
+            });
+        let ext_offset_from_bits = byte_bits[0].clone() + m31_const::<E>(2) * byte_bits[1].clone();
+        eval.add_constraint(
+            cbor.clone()
+                * (ext_sum.clone() - header.clone() * byte_bits[4].clone() * byte_bits[3].clone()),
+        );
+        eval.add_constraint(
+            cbor.clone() * (decoded_ext_offset - ext_sum.clone() * ext_offset_from_bits),
+        );
         let inline = header.clone() - ext_sum.clone();
         eval.add_constraint(
             header.clone() * byte_bits[4].clone() * byte_bits[3].clone() * byte_bits[2].clone(),
@@ -1067,7 +1073,9 @@ impl FrameworkEval for MdocCborStreamEval {
 
         let expected_remaining_next = header.clone() * span_after_header.clone()
             + (cbor.clone() - header.clone()) * (remaining.clone() - one.clone());
-        let continue_cbor = cbor.clone() * cbor_next.clone();
+        // The schedule makes `cbor_next` imply `cbor` away from the cyclic last row.
+        // At the last row, `cbor_next` wraps to the first row's pinned value of one.
+        let continue_cbor = cbor_next.clone() - last;
         eval.add_constraint(
             continue_cbor.clone() * (remaining_next.clone() - expected_remaining_next.clone()),
         );
@@ -1263,6 +1271,8 @@ mod trace_col {
     pub(super) const CBOR: usize = 10;
     pub(super) const HEADER: usize = 21;
     pub(super) const MAJOR: usize = 23;
+    #[cfg(test)]
+    pub(super) const MAJOR_FLAGS: usize = 24;
     pub(super) const ARGUMENT: usize = 32;
     pub(super) const CONTENT_LEN: usize = 36;
     pub(super) const DEPTH: usize = 37;
@@ -1270,6 +1280,10 @@ mod trace_col {
     pub(super) const ORDINAL: usize = 39;
     pub(super) const MAP_KEY: usize = 40;
     pub(super) const MAP_VALUE: usize = 41;
+    #[cfg(test)]
+    pub(super) const EXT_FLAGS: usize = 59;
+    #[cfg(test)]
+    pub(super) const COUNTERS: usize = 69;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1472,7 +1486,7 @@ impl AirProver for MdocCborStream {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 3
+        self.log_size + 2
     }
 
     fn store_polynomial_coefficients(&self) -> bool {
@@ -1539,5 +1553,213 @@ impl AirProver for MdocCborStream {
             .component
             .as_ref()
             .expect("mdoc CBOR component is built")]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use stwo::core::pcs::TreeVec;
+    use stwo_constraint_framework::assert_constraints_on_trace;
+
+    fn weighted_mask(mask: u16, width: usize) -> u32 {
+        (0..width)
+            .filter(|offset| mask & (1 << offset) != 0)
+            .map(|offset| offset as u32)
+            .sum()
+    }
+
+    #[test]
+    fn major_flag_moments_match_equality_decode_for_every_header_byte() {
+        for byte in 0u16..=u8::MAX.into() {
+            for header in [false, true] {
+                let equality_mask = if header { 1 << (byte >> 5) } else { 0 };
+                for mask in 0u16..1 << 8 {
+                    let moments_accept = mask.count_ones() == u32::from(header)
+                        && weighted_mask(mask, 8) == u32::from(header) * u32::from(byte >> 5);
+                    assert_eq!(
+                        moments_accept,
+                        mask == equality_mask,
+                        "byte={byte:#04x}, header={header}, mask={mask:#05x}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extended_flag_moments_match_equality_decode_for_every_header_byte() {
+        for byte in 0u16..=u8::MAX.into() {
+            let additional = byte & 0x1f;
+            let bit_2 = (additional >> 2) & 1;
+            let bit_3 = (additional >> 3) & 1;
+            let bit_4 = (additional >> 4) & 1;
+            for header in [false, true] {
+                let equality_mask = if header && (24..=27).contains(&additional) {
+                    1 << (additional - 24)
+                } else {
+                    0
+                };
+                let legal = !(header && bit_4 * bit_3 * bit_2 != 0);
+                let extended = u32::from(header) * u32::from(bit_4 * bit_3);
+                for mask in 0u16..1 << 4 {
+                    let moments_accept = legal
+                        && mask.count_ones() == extended
+                        && weighted_mask(mask, 4) == extended * u32::from(additional & 0x03);
+                    assert_eq!(
+                        moments_accept,
+                        legal && mask == equality_mask,
+                        "byte={byte:#04x}, header={header}, mask={mask:#04x}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn extended_byte_string_witness() -> MdocCborWitness {
+        let mut bytes = vec![0x58, 24];
+        bytes.extend(0u8..24);
+        MdocCborWitness::new(&bytes, MdocCborInputMode::Raw)
+            .expect("the fixture is one canonical 24-byte CBOR byte string")
+    }
+
+    fn sha_padded_single_item_witness() -> MdocCborWitness {
+        let mut bytes = vec![0x01, 0x80];
+        bytes.resize(SHA_BLOCK_BYTES - SHA_LENGTH_BYTES, 0);
+        bytes.extend_from_slice(&8u64.to_be_bytes());
+        MdocCborWitness::new(&bytes, MdocCborInputMode::ShaPadded)
+            .expect("the fixture is one canonical CBOR integer with SHA-256 padding")
+    }
+
+    fn two_item_array_witness() -> MdocCborWitness {
+        MdocCborWitness::new(&[0x82, 0x00, 0x01], MdocCborInputMode::Raw)
+            .expect("the fixture is one canonical CBOR array with two items")
+    }
+
+    fn assert_witness_constraints(
+        witness: &MdocCborWitness,
+        mode: MdocCborInputMode,
+        base_columns: Vec<Vec<M31>>,
+    ) {
+        let input_relation = FieldBytesRelation::dummy();
+        let parsed_relation = ParsedCborByteRelation::dummy();
+        let (interaction, claimed_sum) =
+            mdoc_cbor_interaction_trace(witness, 0, &input_relation, &parsed_relation);
+        let base = base_columns
+            .into_iter()
+            .map(|values| column_eval(witness.log_size, values))
+            .collect();
+        let trace = TreeVec::new(vec![
+            mdoc_cbor_preprocessed_columns(witness.log_size),
+            base,
+            interaction,
+        ]);
+        let trace = trace.as_ref().map_cols(|column| column.to_cpu().values);
+        let trace = trace.as_cols_ref();
+        let eval = MdocCborStreamEval {
+            log_size: witness.log_size,
+            mode,
+            stream_id: 0,
+            input_relation,
+            parsed_relation,
+        };
+        assert_constraints_on_trace(
+            &trace,
+            eval.log_size(),
+            |row| {
+                eval.evaluate(row);
+            },
+            claimed_sum,
+        );
+    }
+
+    fn weighted_flag_tamper_rejects(changes: &[(usize, M31)]) -> bool {
+        let witness = extended_byte_string_witness();
+        let mut base = mdoc_cbor_base_columns(&witness);
+        for &(column, value) in changes {
+            base[column][0] = value;
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_witness_constraints(&witness, MdocCborInputMode::Raw, base);
+        }))
+        .is_err()
+    }
+
+    #[test]
+    fn linear_continue_gate_matches_product_on_every_schedule_edge() {
+        let witnesses = [
+            extended_byte_string_witness(),
+            sha_padded_single_item_witness(),
+            two_item_array_witness(),
+        ];
+        let mut saw_cbor_to_cbor = false;
+        let mut saw_cbor_to_item = false;
+        let mut saw_cbor_to_non_cbor = false;
+        let mut saw_inactive_padding = false;
+        let mut saw_cyclic_last_to_first = false;
+
+        for witness in &witnesses {
+            let base = mdoc_cbor_base_columns(witness);
+            let n_rows = 1usize << witness.log_size;
+            for row in 0..n_rows {
+                let next = (row + 1) % n_rows;
+                let cbor = base[trace_col::CBOR][row];
+                let cbor_next = base[trace_col::CBOR][next];
+                let last = m31(u32::from(row + 1 == n_rows));
+                assert_eq!(
+                    cbor * cbor_next,
+                    cbor_next - last,
+                    "schedule gate differs at row {row}"
+                );
+
+                saw_cbor_to_cbor |= cbor == m31(1) && cbor_next == m31(1);
+                saw_cbor_to_item |= row + 1 < witness.rows.len()
+                    && witness.rows[row].phase == MdocCborPhase::Cbor
+                    && witness.rows[row + 1].header;
+                saw_cbor_to_non_cbor |= cbor == m31(1) && cbor_next == m31(0);
+                saw_inactive_padding |= row + 1 < n_rows
+                    && base[trace_col::ACTIVE][row] == m31(0)
+                    && cbor == m31(0)
+                    && cbor_next == m31(0);
+                saw_cyclic_last_to_first |=
+                    row + 1 == n_rows && cbor == m31(0) && cbor_next == m31(1);
+            }
+        }
+
+        assert!(saw_cbor_to_cbor);
+        assert!(saw_cbor_to_item);
+        assert!(saw_cbor_to_non_cbor);
+        assert!(saw_inactive_padding);
+        assert!(saw_cyclic_last_to_first);
+    }
+
+    #[test]
+    fn major_flag_weight_tamper_is_rejected() {
+        assert!(weighted_flag_tamper_rejects(&[
+            (trace_col::MAJOR_FLAGS + 2, m31(0)),
+            (trace_col::MAJOR_FLAGS + 3, m31(1)),
+        ]));
+    }
+
+    #[test]
+    fn extended_flag_weight_tamper_is_rejected() {
+        assert!(weighted_flag_tamper_rejects(&[
+            (trace_col::EXT_FLAGS, m31(0)),
+            (trace_col::EXT_FLAGS + 1, m31(1)),
+        ]));
+    }
+
+    #[test]
+    fn non_cbor_stack_transition_tamper_is_rejected() {
+        let witness = sha_padded_single_item_witness();
+        let mut base = mdoc_cbor_base_columns(&witness);
+        let marker_row = 1;
+        assert_eq!(base[trace_col::CBOR][marker_row], m31(0));
+        base[trace_col::COUNTERS][marker_row] = m31(1);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_witness_constraints(&witness, MdocCborInputMode::ShaPadded, base);
+        }))
+        .is_err());
     }
 }
