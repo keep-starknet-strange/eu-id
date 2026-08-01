@@ -644,13 +644,13 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 &[0xf5],
                 VERIFY_AT,
                 &transcript,
-                &fixture.device_pk,
+                &fixture.revocation_pk,
                 &fixture.revocation_pk,
                 REVOCATION_EPOCH,
             )
             .expect("changed issuer context derives");
             let mut changed = public.clone();
-            changed.trusted_issuer_public_key = fixture.device_pk.clone();
+            changed.trusted_issuer_public_key = fixture.revocation_pk.clone();
             changed.request_context_digest = derived.request_context_digest;
             relabeled("issuer key", changed);
 
@@ -664,12 +664,12 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 VERIFY_AT,
                 &transcript,
                 &fixture.issuer_pk,
-                &fixture.device_pk,
+                &fixture.issuer_pk,
                 REVOCATION_EPOCH,
             )
             .expect("changed revocation context derives");
             let mut changed = public.clone();
-            changed.revocation.revocation_public_key = MdocRevocationKey(fixture.device_pk.clone());
+            changed.revocation.revocation_public_key = MdocRevocationKey(fixture.issuer_pk.clone());
             changed.request_context_digest = derived.request_context_digest;
             relabeled("revocation key", changed);
 

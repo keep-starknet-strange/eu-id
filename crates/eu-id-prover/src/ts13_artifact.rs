@@ -577,7 +577,7 @@ struct SerializedClaimV1 {
     fixed_vector_lengths: Vec<NamedU64V1>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NamedU64V1 {
     name: String,
@@ -1449,9 +1449,11 @@ impl GenerationInputV1 {
             )?;
         }
         checked_named_values("stream ID", &self.stream_ids)?;
-        if self.stream_ids.len() != CANONICAL_STREAM_ID_COUNT {
+        let hash_shapes = canonical_hash_stream_shapes()?;
+        if self.stream_ids != canonical_stream_ids(&hash_shapes)? {
             return Err(ArtifactError::InvalidInput(format!(
-                "the canonical profile must contain exactly {CANONICAL_STREAM_ID_COUNT} stream IDs"
+                "the canonical profile must contain the exact {CANONICAL_STREAM_ID_COUNT} named \
+                 stream IDs"
             )));
         }
         checked_name_list(
@@ -1463,7 +1465,6 @@ impl GenerationInputV1 {
             .iter()
             .map(|entry| entry.value)
             .collect::<BTreeSet<_>>();
-        let hash_shapes = canonical_hash_stream_shapes()?;
         if self.hash_streams.len() != CANONICAL_HASH_STREAM_COUNT
             || self
                 .hash_streams
@@ -1478,14 +1479,15 @@ impl GenerationInputV1 {
             ));
         }
         for stream in &self.hash_streams {
-            let shape = hash_shapes.get(&stream.stream_id).ok_or_else(|| {
+            let shape = hash_shapes.get(&stream.name).ok_or_else(|| {
                 ArtifactError::InvalidInput(format!(
                     "hash stream {:?} has no canonical job shape",
                     stream.name
                 ))
             })?;
             let (hash_function, input_capacity_bytes, output_bytes) = hash_stream_geometry(*shape)?;
-            if stream.hash_function != hash_function
+            if stream.stream_id != u64::from(shape.absorb_stream_id)
+                || stream.hash_function != hash_function
                 || stream.domain_separator.0 != [0x1f]
                 || stream.job_count != 1
                 || stream.input_capacity_bytes != input_capacity_bytes
@@ -3409,11 +3411,6 @@ fn set_implementation_text(
     Ok(())
 }
 
-fn expand_a_ordinal(name: &str, suffix: &str) -> Option<usize> {
-    let ordinal = name.strip_prefix("expand_a_")?.strip_suffix(suffix)?;
-    (ordinal.len() == 2).then(|| ordinal.parse().ok()).flatten()
-}
-
 fn required_shape_count(value: Option<usize>, name: &str) -> Result<u64, ArtifactError> {
     value
         .map(|value| value as u64)
@@ -3421,27 +3418,102 @@ fn required_shape_count(value: Option<usize>, name: &str) -> Result<u64, Artifac
 }
 
 fn canonical_hash_stream_shapes(
-) -> Result<BTreeMap<u64, stwo_mldsa::stwo_keccak::sponge::Shape>, ArtifactError> {
-    let mut shapes = BTreeMap::new();
-    for shape in crate::mdoc::ts13_demo_mldsa_keccak_job_shapes(
+) -> Result<BTreeMap<String, stwo_mldsa::stwo_keccak::sponge::Shape>, ArtifactError> {
+    use stwo_mldsa::profile::ML_DSA_44;
+
+    let mut names = ["issuer_mu_job", "issuer_ct_job", "issuer_sib_job"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    names.extend((0..ML_DSA_44.matrix_polys()).map(|ordinal| format!("expand_a_{ordinal:02}_job")));
+    names.extend(
+        [
+            "device_tr_job",
+            "device_mu_job",
+            "device_ct_job",
+            "device_sib_job",
+            "revocation_mu_job",
+            "revocation_ct_job",
+            "revocation_sib_job",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    let live_shapes = crate::mdoc::ts13_demo_mldsa_keccak_job_shapes(
         crate::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY,
-    ) {
-        if shapes
-            .insert(u64::from(shape.absorb_stream_id), shape)
-            .is_some()
-        {
+    );
+    if names.len() != live_shapes.len() || names.len() != CANONICAL_HASH_STREAM_COUNT {
+        return Err(ArtifactError::InvalidInput(format!(
+            "canonical circuit has {} named jobs and {} live jobs instead of \
+             {CANONICAL_HASH_STREAM_COUNT}",
+            names.len(),
+            live_shapes.len()
+        )));
+    }
+    let mut shapes = BTreeMap::new();
+    for (name, shape) in names.into_iter().zip(live_shapes) {
+        if shapes.insert(name, shape).is_some() {
             return Err(ArtifactError::InvalidInput(
-                "canonical hash jobs reuse an absorb stream ID".to_owned(),
+                "canonical hash jobs reuse a name".to_owned(),
             ));
         }
     }
-    if shapes.len() != CANONICAL_HASH_STREAM_COUNT {
+    Ok(shapes)
+}
+
+fn canonical_stream_ids(
+    hash_shapes: &BTreeMap<String, stwo_mldsa::stwo_keccak::sponge::Shape>,
+) -> Result<Vec<NamedU64V1>, ArtifactError> {
+    let mut stream_ids = BTreeMap::new();
+    let mut insert = |name: String, value: u64| {
+        if stream_ids.insert(name, value).is_some() {
+            return Err(ArtifactError::InvalidInput(
+                "canonical stream ID names are not unique".to_owned(),
+            ));
+        }
+        Ok(())
+    };
+    for (job_name, shape) in hash_shapes {
+        let prefix = job_name.strip_suffix("_job").ok_or_else(|| {
+            ArtifactError::InvalidInput(format!(
+                "canonical hash job {job_name:?} has no job suffix"
+            ))
+        })?;
+        insert(
+            format!("{prefix}_absorb"),
+            u64::from(shape.absorb_stream_id),
+        )?;
+        insert(
+            format!("{prefix}_squeeze"),
+            u64::from(shape.squeeze_stream_id),
+        )?;
+    }
+    for (name, value) in [
+        (
+            "issuer_w1_source",
+            crate::mdoc::MDOC_ISSUER_MLDSA_STREAM_BASE,
+        ),
+        (
+            "device_w1_source",
+            crate::mdoc::MDOC_DEVICE_MLDSA_STREAM_BASE,
+        ),
+        (
+            "revocation_w1_source",
+            crate::mdoc::MDOC_REVOCATION_MLDSA_STREAM_BASE,
+        ),
+    ] {
+        insert(name.to_owned(), u64::from(value))?;
+    }
+    if stream_ids.len() != CANONICAL_STREAM_ID_COUNT {
         return Err(ArtifactError::InvalidInput(format!(
-            "canonical circuit has {} hash jobs instead of {CANONICAL_HASH_STREAM_COUNT}",
-            shapes.len()
+            "canonical circuit has {} named stream IDs instead of {CANONICAL_STREAM_ID_COUNT}",
+            stream_ids.len()
         )));
     }
-    Ok(shapes)
+    Ok(stream_ids
+        .into_iter()
+        .map(|(name, value)| NamedU64V1 { name, value })
+        .collect())
 }
 
 fn hash_stream_geometry(
@@ -3522,8 +3594,6 @@ fn set_relation_use_multiplicity(
 }
 
 fn refresh_canonical_profile_semantics(input: &mut GenerationInputV1) -> Result<(), ArtifactError> {
-    use stwo_mldsa::profile::ML_DSA_44;
-
     input.credential_shape.issuer_cose_sig_structure_bytes =
         crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES as u32;
     input.credential_shape.mso_payload_bytes = crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES as u32;
@@ -3532,24 +3602,20 @@ fn refresh_canonical_profile_semantics(input: &mut GenerationInputV1) -> Result<
     input.request_context_corpus.device_sig_structure_capacity =
         crate::mdoc::TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY as u32;
 
-    input.stream_ids.retain(|entry| {
-        expand_a_ordinal(&entry.name, "_absorb")
-            .or_else(|| expand_a_ordinal(&entry.name, "_squeeze"))
-            .is_none_or(|ordinal| ordinal < ML_DSA_44.matrix_polys())
-    });
-    input.hash_streams.retain(|stream| {
-        expand_a_ordinal(&stream.name, "_job")
-            .is_none_or(|ordinal| ordinal < ML_DSA_44.matrix_polys())
-    });
     let hash_shapes = canonical_hash_stream_shapes()?;
+    input.stream_ids = canonical_stream_ids(&hash_shapes)?;
+    input
+        .hash_streams
+        .retain(|stream| hash_shapes.contains_key(&stream.name));
     for stream in &mut input.hash_streams {
-        let shape = hash_shapes.get(&stream.stream_id).ok_or_else(|| {
+        let shape = hash_shapes.get(&stream.name).ok_or_else(|| {
             ArtifactError::InvalidInput(format!(
                 "hash stream {:?} has no canonical job shape",
                 stream.name
             ))
         })?;
         let (hash_function, input_capacity_bytes, output_bytes) = hash_stream_geometry(*shape)?;
+        stream.stream_id = u64::from(shape.absorb_stream_id);
         stream.hash_function = hash_function.to_owned();
         stream.domain_separator = HexBytes(vec![0x1f]);
         stream.job_count = 1;
@@ -4712,6 +4778,13 @@ mod tests {
         assert_eq!(input.stream_ids.len(), 55);
         assert_eq!(input.hash_streams.len(), 26);
         assert_eq!(
+            input.stream_ids,
+            canonical_stream_ids(
+                &canonical_hash_stream_shapes().expect("canonical hash shapes derive")
+            )
+            .expect("canonical stream IDs derive")
+        );
+        assert_eq!(
             input
                 .hash_streams
                 .iter()
@@ -4798,6 +4871,48 @@ mod tests {
         assert!(
             drifted.validate().is_err(),
             "every hash stream must reference a declared stream ID"
+        );
+
+        let mut drifted = sample_input();
+        let issuer_ct_id = drifted
+            .hash_streams
+            .iter()
+            .find(|stream| stream.name == "issuer_ct_job")
+            .expect("issuer c-tilde job is present")
+            .stream_id;
+        let device_ct_id = drifted
+            .hash_streams
+            .iter()
+            .find(|stream| stream.name == "device_ct_job")
+            .expect("device c-tilde job is present")
+            .stream_id;
+        drifted
+            .hash_streams
+            .iter_mut()
+            .find(|stream| stream.name == "issuer_ct_job")
+            .expect("issuer c-tilde job is present")
+            .stream_id = device_ct_id;
+        drifted
+            .hash_streams
+            .iter_mut()
+            .find(|stream| stream.name == "device_ct_job")
+            .expect("device c-tilde job is present")
+            .stream_id = issuer_ct_id;
+        assert!(
+            drifted.validate().is_err(),
+            "same-geometry hash jobs must keep their semantic stream IDs"
+        );
+
+        let mut drifted = sample_input();
+        drifted
+            .stream_ids
+            .iter_mut()
+            .find(|entry| entry.name == "issuer_mu_squeeze")
+            .expect("issuer mu squeeze stream is present")
+            .value += 10_000;
+        assert!(
+            drifted.validate().is_err(),
+            "each named squeeze stream must keep its canonical ID"
         );
 
         let mut drifted = sample_input();

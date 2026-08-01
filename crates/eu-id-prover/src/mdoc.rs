@@ -138,9 +138,9 @@ const MDOC_REVOCATION_MLDSA_NAMESPACE: &str = "mdoc/ts13/revocation";
 /// All instances share one Keccak-service relation set.
 /// Thus, each role uses a unique stream range.
 /// Each base is a multiple of [`stwo_mldsa::statement::STREAM_BASE_STRIDE`].
-const MDOC_ISSUER_MLDSA_STREAM_BASE: u32 = 0x100;
-const MDOC_DEVICE_MLDSA_STREAM_BASE: u32 = 0x200;
-const MDOC_REVOCATION_MLDSA_STREAM_BASE: u32 = 0x300;
+pub(crate) const MDOC_ISSUER_MLDSA_STREAM_BASE: u32 = 0x100;
+pub(crate) const MDOC_DEVICE_MLDSA_STREAM_BASE: u32 = 0x200;
+pub(crate) const MDOC_REVOCATION_MLDSA_STREAM_BASE: u32 = 0x300;
 const MDOC_DEVICE_EXPAND_A_STREAM_BASE: u32 = 0x400;
 const _: () = assert!(
     MDOC_ISSUER_MLDSA_STREAM_BASE.is_multiple_of(stwo_mldsa::statement::STREAM_BASE_STRIDE)

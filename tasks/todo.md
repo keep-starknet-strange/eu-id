@@ -91,7 +91,7 @@ Privacy claim:
   - [ ] Pin final release latency and peak memory.
 - [x] P3: Reduce private MSO and item SHA-256 to at most 1,500,000 committed
   cells without moving private-input checks outside the proof.
-  - [x] Reduce the SHA geometry to 1,320,640 committed cells.
+  - [x] Reduce the SHA geometry to 702,144 committed cells.
   - [x] Update and validate the live source-bound artifact profile.
   - [x] Pass the canonical `proveIdentity` and `verifyIdentity` release test.
   - [x] Record the seven-sample desktop result and the cold Pixel 8 delta.
