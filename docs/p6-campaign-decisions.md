@@ -1,6 +1,6 @@
 # TS13 phone proving campaign decisions
 
-Status: active; P5 is canonical
+Status: decision required; P5 is canonical and held
 
 This file is the tracked authority for the TS13 phone proving campaign. The
 files under the main checkout's `tasks/` directory are communication mirrors.
@@ -69,10 +69,11 @@ The campaign uses this route:
 
 - The restored P5 carrier is the canonical proof path.
 - The c7 AIR track is sound but rejected on measured phone throughput.
-- A-018-route authorizes an authenticated witness-MLE opening primitive in `~/stwo` on
-  a dedicated branch from `dev-copy`.
-- The application STWO pin stays at `4f39939e` until a recorded repin
-  decision passes the required parity and baseline gates.
+- A-019 supersedes the A-018 engine authorization. It rejects the compact
+  authenticated-MLE route under the fixed campaign constraints.
+- No engine, N, S, repin, or application-integration work may start before
+  Lucas selects a new campaign disposition.
+- The application STWO pin stays at `4f39939e`.
 
 A filed `GO` starts an approved stage. Fable controls technical mailbox
 answers and stage-gate definitions. Lucas may veto any campaign decision.
@@ -119,8 +120,24 @@ rejected. The exact AArch64 library uses the intended NEON path.
 
 The fixed-scope witness-parallelism route could not meet the three-phone gate.
 The c7 structural AIR route was sound but slower on every binding phone. P5 is
-therefore the canonical no-regression baseline. The authorized engine route
-must preserve every property in section 2.
+therefore the canonical no-regression baseline.
+
+A-019 confirms that the proposed compact authenticated-MLE route is blocked.
+The P5 carrier commits 7,454,720 cells. Committing only the 200 state columns
+would reduce that count by more than 5 million cells, but it would leave 696
+nonlinear auxiliary MLEs unauthenticated. The nonlinear split operations do
+not commute with MLE evaluation over the spread-byte representation. The
+bit-or-nibble representation authenticates the derivation but recreates the
+measured c7 dependent chain. The pinned PCS has no separate compact opening
+that closes this gap. G1 also counts every field element committed by a
+replacement proof system, so moving commitments does not meet the gate.
+
+The campaign has no authorized P6 implementation route. Lucas must select one
+of these dispositions:
+
+1. Close the performance campaign at the verified P5 baseline.
+2. Revise the phone-latency gate or another fixed campaign constraint.
+3. Authorize a research-scale proof-system project outside this campaign.
 
 ## 5. Current canonical P5 and archived c7
 
@@ -170,18 +187,22 @@ run used circuit `6b30e794...`, six proof workers, a 2 MiB proof-thread stack,
 16 MiB worker stacks, and a fixed 1,572,910-byte envelope. It emitted 25 phase
 rows.
 
-A-018-route defines these engine gates:
+A-018-route defined these engine gates:
 
 1. G1: On desktop at product size, the primitive-backed Keccak proof must beat
    the P5 post-proof phase and remove at least 5 million committed cells.
 2. G2: On all three phones, the post-proof phase must not exceed P5 and total
    proving must be strictly faster than P5.
 
-N, S, and application integration remain stopped until G2 passes.
+A-019 closes this route before G1 because no sound primitive meets its cell
+and dependency requirements. N, S, and application integration remain
+stopped. Do not run G2 against a design that did not pass G1.
 
 ## 7. Completion rule
 
 One accepted, source-bound artifact must meet the 2,000 ms cold-prove limit on
-all three phones. The pinned-engine campaign did not reach this limit. The
-authorized MLE-opening route must first pass G1 and G2. Do not weaken the
-theorem, unlinkability, ML-DSA-65, local proving, or the product API.
+all three phones. The current campaign did not reach this limit, and A-019
+confirms that no authorized implementation route remains. Hold the verified
+P5 artifact until Lucas selects a disposition. Do not weaken the theorem,
+unlinkability, ML-DSA-65, local proving, or the product API without an explicit
+new decision.

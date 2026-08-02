@@ -203,23 +203,31 @@ for measured phone throughput and restored P5. Circuits `e3426e32...` and
 - [x] Pass the full release, adversarial, artifact, and desktop gates.
 - [x] Audit the authenticated-MLE route against the G1 committed-cell gate.
 - [x] Send the compact-source derivation gap to Fable as mailbox Q-019.
-- [ ] Receive an accepted compact-source protocol before engine implementation.
-- [ ] Design the accepted witness-MLE opening primitive on a dedicated STWO
-  branch from the exact application pin.
-- [ ] Pass engine gate G1 on desktop and G2 on all three phones.
+- [x] Read A-019 and record that no accepted compact-source protocol exists
+  under the fixed campaign constraints.
+- [x] Stop the witness-MLE engine, N, S, and application-integration tracks.
+- [x] Keep the verified P5 source, artifact, and API as the canonical baseline.
+- [ ] Receive Lucas's campaign decision: close at P5, revise the campaign
+  gate or fixed constraints, or authorize research-scale proof-system work.
 
-The first engine gate is no regression from the P5 matrix on any phone: 5,450
-ms on Pixel 8, 2,755 ms on Galaxy S24 Ultra, and 5,853 ms on Galaxy A54.
-Application integration, N, and S remain stopped until G2 passes. The later
-target remains below 2,000 ms on every phone.
+A-019 supersedes the A-018 engine authorization. It confirms that the compact
+authenticated-MLE route cannot meet G1 while it keeps the pinned PCS and FRI
+settings, counts every replacement commitment, and avoids the measured c7
+dependent chain. No engine implementation or G2 phone run may start.
 
 The regression is confined to `post_interaction_proof`. The c7 path replaces
 253 built-in GKR sumcheck rounds with 1,410 custom rounds. A measured serial
 cutoff for small rounds increased the six-worker desktop post-proof median
 from 1.160 seconds to 1.208 seconds, so it was removed. Table streaming cannot
 provide the required 2.09x to 4.67x phase speedup. A-018 confirms the P5
-restore. A-018-route authorizes the authenticated-MLE engine design while P5
-stays canonical.
+restore. A-019 closes the authenticated-MLE engine route and keeps P5
+canonical until Lucas selects the campaign disposition.
+
+### A-019 review
+
+This reconciliation changes only tracked campaign text. It does not change
+the proof source, theorem, transcript, circuit artifact, envelope, mobile
+fixture, or `proveIdentity` and `verifyIdentity` API.
 
 ## Canonical P5 checkpoint and restoration
 

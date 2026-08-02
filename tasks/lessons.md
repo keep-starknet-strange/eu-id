@@ -148,6 +148,8 @@
 
 - Re-read every new final mailbox answer before continuing dependent work.
 - Treat a final mailbox policy as superseding earlier measurements and checkpoints.
+- When a final mailbox answer stops a route, remove its dependent implementation
+  and benchmark work from the active plan before exploring alternatives.
 - Apply a user scope change immediately.
 - Treat a checkpoint result as incomplete when the user authorizes the full campaign.
 - Stop cloud and device work when the user limits a benchmark to the computer.
