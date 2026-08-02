@@ -1,6 +1,6 @@
 # TS13 phone proving campaign decisions
 
-Status: active
+Status: active; P5 is canonical
 
 This file is the tracked authority for the TS13 phone proving campaign. The
 files under the main checkout's `tasks/` directory are communication mirrors.
@@ -65,11 +65,14 @@ Any other property change needs user approval before implementation.
 Repository-owned `air-core` proving machinery is allowed. The STWO pin does
 not move under this authorization.
 
-The campaign uses a hybrid route:
+The campaign uses this route:
 
-- The AIR track reviews and measures the committed-nibble candidate now.
-- The engine track may develop an uncommitted-MLE opening primitive later.
-  That work does not move the STWO pin or block the AIR candidate.
+- The restored P5 carrier is the canonical proof path.
+- The c7 AIR track is sound but rejected on measured phone throughput.
+- A-018-route authorizes an authenticated witness-MLE opening primitive in `~/stwo` on
+  a dedicated branch from `dev-copy`.
+- The application STWO pin stays at `4f39939e` until a recorded repin
+  decision passes the required parity and baseline gates.
 
 A filed `GO` starts an approved stage. Fable controls technical mailbox
 answers and stage-gate definitions. Lucas may veto any campaign decision.
@@ -91,14 +94,10 @@ applicable.
 
 ### P2 — Keccak service
 
-The prior 25-row all-ML-DSA-65 carrier used 9,102,656 committed cells. The
-layered acceptance candidate replaces that carrier. Its current Keccak
-AIR-reference count is 1,534,720 cells.
-
-A-015-review accepts the candidate as sound and reports no critical or high
-finding. Its three completion conditions, new source-bound artifact, and full
-release matrix are complete. Final acceptance requires the final-hash phone
-run.
+The canonical 25-row all-ML-DSA-65 carrier uses 9,102,656 committed cells.
+The c7 experiment reduced the Keccak AIR-reference count to 1,534,720 cells.
+A-015-review accepts c7 as sound and reports no critical or high finding. The
+final phone matrix rejected it for throughput. A-018 then restored P5.
 
 ### P3 — Private SHA-256
 
@@ -108,7 +107,7 @@ cells. It keeps the private-input checks inside the proof.
 ### P4 — PCS and FRI
 
 The selected point is blowup 3, 36 queries, proof-of-work 20, and lifting log
-size 19. The current candidate envelope is 1,507,374 bytes.
+size 19. The canonical P5 envelope is 1,572,910 bytes.
 
 ### P5 — Android runtime
 
@@ -118,72 +117,71 @@ rejected. The exact AArch64 library uses the intended NEON path.
 
 ### P6 — Structural continuation
 
-The fixed-scope witness-parallelism route was rejected because it could not
-meet the three-phone gate. Structural AIR work was then authorized with all
-properties in section 2 intact.
+The fixed-scope witness-parallelism route could not meet the three-phone gate.
+The c7 structural AIR route was sound but slower on every binding phone. P5 is
+therefore the canonical no-regression baseline. The authorized engine route
+must preserve every property in section 2.
 
-## 5. Current layered candidate
+## 5. Current canonical P5 and archived c7
 
-A-013 quarantined the committed-nibble implementation and selected a
-committed-bit v3 route. A-015 suspends that v3 route and promotes the existing
-committed-nibble implementation to an acceptance candidate. The bit layer is
-internal. It is deterministically extracted from 400 committed spread-nibble
-columns. Both boundary claims tie back to committed columns.
+A-018 restored the last sound P5 proof path. The restored circuit has this
+provenance:
 
-The soundness review is complete. Final acceptance requires all of these
-events:
+- Source restore commit:
+  `1e035312a566a2b8b96f4febad7eb35f17bed493`.
+- Artifact and fixture commit:
+  `cdfdf52c38a86143733ea80e4e8a3064a53950f9`.
+- Circuit and artifact SHA-256:
+  `6b30e79449d331477027412fd30c831f7bb45cea42214b072845173fea0241b6`.
+- Soundness-source-tree SHA-256:
+  `a39bc90c4c14226728bfd4f4a314a12a81f162c8fd62991fc5f214973de99ec3`.
+- Shape-manifest SHA-256:
+  `a5c8c6fdbaac8e1a9b0ca81704b31c7e29f2ec27487f603139531c39faf42d60`.
+- Generation-input SHA-256:
+  `60f05b9e596a48e03f6895f36f962775f3f6d1f2dfd50ca3fbb94640153863f0`.
+- Mobile-fixture SHA-256:
+  `06ef4ade577e1b69a776adafa778fd0fe16e3c75478772f1d5abf0c7072a98f4`.
+- Cargo.lock SHA-256:
+  `23e70c964b943632fed547cfa38e6c1d24cfeac070a3518bc0f1a704f7597dbe`.
+- Proof-body capacity: 1,572,864 bytes.
+- Total envelope: 1,572,910 bytes.
 
-1. Complete the F-1 artifact-binding wording, F-2 exported off-domain nibble
-   negative, and F-3 carrier-baseline wording.
-2. Commit the source change and generate a new source-bound artifact.
-3. Pass the complete release matrix with the new circuit hash.
-4. Pass the exact three-phone Firebase matrix with that hash.
+The historical P5 matrix `matrix-92u1aei93c81a` is the A-018 phone-latency
+baseline. It measured 5,450 ms on Pixel 8, 2,755 ms on Galaxy S24 Ultra, and
+5,853 ms on Galaxy A54. It used the prior P5 circuit hash `2eff9e07...`. It is
+not current-hash evidence.
 
-The reviewed pre-F-2 candidate has this provenance:
+The c7 status is: sound; rejected on measured phone throughput, 2026-08-02
 
-- Design: `docs/ts13-keccak-layered-gkr.md`.
-- Soundness-source commit: `2111a1eb`.
-- Source-bound artifact commit: `5a619bf2`.
-- Evidence-ledger commit: `358646b1`.
-- Circuit hash:
-  `3fac167754de85508fd6fda45e37043f6e104821463b9fa40e17d88fa4938b9c`.
-- Replacement geometry: 212,992 cells.
-- Complete Keccak AIR-reference geometry: 1,534,720 cells.
-- Proof body capacity: 1,507,328 bytes.
-- Total envelope: 1,507,374 bytes.
-
-Conditions F-1 through F-3 are complete at soundness-source commit
-`cf8f2cec`. The regenerated circuit hash is
-`c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`.
-The shape and 1,507,328-byte proof-body capacity are unchanged. The final
-release matrix and Android package checks passed. Seven fresh desktop
-processes measured a 1,780 ms median prove time, an 81 ms median verify time,
-and a maximum resident set size of 786,415,616 bytes. Every envelope was
-1,507,374 bytes. The tracked evidence is in
+Its final matrix measured 13,560 ms, 5,075 ms, and 9,523 ms on the same
+phones. The complete c7 evidence remains in
 `tasks/bench-results/ts13-layered-final-20260802`.
 
-## 6. Review gates
+## 6. Current gates
 
 A-016 withdraws the stale literal 108-bit soundness label. The retained OODS
 term is about 106 bits by itself. The named live partial union is about 105.91
-bits before global LogUp collision terms. A-015-review confirms that the
-candidate replaces the removed carrier contribution without a net loss under
-the same accounting convention. It reports no omitted term class or changed
-term outside the replacement.
+bits before global LogUp collision terms. The c7 soundness review found no
+omitted term class and no changed term outside the replacement.
 
-A-016 also retires the earlier A54 complete-Keccak limit of 1,200 ms because
-the timing wire cannot measure it. The full cold `proveIdentity` result on all
-three phones is the acceptance gate. Attach the desktop 25-phase record to the
-same evidence set so that the layered prover cost stays visible.
+The fresh restored-P5 desktop record measured `proveIdentity` at 1,280 ms and
+`verifyIdentity` at 42 ms. Peak resident memory was 1,513,652,224 bytes. The
+run used circuit `6b30e794...`, six proof workers, a 2 MiB proof-thread stack,
+16 MiB worker stacks, and a fixed 1,572,910-byte envelope. It emitted 25 phase
+rows.
 
-Firebase remains on hold until an `A-014-confirmed` note records the user's
-refreshed end-user OAuth login. After that note, probe the exact result bucket
-before upload and run one matrix with all three phones.
+A-018-route defines these engine gates:
+
+1. G1: On desktop at product size, the primitive-backed Keccak proof must beat
+   the P5 post-proof phase and remove at least 5 million committed cells.
+2. G2: On all three phones, the post-proof phase must not exceed P5 and total
+   proving must be strictly faster than P5.
+
+N, S, and application integration remain stopped until G2 passes.
 
 ## 7. Completion rule
 
 One accepted, source-bound artifact must meet the 2,000 ms cold-prove limit on
-all three phones. Do not call the performance campaign complete before that
-result. If a phone misses the limit, continue with an accepted optimization or
-obtain an explicit tracked gate change. Do not weaken the theorem,
-unlinkability, ML-DSA-65, local proving, or the product API.
+all three phones. The pinned-engine campaign did not reach this limit. The
+authorized MLE-opening route must first pass G1 and G2. Do not weaken the
+theorem, unlinkability, ML-DSA-65, local proving, or the product API.

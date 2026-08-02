@@ -2,9 +2,12 @@
 
 Date: 2026-08-02
 
-Status: The soundness review, release tests, Android package, desktop campaign,
-and final Firebase run are complete. All phone tests passed. The phone proving
-gate failed on all three devices.
+Status: sound; rejected on measured phone throughput, 2026-08-02
+
+The soundness review, release tests, Android package, desktop campaign, and
+final Firebase run are complete. All phone tests passed. The phone proving
+gate failed on all three devices. P5 is now canonical at source restore commit
+`1e035312` and artifact commit `cdfdf52c`.
 
 Privacy claim: `public-input unlinkable; transcript zero knowledge pending`
 

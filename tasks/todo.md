@@ -151,11 +151,11 @@ Privacy claim:
   Galaxy S24 Ultra, and Galaxy A54; verify at most 500 ms; use a fixed
   credential-independent envelope; and meet the mailbox-approved proof-size
   ceiling.
-  - [ ] Meet the 2,000 ms cold-prove target on all three phones. The final
-    canonical matrix failed this target on all three phones.
+  - [ ] Meet the 2,000 ms cold-prove target on all three phones. The P5
+    baseline and the rejected c7 matrix failed this target on all three phones.
   - [x] Keep verification at or below the approved 500 ms limit on all three
     phones.
-  - [x] Keep one fixed, credential-independent 1,507,374-byte envelope.
+  - [x] Keep one fixed, credential-independent 1,572,910-byte envelope.
   - [x] Keep the envelope below the 2,500,000-byte ceiling.
 
 ## Invariants
@@ -175,51 +175,54 @@ Privacy claim:
 - [x] Audit the redesign against the normative TS13 theorem and privacy model.
 - [x] Compare the redesign with the live soundness source and artifact `e3426e32…`.
 - [x] Record the frozen layered-Keccak APK's exact provenance and quarantine status.
-- [x] Reject the missing committed-bit v3 and retain the accepted committed-nibble path.
+- [x] Reject the missing committed-bit v3 and review the committed-nibble path.
 - [x] Receive Lucas's authentication confirmation and pass the A-014 bucket probe.
 - [x] Run one parallel three-phone matrix with the final c7 APK pair.
 - [x] Record exact phone metrics and reconcile the final campaign evidence.
 
 Audit result: A-013 is an interim decision, not an implementation design. Its
 promised v3 was never issued and its literal 108-bit gate is stale. A-015 and
-A-016 permanently retire that route and accept the committed-nibble design.
-Circuit `e3426e32…` and its APK pair are historical throughput-only artifacts.
-Final acceptance evidence must use circuit `c7c99e7b…` and its final package.
+A-016 accepted the committed-nibble design as sound. A-018 later rejected it
+for measured phone throughput and restored P5. Circuits `e3426e32...` and
+`c7c99e7b...` are historical c7 evidence. The canonical circuit is
+`6b30e794...`.
 
-## C7 phone regression recovery
+## C7 disposition and P5 restoration
 
 - [x] Compare the P5 and c7 phone profiles phase by phase on all three phones.
 - [x] Map the measured regression to exact live source and geometry changes.
 - [x] Audit existing branches and the current `post_interaction_proof` path for
   a reusable sound optimization.
-- [ ] Implement the smallest structural fix that improves all three phones.
-- [ ] Preserve the fixed theorem, all ML-DSA-65 roles, public-input
+- [x] Reject c7 micro-optimization as unable to recover P5 phone latency.
+- [x] Restore the last sound P5 source path as the canonical implementation.
+- [x] Regenerate the source-bound P5 artifact, circuit hash, and mobile fixture.
+- [x] Record one fresh-process desktop result at the restored circuit hash.
+- [x] Preserve the fixed theorem, all ML-DSA-65 roles, public-input
   unlinkability, local proving, pinned STWO and PCS settings, the fixed
   envelope, and the two-function API.
-- [ ] Pass the full release, adversarial, artifact, and desktop gates.
-- [ ] Regenerate the source-bound AAR and APK pair after each accepted source
-  change.
-- [ ] Rerun one parallel matrix on Pixel 8, Galaxy S24 Ultra, and Galaxy A54.
+- [x] Pass the full release, adversarial, artifact, and desktop gates.
+- [ ] Design the authorized witness-MLE opening primitive on a dedicated
+  branch from `~/stwo` `dev-copy`.
+- [ ] Pass engine gate G1 on desktop and G2 on all three phones.
 
-The first hard gate is no regression from the P5 matrix on any phone: 5,450 ms
-on Pixel 8, 2,755 ms on Galaxy S24 Ultra, and 5,853 ms on Galaxy A54. Do not
-start application integration while c7 remains 1.6 to 2.5 times slower than
-that checkpoint. The later target remains below 2,000 ms on every phone.
+The first engine gate is no regression from the P5 matrix on any phone: 5,450
+ms on Pixel 8, 2,755 ms on Galaxy S24 Ultra, and 5,853 ms on Galaxy A54.
+Application integration, N, and S remain stopped until G2 passes. The later
+target remains below 2,000 ms on every phone.
 
 The regression is confined to `post_interaction_proof`. The c7 path replaces
 253 built-in GKR sumcheck rounds with 1,410 custom rounds. A measured serial
 cutoff for small rounds increased the six-worker desktop post-proof median
 from 1.160 seconds to 1.208 seconds, so it was removed. Table streaming cannot
-provide the required 2.09x to 4.67x phase speedup. Mailbox Q-018 requests the
-open authenticated-MLE engine design or confirmation that the branch must
-restore P5 before further redesign work.
+provide the required 2.09x to 4.67x phase speedup. A-018 confirms the P5
+restore. A-018-route authorizes the authenticated-MLE engine design while P5
+stays canonical.
 
-## Pre-layered performance checkpoint
+## Canonical P5 checkpoint and restoration
 
-This section records the P5 checkpoint before the authorized layered Keccak
-redesign. At that checkpoint, the 2,000 ms cold-prove target failed on all
-three phones and P6 was out of scope. The later layered Keccak section
-supersedes each use of "final" in this checkpoint.
+This section records the P5 checkpoint and its restoration after the c7 phone
+regression. The 2,000 ms cold-prove target failed on all three phones. The P5
+phone matrix remains the A-018 no-regression baseline.
 The Android jemalloc candidate is rejected because the maintained bindings do
 not build with NDK 27 without a local patch or linker shim.
 
@@ -251,13 +254,16 @@ Ultra, and 5,638 ms on Galaxy A54. Product cleanup, final artifact
 regeneration, the full verification matrix, and the final canonical
 three-phone gate are complete.
 
-The final soundness-source checkpoint is `13a1a51d`. The source-bound artifact
-commit is `a34ac578`. The final package source and mobile fixture commit is
-`a91085dc`. The final circuit hash is
+The original P5 soundness-source checkpoint is `13a1a51d`. Its source-bound
+artifact commit is `a34ac578`. Its package source and mobile fixture commit is
+`a91085dc`. Its circuit hash is
 `2eff9e073151b4bce733516f4b6dd411b6d48ef5425fd93d41c64bedf524fea9`.
+The restored source commit is `1e035312`. The restored artifact and fixture
+commit is `cdfdf52c`. The canonical circuit hash is
+`6b30e79449d331477027412fd30c831f7bb45cea42214b072845173fea0241b6`.
 The product has no temporary runtime controls.
 
-Final package 3 has these SHA-256 values:
+Historical P5 package 3 has these SHA-256 values:
 
 - AAR:
   `cdd744130c540f8ba910843b2a0fafe482714b864c200c06ee375c7aa6f242fa`
@@ -364,9 +370,11 @@ artifact check, and the diff check passed.
 - [x] Rerun all release, ignored, negative, unlinkability, and artifact tests.
 - [x] Run one exact three-phone acceptance matrix with the final APK pair.
 
-## Layered Keccak review
+## Archived layered Keccak experiment
 
-The acceptance candidate uses 400 committed spread-nibble columns, an
+Status: sound; rejected on measured phone throughput, 2026-08-02
+
+The c7 experiment used 400 committed spread-nibble columns, an
 18-variable grouped extraction and validity sumcheck, carried wiring
 functionals, and two source-bound log-9 MLE components. The replacement adds
 212,992 cells. The complete Keccak service uses 1,534,720 cells after removal
@@ -376,13 +384,11 @@ contribution. A-015-review independently accepts the protocol as sound and
 reports no critical or high finding.
 
 A-013 quarantined this package after it selected a committed-bit route. A-015
-suspends that route and promotes this committed-nibble design to an acceptance
-candidate. A-015-review accepts the protocol as sound with no critical or high
-finding. It requires F-1 through F-3 before final acceptance. F-2 changes the
-soundness source, so the old artifact and package remain throughput evidence
-only. A-016 requires unchanged-or-improved algebraic soundness under identical
-accounting and records the live baseline at about 105.91 bits. It retires the
-unmeasurable A54 complete-Keccak sub-gate.
+then promoted this committed-nibble design to an acceptance candidate.
+A-015-review accepted the protocol as sound with no critical or high finding.
+F-1 through F-3 completed its soundness conditions. A-018 later rejected c7
+for phone throughput and restored P5. The c7 source and package remain
+historical evidence.
 
 The candidate release freeze passed 30 layered-library tests and 31 service
 tests. The matrix includes row swaps, cross-permutation source attacks,

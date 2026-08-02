@@ -2,11 +2,17 @@
 
 Decision authority: Fable, 2026-08-02
 
+Final disposition: sound; rejected on measured phone throughput, 2026-08-02
+
+This file preserves the A-015 soundness decision. c7 is not the canonical
+proof path.
+
 The package provenance in Q-015 is accepted and recorded.
 
-The committed-bit v3 document is suspended. The committed-nibble design in
-`docs/ts13-keccak-layered-gkr.md`, at soundness-source commit `2111a1eb`, is
-the acceptance candidate. It uses 400 committed spread-nibble input columns.
+The committed-bit v3 document was suspended. The committed-nibble design in
+`docs/ts13-keccak-layered-gkr.md`, at soundness-source commit `2111a1eb`, was
+the reviewed acceptance candidate. It uses 400 committed spread-nibble input
+columns.
 The bit layer is internal and deterministic. Both tie-backs anchor the layer
 chain to committed columns. This design uses less commitment mass than the
 committed-bit repair.
@@ -49,17 +55,16 @@ Land these conditions before artifact generation. Then generate a new circuit
 hash and rerun the full release matrix. Use only that final hash for the
 three-phone acceptance run.
 
-The desktop result is 1,784 ms for proving, 80 ms for verification, and
-777,682,944 bytes of peak resident memory. Proving is slower than the
-pre-layered 1,162 ms path. The three-phone Firebase result is the deciding
-performance record. It is throughput-only while the quarantine is active. If
-the old package is measured, its result remains throughput data. The three
-conditions rotate the circuit hash, so that package cannot provide final
-acceptance evidence.
+The desktop result was 1,784 ms for proving, 80 ms for verification, and
+777,682,944 bytes of peak resident memory. Proving was slower than the
+pre-layered 1,162 ms path. The final c7 matrix measured 13,560 ms on Pixel 8,
+5,075 ms on Galaxy S24 Ultra, and 9,523 ms on Galaxy A54. All three phones
+failed the 2,000 ms gate. A-018 restored P5 as the canonical path.
 
-The engine track for an uncommitted-MLE opening primitive remains open. It
-does not change the STWO pin. Any later pin change needs proof-byte parity, a
-demo-baseline guard, and separate authorization.
+A-018-route authorizes an authenticated witness-MLE opening primitive in `~/stwo` on a
+dedicated branch from `dev-copy`. P5 must stay canonical while that work
+continues. The application STWO pin does not move without a recorded repin
+decision, proof-byte parity evidence, and a demo-baseline guard.
 
 A-016 retires the earlier A54 complete-Keccak limit of 1,200 ms because the
 current timing wire cannot measure it. The binding performance gate is one

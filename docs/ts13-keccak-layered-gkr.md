@@ -1,17 +1,19 @@
-# TS13 layered Keccak prototype
+# Archived TS13 layered Keccak design
 
-Status: independently reviewed; accepted as sound with conditions
+Status: sound; rejected on measured phone throughput, 2026-08-02
 
-A-015-review accepts this committed-nibble design as sound. It reports no
-critical or high finding. Conditions F-1 through F-3 are complete at
-soundness-source commit `cf8f2cec`. Final campaign acceptance still requires
-the three-phone run with circuit hash
+This document is an archived design record. It is not the canonical
+implementation. A-018 restored the P5 carrier after the final c7 matrix
+regressed cold proving by 1.63x to 2.49x. The complete evidence is in
+`tasks/bench-results/ts13-layered-final-20260802`.
+
+A-015-review accepts the c7 committed-nibble protocol as sound. It reports no
+critical or high finding. That verdict stands. The performance rejection does
+not change the soundness result. Conditions F-1 through F-3 are complete at
+soundness-source commit `cf8f2cec`. The final c7 circuit hash is
 `c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`.
-A full release matrix and final package check passed for this hash.
-A-016 requires the candidate to preserve or improve the live whole-system
-algebraic bound under the same accounting convention.
 
-This design replaces the removed Keccak round carrier. It does not change the
+The c7 experiment replaced the Keccak round carrier. It did not change the
 TS13 identity theorem, ML-DSA-65, the public statement, the PCS settings, the
 STWO revision, local proving, or the product API.
 
@@ -475,7 +477,7 @@ The prototype replacement mass is:
 | New preprocessed columns | 0 |
 | **Total** | **212,992** |
 
-The canonical service accepts at most 136 absorbed bytes for each SHAKE-128
+The c7 service accepted at most 136 absorbed bytes for each SHAKE-128
 job. Every TS13 SHAKE-128 job absorbs 34 bytes. SHAKE-128 still emits the full
 168-byte rate for every squeeze block. The trace commits 136 columns for each
 absorb byte, absorb spread, new rate, and capacity pad family. It derives the
@@ -500,15 +502,14 @@ track. A-015 suspends the committed-bit route and keeps the engine route open
 for future work. A-015-review accepts this candidate as sound, subject to the
 three recorded completion conditions.
 
-A-016 requires one cold full-proof run on all three gate phones. Keep the
-matching desktop phase record in the same evidence set. Complete the review
-conditions and final-hash evidence before starting another cryptographic path.
-If one phone misses the 2,000 ms gate, use a new accepted lever or obtain an
-explicit gate change.
+A-016 required one cold full-proof run on all three gate phones. The final
+matrix measured 13,560 ms on Pixel 8, 5,075 ms on Galaxy S24 Ultra, and 9,523
+ms on Galaxy A54. All three phones failed the 2,000 ms gate. A-018 therefore
+rejected c7 for throughput and restored P5 as the canonical path.
 
 ## 13. Required checks
 
-The canonical implementation has one `layered_gkr` path. It does not contain
+The archived c7 implementation had one `layered_gkr` path. It did not contain
 the old carrier, round GKR, round schedule, round trace, or generic wire. It
 keeps only the XOR and conversion tables used by this protocol.
 

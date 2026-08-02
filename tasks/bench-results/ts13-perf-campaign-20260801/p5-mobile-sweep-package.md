@@ -262,7 +262,7 @@ The Galaxy A54 minimum came from the rejected affinity policy. Thus, these
 minimum values are not a proposed final configuration. No measured
 configuration met the 2,000 ms gate.
 
-## Final canonical product evidence
+## Original P5 canonical product evidence
 
 The final product uses one fixed runtime and the `proveIdentity` and
 `verifyIdentity` API. It has this provenance:
@@ -315,3 +315,60 @@ artifact check, and the diff check passed.
 The final package passed the 350 ms verification gate and the 2,500,000-byte
 envelope ceiling. It failed the 2,000 ms prove target on all three phones. P6
 was infeasible in the fixed campaign scope, so the campaign skipped it.
+
+## Restored canonical state — 2026-08-02
+
+A-018 restored P5 after c7 failed the phone-throughput gate. The source bytes
+match the last sound P5 path. The source-bound commit changed, so the circuit
+hash also changed.
+
+- Measured source, artifact, and fixture commit:
+  `cdfdf52c38a86143733ea80e4e8a3064a53950f9`.
+- Source restore commit:
+  `1e035312a566a2b8b96f4febad7eb35f17bed493`.
+- Circuit and artifact SHA-256:
+  `6b30e79449d331477027412fd30c831f7bb45cea42214b072845173fea0241b6`.
+- Soundness-source-tree SHA-256:
+  `a39bc90c4c14226728bfd4f4a314a12a81f162c8fd62991fc5f214973de99ec3`.
+- Shape-manifest SHA-256:
+  `a5c8c6fdbaac8e1a9b0ca81704b31c7e29f2ec27487f603139531c39faf42d60`.
+- Generation-input SHA-256:
+  `60f05b9e596a48e03f6895f36f962775f3f6d1f2dfd50ca3fbb94640153863f0`.
+- Binary SHA-256:
+  `3760907c6c4754e1941b4ea8dd61dc589a4a2df62f6f7b0b57af571906f8145a`.
+- Mobile-fixture SHA-256:
+  `06ef4ade577e1b69a776adafa778fd0fe16e3c75478772f1d5abf0c7072a98f4`.
+- Cargo.lock SHA-256:
+  `23e70c964b943632fed547cfa38e6c1d24cfeac070a3518bc0f1a704f7597dbe`.
+- Rust toolchain file SHA-256:
+  `8f0604004d13f7a26332366e59ba731bbb6046aaf789439d760abf67ad78589f`.
+- Proof-body capacity: 1,572,864 bytes.
+- Identity-proof envelope: 1,572,910 bytes.
+
+The PCS uses proof-of-work 20, blowup log 3, 36 queries, last-layer log 1,
+fold step 2, and lifting log 19. The six workspace packages used their default
+feature sets.
+
+### Fresh-process desktop record
+
+The host was a 12-core Apple M2 Max MacBook Pro with 32 GB of memory. It ran
+macOS 26.5.2, build 25F84. The compiler was Rust nightly 1.94.0 from
+2026-01-14. One fresh release process made one `proveIdentity` call and one
+`verifyIdentity` call.
+
+| Metric | Result |
+| --- | ---: |
+| `proveIdentity` | 1,280 ms |
+| `verifyIdentity`, first and median | 42 ms |
+| Maximum resident set size | 1,513,652,224 bytes |
+| Proof-body capacity | 1,572,864 bytes |
+| Envelope | 1,572,910 bytes |
+| Phase rows | 25 |
+| Actual proof workers | 6 |
+| Proof-thread stack | 2,097,152 bytes |
+| Worker stack | 16,777,216 bytes |
+
+The historical matrix `matrix-92u1aei93c81a` remains the A-018 phone-latency
+baseline. It used the prior P5 circuit hash
+`2eff9e073151b4bce733516f4b6dd411b6d48ef5425fd93d41c64bedf524fea9`.
+It is same-path latency evidence, not current-hash evidence.
