@@ -174,4 +174,6 @@
 - Keep the core proof contract independent of wallet code.
 - End the core contract at the exported prove and verify API.
 - Treat the proof bytes as opaque at that boundary.
+- Do not split proving into offline and online app calls when the user requires
+  the existing wallet flow.
 - Check the repository root for task files even when source work uses a worktree.

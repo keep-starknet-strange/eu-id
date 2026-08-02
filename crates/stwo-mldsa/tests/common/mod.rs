@@ -1,12 +1,12 @@
 #![allow(dead_code)]
 
 use ml_dsa::signature::{Keypair, Signer, Verifier};
-use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa44, MlDsa65, SigningKey};
+use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
-use stwo_mldsa::profile::{ML_DSA_44, ML_DSA_65};
+use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::witness::{generate_witness, MlDsaWitness};
@@ -54,31 +54,6 @@ pub fn oracle_input(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
     oracle_input_from_key(&oracle_keypair(seed), msg)
 }
 
-pub fn oracle_keypair44(seed: u64) -> SigningKey<MlDsa44> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut sk_seed = [0u8; 32];
-    rng.fill(&mut sk_seed);
-    SigningKey::<MlDsa44>::from_seed(&sk_seed.into())
-}
-
-pub fn oracle_input_from_key44(sk: &SigningKey<MlDsa44>, msg: &[u8]) -> MlDsaVerifyInput {
-    let vk = sk.verifying_key();
-    let sig = sk.sign(msg);
-    assert!(vk.verify(msg, &sig).is_ok(), "ML-DSA-44 oracle self-check");
-    let vk_bytes: EncodedVerifyingKey<MlDsa44> = vk.encode();
-    let sig_bytes: EncodedSignature<MlDsa44> = sig.encode();
-    let pk = pk_decode(ML_DSA_44, vk_bytes.as_slice()).expect("ML-DSA-44 pk_decode");
-    let sp = sig_decode(ML_DSA_44, sig_bytes.as_slice()).expect("ML-DSA-44 sig_decode");
-    let (tr_vec, _) = shake256(&[vk_bytes.as_slice()], 64);
-    let mut tr = [0u8; 64];
-    tr.copy_from_slice(&tr_vec);
-    MlDsaVerifyInput::from_decoded(ML_DSA_44, &pk, &sp, tr, msg.to_vec())
-}
-
-pub fn oracle_input44(seed: u64, msg: &[u8]) -> MlDsaVerifyInput {
-    oracle_input_from_key44(&oracle_keypair44(seed), msg)
-}
-
 pub fn witness_and_input(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInput) {
     let input = oracle_input(seed, msg);
     let witness = generate_witness(ML_DSA_65, &input).expect("witness");
@@ -87,10 +62,4 @@ pub fn witness_and_input(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInp
 
 pub fn witness_for(seed: u64, msg: &[u8]) -> MlDsaWitness {
     witness_and_input(seed, msg).0
-}
-
-pub fn witness_and_input44(seed: u64, msg: &[u8]) -> (MlDsaWitness, MlDsaVerifyInput) {
-    let input = oracle_input44(seed, msg);
-    let witness = generate_witness(ML_DSA_44, &input).expect("ML-DSA-44 witness");
-    (witness, input)
 }

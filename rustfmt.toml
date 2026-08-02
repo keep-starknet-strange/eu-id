@@ -1,8 +1,3 @@
-# rustfmt configuration for the eu-id workspace.
-#
-# Intentionally minimal: it pins the two settings that should never drift and
-# otherwise tracks rustfmt defaults, so it reformats no existing code. Tighten
-# it later (e.g. imports_granularity, group_imports, wrap_comments) and run
-# `make fmt` once to apply the new style across the whole workspace.
+# Keep formatting stable across the workspace.
 edition = "2021"
 max_width = 100

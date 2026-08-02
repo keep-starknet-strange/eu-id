@@ -290,25 +290,31 @@ fn map_core_prove_error(error: eu_id_prover::Error) -> IdentityError {
 
 pub(crate) fn prove_identity_inner(
     statement: &IdentityStatement,
-    witness: &IdentityWitness,
+    witness: IdentityWitness,
 ) -> Result<Vec<u8>, IdentityError> {
     let total_start = std::time::Instant::now();
     let public_input_start = std::time::Instant::now();
     let prepared = prepare_public_input(statement)?;
     report_prove_timing("public_input_prepare", public_input_start.elapsed());
-    if witness.revocation_id_lo >= witness.revocation_id_hi
-        || witness.revocation_signature.len() != eu_id_prover::ts13_demo::ML_DSA_65_SIGNATURE_BYTES
+    let IdentityWitness {
+        document,
+        revocation_id_lo,
+        revocation_id_hi,
+        revocation_signature,
+    } = witness;
+    if revocation_id_lo >= revocation_id_hi
+        || revocation_signature.len() != eu_id_prover::ts13_demo::ML_DSA_65_SIGNATURE_BYTES
     {
         return Err(IdentityError::InvalidRevocationWitness);
     }
     let core_start = std::time::Instant::now();
     let proof = eu_id_prover::prove_mdoc_ts13_demo(
-        &witness.document,
+        &document,
         &prepared.request,
         &prepared.circuit,
-        witness.revocation_id_lo,
-        witness.revocation_id_hi,
-        eu_id_prover::mdoc::MdocRevocationSignature(witness.revocation_signature.clone()),
+        revocation_id_lo,
+        revocation_id_hi,
+        eu_id_prover::mdoc::MdocRevocationSignature(revocation_signature),
     )
     .map_err(map_core_prove_error)?;
     report_prove_timing("core_prove", core_start.elapsed());

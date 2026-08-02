@@ -61,7 +61,7 @@ use crate::mdoc_private_mso_validity::{
     MdocMsoValidityBytesRelation, MdocPrivateMsoValidityWitness,
     SharedMdocMsoValidityBytesRelation, MDOC_TDATE_BYTES,
 };
-use crate::policy::Date;
+use crate::randomness::{random_bit, random_m31};
 
 pub(crate) const MDOC_PRIVATE_MSO_BIND_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_MSO_BIND_ROWS: usize = 1usize << MDOC_PRIVATE_MSO_BIND_LOG_SIZE;
@@ -70,25 +70,11 @@ pub(crate) const MDOC_PRIVATE_MSO_MIN_BLIND_ROWS: usize = 256;
 pub(crate) const MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES: usize = 1_987;
 pub(crate) const MDOC_PRIVATE_MSO_MAX_DOC_TYPE_BYTES: usize = 23;
 
-const BIND_VERSION: u64 = 4;
+const BIND_VERSION: u64 = 5;
 const BIND_DOMAIN: u64 = 0x4d44_4f43_4d53_4f42; // "MDOCMSOB"
 const CHUNK_BYTES: usize = 32;
 const DOC_TYPE_CHUNKS: usize = 1;
 const OFFSET_BITS: usize = 13;
-const TDATE_BYTES: usize = MDOC_TDATE_BYTES;
-const TDATE_DIGITS: usize = 14;
-const DIGIT_BITS: usize = 4;
-const DATE_SLACK_BITS: usize = 23;
-const MONTH_RANGE_BITS: usize = 4;
-const DAY_RANGE_BITS: usize = 5;
-const HOUR_RANGE_BITS: usize = 5;
-const MINUTE_RANGE_BITS: usize = 6;
-const SECOND_RANGE_BITS: usize = 6;
-const RANGE_BITS: usize = 2 * MONTH_RANGE_BITS
-    + 2 * DAY_RANGE_BITS
-    + HOUR_RANGE_BITS
-    + MINUTE_RANGE_BITS
-    + SECOND_RANGE_BITS;
 const M31_MODULUS: u32 = 2_147_483_647;
 
 // Canonical CBOR prefix through the protected-header byte-string head for
@@ -130,7 +116,6 @@ pub(crate) struct MdocPrivateMsoBindSpec {
     pub(crate) issuer_message_len: usize,
     pub(crate) mso_len: usize,
     pub(crate) doc_type: String,
-    pub(crate) policy_date: Date,
     pub(crate) sha_stream: MdocPrivateMsoShaStreamSpec,
 }
 
@@ -183,11 +168,6 @@ pub(crate) enum MdocPrivateMsoBindError {
     DocTypeTooLong {
         length: usize,
         max: usize,
-    },
-    InvalidPolicyDate {
-        year: u32,
-        month: u32,
-        day: u32,
     },
     ShaFieldIdOutOfRange {
         field_id: u32,
@@ -263,9 +243,6 @@ impl fmt::Display for MdocPrivateMsoBindError {
                 f,
                 "public docType has {length} bytes; the supported canonical one-chunk profile allows at most {max}"
             ),
-            Self::InvalidPolicyDate { year, month, day } => {
-                write!(f, "invalid policy date {year:04}-{month:02}-{day:02}")
-            }
             Self::ShaFieldIdOutOfRange { field_id } => write!(
                 f,
                 "MSO SHA stream field id {field_id} is not canonical in M31"
@@ -473,14 +450,14 @@ impl MdocPrivateMsoBindWitness {
         checked_window_end(
             WindowKind::ValidFrom,
             valid_from_offset,
-            VALID_FROM_ANCHOR.len() + TDATE_BYTES,
+            VALID_FROM_ANCHOR.len() + MDOC_TDATE_BYTES,
             spec.mso_len,
         )?;
         let valid_until_offset = unique_subslice(mso_bytes, VALID_UNTIL_ANCHOR, "MSO validUntil")?;
         checked_window_end(
             WindowKind::ValidUntil,
             valid_until_offset,
-            VALID_UNTIL_ANCHOR.len() + TDATE_BYTES,
+            VALID_UNTIL_ANCHOR.len() + MDOC_TDATE_BYTES,
             spec.mso_len,
         )?;
         Ok(Self {
@@ -760,15 +737,15 @@ fn push_private_device_key_window(rows: &mut Vec<PublicRow>) {
 }
 
 fn push_tdate_window(rows: &mut Vec<PublicRow>, kind: WindowKind, anchor: &[u8], valid_from: bool) {
-    let window_len = anchor.len() + TDATE_BYTES;
+    let window_len = anchor.len() + MDOC_TDATE_BYTES;
     let mut anchor_row = PublicRow::new(kind, window_len, 0, anchor.len(), false);
     anchor_row.expected_active[..anchor.len()].fill(true);
     anchor_row.expected[..anchor.len()].copy_from_slice(anchor);
     anchor_row.issuer_active[..anchor.len()].fill(true);
     rows.push(anchor_row);
 
-    let mut date_row = PublicRow::new(kind, window_len, anchor.len(), TDATE_BYTES, true);
-    date_row.issuer_active[..TDATE_BYTES].fill(true);
+    let mut date_row = PublicRow::new(kind, window_len, anchor.len(), MDOC_TDATE_BYTES, true);
+    date_row.issuer_active[..MDOC_TDATE_BYTES].fill(true);
     date_row.valid_from_date_row = valid_from;
     date_row.valid_until_date_row = !valid_from;
     rows.push(date_row);
@@ -834,16 +811,6 @@ fn validate_spec(spec: &MdocPrivateMsoBindSpec) -> Result<PublicShape, MdocPriva
         return Err(MdocPrivateMsoBindError::DocTypeTooLong {
             length: spec.doc_type.len(),
             max: MDOC_PRIVATE_MSO_MAX_DOC_TYPE_BYTES,
-        });
-    }
-    if spec.policy_date.year > 9_999
-        || !(1..=12).contains(&spec.policy_date.month)
-        || !(1..=31).contains(&spec.policy_date.day)
-    {
-        return Err(MdocPrivateMsoBindError::InvalidPolicyDate {
-            year: spec.policy_date.year,
-            month: spec.policy_date.month,
-            day: spec.policy_date.day,
         });
     }
     let payload_anchor = payload_anchor(spec.mso_len);
@@ -926,10 +893,7 @@ const TRACE_WINDOW_OFFSET: usize = TRACE_PAYLOAD_SLACK_BITS + OFFSET_BITS;
 const TRACE_WINDOW_OFFSET_BITS: usize = TRACE_WINDOW_OFFSET + 1;
 const TRACE_WINDOW_SLACK: usize = TRACE_WINDOW_OFFSET_BITS + OFFSET_BITS;
 const TRACE_WINDOW_SLACK_BITS: usize = TRACE_WINDOW_SLACK + 1;
-const TRACE_DIGIT_BITS: usize = TRACE_WINDOW_SLACK_BITS + OFFSET_BITS;
-const TRACE_DATE_SLACK_BITS: usize = TRACE_DIGIT_BITS + TDATE_DIGITS * DIGIT_BITS;
-const TRACE_RANGE_BITS: usize = TRACE_DATE_SLACK_BITS + DATE_SLACK_BITS;
-const TRACE_COLS: usize = TRACE_RANGE_BITS + RANGE_BITS;
+const TRACE_COLS: usize = TRACE_WINDOW_SLACK_BITS + OFFSET_BITS;
 
 fn m31(value: usize) -> M31 {
     M31::from_u32_unchecked(value as u32)
@@ -937,20 +901,6 @@ fn m31(value: usize) -> M31 {
 
 fn m31_u32(value: u32) -> M31 {
     M31::from_u32_unchecked(value)
-}
-
-fn random_m31_cell() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let candidate = rng.next_u32() & 0x7fff_ffff;
-        if candidate != 0x7fff_ffff {
-            return M31::from_u32_unchecked(candidate);
-        }
-    }
-}
-
-fn random_bit() -> M31 {
-    M31::from_u32_unchecked(rand::thread_rng().next_u32() & 1)
 }
 
 fn coset_order_to_circle_domain_order(log_size: u32, values: Vec<M31>) -> Vec<M31> {
@@ -1074,141 +1024,19 @@ fn write_bits(columns: &mut [Vec<M31>], start: usize, row: usize, value: usize, 
     }
 }
 
-fn write_digit_bits(columns: &mut [Vec<M31>], row: usize, digits: &[u8; TDATE_DIGITS]) {
-    for (digit_index, digit) in digits.iter().enumerate() {
-        write_bits(
-            columns,
-            TRACE_DIGIT_BITS + digit_index * DIGIT_BITS,
-            row,
-            usize::from(*digit),
-            DIGIT_BITS,
-        );
-    }
-}
-
-fn randomize_globally_constrained_cells(columns: &mut [Vec<M31>]) {
+fn randomize_globally_constrained_cells(columns: &mut [Vec<M31>], rng: &mut impl RngCore) {
     for row in 0..MDOC_PRIVATE_MSO_BIND_ROWS {
         for start in [
             TRACE_PAYLOAD_OFFSET_BITS,
             TRACE_PAYLOAD_SLACK_BITS,
             TRACE_WINDOW_OFFSET_BITS,
             TRACE_WINDOW_SLACK_BITS,
-            TRACE_DATE_SLACK_BITS,
-            TRACE_RANGE_BITS,
         ] {
-            let count = match start {
-                TRACE_DATE_SLACK_BITS => DATE_SLACK_BITS,
-                TRACE_RANGE_BITS => RANGE_BITS,
-                _ => OFFSET_BITS,
-            };
-            for column in &mut columns[start..start + count] {
-                column[row] = random_bit();
+            for column in &mut columns[start..start + OFFSET_BITS] {
+                column[row] = random_bit(rng);
             }
         }
-        let digits = std::array::from_fn(|_| (rand::thread_rng().next_u32() % 10) as u8);
-        write_digit_bits(columns, row, &digits);
     }
-}
-
-#[derive(Clone, Copy)]
-struct ParsedTdate {
-    digits: [u8; TDATE_DIGITS],
-    year: usize,
-    month: usize,
-    day: usize,
-    hour: usize,
-    minute: usize,
-    second: usize,
-}
-
-fn parse_tdate_for_trace(bytes: &[u8]) -> ParsedTdate {
-    const POSITIONS: [usize; TDATE_DIGITS] = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
-    let digits = std::array::from_fn(|index| {
-        bytes
-            .get(POSITIONS[index])
-            .copied()
-            .and_then(|byte| byte.checked_sub(b'0'))
-            .filter(|digit| *digit <= 9)
-            .unwrap_or(0)
-    });
-    let pair = |index: usize| usize::from(digits[index]) * 10 + usize::from(digits[index + 1]);
-    ParsedTdate {
-        digits,
-        year: usize::from(digits[0]) * 1000
-            + usize::from(digits[1]) * 100
-            + usize::from(digits[2]) * 10
-            + usize::from(digits[3]),
-        month: pair(4),
-        day: pair(6),
-        hour: pair(8),
-        minute: pair(10),
-        second: pair(12),
-    }
-}
-
-fn date_key(year: usize, month: usize, day: usize) -> usize {
-    year * 512 + month * 32 + day
-}
-
-fn policy_date_key(policy: Date) -> usize {
-    date_key(
-        policy.year as usize,
-        policy.month as usize,
-        policy.day as usize,
-    )
-}
-
-fn range_slacks(date: ParsedTdate) -> [usize; 7] {
-    [
-        date.month.saturating_sub(1),
-        12usize.saturating_sub(date.month),
-        date.day.saturating_sub(1),
-        31usize.saturating_sub(date.day),
-        23usize.saturating_sub(date.hour),
-        59usize.saturating_sub(date.minute),
-        59usize.saturating_sub(date.second),
-    ]
-}
-
-fn write_tdate_aux(
-    columns: &mut [Vec<M31>],
-    row: usize,
-    bytes: &[u8],
-    policy: Date,
-    valid_from: bool,
-) {
-    let date = parse_tdate_for_trace(bytes);
-    write_digit_bits(columns, row, &date.digits);
-    let credential_key = date_key(date.year, date.month, date.day);
-    let public_key = policy_date_key(policy);
-    let compare_slack = if valid_from {
-        public_key.saturating_sub(credential_key)
-    } else {
-        credential_key.saturating_sub(public_key)
-    };
-    write_bits(
-        columns,
-        TRACE_DATE_SLACK_BITS,
-        row,
-        compare_slack,
-        DATE_SLACK_BITS,
-    );
-    let slacks = range_slacks(date);
-    let widths = [
-        MONTH_RANGE_BITS,
-        MONTH_RANGE_BITS,
-        DAY_RANGE_BITS,
-        DAY_RANGE_BITS,
-        HOUR_RANGE_BITS,
-        MINUTE_RANGE_BITS,
-        SECOND_RANGE_BITS,
-    ];
-    let mut start = TRACE_RANGE_BITS;
-    for (slack, width) in slacks.into_iter().zip(widths) {
-        write_bits(columns, start, row, slack, width);
-        start += width;
-    }
-    debug_assert_eq!(start, TRACE_COLS);
 }
 
 fn mso_window_offset(witness: &MdocPrivateMsoBindWitness, kind: WindowKind) -> usize {
@@ -1318,12 +1146,13 @@ fn private_trace(
     let padded = padded_mso(raw_mso, spec.sha_stream.padded_len);
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); MDOC_PRIVATE_MSO_BIND_ROWS]; TRACE_COLS];
+    let mut rng = rand::thread_rng();
     for column in &mut columns {
         for value in column.iter_mut() {
-            *value = random_m31_cell();
+            *value = random_m31(&mut rng);
         }
     }
-    randomize_globally_constrained_cells(&mut columns);
+    randomize_globally_constrained_cells(&mut columns, &mut rng);
 
     let mut issuer_position_uses = vec![0u32; spec.issuer_message_len];
     let mut issuer_uses_total = 0usize;
@@ -1394,15 +1223,6 @@ fn private_trace(
                     .ok_or(MdocPrivateMsoBindError::UseCountOverflow { issuer_index })?;
                 issuer_uses_total += 1;
             }
-        }
-        if row.valid_from_date_row || row.valid_until_date_row {
-            write_tdate_aux(
-                &mut columns,
-                row_index,
-                source,
-                spec.policy_date,
-                row.valid_from_date_row,
-            );
         }
     }
     let active_rows = shape.rows.len();
@@ -1693,11 +1513,6 @@ impl FrameworkEval for MdocPrivateMsoEval {
         let window_slack = eval.next_trace_mask();
         let window_slack_bits: [E::F; OFFSET_BITS] =
             std::array::from_fn(|_| eval.next_trace_mask());
-        let digit_bits: [[E::F; DIGIT_BITS]; TDATE_DIGITS] =
-            std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
-        let date_slack_bits: [E::F; DATE_SLACK_BITS] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let range_bits: [E::F; RANGE_BITS] = std::array::from_fn(|_| eval.next_trace_mask());
 
         let one = m31_const::<E>(1);
         for selector in [
@@ -1744,16 +1559,8 @@ impl FrameworkEval for MdocPrivateMsoEval {
             .chain(payload_slack_bits.iter())
             .chain(window_offset_bits.iter())
             .chain(window_slack_bits.iter())
-            .chain(date_slack_bits.iter())
-            .chain(range_bits.iter())
-            .chain(digit_bits.iter().flatten())
         {
             add_boolean(&mut eval, bit.clone(), &one);
-        }
-        for bits in &digit_bits {
-            // Four boolean bits plus these two quadratic exclusions encode 0..9.
-            eval.add_constraint(bits[3].clone() * bits[2].clone());
-            eval.add_constraint(bits[3].clone() * bits[1].clone());
         }
 
         // One payload anchor is common to every active row.
@@ -1813,78 +1620,6 @@ impl FrameworkEval for MdocPrivateMsoEval {
                 );
             }
         }
-        let date_active = valid_from_date_row.clone() + valid_until_date_row.clone();
-        const DIGIT_POSITIONS: [usize; TDATE_DIGITS] =
-            [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
-        let digits: [E::F; TDATE_DIGITS] =
-            std::array::from_fn(|index| bit_sum::<E>(&digit_bits[index]));
-        for (digit_index, byte_index) in DIGIT_POSITIONS.into_iter().enumerate() {
-            eval.add_constraint(
-                date_active.clone()
-                    * (bytes[byte_index].clone()
-                        - m31_const::<E>(b'0' as usize)
-                        - digits[digit_index].clone()),
-            );
-        }
-        for (index, byte) in [
-            (4usize, b'-'),
-            (7, b'-'),
-            (10, b'T'),
-            (13, b':'),
-            (16, b':'),
-            (19, b'Z'),
-        ] {
-            eval.add_constraint(
-                date_active.clone() * (bytes[index].clone() - m31_const::<E>(byte as usize)),
-            );
-        }
-
-        let year = m31_const::<E>(1000) * digits[0].clone()
-            + m31_const::<E>(100) * digits[1].clone()
-            + m31_const::<E>(10) * digits[2].clone()
-            + digits[3].clone();
-        let month = m31_const::<E>(10) * digits[4].clone() + digits[5].clone();
-        let day = m31_const::<E>(10) * digits[6].clone() + digits[7].clone();
-        let hour = m31_const::<E>(10) * digits[8].clone() + digits[9].clone();
-        let minute = m31_const::<E>(10) * digits[10].clone() + digits[11].clone();
-        let second = m31_const::<E>(10) * digits[12].clone() + digits[13].clone();
-        let date_key =
-            m31_const::<E>(512) * year + m31_const::<E>(32) * month.clone() + day.clone();
-
-        let mut range_cursor = 0usize;
-        let month_lower = bit_sum::<E>(&range_bits[range_cursor..range_cursor + MONTH_RANGE_BITS]);
-        range_cursor += MONTH_RANGE_BITS;
-        let month_upper = bit_sum::<E>(&range_bits[range_cursor..range_cursor + MONTH_RANGE_BITS]);
-        range_cursor += MONTH_RANGE_BITS;
-        let day_lower = bit_sum::<E>(&range_bits[range_cursor..range_cursor + DAY_RANGE_BITS]);
-        range_cursor += DAY_RANGE_BITS;
-        let day_upper = bit_sum::<E>(&range_bits[range_cursor..range_cursor + DAY_RANGE_BITS]);
-        range_cursor += DAY_RANGE_BITS;
-        let hour_upper = bit_sum::<E>(&range_bits[range_cursor..range_cursor + HOUR_RANGE_BITS]);
-        range_cursor += HOUR_RANGE_BITS;
-        let minute_upper =
-            bit_sum::<E>(&range_bits[range_cursor..range_cursor + MINUTE_RANGE_BITS]);
-        range_cursor += MINUTE_RANGE_BITS;
-        let second_upper =
-            bit_sum::<E>(&range_bits[range_cursor..range_cursor + SECOND_RANGE_BITS]);
-        range_cursor += SECOND_RANGE_BITS;
-        debug_assert_eq!(range_cursor, RANGE_BITS);
-
-        eval.add_constraint(date_active.clone() * (month.clone() - one.clone() - month_lower));
-        eval.add_constraint(date_active.clone() * (m31_const::<E>(12) - month - month_upper));
-        eval.add_constraint(date_active.clone() * (day.clone() - one.clone() - day_lower));
-        eval.add_constraint(date_active.clone() * (m31_const::<E>(31) - day - day_upper));
-        eval.add_constraint(date_active.clone() * (m31_const::<E>(23) - hour - hour_upper));
-        eval.add_constraint(date_active.clone() * (m31_const::<E>(59) - minute - minute_upper));
-        eval.add_constraint(date_active.clone() * (m31_const::<E>(59) - second - second_upper));
-        let compare_slack = bit_sum::<E>(&date_slack_bits);
-        let policy_key = m31_const::<E>(policy_date_key(self.spec.policy_date));
-        eval.add_constraint(
-            valid_from_date_row.clone()
-                * (policy_key.clone() - date_key.clone() - compare_slack.clone()),
-        );
-        eval.add_constraint(valid_until_date_row.clone() * (date_key - policy_key - compare_slack));
-
         // Fixed relation-site order: 32 issuer, 32 SHA, one MSO start,
         // one device start, two validity tuples, and the blinder.
         for index in 0..CHUNK_BYTES {
@@ -2067,9 +1802,6 @@ impl Air for MdocPrivateMsoBind {
         channel.mix_u64(self.shape.preprocessed_cols() as u64);
         channel.mix_u64(TRACE_COLS as u64);
         channel.mix_u64(self.interaction_columns() as u64);
-        channel.mix_u64(self.spec.policy_date.year as u64);
-        channel.mix_u64(self.spec.policy_date.month as u64);
-        channel.mix_u64(self.spec.policy_date.day as u64);
         channel.mix_u64(self.spec.doc_type.len() as u64);
         for &byte in self.spec.doc_type.as_bytes() {
             channel.mix_u64(u64::from(byte));
@@ -2350,11 +2082,6 @@ mod tests {
             issuer_message_len: crate::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES,
             mso_len: crate::ts13::TS13_MAX_MSO_PAYLOAD_BYTES,
             doc_type: PID.to_string(),
-            policy_date: Date {
-                year: 2026,
-                month: 7,
-                day: 29,
-            },
             sha_stream: MdocPrivateMsoShaStreamSpec {
                 field_id: 91,
                 padded_len: 4_160,
@@ -3177,6 +2904,31 @@ mod tests {
                 .unwrap()
                 .validity_bytes[19] ^= 1;
         });
+        assert_counter_mutation_rejects(&fixture, "validity endpoint kind", |rows| {
+            rows.iter_mut()
+                .find(|row| row.validity == 1 && row.field_id == 0)
+                .unwrap()
+                .field_id = 1;
+        });
+        assert_counter_mutation_rejects(&fixture, "missing validity endpoint", |rows| {
+            rows.iter_mut()
+                .find(|row| row.validity == 1 && row.field_id == 0)
+                .unwrap()
+                .validity = 0;
+        });
+        assert_counter_mutation_rejects(&fixture, "swapped validity endpoints", |rows| {
+            let from = rows
+                .iter()
+                .position(|row| row.validity == 1 && row.field_id == 0)
+                .unwrap();
+            let until = rows
+                .iter()
+                .position(|row| row.validity == 1 && row.field_id == 1)
+                .unwrap();
+            let from_bytes = rows[from].validity_bytes;
+            rows[from].validity_bytes = rows[until].validity_bytes;
+            rows[until].validity_bytes = from_bytes;
+        });
         assert_counter_mutation_rejects(&fixture, "raw MSO mirror byte", |rows| {
             rows.iter_mut()
                 .find(|row| row.sha == 1 && row.index == 123)
@@ -3327,7 +3079,7 @@ mod tests {
     #[test]
     fn canonical_shape_census_and_witness_handoffs_are_exact() {
         let (binder, census, witness) = test_binder_with_witness();
-        assert_eq!(TRACE_COLS, 202);
+        assert_eq!(TRACE_COLS, 88);
         assert_eq!(
             binder.shape.preprocessed_cols(),
             MAX_PROFILE_PREPROCESSED_COLS
@@ -3362,11 +3114,6 @@ mod tests {
             issuer_message_len: crate::mdoc::TS13_DEMO_ISSUER_MESSAGE_BYTES,
             mso_len: crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES,
             doc_type: PID.to_string(),
-            policy_date: Date {
-                year: 2026,
-                month: 7,
-                day: 29,
-            },
             sha_stream: MdocPrivateMsoShaStreamSpec {
                 field_id: 91,
                 padded_len: checked_sha_padded_len(crate::mdoc::TS13_DEMO_MSO_PAYLOAD_BYTES)
@@ -3614,7 +3361,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_anchors_offsets_prefix_tdates_and_padding_mutations_reject() {
+    fn canonical_anchors_offsets_prefix_and_padding_mutations_reject() {
         let (binder, _) = test_binder();
         let honest = binder.trace.as_ref().unwrap();
         let anchor_row = binder
@@ -3668,12 +3415,6 @@ mod tests {
         let mut device = honest.clone();
         device.columns[TRACE_BYTE_START][device_first_row] += m31_u32(1);
         assert_row_rejects(&binder.spec, &binder.shape, &device, device_first_row);
-
-        let valid_from_date_row = 7;
-        let mut bad_time = honest.clone();
-        bad_time.columns[TRACE_BYTE_START + 11][valid_from_date_row] = m31_u32(b'2' as u32);
-        bad_time.columns[TRACE_BYTE_START + 12][valid_from_date_row] = m31_u32(b'4' as u32);
-        assert_row_rejects(&binder.spec, &binder.shape, &bad_time, valid_from_date_row);
 
         let padding_marker_row = 138;
         let mut padding = honest.clone();
@@ -3862,7 +3603,7 @@ mod tests {
     }
 
     #[test]
-    fn inactive_bits_and_digits_are_fresh_and_globally_valid() {
+    fn inactive_decomposition_bits_are_fresh_and_boolean() {
         let (first, _) = test_binder();
         let (second, _) = test_binder();
         let inactive = first.active_rows();
@@ -3886,26 +3627,10 @@ mod tests {
                 TRACE_PAYLOAD_SLACK_BITS,
                 TRACE_WINDOW_OFFSET_BITS,
                 TRACE_WINDOW_SLACK_BITS,
-                TRACE_DATE_SLACK_BITS,
-                TRACE_RANGE_BITS,
             ] {
-                let count = match start {
-                    TRACE_DATE_SLACK_BITS => DATE_SLACK_BITS,
-                    TRACE_RANGE_BITS => RANGE_BITS,
-                    _ => OFFSET_BITS,
-                };
-                assert!(first.columns[start..start + count]
+                assert!(first.columns[start..start + OFFSET_BITS]
                     .iter()
                     .all(|column| matches!(column[row].0, 0 | 1)));
-            }
-            for digit in 0..TDATE_DIGITS {
-                let value = (0..DIGIT_BITS)
-                    .map(|bit| {
-                        (first.columns[TRACE_DIGIT_BITS + digit * DIGIT_BITS + bit][row].0 as usize)
-                            << bit
-                    })
-                    .sum::<usize>();
-                assert!(value <= 9);
             }
         }
     }

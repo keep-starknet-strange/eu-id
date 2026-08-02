@@ -44,6 +44,8 @@ use stwo_constraint_framework::{
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
+use stwo_keccak::relations::SharedKeccakRelations;
+use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_mldsa::binding::SharedT1CellRelation;
 use stwo_mldsa::coeffs::relations::SharedRangeRelation;
 use stwo_mldsa::coeffs::tables::SharedRangeTable;
@@ -53,8 +55,6 @@ use stwo_mldsa::statement::HOSTED_MSG_FIELD_ID;
 use stwo_mldsa::statement::{
     keccak_job_shapes, MlDsaProver as MlDsaStatementProver, MlDsaVerifier as MlDsaStatementVerifier,
 };
-use stwo_mldsa::stwo_keccak::relations::SharedKeccakRelations;
-use stwo_mldsa::stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
 use stwo_mldsa::types::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::field_exposure::FieldExposure;
@@ -73,7 +73,6 @@ use crate::claimed_sum_blinder::{
 use crate::mdoc_cbor_stream::{MdocCborInputMode, MdocCborStream, MdocCborStreamInteractionClaim};
 use crate::mdoc_private_device_key_bind::{
     MdocPrivateDeviceKeyBind, MdocPrivateDeviceKeyInteractionClaim,
-    MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS,
 };
 use crate::mdoc_private_item_bind::{
     MdocPrivateItemBind, MdocPrivateItemError, MdocPrivateItemFieldIds, MdocPrivateItemHandles,
@@ -152,7 +151,7 @@ const _: () = assert!(
 
 pub(crate) fn ts13_demo_mldsa_keccak_job_shapes(
     device_message_len: usize,
-) -> Vec<stwo_mldsa::stwo_keccak::sponge::Shape> {
+) -> Vec<stwo_keccak::sponge::Shape> {
     let mut shapes = keccak_job_shapes(
         TS13_DEMO_ISSUER_MESSAGE_BYTES,
         MDOC_ISSUER_MLDSA_STREAM_BASE,
@@ -1299,10 +1298,6 @@ pub struct MdocProof {
     /// Opaque post-interaction payloads. The Keccak service carries its
     /// round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
-    /// Prover-side executable geometry for artifact drift tests.
-    /// The proof does not contain this value.
-    #[serde(skip, default)]
-    ts13_demo_circuit_geometry: Option<MdocTs13DemoCircuitGeometry>,
 }
 
 impl MdocProof {
@@ -1422,12 +1417,7 @@ impl MdocProof {
                 == stwo_mldsa::statement::hosted_private_key_claimed_sums_len()
             && self.revocation_mldsa.has_expected_shape(false)
             && self.keccak_service_claimed_sums.len()
-                == stwo_mldsa::stwo_keccak::service::service_claimed_sums_len()
-    }
-
-    #[doc(hidden)]
-    pub fn ts13_demo_circuit_geometry(&self) -> Option<&MdocTs13DemoCircuitGeometry> {
-        self.ts13_demo_circuit_geometry.as_ref()
+                == stwo_keccak::service::service_claimed_sums_len()
     }
 }
 
@@ -1595,7 +1585,6 @@ pub struct MdocAirInstanceGeometry {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MdocComponentGeometry {
     pub trace_rows: u32,
-    pub active_rows: u32,
     pub constraint_count: usize,
     pub max_constraint_log_degree_bound: u32,
     pub trace_log_degree_bounds: Vec<Vec<u32>>,
@@ -1604,9 +1593,6 @@ pub struct MdocComponentGeometry {
 fn capture_ts13_demo_circuit_geometry(
     modules: &[&mut dyn AirProver],
 ) -> MdocTs13DemoCircuitGeometry {
-    const TS13_DEMO_DEVICE_KEY_BIND_AIR_ORDINAL: usize = 15;
-    const TS13_DEMO_DEVICE_KEY_BIND_COMPONENT_ORDINAL: usize = 0;
-
     let mut seen_preprocessed_ids = HashSet::new();
     let mut committed_preprocessed_ids = Vec::new();
     let mut committed_preprocessed_log_sizes = Vec::new();
@@ -1632,8 +1618,7 @@ fn capture_ts13_demo_circuit_geometry(
         committed_preprocessed_log_sizes,
         air_instances: modules
             .iter()
-            .enumerate()
-            .map(|(air_ordinal, module)| {
+            .map(|module| {
                 let layout = module.layout();
                 MdocAirInstanceGeometry {
                     preprocessed_log_sizes: layout.preprocessed,
@@ -1646,8 +1631,7 @@ fn capture_ts13_demo_circuit_geometry(
                     components: module
                         .components()
                         .into_iter()
-                        .enumerate()
-                        .map(|(component_ordinal, component)| {
+                        .map(|component| {
                             let trace_log_degree_bounds = component
                                 .trace_log_degree_bounds()
                                 .iter()
@@ -1662,14 +1646,6 @@ fn capture_ts13_demo_circuit_geometry(
                                 .expect("TS13 component has a supported non-empty trace layout");
                             MdocComponentGeometry {
                                 trace_rows,
-                                active_rows: if air_ordinal == TS13_DEMO_DEVICE_KEY_BIND_AIR_ORDINAL
-                                    && component_ordinal
-                                        == TS13_DEMO_DEVICE_KEY_BIND_COMPONENT_ORDINAL
-                                {
-                                    MDOC_PRIVATE_DEVICE_KEY_ACTIVE_ROWS as u32
-                                } else {
-                                    trace_rows
-                                },
                                 constraint_count: component.n_constraints(),
                                 max_constraint_log_degree_bound: component
                                     .max_constraint_log_degree_bound(),
@@ -1793,15 +1769,11 @@ pub(crate) fn checked_sha256_padded_len(message_len: usize) -> Option<usize> {
         })
 }
 
-fn private_mso_bind_spec(
-    verification_date: Date,
-    mso_sha_padded_len: usize,
-) -> MdocPrivateMsoBindSpec {
+fn private_mso_bind_spec(mso_sha_padded_len: usize) -> MdocPrivateMsoBindSpec {
     MdocPrivateMsoBindSpec {
         issuer_message_len: TS13_DEMO_ISSUER_MESSAGE_BYTES,
         mso_len: TS13_DEMO_MSO_PAYLOAD_BYTES,
         doc_type: PID_DOCTYPE.to_string(),
-        policy_date: verification_date,
         sha_stream: MdocPrivateMsoShaStreamSpec {
             field_id: MDOC_MSO_SHA_STREAM_FIELD_ID,
             padded_len: mso_sha_padded_len,
@@ -2520,12 +2492,13 @@ fn prepare_mldsa_role(
     Ok((witness, input))
 }
 
-pub(crate) fn prove_mdoc_ts13_demo_circuit(
+fn prove_mdoc_ts13_demo_circuit_inner(
     extracted: &ExtractedPidMdoc,
     public: &MdocTs13DemoCircuitPublicInput,
     revocation_range: MdocRevocationRangeWitness,
     revocation_signature: MdocRevocationSignature,
-) -> Result<MdocProof, Error> {
+    capture_geometry: bool,
+) -> Result<(MdocProof, Option<MdocTs13DemoCircuitGeometry>), Error> {
     let witness_start = std::time::Instant::now();
     let config = mdoc_ts13_pcs_config();
     let verification_date = validate_public_input_shape(public, "prove")?;
@@ -2570,7 +2543,7 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     let issuer_input = extracted.issuer_auth_input.as_ref().clone();
     let device_input = extracted.device_auth_input.as_ref().clone();
     let issuer_message = issuer_input.message.clone();
-    let private_mso_spec = private_mso_bind_spec(verification_date, mso_sha_padded_len);
+    let private_mso_spec = private_mso_bind_spec(mso_sha_padded_len);
     let private_mso_witness = MdocPrivateMsoBindWitness::from_canonical_issuer_message(
         &private_mso_spec,
         issuer_message.clone(),
@@ -2867,10 +2840,10 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
         let (stark_proof, post_interaction_payloads) =
             air_core::prove_with_post_interaction(modules.as_mut_slice(), config)
                 .map_err(|e| Error::Prove(format!("{e:?}")))?;
-        let geometry = Some(capture_ts13_demo_circuit_geometry(&modules));
+        let geometry = capture_geometry.then(|| capture_ts13_demo_circuit_geometry(&modules));
         (stark_proof, post_interaction_payloads, geometry)
     };
-    Ok(MdocProof {
+    let proof = MdocProof {
         stark_proof,
         sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
         mldsa: MdocMlDsaClaims::from_prover(&issuer_mldsa),
@@ -2895,8 +2868,46 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
         ts13_mso_validity_interaction_claim: ts13_mso_validity.interaction_claim().clone(),
         ts13_revocation_range_interaction_claim: ts13_revocation_range.interaction_claim().clone(),
         post_interaction_payloads,
-        ts13_demo_circuit_geometry,
+    };
+    Ok((proof, ts13_demo_circuit_geometry))
+}
+
+pub(crate) fn prove_mdoc_ts13_demo_circuit(
+    extracted: &ExtractedPidMdoc,
+    public: &MdocTs13DemoCircuitPublicInput,
+    revocation_range: MdocRevocationRangeWitness,
+    revocation_signature: MdocRevocationSignature,
+) -> Result<MdocProof, Error> {
+    prove_mdoc_ts13_demo_circuit_inner(
+        extracted,
+        public,
+        revocation_range,
+        revocation_signature,
+        false,
+    )
+    .map(|(proof, geometry)| {
+        debug_assert!(geometry.is_none());
+        proof
     })
+}
+
+pub(crate) fn prove_mdoc_ts13_demo_circuit_for_artifact(
+    extracted: &ExtractedPidMdoc,
+    public: &MdocTs13DemoCircuitPublicInput,
+    revocation_range: MdocRevocationRangeWitness,
+    revocation_signature: MdocRevocationSignature,
+) -> Result<(MdocProof, MdocTs13DemoCircuitGeometry), Error> {
+    let (proof, geometry) = prove_mdoc_ts13_demo_circuit_inner(
+        extracted,
+        public,
+        revocation_range,
+        revocation_signature,
+        true,
+    )?;
+    Ok((
+        proof,
+        geometry.expect("artifact proof captures circuit geometry"),
+    ))
 }
 
 pub(crate) fn verify_mdoc_ts13_demo_circuit(
@@ -2904,7 +2915,7 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
     public: &MdocTs13DemoCircuitPublicInput,
 ) -> Result<(), Error> {
     let expected_pcs_config = mdoc_ts13_pcs_config();
-    let verification_date = validate_public_input_shape(public, "verify")?;
+    validate_public_input_shape(public, "verify")?;
     let mut issuer_input = *private_issuer_verifier_input(&public.trusted_issuer_public_key)?;
     validate_single_mldsa_public_key("issuer", &issuer_input, "verify")?;
     validate_public_issuer_projection(&issuer_input)?;
@@ -2943,9 +2954,7 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
             "mdoc proof ML-DSA revocation claim tree does not match the statement".to_string(),
         ));
     }
-    if proof.keccak_service_claimed_sums.len()
-        != stwo_mldsa::stwo_keccak::service::service_claimed_sums_len()
-    {
+    if proof.keccak_service_claimed_sums.len() != stwo_keccak::service::service_claimed_sums_len() {
         return Err(Error::Verify(
             "mdoc proof Keccak service claims do not match the statement".to_string(),
         ));
@@ -3082,7 +3091,7 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
         mso_stream_field.clone(),
     )
     .with_shared_tables(sha_table_relations.clone());
-    let private_mso_spec = private_mso_bind_spec(verification_date, mso_sha_padded_len);
+    let private_mso_spec = private_mso_bind_spec(mso_sha_padded_len);
     let mut private_mso_bind = MdocPrivateMsoBind::verifier(
         private_mso_spec,
         issuer_message_field.clone(),
@@ -3241,10 +3250,10 @@ const TS13_PCS_POW_BITS: u32 = 20;
 const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = Some(19);
 
 pub(crate) fn mdoc_ts13_pcs_config() -> PcsConfig {
-    // PCS query and proof-of-work label: 36×3 + 20 = 128 bits.
-    // This exceeds the 108-bit OODS bound that dominates the TS13 STARK.
-    // The verifier pins this configuration and rejects other configurations.
-    // TS13 accounts for OODS and binding-hash limits separately.
+    // The PCS query and proof-of-work parameter expression is 36×3 + 20 = 128.
+    // The verifier rejects every other configuration. This value is not an
+    // overall security claim. The analysis also includes algebraic, relation,
+    // GKR, and binding-hash terms.
     PcsConfig {
         pow_bits: TS13_PCS_POW_BITS,
         fri_config: FriConfig::new(1, TS13_PCS_LOG_BLOWUP_FACTOR, TS13_PCS_QUERIES, 2),
@@ -3452,7 +3461,7 @@ mod tests {
 
         let shapes = ts13_demo_mldsa_keccak_job_shapes(TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY);
         assert_eq!(shapes.len(), 40);
-        let jobs = stwo_mldsa::stwo_keccak::sponge_v::JobList::new(shapes);
+        let jobs = stwo_keccak::sponge_v::JobList::new(shapes);
         let role_permutations: [usize; 4] = [
             jobs.jobs[ISSUER_JOBS]
                 .iter()

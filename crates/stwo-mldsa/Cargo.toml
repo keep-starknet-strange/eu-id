@@ -24,7 +24,7 @@ num-traits.workspace = true
 # supplies the KAT fallback if the vendored ACVP vectors are unavailable. Our
 # runtime code never depends on it — dev-only.
 ml-dsa = "0.1.1"
-rand = "0.9"
+rand = "0.8"
 hex = "0.4"
 serde_json = "1"
 bincode = "1"

@@ -36,6 +36,8 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator, ORIGINAL_TRACE_IDX,
 };
 
+use crate::randomness::random_m31;
+
 /// Use eight counters to support the nested maps in the TS13 mdoc profile.
 pub(crate) const MDOC_CBOR_MAX_DEPTH: usize = 8;
 const MDOC_CBOR_MIN_LOG_SIZE: u32 = 9;
@@ -655,9 +657,9 @@ fn row_values(row: &MdocCborWitnessRow) -> Vec<M31> {
     values
 }
 
-fn inactive_row_values() -> Vec<M31> {
+fn inactive_row_values(rng: &mut impl RngCore) -> Vec<M31> {
     let mut values = (0..MDOC_CBOR_TRACE_COLS)
-        .map(|_| random_m31_cell())
+        .map(|_| random_m31(rng))
         .collect::<Vec<_>>();
     // These columns encode the variable-length schedule.
     // Cross-row constraints set the inactive suffix to zero.
@@ -692,12 +694,13 @@ fn column_eval(log_size: u32, values: Vec<M31>) -> MdocCborColumnEval {
 fn mdoc_cbor_base_columns(witness: &MdocCborWitness) -> Vec<Vec<M31>> {
     let n_rows = 1usize << witness.log_size;
     let mut columns = vec![vec![m31(0); n_rows]; MDOC_CBOR_TRACE_COLS];
+    let mut rng = rand::thread_rng();
     for row_index in 0..n_rows {
         let values = witness
             .rows
             .get(row_index)
             .map(row_values)
-            .unwrap_or_else(inactive_row_values);
+            .unwrap_or_else(|| inactive_row_values(&mut rng));
         for (column, value) in columns.iter_mut().zip(values) {
             column[row_index] = value;
         }
@@ -1467,16 +1470,6 @@ impl Air for MdocCborStream {
             .component
             .as_ref()
             .expect("mdoc CBOR component is built")]
-    }
-}
-
-fn random_m31_cell() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let value = rng.next_u32() & 0x7fff_ffff;
-        if value != 0x7fff_ffff {
-            return m31(value);
-        }
     }
 }
 

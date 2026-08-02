@@ -42,7 +42,7 @@ pub fn prove_identity(
             PROOF_THREAD_STACK_SIZE_BYTES,
             PROOF_WORKER_STACK_SIZE_BYTES,
         );
-        ts13_demo::prove_identity_inner(&statement, &witness)
+        ts13_demo::prove_identity_inner(&statement, witness)
     })
 }
 

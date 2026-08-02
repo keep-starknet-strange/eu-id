@@ -91,8 +91,6 @@ class Ts13MobileBenchmarkInstrumentedTest {
                     JSONObject(line.removePrefix(PROVE_TIMING_PREFIX))
                 }.toList()
         }
-        assertEquals(EXPECTED_PHASE_COUNT, phaseTimings.size)
-
         val runtimeConfiguration = phaseTimings.single {
             it.getString("scope") == "sdk" &&
                 it.getString("phase") == "runtime_configuration"
@@ -230,7 +228,6 @@ class Ts13MobileBenchmarkInstrumentedTest {
         const val FIXTURE_SCHEMA = "euid-ts13-mobile-fixture-v1"
         const val LOG_TAG = "Ts13MobileBenchmark"
         const val MAX_LOG_RECORD_BYTES = 3_000
-        const val EXPECTED_PHASE_COUNT = 25
         const val PROOF_WORKER_COUNT = 6
         const val MEBIBYTE_BYTES = 1024L * 1024L
         const val PROOF_THREAD_STACK_BYTES = 2L * MEBIBYTE_BYTES

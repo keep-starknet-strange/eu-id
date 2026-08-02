@@ -21,6 +21,21 @@ pub const HASH_EMBED_PATH: &str = "crates/eu-id-prover/src/generated/ts13_demo_a
 pub const GENERATION_INPUT_PATH: &str = "artifacts/ts13-demo-v1/generation-input-v1.json";
 pub const NORMATIVE_SPEC_PATH: &str = "docs/ts13-unlinkable-age18-demo-spec.md";
 
+/// Prove and return live circuit geometry for artifact maintenance.
+///
+/// This Rust-only diagnostic is not part of the UniFFI API.
+#[doc(hidden)]
+pub fn prove_live_ts13_demo(
+    document: &[u8],
+    request: &crate::MdocPidRequest,
+    public: &crate::MdocTs13DemoCircuitPublicInput,
+    id_lo: u64,
+    id_hi: u64,
+    signature: crate::mdoc::MdocRevocationSignature,
+) -> Result<(crate::MdocProof, crate::mdoc::MdocTs13DemoCircuitGeometry), crate::Error> {
+    crate::prove_mdoc_ts13_demo_for_artifact(document, request, public, id_lo, id_hi, signature)
+}
+
 /// Generated files that the soundness source-tree digest omits.
 ///
 /// The scanner also omits Cargo `target` directories. It does not use
@@ -70,8 +85,8 @@ const CANONICAL_MERKLE_TREE_ORDER: [&str; 5] = [
 const PROFILE_ID: &str = "ts13-pid-age-over-18-unlinkable-demo-v1";
 const PROOF_SYSTEM_ID: &str = "stwo-euid-ts13-demo-v1";
 const CONSTRAINT_SYSTEM_VERSION: &str = "ts13-unlinkable-air-v1";
-const ARTIFACT_SCHEMA_VERSION: u64 = 2;
-const SHAPE_SCHEMA_VERSION: u64 = 2;
+const ARTIFACT_SCHEMA_VERSION: u64 = 3;
+const SHAPE_SCHEMA_VERSION: u64 = 3;
 const ENVELOPE_VERSION: u64 = 4;
 const ENVELOPE_HEADER_BYTES: u64 = 46;
 const ENVELOPE_CAPACITY_ALIGNMENT: u64 = 65_536;
@@ -99,9 +114,8 @@ const CANONICAL_SERIALIZED_CLAIM_NAMES: [&str; 19] = crate::mdoc::MDOC_PROOF_SER
 const OUTER_CBOR_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,mode=outer,stream_id,log_size)";
 const INNER_CBOR_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,mode=inner,stream_id,log_size)";
 const MSO_BIND_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,issuer_message_len,mso_len,\
-payload_anchor_len,row_count,preprocessed_cols,trace_cols,interaction_cols,policy_year,\
-policy_month,policy_day,doc_type_len,each_doc_type_byte,private_device_key_mode,public_key_len,\
-sha_field_id,sha_padded_len)";
+payload_anchor_len,row_count,preprocessed_cols,trace_cols,interaction_cols,doc_type_len,\
+each_doc_type_byte,private_device_key_mode,public_key_len,sha_field_id,sha_padded_len)";
 const ITEM_BIND_PUBLIC_MIX_ENCODING: &str = "mix_u64(domain,version,transcript_tag,\
 attribute_index=0,padded_item_bytes=128,log_size,outer_parser_log_size,inner_parser_log_size,\
 max_random_bytes,element_identifier_len,element_value_len,digest_id_max,outer_stream_field_id,\
@@ -470,7 +484,6 @@ struct AirInstanceLayoutV1 {
 struct AirComponentLayoutV1 {
     name: String,
     trace_rows: u32,
-    active_rows: u32,
     constraint_count: u32,
     max_constraint_log_degree_bound: u32,
     trace_mask_column_counts: Vec<u32>,
@@ -766,7 +779,6 @@ struct ShapeComponentV1 {
     air_instance_ordinal: u32,
     component: String,
     trace_rows: u32,
-    active_rows: u32,
     constraint_count: u32,
     max_constraint_log_degree_bound: u32,
     trace_mask_column_counts: Vec<u32>,
@@ -1062,8 +1074,6 @@ impl GenerationInputV1 {
                         || component.max_constraint_log_degree_bound == 0
                         || component.trace_rows == 0
                         || !component.trace_rows.is_power_of_two()
-                        || component.active_rows == 0
-                        || component.active_rows > component.trace_rows
                         || component.trace_mask_column_counts.is_empty()
                         || component.trace_mask_column_counts.len() > 4
                     {
@@ -1091,20 +1101,10 @@ impl GenerationInputV1 {
                     .to_owned(),
             ));
         }
-        let device_key_binder = &self.modules[14];
-        if device_key_binder.air_instances.len() != 1
-            || !device_key_binder
-                .air_instances
-                .iter()
-                .flat_map(|air| &air.components)
-                .any(|component| {
-                    component.active_rows == CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS as u32
-                })
-        {
-            return Err(ArtifactError::InvalidInput(format!(
-                "the private device-key binder must be one AIR instance with a \
-                     {CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS}-active-row component"
-            )));
+        if self.modules[14].air_instances.len() != 1 {
+            return Err(ArtifactError::InvalidInput(
+                "the private device-key binder must be one AIR instance".to_owned(),
+            ));
         }
         if self.modules[15].air_instances.len() != 1 {
             return Err(ArtifactError::InvalidInput(
@@ -1328,7 +1328,7 @@ impl GenerationInputV1 {
                 11,
                 "p11_private_mso_binder",
                 MSO_BIND_PUBLIC_MIX_ENCODING,
-                320,
+                296,
             ),
             (
                 12,
@@ -1605,7 +1605,7 @@ impl GenerationInputV1 {
             ("impl.hash_job_count", CANONICAL_HASH_STREAM_COUNT as u64),
             (
                 "impl.keccak_service_claimed_sum_count",
-                stwo_mldsa::stwo_keccak::service::service_claimed_sums_len() as u64,
+                stwo_keccak::service::service_claimed_sums_len() as u64,
             ),
             (
                 "impl.mldsa.device_claimed_sum_count",
@@ -1901,7 +1901,6 @@ impl GenerationInputV1 {
                         air_instance_ordinal,
                         component: component.name.clone(),
                         trace_rows: component.trace_rows,
-                        active_rows: component.active_rows,
                         constraint_count: component.constraint_count,
                         max_constraint_log_degree_bound: component.max_constraint_log_degree_bound,
                         trace_mask_column_counts: component.trace_mask_column_counts.clone(),
@@ -3495,7 +3494,7 @@ fn required_shape_count(value: Option<usize>, name: &str) -> Result<u64, Artifac
 }
 
 fn canonical_hash_stream_shapes(
-) -> Result<BTreeMap<String, stwo_mldsa::stwo_keccak::sponge::Shape>, ArtifactError> {
+) -> Result<BTreeMap<String, stwo_keccak::sponge::Shape>, ArtifactError> {
     use stwo_mldsa::profile::ML_DSA_65;
 
     let mut names = ["issuer_mu_job", "issuer_ct_job", "issuer_sib_job"]
@@ -3539,7 +3538,7 @@ fn canonical_hash_stream_shapes(
 }
 
 fn canonical_stream_ids(
-    hash_shapes: &BTreeMap<String, stwo_mldsa::stwo_keccak::sponge::Shape>,
+    hash_shapes: &BTreeMap<String, stwo_keccak::sponge::Shape>,
 ) -> Result<Vec<NamedU64V1>, ArtifactError> {
     let mut stream_ids = BTreeMap::new();
     let mut insert = |name: String, value: u64| {
@@ -3594,9 +3593,9 @@ fn canonical_stream_ids(
 }
 
 fn hash_stream_geometry(
-    shape: stwo_mldsa::stwo_keccak::sponge::Shape,
+    shape: stwo_keccak::sponge::Shape,
 ) -> Result<(&'static str, u32, u32), ArtifactError> {
-    use stwo_mldsa::stwo_keccak::sponge::XofMode;
+    use stwo_keccak::sponge::XofMode;
 
     let hash_function = match shape.xof_mode {
         XofMode::Shake256 => "SHAKE-256",
@@ -3859,7 +3858,6 @@ fn refresh_air_geometry(
             air.max_constraint_log_degree_bound = live.max_constraint_log_degree_bound;
             for (component, live) in air.components.iter_mut().zip(&live.components) {
                 component.trace_rows = live.trace_rows;
-                component.active_rows = live.active_rows;
                 component.constraint_count =
                     u32::try_from(live.constraint_count).map_err(|_| {
                         ArtifactError::InvalidInput(
@@ -4286,7 +4284,6 @@ fn validate_live_profile_input(
                 .zip(&live.components)
                 .any(|(expected, actual)| {
                     expected.trace_rows != actual.trace_rows
-                        || expected.active_rows != actual.active_rows
                         || expected.constraint_count as usize != actual.constraint_count
                         || expected.max_constraint_log_degree_bound
                             != actual.max_constraint_log_degree_bound
@@ -4414,7 +4411,7 @@ fn validate_live_profile_input(
         || proof.revocation_mldsa_claimed_sum_count
             != Some(stwo_mldsa::statement::hosted_claimed_sums_len())
         || proof.keccak_service_claimed_sum_count
-            != Some(stwo_mldsa::stwo_keccak::service::service_claimed_sums_len())
+            != Some(stwo_keccak::service::service_claimed_sums_len())
         || proof.private_item_claim_count != 1
         || proof.cbor_parser_claim_count != 2
     {
@@ -4506,11 +4503,6 @@ mod tests {
                                 .then_some(AirComponentLayoutV1 {
                                     name: format!("{name}_component_{air_instance_ordinal}"),
                                     trace_rows: 1_u32 << max_log_size,
-                                    active_rows: if *name == "private_device_key_binder" {
-                                        CANONICAL_DEVICE_KEY_BIND_ACTIVE_ROWS as u32
-                                    } else {
-                                        1
-                                    },
                                     constraint_count: 1,
                                     max_constraint_log_degree_bound: max_log_size + 1,
                                     trace_mask_column_counts: vec![0, 1],

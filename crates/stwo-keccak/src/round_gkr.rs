@@ -38,9 +38,9 @@
 //! Let `q = (2^31 - 1)^4`, the size of QM31. A conservative union bound is
 //! `759/q` for sumcheck, `23/q` for the layer column folds, `1/q` for δ, and
 //! `8191/q` for the outer log13 MLE identity. The total is `8974/q`, which is
-//! about `2^-110.9`. The demo's existing 108-bit algebraic OODS bound remains
-//! the limiting algebraic bound. Its 128-bit PCS query and proof-of-work bound
-//! also remains stronger than the 108-bit bound.
+//! about `2^-110.9`. This is only the GKR contribution. The complete analysis
+//! also includes STARK OODS, LogUp relation collisions, binding hashes, and
+//! PCS terms. It does not claim 128-bit security for the complete system.
 
 use num_traits::{One, Zero};
 use rayon::prelude::*;

@@ -2185,7 +2185,7 @@ impl AirProver for MlDsaProver {
             evals.extend(self.coeffs_rc_mult.clone());
         }
 
-        // 3. decomp base + 4. rc mult (stash w1Encode bytes for the w1enc bridge).
+        // 3. Decomposition base + 4. range counts. Store w1Encode bytes for its bridge.
         let dls = decomp_log_size();
         evals.extend(decomp::gen_decomp_base_trace(&self.witness, dls));
         let decomp_metadata = decomp::gen_decomp_metadata(&self.witness);
@@ -2311,7 +2311,7 @@ impl AirProver for MlDsaProver {
         let rel = self.relations().clone();
         let mut evals = Vec::new();
 
-        // 1. coeffs interaction (stash group_evals + claimed).
+        // 1. Coefficient interaction. Store group evaluations and claims.
         let cls = coeffs_log_size();
         let coeffs_int =
             coeffs::gen_coeffs_interaction(&self.witness, cls, rel.r, rel.s, &rel.coeffs);

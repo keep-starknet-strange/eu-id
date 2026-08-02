@@ -12,7 +12,6 @@ use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -38,6 +37,7 @@ use crate::claimed_sum_blinder::{
     add_blinder_relation_entry, blinder_counter_interaction, blinder_denominator, random_qm31,
     ClaimedSumBlinderEval, ClaimedSumBlinderRelation,
 };
+use crate::randomness::random_m31;
 
 pub(crate) const MDOC_PRIVATE_MESSAGE_MAX_BYTES: usize =
     crate::ts13::TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES;
@@ -119,16 +119,6 @@ fn checked_log_size(message_len: usize) -> Result<u32, MdocPrivateMessageError> 
         });
     }
     Ok(domain_rows.ilog2())
-}
-
-fn random_m31_cell() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let candidate = rng.next_u32() & 0x7fff_ffff;
-        if candidate != 0x7fff_ffff {
-            return M31::from_u32_unchecked(candidate);
-        }
-    }
 }
 
 fn coset_order_to_circle_domain_order(log_size: u32, values: Vec<M31>) -> Vec<M31> {
@@ -215,17 +205,18 @@ impl MdocPrivateMessageWitness {
         }
 
         let domain_rows = 1usize << log_size;
+        let mut rng = rand::thread_rng();
         let mut byte_cells = Vec::with_capacity(domain_rows);
         byte_cells.extend(
             message
                 .into_iter()
                 .map(|byte| M31::from_u32_unchecked(u32::from(byte))),
         );
-        byte_cells.resize_with(domain_rows, random_m31_cell);
+        byte_cells.resize_with(domain_rows, || random_m31(&mut rng));
 
         let mut extra_use_cells = Vec::with_capacity(domain_rows);
         extra_use_cells.extend(extra_uses.into_iter().map(M31::from_u32_unchecked));
-        extra_use_cells.resize_with(domain_rows, random_m31_cell);
+        extra_use_cells.resize_with(domain_rows, || random_m31(&mut rng));
 
         Ok(Self {
             bytes: byte_cells,

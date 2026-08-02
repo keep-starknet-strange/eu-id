@@ -21,6 +21,7 @@ mod mdoc_value_digests_scan;
 #[path = "../tests/support/mldsa_fixture.rs"]
 mod mldsa_test_fixture;
 mod policy;
+mod randomness;
 pub mod ts13;
 #[doc(hidden)]
 pub mod ts13_artifact;
@@ -120,6 +121,25 @@ pub fn report_prove_runtime_configuration(
 }
 
 pub use mdoc::{MdocPidRequest, MdocProof, MdocTs13DemoCircuitPublicInput};
+
+fn extract_ts13_demo(
+    document: &[u8],
+    request: &MdocPidRequest,
+) -> Result<(mdoc::ExtractedPidMdoc, u64), Error> {
+    let extract_start = std::time::Instant::now();
+    if document.len() > ts13::TS13_MAX_DOCUMENT_BYTES {
+        return Err(Error::UnsupportedDemoCredentialShape);
+    }
+    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
+    let id = ts13::ts13_mso_derived_revocation_id(&extracted.mso);
+    report_prove_timing(
+        "eu_id_prover",
+        "credential_extract",
+        extract_start.elapsed(),
+    );
+    Ok((extracted, id))
+}
+
 /// Prove the fixed public-input-unlinkable TS13 age-over-18 theorem.
 ///
 /// The returned proof contains no serialized semantic statement. The SDK
@@ -132,18 +152,25 @@ pub fn prove_mdoc_ts13_demo(
     id_hi: u64,
     signature: mdoc::MdocRevocationSignature,
 ) -> Result<MdocProof, Error> {
-    let extract_start = std::time::Instant::now();
-    if document.len() > ts13::TS13_MAX_DOCUMENT_BYTES {
-        return Err(Error::UnsupportedDemoCredentialShape);
-    }
-    let extracted = mdoc::extract_pid_mdoc(document, request).map_err(Error::Mdoc)?;
-    let id = ts13::ts13_mso_derived_revocation_id(&extracted.mso);
-    report_prove_timing(
-        "eu_id_prover",
-        "credential_extract",
-        extract_start.elapsed(),
-    );
+    let (extracted, id) = extract_ts13_demo(document, request)?;
     mdoc::prove_mdoc_ts13_demo_circuit(
+        &extracted,
+        public,
+        mdoc::MdocRevocationRangeWitness { id, id_lo, id_hi },
+        signature,
+    )
+}
+
+pub(crate) fn prove_mdoc_ts13_demo_for_artifact(
+    document: &[u8],
+    request: &MdocPidRequest,
+    public: &MdocTs13DemoCircuitPublicInput,
+    id_lo: u64,
+    id_hi: u64,
+    signature: mdoc::MdocRevocationSignature,
+) -> Result<(MdocProof, mdoc::MdocTs13DemoCircuitGeometry), Error> {
+    let (extracted, id) = extract_ts13_demo(document, request)?;
+    mdoc::prove_mdoc_ts13_demo_circuit_for_artifact(
         &extracted,
         public,
         mdoc::MdocRevocationRangeWitness { id, id_lo, id_hi },

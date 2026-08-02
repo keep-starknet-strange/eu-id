@@ -148,13 +148,6 @@ pub fn generate_preprocessed_trace(
     evals
 }
 
-// Count table-row hits from the round and sponge lookup data.
-
-/// Total preprocessed cell count across all nine tables (for the acceptance
-/// report): `2^16·3 (dense) + 2^8·2 (conv) + 7·2^8·3 (split)`.
-pub const PREPROCESSED_CELLS: usize =
-    (1 << LOG_SIZE_DENSE) * 3 + (1 << LOG_SIZE_SPLIT) * 2 + 7 * (1 << LOG_SIZE_SPLIT) * 3;
-
 /// Per-table multiplicity vectors. The Dense table has two (xor3, andnot); every
 /// other table has one. Indexed as `TableKind::ALL`, flattened by relation.
 pub struct TableMultiplicities {

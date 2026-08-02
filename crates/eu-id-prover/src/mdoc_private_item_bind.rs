@@ -15,7 +15,6 @@ use air_core::relations::{FieldBytesRelation, SharedFieldRelation, SharedRelatio
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -44,6 +43,7 @@ use crate::mdoc_cbor_stream::{
     parser_log_size, MdocCborInputMode, MdocCborPhase, MdocCborStreamError, MdocCborWitness,
     MdocCborWitnessRow, ParsedCborByteRelation, SharedParsedCborByteRelation,
 };
+use crate::randomness::{random_bit, random_m31};
 
 const MDOC_PRIVATE_ITEM_PADDED_BYTES: usize = 128;
 const MDOC_PRIVATE_ITEM_TRANSCRIPT_ATTRIBUTE_INDEX: u64 = 0;
@@ -314,20 +314,6 @@ mod trace_col {
 
 fn m31(value: u32) -> M31 {
     M31::from_u32_unchecked(value)
-}
-
-fn random_m31() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let candidate = rng.next_u32() & 0x7fff_ffff;
-        if candidate != 0x7fff_ffff {
-            return m31(candidate);
-        }
-    }
-}
-
-fn random_bit() -> M31 {
-    m31(rand::thread_rng().next_u32() & 1)
 }
 
 fn item_log_size() -> u32 {
@@ -707,8 +693,13 @@ impl MdocPrivateItemWitness {
             return Err(MdocPrivateItemError::TraceTooLarge { rows: active_rows });
         }
 
+        let mut rng = rand::thread_rng();
         let mut columns = (0..trace_col::COUNT)
-            .map(|_| (0..domain_rows).map(|_| random_m31()).collect::<Vec<_>>())
+            .map(|_| {
+                (0..domain_rows)
+                    .map(|_| random_m31(&mut rng))
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>();
         for column_index in [
             trace_col::ACTIVE,
@@ -748,20 +739,22 @@ impl MdocPrivateItemWitness {
         columns[trace_col::KEY_SEEN..trace_col::KEY_SEEN + KEY_COUNT]
             .iter_mut()
             .for_each(|column| {
-                column.iter_mut().for_each(|value| *value = random_bit());
+                column
+                    .iter_mut()
+                    .for_each(|value| *value = random_bit(&mut rng));
             });
         for index in 0..RANDOM_BOUND_BITS {
             columns[trace_col::RANDOM_LOWER_BITS + index]
                 .iter_mut()
-                .for_each(|value| *value = random_bit());
+                .for_each(|value| *value = random_bit(&mut rng));
             columns[trace_col::RANDOM_UPPER_BITS + index]
                 .iter_mut()
-                .for_each(|value| *value = random_bit());
+                .for_each(|value| *value = random_bit(&mut rng));
         }
         for index in 0..5 {
             columns[trace_col::DIGEST_SHORT_SLACK_BITS + index]
                 .iter_mut()
-                .for_each(|value| *value = random_bit());
+                .for_each(|value| *value = random_bit(&mut rng));
         }
         columns[trace_col::INNER_LEN][..active_rows].fill(m31(inner.rows.len() as u32));
 

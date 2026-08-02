@@ -215,7 +215,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             let request = request(transcript.clone());
             let (id_lo, id_hi, revocation_signature) = revocation_witness(&fixture.mso);
 
-            let proof = prove_mdoc_ts13_demo(
+            let (proof, geometry) = eu_id_prover::ts13_artifact::prove_live_ts13_demo(
                 &fixture.document,
                 &request,
                 &public,
@@ -225,9 +225,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             )
             .expect("TS13 demo proves");
             let shape = proof.ts13_demo_proof_shape();
-            let geometry = proof
-                .ts13_demo_circuit_geometry()
-                .expect("live circuit geometry is captured");
+            let geometry = &geometry;
             let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let artifact_input_path =
                 workspace.join(eu_id_prover::ts13_artifact::GENERATION_INPUT_PATH);
@@ -472,7 +470,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     (3, 117, 4, 0),
                     (3, 117, 4, 0),
                     (5, 80, 140, 0),
-                    (67, 202, 144, 0),
+                    (67, 88, 144, 0),
                     (2, 88, 104, 0),
                     (4, 305, 92, 0),
                     (11, 13, 16, 0),

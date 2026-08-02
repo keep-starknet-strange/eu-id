@@ -164,7 +164,7 @@ fn build_pid_document_with_attributes(
     let issuer_signature = sig_bytes.to_vec();
 
     let issuer_auth = Value::Array(vec![
-        Value::Bytes(protected.clone()),
+        Value::Bytes(protected),
         Value::Map(vec![(
             "issuerKey".into(),
             mldsa_cose_key(&issuer_pk, COSE_ALG_ML_DSA_65),

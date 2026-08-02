@@ -50,38 +50,6 @@ impl WordLimbs {
     }
 }
 
-/// The SHA-256 working state `(a, b, c, d, e, f, g, h)`, in that order.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorkingState(pub [u32; N_STATE_WORDS]);
-
-impl WorkingState {
-    /// Index-into-name helpers — naming follows FIPS 180-4 §6.2.2 step 2.
-    pub fn a(&self) -> u32 {
-        self.0[0]
-    }
-    pub fn b(&self) -> u32 {
-        self.0[1]
-    }
-    pub fn c(&self) -> u32 {
-        self.0[2]
-    }
-    pub fn d(&self) -> u32 {
-        self.0[3]
-    }
-    pub fn e(&self) -> u32 {
-        self.0[4]
-    }
-    pub fn f(&self) -> u32 {
-        self.0[5]
-    }
-    pub fn g(&self) -> u32 {
-        self.0[6]
-    }
-    pub fn h(&self) -> u32 {
-        self.0[7]
-    }
-}
-
 /// The hash state `H = (H₀, H₁, …, H₇)` carried across blocks.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct HashState(pub [u32; N_STATE_WORDS]);

@@ -58,7 +58,7 @@ jobs:
     name: Build & test
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # Use one Rayon worker to limit peak memory on the shared runner.
+    # Limit crates that use the global Rayon pool on the shared runner.
     env:
       RAYON_NUM_THREADS: 1
     steps:

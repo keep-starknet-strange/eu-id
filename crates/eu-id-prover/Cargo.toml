@@ -7,6 +7,7 @@ edition.workspace = true
 air-core = { path = "../air-core" }
 stwo-mldsa = { path = "../stwo-mldsa" }
 stwo-sha256 = { path = "../stwo-sha256" }
+stwo-keccak = { path = "../stwo-keccak" }
 stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true, features = ["parallel"] }
 

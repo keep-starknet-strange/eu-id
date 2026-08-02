@@ -9,6 +9,50 @@ The tracked decision mirror is `docs/p6-a020-campaign-closure.md`.
 Privacy claim:
 `public-input unlinkable; transcript zero knowledge pending`
 
+## Post-campaign internal quality pass
+
+Scope: improve the canonical implementation without changing the wallet flow,
+the `proveIdentity` and `verifyIdentity` interface, or any proof property.
+
+- [x] Freeze the clean source, artifact, fixture, dependency, and desktop
+  performance baseline before edits.
+- [x] Trace the canonical prover, verifier, serialization, fixture, and FFI
+  paths from their exported entry points.
+- [x] Audit every workspace crate for dead code, duplicate logic, stale
+  comments, unclear names, unnecessary dependencies, and misplaced concerns.
+- [x] Audit the live AIR layouts, preprocessed columns, trace columns,
+  relations, transcript messages, and verifier checks before deleting proof
+  code.
+- [x] Audit existing branches and history before writing a new helper or
+  performance optimization.
+- [x] Implement only changes with a simpler canonical path or a measured
+  performance benefit.
+- [x] Keep the app flow, theorem, ML-DSA-65 roles, public-input unlinkability,
+  local proving, pinned STWO/PCS/FRI settings, fixed envelope, and two-function
+  API unchanged.
+- [ ] Regenerate the source-bound artifact and mobile fixture after each
+  accepted soundness-source change. Otherwise, prove that they did not change.
+- [ ] Run release formatting, Clippy, all-target build, normal and ignored
+  tests, adversarial matrices, unlinkability tests, dependency checks, and
+  artifact drift.
+- [ ] Measure the final canonical `proveIdentity` and `verifyIdentity` path in
+  fresh serial processes and compare it with the frozen baseline.
+- [ ] Run an independent final soundness, simplicity, and performance review.
+- [ ] Remove all temporary probes, controls, generated build output, and stale
+  plan text introduced by this pass.
+
+Review to date:
+
+- The application surface still has only `proveIdentity` and `verifyIdentity`.
+- Every committed preprocessed column has an active consumer. The reserved
+  Keccak-round relation remains because it fixes later transcript challenges.
+- The private MSO binder no longer repeats validity logic. The exact validity
+  AIR still binds the same authenticated bytes and proves strict whole-second
+  bounds.
+- Normal proofs no longer collect artifact-only circuit geometry.
+- Release all-target checks, focused validity and relation-seam tests, and
+  release Clippy pass. Artifact refresh and the full final matrix remain.
+
 ## Canonical product
 
 - [x] Implement one fixed TS13 age-over-18 theorem.

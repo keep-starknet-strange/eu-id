@@ -21,7 +21,6 @@ use air_core::relations::SharedRelation;
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -49,6 +48,7 @@ use crate::claimed_sum_blinder::{
     add_blinder_relation_entry, blinder_counter_interaction, blinder_denominator, random_qm31,
     ClaimedSumBlinderEval, ClaimedSumBlinderRelation,
 };
+use crate::randomness::random_m31;
 use crate::ts13_demo::{
     verification_timestamp_rfc3339_utc, TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES,
 };
@@ -498,16 +498,6 @@ fn m31(value: u32) -> M31 {
     M31::from_u32_unchecked(value)
 }
 
-fn random_m31_cell() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let candidate = rng.next_u32() & 0x7fff_ffff;
-        if candidate != 0x7fff_ffff {
-            return m31(candidate);
-        }
-    }
-}
-
 fn coset_order_to_circle_domain_order(log_size: u32, values: Vec<M31>) -> Vec<M31> {
     let mut ordered = vec![m31(0); 1usize << log_size];
     for (coset_index, value) in values.into_iter().enumerate() {
@@ -550,9 +540,10 @@ fn preprocessed_columns() -> Vec<ValidityColumnEval> {
 
 fn base_trace(rows: &[ValidityRow; 2]) -> Vec<ValidityColumnEval> {
     let mut columns = vec![vec![m31(0); MDOC_PRIVATE_MSO_VALIDITY_ROWS]; TRACE_COLS];
+    let mut rng = rand::thread_rng();
     for column in &mut columns {
         for value in column {
-            *value = random_m31_cell();
+            *value = random_m31(&mut rng);
         }
     }
     for (row_index, row) in rows.iter().enumerate() {

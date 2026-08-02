@@ -55,6 +55,7 @@ use crate::mdoc_private_item_bind::{
     MdocPrivateDigestIdRelation, SharedMdocPrivateDigestIdRelation, MDOC_PRIVATE_ITEM_DIGEST_ID_MAX,
 };
 use crate::mdoc_private_mso_bind::{MdocMsoStartRelation, SharedMdocMsoStartRelation};
+use crate::randomness::{random_bit, random_m31};
 
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_ROWS: usize = 1usize << MDOC_VALUE_DIGESTS_SCAN_LOG_SIZE;
@@ -778,20 +779,6 @@ fn m31_u32(value: u32) -> M31 {
     M31::from_u32_unchecked(value)
 }
 
-fn random_m31() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let candidate = rng.next_u32() & 0x7fff_ffff;
-        if candidate != 0x7fff_ffff {
-            return m31_u32(candidate);
-        }
-    }
-}
-
-fn random_bit() -> M31 {
-    m31_u32(rand::thread_rng().next_u32() & 1)
-}
-
 fn inverse(value: M31) -> M31 {
     if value == m31(0) {
         m31(0)
@@ -1135,9 +1122,9 @@ fn build_rows(
     }
 }
 
-fn write_random_bits(columns: &mut [Vec<M31>], start: usize, count: usize) {
+fn write_random_bits(columns: &mut [Vec<M31>], start: usize, count: usize, rng: &mut impl RngCore) {
     for column in &mut columns[start..start + count] {
-        column.iter_mut().for_each(|value| *value = random_bit());
+        column.iter_mut().for_each(|value| *value = random_bit(rng));
     }
 }
 
@@ -1167,11 +1154,16 @@ fn build_trace(
     rows: Vec<ScanRow>,
 ) -> Result<(MdocValueDigestsWitnessTrace, MdocValueDigestsUseCensus), MdocValueDigestsScanError> {
     let mut columns = vec![vec![m31(0); MDOC_VALUE_DIGESTS_SCAN_ROWS]; TRACE_COLS];
+    let mut rng = rand::thread_rng();
     for column in &mut columns[trace_col::BYTE..trace_col::BYTE + BYTE_SITES] {
-        column.iter_mut().for_each(|value| *value = random_m31());
+        column
+            .iter_mut()
+            .for_each(|value| *value = random_m31(&mut rng));
     }
     for column in &mut columns[trace_col::BYTE_OFFSET..trace_col::BYTE_OFFSET + BYTE_SITES] {
-        column.iter_mut().for_each(|value| *value = random_m31());
+        column
+            .iter_mut()
+            .for_each(|value| *value = random_m31(&mut rng));
     }
     for (start, count) in [
         (trace_col::CURSOR_BITS, OFFSET_BITS),
@@ -1190,7 +1182,7 @@ fn build_trace(
         (trace_col::SORTED_ID_DIFF_BITS, SORTED_DIFF_BITS),
         (trace_col::NAMESPACE_UPPER_SLACK_BITS, NAMESPACE_LEN_BITS),
     ] {
-        write_random_bits(&mut columns, start, count);
+        write_random_bits(&mut columns, start, count, &mut rng);
     }
     let mut requested_count = 0usize;
     let mut selected_count = 0usize;

@@ -225,7 +225,7 @@ pub trait Air {
     /// Bind this module's public statement to the shared transcript.
     fn mix_public(&self, channel: &mut Ch);
 
-    /// Draw this module's lookup relations from the shared channel and stash
+    /// Draw this module's lookup relations from the shared channel and store
     /// them for the interaction phase and component assembly.
     fn draw_relations(&mut self, channel: &mut Ch);
 
@@ -356,7 +356,7 @@ pub trait AirProver: Air {
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
     /// Phase 2: build the interaction (LogUp) columns from the drawn relations,
-    /// append them, and stash this module's claimed sums (read back via
+    /// append them, and store this module's claimed sums (read back via
     /// [`Air::claimed_sums`]).
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
@@ -399,13 +399,6 @@ pub fn prove(
     Ok(proof)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProveTimingMode {
-    Disabled,
-    Legacy,
-    Json,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[doc(hidden)]
 pub struct ProcessMemoryKib {
@@ -415,21 +408,8 @@ pub struct ProcessMemoryKib {
     pub vm_hwm: Option<u64>,
 }
 
-fn prove_timing_mode() -> ProveTimingMode {
-    prove_timing_mode_for(
-        std::env::var_os("EUID_PROVE_TIMING").is_some(),
-        std::env::var_os("AIR_CORE_PROVE_TIMING").is_some(),
-    )
-}
-
-fn prove_timing_mode_for(json: bool, legacy: bool) -> ProveTimingMode {
-    if json {
-        ProveTimingMode::Json
-    } else if legacy {
-        ProveTimingMode::Legacy
-    } else {
-        ProveTimingMode::Disabled
-    }
+fn prove_timing_enabled() -> bool {
+    std::env::var_os("EUID_PROVE_TIMING").is_some()
 }
 
 fn parse_process_memory_kib(status: &str) -> ProcessMemoryKib {
@@ -496,21 +476,16 @@ fn emit_timing_line(line: &str) {
     }
 }
 
-fn report_prove_phase(timing: ProveTimingMode, name: &str, t_last: &mut std::time::Instant) {
-    match timing {
-        ProveTimingMode::Disabled => return,
-        ProveTimingMode::Legacy => {
-            eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
-        }
-        ProveTimingMode::Json => {
-            emit_timing_line(&timing_json(
-                "air_core",
-                name,
-                t_last.elapsed().as_micros(),
-                process_memory_kib(),
-            ));
-        }
+fn report_prove_phase(timing_enabled: bool, name: &str, t_last: &mut std::time::Instant) {
+    if !timing_enabled {
+        return;
     }
+    emit_timing_line(&timing_json(
+        "air_core",
+        name,
+        t_last.elapsed().as_micros(),
+        process_memory_kib(),
+    ));
     *t_last = std::time::Instant::now();
 }
 
@@ -602,7 +577,7 @@ pub fn prove_with_post_interaction(
         .lifting_log_size
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
-    let timing = prove_timing_mode();
+    let timing = prove_timing_enabled();
     let t_start = std::time::Instant::now();
     let mut t_last = t_start;
     dump_shape_census_if_requested(modules);
@@ -705,7 +680,7 @@ pub fn prove_with_post_interaction(
         modules.iter().flat_map(|m| m.prover_components()).collect();
     report_prove_phase(timing, "build-components", &mut t_last);
     let stark_start = std::time::Instant::now();
-    let (result, stwo_spans) = if timing == ProveTimingMode::Json {
+    let (result, stwo_spans) = if timing {
         use tracing_subscriber::layer::SubscriberExt as _;
 
         let spans = stwo::tracing::SpanAccumulator::default();
@@ -725,15 +700,13 @@ pub fn prove_with_post_interaction(
     if let Some(csv) = stwo_spans {
         report_stwo_spans(&csv, stark_total_us);
     }
-    match timing {
-        ProveTimingMode::Disabled => {}
-        ProveTimingMode::Legacy => eprintln!("air-core prove TOTAL: {:?}", t_start.elapsed()),
-        ProveTimingMode::Json => emit_timing_line(&timing_json(
+    if timing {
+        emit_timing_line(&timing_json(
             "air_core",
             "total",
             t_start.elapsed().as_micros(),
             process_memory_kib(),
-        )),
+        ));
     }
     result.map(|proof| (proof, post_interaction_payloads))
 }
@@ -1214,11 +1187,7 @@ mod tests {
     use stwo::prover::backend::simd::column::BaseColumn;
 
     #[test]
-    fn timing_output_is_opt_in_and_stwo_spans_are_coherent() {
-        assert_eq!(
-            prove_timing_mode_for(false, false),
-            ProveTimingMode::Disabled
-        );
+    fn timing_output_and_stwo_spans_are_coherent() {
         assert_eq!(
             timing_json(
                 "air_core",

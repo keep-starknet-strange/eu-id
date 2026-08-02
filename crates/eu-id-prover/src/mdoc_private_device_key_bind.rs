@@ -12,7 +12,6 @@ use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -43,6 +42,7 @@ use crate::claimed_sum_blinder::{
     ClaimedSumBlinderEval, ClaimedSumBlinderRelation,
 };
 use crate::mdoc_private_mso_bind::{MdocDevicePkStartRelation, SharedMdocDevicePkStartRelation};
+use crate::randomness::{random_bit, random_m31};
 
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE: u32 = 9;
 pub(crate) const MDOC_PRIVATE_DEVICE_KEY_ROWS: usize = 1usize << MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE;
@@ -247,20 +247,6 @@ fn preprocessed_columns() -> Vec<ColEval> {
         .collect()
 }
 
-fn random_m31() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let candidate = rng.next_u32() & 0x7fff_ffff;
-        if candidate != 0x7fff_ffff {
-            return m31(candidate);
-        }
-    }
-}
-
-fn random_bit() -> M31 {
-    m31(rand::thread_rng().next_u32() & 1)
-}
-
 fn set_bits(columns: &mut [Vec<M31>], start: usize, row: usize, byte: u8) {
     for bit in 0..8 {
         columns[start + bit][row] = m31(u32::from((byte >> bit) & 1));
@@ -345,14 +331,15 @@ fn build_trace(
     }
 
     let mut columns = vec![vec![m31(0); MDOC_PRIVATE_DEVICE_KEY_ROWS]; TRACE_COLS];
+    let mut rng = rand::thread_rng();
     for column in &mut columns {
         for cell in column {
-            *cell = random_m31();
+            *cell = random_m31(&mut rng);
         }
     }
     for column in &mut columns[COL_B1_BITS..TRACE_COLS] {
         for cell in column {
-            *cell = random_bit();
+            *cell = random_bit(&mut rng);
         }
     }
 

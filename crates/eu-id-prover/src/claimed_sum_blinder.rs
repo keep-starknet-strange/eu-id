@@ -9,7 +9,6 @@
 //! The published pair still reveals the module sum.
 //! This method does not make STWO zero knowledge.
 
-use rand::RngCore;
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
 use stwo::prover::backend::simd::m31::PackedM31;
@@ -21,23 +20,15 @@ use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
+use crate::randomness::random_m31;
+
 // Draw one relation instance for each randomized module.
 relation!(ClaimedSumBlinderRelation, SECURE_EXTENSION_DEGREE);
 
-/// Sample one uniform M31 cell from the host CSPRNG.
-fn random_m31() -> M31 {
-    let mut rng = rand::thread_rng();
-    loop {
-        let candidate = rng.next_u32() & 0x7fff_ffff;
-        if candidate != 0x7fff_ffff {
-            return M31::from_u32_unchecked(candidate);
-        }
-    }
-}
-
 /// Fresh uniform QM31 from the host CSPRNG.
 pub(crate) fn random_qm31() -> QM31 {
-    QM31::from_m31_array(std::array::from_fn(|_| random_m31()))
+    let mut rng = rand::thread_rng();
+    QM31::from_m31_array(std::array::from_fn(|_| random_m31(&mut rng)))
 }
 
 /// `combine(v)` as a packed constant for prover-side interaction columns.

@@ -39,14 +39,7 @@ enum FixtureWriteError {
 }
 
 fn main() {
-    let config = parse_config();
-    std::thread::Builder::new()
-        .name("ts13-sdk-perf-probe".to_string())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(move || run(config))
-        .expect("SDK TS13 probe worker starts")
-        .join()
-        .expect("SDK TS13 probe worker does not panic");
+    run(parse_config());
 }
 
 fn parse_config() -> Config {
@@ -184,7 +177,7 @@ fn run(config: Config) {
         document: fixture.document.clone(),
         revocation_id_lo: id_lo,
         revocation_id_hi: id_hi,
-        revocation_signature: revocation_signature.clone(),
+        revocation_signature,
     };
     println!(
         "TS13_SDK_FIXTURE document_bytes={} issuer_sig_structure_bytes={} mso_payload_bytes={} device_sig_structure_bytes={} requested_item_bytes={}",
