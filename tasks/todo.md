@@ -289,9 +289,13 @@ artifact check, and the diff check passed.
   - [x] Remove product-dead SHAKE-128 absorb columns and lookup entries.
   - [x] Confirm that every retained Keccak preprocessed column is active.
   - [x] Pass the complete layered adversarial freeze matrix.
-  - [ ] Measure the desktop and cold Galaxy A54 hard-stop gates.
-- [ ] Regenerate the source-bound artifact and pass the complete release and
-  unlinkability checks.
+  - [x] Measure the desktop hard-stop gate through `proveIdentity`.
+  - [x] Reduce the three-sample desktop median from 8,243 ms to 1,810 ms.
+  - [ ] Measure the cold Galaxy A54 hard-stop gate.
+- [x] Regenerate and verify the source-bound artifact after each retained
+  source change.
+- [x] Pass the complete release and unlinkability checks at the frozen source.
+- [x] Build and verify one source-bound AAR and APK pair for the final phone run.
 - [ ] Run one final three-phone Firebase matrix with one exact APK pair.
 
 ## Layered Keccak review
@@ -305,9 +309,45 @@ same-accounting error is `8468/(q-2)`, below the removed carrier's `8974/q`
 contribution. The design does not change the theorem, public statement,
 unlinkability claim, product API, STWO revision, or PCS settings.
 
-Mailbox A-013 is still pending. The release freeze passed 27 layered-library
-tests and 31 service tests. A separate wire test executes the SHAKE-128
-deserializer and rejects a 137-byte message. The matrix includes row swaps,
+Mailbox A-013 is still pending. The current release freeze passed 30
+layered-library tests and 31 service tests. The matrix includes row swaps,
 cross-permutation source attacks, alternate Iota, SIMD equivalence, invalid
-nibbles, and canonical mutations in all 147 payload sections. The source-bound
-artifact regeneration is pending.
+nibbles, and canonical mutations in all 147 payload sections.
+
+The frozen soundness source is `2111a1eb`. The source-bound artifact commit is
+`5a619bf2`. The circuit hash is
+`3fac167754de85508fd6fda45e37043f6e104821463b9fa40e17d88fa4938b9c`.
+The identity-proof body capacity is 1,507,328 bytes.
+
+The final locked release matrix passed all normal workspace tests and all 18
+ignored tests. It also passed the exact A1/A2/B unlinkability test, the 17-case
+exported-prover rejection matrix, the three-test live artifact target, the
+exact public schema test, release Clippy with warnings denied, formatting, the
+quantum-only dependency check, and the artifact-drift check.
+
+Seven separate desktop processes measured these `proveIdentity` times in
+milliseconds: 1,768, 1,834, 1,774, 1,852, 1,860, 1,784, and 1,782. The median
+was 1,784 ms. The median `verifyIdentity` time was 80 ms. Every proof envelope
+was 1,507,374 bytes. The measured maximum resident set size was 777,682,944
+bytes. The desktop median is 78.4 percent lower than the 8,243 ms layered
+baseline.
+
+The desktop host was a 12-core Apple M2 Max MacBook Pro with 32 GB of memory
+and macOS 26.5.2. The Rust compiler was nightly 1.94.0 from 2026-01-14. The
+probe SHA-256 was
+`123b93f5909dcf39d5a470731692210460549e89a157da4b3541607447415845`.
+The `Cargo.lock` SHA-256 was
+`220b0810dc0423085bb2654fd738ee5d0ee71ca8e61cf971ae38edc128ff87ff`.
+
+The final mobile package has these SHA-256 values:
+
+- AAR: `d91605ae10f60757fe1db60a0bd4e08b1928a7e94531af05d75ca5f0e3e31501`
+- Host APK: `4c7a70bf62f11c1fbcccb5aa8c121b778518f8c7bfbc945ae73d576ff33ec614`
+- Test APK: `d959332c98d7d47231258912a89dfd5eebcdb400cc3ed78bb58564b49518ea19`
+- Fixture: `3776028d3821a5242578f8f9878d44e5c680d0f0f5626135f05d22eb00efc32a`
+
+The AAR and host APK contain the same ARM64 library. The test APK contains the
+exact checked-in fixture. The fixture names only `proveIdentity` and
+`verifyIdentity` and binds the final circuit hash. The final three-phone matrix
+is pending because Google Cloud authentication needs a user login. Mailbox
+A-014 is pending. Mailbox A-013 is also pending.
