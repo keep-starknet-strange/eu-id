@@ -276,7 +276,25 @@ artifact check, and the diff check passed.
     the old carrier disconnects the retained schedule and LogUp graph.
   - [x] Send the exact K-prototype correction request as main-repository
     mailbox Q-013.
+  - [x] Complete an independent K soundness audit and track the accepted
+    implementation design in `docs/ts13-keccak-layered-gkr.md`.
+  - [x] Pass a second code-level red-team review of the tracked K design.
+  - [ ] Reconcile the tracked design with mailbox A-013 when it arrives.
 - [ ] Implement and measure each accepted redesign stage at its hard stop gate.
 - [ ] Regenerate the source-bound artifact and pass the complete release and
   unlinkability checks.
 - [ ] Run one final three-phone Firebase matrix with one exact APK pair.
+
+## Layered Keccak review
+
+The accepted prototype design uses 400 committed spread-nibble columns, an
+18-variable grouped extraction and validity sumcheck, carried wiring
+functionals, and two source-bound log-9 MLE components. Its projected
+replacement mass is 212,992 cells. Its conservative same-accounting error is
+`8468/(q-2)`, below the current carrier's `8974/q` contribution. The design
+does not change the theorem, public statement, unlinkability claim, product
+API, STWO revision, or PCS settings.
+
+Mailbox A-013 is still pending. The independent design passed its final
+code-level review, so implementation can start while the mailbox monitor
+continues.

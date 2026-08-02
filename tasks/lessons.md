@@ -63,6 +63,8 @@
 
 ## AIR soundness
 
+- Derive the OODS degree from the verifier's recombined composition polynomial.
+- Do not use one split-part degree as the whole OODS bound.
 - Audit each state column directly.
 - Audit each transition directly.
 - Audit each permutation tuple field directly.
