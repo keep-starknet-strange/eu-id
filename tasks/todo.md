@@ -201,8 +201,11 @@ for measured phone throughput and restored P5. Circuits `e3426e32...` and
   unlinkability, local proving, pinned STWO and PCS settings, the fixed
   envelope, and the two-function API.
 - [x] Pass the full release, adversarial, artifact, and desktop gates.
-- [ ] Design the authorized witness-MLE opening primitive on a dedicated
-  branch from `~/stwo` `dev-copy`.
+- [x] Audit the authenticated-MLE route against the G1 committed-cell gate.
+- [x] Send the compact-source derivation gap to Fable as mailbox Q-019.
+- [ ] Receive an accepted compact-source protocol before engine implementation.
+- [ ] Design the accepted witness-MLE opening primitive on a dedicated STWO
+  branch from the exact application pin.
 - [ ] Pass engine gate G1 on desktop and G2 on all three phones.
 
 The first engine gate is no regression from the P5 matrix on any phone: 5,450
