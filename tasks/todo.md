@@ -281,20 +281,33 @@ artifact check, and the diff check passed.
   - [x] Pass a second code-level red-team review of the tracked K design.
   - [ ] Reconcile the tracked design with mailbox A-013 when it arrives.
 - [ ] Implement and measure each accepted redesign stage at its hard stop gate.
+  - [x] Implement one layered Keccak path and delete the carrier, round AIR,
+    schedule table, AndNot table, split tables, and generic GKR codec.
+  - [x] Bind 400 committed input nibbles and the committed output through two
+    outer-STARK MLE components.
+  - [x] Reduce the service to five components and three claimed sums.
+  - [x] Remove product-dead SHAKE-128 absorb columns and lookup entries.
+  - [x] Confirm that every retained Keccak preprocessed column is active.
+  - [x] Pass the complete layered adversarial freeze matrix.
+  - [ ] Measure the desktop and cold Galaxy A54 hard-stop gates.
 - [ ] Regenerate the source-bound artifact and pass the complete release and
   unlinkability checks.
 - [ ] Run one final three-phone Firebase matrix with one exact APK pair.
 
 ## Layered Keccak review
 
-The accepted prototype design uses 400 committed spread-nibble columns, an
+The implemented prototype uses 400 committed spread-nibble columns, an
 18-variable grouped extraction and validity sumcheck, carried wiring
-functionals, and two source-bound log-9 MLE components. Its projected
-replacement mass is 212,992 cells. Its conservative same-accounting error is
-`8468/(q-2)`, below the current carrier's `8974/q` contribution. The design
-does not change the theorem, public statement, unlinkability claim, product
-API, STWO revision, or PCS settings.
+functionals, and two source-bound log-9 MLE components. The replacement adds
+212,992 cells. The complete Keccak service uses 1,534,720 cells after removal
+of product-dead SHAKE-128 absorb columns and lookup entries. Its conservative
+same-accounting error is `8468/(q-2)`, below the removed carrier's `8974/q`
+contribution. The design does not change the theorem, public statement,
+unlinkability claim, product API, STWO revision, or PCS settings.
 
-Mailbox A-013 is still pending. The independent design passed its final
-code-level review, so implementation can start while the mailbox monitor
-continues.
+Mailbox A-013 is still pending. The release freeze passed 27 layered-library
+tests and 31 service tests. A separate wire test executes the SHAKE-128
+deserializer and rejects a 137-byte message. The matrix includes row swaps,
+cross-permutation source attacks, alternate Iota, SIMD equivalence, invalid
+nibbles, and canonical mutations in all 147 payload sections. The source-bound
+artifact regeneration is pending.

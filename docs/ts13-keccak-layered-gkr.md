@@ -1,8 +1,8 @@
 # TS13 layered Keccak prototype
 
-Status: accepted for implementation
+Status: implemented and soundness-audited
 
-This design replaces the current Keccak round carrier. It does not change the
+This design replaces the removed Keccak round carrier. It does not change the
 TS13 identity theorem, ML-DSA-65, the public statement, the PCS settings, the
 STWO revision, local proving, or the product API.
 
@@ -85,14 +85,16 @@ Use nibble slot `n = 2*j + h`, where `h = 0` selects `lo` and `h = 1`
 selects `hi`. Slots 400 through 511 are virtual zero slots. Constrain every
 committed nibble to zero when the existing `is_active` column is zero.
 
-The vertical sponge keeps its positive `KeccakState(IN)` entry. Replace its
-negative `KeccakState(OUT, post)` entry with a negative
-`KeccakState(IN, input_spread)` entry. Keep the existing permutation ID in
-both entries. This gives one positive and one negative input tuple for each
-row.
+The vertical sponge emits one positive computed-input entry and one negative
+committed-input entry. Both use the existing permutation ID and the same
+recomposed `input_spread` state. This gives one positive and one negative input
+tuple for each row.
 
-Delete both old carrier state entries. The layered proof below binds the new
-input columns directly to the existing `post[200]` output columns.
+Use the canonical tuple `(permutation_id, state[200])`. Do not retain a
+constant direction or state tag.
+
+The removed carrier state entries are not retained. The layered proof binds
+the input columns directly to the existing `post[200]` output columns.
 
 ## 4. Circuit domains
 
@@ -389,7 +391,7 @@ The aggregate count is:
 | **Total** | **8,894** |
 
 The exact payload size is 142,304 bytes. The local verifier accepts no other
-shape. The current generic degree-three GKR wire and decoder are deleted.
+shape. The generic degree-three GKR wire and decoder are deleted.
 
 For a non-product service with public `p = p_log`, derive the expected field
 count and byte count from the `JobList`:
@@ -405,7 +407,7 @@ trailing byte. The TS13 envelope validator accepts only the `p = 9` result.
 ## 11. Soundness ledger
 
 Let `q = (2^31-1)^4`. Under the same conservative accounting used for the
-current carrier, the K contribution is:
+removed carrier baseline, the K contribution is:
 
 | Event | Coefficient |
 | --- | ---: |
@@ -424,7 +426,7 @@ Thus:
 epsilon_K <= 8468/(q-2)
 ```
 
-The current carrier uses `8974/q` under the same convention. The replacement
+The removed carrier uses `8974/q` under the same convention. The replacement
 improves that coefficient by 506, before the negligible denominator change.
 
 The two MLE constraints are also part of the one outer STARK composition and
@@ -449,19 +451,27 @@ The prototype replacement mass is:
 | New preprocessed columns | 0 |
 | **Total** | **212,992** |
 
+The canonical service accepts at most 136 absorbed bytes for each SHAKE-128
+job. Every TS13 SHAKE-128 job absorbs 34 bytes. SHAKE-128 still emits the full
+168-byte rate for every squeeze block. The trace commits 136 columns for each
+absorb byte, absorb spread, new rate, and capacity pad family. It derives the
+remaining 32 absorb positions from the public padding schedule. The AIR omits
+the 32 high conversion, absorb-input, and XOR entries. It also omits the
+later-absorb SHAKE-128 state entry.
+
 After removal of the old carrier, schedule table, AndNot table, and split
 tables, the complete Keccak layout is:
 
 ```text
 preprocessed:    16@9, 2@16, 2@8
-trace:           1442@9, 1@16, 1@8
-interaction:     848@9, 4@16, 4@8
+trace:           1314@9, 1@16, 1@8
+interaction:     752@9, 4@16, 4@8
 post-interaction: 16@9
 ```
 
-This is 1,649,408 AIR-reference cells. The physical system total is projected
-at 9,270,864 cells. The replacement passes the 320,000-cell prototype gate.
-It is 149,408 cells above the later 1.5-million complete-Keccak stop gate.
+This is 1,534,720 AIR-reference cells. The physical system total is projected
+at 9,156,176 cells. The replacement passes the 320,000-cell prototype gate.
+It is 34,720 cells above the later 1.5-million complete-Keccak stop gate.
 Do not hide that gap. If the prototype passes its A54 time gate, the next K
 step must fold the sponge absorb XOR check into the layered argument and
 retire the log-16 XOR table. Retiring that table removes 458,752 cells before
@@ -469,22 +479,22 @@ any replacement additions.
 
 The current A54 data gives this conservative first-order model:
 
-- Tree 1 mass falls from 11,965,152 to 4,647,872 cells.
-- Total physical commitment mass falls by about 44.6 percent.
-- A54 Tree 1 commitment can fall from 694 ms to about 270 ms if it scales with
+- Tree 1 mass falls from 11,965,152 to 4,582,336 cells.
+- Total physical commitment mass falls by about 45.2 percent.
+- A54 Tree 1 commitment can fall from 694 ms to about 266 ms if it scales with
   cells.
-- A54 STARK work can fall from 1,636 ms to about 917 ms if it scales with
+- A54 STARK work can fall from 1,636 ms to about 906 ms if it scales with
   AIR-reference cells.
 - The new layered proof replaces the measured 1,023 ms old Keccak GKR phase.
 
 These numbers do not prove the time gate. Measure one cold A54 run after the
 full negative and artifact checks. Do not start N or S before that result.
 
-## 13. Required implementation and tests
+## 13. Required checks
 
-Implement one `layered_gkr` path. Delete the old carrier, old round GKR,
-round schedule, old round trace, and old generic wire. Keep only the XOR and
-conversion tables used by the prototype.
+The canonical implementation has one `layered_gkr` path. It does not contain
+the old carrier, round GKR, round schedule, round trace, or generic wire. It
+keeps only the XOR and conversion tables used by this protocol.
 
 At minimum, release tests MUST cover:
 
@@ -494,7 +504,7 @@ At minimum, release tests MUST cover:
   nibble slots;
 - all four extraction polynomials and the nibble validity polynomial;
 - one invalid spread nibble;
-- input-source, output-source, and GKR-source mutations;
+- input-source, output-source, and source-MLE mutations;
 - a row swap and a cross-permutation source swap;
 - alternate coherent Iota constants;
 - every payload section, truncation, trailing bytes, and noncanonical limbs;

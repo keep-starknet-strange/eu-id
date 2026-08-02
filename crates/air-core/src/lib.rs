@@ -3,12 +3,13 @@
 //! Each circuit implements [`Air`] and [`AirProver`]. A module contributes
 //! columns and components to shared commitment trees. The [`prove`] and
 //! [`verify`] functions own the channel, commitment scheme, and transcript.
-//! They run each module through the same four phases:
+//! They run each module through the same five phases:
 //!
 //! 0. preprocessed tables
 //! 1. main witness and multiplicity columns
 //! 2. interaction (LogUp) columns
-//! 3. component assembly and one proof operation
+//! 3. auxiliary proof messages and tie-back columns
+//! 4. component assembly and one STARK proof operation
 //!
 //! Proving a single circuit is just `prove(&mut [&mut module])`.
 //!
@@ -18,7 +19,6 @@
 //! the same hash. The [`Mc`], [`Ch`], and [`Hasher`] aliases define that hash.
 
 pub mod claim_mask;
-pub mod gkr;
 pub mod relations;
 
 use std::collections::{HashMap, HashSet};
@@ -277,7 +277,7 @@ pub trait Air {
     /// after [`Air::build_components`].
     fn components(&self) -> Vec<&dyn Component>;
 
-    /// Optional post-interaction tree column log-sizes. Feature-gated lookup
+    /// Optional post-interaction tree column log-sizes. Auxiliary lookup
     /// arguments use this for MLE tie-back traces committed after tree 2.
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
         Vec::new()
@@ -290,8 +290,8 @@ pub trait Air {
     }
 
     /// Give this module its post-interaction payload. The orchestrator calls
-    /// this method before [`Air::verify_post_interaction`]. A module that uses
-    /// GKR stores and decodes the payload during verification.
+    /// this method before [`Air::verify_post_interaction`]. A post-interaction
+    /// protocol stores and decodes the payload during verification.
     fn load_post_interaction_payload(&mut self, _payload: &[u8]) {}
 }
 
@@ -362,7 +362,8 @@ pub trait AirProver: Air {
 
     /// Optional prover-side post-interaction transcript work, run after tree 2
     /// is committed. Any proof messages mixed here are therefore bound to all
-    /// committed GKR inputs: trace/multiplicity columns, relation randomness,
+    /// committed post-interaction inputs: trace and multiplicity columns,
+    /// relation randomness,
     /// claimed sums, and interaction columns.
     fn prove_post_interaction(&mut self, _channel: &mut Ch) {}
 
@@ -381,12 +382,13 @@ pub trait AirProver: Air {
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>>;
 }
 
-/// Drive every module through the four phases against one shared channel and one
+/// Drive every module through the five phases against one shared channel and one
 /// shared commitment scheme, producing a single STARK proof.
 ///
 /// Convenience wrapper over [`prove_with_post_interaction`] for the common case
-/// of modules that emit no GKR payload. A debug assertion fails if a module
-/// emits a payload. Such a module must use [`prove_with_post_interaction`].
+/// of modules that emit no post-interaction payload. A debug assertion fails
+/// if a module emits a payload. Such a module must use
+/// [`prove_with_post_interaction`].
 pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
@@ -394,7 +396,7 @@ pub fn prove(
     let (proof, payloads) = prove_with_post_interaction(modules, config)?;
     debug_assert!(
         payloads.iter().all(Vec::is_empty),
-        "a module emitted a GKR post-interaction payload; use prove_with_post_interaction"
+        "a module emitted a post-interaction payload; use prove_with_post_interaction"
     );
     Ok(proof)
 }
@@ -402,7 +404,6 @@ pub fn prove(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProveTimingMode {
     Disabled,
-    Legacy,
     Json,
 }
 
@@ -416,17 +417,8 @@ pub struct ProcessMemoryKib {
 }
 
 fn prove_timing_mode() -> ProveTimingMode {
-    prove_timing_mode_for(
-        std::env::var_os("EUID_PROVE_TIMING").is_some(),
-        std::env::var_os("AIR_CORE_PROVE_TIMING").is_some(),
-    )
-}
-
-fn prove_timing_mode_for(json: bool, legacy: bool) -> ProveTimingMode {
-    if json {
+    if std::env::var_os("EUID_PROVE_TIMING").is_some() {
         ProveTimingMode::Json
-    } else if legacy {
-        ProveTimingMode::Legacy
     } else {
         ProveTimingMode::Disabled
     }
@@ -499,9 +491,6 @@ fn emit_timing_line(line: &str) {
 fn report_prove_phase(timing: ProveTimingMode, name: &str, t_last: &mut std::time::Instant) {
     match timing {
         ProveTimingMode::Disabled => return,
-        ProveTimingMode::Legacy => {
-            eprintln!("air-core prove phase {name}: {:?}", t_last.elapsed());
-        }
         ProveTimingMode::Json => {
             emit_timing_line(&timing_json(
                 "air_core",
@@ -666,21 +655,21 @@ pub fn prove_with_post_interaction(
     tb.commit(channel);
     report_prove_phase(timing, "tree2-commit", &mut t_last);
 
-    // Optional post-tree-2 transcript block. GKR lookup proofs live here:
-    // their inputs are already committed (trees 1/2 plus relation draws), and
-    // any MLE-eval tie-back columns are committed immediately after the GKR
-    // proof messages so the verifier replays the same Fiat-Shamir order.
+    // Optional post-tree-2 transcript block. The inputs to an auxiliary proof
+    // are already committed in trees 1 and 2 and in the relation draws. The
+    // prover commits any MLE tie-back columns after the proof messages. The
+    // verifier uses the same Fiat-Shamir order.
     for m in modules.iter_mut() {
         m.prove_post_interaction(channel);
     }
-    // Collect the opaque per-module GKR payloads now that they have been
+    // Collect the opaque per-module payloads now that they have been
     // produced and mixed into the channel. Order matches module order, so the
     // verifier can redistribute them positionally.
     let post_interaction_payloads: Vec<Vec<u8>> = modules
         .iter_mut()
         .map(|m| m.take_post_interaction_payload())
         .collect();
-    report_prove_phase(timing, "post_interaction_gkr", &mut t_last);
+    report_prove_phase(timing, "post_interaction_proof", &mut t_last);
     if modules
         .iter()
         .any(|m| !m.post_interaction_log_sizes().is_empty())
@@ -727,7 +716,6 @@ pub fn prove_with_post_interaction(
     }
     match timing {
         ProveTimingMode::Disabled => {}
-        ProveTimingMode::Legacy => eprintln!("air-core prove TOTAL: {:?}", t_start.elapsed()),
         ProveTimingMode::Json => emit_timing_line(&timing_json(
             "air_core",
             "total",
@@ -842,8 +830,8 @@ pub fn compute_preprocessed_root(
     root
 }
 
-/// [`compute_preprocessed_root`] without the per-shape cache: every call
-/// rebuilds and commits tree 0.
+/// Uncached prover-side tree-0 construction. Every call rebuilds and commits
+/// tree 0.
 ///
 /// Use this function when a preprocessed column ID does not determine its
 /// content. For example, a dynamic schedule can use one ID for different
@@ -982,9 +970,9 @@ pub fn verify(
 /// On `Some(expected)`, the proof's `commitments[0]` must equal `expected`.
 /// This check occurs before the root enters the transcript. A mismatch returns
 /// [`VerifyError::PreprocessedRootMismatch`]. Callers obtain
-/// `expected` from [`compute_preprocessed_root`] over their own trusted module
-/// constructions or from a profile constant generated in the same way. They
-/// must not obtain it from the proof.
+/// `expected` from [`compute_canonical_preprocessed_root`] over their own
+/// trusted module constructions or from a profile constant generated in the
+/// same way. They must not obtain it from the proof.
 ///
 /// # Soundness
 ///
@@ -992,8 +980,8 @@ pub fn verify(
 /// contents, order, and sizes of every preprocessed column cryptographically.
 /// The prover-side 64-bit `DefaultHasher` fingerprint guard
 /// (`PreprocessedColumnFingerprint`) is NOT a soundness pin and must never be
-/// substituted for this check. `None` enables unpinned verification for shape
-/// tests only.
+/// substituted for this check. `None` skips this pin and is sound only when the
+/// caller binds the preprocessed content through another trusted mechanism.
 pub fn verify_with_expected_preprocessed_root(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
@@ -1012,11 +1000,11 @@ pub fn verify_with_expected_preprocessed_root(
 /// [`prove_with_post_interaction`]. Each non-empty payload is handed to its
 /// module (positional, same order as prove) via
 /// [`Air::load_post_interaction_payload`] before the module's
-/// [`Air::verify_post_interaction`] runs. A module that uses GKR then replays
-/// its proof against the shared channel.
+/// [`Air::verify_post_interaction`] runs. A module with an auxiliary proof then
+/// replays its proof against the shared channel.
 ///
-/// `post_interaction_payloads` is either empty (no module offloads anything) or
-/// exactly one entry per module. Verification rejects any other length.
+/// `post_interaction_payloads` is either empty (no module produces a payload)
+/// or exactly one entry per module. Verification rejects any other length.
 pub fn verify_with_expected_preprocessed_root_and_payloads(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
@@ -1083,7 +1071,7 @@ pub fn verify_with_expected_preprocessed_root_and_payloads(
         .collect();
     commitment_scheme.commit(proof.commitments[2], &interaction_sizes, channel);
 
-    // Hand each module its opaque payload (if any) before it replays its GKR
+    // Hand each module its opaque payload before it replays its auxiliary
     // proof against the shared channel in `verify_post_interaction`.
     if !post_interaction_payloads.is_empty() {
         for (m, payload) in modules.iter_mut().zip(post_interaction_payloads) {
@@ -1215,10 +1203,6 @@ mod tests {
 
     #[test]
     fn timing_output_is_opt_in_and_stwo_spans_are_coherent() {
-        assert_eq!(
-            prove_timing_mode_for(false, false),
-            ProveTimingMode::Disabled
-        );
         assert_eq!(
             timing_json(
                 "air_core",
@@ -1791,280 +1775,5 @@ mod tests {
             }
             other => panic!("expected PreprocessedRootMismatch, got {other:?}"),
         }
-    }
-
-    // ------------------------------------------------------------------
-    // End-to-end GKR transport through prove and verify.
-    // ------------------------------------------------------------------
-
-    use num_traits::One;
-    use stwo::core::fields::qm31::SecureField;
-    use stwo::prover::backend::CpuBackend;
-    use stwo::prover::lookups::gkr_prover::{prove_batch, Layer};
-    use stwo::prover::lookups::gkr_verifier::{partially_verify_batch, Gate};
-    use stwo::prover::lookups::mle::Mle;
-
-    use crate::gkr::{decode_gkr_batch_proof, encode_gkr_batch_proof};
-
-    fn grand_product(values: &[SecureField]) -> SecureField {
-        values
-            .iter()
-            .copied()
-            .fold(SecureField::one(), |acc, v| acc * v)
-    }
-
-    /// Toy module that carries a trivial one-column STARK (so `air_core::prove`
-    /// has real components to open) and, on the side, a GKR grand-product proof
-    /// over a private input layer whose product equals a public `claim`.
-    ///
-    /// This fixture tests opaque payload transport and the post-tree-2
-    /// Fiat-Shamir binding. It does not use an MLE-evaluation tie-back. The
-    /// verifier binds the GKR output claim directly to the public value and
-    /// accepts the input-layer evaluation claims.
-    struct GkrToyModule {
-        id: PreProcessedColumnId,
-        log_size: u32,
-        relation: Option<TableRelation>,
-        component: Option<FrameworkComponent<TableEval>>,
-        /// Prover-only witness: the GKR input layer.
-        values: Vec<SecureField>,
-        /// Public grand-product claim, mixed into the transcript by both sides.
-        claim: SecureField,
-        /// Prover: filled in `prove_post_interaction`. Verifier: loaded via
-        /// `load_post_interaction_payload`.
-        gkr_blob: Vec<u8>,
-    }
-
-    impl GkrToyModule {
-        fn prover(values: Vec<SecureField>) -> Self {
-            let claim = grand_product(&values);
-            Self::with_claim(values, claim)
-        }
-
-        /// Create a test prover whose `claim` can differ from its values.
-        fn with_claim(values: Vec<SecureField>, claim: SecureField) -> Self {
-            Self {
-                id: PreProcessedColumnId {
-                    id: "gkr_toy".to_string(),
-                },
-                log_size: 4,
-                relation: None,
-                component: None,
-                values,
-                claim,
-                gkr_blob: Vec::new(),
-            }
-        }
-
-        fn verifier(claim: SecureField) -> Self {
-            Self::with_claim(Vec::new(), claim)
-        }
-
-        fn column(&self) -> PreprocessedColumnEval {
-            CircleEvaluation::new(
-                CanonicCoset::new(self.log_size).circle_domain(),
-                BaseColumn::from_iter((0..1u32 << self.log_size).map(M31::from_u32_unchecked)),
-            )
-        }
-    }
-
-    impl Air for GkrToyModule {
-        fn mix_public(&self, channel: &mut Ch) {
-            channel.mix_felts(&[self.claim]);
-        }
-
-        fn draw_relations(&mut self, channel: &mut Ch) {
-            self.relation = Some(TableRelation::draw(channel));
-        }
-
-        fn layout(&self) -> TreeLayout {
-            TreeLayout {
-                preprocessed: vec![self.log_size],
-                trace: vec![self.log_size],
-                interaction: vec![self.log_size; 4],
-            }
-        }
-
-        fn claimed_sums(&self) -> Vec<QM31> {
-            Vec::new()
-        }
-
-        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-            vec![self.id.clone()]
-        }
-
-        fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
-            self.component = Some(FrameworkComponent::new(
-                allocator,
-                TableEval {
-                    log_size: self.log_size,
-                    id: self.id.clone(),
-                    relation: self.relation.clone().expect("relation is drawn"),
-                },
-                QM31::zero(),
-            ));
-        }
-
-        fn components(&self) -> Vec<&dyn Component> {
-            vec![self.component.as_ref().expect("component is built")]
-        }
-
-        fn load_post_interaction_payload(&mut self, payload: &[u8]) {
-            self.gkr_blob = payload.to_vec();
-        }
-
-        fn verify_post_interaction(&mut self, channel: &mut Ch) -> Result<(), VerificationError> {
-            let proof = decode_gkr_batch_proof(&self.gkr_blob).map_err(|e| {
-                VerificationError::InvalidStructure(format!("GKR blob decode failed: {e}"))
-            })?;
-            // Bind the output claim to the public value BEFORE replaying, so a
-            // proof of a different product is rejected even if internally valid.
-            let output = proof
-                .output_claims_by_instance
-                .first()
-                .and_then(|c| c.first())
-                .copied()
-                .ok_or_else(|| {
-                    VerificationError::InvalidStructure("GKR proof has no output claim".into())
-                })?;
-            if output != self.claim {
-                return Err(VerificationError::InvalidStructure(
-                    "GKR output claim does not match public claim".into(),
-                ));
-            }
-            // Replay against the shared channel: this is the Fiat-Shamir binding
-            // to trees 1/2 and the drawn relations. A tampered blob desyncs here.
-            partially_verify_batch(vec![Gate::GrandProduct], &proof, channel).map_err(|e| {
-                VerificationError::InvalidStructure(format!("GKR verify failed: {e}"))
-            })?;
-            Ok(())
-        }
-    }
-
-    impl AirProver for GkrToyModule {
-        fn max_log_size(&self) -> u32 {
-            self.log_size
-        }
-
-        fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
-            tb.extend_evals(vec![self.column()]);
-        }
-
-        fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-            fingerprint_preprocessed_columns(
-                "gkr_toy",
-                std::slice::from_ref(&self.id),
-                &[self.column()],
-            )
-        }
-
-        fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
-            tb.extend_evals(vec![self.column()]);
-        }
-
-        fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>) {
-            let relation = self.relation.clone().expect("relation is drawn");
-            let column = self.column();
-            let mut logup = LogupTraceGenerator::new(self.log_size);
-            logup.col_from_fn(|vec_row| {
-                (
-                    PackedQM31::zero(),
-                    relation.combine(&[column.data[vec_row]]),
-                )
-            });
-            let (trace, claimed_sum) = logup.finalize_last();
-            assert_eq!(claimed_sum, QM31::zero());
-            tb.extend_evals(trace);
-        }
-
-        fn prove_post_interaction(&mut self, channel: &mut Ch) {
-            let layer =
-                Layer::GrandProduct(Mle::<CpuBackend, SecureField>::new(self.values.clone()));
-            let (proof, _artifact) = prove_batch(channel, vec![layer]);
-            self.gkr_blob = encode_gkr_batch_proof(&proof);
-        }
-
-        fn take_post_interaction_payload(&mut self) -> Vec<u8> {
-            std::mem::take(&mut self.gkr_blob)
-        }
-
-        fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-            vec![self.component.as_ref().expect("component is built")]
-        }
-    }
-
-    #[test]
-    fn gkr_transport_round_trips_and_verifies() {
-        let values: Vec<SecureField> = (1u32..=16).map(SecureField::from).collect();
-        let mut prover = GkrToyModule::prover(values.clone());
-        let claim = prover.claim;
-
-        let (proof, payloads) =
-            prove_with_post_interaction(&mut [&mut prover], PcsConfig::default())
-                .expect("toy GKR proves");
-        assert_eq!(payloads.len(), 1);
-        assert!(
-            !payloads[0].is_empty(),
-            "GKR blob must travel in the payload"
-        );
-
-        let mut verifier = GkrToyModule::verifier(claim);
-        verify_with_expected_preprocessed_root_and_payloads(
-            &mut [&mut verifier],
-            &proof,
-            None,
-            &payloads,
-        )
-        .expect("toy GKR verifies against matching payload");
-    }
-
-    #[test]
-    fn gkr_transport_rejects_corrupted_blob() {
-        let values: Vec<SecureField> = (1u32..=16).map(SecureField::from).collect();
-        let mut prover = GkrToyModule::prover(values);
-        let claim = prover.claim;
-
-        let (proof, mut payloads) =
-            prove_with_post_interaction(&mut [&mut prover], PcsConfig::default())
-                .expect("toy GKR proves");
-        // Flip a byte deep inside the sumcheck data (past the length prefixes).
-        let mid = payloads[0].len() / 2;
-        payloads[0][mid] ^= 0xff;
-
-        let mut verifier = GkrToyModule::verifier(claim);
-        let result = verify_with_expected_preprocessed_root_and_payloads(
-            &mut [&mut verifier],
-            &proof,
-            None,
-            &payloads,
-        );
-        assert!(result.is_err(), "corrupted GKR blob must be rejected");
-    }
-
-    #[test]
-    fn gkr_transport_rejects_wrong_claim() {
-        // Both sides use the same public claim, so the transcript stays in
-        // sync. The claim does not equal the true grand product.
-        // The output-claim binding rejects this mismatch.
-        let values: Vec<SecureField> = (1u32..=16).map(SecureField::from).collect();
-        let true_product = grand_product(&values);
-        let wrong_claim = true_product + SecureField::one();
-        let mut prover = GkrToyModule::with_claim(values, wrong_claim);
-
-        let (proof, payloads) =
-            prove_with_post_interaction(&mut [&mut prover], PcsConfig::default())
-                .expect("toy GKR proves");
-
-        let mut verifier = GkrToyModule::verifier(wrong_claim);
-        let result = verify_with_expected_preprocessed_root_and_payloads(
-            &mut [&mut verifier],
-            &proof,
-            None,
-            &payloads,
-        );
-        assert!(
-            result.is_err(),
-            "GKR proof of a different product must be rejected"
-        );
     }
 }

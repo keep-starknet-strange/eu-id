@@ -1,4 +1,4 @@
-//! Keccak-f[1600] / SHAKE-256 structural constants.
+//! `Keccak-f[1600]` and SHAKE structural constants.
 
 /// Keccak-f state lanes (5x5).
 pub const N_LANES_KECCAK: usize = 25;
@@ -6,9 +6,9 @@ pub const N_LANES_KECCAK: usize = 25;
 pub const N_BYTES_IN_U64: usize = 8;
 /// Total state bytes: 25 lanes x 8 bytes = 200.
 pub const N_BYTES_IN_STATE: usize = N_LANES_KECCAK * N_BYTES_IN_U64;
-/// sqrt of the lane count (the 5 in 5x5).
+/// Width and height of the 5x5 lane grid.
 pub const SQRT_N_LANES: usize = 5;
-/// Rounds in Keccak-f[1600].
+/// Rounds in `Keccak-f[1600]`.
 pub const N_ROUNDS: usize = 24;
 
 /// SHAKE-256 rate in bytes (1088 bits). Capacity is 512 bits.
@@ -21,8 +21,8 @@ pub const DELIMITED_SUFFIX: u8 = 0x1F;
 /// Final padding bit OR-ed into the last rate byte (`0x80`).
 pub const FINAL_BIT: u8 = 0x80;
 
-/// Iota round constants from FIPS 202, plus zero for boundary row 24.
-pub const IOTA_RC: [u64; N_ROUNDS + 1] = [
+/// Iota round constants from FIPS 202.
+pub const IOTA_RC: [u64; N_ROUNDS] = [
     0x0000_0000_0000_0001,
     0x0000_0000_0000_8082,
     0x8000_0000_0000_808A,
@@ -47,23 +47,7 @@ pub const IOTA_RC: [u64; N_ROUNDS + 1] = [
     0x8000_0000_0000_8080,
     0x0000_0000_8000_0001,
     0x8000_0000_8000_8008,
-    0x0000_0000_0000_0000, // fixed value for boundary row 24
 ];
-
-/// Little-endian byte positions that vary in the Keccak Iota constants.
-/// Bytes 2, 4, 5, and 6 are zero in every round and are inlined as zero.
-pub const IOTA_RC_BYTE_INDICES: [usize; 4] = [0, 1, 3, 7];
-
-/// Return the 24 Iota constants without the boundary-row-24 zero.
-pub const fn iota_rc_rounds() -> [u64; N_ROUNDS] {
-    let mut out = [0u64; N_ROUNDS];
-    let mut i = 0;
-    while i < N_ROUNDS {
-        out[i] = IOTA_RC[i];
-        i += 1;
-    }
-    out
-}
 
 /// Rho rotation offsets indexed `[x][y]`; lane index is `x + 5*y`.
 /// `B[5*y + ((2x+3y) mod 5)] = rotl(A[x+5*y], RHO_OFFSETS[x][y])`.

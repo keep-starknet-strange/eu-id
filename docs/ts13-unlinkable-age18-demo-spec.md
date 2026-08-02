@@ -670,8 +670,9 @@ These fixed components bind the private theorem:
 - private device-key derivation and binding;
 - private revocation range and signature.
 
-The Keccak service MUST bind its round GKR output claim to the global LogUp sum
-and the committed trace.
+The Keccak service MUST bind its layered proof to the committed sponge input
+and output columns. It MUST use two log-9 MLE components for these bindings.
+The verifier MUST check both bindings in the outer STARK.
 
 The fixed all-ML-DSA-65 Keccak plan uses 261 permutations:
 
@@ -680,17 +681,41 @@ The fixed all-ML-DSA-65 Keccak plan uses 261 permutations:
 - 36 device permutations;
 - 13 revocation permutations.
 
-The sound carrier uses 25 rows for each permutation.
-It has 910 committed columns at log size 13.
-The complete shared service commits these cells:
+Each SHAKE-128 job MUST absorb at most 136 bytes. Every fixed TS13 SHAKE-128
+job absorbs 34 bytes. Each SHAKE-128 squeeze block MUST still contain all 168
+rate bytes. The AIR MUST derive absorb positions 136 through 167 from the
+public padding schedule. It MUST NOT commit those derived bytes or their
+spread values.
 
-- 211,104 preprocessed cells;
-- 8,121,376 trace cells;
-- 704,640 interaction cells;
-- 65,536 post-interaction cells;
-- 9,102,656 cells in total.
+The layered proof checks all 24 Keccak-f[1600] rounds. It uses the physical
+sponge row as the permutation coordinate. It checks active message rows and
+active capacity rows. It requires zero input for an unused capacity row. It
+requires zero state for a padding row.
 
-The performance campaign gate for this service is 9,200,000 committed cells.
+The sponge commits 400 spread-nibble input columns. The layered proof checks
+that each committed nibble is valid. It extracts all four bits from each
+nibble. It checks the fixed Theta, Rho, Pi, Chi, and Iota maps. It binds the
+final state to the committed sponge output.
+
+The layered payload MUST contain exactly 8,894 QM31 fields in canonical limb
+encoding. Its size MUST be 142,304 bytes. The product service has this fixed
+geometry:
+
+- preprocessed: 16 columns at log size 9, two at log size 16, and two at log
+  size 8;
+- trace: 1,314 columns at log size 9, one at log size 16, and one at log size
+  8;
+- interaction: 752 columns at log size 9, four at log size 16, and four at log
+  size 8;
+- post-interaction: 16 columns at log size 9;
+- five components and three claimed sums;
+- 139,776 preprocessed cells;
+- 738,560 trace cells;
+- 648,192 interaction cells;
+- 8,192 post-interaction cells;
+- 1,534,720 committed cells in total.
+
+The fixed payload and fixed geometry do not depend on credential values.
 
 ### 8.1 Private `rho` and matrix expansion
 

@@ -7,8 +7,6 @@ edition.workspace = true
 stwo = { workspace = true, features = ["tracing"] }
 stwo-constraint-framework = { workspace = true }
 num-traits = { workspace = true }
-serde = { workspace = true }
-bincode = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 

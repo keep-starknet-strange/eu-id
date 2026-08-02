@@ -1,20 +1,10 @@
-//! Table-provider components for the spread-form Keccak AIR. Each preprocessed
-//! lookup table gets a component that holds the table as preprocessed columns
-//! plus multiplicity trace columns. It yields each relation with a negative
-//! multiplicity. The carrier and sponge use the same relations with positive
-//! multiplicities. Thus, the LogUp balance holds only for valid table rows.
+//! Table-provider components for the spread-form sponge AIR.
 //!
-//! Three table families:
-//! - **Dense:** one `2^16`-row table `(key, spread(xor), andnot)` that serves both
-//!   the `xor3` and `andnot` relations. Both key a 16-bit base-4 digit value, so
-//!   they share the dense key space. Merging halves the fixed `2^16`
-//!   commitment. It carries two multiplicity columns and yields
-//!   both relations.
-//! - **Conv:** `2^8`-row `(byte, spread(byte))` byte↔spread table.
-//! - **Split(r):** `2^8`-row `(spread_byte, spread_hi, spread_lo)` spread split.
+//! Each component commits one multiplicity column. It uses a fixed table as
+//! preprocessed input and yields the matching lookup relation with negative
+//! multiplicity. The sponge uses the relation with positive multiplicity.
 
 use serde::{Deserialize, Serialize};
-use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::poly::circle::CanonicCoset;
@@ -29,98 +19,57 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
 
-use crate::keccak_round::InteractionClaimData as RoundData;
-use crate::relations::{KeccakRelations, SplitRelation};
-use crate::tables::{
-    build_conv_table, build_dense_table, build_split_table, LOG_SIZE_DENSE, LOG_SIZE_SPLIT,
-    SPLIT_SHIFTS,
-};
-use crate::utils::unspread_u32;
+use crate::relations::KeccakRelations;
+use crate::tables::{build_conv_table, build_xor3_table, LOG_SIZE_CONV, LOG_SIZE_XOR3};
 
-/// Identifies one table so its preprocessed column ids, log size, rows, width,
-/// multiplicity count, and relation(s) are all consistent.
+/// Identifies one table and defines its columns, size, and rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableKind {
-    Dense,
+    Xor3,
     Conv,
-    Split(u32),
 }
 
 impl TableKind {
-    pub const ALL: [TableKind; 9] = [
-        TableKind::Dense,
-        TableKind::Conv,
-        TableKind::Split(1),
-        TableKind::Split(2),
-        TableKind::Split(3),
-        TableKind::Split(4),
-        TableKind::Split(5),
-        TableKind::Split(6),
-        TableKind::Split(7),
-    ];
+    pub const ALL: [TableKind; 2] = [TableKind::Xor3, TableKind::Conv];
 
-    fn tag(&self) -> String {
+    fn tag(&self) -> &'static str {
         match self {
-            TableKind::Dense => "keccak_dense".to_string(),
-            TableKind::Conv => "keccak_conv".to_string(),
-            TableKind::Split(r) => format!("keccak_split_{r}"),
+            TableKind::Xor3 => "keccak_xor3",
+            TableKind::Conv => "keccak_conv",
         }
     }
 
     pub fn log_size(&self) -> u32 {
         match self {
-            TableKind::Dense => LOG_SIZE_DENSE,
-            TableKind::Conv | TableKind::Split(_) => LOG_SIZE_SPLIT,
+            TableKind::Xor3 => LOG_SIZE_XOR3,
+            TableKind::Conv => LOG_SIZE_CONV,
         }
     }
 
-    /// Number of preprocessed columns (Dense=3, Conv=2, Split=3).
+    /// Both fixed tables contain a key and a value.
     pub fn n_cols(&self) -> usize {
-        match self {
-            TableKind::Conv => 2,
-            TableKind::Dense | TableKind::Split(_) => 3,
-        }
+        2
     }
 
-    /// Number of relations yielded (and multiplicity columns): Dense=2, else 1.
-    pub fn n_relations(&self) -> usize {
+    fn rows(&self) -> Vec<[u32; 2]> {
         match self {
-            TableKind::Dense => 2,
-            _ => 1,
-        }
-    }
-
-    /// Rows as `Vec<Vec<u32>>` (each inner vec of length `n_cols`).
-    fn rows(&self) -> Vec<Vec<u32>> {
-        match self {
-            TableKind::Dense => build_dense_table()
-                .into_iter()
-                .map(|r| r.to_vec())
-                .collect(),
-            TableKind::Conv => build_conv_table().into_iter().map(|r| r.to_vec()).collect(),
-            TableKind::Split(r) => build_split_table(*r)
-                .into_iter()
-                .map(|r| r.to_vec())
-                .collect(),
+            TableKind::Xor3 => build_xor3_table(),
+            TableKind::Conv => build_conv_table(),
         }
     }
 
     /// The preprocessed column ids (`n_cols` of them).
     pub fn column_ids(&self) -> Vec<PreProcessedColumnId> {
-        let t = self.tag();
+        let tag = self.tag();
         (0..self.n_cols())
             .map(|c| PreProcessedColumnId {
-                id: if matches!((self, c), (TableKind::Conv, 1) | (TableKind::Split(_), 0)) {
-                    "keccak_spread_byte_8".to_string()
-                } else {
-                    format!("{t}_{c}")
-                },
+                id: format!("{tag}_{c}"),
             })
             .collect()
     }
 }
 
-/// All preprocessed column ids for the nine tables, in a fixed order.
+/// All preprocessed column IDs in a fixed order.
 pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     TableKind::ALL.iter().flat_map(|k| k.column_ids()).collect()
 }
@@ -148,117 +97,66 @@ pub fn generate_preprocessed_trace(
     evals
 }
 
-// Count table-row hits from the round and sponge lookup data.
+/// Total cells in the two preprocessed tables.
+pub const PREPROCESSED_CELLS: usize = (1 << LOG_SIZE_XOR3) * 2 + (1 << LOG_SIZE_CONV) * 2;
 
-/// Total preprocessed cell count across all nine tables (for the acceptance
-/// report): `2^16·3 (dense) + 2^8·2 (conv) + 7·2^8·3 (split)`.
-pub const PREPROCESSED_CELLS: usize =
-    (1 << LOG_SIZE_DENSE) * 3 + (1 << LOG_SIZE_SPLIT) * 2 + 7 * (1 << LOG_SIZE_SPLIT) * 3;
-
-/// Per-table multiplicity vectors. The Dense table has two (xor3, andnot); every
-/// other table has one. Indexed as `TableKind::ALL`, flattened by relation.
+/// Multiplicity of each fixed table row.
 pub struct TableMultiplicities {
-    /// `per_table[i]` is a vec of `n_relations` multiplicity vectors.
-    pub per_table: Vec<Vec<Vec<u32>>>,
+    xor3: Vec<u32>,
+    conv: Vec<u32>,
 }
 
-const DENSE_I: usize = 0;
-const CONV_I: usize = 1;
-
 impl TableMultiplicities {
-    /// Count only the 24 round rows in each 25-row carrier block. Header and
-    /// padding lookup numerators are zero, so the table must not count them.
-    pub fn from_carrier_round(data: &RoundData, n_perms: usize) -> Self {
-        let mut per_table: Vec<Vec<Vec<u32>>> = TableKind::ALL
-            .iter()
-            .map(|kind| vec![vec![0u32; 1 << kind.log_size()]; kind.n_relations()])
-            .collect();
-        let active = |row: usize| {
-            row < n_perms * crate::carrier::ROWS_PER_PERMUTATION
-                && !row.is_multiple_of(crate::carrier::ROWS_PER_PERMUTATION)
-        };
-
-        for lookup in &data.lookup_data.xor3 {
-            for (vector_row, tuple) in lookup.iter().enumerate() {
-                for (lane, key) in tuple[0].to_array().iter().enumerate() {
-                    if active(vector_row * N_LANES + lane) {
-                        per_table[DENSE_I][0][key.0 as usize] += 1;
-                    }
-                }
-            }
-        }
-        for lookup in &data.lookup_data.andnot {
-            for (vector_row, tuple) in lookup.iter().enumerate() {
-                for (lane, value) in tuple[0].to_array().iter().enumerate() {
-                    if active(vector_row * N_LANES + lane) {
-                        per_table[DENSE_I][1][value.0 as usize] += 1;
-                    }
-                }
-            }
-        }
-        for lookup in &data.lookup_data.split {
-            for (vector_row, tuple) in lookup.iter().enumerate() {
-                let shift = tuple[0].to_array()[0].0;
-                let table_index = split_table_index(shift);
-                for (lane, value) in tuple[1].to_array().iter().enumerate() {
-                    if active(vector_row * N_LANES + lane) {
-                        per_table[table_index][0][unspread_u32(value.0) as usize] += 1;
-                    }
-                }
-            }
-        }
-
-        Self { per_table }
-    }
-
-    /// Fold in the sponge's lane-0 lookups: the multi-block absorb XOR3 (dense
-    /// relation 0) and the byte↔spread conv uses. Counted once (lane 0 only).
-    pub fn add_sponge(&mut self, xor_blocks: &[Vec<[PackedM31; 2]>], conv: &[[PackedM31; 2]]) {
+    /// Count the sponge's XOR and byte-conversion lookups once per tuple.
+    pub fn from_sponge(
+        xor_blocks: &[Vec<[PackedM31; 2]>],
+        conv_lookups: &[[PackedM31; 2]],
+    ) -> Self {
+        let mut xor3 = vec![0u32; 1 << LOG_SIZE_XOR3];
+        let mut conv = vec![0u32; 1 << LOG_SIZE_CONV];
         for block in xor_blocks {
             for tuple in block {
                 let key = tuple[0].to_array()[0].0 as usize;
-                self.per_table[DENSE_I][0][key] += 1;
+                xor3[key] += 1;
             }
         }
-        for tuple in conv {
+        for tuple in conv_lookups {
             let byte = tuple[0].to_array()[0].0 as usize;
-            self.per_table[CONV_I][0][byte] += 1;
+            conv[byte] += 1;
+        }
+        Self { xor3, conv }
+    }
+
+    fn for_kind(&self, kind: TableKind) -> &[u32] {
+        match kind {
+            TableKind::Xor3 => &self.xor3,
+            TableKind::Conv => &self.conv,
         }
     }
 }
 
-fn split_table_index(r: u32) -> usize {
-    // TableKind::ALL is [Dense, Conv, Split(1..7)]; Split(r) is at index 1 + r.
-    debug_assert!(SPLIT_SHIFTS.contains(&r));
-    1 + r as usize
-}
-
-/// Multiplicity trace: `n_relations` base columns per table.
+/// One multiplicity trace column per table.
 pub fn generate_trace(
     mult: &TableMultiplicities,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
     let mut cols = Vec::new();
-    for (kind, mults) in TableKind::ALL.iter().zip(&mult.per_table) {
+    for kind in TableKind::ALL {
         let domain = CanonicCoset::new(kind.log_size()).circle_domain();
-        for m in mults {
-            let col: BaseColumn = m.iter().map(|&v| BaseField::from(v)).collect();
-            cols.push(CircleEvaluation::new(domain, col));
-        }
+        let col: BaseColumn = mult
+            .for_kind(kind)
+            .iter()
+            .map(|&value| BaseField::from(value))
+            .collect();
+        cols.push(CircleEvaluation::new(domain, col));
     }
     cols
 }
 
-// ── Interaction: one paired yield fraction column per table ──
+// ── Interaction: one yield fraction column per table ──
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InteractionClaim {
     pub claimed_sums: Vec<SecureField>,
-}
-
-impl InteractionClaim {
-    pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_felts(&self.claimed_sums);
-    }
 }
 
 pub fn generate_interaction_trace(
@@ -271,42 +169,18 @@ pub fn generate_interaction_trace(
     let mut all_cols = Vec::new();
     let mut claimed_sums = Vec::new();
 
-    for (kind, mults) in TableKind::ALL.iter().zip(&mult.per_table) {
+    for kind in TableKind::ALL {
         let rows = kind.rows();
         let log_size = kind.log_size();
         let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
         let mut gen = LogupTraceGenerator::new(log_size);
-
-        match kind {
-            TableKind::Dense => {
-                // Two yields (xor3, andnot) over the shared rows, pair-batched.
-                let mut col = gen.new_col();
-                for vr in 0..n_vec_rows {
-                    let base = vr * N_LANES;
-                    let pack = |c: usize| {
-                        PackedM31::from_array(std::array::from_fn(|l| M31::from(rows[base + l][c])))
-                    };
-                    let key = pack(0);
-                    let xor_out = pack(1);
-                    let andnot_out = pack(2);
-                    let d0: PackedQM31 = rel.xor3.combine(&[key, xor_out]);
-                    let d1: PackedQM31 = rel.andnot.combine(&[key, andnot_out]);
-                    let n0 = packed_neg_mult(&mults[0], vr);
-                    let n1 = packed_neg_mult(&mults[1], vr);
-                    col.write_frac(vr, n0 * d1 + n1 * d0, d0 * d1);
-                }
-                col.finalize_col();
-            }
-            _ => {
-                let mut col = gen.new_col();
-                for vr in 0..n_vec_rows {
-                    let num = packed_neg_mult(&mults[0], vr);
-                    let den = packed_row_denom(kind, rel, &rows, vr);
-                    col.write_frac(vr, num, den);
-                }
-                col.finalize_col();
-            }
+        let mut col = gen.new_col();
+        for vector_row in 0..n_vec_rows {
+            let numerator = packed_neg_mult(mult.for_kind(kind), vector_row);
+            let denominator = packed_row_denom(kind, rel, &rows, vector_row);
+            col.write_frac(vector_row, numerator, denominator);
         }
+        col.finalize_col();
 
         let (trace, sum) = gen.finalize_last();
         all_cols.extend(trace);
@@ -316,39 +190,28 @@ pub fn generate_interaction_trace(
     (InteractionClaim { claimed_sums }, all_cols)
 }
 
-fn packed_neg_mult(mults: &[u32], vr: usize) -> PackedQM31 {
-    let base = vr * N_LANES;
+fn packed_neg_mult(mults: &[u32], vector_row: usize) -> PackedQM31 {
+    let base = vector_row * N_LANES;
     let arr: [M31; N_LANES] = std::array::from_fn(|l| M31::from(mults[base + l]));
     -PackedQM31::from(PackedM31::from_array(arr))
 }
 
 fn packed_row_denom(
-    kind: &TableKind,
+    kind: TableKind,
     rel: &KeccakRelations,
-    rows: &[Vec<u32>],
-    vr: usize,
+    rows: &[[u32; 2]],
+    vector_row: usize,
 ) -> PackedQM31 {
-    let base = vr * N_LANES;
-    let n = kind.n_cols();
+    let base = vector_row * N_LANES;
     let pack =
         |c: usize| PackedM31::from_array(std::array::from_fn(|l| M31::from(rows[base + l][c])));
     match kind {
+        TableKind::Xor3 => rel.xor3.combine(&[pack(0), pack(1)]),
         TableKind::Conv => rel.conv.combine(&[pack(0), pack(1)]),
-        TableKind::Split(r) => {
-            let sr: &SplitRelation = &rel.split[(*r - 1) as usize];
-            let cols: Vec<PackedM31> = (0..n).map(pack).collect();
-            sr.combine(&cols)
-        }
-        TableKind::Dense => unreachable!("dense handled inline"),
     }
 }
 
 // ── Components (one FrameworkEval per table) ──
-
-#[derive(Copy, Clone, Default, Serialize, Deserialize, Debug)]
-pub struct Claim {
-    pub log_size: u32,
-}
 
 #[derive(Clone)]
 pub struct Eval {
@@ -370,34 +233,18 @@ impl FrameworkEval for Eval {
             .iter()
             .map(|id| eval.get_preprocessed_column(id.clone()))
             .collect();
+        let mult = eval.next_trace_mask();
         match self.kind {
-            TableKind::Dense => {
-                // (key, xor_out, andnot_out) yields xor3 and andnot.
-                let m_xor = eval.next_trace_mask();
-                let m_and = eval.next_trace_mask();
+            TableKind::Xor3 => {
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.xor3,
-                    -E::EF::from(m_xor),
-                    &[cols[0].clone(), cols[1].clone()],
-                ));
-                eval.add_to_relation(RelationEntry::new(
-                    &self.relations.andnot,
-                    -E::EF::from(m_and),
-                    &[cols[0].clone(), cols[2].clone()],
-                ));
-            }
-            TableKind::Conv => {
-                let mult = eval.next_trace_mask();
-                eval.add_to_relation(RelationEntry::new(
-                    &self.relations.conv,
                     -E::EF::from(mult),
                     &cols,
                 ));
             }
-            TableKind::Split(r) => {
-                let mult = eval.next_trace_mask();
+            TableKind::Conv => {
                 eval.add_to_relation(RelationEntry::new(
-                    &self.relations.split[(r - 1) as usize],
+                    &self.relations.conv,
                     -E::EF::from(mult),
                     &cols,
                 ));
@@ -415,18 +262,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spread_byte_tables_share_one_physical_column() {
-        let shared = TableKind::Conv.column_ids()[1].clone();
-        for shift in 1..=7 {
-            assert_eq!(TableKind::Split(shift).column_ids()[0], shared);
-        }
+    fn table_geometry_is_canonical() {
+        assert_eq!(TableKind::ALL, [TableKind::Xor3, TableKind::Conv]);
+        assert_eq!(TableKind::Xor3.log_size(), LOG_SIZE_XOR3);
+        assert_eq!(TableKind::Conv.log_size(), LOG_SIZE_CONV);
+        assert_eq!(TableKind::Xor3.n_cols(), 2);
+        assert_eq!(TableKind::Conv.n_cols(), 2);
         assert_eq!(
             all_preprocessed_column_ids()
                 .into_iter()
-                .map(|id| id.id)
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            19
+                .map(|column| column.id)
+                .collect::<Vec<_>>(),
+            [
+                "keccak_xor3_0",
+                "keccak_xor3_1",
+                "keccak_conv_0",
+                "keccak_conv_1",
+            ]
         );
+        assert_eq!(
+            all_preprocessed_log_sizes(),
+            [LOG_SIZE_XOR3, LOG_SIZE_XOR3, LOG_SIZE_CONV, LOG_SIZE_CONV]
+        );
+        assert_eq!(generate_preprocessed_trace().len(), 4);
+        assert_eq!(PREPROCESSED_CELLS, 131_584);
+    }
+
+    #[test]
+    fn sponge_multiplicities_count_each_tuple_once() {
+        let packed = |value: u32| PackedM31::from(M31::from(value));
+        let xor_blocks = vec![
+            vec![[packed(7), packed(1)], [packed(7), packed(1)]],
+            vec![[packed(11), packed(5)]],
+        ];
+        let conv_lookups = vec![[packed(3), packed(5)], [packed(255), packed(21_845)]];
+
+        let multiplicities = TableMultiplicities::from_sponge(&xor_blocks, &conv_lookups);
+
+        assert_eq!(multiplicities.xor3[7], 2);
+        assert_eq!(multiplicities.xor3[11], 1);
+        assert_eq!(multiplicities.xor3.iter().sum::<u32>(), 3);
+        assert_eq!(multiplicities.conv[3], 1);
+        assert_eq!(multiplicities.conv[255], 1);
+        assert_eq!(multiplicities.conv.iter().sum::<u32>(), 2);
+        assert_eq!(generate_trace(&multiplicities).len(), 2);
     }
 }

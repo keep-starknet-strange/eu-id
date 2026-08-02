@@ -1,27 +1,16 @@
-//! State representation and the native Keccak-f[1600] reference used to fill
-//! and validate traces.
-//!
-//! The state is `[PackedM31; 200]`: 25 lanes of 8 little-endian byte limbs.
-//! byte `idx = lane*8 + byte_idx`. The `N_LANES` SIMD lanes of each `PackedM31`
-//! carry independent permutation instances. One column set proves `N_LANES`
-//! permutations at once. This is the unit for cells-per-permutation accounting.
+//! Shared column-order and spread-encoding utilities.
 
-use num_traits::{One, Zero};
+use num_traits::Zero;
 use stwo::core::fields::m31::M31;
-use stwo::prover::backend::simd::m31::{PackedM31, N_LANES};
-
-use crate::constants::{N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, N_ROUNDS};
 
 // ───────────────────────────── Spread encoding ─────────────────────────────
 //
 // Stride-2 "spread" form: a byte `b = Σ bᵢ·2ⁱ` maps to `spread(b) = Σ bᵢ·4ⁱ`
 // (a 16-bit value whose 8 base-4 digits are exactly `b`'s bits). Sums of ≤3
 // spread values stay carry-free in M31 (each base-4 slot sums to ≤3), so XOR of
-// up to three bytes is a single dense `sum → spread(xor)` table lookup, and
-// AndNot is a single `spread(b')+2·spread(b'') → spread(¬b'∧b'')` lookup. The
-// Keccak state is carried in spread form across all rounds and through the
-// `KeccakStateRelation`. Byte form appears only at the HashIo boundary, where
-// the `conv` table converts it.
+// up to three bytes is one dense `sum → spread(xor)` table lookup. Byte form
+// appears at the HashIo boundary, where the conversion table binds it to spread
+// form.
 
 /// Largest spread value: `spread(0xFF) = Σ 4ⁱ = (4⁸−1)/3 = 21845`.
 pub const SPREAD_MAX: u32 = spread_u32(0xFF);
@@ -46,33 +35,6 @@ pub const fn unspread_u32(spread: u32) -> u32 {
         i += 1;
     }
     out
-}
-
-/// A monotone activity mask: the first `padding_offset` rows are active (1),
-/// the rest are padding (0). Used to gate real vs. padded permutation rows.
-#[derive(Debug, Clone)]
-pub struct Enabler {
-    pub padding_offset: usize,
-}
-
-impl Enabler {
-    pub const fn new(padding_offset: usize) -> Self {
-        Self { padding_offset }
-    }
-
-    pub fn packed_at(&self, vec_row: usize) -> PackedM31 {
-        let row_offset = vec_row * N_LANES;
-        if row_offset >= self.padding_offset {
-            return PackedM31::zero();
-        }
-        if row_offset + N_LANES <= self.padding_offset {
-            return PackedM31::one();
-        }
-        let mut res = [M31::zero(); N_LANES];
-        let enabled = self.padding_offset - row_offset;
-        res[..enabled].fill(M31::one());
-        PackedM31::from_array(res)
-    }
 }
 
 // ───────────────────── Column ordering for row-offset masks ─────────────────
@@ -122,92 +84,6 @@ pub fn circle_row_to_coset(log_size: u32) -> Vec<usize> {
         lookup[domain_row] = coset;
     }
     lookup
-}
-
-// ───────────────────────────── Keccak-f[1600] ──────────────────────────────
-
-const KECCAK_RHO: [u32; 24] = [
-    1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,
-];
-const KECCAK_PI: [usize; 24] = [
-    10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
-];
-const KECCAK_RC: [u64; N_ROUNDS] = crate::constants::iota_rc_rounds();
-
-/// A single Keccak-f[1600] round over all SIMD lanes, in place.
-pub fn keccak_f1600_round(state: &mut [PackedM31; N_BYTES_IN_STATE], round: usize) {
-    debug_assert!(round < N_ROUNDS);
-    for lane in 0..N_LANES {
-        let mut words = load_lane_words(state, lane);
-        keccak_f1600_round_words(&mut words, round);
-        store_lane_words(state, lane, &words);
-    }
-}
-
-fn keccak_f1600_round_words(state: &mut [u64; N_LANES_KECCAK], round: usize) {
-    let mut c = [0u64; 5];
-    for x in 0..5 {
-        c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
-    }
-    let mut d = [0u64; 5];
-    for x in 0..5 {
-        d[x] = c[(x + 4) % 5] ^ c[(x + 1) % 5].rotate_left(1);
-    }
-    for y in 0..5 {
-        for x in 0..5 {
-            state[x + 5 * y] ^= d[x];
-        }
-    }
-    let mut current = state[1];
-    for i in 0..24 {
-        let idx = KECCAK_PI[i];
-        let tmp = state[idx];
-        state[idx] = current.rotate_left(KECCAK_RHO[i]);
-        current = tmp;
-    }
-    for y in 0..5 {
-        let base = 5 * y;
-        let row = [
-            state[base],
-            state[base + 1],
-            state[base + 2],
-            state[base + 3],
-            state[base + 4],
-        ];
-        for x in 0..5 {
-            state[base + x] = row[x] ^ ((!row[(x + 1) % 5]) & row[(x + 2) % 5]);
-        }
-    }
-    state[0] ^= KECCAK_RC[round];
-}
-
-fn load_lane_words(state: &[PackedM31; N_BYTES_IN_STATE], lane: usize) -> [u64; N_LANES_KECCAK] {
-    let mut words = [0u64; N_LANES_KECCAK];
-    for (w, word) in words.iter_mut().enumerate() {
-        let mut value = 0u64;
-        for byte_idx in 0..N_BYTES_IN_U64 {
-            let idx = w * N_BYTES_IN_U64 + byte_idx;
-            let byte = state[idx].to_array()[lane].0 as u64;
-            value |= byte << (8 * byte_idx);
-        }
-        *word = value;
-    }
-    words
-}
-
-fn store_lane_words(
-    state: &mut [PackedM31; N_BYTES_IN_STATE],
-    lane: usize,
-    words: &[u64; N_LANES_KECCAK],
-) {
-    for (w, &value) in words.iter().enumerate() {
-        for byte_idx in 0..N_BYTES_IN_U64 {
-            let idx = w * N_BYTES_IN_U64 + byte_idx;
-            let mut lanes = state[idx].to_array();
-            lanes[lane] = M31::from(((value >> (8 * byte_idx)) & 0xFF) as u32);
-            state[idx] = PackedM31::from_array(lanes);
-        }
-    }
 }
 
 #[cfg(test)]

@@ -113,6 +113,11 @@ impl<'de> Deserialize<'de> for Shape {
                 "sponge shape must contain at least one squeeze block",
             ));
         }
+        if wire.xof_mode == XofMode::Shake128 && wire.message_len > N_BYTES_IN_RATE {
+            return Err(D::Error::custom(format_args!(
+                "SHAKE-128 service messages must not exceed {N_BYTES_IN_RATE} bytes"
+            )));
+        }
         let expected_n_absorb = (wire.message_len + 1).div_ceil(wire.xof_mode.rate());
         if wire.n_absorb != expected_n_absorb {
             return Err(D::Error::custom(format_args!(
@@ -151,7 +156,8 @@ impl Shape {
         )
     }
 
-    /// A SHAKE-128 service shape.
+    /// A SHAKE-128 service shape. The message can contain at most 136 bytes.
+    /// The squeeze rate stays at 168 bytes.
     pub fn shake128(
         message_len: usize,
         n_squeeze: usize,
@@ -232,6 +238,10 @@ impl Shape {
         perm_id_base: usize,
     ) -> Self {
         assert!(n_squeeze >= 1, "at least one squeeze block");
+        assert!(
+            xof_mode != XofMode::Shake128 || message_len <= N_BYTES_IN_RATE,
+            "SHAKE-128 service messages must not exceed {N_BYTES_IN_RATE} bytes"
+        );
         let geometry_message_len = message_capacity.unwrap_or(message_len);
         Self {
             xof_mode,
@@ -342,7 +352,6 @@ fn keccak_round_words(state: &mut [u64; 25], round: usize) {
     const PI: [usize; 24] = [
         10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,
     ];
-    let rc = crate::constants::iota_rc_rounds();
     let mut c = [0u64; 5];
     for x in 0..5 {
         c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
@@ -370,5 +379,5 @@ fn keccak_round_words(state: &mut [u64; 25], round: usize) {
             state[base + x] = row[x] ^ ((!row[(x + 1) % 5]) & row[(x + 2) % 5]);
         }
     }
-    state[0] ^= rc[round];
+    state[0] ^= crate::constants::IOTA_RC[round];
 }

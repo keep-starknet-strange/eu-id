@@ -191,11 +191,10 @@ pub struct MlDsaProof {
     pub group_evals: Vec<SecureField>,
     /// Every component's claimed sum, in commit order, then `native_use_sum` LAST.
     pub claimed_sums: Vec<SecureField>,
-    /// The keccak service module's claimed sums (`[sponge_v, keccak, round,
-    /// tables ×9]`) — the standalone proof composes `[service, mldsa]`.
+    /// The Keccak service sums in sponge, XOR-table, conversion-table order.
     pub service_claimed_sums: Vec<SecureField>,
-    /// Opaque post-interaction payloads. The Keccak service stores its
-    /// round-GKR proof in its module slot.
+    /// Opaque post-interaction payloads. The Keccak service stores its layered
+    /// proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
@@ -2948,10 +2947,9 @@ pub fn verify_mldsa(
             "ML-DSA statement: bad service claimed-sums length".to_string(),
         ));
     }
-    // The keccak service's round LogUp is GKR-offloaded: the payload-aware
-    // verify entry distributes `post_interaction_payloads` to each module in
-    // prove order; the service's `verify_post_interaction` fails closed on a
-    // missing/corrupt blob (an empty blob fails GKR decode).
+    // The payload-aware verifier distributes post-interaction payloads in
+    // module order. The Keccak service rejects a missing or invalid layered
+    // proof.
     let mut service = KeccakServiceVerifier::new(
         job_shapes,
         proof.service_claimed_sums.clone(),

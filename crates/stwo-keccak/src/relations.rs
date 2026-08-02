@@ -1,13 +1,9 @@
-//! LogUp relations for the Keccak / SHAKE-256 AIR.
+//! LogUp relations for the Keccak and SHAKE AIR.
 //!
-//! This module defines two relation families:
-//!
-//! 1. **Interface relations:** [`KeccakStateRelation`] and [`HashIoRelation`].
-//!    Downstream ML-DSA components use only these relations.
-//! 2. **Internal relations:** [`Xor3`], [`AndNot`], [`Conv`], and the seven
-//!    `Split*` byte-split channels connect the carrier to its spread-form
-//!    lookup tables. [`KeccakRound`] keeps its fixed v1 transcript draw. No AIR
-//!    emits a `KeccakRound` tuple in this profile.
+//! [`KeccakStateRelation`] binds each committed sponge input to the state that
+//! the Keccak proof uses. [`HashIoRelation`] connects byte streams to the
+//! sponge. [`Xor3`] and [`Conv`] connect the sponge to their fixed lookup
+//! tables.
 //!
 //! Each `relation!(_, N)` declares a struct wrapping `LookupElements<N>`; `N`
 //! is the base-field arity of one lookup tuple. Stwo's macro implements
@@ -19,49 +15,18 @@
 use stwo::core::channel::Channel;
 use stwo_constraint_framework::relation;
 
-use crate::constants::{IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE};
+use crate::constants::N_BYTES_IN_STATE;
 
 // ───────────────────────────── Interface relations ─────────────────────────
 
-/// Arity of [`KeccakStateRelation`]: `perm_id`, `direction`, then the 200
-/// state limbs (carried in **spread** form; see [`crate::utils`]).
-pub const KECCAK_STATE_ARITY: usize = 2 + N_BYTES_IN_STATE;
+/// Arity of [`KeccakStateRelation`]: permutation ID and 200 spread state bytes.
+///
+/// The tuple is `(perm_id, s_0, ..., s_199)`. The sponge emits its computed
+/// input state and consumes the state that its committed nibble columns
+/// encode. The permutation ID prevents a row from using another row's state.
+pub const KECCAK_STATE_ARITY: usize = 1 + N_BYTES_IN_STATE;
 
 relation!(KeccakStateRelation, KECCAK_STATE_ARITY);
-
-/// Permutation-chaining relation between the sponge and the permutation prover.
-///
-/// A tuple is `(perm_id, direction, s_0, s_1, …, s_199)`:
-/// - `perm_id`: a running index that uniquely labels one Keccak-f[1600]
-///   invocation *within a single proof*. The sponge assigns `perm_id`s
-///   densely `0, 1, …` in issue order; the `keccak` permutation prover echoes
-///   the same id on both its input- and output-state tuples so the two sides
-///   pair up. `perm_id` prevents a malicious prover from satisfying one
-///   sponge permute-request with a different request's permutation.
-/// - `direction`: `IN` (0) for the pre-permutation state, `OUT` (1) for the
-///   post-permutation state. The pair `(perm_id, IN)` / `(perm_id, OUT)`
-///   binds one permutation's endpoints.
-/// - `s_0..s_199`: the 200 little-endian state limbs (`lane*8 + byte`), each
-///   the *spread* of the corresponding state byte. The whole Keccak state stays
-///   in spread form across permutations; byte form appears only at the HashIo
-///   boundary (see [`crate::sponge_v`]).
-///
-/// ## Multiplicity convention
-///
-/// The **sponge** is the requester: it *yields* (positive multiplicity) one
-/// `(perm_id, IN, pre_state)` and requires (negative) one
-/// `(perm_id, OUT, post_state)` per permutation it needs. The **keccak**
-/// permutation prover is the provider: for each row it *requires* (negative)
-/// its `(perm_id, IN, ·)` input and *yields* (positive) its `(perm_id, OUT, ·)`
-/// output. The two balance iff every sponge request is served by exactly one
-/// proven permutation with matching endpoints. The fixed sign convention is
-/// defined by the two component evaluators.
-pub mod direction {
-    /// Pre-permutation state tag.
-    pub const IN: u32 = 0;
-    /// Post-permutation state tag.
-    pub const OUT: u32 = 1;
-}
 
 /// Arity of [`HashIoRelation`]: `(stream_id, byte_pos, byte)`.
 pub const HASH_IO_ARITY: usize = 3;
@@ -70,50 +35,21 @@ relation!(HashIoRelation, HASH_IO_ARITY);
 
 // ───────────────────────────── Internal relations ──────────────────────────
 
-/// `xor3` channel: `(key, spread(xor))` with `key = s1+s2+s3`. Its arity is 2.
-/// The key is a degree-1 linear combination of committed spread cells.
-pub const DENSE_LOOKUP_ARITY: usize = 2;
-relation!(Xor3, DENSE_LOOKUP_ARITY);
+/// Arity of the XOR and byte-conversion lookup tuples.
+pub const BYTE_LOOKUP_ARITY: usize = 2;
 
-// `andnot` channel: `(u, spread(¬b'∧b''))` with `u = spread(b')+2·spread(b'')`.
-relation!(AndNot, DENSE_LOOKUP_ARITY);
+// `(key, spread(xor))`, where `key` is the sum of up to three spread bytes.
+relation!(Xor3, BYTE_LOOKUP_ARITY);
 
-// `conv` byte↔spread channel: `(byte, spread(byte))`. Its arity is 2.
-relation!(Conv, DENSE_LOOKUP_ARITY);
+// `(byte, spread(byte))`.
+relation!(Conv, BYTE_LOOKUP_ARITY);
 
-/// Spread split channels, one per sub-byte shift `r ∈ {1..=7}`:
-/// `(spread_byte, spread_hi, spread_lo)`.
-pub const SPLIT_LOOKUP_ARITY: usize = 3;
-relation!(Split1, SPLIT_LOOKUP_ARITY);
-relation!(Split2, SPLIT_LOOKUP_ARITY);
-relation!(Split3, SPLIT_LOOKUP_ARITY);
-relation!(Split4, SPLIT_LOOKUP_ARITY);
-relation!(Split5, SPLIT_LOOKUP_ARITY);
-relation!(Split6, SPLIT_LOOKUP_ARITY);
-relation!(Split7, SPLIT_LOOKUP_ARITY);
-
-/// Arity of the reserved v1 [`KeccakRound`] transcript relation.
-///
-/// The removed standalone round wrapper used a permutation identifier, a
-/// direction, a round index, four Iota byte lanes, and 200 state bytes. The v1
-/// profile keeps this unused draw so later transcript challenges do not move.
-pub const KECCAK_ROUND_ARITY: usize = 3 + IOTA_RC_BYTE_INDICES.len() + N_BYTES_IN_STATE;
-relation!(KeccakRound, KECCAK_ROUND_ARITY);
-
-/// Arity of [`RoundScheduleRelation`]: position, row roles, and eight Iota
-/// constant bytes. The fixed schedule table provides each valid position once
-/// per permutation.
-pub const ROUND_SCHEDULE_ARITY: usize = 4 + 8;
-relation!(RoundScheduleRelation, ROUND_SCHEDULE_ARITY);
-
-/// Shared handle for the ONE drawn [`KeccakRelations`] of a composed proof.
+/// Shared handle for the single [`KeccakRelations`] value in a composed proof.
 ///
 /// The [`crate::service::KeccakServiceProver`] / `Verifier` module draws the
-/// relations during its `draw_relations` and `set`s them here; consumer modules
-/// (the stwo-mldsa bridges/prefix/sinks/decomp/sib) read the handle back in
-/// their own `draw_relations` (which air-core runs strictly after the
-/// service's, in module order). Same mechanism as
-/// `air_core::relations::SharedFieldRelation`.
+/// relations during `draw_relations` and stores them here. Consumer modules
+/// read the handle during their `draw_relations` calls. Air-core runs those
+/// calls after the service call.
 pub type SharedKeccakRelations = air_core::relations::SharedRelation<KeccakRelations>;
 
 /// Every relation the Keccak AIR draws, held together so prove and verify draw
@@ -122,63 +58,8 @@ pub type SharedKeccakRelations = air_core::relations::SharedRelation<KeccakRelat
 pub struct KeccakRelations {
     pub keccak_state: KeccakStateRelation,
     pub hash_io: HashIoRelation,
-    pub keccak_round: KeccakRound,
     pub xor3: Xor3,
-    pub andnot: AndNot,
     pub conv: Conv,
-    pub split: [SplitRelation; 7],
-    pub round_schedule: RoundScheduleRelation,
-}
-
-/// A type-erasing wrapper over the seven `Split*` channels so the round
-/// component can index them by shift `r-1` without a 7-arm match.
-///
-/// `relation!` generates seven *distinct* types with identical arity; a slice
-/// needs one type. `combine`/`draw` are forwarded so the wrapper behaves like
-/// any relation from the framework's perspective.
-#[derive(Clone, Debug)]
-pub enum SplitRelation {
-    S1(Split1),
-    S2(Split2),
-    S3(Split3),
-    S4(Split4),
-    S5(Split5),
-    S6(Split6),
-    S7(Split7),
-}
-
-impl<F, EF> stwo_constraint_framework::Relation<F, EF> for SplitRelation
-where
-    F: Clone,
-    EF: stwo_constraint_framework::RelationEFTraitBound<F>,
-{
-    fn combine(&self, values: &[F]) -> EF {
-        match self {
-            SplitRelation::S1(r) => r.combine(values),
-            SplitRelation::S2(r) => r.combine(values),
-            SplitRelation::S3(r) => r.combine(values),
-            SplitRelation::S4(r) => r.combine(values),
-            SplitRelation::S5(r) => r.combine(values),
-            SplitRelation::S6(r) => r.combine(values),
-            SplitRelation::S7(r) => r.combine(values),
-        }
-    }
-
-    fn get_name(&self) -> &str {
-        match self {
-            SplitRelation::S1(_) => "Split1",
-            SplitRelation::S2(_) => "Split2",
-            SplitRelation::S3(_) => "Split3",
-            SplitRelation::S4(_) => "Split4",
-            SplitRelation::S5(_) => "Split5",
-            SplitRelation::S6(_) => "Split6",
-            SplitRelation::S7(_) => "Split7",
-        }
-    }
-
-    fn get_size(&self) -> usize {
-        SPLIT_LOOKUP_ARITY
-    }
 }
 
 impl KeccakRelations {
@@ -187,20 +68,8 @@ impl KeccakRelations {
         Self {
             keccak_state: KeccakStateRelation::draw(channel),
             hash_io: HashIoRelation::draw(channel),
-            keccak_round: KeccakRound::draw(channel),
             xor3: Xor3::draw(channel),
-            andnot: AndNot::draw(channel),
             conv: Conv::draw(channel),
-            split: [
-                SplitRelation::S1(Split1::draw(channel)),
-                SplitRelation::S2(Split2::draw(channel)),
-                SplitRelation::S3(Split3::draw(channel)),
-                SplitRelation::S4(Split4::draw(channel)),
-                SplitRelation::S5(Split5::draw(channel)),
-                SplitRelation::S6(Split6::draw(channel)),
-                SplitRelation::S7(Split7::draw(channel)),
-            ],
-            round_schedule: RoundScheduleRelation::draw(channel),
         }
     }
 
@@ -210,20 +79,8 @@ impl KeccakRelations {
         Self {
             keccak_state: KeccakStateRelation::dummy(),
             hash_io: HashIoRelation::dummy(),
-            keccak_round: KeccakRound::dummy(),
             xor3: Xor3::dummy(),
-            andnot: AndNot::dummy(),
             conv: Conv::dummy(),
-            split: [
-                SplitRelation::S1(Split1::dummy()),
-                SplitRelation::S2(Split2::dummy()),
-                SplitRelation::S3(Split3::dummy()),
-                SplitRelation::S4(Split4::dummy()),
-                SplitRelation::S5(Split5::dummy()),
-                SplitRelation::S6(Split6::dummy()),
-                SplitRelation::S7(Split7::dummy()),
-            ],
-            round_schedule: RoundScheduleRelation::dummy(),
         }
     }
 }

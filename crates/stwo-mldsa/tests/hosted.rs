@@ -37,6 +37,7 @@ use air_core::{
 use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 
+use stwo_keccak::constants::N_BYTES_IN_RATE;
 use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::service::{service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier};
 use stwo_keccak::sponge::{Shape, XofMode};
@@ -1380,6 +1381,19 @@ fn fixed_shape_wire_is_exact_and_capacity_shape_is_not_serialized() {
         fixed
     );
 
+    let over_profile_wire = FixedShapeWire {
+        xof_mode: XofMode::Shake128,
+        message_len: N_BYTES_IN_RATE + 1,
+        n_absorb: 1,
+        n_squeeze: 1,
+        absorb_stream_id: 11,
+        squeeze_stream_id: 12,
+        perm_id_base: 0,
+    };
+    let encoded = bincode::serialize(&over_profile_wire).expect("invalid test wire serializes");
+    let error = bincode::deserialize::<Shape>(&encoded).expect_err("shape must be rejected");
+    assert!(error.to_string().contains("must not exceed 136 bytes"));
+
     let capacity = Shape::with_message_capacity(303, DEVICE_SIG_STRUCTURE_CAPACITY + 66, 1, 11, 12)
         .expect("capacity shape");
     let error = bincode::serialize(&capacity).expect_err("capacity must not silently downgrade");
@@ -1606,15 +1620,15 @@ fn hosted_public_native_mu_mismatch_returns_error_not_panic() {
 }
 
 #[test]
-fn hosted_missing_round_gkr_payload_rejects() {
-    let msg = b"hosted proof must carry the round GKR payload".to_vec();
+fn hosted_missing_layered_keccak_payload_rejects() {
+    let msg = b"hosted proof must carry the layered Keccak payload".to_vec();
     let mut proof = prove_hosted(4242, &msg, msg.clone());
     proof.post_interaction_payloads.clear();
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| verify_hosted(&proof, msg)));
     assert!(
         matches!(result, Ok(Err(_))),
-        "missing hosted round-GKR payload must return an error, not panic"
+        "missing hosted layered Keccak payload must return an error, not panic"
     );
 }
 

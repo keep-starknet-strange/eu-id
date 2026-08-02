@@ -13,12 +13,12 @@ use sha3::{Shake128, Shake256};
 
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
-use stwo::core::fields::m31::M31;
+use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 use stwo::core::fields::qm31::{SecureField, QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::fri::FriConfig;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::pcs::TreeVec;
-use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
+use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::Column;
@@ -31,21 +31,20 @@ use stwo_constraint_framework::{
 
 use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 
-use stwo_keccak::constants::{IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS};
-use stwo_keccak::keccak;
-use stwo_keccak::keccak_round::{N_XOR3_C, N_XOR3_THETA_APPLY};
-use stwo_keccak::relations::{HashIoRelation, KeccakRelations, SharedKeccakRelations};
-use stwo_keccak::service::{
-    service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier, PermWitness,
+use stwo_keccak::constants::{N_BYTES_IN_RATE, N_BYTES_IN_STATE, N_ROUNDS};
+use stwo_keccak::layered_gkr::{
+    is_canonical_payload, payload_byte_count, payload_field_count, LayeredKeccakProver,
+    N_TIEBACK_COLUMNS, PRODUCT_PAYLOAD_BYTES, PRODUCT_P_LOG,
 };
+use stwo_keccak::relations::{HashIoRelation, KeccakRelations, SharedKeccakRelations};
+use stwo_keccak::service::{service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier};
 use stwo_keccak::sponge::Shape;
 use stwo_keccak::sponge_v::{
     gen_schedule_preprocessed, generate_base_trace, generate_interaction_trace, generate_jobs,
-    schedule_ids, Eval as SpongeEval, JobList, SpongeVRun,
+    schedule_ids, Eval as SpongeEval, JobList, SpongeVRun, N_ABSORB_COLS,
 };
-use stwo_keccak::tables::{build_conv_table, build_dense_table};
-use stwo_keccak::tables_air::TableMultiplicities;
-use stwo_keccak::utils::{col_eval, spread_u32, unspread_u32, ColEval, SPREAD_MAX};
+use stwo_keccak::tables::{build_conv_table, build_xor3_table};
+use stwo_keccak::utils::{col_eval, spread_u32, ColEval, SPREAD_MAX};
 
 // =====================================================================
 // Test io-closer module: yields every job's absorb bytes (+) and requires
@@ -235,153 +234,6 @@ impl AirProver for IoCloser {
 // Fixture helpers.
 // =====================================================================
 
-const ALTERNATE_IOTA_ROUND: usize = 1;
-const ALTERNATE_IOTA_RC: u64 = 0;
-
-fn set_packed_lane(cell: &mut PackedM31, lane: usize, value: M31) {
-    let mut values = cell.to_array();
-    values[lane] = value;
-    *cell = PackedM31::from_array(values);
-}
-
-fn packed_lane(cell: PackedM31, lane: usize) -> M31 {
-    cell.to_array()[lane]
-}
-
-fn round_state(
-    input: &[u8; N_BYTES_IN_STATE],
-    round: usize,
-    round_constant: u64,
-) -> [u8; N_BYTES_IN_STATE] {
-    let mut packed: [PackedM31; N_BYTES_IN_STATE] =
-        std::array::from_fn(|index| PackedM31::from(M31::from(input[index] as u32)));
-    stwo_keccak::utils::keccak_f1600_round(&mut packed, round);
-    let mut output = std::array::from_fn(|index| packed[index].to_array()[0].0 as u8);
-    let delta = IOTA_RC[round] ^ round_constant;
-    for (byte, delta_byte) in output[..N_BYTES_IN_U64].iter_mut().zip(delta.to_le_bytes()) {
-        *byte ^= delta_byte;
-    }
-    output
-}
-
-fn set_carrier_coset_cell(column: &mut ColEval, coset_row: usize, value: M31) {
-    let log_size = column.values.len().ilog2();
-    let domain_row = stwo_keccak::utils::circle_row_to_coset(log_size)
-        .into_iter()
-        .position(|row| row == coset_row)
-        .expect("carrier coset row exists");
-    column.values.as_mut_slice()[domain_row] = value;
-}
-
-fn carrier_coset_cell(column: &ColEval, coset_row: usize) -> M31 {
-    let log_size = column.values.len().ilog2();
-    let domain_row = stwo_keccak::utils::circle_row_to_coset(log_size)
-        .into_iter()
-        .position(|row| row == coset_row)
-        .expect("carrier coset row exists");
-    column.values.at(domain_row)
-}
-
-fn rotate_carrier_coset_column(column: &mut ColEval) {
-    let n_rows = column.values.len();
-    let log_size = n_rows.ilog2();
-    let row_to_coset = stwo_keccak::utils::circle_row_to_coset(log_size);
-    let mut coset_to_row = vec![0; n_rows];
-    for (row, coset) in row_to_coset.iter().copied().enumerate() {
-        coset_to_row[coset] = row;
-    }
-    let original = column.values.to_cpu();
-    for (row, coset) in row_to_coset.into_iter().enumerate() {
-        let source_coset = (coset + n_rows - 1) % n_rows;
-        column.values.set(row, original[coset_to_row[source_coset]]);
-    }
-}
-
-/// Build a coherent permutation with one wrong Iota constant. The carrier,
-/// GKR leaves, table counts, sponge output, and all later rounds agree. Only
-/// the verifier-fixed 25-position schedule has the official constant.
-fn install_alternate_iota_witness(run: &mut SpongeVRun) -> PermWitness {
-    assert_eq!(run.jobs.n_perms_total(), 1);
-    let shape = &run.jobs.jobs[0];
-    let rate = shape.rate();
-    let perm_id = run.perm_inputs[0][N_BYTES_IN_STATE].to_array()[0];
-    let mut state =
-        std::array::from_fn(|index| unspread_u32(run.perm_inputs[0][index].to_array()[0].0) as u8);
-    let mut states = Vec::with_capacity(N_ROUNDS + 1);
-    states.push(state);
-    for (round, official_constant) in IOTA_RC.iter().copied().enumerate().take(N_ROUNDS) {
-        state = round_state(
-            &state,
-            round,
-            if round == ALTERNATE_IOTA_ROUND {
-                ALTERNATE_IOTA_RC
-            } else {
-                official_constant
-            },
-        );
-        states.push(state);
-    }
-
-    run.rows[0].post = state;
-    run.rows[0].squeeze_byte.fill(0);
-    run.rows[0].squeeze_byte[..rate].copy_from_slice(&state[..rate]);
-    run.outputs[0] = state[..rate].to_vec();
-    run.conv.truncate(rate);
-    run.conv.extend(state[..rate].iter().map(|byte| {
-        [
-            PackedM31::from(M31::from(*byte as u32)),
-            PackedM31::from(M31::from(spread_u32(*byte as u32))),
-        ]
-    }));
-
-    let boundary_data = keccak::BoundaryWitness {
-        n_perms: 1,
-        rows: states
-            .iter()
-            .map(|state| keccak::BoundaryRow {
-                perm_id,
-                state: std::array::from_fn(|index| M31::from(spread_u32(state[index] as u32))),
-            })
-            .collect(),
-    };
-    let mut carrier_witness = stwo_keccak::carrier::generate(&boundary_data);
-    let position = ALTERNATE_IOTA_ROUND + 1;
-    let vector_row = position / N_LANES;
-    let lane = position % N_LANES;
-
-    for byte in 0..N_BYTES_IN_U64 {
-        let official = M31::from(spread_u32(
-            IOTA_RC[ALTERNATE_IOTA_ROUND].to_le_bytes()[byte] as u32,
-        ));
-        let alternate = M31::from(spread_u32(ALTERNATE_IOTA_RC.to_le_bytes()[byte] as u32));
-        set_carrier_coset_cell(
-            &mut carrier_witness.trace[stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + byte],
-            position,
-            alternate,
-        );
-        set_carrier_coset_cell(
-            &mut carrier_witness.interaction.trace_mut()
-                [stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + byte],
-            position,
-            alternate,
-        );
-        let key = &mut carrier_witness.round.lookup_data.xor3[N_XOR3_C + N_XOR3_THETA_APPLY + byte]
-            [vector_row][0];
-        let changed_key = packed_lane(*key, lane) - official + alternate;
-        set_packed_lane(key, lane, changed_key);
-    }
-
-    let mut table_mult =
-        TableMultiplicities::from_carrier_round(&carrier_witness.round, boundary_data.n_perms);
-    table_mult.add_sponge(&run.xor, &run.conv);
-    PermWitness {
-        carrier_claim: carrier_witness.claim,
-        carrier_trace: carrier_witness.trace,
-        carrier_data: Some(carrier_witness.interaction),
-        table_mult,
-    }
-}
-
 fn shapes_for(messages: &[Vec<u8>], n_squeezes: &[usize]) -> Vec<Shape> {
     messages
         .iter()
@@ -437,12 +289,13 @@ struct ProvedJobs {
     messages: Vec<Vec<u8>>,
     outputs: Vec<Vec<u8>>,
     service_claims: Vec<SecureField>,
+    service_components: usize,
     proof: stwo::core::proof::StarkProof<air_core::Hasher>,
-    /// Per-module opaque post-interaction payloads (the service's round-GKR blob).
+    /// Per-module opaque post-interaction payloads.
     payloads: Vec<Vec<u8>>,
 }
 
-/// Batch-four round LogUp constraints have log-degree excess two.
+/// Batch-four sponge LogUp constraints have log-degree excess two.
 fn pcs_config() -> PcsConfig {
     PcsConfig {
         fri_config: FriConfig::new(0, 2, 3, 1),
@@ -460,24 +313,23 @@ fn prove_jobs(
     prove_jobs_full(messages, n_squeezes, tamper, None, pcs_config())
 }
 
-/// [`prove_jobs`] with a permutation-witness tamper hook (round base trace /
-/// round lookup data) and an explicit PCS config.
+/// [`prove_jobs`] with a layered-witness tamper hook and an explicit PCS config.
 fn prove_jobs_full(
     messages: Vec<Vec<u8>>,
     n_squeezes: Vec<usize>,
     tamper: Option<&dyn Fn(&mut SpongeVRun)>,
-    perm_tamper: Option<&dyn Fn(&mut PermWitness)>,
+    layered_tamper: Option<&dyn Fn(&mut LayeredKeccakProver)>,
     config: PcsConfig,
 ) -> ProvedJobs {
     let shapes = shapes_for(&messages, &n_squeezes);
-    prove_shapes_full(shapes, messages, tamper, perm_tamper, config)
+    prove_shapes_full(shapes, messages, tamper, layered_tamper, config)
 }
 
 fn prove_shapes_full(
     shapes: Vec<Shape>,
     messages: Vec<Vec<u8>>,
     tamper: Option<&dyn Fn(&mut SpongeVRun)>,
-    perm_tamper: Option<&dyn Fn(&mut PermWitness)>,
+    layered_tamper: Option<&dyn Fn(&mut LayeredKeccakProver)>,
     config: PcsConfig,
 ) -> ProvedJobs {
     let handle = SharedKeccakRelations::new();
@@ -486,8 +338,8 @@ fn prove_shapes_full(
     if let Some(t) = tamper {
         t(service.run_mut());
     }
-    if let Some(t) = perm_tamper {
-        t(service.perm_mut());
+    if let Some(t) = layered_tamper {
+        t(service.layered_mut());
     }
     let mut closer = IoCloser::new(closer_entries(&shapes, &messages, &outputs), handle);
     let (proof, payloads) =
@@ -498,6 +350,7 @@ fn prove_shapes_full(
         messages,
         outputs,
         service_claims: service.claimed_sums(),
+        service_components: service.components().len(),
         proof,
         payloads,
     }
@@ -541,12 +394,11 @@ fn rejected(
     .unwrap_or(true)
 }
 
-/// A permutation-witness tamper is rejected whether the prover's local
-/// constraint check fails early or the verifier rejects the produced proof.
-fn perm_rejected(
+/// A layered-witness tamper is rejected by proving or verification.
+fn layered_rejected(
     messages: Vec<Vec<u8>>,
     n_squeezes: Vec<usize>,
-    tamper: &dyn Fn(&mut PermWitness),
+    tamper: &dyn Fn(&mut LayeredKeccakProver),
 ) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let p = prove_jobs_full(
@@ -561,6 +413,97 @@ fn perm_rejected(
     .unwrap_or(true)
 }
 
+static SOURCE_MLE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Build an invalid source-MLE proof without the prover-side oracle check.
+/// The verifier must still reject the proof.
+fn prove_with_desynchronized_source(
+    messages: Vec<Vec<u8>>,
+    n_squeezes: Vec<usize>,
+    tamper: &dyn Fn(&mut LayeredKeccakProver),
+) -> ProvedJobs {
+    const SKIP_ORACLE_CHECK: &str = "STWO_MLE_EVAL_SKIP_ORACLE_CONSISTENCY";
+
+    let _lock = SOURCE_MLE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let previous = std::env::var_os(SKIP_ORACLE_CHECK);
+    std::env::set_var(SKIP_ORACLE_CHECK, "1");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove_jobs_full(messages, n_squeezes, None, Some(tamper), pcs_config())
+    }));
+    if let Some(previous) = previous {
+        std::env::set_var(SKIP_ORACLE_CHECK, previous);
+    } else {
+        std::env::remove_var(SKIP_ORACLE_CHECK);
+    }
+    match result {
+        Ok(proof) => proof,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn physical_permutation_row(p_log: u32, logical_row: usize) -> usize {
+    stwo_keccak::utils::circle_row_to_coset(p_log)
+        .into_iter()
+        .position(|coset| coset == logical_row)
+        .expect("logical permutation row exists")
+}
+
+fn layered_payload_sections(p_log: u32) -> Vec<(String, usize)> {
+    const FIXED_SECTIONS: usize = 3;
+    const SECTIONS_PER_ROUND: usize = 6;
+    const STATE_LOCAL_LOG: usize = 11;
+    const PARITY_LOCAL_LOG: usize = 9;
+    const NIBBLE_LOCAL_LOG: usize = 9;
+    const CHI_COEFFICIENTS: usize = 6;
+    const THETA_COEFFICIENTS: usize = 5;
+    const PARITY_COEFFICIENTS: usize = 7;
+    const EXTRACTION_COEFFICIENTS: usize = 18;
+    const CHI_TERMINALS: usize = 3;
+    const THETA_TERMINALS: usize = 3;
+    const PARITY_TERMINALS: usize = 5;
+
+    let p_log = p_log as usize;
+    let mut cursor = 0;
+    let mut sections = vec![("output claim".to_owned(), cursor)];
+    cursor += 1;
+    for round in (0..N_ROUNDS).rev() {
+        for (name, sumcheck_fields, terminal_fields) in [
+            (
+                "chi",
+                (p_log + STATE_LOCAL_LOG) * CHI_COEFFICIENTS,
+                CHI_TERMINALS,
+            ),
+            (
+                "theta",
+                (p_log + STATE_LOCAL_LOG) * THETA_COEFFICIENTS,
+                THETA_TERMINALS,
+            ),
+            (
+                "parity",
+                (p_log + PARITY_LOCAL_LOG) * PARITY_COEFFICIENTS,
+                PARITY_TERMINALS,
+            ),
+        ] {
+            sections.push((format!("round {round} {name} sumcheck"), cursor));
+            cursor += sumcheck_fields;
+            sections.push((format!("round {round} {name} terminals"), cursor));
+            cursor += terminal_fields;
+        }
+    }
+    sections.push(("extraction sumcheck".to_owned(), cursor));
+    cursor += (p_log + NIBBLE_LOCAL_LOG) * EXTRACTION_COEFFICIENTS;
+    sections.push(("extraction terminal".to_owned(), cursor));
+    cursor += 1;
+    assert_eq!(cursor, payload_field_count(p_log as u32));
+    assert_eq!(
+        sections.len(),
+        FIXED_SECTIONS + N_ROUNDS * SECTIONS_PER_ROUND
+    );
+    sections
+}
+
 // =====================================================================
 // Positive gates.
 // =====================================================================
@@ -569,10 +512,13 @@ fn perm_rejected(
 fn single_job_proves_and_matches_sha3() {
     let msg = (0..300u32).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>();
     let p = prove_jobs(vec![msg.clone()], vec![1], None);
+    assert_eq!(p.service_claims.len(), 3);
+    assert_eq!(p.service_components, 5);
+    assert_eq!(p.payloads[0].len(), payload_byte_count(LOG_N_LANES));
     assert_eq!(
         p.outputs[0],
         shake256_ref(&msg, 136),
-        "rotated sponge output != sha3"
+        "service output != SHAKE-256"
     );
     verify_jobs(&p, &p.messages.clone()).expect("single-job verify");
 }
@@ -671,13 +617,11 @@ fn fixed_capacity_geometry_and_tree_zero_ignore_actual_length() {
 }
 
 #[test]
-fn canonical_n261_carrier_geometry_is_pinned() {
+fn canonical_n261_layered_geometry_is_pinned() {
     const N_PERMUTATIONS: usize = 261;
     const CAPACITY_PERMUTATIONS: usize = 256;
     const SHAKE256_RATE: usize = 136;
     const EXPECTED_SCHEDULE_COLUMNS: usize = 16;
-    const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 7_520_256;
-    const EXPECTED_SERVICE_CELLS: usize = 9_102_656;
 
     let capacity_bytes = (CAPACITY_PERMUTATIONS - 1) * SHAKE256_RATE;
     let mut shapes = vec![Shape::with_message_capacity(0, capacity_bytes, 1, 1, 2)
@@ -689,78 +633,41 @@ fn canonical_n261_carrier_geometry_is_pinned() {
 
     let jobs = JobList::new(shapes.clone());
     assert_eq!(jobs.n_perms_total(), N_PERMUTATIONS);
-    assert_eq!(jobs.log_size(), 9);
+    assert_eq!(jobs.log_size(), PRODUCT_P_LOG);
     assert_eq!(jobs.n_schedule_cols(), EXPECTED_SCHEDULE_COLUMNS);
-    assert_eq!(jobs.n_base_cols(), 1_042);
-    assert_eq!(stwo_keccak::sponge_v::n_interaction_cols(&jobs), 848);
+    assert_eq!(jobs.n_base_cols(), 1_314);
+    assert_eq!(stwo_keccak::sponge_v::n_interaction_cols(&jobs), 752);
+    assert_eq!(service_claimed_sums_len(), 3);
+    assert_eq!(N_TIEBACK_COLUMNS, 16);
+    assert_eq!(payload_byte_count(jobs.log_size()), PRODUCT_PAYLOAD_BYTES);
+    assert_eq!(PRODUCT_PAYLOAD_BYTES, 142_304);
 
-    let carrier_claim = stwo_keccak::carrier::Claim {
-        n_perms: N_PERMUTATIONS,
-    };
-    assert_eq!(carrier_claim.log_size(), 13);
+    let layout = stwo_keccak::service::debug_layout(shapes.clone());
     assert_eq!(
-        N_PERMUTATIONS * stwo_keccak::carrier::ROWS_PER_PERMUTATION,
-        6_525
+        layout.preprocessed,
+        [vec![9; 16], vec![16; 2], vec![8; 2]].concat()
     );
-    assert_eq!(stwo_keccak::carrier::N_COLUMNS, 910);
-    assert_eq!(stwo_keccak::carrier::N_TOTAL_LOOKUPS, 899);
-    assert_eq!(stwo_keccak::round_gkr::LOG_SLOTS, 10);
-    assert_eq!(stwo_keccak::round_gkr::N_TIEBACK_COLUMNS, 8);
+    assert_eq!(layout.trace, [vec![9; 1_314], vec![16], vec![8]].concat());
     assert_eq!(
-        stwo_keccak::round_gkr::LOG_SLOTS + carrier_claim.log_size(),
-        23
+        layout.interaction,
+        [vec![9; 752], vec![16; 4], vec![8; 4]].concat()
     );
-
-    let layout = stwo_keccak::service::debug_layout(shapes);
-    let committed_cells = |logs: &[u32]| {
-        logs.iter()
-            .map(|&log_size| 1usize << log_size)
-            .sum::<usize>()
-    };
-    let tieback_cells = stwo_keccak::round_gkr::N_TIEBACK_COLUMNS << carrier_claim.log_size();
-    let carrier_cells = stwo_keccak::carrier::N_COLUMNS << carrier_claim.log_size();
-    assert_eq!(
-        carrier_cells + tieback_cells,
-        EXPECTED_CARRIER_AND_TIEBACK_CELLS
-    );
-    assert_eq!(
-        (stwo_keccak::carrier::N_SCHEDULE_TABLE_PREPROCESSED
-            + stwo_keccak::carrier::N_SCHEDULE_TABLE_TRACE
-            + stwo_keccak::carrier::N_SCHEDULE_TABLE_INTERACTION)
-            << stwo_keccak::carrier::SCHEDULE_TABLE_LOG_SIZE,
-        576
-    );
-    let service_cells = committed_cells(&layout.preprocessed)
-        + committed_cells(&layout.trace)
-        + committed_cells(&layout.interaction)
-        + tieback_cells;
-    assert_eq!(service_cells, EXPECTED_SERVICE_CELLS);
-    assert_eq!(
-        service_cells - EXPECTED_CARRIER_AND_TIEBACK_CELLS,
-        1_582_400
-    );
-}
-
-#[test]
-fn carrier_witness_generator_supports_n261() {
-    const N_PERMUTATIONS: usize = 261;
-    const EXPECTED_LOG_SIZE: u32 = 13;
-
-    let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; N_PERMUTATIONS];
-    for (permutation, input) in inputs.iter_mut().enumerate() {
-        input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
-    }
-    let witness = stwo_keccak::service::build_perm_witness(&inputs);
-    assert_eq!(witness.carrier_claim.n_perms, N_PERMUTATIONS);
-    assert_eq!(witness.carrier_claim.log_size(), EXPECTED_LOG_SIZE);
-    assert_eq!(witness.carrier_trace.len(), stwo_keccak::carrier::N_COLUMNS);
-    assert!(witness
-        .carrier_trace
+    let committed_cells = layout
+        .preprocessed
         .iter()
-        .all(|column| column.domain.log_size() == EXPECTED_LOG_SIZE));
-    let data = witness.carrier_data.expect("carrier GKR source");
-    assert_eq!(data.log_size, EXPECTED_LOG_SIZE);
-    assert_eq!(data.n_perms, N_PERMUTATIONS);
+        .chain(&layout.trace)
+        .chain(&layout.interaction)
+        .map(|&log_size| 1usize << log_size)
+        .sum::<usize>()
+        + N_TIEBACK_COLUMNS * (1usize << PRODUCT_P_LOG);
+    assert_eq!(committed_cells, 1_534_720);
+
+    let verifier = KeccakServiceVerifier::new(
+        shapes,
+        vec![SecureField::zero(); service_claimed_sums_len()],
+        SharedKeccakRelations::new(),
+    );
+    assert_eq!(verifier.post_interaction_log_sizes(), vec![9; 16]);
 }
 
 #[test]
@@ -780,17 +687,15 @@ fn fixed_capacity_hashes_actual_prefix_and_canonicalizes_unused_rows() {
         let actual_rows = (len + 1).div_ceil(136);
         assert!(run.rows[..actual_rows].iter().all(|row| row.absorb_active));
         assert!(run.rows[actual_rows - 1].squeeze_active);
-        for (row_index, row) in run.rows.iter().enumerate().skip(actual_rows) {
+        for row in run.rows.iter().skip(actual_rows) {
             assert!(!row.absorb_active);
             assert!(!row.squeeze_active);
-            assert_eq!(row.block_byte, [0; stwo_keccak::sponge_v::MAX_RATE]);
-            assert_eq!(row.new_rate, [0; stwo_keccak::sponge_v::MAX_RATE]);
+            assert_eq!(row.block_byte, [0; N_ABSORB_COLS]);
+            assert_eq!(row.new_rate, [0; N_ABSORB_COLS]);
             assert_eq!(row.squeeze_byte, [0; stwo_keccak::sponge_v::MAX_RATE]);
+            assert_eq!(row.input, [0; N_BYTES_IN_STATE]);
             let expected = canonical_unused_post.get_or_insert(row.post);
             assert_eq!(&row.post, expected, "unused row must prove Keccak-f(0)");
-            assert!(run.perm_inputs[row_index][..200]
-                .iter()
-                .all(|value| value.to_array().iter().all(|lane| *lane == M31::zero())));
         }
     }
 }
@@ -872,12 +777,12 @@ fn fixed_capacity_job_proves_and_over_capacity_rejects() {
         "a nonzero inactive capacity byte must violate the canonical-zero constraint"
     );
     run.rows[first_unused].block_byte[0] = 0;
-    run.rows[capacity_start].block_byte[stwo_keccak::constants::N_BYTES_IN_RATE] = 1;
+    run.rows[capacity_start].squeeze_byte[N_BYTES_IN_RATE] = 1;
     assert!(
         tamper_rejects(&run),
-        "a nonzero byte outside the SHAKE-256 rate must violate canonical zero"
+        "a nonzero squeeze byte outside the SHAKE-256 rate must violate canonical zero"
     );
-    run.rows[capacity_start].block_byte[stwo_keccak::constants::N_BYTES_IN_RATE] = 0;
+    run.rows[capacity_start].squeeze_byte[N_BYTES_IN_RATE] = 0;
     run.rows[capacity_start].absorb_active = false;
     assert!(
         tamper_rejects(&run),
@@ -914,13 +819,18 @@ fn fixed_capacity_job_proves_and_over_capacity_rejects() {
 
 #[test]
 fn shake128_job_proves_and_matches_sha3() {
-    let msg = (0..400u32)
+    let msg = (0..N_BYTES_IN_RATE as u32)
         .map(|i| (i.wrapping_mul(19) + 7) as u8)
         .collect::<Vec<u8>>();
     let shapes = vec![Shape::shake128(msg.len(), 2, 10, 11)];
     let p = prove_shapes_full(shapes, vec![msg.clone()], None, None, pcs_config());
     assert_eq!(p.outputs[0], shake128_ref(&msg, 2 * 168));
     verify_jobs(&p, &[msg]).expect("SHAKE-128 verify");
+}
+
+#[test]
+fn shake128_rejects_a_137_byte_message() {
+    assert!(std::panic::catch_unwind(|| Shape::shake128(N_BYTES_IN_RATE + 1, 1, 10, 11)).is_err());
 }
 
 /// FIPS 202 SHAKE-256 cases: empty input, final-byte fuse, block-boundary
@@ -955,9 +865,9 @@ fn shake256_kat_matrix_on_service_path() {
 fn mixed_shake128_shake256_job_list_proves() {
     let messages = vec![
         vec![0x11; 135],
-        vec![0x22; 167],
+        vec![0x22; 34],
         (0..300u32).map(|i| (i * 31) as u8).collect(),
-        vec![0x44; 168],
+        vec![0x44; N_BYTES_IN_RATE],
     ];
     let shapes = vec![
         Shape::new(messages[0].len(), 1, 10, 11),
@@ -1036,10 +946,18 @@ fn tampered_new_rate_rejects() {
     }));
 }
 
-/// Change one post byte so the sponge output requirement no longer
-/// matches the keccak component's OUT yield → LogUp unbalanced → reject.
+/// A committed input change must not alter the independent layered source.
 #[test]
-fn tampered_post_rejects() {
+fn committed_input_source_mutation_rejects() {
+    let messages = vec![vec![0x32u8; 300]];
+    assert!(rejected(messages, vec![1], &|run| {
+        run.rows[0].input[17] ^= 1;
+    }));
+}
+
+/// A committed output change must not alter the independent layered source.
+#[test]
+fn committed_output_source_mutation_rejects() {
     let messages = vec![vec![0x33u8; 300]];
     assert!(rejected(messages, vec![1], &|run| {
         run.rows[0].post[17] ^= 1;
@@ -1058,8 +976,7 @@ fn noncanonical_pad_byte_rejects() {
 }
 
 /// Make the HashIo producer yield a different byte from the
-/// sponge absorbed → global LogUp unbalanced → reject (the hosted-mode swap
-/// soundness, re-run against the rotated sponge).
+/// sponge absorbed → global LogUp unbalanced → reject.
 #[test]
 fn producer_message_byte_mismatch_rejects() {
     let msg = vec![0x44u8; 300];
@@ -1102,14 +1019,13 @@ fn service_preprocessed_root_tamper_rejects() {
     assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
-/// A non-spread value smuggled into a spread-output column cannot collide with
-/// the genuine dense-table row used by the service's xor path.
+/// A non-spread value cannot collide with the genuine XOR-table row.
 #[test]
-fn non_spread_value_in_spread_column_has_no_dense_row() {
+fn non_spread_value_has_no_xor_table_row() {
     let rel = KeccakRelations::dummy();
-    let table = build_dense_table();
+    let table = build_xor3_table();
     let key = spread_u32(0xAB) + spread_u32(0xCD) + spread_u32(0x37);
-    let [tk, honest_out, _] = table[key as usize];
+    let [tk, honest_out] = table[key as usize];
     assert_eq!(tk, key);
     let bad_out = honest_out | 0b11;
     assert!(
@@ -1143,319 +1059,161 @@ fn wrong_conv_at_hashio_boundary_has_no_conv_row() {
 }
 
 // =====================================================================
-// Adversarial tests for the round LogUp-to-GKR path.
+// Layered proof and source tie-back tests.
 // =====================================================================
 
-/// A complete service witness for a nonstandard intermediate Iota constant
-/// must fail against the verifier-pinned FIPS 202 schedule. The sponge output,
-/// all 25 carrier states, all 24 round rows, table multiplicities, and the
-/// output closer use the same nonstandard permutation.
 #[test]
-fn coherent_alternate_iota_schedule_rejects() {
-    let message = vec![0x5au8; 32];
-    let shapes = shapes_for(std::slice::from_ref(&message), &[1]);
-    let handle = SharedKeccakRelations::new();
-    let mut service =
-        KeccakServiceProver::new(shapes.clone(), vec![message.clone()], handle.clone());
-    let official_output = service.job_outputs()[0].clone();
-    let alternate_perm = install_alternate_iota_witness(service.run_mut());
-    *service.perm_mut() = alternate_perm;
-    let outputs = service.job_outputs().to_vec();
-    assert_ne!(outputs[0], official_output);
-    assert_ne!(outputs[0], shake256_ref(&message, outputs[0].len()));
-
-    let mut closer = IoCloser::new(
-        closer_entries(&shapes, std::slice::from_ref(&message), &outputs),
-        handle,
-    );
-    let (proof, payloads) =
-        air_core::prove_with_post_interaction(&mut [&mut service, &mut closer], pcs_config())
-            .expect("coherent alternate-Iota witness should reach verification");
-    let proved = ProvedJobs {
-        shapes,
-        messages: vec![message.clone()],
-        outputs,
-        service_claims: service.claimed_sums(),
-        proof,
-        payloads,
-    };
-    assert!(
-        verify_jobs(&proved, &[message]).is_err(),
-        "the fixed round schedule must reject a coherent alternate-Iota witness"
-    );
-}
-
-/// Skip the prover-side coeff-poly-vs-oracle completeness self-check so the
-/// adversarial provers below can produce their desynchronized proofs; the
-/// verifier must then reject them independently.
-fn skip_prover_oracle_self_check() {
-    std::env::set_var("STWO_MLE_EVAL_SKIP_ORACLE_CONSISTENCY", "1");
-}
-
-/// A corrupted GKR payload blob must be rejected (decode failure or
-/// Fiat-Shamir replay desynchronization both fail closed).
-#[test]
-fn corrupted_gkr_payload_rejects() {
+fn layered_payload_codec_rejects_malformed_wire() {
     let msg = vec![0x21u8; 300];
     let p = prove_jobs(vec![msg.clone()], vec![1], None);
-    assert!(!p.payloads[0].is_empty(), "service must emit a GKR blob");
+    let p_log = JobList::new(p.shapes.clone()).log_size();
+    let honest = &p.payloads[0];
+    assert_eq!(honest.len(), payload_byte_count(p_log));
+    assert!(is_canonical_payload(honest, p_log));
 
-    let mut corrupted = p.payloads.clone();
-    let mid = corrupted[0].len() / 2;
-    corrupted[0][mid] ^= 0xff;
-    assert!(verify_jobs_with_payloads(&p, &p.messages, &corrupted).is_err());
+    const FIELD_BYTES: usize = SECURE_EXTENSION_DEGREE * size_of::<u32>();
+    for (section, field) in layered_payload_sections(p_log) {
+        let mut payloads = p.payloads.clone();
+        let byte = field * FIELD_BYTES;
+        let raw = u32::from_le_bytes(
+            payloads[0][byte..byte + size_of::<u32>()]
+                .try_into()
+                .expect("one M31 limb"),
+        );
+        let changed = if raw == 0 { 1 } else { raw - 1 };
+        payloads[0][byte..byte + size_of::<u32>()].copy_from_slice(&changed.to_le_bytes());
+        assert!(
+            is_canonical_payload(&payloads[0], p_log),
+            "{section}: mutation must remain canonical"
+        );
+        assert!(
+            verify_jobs_with_payloads(&p, &p.messages, &payloads).is_err(),
+            "{section}: canonical mutation must reject"
+        );
+    }
 
     let mut truncated = p.payloads.clone();
-    truncated[0].truncate(4);
+    truncated[0].pop();
+    assert!(!is_canonical_payload(&truncated[0], p_log));
     assert!(verify_jobs_with_payloads(&p, &p.messages, &truncated).is_err());
+
+    let mut trailing = p.payloads.clone();
+    trailing[0].push(0);
+    assert!(!is_canonical_payload(&trailing[0], p_log));
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &trailing).is_err());
+
+    let mut noncanonical = p.payloads.clone();
+    noncanonical[0][..4].copy_from_slice(&M31_MODULUS.to_le_bytes());
+    assert!(!is_canonical_payload(&noncanonical[0], p_log));
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &noncanonical).is_err());
 }
 
-/// With no payloads, the service's round LogUp is unproven and verification
-/// must fail closed.
 #[test]
-fn missing_gkr_payload_rejects() {
+fn missing_layered_payload_rejects() {
     let msg = vec![0x22u8; 300];
-    let p = prove_jobs(vec![msg.clone()], vec![1], None);
-    assert!(verify_jobs_with_payloads(&p, &p.messages, &[]).is_err());
+    let p = prove_jobs(vec![msg], vec![1], None);
+    let mut payloads = p.payloads.clone();
+    payloads[0].clear();
+    assert!(verify_jobs_with_payloads(&p, &p.messages, &payloads).is_err());
 }
 
-/// A structurally valid GKR proof from another proof with the same job shape
-/// must desynchronize the shared-channel replay.
 #[test]
-fn gkr_claim_swapped_between_proofs_rejects() {
-    let msg_a = vec![0x31u8; 300];
-    let msg_b = vec![0x32u8; 300];
-    let a = prove_jobs(vec![msg_a], vec![1], None);
-    let b = prove_jobs(vec![msg_b], vec![1], None);
-
+fn same_shape_layered_payload_swap_rejects() {
+    let a = prove_jobs(vec![vec![0x31u8; 300]], vec![1], None);
+    let b = prove_jobs(vec![vec![0x32u8; 300]], vec![1], None);
+    assert_eq!(a.shapes, b.shapes);
+    assert_eq!(a.payloads[0].len(), b.payloads[0].len());
     assert!(verify_jobs_with_payloads(&a, &a.messages, &b.payloads).is_err());
     assert!(verify_jobs_with_payloads(&b, &b.messages, &a.payloads).is_err());
 }
 
-/// ExpandA contributes 30 SHAKE-128 jobs to this service. A changed committed
-/// carrier cell must break the GKR tie-back.
 #[test]
-fn tampered_expand_a_round_base_cell_rejects() {
-    const EXPAND_A_POLYS: usize = 30;
-    const EXPAND_A_SQUEEZE_BLOCKS: usize = 8;
-    const STREAM_BASE: u32 = 1_000;
-
-    skip_prover_oracle_self_check();
-    let rho = [0x5au8; 32];
-    let messages = (0..EXPAND_A_POLYS)
-        .map(|poly| {
-            let row = poly / 5;
-            let col = poly % 5;
-            [rho.as_slice(), &[col as u8, row as u8]].concat()
-        })
-        .collect::<Vec<_>>();
-    let shapes = messages
-        .iter()
-        .enumerate()
-        .map(|(poly, msg)| {
-            Shape::shake128(
-                msg.len(),
-                EXPAND_A_SQUEEZE_BLOCKS,
-                STREAM_BASE + 2 * poly as u32,
-                STREAM_BASE + 2 * poly as u32 + 1,
-            )
-        })
-        .collect();
-    let p = prove_shapes_full(
-        shapes,
-        messages.clone(),
-        None,
-        Some(&|perm| {
-            use stwo::prover::backend::Column;
-            let col = &mut perm.carrier_trace[20];
-            let value = col.values.at(0);
-            col.values.set(0, value + M31::one());
-        }),
-        pcs_config(),
-    );
-    assert!(verify_jobs(&p, &messages).is_err());
-}
-
-/// A cross-permutation carrier-state swap must break the row-wise tie-back.
-#[test]
-fn cross_permutation_carrier_state_swap_rejects() {
-    let msg = vec![0x3fu8; 300]; // three Keccak permutations
-    assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        let first = N_ROUNDS;
-        let second = stwo_keccak::carrier::ROWS_PER_PERMUTATION + N_ROUNDS;
-        let trace = perm
-            .carrier_data
-            .as_mut()
-            .expect("carrier GKR data")
-            .trace_mut();
-        let column = &mut trace[stwo_keccak::carrier::CARRIER_COLUMN_START];
-        let first_value = carrier_coset_cell(column, first);
-        let second_value = carrier_coset_cell(column, second);
-        set_carrier_coset_cell(column, first, second_value);
-        set_carrier_coset_cell(column, second, first_value);
-    }));
-}
-
-/// Swap two committed positions and the matching GKR schedule data. The
-/// schedule multiset stays unchanged, but the recurrence must reject.
-#[test]
-fn reordered_carrier_positions_reject() {
-    let msg = vec![0x40u8; 300];
-    assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        set_carrier_coset_cell(&mut perm.carrier_trace[4], 1, M31::from(2u32));
-        set_carrier_coset_cell(&mut perm.carrier_trace[4], 2, M31::from(1u32));
-        let trace = perm
-            .carrier_data
-            .as_mut()
-            .expect("carrier GKR data")
-            .trace_mut();
-        set_carrier_coset_cell(&mut trace[4], 1, M31::from(2u32));
-        set_carrier_coset_cell(&mut trace[4], 2, M31::from(1u32));
-    }));
-}
-
-/// Tamper the endpoint GKR data while the committed carrier stays honest.
-#[test]
-fn tampered_carrier_endpoint_source_rejects() {
-    skip_prover_oracle_self_check();
+fn output_source_mle_mutation_reaches_verifier_and_rejects() {
     let msg = vec![0x41u8; 300];
-    let p = prove_jobs_full(
-        vec![msg.clone()],
-        vec![1],
-        None,
-        Some(&|perm| {
-            let trace = perm
-                .carrier_data
-                .as_mut()
-                .expect("carrier GKR data")
-                .trace_mut();
-            let column = &mut trace[stwo_keccak::carrier::CARRIER_COLUMN_START];
-            let value = carrier_coset_cell(column, 0);
-            set_carrier_coset_cell(column, 0, value + M31::one());
-        }),
-        pcs_config(),
+    let p = prove_with_desynchronized_source(vec![msg.clone()], vec![1], &|layered| {
+        layered.perturb_source_mle_value(true, 0)
+    });
+    assert!(
+        verify_jobs(&p, &[msg]).is_err(),
+        "the verifier must reject the desynchronized output source MLE"
     );
-    assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
-/// The adversary shifts claimed-sum mass between the carrier and schedule slots.
-/// Component-level direct LogUp claims must reject even though the global sum
-/// is preserved.
 #[test]
-fn forged_carrier_claim_with_compensating_slot_rejects() {
+fn input_source_mle_mutation_reaches_verifier_and_rejects() {
+    let msg = vec![0x43u8; 300];
+    let p = prove_with_desynchronized_source(vec![msg.clone()], vec![1], &|layered| {
+        layered.perturb_source_mle_value(false, 0)
+    });
+    assert!(
+        verify_jobs(&p, &[msg]).is_err(),
+        "the verifier must reject the desynchronized input source MLE"
+    );
+}
+
+#[test]
+fn claim_neutral_cross_permutation_source_swaps_reach_verifier_and_reject() {
+    let msg = (0..300u32)
+        .map(|index| index.wrapping_mul(29).wrapping_add(7) as u8)
+        .collect::<Vec<_>>();
+    let p_log = JobList::new(shapes_for(std::slice::from_ref(&msg), &[1])).log_size();
+    let first = physical_permutation_row(p_log, 0);
+    let second = physical_permutation_row(p_log, 1);
+
+    for output in [false, true] {
+        let p = prove_with_desynchronized_source(vec![msg.clone()], vec![1], &|layered| {
+            layered.swap_source_mle_rows(output, first, second)
+        });
+        assert!(
+            verify_jobs(&p, std::slice::from_ref(&msg)).is_err(),
+            "the verifier must reject the claim-neutral {} source-row swap",
+            if output { "output" } else { "input" }
+        );
+    }
+}
+
+#[test]
+fn balanced_permutation_row_swap_reaches_verifier_and_rejects() {
+    let msg = (0..300u32)
+        .map(|index| index.wrapping_mul(31).wrapping_add(11) as u8)
+        .collect::<Vec<_>>();
+    let p_log = JobList::new(shapes_for(std::slice::from_ref(&msg), &[1])).log_size();
+    let first = physical_permutation_row(p_log, 0);
+    let second = physical_permutation_row(p_log, 1);
+    let p = prove_with_desynchronized_source(vec![msg.clone()], vec![1], &|layered| {
+        layered.swap_permutation_rows(first, second)
+    });
+    assert!(
+        verify_jobs(&p, &[msg]).is_err(),
+        "the source tie-backs must reject a coherent whole-permutation swap"
+    );
+}
+
+#[test]
+fn internal_layered_state_mutation_rejects() {
+    let msg = vec![0x44u8; 300];
+    let storage_row = stwo_keccak::utils::circle_row_to_coset(LOG_N_LANES)
+        .into_iter()
+        .position(|coset| coset == 0)
+        .expect("first permutation storage row");
+    assert!(layered_rejected(vec![msg], vec![1], &|layered| {
+        layered.flip_state_bit(12, storage_row, 7, 31);
+    }));
+}
+
+#[test]
+fn compensating_service_claim_mutation_rejects() {
     let msg = vec![0x42u8; 300];
     let mut p = prove_jobs(vec![msg.clone()], vec![1], None);
-    // claims = [sponge, carrier, schedule, tables×9]. Keep the total unchanged.
+    assert_eq!(p.service_claims.len(), 3);
     p.service_claims[1] += SecureField::one();
     p.service_claims[2] -= SecureField::one();
     assert!(verify_jobs(&p, &[msg]).is_err());
 }
 
-/// Tampered committed base cell with honest GKR fractions and claimed sums
-/// must be rejected by the MLE-eval tie-back.
+/// Both source tie-backs work with `log_blowup = 4`.
 #[test]
-fn tampered_carrier_base_cell_rejects() {
-    skip_prover_oracle_self_check();
-    let msg = vec![0x43u8; 300];
-    let p = prove_jobs_full(
-        vec![msg.clone()],
-        vec![1],
-        None,
-        Some(&|perm| {
-            use stwo::prover::backend::Column;
-            let col = &mut perm.carrier_trace[20];
-            let value = col.values.at(0);
-            col.values.set(0, value + M31::one());
-        }),
-        pcs_config(),
-    );
-    assert!(verify_jobs(&p, &[msg]).is_err());
-}
-
-/// The end marker closes the active chain after the last final row.
-#[test]
-fn missing_carrier_end_marker_rejects() {
-    const END_COLUMN: usize = 5;
-
-    let msg = vec![0x45u8; 300];
-    assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        let end_row = perm.carrier_claim.n_perms * stwo_keccak::carrier::ROWS_PER_PERMUTATION;
-        set_carrier_coset_cell(&mut perm.carrier_trace[END_COLUMN], end_row, M31::zero());
-    }));
-}
-
-/// The first row of each block must remain the input endpoint row.
-#[test]
-fn missing_carrier_header_role_rejects() {
-    const HEADER_COLUMN: usize = 0;
-
-    let msg = vec![0x46u8; 300];
-    assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        set_carrier_coset_cell(&mut perm.carrier_trace[HEADER_COLUMN], 0, M31::zero());
-        let trace = perm
-            .carrier_data
-            .as_mut()
-            .expect("carrier GKR data")
-            .trace_mut();
-        set_carrier_coset_cell(&mut trace[HEADER_COLUMN], 0, M31::zero());
-    }));
-}
-
-/// A row swap in the independent GKR source must fail the MLE tie-back.
-#[test]
-fn row_swapped_gkr_source_column_rejects() {
-    skip_prover_oracle_self_check();
-    let msg = vec![0x44u8; 300];
-    let p = prove_jobs_full(
-        vec![msg.clone()],
-        vec![1],
-        None,
-        Some(&|perm| {
-            let trace = perm
-                .carrier_data
-                .as_mut()
-                .expect("carrier GKR data")
-                .trace_mut();
-            let column = &mut trace[20];
-            let first = carrier_coset_cell(column, 0);
-            let second = carrier_coset_cell(column, 1);
-            set_carrier_coset_cell(column, 0, second);
-            set_carrier_coset_cell(column, 1, first);
-        }),
-        pcs_config(),
-    );
-    assert!(verify_jobs(&p, &[msg]).is_err());
-}
-
-/// A logical row rotation preserves every GKR fraction multiset. The MLE
-/// tie-back must still reject because the committed carrier does not rotate.
-#[test]
-fn cyclically_rotated_gkr_source_rejects() {
-    skip_prover_oracle_self_check();
-    let msg = vec![0x49u8; 300];
-    let p = prove_jobs_full(
-        vec![msg.clone()],
-        vec![1],
-        None,
-        Some(&|perm| {
-            let trace = perm
-                .carrier_data
-                .as_mut()
-                .expect("carrier GKR data")
-                .trace_mut();
-            assert_eq!(trace.len(), stwo_keccak::carrier::N_COLUMNS);
-            for column in trace {
-                rotate_carrier_coset_column(column);
-            }
-        }),
-        pcs_config(),
-    );
-    assert!(verify_jobs(&p, &[msg]).is_err());
-}
-
-/// The GKR tie-back works with `log_blowup = 4`.
-#[test]
-fn gkr_offload_proves_with_blowup_4_subdomain_mode() {
+fn layered_proof_works_with_blowup_4_subdomain_mode() {
     let msg = vec![0x51u8; 300];
     let config = PcsConfig {
         fri_config: FriConfig::new(1, 4, 3, 2),

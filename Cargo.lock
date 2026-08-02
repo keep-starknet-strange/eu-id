@@ -6,9 +6,7 @@ version = 4
 name = "air-core"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "num-traits",
- "serde",
  "stwo",
  "stwo-constraint-framework",
  "tracing",
@@ -861,15 +859,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1561,29 +1550,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stwo-air-utils"
-version = "2.2.0"
-source = "git+https://github.com/0xLucqs/stwo.git?rev=4f39939eacd0c5efc8ee157e4215a250ca29168f#4f39939eacd0c5efc8ee157e4215a250ca29168f"
-dependencies = [
- "bytemuck",
- "itertools 0.12.1",
- "rayon",
- "stwo",
- "stwo-air-utils-derive",
-]
-
-[[package]]
-name = "stwo-air-utils-derive"
-version = "2.2.0"
-source = "git+https://github.com/0xLucqs/stwo.git?rev=4f39939eacd0c5efc8ee157e4215a250ca29168f#4f39939eacd0c5efc8ee157e4215a250ca29168f"
-dependencies = [
- "itertools 0.13.0",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
 name = "stwo-constraint-framework"
 version = "2.2.0"
 source = "git+https://github.com/0xLucqs/stwo.git?rev=4f39939eacd0c5efc8ee157e4215a250ca29168f#4f39939eacd0c5efc8ee157e4215a250ca29168f"
@@ -1608,8 +1574,6 @@ dependencies = [
  "serde",
  "sha3 0.11.0",
  "stwo",
- "stwo-air-utils",
- "stwo-air-utils-derive",
  "stwo-constraint-framework",
 ]
 

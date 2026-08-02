@@ -1297,7 +1297,7 @@ pub struct MdocProof {
     ts13_mso_validity_interaction_claim: MdocPrivateMsoValidityInteractionClaim,
     ts13_revocation_range_interaction_claim: MdocRevocationRangeInteractionClaim,
     /// Opaque post-interaction payloads. The Keccak service carries its
-    /// round-GKR proof in its module slot.
+    /// layered proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
     /// Prover-side executable geometry for artifact drift tests.
     /// The proof does not contain this value.
@@ -1407,7 +1407,9 @@ impl MdocProof {
                 .enumerate()
                 .all(|(index, payload)| {
                     if index == 2 {
-                        air_core::gkr::is_ts13_demo_gkr_batch_proof_wire(payload)
+                        stwo_mldsa::stwo_keccak::layered_gkr::is_ts13_demo_layered_keccak_wire(
+                            payload,
+                        )
                     } else {
                         payload.is_empty()
                     }
@@ -2950,10 +2952,10 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
             "mdoc proof Keccak service claims do not match the statement".to_string(),
         ));
     }
-    // The Keccak service uses GKR for its round LogUp. Its proof is in
+    // The Keccak service puts its layered proof in
     // `post_interaction_payloads`. Verification gives each module its payload
-    // in proof order. `verify_post_interaction` rejects a missing or invalid
-    // payload. An empty payload fails GKR decoding.
+    // in proof order. `verify_post_interaction` rejects a missing, empty, or
+    // invalid payload.
     let issuer_message_field = SharedFieldRelation::new();
     let revocation_message_field = SharedFieldRelation::new();
     let attribute_digest = SharedDigestRelation::new();
@@ -3242,7 +3244,8 @@ const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = Some(19);
 
 pub(crate) fn mdoc_ts13_pcs_config() -> PcsConfig {
     // PCS query and proof-of-work label: 36×3 + 20 = 128 bits.
-    // This exceeds the 108-bit OODS bound that dominates the TS13 STARK.
+    // This label is separate from the algebraic OODS bound. The verifier's
+    // recombined composition polynomial gives an OODS term of about 106 bits.
     // The verifier pins this configuration and rejects other configurations.
     // TS13 accounts for OODS and binding-hash limits separately.
     PcsConfig {

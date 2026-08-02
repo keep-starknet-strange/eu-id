@@ -374,10 +374,10 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 committed_histogram.into_iter().collect::<Vec<_>>(),
                 [
                     (4, 5),
-                    (5, 19),
+                    (5, 6),
                     (6, 3),
                     (7, 5),
-                    (8, 27),
+                    (8, 13),
                     (9, 110),
                     (10, 92),
                     (11, 8),
@@ -385,7 +385,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     (13, 18),
                     (14, 7),
                     (15, 8),
-                    (16, 3),
+                    (16, 2),
                 ]
             );
             assert_eq!(shape.commitment_count, 5);
@@ -395,7 +395,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [319, 4_285, 2_380, 8, 16]
+                [291, 3_638, 2_252, 16, 16]
             );
             assert_eq!(
                 shape
@@ -403,7 +403,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [319, 4_285, 2_380, 8, 16]
+                [291, 3_638, 2_252, 16, 16]
             );
             let common_query_count = shape.queried_values[0][0];
             assert!(common_query_count > 0);
@@ -417,7 +417,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 .flatten()
                 .all(|&query_count| query_count == common_query_count));
             let mut expected_post_payloads = vec![0; 20];
-            expected_post_payloads[2] = 20_128;
+            expected_post_payloads[2] = stwo_mldsa::stwo_keccak::layered_gkr::PRODUCT_PAYLOAD_BYTES;
             assert_eq!(shape.post_interaction_payload_bytes, expected_post_payloads);
             assert_eq!(shape.fri_last_layer_coefficient_count, 2);
             assert_eq!(shape.sha_table_pair_claim_count, 3);
@@ -440,7 +440,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     Some(23),
                     Some(30),
                     Some(18),
-                    Some(12),
+                    Some(3),
                 )
             );
             assert_eq!(shape.private_item_claim_count, 1);
@@ -463,7 +463,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 [
                     (8, 4, 12, 0),
                     (2, 1, 4, 0),
-                    (55, 1_963, 888, 8),
+                    (20, 1_316, 760, 16),
                     (0, 0, 0, 0),
                     (2, 2, 8, 0),
                     (63, 125, 192, 0),
@@ -489,7 +489,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(|air| air.components.len())
                     .collect::<Vec<_>>(),
-                [3, 1, 13, 0, 2, 18, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 23, 2, 18, 0]
+                [3, 1, 5, 0, 2, 18, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 23, 2, 18, 0]
             );
             assert_eq!(
                 geometry
@@ -497,18 +497,18 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(|air| air.claimed_sum_count)
                     .collect::<Vec<_>>(),
-                [3, 1, 12, 0, 2, 18, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 23, 2, 18, 0]
+                [3, 1, 3, 0, 2, 18, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 23, 2, 18, 0]
             );
             assert_eq!(
                 geometry.air_instances[2].post_interaction_log_sizes,
-                [13; 8]
+                [9; stwo_mldsa::stwo_keccak::layered_gkr::N_TIEBACK_COLUMNS]
             );
             assert!(geometry
                 .air_instances
                 .iter()
                 .enumerate()
                 .all(|(index, air)| index == 2 || air.post_interaction_log_sizes.is_empty()));
-            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 319);
+            assert_eq!(geometry.committed_preprocessed_log_sizes.len(), 291);
             assert_eq!(
                 column_counts.iter().fold(
                     [0usize; 3],
@@ -518,7 +518,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                         post + air_post,
                     ]
                 ),
-                [4_285, 2_380, 8]
+                [3_638, 2_252, 16]
             );
             let reject_proof_without_panic = |label: &str, candidate: &eu_id_prover::MdocProof| {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
