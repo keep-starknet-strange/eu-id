@@ -30,15 +30,15 @@ the `proveIdentity` and `verifyIdentity` interface, or any proof property.
 - [x] Keep the app flow, theorem, ML-DSA-65 roles, public-input unlinkability,
   local proving, pinned STWO/PCS/FRI settings, fixed envelope, and two-function
   API unchanged.
-- [ ] Regenerate the source-bound artifact and mobile fixture after each
+- [x] Regenerate the source-bound artifact and mobile fixture after each
   accepted soundness-source change. Otherwise, prove that they did not change.
-- [ ] Run release formatting, Clippy, all-target build, normal and ignored
+- [x] Run release formatting, Clippy, all-target build, normal and ignored
   tests, adversarial matrices, unlinkability tests, dependency checks, and
   artifact drift.
-- [ ] Measure the final canonical `proveIdentity` and `verifyIdentity` path in
+- [x] Measure the final canonical `proveIdentity` and `verifyIdentity` path in
   fresh serial processes and compare it with the frozen baseline.
-- [ ] Run an independent final soundness, simplicity, and performance review.
-- [ ] Remove all temporary probes, controls, generated build output, and stale
+- [x] Run an independent final soundness, simplicity, and performance review.
+- [x] Remove all temporary probes, controls, generated build output, and stale
   plan text introduced by this pass.
 
 Review to date:
@@ -50,8 +50,15 @@ Review to date:
   AIR still binds the same authenticated bytes and proves strict whole-second
   bounds.
 - Normal proofs no longer collect artifact-only circuit geometry.
-- Release all-target checks, focused validity and relation-seam tests, and
-  release Clippy pass. Artifact refresh and the full final matrix remain.
+- The final source-bound artifact, generated constants, and Android fixture
+  use circuit hash `a1011099bb0bd64358be0384940dd3afdd0ba23505107f26317fdf12599ea7ca`.
+- All 535 normal and all 18 ignored release tests pass. Release Clippy,
+  formatting, the all-target build, quantum-only dependency check, artifact
+  drift check, and Android compilation pass.
+- Seven fresh processes measured a 1,314 ms median prove time and a 40 ms
+  median verify time. An alternating baseline and final comparison found no
+  measurable latency change. The fixed envelope is 1,507,374 bytes. This pass
+  makes no memory-improvement claim.
 
 ## Canonical product
 
