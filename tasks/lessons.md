@@ -2,6 +2,8 @@
 
 ## Evidence
 
+- Put shell search patterns that contain backticks in single quotes. Do not
+  place them inside a double-quoted shell argument.
 - Trace the exact prover entrypoint before you name a proof or benchmark.
 - Trace the exact verifier entrypoint.
 - Trace the fixture constructor.

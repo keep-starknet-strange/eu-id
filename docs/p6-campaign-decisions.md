@@ -1,6 +1,6 @@
 # TS13 phone proving campaign decisions
 
-Status: decision required; P5 is canonical and held
+Status: closed at P5 by A-020, 2026-08-02
 
 This file is the tracked authority for the TS13 phone proving campaign. The
 files under the main checkout's `tasks/` directory are communication mirrors.
@@ -8,14 +8,14 @@ They are not campaign-branch records.
 
 ## 1. Goal
 
-The campaign must make one cold `proveIdentity` call complete in less than
+The original campaign target was one cold `proveIdentity` call in less than
 2,000 ms on each of these Android phones:
 
 - Google Pixel 8, model `shiba`, API 34.
 - Samsung Galaxy S24 Ultra, model `e3q`, API 34.
 - Samsung Galaxy A54, model `a54x`, API 34.
 
-The same execution must meet these limits:
+The same execution had these additional limits:
 
 - `verifyIdentity` must complete in at most 500 ms.
 - The identity-proof envelope must contain at most 2,500,000 bytes.
@@ -27,6 +27,8 @@ device, API level, worker count, stack sizes, proof time, verification time,
 envelope size, and peak resident memory.
 
 Performance is a campaign gate. It is not part of TS13 conformance.
+A-020 formally retires the 2,000 ms target and closes the campaign at P5.
+The verification, envelope, privacy, and soundness requirements remain met.
 
 ## 2. Properties that must stay unchanged
 
@@ -51,32 +53,35 @@ Every stage must preserve these properties:
 A STWO revision change needs proof-byte parity evidence, a demo-baseline
 guard, and a separate authorization.
 
-## 3. Approved change ledger
+## 3. Historical change ledger
 
-The following values may change without another user question:
+During the active campaign, these values could change without another user
+question:
 
 - Circuit hash.
 - Proof-body composition.
 - Envelope capacity, up to 2,500,000 bytes.
 - Phone verification time, up to 500 ms.
 
-Any other property change needs user approval before implementation.
+Any other property change needed user approval before implementation.
 
-Repository-owned `air-core` proving machinery is allowed. The STWO pin does
+Repository-owned `air-core` proving machinery was allowed. The STWO pin did
 not move under this authorization.
 
-The campaign uses this route:
+The campaign ended with this route record:
 
 - The restored P5 carrier is the canonical proof path.
 - The c7 AIR track is sound but rejected on measured phone throughput.
 - A-019 supersedes the A-018 engine authorization. It rejects the compact
   authenticated-MLE route under the fixed campaign constraints.
-- No engine, N, S, repin, or application-integration work may start before
-  Lucas selects a new campaign disposition.
+- A-020 closes the campaign at P5. It does not authorize an engine, N, S,
+  repin, or application-integration performance track.
 - The application STWO pin stays at `4f39939e`.
 
-A filed `GO` starts an approved stage. Fable controls technical mailbox
-answers and stage-gate definitions. Lucas may veto any campaign decision.
+During the active work, a filed `GO` started an approved stage. Fable
+controlled technical mailbox answers and stage-gate definitions. Lucas could
+veto any campaign decision. A-020 ends these authorizations. Future work needs
+a new tracked decision.
 
 ## 4. Work-order record
 
@@ -89,9 +94,8 @@ ordered phase records.
 ### P1 — Canonical-path overhead
 
 The accepted checkpoint measured the canonical path at 1.059 times the
-AIR-core time on desktop. This passed the 1.15 limit. The final accepted
-artifact must record this ratio again or state why the checkpoint remains
-applicable.
+AIR-core time on desktop. This passed the 1.15 limit. A-020 accepts this
+checkpoint as the closing P1 evidence. It requires no new ratio measurement.
 
 ### P2 — Keccak service
 
@@ -132,12 +136,9 @@ measured c7 dependent chain. The pinned PCS has no separate compact opening
 that closes this gap. G1 also counts every field element committed by a
 replacement proof system, so moving commitments does not meet the gate.
 
-The campaign has no authorized P6 implementation route. Lucas must select one
-of these dispositions:
-
-1. Close the performance campaign at the verified P5 baseline.
-2. Revise the phone-latency gate or another fixed campaign constraint.
-3. Authorize a research-scale proof-system project outside this campaign.
+The campaign has no authorized P6 implementation route. A-020 selects closure
+at the verified P5 baseline. A characteristic-2-native proof system would be
+a separate research project and needs a new decision.
 
 ## 5. Current canonical P5 and archived c7
 
@@ -174,7 +175,7 @@ Its final matrix measured 13,560 ms, 5,075 ms, and 9,523 ms on the same
 phones. The complete c7 evidence remains in
 `tasks/bench-results/ts13-layered-final-20260802`.
 
-## 6. Current gates
+## 6. Closing evidence
 
 A-016 withdraws the stale literal 108-bit soundness label. The retained OODS
 term is about 106 bits by itself. The named live partial union is about 105.91
@@ -198,11 +199,112 @@ A-019 closes this route before G1 because no sound primitive meets its cell
 and dependency requirements. N, S, and application integration remain
 stopped. Do not run G2 against a design that did not pass G1.
 
-## 7. Completion rule
+The closing phone benchmark passed verification at or below 500 ms, used a
+fixed 1,572,910-byte envelope, and returned one successful test on each phone.
+It did not meet 2,000 ms proving. A-020 retires that proving target.
 
-One accepted, source-bound artifact must meet the 2,000 ms cold-prove limit on
-all three phones. The current campaign did not reach this limit, and A-019
-confirms that no authorized implementation route remains. Hold the verified
-P5 artifact until Lucas selects a disposition. Do not weaken the theorem,
-unlinkability, ML-DSA-65, local proving, or the product API without an explicit
-new decision.
+## 7. Closure rule
+
+A-020 closes P1 through P6 as applicable at the restored P5 baseline. P1
+through P5 produced accepted measurements and changes. P6 mapped the measured
+P5-to-c7 frontier and found no sound implementation route under the fixed
+constraints. Section 11.7 of the normative specification defines the required
+resource fields. The final conforming record is in section 8 below.
+
+No campaign work remains. A future performance project needs a new tracked
+decision. It must not weaken the theorem, unlinkability, ML-DSA-65, local
+proving, or the product API without explicit authorization.
+
+## 8. A-020 final disposition
+
+Lucas closed the performance campaign at P5 on 2026-08-02. The canonical
+circuit remains `6b30e79449d331477027412fd30c831f7bb45cea42214b072845173fea0241b6`.
+The privacy claim remains `public-input unlinkable; transcript zero knowledge
+pending`. The c7 and authenticated-MLE routes remain archived evidence. They
+are not active implementation paths.
+
+The closing P5 state passed all normal release workspace tests, all 18 ignored
+release tests, the A1/A2/B unlinkability test, the invalid-witness matrix, the
+source-bound artifact drift test, release Clippy with warnings denied, and
+formatting. The per-work-order deltas and decisions remain in main-repository
+mailbox Q/A-001 through Q/A-019. Git history retains c7, the superseded
+A-018-route engine work order, the retired gates, and the complete design
+review thread.
+
+### Section 11.7 resource record
+
+This tracked record supplies the fields required by section 11.7 of the
+normative specification. The canonical restored artifact has this identity:
+
+- source restore commit:
+  `1e035312a566a2b8b96f4febad7eb35f17bed493`;
+- artifact and fixture commit:
+  `cdfdf52c38a86143733ea80e4e8a3064a53950f9`;
+- circuit hash:
+  `6b30e79449d331477027412fd30c831f7bb45cea42214b072845173fea0241b6`;
+- fixture SHA-256:
+  `06ef4ade577e1b69a776adafa778fd0fe16e3c75478772f1d5abf0c7072a98f4`;
+- fixture path:
+  `mobile/EuIdBenchAndroid/src/androidTest/assets/ts13_mobile_benchmark_fixture_v1.json`;
+- release probe binary SHA-256:
+  `3760907c6c4754e1941b4ea8dd61dc589a4a2df62f6f7b0b57af571906f8145a`;
+- PCS: proof-of-work 20, blowup log 3, 36 queries, last-layer log 1,
+  fold step 2, and lifting log 19;
+- feature set: the default features of all six workspace packages;
+- identity-proof envelope: 1,572,910 bytes.
+
+One fresh release process on a 12-core Apple M2 Max with macOS 26.5.2 used
+six proof workers, a 2,097,152-byte proof-thread stack, and 16,777,216-byte
+worker stacks. It completed `proveIdentity` and `verifyIdentity`, emitted 25
+phase records, and measured 1,280 ms for proving, 42 ms for verification, and
+1,513,652,224 bytes of maximum resident memory.
+
+The closing phone benchmark is Firebase matrix `matrix-92u1aei93c81a`.
+Each phone ran Android 14, API 34, with six actual proof workers. Each run
+used a 2,097,152-byte proof-thread stack, a 16,777,216-byte worker stack, and
+the fixed 1,572,910-byte envelope.
+
+| Device | Prove | Verify | Peak resident memory |
+| --- | ---: | ---: | ---: |
+| Google Pixel 8 (`shiba`) | 5,450 ms | 239 ms | 1,346,468 KiB |
+| Samsung Galaxy S24 Ultra (`e3q`) | 2,755 ms | 140 ms | 1,414,276 KiB |
+| Samsung Galaxy A54 (`a54x`) | 5,853 ms | 255 ms | 1,338,168 KiB |
+
+All three phone tests passed. The matrix numeric ID is
+`4904946063125125660`, and its history is `bh.f5f036aa81c4230a`. The matrix
+used package commit `a91085dc` and fixture SHA-256
+`c9fe96c76b13a884afb324e68dd939561c8d4664fe59e8cdfc85e8bf0625ea52`.
+The measured package files have these SHA-256 values:
+
+- AAR:
+  `cdd744130c540f8ba910843b2a0fafe482714b864c200c06ee375c7aa6f242fa`;
+- host APK:
+  `b126d7693abb8079b2412a0ba1590124f16252ed61449d96e0b86f5aec3e6766`;
+- test APK:
+  `050ddfca27695d32c1c6e1d563ec76a1f16ad2d9551f497e877e5cd839678ae3`;
+- AAR and host APK ARM64 library:
+  `aedf9b1e6213e6d0bc7bf5b2cd20e51a5908eee5cee844b7e11bbcf87533dc38`.
+
+It used the prior P5 circuit hash
+`2eff9e073151b4bce733516f4b6dd411b6d48ef5425fd93d41c64bedf524fea9`.
+The restored P5 source bytes match that proof path, but the source-bound hash
+changed. A-020 accepts this matrix as the closing same-path phone benchmark.
+It is not current-hash phone evidence. The 2,000 ms proving target was not
+met and is retired. Performance remains outside TS13 conformance.
+
+### Campaign yield
+
+The campaign started on 2026-07-31 using the 2026-07-30 phone measurements as
+its baseline. The closing P5 results improve on that baseline:
+
+| Device | Starting prove | Closing P5 prove |
+| --- | ---: | ---: |
+| Google Pixel 8 | 7,892 ms | 5,450 ms |
+| Samsung Galaxy S24 Ultra | 4,081 ms | 2,755 ms |
+| Samsung Galaxy A54 | 11,601 ms | 5,853 ms |
+
+The fixed envelope decreased from 1,769,518 bytes to 1,572,910 bytes. The
+physical circuit decreased from about 24.49 million cells to 16,722,320
+cells. The P5-to-c7 measurements show that phone cost depends on dependent
+sumcheck rounds and table churn, not only on committed-cell count. A new point
+outside this frontier requires a separate proof-system project.

@@ -2,6 +2,10 @@
 
 Branch: `codex/ts13-unlinkable-v1`
 
+Status: closed at P5 by main-repository mailbox
+`tasks/mailbox/A-020-campaign-closed-at-p5.md`, 2026-08-02.
+The tracked decision mirror is `docs/p6-a020-campaign-closure.md`.
+
 Privacy claim:
 `public-input unlinkable; transcript zero knowledge pending`
 
@@ -147,12 +151,10 @@ Privacy claim:
   soundness-negative, and unlinkability-negative test matrix.
 - [x] Run the final desktop campaign and the final Firebase three-device
   campaign through the canonical `proveIdentity` and `verifyIdentity` API.
-- [ ] Meet the primary mobile gates: cold prove below 2,000 ms on Pixel 8,
-  Galaxy S24 Ultra, and Galaxy A54; verify at most 500 ms; use a fixed
-  credential-independent envelope; and meet the mailbox-approved proof-size
-  ceiling.
-  - [ ] Meet the 2,000 ms cold-prove target on all three phones. The P5
-    baseline and the rejected c7 matrix failed this target on all three phones.
+- [x] Close the primary mobile gate under A-020 after the fixed-scope campaign
+  proved the 2,000 ms target unreachable and Lucas formally retired it.
+  - [x] Record that P5 and c7 failed the retired 2,000 ms target on all three
+    phones.
   - [x] Keep verification at or below the approved 500 ms limit on all three
     phones.
   - [x] Keep one fixed, credential-independent 1,572,910-byte envelope.
@@ -207,8 +209,7 @@ for measured phone throughput and restored P5. Circuits `e3426e32...` and
   under the fixed campaign constraints.
 - [x] Stop the witness-MLE engine, N, S, and application-integration tracks.
 - [x] Keep the verified P5 source, artifact, and API as the canonical baseline.
-- [ ] Receive Lucas's campaign decision: close at P5, revise the campaign
-  gate or fixed constraints, or authorize research-scale proof-system work.
+- [x] Receive A-020 and close the performance campaign at P5.
 
 A-019 supersedes the A-018 engine authorization. It confirms that the compact
 authenticated-MLE route cannot meet G1 while it keeps the pinned PCS and FRI
@@ -221,7 +222,23 @@ cutoff for small rounds increased the six-worker desktop post-proof median
 from 1.160 seconds to 1.208 seconds, so it was removed. Table streaming cannot
 provide the required 2.09x to 4.67x phase speedup. A-018 confirms the P5
 restore. A-019 closes the authenticated-MLE engine route and keeps P5
-canonical until Lucas selects the campaign disposition.
+canonical. A-020 then closes the campaign at P5.
+
+## A-020 campaign closure
+
+- [x] Record the A-020 closure and its decision mirror in the tracked
+  governance set under `docs/`.
+- [x] Add the final section 11.7-conformant resource record for circuit
+  `6b30e794...` to the tracked campaign authority.
+- [x] Reference P5 matrix `matrix-92u1aei93c81a` as the accepted closing
+  same-path phone benchmark, not as current-hash evidence.
+- [x] Close this ledger with the main-repository A-020 mailbox pointer.
+- [x] Keep P5 canonical and make no proof, artifact, transcript, or API change.
+
+Closure review: P1 through P5 are complete. P6 is complete as an infeasibility
+and frontier result under the fixed constraints. A-020 retires the unmet
+2,000 ms gate. The other mobile gates passed. The campaign has no remaining
+implementation or benchmark work.
 
 ### A-019 review
 

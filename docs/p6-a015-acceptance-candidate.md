@@ -44,16 +44,16 @@ improve the live whole-system algebraic bound under identical accounting. The
 recorded live baseline is about 105.91 bits before global LogUp collision
 terms.
 
-The review requires three conditions before final campaign acceptance:
+The review required three conditions before final campaign acceptance:
 
 1. State the actual artifact binding for the Keccak constants and payload.
 2. Add one exported `verifyIdentity` negative for a recomposition-neutral,
    off-domain input-nibble pair.
 3. State that the removed carrier baseline is not independently recomputable.
 
-Land these conditions before artifact generation. Then generate a new circuit
-hash and rerun the full release matrix. Use only that final hash for the
-three-phone acceptance run.
+The implementation completed these conditions, generated circuit hash
+`c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`,
+and reran the full release matrix. The c7 three-phone run used that final hash.
 
 The desktop result was 1,784 ms for proving, 80 ms for verification, and
 777,682,944 bytes of peak resident memory. Proving was slower than the
@@ -61,12 +61,11 @@ pre-layered 1,162 ms path. The final c7 matrix measured 13,560 ms on Pixel 8,
 5,075 ms on Galaxy S24 Ultra, and 9,523 ms on Galaxy A54. All three phones
 failed the 2,000 ms gate. A-018 restored P5 as the canonical path.
 
-A-018-route authorizes an authenticated witness-MLE opening primitive in `~/stwo` on a
-dedicated branch from `dev-copy`. P5 must stay canonical while that work
-continues. The application STWO pin does not move without a recorded repin
-decision, proof-byte parity evidence, and a demo-baseline guard.
+A-018-route later authorized an authenticated witness-MLE opening primitive.
+A-019 closed that route as infeasible under the fixed campaign constraints.
+A-020 then closed the campaign at P5. No engine or repin work remains active.
 
 A-016 retires the earlier A54 complete-Keccak limit of 1,200 ms because the
-current timing wire cannot measure it. The binding performance gate is one
-cold `proveIdentity` call below 2,000 ms on each of the three phones. The
-desktop 25-phase record must stay with the phone evidence.
+current timing wire cannot measure it. The later 2,000 ms three-phone target
+was not met. A-020 formally retires it. The desktop 25-phase record remains
+with the phone evidence.

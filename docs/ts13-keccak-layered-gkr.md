@@ -498,9 +498,10 @@ post-interaction: 16@9
 This is 1,534,720 AIR-reference cells. The physical system total is projected
 at 9,156,176 cells. The replacement passes the 320,000-cell prototype gate.
 A-013 supersedes the earlier 1.5-million complete-Keccak gate for the AIR
-track. A-015 suspends the committed-bit route and keeps the engine route open
-for future work. A-015-review accepts this candidate as sound, subject to the
-three recorded completion conditions.
+track. A-015 suspended the committed-bit route and initially kept the engine
+route open. A-015-review accepted this candidate as sound, subject to the
+three recorded completion conditions. A-019 later closed the engine route,
+and A-020 closed the performance campaign at P5.
 
 A-016 required one cold full-proof run on all three gate phones. The final
 matrix measured 13,560 ms on Pixel 8, 5,075 ms on Galaxy S24 Ultra, and 9,523
