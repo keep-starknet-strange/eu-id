@@ -2,8 +2,9 @@
 
 Date: 2026-08-02
 
-Status: The soundness review, release tests, Android package, and desktop
-campaign are complete. The final Firebase run waits for `A-014-confirmed`.
+Status: The soundness review, release tests, Android package, desktop campaign,
+and final Firebase run are complete. All phone tests passed. The phone proving
+gate failed on all three devices.
 
 Privacy claim: `public-input unlinkable; transcript zero knowledge pending`
 
@@ -44,6 +45,13 @@ or high finding. This checkpoint completes its three conditions:
    nibble pair. The malicious prover emits an encoded proof first.
 3. The design states that no live source recomputes the removed carrier's
    `8974/q` value. Acceptance does not depend on that value.
+
+- F-1 landed in `cf8f2cec27f7952d982c6d157a7fb3793ee79010`. It
+  selected the documented source-package-digest and payload-shape-gate
+  resolution. It did not add duplicate artifact constants.
+- F-3 landed in `cf8f2cec27f7952d982c6d157a7fb3793ee79010`. It
+  records the `8974/q` value as a non-recomputable historical baseline and
+  makes clear that acceptance does not depend on it.
 
 The exact F-2 release test returned `ProofVerificationFailed`. It did not
 return a host, envelope, or prover error. The verifier failed in the layered
@@ -117,15 +125,40 @@ reviewed pre-F-2 checkpoint, the prove median is 4 ms lower and the verify
 median is 1 ms higher. The maximum RSS is 8,732,672 bytes higher. These small
 differences do not show an honest-path performance change.
 
-## Pending phone gate
+## Phone method
 
-Firebase must run the same host and test APKs on Pixel 8 (`shiba`), Galaxy S24
-Ultra (`e3q`), and Galaxy A54 (`a54x`) with API 34. One matrix must run all
-three phones in parallel. The binding gates are:
+Firebase matrix `matrix-5gyixcf0k5kxa` ran the same host and test APKs on
+Pixel 8 (`shiba`), Galaxy S24 Ultra (`e3q`), and Galaxy A54 (`a54x`). All
+three physical phones used API 34 in one parallel matrix. Each phone ran one
+cold process and one `proveIdentity` test.
 
-- Cold `proveIdentity` below 2,000 ms on each phone.
-- `verifyIdentity` at most 500 ms on each phone.
-- A fixed envelope below 2,500,000 bytes.
-- Exactly 25 phase records and the fixed runtime settings.
+- Numeric matrix ID:
+  [8470816123494757576](https://console.firebase.google.com/project/exploration-dev-503108/testlab/histories/bh.f5f036aa81c4230a/matrices/8470816123494757576)
+- GCS result prefix:
+  `ts13-unlinkable-v1-final-c7c99e7b-parallel-20260802-1`
+- Exact result rows: `phone-final.csv`
+- Downloaded result hashes: `firebase-result-files.sha256`
 
-The upload remains on hold until the mailbox contains `A-014-confirmed`.
+## Phone results
+
+| Firebase model | Phone | Prove | Verify | Peak HWM | Envelope | Test |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `shiba` | Pixel 8 | 13,560 ms | 299 ms | 727,616 KiB | 1,507,374 bytes | `OK (1 test)` |
+| `e3q` | Galaxy S24 Ultra | 5,075 ms | 183 ms | 839,520 KiB | 1,507,374 bytes | `OK (1 test)` |
+| `a54x` | Galaxy A54 | 9,523 ms | 257 ms | 783,692 KiB | 1,507,374 bytes | `OK (1 test)` |
+
+Each result used circuit
+`c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`.
+Each process used six Rayon workers, a 2,097,152-byte proof-thread stack, and
+a 16,777,216-byte worker stack. Each log contains exactly 25 phase records.
+Each JUnit XML file reports one test with zero failures, errors, or skips. The
+benchmark test reported no out-of-memory error, crash, ANR, or fatal signal.
+
+The `verifyIdentity` gate passed on all three phones. The envelope gate and
+the runtime-shape gate also passed. No phone met the below-2,000 ms cold
+`proveIdentity` gate. The `post_interaction_proof` phase used 10,316,083 us on
+Pixel 8, 3,756,152 us on Galaxy S24 Ultra, and 7,069,064 us on Galaxy A54. It
+was the largest measured phase on each phone.
+
+Each result is one cold sample. These samples do not define a stable latency
+distribution.

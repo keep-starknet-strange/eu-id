@@ -1,0 +1,4 @@
+firebase_model,device,api,available_processors,rayon_threads,proof_thread_stack_bytes,proof_worker_stack_bytes,prove_ms,verify_ms,envelope_bytes,vm_hwm_kib,phase_count,post_interaction_proof_us,test_status,circuit_hash
+shiba,Pixel 8,34,9,6,2097152,16777216,13560,299,1507374,727616,25,10316083,OK (1 test),c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc
+e3q,SM-S928U1,34,8,6,2097152,16777216,5075,183,1507374,839520,25,3756152,OK (1 test),c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc
+a54x,SM-A546U,34,8,6,2097152,16777216,9523,257,1507374,783692,25,7069064,OK (1 test),c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc

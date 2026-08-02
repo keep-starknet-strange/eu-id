@@ -155,7 +155,7 @@ Privacy claim:
     canonical matrix failed this target on all three phones.
   - [x] Keep verification at or below the approved 500 ms limit on all three
     phones.
-  - [x] Keep one fixed, credential-independent 1,572,910-byte envelope.
+  - [x] Keep one fixed, credential-independent 1,507,374-byte envelope.
   - [x] Keep the envelope below the 2,500,000-byte ceiling.
 
 ## Invariants
@@ -169,11 +169,29 @@ Privacy claim:
 - Benchmark only the final soundness-checked artifact and canonical `proveIdentity` path.
 - Regenerate the circuit hash after all source cleanup.
 
-## Review
+## A-013 committed-bit redesign reconciliation
 
-The canonical implementation and the performance campaign are complete. The
-2,000 ms cold-prove target failed on all three phones. P6 was infeasible in the
-fixed campaign scope and remains skipped.
+- [x] Read A-013, Q-013, Q-012, Q-011, and every linked design in full.
+- [x] Audit the redesign against the normative TS13 theorem and privacy model.
+- [x] Compare the redesign with the live soundness source and artifact `e3426e32…`.
+- [x] Record the frozen layered-Keccak APK's exact provenance and quarantine status.
+- [x] Reject the missing committed-bit v3 and retain the accepted committed-nibble path.
+- [x] Receive Lucas's authentication confirmation and pass the A-014 bucket probe.
+- [x] Run one parallel three-phone matrix with the final c7 APK pair.
+- [x] Record exact phone metrics and reconcile the final campaign evidence.
+
+Audit result: A-013 is an interim decision, not an implementation design. Its
+promised v3 was never issued and its literal 108-bit gate is stale. A-015 and
+A-016 permanently retire that route and accept the committed-nibble design.
+Circuit `e3426e32…` and its APK pair are historical throughput-only artifacts.
+Final acceptance evidence must use circuit `c7c99e7b…` and its final package.
+
+## Pre-layered performance checkpoint
+
+This section records the P5 checkpoint before the authorized layered Keccak
+redesign. At that checkpoint, the 2,000 ms cold-prove target failed on all
+three phones and P6 was out of scope. The later layered Keccak section
+supersedes each use of "final" in this checkpoint.
 The Android jemalloc candidate is rejected because the maintained bindings do
 not build with NDK 27 without a local patch or linker shim.
 
@@ -287,7 +305,7 @@ artifact check, and the diff check passed.
   - [x] Select the truthful source-digest and payload-shape binding for F-1.
   - [x] Add the exported off-domain input-nibble negative required by F-2.
   - [x] Record the removed carrier baseline provenance required by F-3.
-- [ ] Implement and measure each authorized redesign stage at its hard stop
+- [x] Implement and measure each authorized redesign stage at its hard stop
   gate.
   - [x] Build one layered Keccak acceptance candidate and delete the carrier,
     round AIR, schedule table, AndNot table, split tables, and generic GKR
@@ -302,7 +320,7 @@ artifact check, and the diff check passed.
   - [x] Reduce the three-sample desktop throughput median from 8,243 ms to
     1,810 ms.
   - [x] Retire the unmeasurable complete-Keccak A54 sub-gate under A-016.
-  - [ ] Measure the full cold `proveIdentity` gate on all three phones.
+  - [x] Measure the full cold `proveIdentity` gate on all three phones.
 - [x] Regenerate and verify the source-bound artifact after each retained
   acceptance-candidate source change.
 - [x] Pass the complete release and unlinkability consistency checks for the
@@ -310,13 +328,13 @@ artifact check, and the diff check passed.
 - [x] Build and verify one source-bound AAR and APK pair for throughput data.
 - [x] Record the quarantined package provenance in mailbox Q-015.
 - [x] Receive A-015 acceptance of the package provenance.
-- [ ] Receive the `A-014-confirmed` Google Cloud login note.
+- [x] Receive the Google Cloud login confirmation and pass the bucket probe.
 - [x] Commit F-1 through F-3 before artifact generation.
 - [x] Regenerate the source-bound artifact, circuit hash, and fixture after
   the F-2 source change.
 - [x] Build the source-bound AAR and APK pair for the final circuit hash.
 - [x] Rerun all release, ignored, negative, unlinkability, and artifact tests.
-- [ ] Run one exact three-phone acceptance matrix with the final APK pair.
+- [x] Run one exact three-phone acceptance matrix with the final APK pair.
 
 ## Layered Keccak review
 
@@ -386,9 +404,8 @@ The candidate package has these SHA-256 values:
 The AAR and host APK contain the same ARM64 library. The test APK contains the
 exact checked-in fixture. The fixture names only `proveIdentity` and
 `verifyIdentity` and binds the old candidate circuit hash. A final-hash
-three-phone matrix is pending. A-014 requires a Lucas-only Google Cloud login
-and an `A-014-confirmed` note before the upload. The old package remains a
-throughput checkpoint because F-2 requires a code change and new circuit hash.
+three-phone matrix used only the final-hash package. The old package remains a
+throughput checkpoint because F-2 required a code change and new circuit hash.
 
 The post-review soundness-source commit is `cf8f2cec`. The artifact and fixture
 commit is `c2923bac`. The final circuit hash is
@@ -402,4 +419,8 @@ parity checks. The final seven-process desktop median is 1,780 ms for proving
 and 81 ms for verification. The maximum resident set size is 786,415,616
 bytes. Every proof envelope is 1,507,374 bytes. Detailed evidence and package
 hashes are in `tasks/bench-results/ts13-layered-final-20260802`. The final
-three-phone matrix still waits for `A-014-confirmed`.
+three-phone matrix is `matrix-5gyixcf0k5kxa`. All three tests passed. The
+phone prove times were 13,560 ms on Pixel 8, 5,075 ms on Galaxy S24 Ultra,
+and 9,523 ms on Galaxy A54. All three phones failed the 2,000 ms prove gate.
+All three passed the 500 ms verify gate, the fixed-envelope gate, and the
+runtime-shape gate.

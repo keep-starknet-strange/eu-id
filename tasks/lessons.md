@@ -154,6 +154,9 @@
 - Resume cloud or device work when the user explicitly authorizes it again.
 - Treat a direct statement that Firebase is approved as authorization for the
   scoped Firebase uploads and test runs. Do not ask for the same approval again.
+- Treat a direct authentication confirmation from the user as the mailbox
+  confirmation. Run the required non-interactive probe at once. Record the
+  mailbox confirmation only after the probe succeeds.
 - Put external-state questions in the main-repository mailbox when the user selects that channel.
 - Remove excluded work from the active plan.
 - Remove compatibility routes when the user selects one canonical API.
