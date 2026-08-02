@@ -186,6 +186,34 @@ A-016 permanently retire that route and accept the committed-nibble design.
 Circuit `e3426e32…` and its APK pair are historical throughput-only artifacts.
 Final acceptance evidence must use circuit `c7c99e7b…` and its final package.
 
+## C7 phone regression recovery
+
+- [x] Compare the P5 and c7 phone profiles phase by phase on all three phones.
+- [x] Map the measured regression to exact live source and geometry changes.
+- [x] Audit existing branches and the current `post_interaction_proof` path for
+  a reusable sound optimization.
+- [ ] Implement the smallest structural fix that improves all three phones.
+- [ ] Preserve the fixed theorem, all ML-DSA-65 roles, public-input
+  unlinkability, local proving, pinned STWO and PCS settings, the fixed
+  envelope, and the two-function API.
+- [ ] Pass the full release, adversarial, artifact, and desktop gates.
+- [ ] Regenerate the source-bound AAR and APK pair after each accepted source
+  change.
+- [ ] Rerun one parallel matrix on Pixel 8, Galaxy S24 Ultra, and Galaxy A54.
+
+The first hard gate is no regression from the P5 matrix on any phone: 5,450 ms
+on Pixel 8, 2,755 ms on Galaxy S24 Ultra, and 5,853 ms on Galaxy A54. Do not
+start application integration while c7 remains 1.6 to 2.5 times slower than
+that checkpoint. The later target remains below 2,000 ms on every phone.
+
+The regression is confined to `post_interaction_proof`. The c7 path replaces
+253 built-in GKR sumcheck rounds with 1,410 custom rounds. A measured serial
+cutoff for small rounds increased the six-worker desktop post-proof median
+from 1.160 seconds to 1.208 seconds, so it was removed. Table streaming cannot
+provide the required 2.09x to 4.67x phase speedup. Mailbox Q-018 requests the
+open authenticated-MLE engine design or confirmation that the branch must
+restore P5 before further redesign work.
+
 ## Pre-layered performance checkpoint
 
 This section records the P5 checkpoint before the authorized layered Keccak

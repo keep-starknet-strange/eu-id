@@ -157,6 +157,9 @@
 - Treat a direct authentication confirmation from the user as the mailbox
   confirmation. Run the required non-interactive probe at once. Record the
   mailbox confirmation only after the probe succeeds.
+- Do not recommend integration after the accepted proof path regresses on the
+  binding phones. Restore the previous phone performance first, and use it as
+  a hard no-regression gate for each later redesign.
 - Put external-state questions in the main-repository mailbox when the user selects that channel.
 - Remove excluded work from the active plan.
 - Remove compatibility routes when the user selects one canonical API.
