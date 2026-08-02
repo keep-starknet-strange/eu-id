@@ -954,18 +954,18 @@ fn packed_base_xor(left: PackedM31, right: PackedM31) -> PackedM31 {
     left + right - (product + product)
 }
 
-fn packed_gate_pair_evaluations(
+fn accumulate_packed_gate_pair_evaluations(
     kind: GateKind,
     arrays: &[Vec<PackedQM31>],
     i: usize,
-) -> [PackedQM31; MAX_GATE_SUMCHECK_COEFFICIENTS] {
+    evaluations: &mut [PackedQM31; MAX_GATE_SUMCHECK_COEFFICIENTS],
+) {
     let half = arrays[0].len() / 2;
     let linear = |array: usize| {
         let left = arrays[array][i];
         (left, arrays[array][i + half] - left)
     };
     let (mut coefficient, coefficient_step) = linear(0);
-    let mut output = [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
     match kind {
         GateKind::Chi => {
             let (mut b0, b0_step) = linear(1);
@@ -974,28 +974,28 @@ fn packed_gate_pair_evaluations(
             let (mut q, q_step) = linear(4);
             let one = PackedQM31::broadcast(SecureField::one());
             let and_not = (one - b1) * b2;
-            output[0] = coefficient * packed_xor(packed_xor(b0, and_not), q);
-            for value in &mut output[1..=CHI_DEGREE] {
+            evaluations[0] += coefficient * packed_xor(packed_xor(b0, and_not), q);
+            for value in &mut evaluations[1..=CHI_DEGREE] {
                 coefficient += coefficient_step;
                 b0 += b0_step;
                 b1 += b1_step;
                 b2 += b2_step;
                 q += q_step;
                 let and_not = (one - b1) * b2;
-                *value = coefficient * packed_xor(packed_xor(b0, and_not), q);
+                *value += coefficient * packed_xor(packed_xor(b0, and_not), q);
             }
         }
         GateKind::Theta => {
             let (mut a, a_step) = linear(1);
             let (mut left, left_step) = linear(2);
             let (mut right, right_step) = linear(3);
-            output[0] = coefficient * packed_xor(packed_xor(a, left), right);
-            for value in &mut output[1..=THETA_DEGREE] {
+            evaluations[0] += coefficient * packed_xor(packed_xor(a, left), right);
+            for value in &mut evaluations[1..=THETA_DEGREE] {
                 coefficient += coefficient_step;
                 a += a_step;
                 left += left_step;
                 right += right_step;
-                *value = coefficient * packed_xor(packed_xor(a, left), right);
+                *value += coefficient * packed_xor(packed_xor(a, left), right);
             }
         }
         GateKind::Parity => {
@@ -1004,28 +1004,29 @@ fn packed_gate_pair_evaluations(
             let (mut c, c_step) = linear(3);
             let (mut d, d_step) = linear(4);
             let (mut e, e_step) = linear(5);
-            output[0] = coefficient * packed_xor(packed_xor(packed_xor(packed_xor(a, b), c), d), e);
-            for value in &mut output[1..=PARITY_DEGREE] {
+            evaluations[0] +=
+                coefficient * packed_xor(packed_xor(packed_xor(packed_xor(a, b), c), d), e);
+            for value in &mut evaluations[1..=PARITY_DEGREE] {
                 coefficient += coefficient_step;
                 a += a_step;
                 b += b_step;
                 c += c_step;
                 d += d_step;
                 e += e_step;
-                *value =
+                *value +=
                     coefficient * packed_xor(packed_xor(packed_xor(packed_xor(a, b), c), d), e);
             }
         }
     }
-    output
 }
 
-fn packed_first_gate_pair_evaluations(
+fn accumulate_packed_first_gate_pair_evaluations(
     kind: GateKind,
     coefficient: &[PackedQM31],
     terminals: &[Vec<PackedM31>],
     i: usize,
-) -> [PackedQM31; MAX_GATE_SUMCHECK_COEFFICIENTS] {
+    evaluations: &mut [PackedQM31; MAX_GATE_SUMCHECK_COEFFICIENTS],
+) {
     let half = coefficient.len() / 2;
     let linear = |array: usize| {
         let left = terminals[array][i];
@@ -1034,7 +1035,6 @@ fn packed_first_gate_pair_evaluations(
     let coefficient_left = coefficient[i];
     let coefficient_step = coefficient[i + half] - coefficient_left;
     let mut coefficient = coefficient_left;
-    let mut output = [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
     match kind {
         GateKind::Chi => {
             let (mut b0, b0_step) = linear(0);
@@ -1043,28 +1043,28 @@ fn packed_first_gate_pair_evaluations(
             let (mut q, q_step) = linear(3);
             let one = PackedM31::broadcast(M31::one());
             let and_not = (one - b1) * b2;
-            output[0] = coefficient * packed_base_xor(packed_base_xor(b0, and_not), q);
-            for value in &mut output[1..=CHI_DEGREE] {
+            evaluations[0] += coefficient * packed_base_xor(packed_base_xor(b0, and_not), q);
+            for value in &mut evaluations[1..=CHI_DEGREE] {
                 coefficient += coefficient_step;
                 b0 += b0_step;
                 b1 += b1_step;
                 b2 += b2_step;
                 q += q_step;
                 let and_not = (one - b1) * b2;
-                *value = coefficient * packed_base_xor(packed_base_xor(b0, and_not), q);
+                *value += coefficient * packed_base_xor(packed_base_xor(b0, and_not), q);
             }
         }
         GateKind::Theta => {
             let (mut a, a_step) = linear(0);
             let (mut left, left_step) = linear(1);
             let (mut right, right_step) = linear(2);
-            output[0] = coefficient * packed_base_xor(packed_base_xor(a, left), right);
-            for value in &mut output[1..=THETA_DEGREE] {
+            evaluations[0] += coefficient * packed_base_xor(packed_base_xor(a, left), right);
+            for value in &mut evaluations[1..=THETA_DEGREE] {
                 coefficient += coefficient_step;
                 a += a_step;
                 left += left_step;
                 right += right_step;
-                *value = coefficient * packed_base_xor(packed_base_xor(a, left), right);
+                *value += coefficient * packed_base_xor(packed_base_xor(a, left), right);
             }
         }
         GateKind::Parity => {
@@ -1073,19 +1073,19 @@ fn packed_first_gate_pair_evaluations(
             let (mut c, c_step) = linear(2);
             let (mut d, d_step) = linear(3);
             let (mut e, e_step) = linear(4);
-            output[0] = coefficient
+            evaluations[0] += coefficient
                 * packed_base_xor(
                     packed_base_xor(packed_base_xor(packed_base_xor(a, b), c), d),
                     e,
                 );
-            for value in &mut output[1..=PARITY_DEGREE] {
+            for value in &mut evaluations[1..=PARITY_DEGREE] {
                 coefficient += coefficient_step;
                 a += a_step;
                 b += b_step;
                 c += c_step;
                 d += d_step;
                 e += e_step;
-                *value = coefficient
+                *value += coefficient
                     * packed_base_xor(
                         packed_base_xor(packed_base_xor(packed_base_xor(a, b), c), d),
                         e,
@@ -1093,7 +1093,6 @@ fn packed_first_gate_pair_evaluations(
             }
         }
     }
-    output
 }
 
 fn pack_values(values: Vec<SecureField>) -> Vec<PackedQM31> {
@@ -1284,7 +1283,19 @@ fn prove_gate_sumcheck(
     let half = coefficient.len() / 2;
     let evaluations = (0..half)
         .into_par_iter()
-        .map(|i| packed_first_gate_pair_evaluations(kind, &coefficient, &base_terminals, i))
+        .fold(
+            || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
+            |mut evaluations, i| {
+                accumulate_packed_first_gate_pair_evaluations(
+                    kind,
+                    &coefficient,
+                    &base_terminals,
+                    i,
+                    &mut evaluations,
+                );
+                evaluations
+            },
+        )
         .reduce(
             || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
             |mut left, right| {
@@ -1321,7 +1332,13 @@ fn prove_gate_sumcheck(
         let half = arrays[0].len() / 2;
         let evaluations = (0..half)
             .into_par_iter()
-            .map(|i| packed_gate_pair_evaluations(kind, &arrays, i))
+            .fold(
+                || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
+                |mut evaluations, i| {
+                    accumulate_packed_gate_pair_evaluations(kind, &arrays, i, &mut evaluations);
+                    evaluations
+                },
+            )
             .reduce(
                 || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
                 |mut left, right| {
