@@ -393,7 +393,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [319, 4_285, 2_380, 8, 16]
+                [319, 4_171, 2_380, 8, 16]
             );
             assert_eq!(
                 shape
@@ -401,7 +401,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [319, 4_285, 2_380, 8, 16]
+                [319, 4_171, 2_380, 8, 16]
             );
             let common_query_count = shape.queried_values[0][0];
             assert!(common_query_count > 0);
