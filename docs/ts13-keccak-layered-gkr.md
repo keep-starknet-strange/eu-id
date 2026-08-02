@@ -1,6 +1,14 @@
 # TS13 layered Keccak prototype
 
-Status: implemented and soundness-audited
+Status: acceptance candidate under quarantine
+
+A-015 suspends the committed-bit v3 design and promotes this committed-nibble
+design to an acceptance candidate. The quarantine from A-013 stays active
+until the independent A-015 review accepts this exact design and source. Until
+then, the implementation and its measurements provide throughput and
+consistency data only. Do not make more cryptographic changes before the
+review. A-016 requires the candidate to preserve or improve the live
+whole-system algebraic bound under the same accounting convention.
 
 This design replaces the removed Keccak round carrier. It does not change the
 TS13 identity theorem, ML-DSA-65, the public statement, the PCS settings, the
@@ -33,9 +41,11 @@ standalone service tests use this same prover, verifier, transcript, codec,
 and pair of tie-backs. Do not retain the old carrier as a fallback. The TS13
 product artifact separately requires `p_log = 9`.
 
-The prototype MUST stop if its replacement mass exceeds 320,000 committed
-cells. It MUST also stop if complete Keccak work exceeds 1,200 ms in one cold,
-instrumented Galaxy A54 run.
+The replacement mass MUST not exceed 320,000 committed cells. The candidate
+uses 212,992 cells. A-016 retires the complete-Keccak 1,200 ms sub-gate because
+the timing wire cannot measure it. Performance acceptance requires one full
+cold `proveIdentity` call below 2,000 ms on each gate phone. Keep the matching
+desktop phase record.
 
 ## 2. Authoritative row order
 
@@ -471,24 +481,14 @@ post-interaction: 16@9
 
 This is 1,534,720 AIR-reference cells. The physical system total is projected
 at 9,156,176 cells. The replacement passes the 320,000-cell prototype gate.
-It is 34,720 cells above the later 1.5-million complete-Keccak stop gate.
-Do not hide that gap. If the prototype passes its A54 time gate, the next K
-step must fold the sponge absorb XOR check into the layered argument and
-retire the log-16 XOR table. Retiring that table removes 458,752 cells before
-any replacement additions.
+A-013 supersedes the earlier 1.5-million complete-Keccak gate for the AIR
+track. A-015 suspends the committed-bit route and keeps the engine route open
+for future work. Neither route blocks review of this candidate.
 
-The current A54 data gives this conservative first-order model:
-
-- Tree 1 mass falls from 11,965,152 to 4,582,336 cells.
-- Total physical commitment mass falls by about 45.2 percent.
-- A54 Tree 1 commitment can fall from 694 ms to about 266 ms if it scales with
-  cells.
-- A54 STARK work can fall from 1,636 ms to about 906 ms if it scales with
-  AIR-reference cells.
-- The new layered proof replaces the measured 1,023 ms old Keccak GKR phase.
-
-These numbers do not prove the time gate. Measure one cold A54 run after the
-full negative and artifact checks. Do not start N or S before that result.
+A-016 requires one cold full-proof run on all three gate phones. Keep the
+matching desktop phase record in the same evidence set. Do not start another
+cryptographic path before the review. If one phone misses the 2,000 ms gate,
+use a new accepted lever or obtain an explicit gate change.
 
 ## 13. Required checks
 
