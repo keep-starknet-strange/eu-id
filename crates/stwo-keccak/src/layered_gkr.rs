@@ -1072,38 +1072,28 @@ fn packed_gate_pair_polynomial(
     coefficient.mul(gate)
 }
 
-#[inline(always)]
-fn packed_base_limb(value: PackedQM31) -> PackedM31 {
-    let [base, b, c, d] = value.into_packed_m31s();
-    debug_assert!(b.is_zero() && c.is_zero() && d.is_zero());
-    base
-}
-
 fn packed_first_gate_pair_polynomial(
     kind: GateKind,
-    arrays: &[Vec<PackedQM31>],
+    coefficient: &[PackedQM31],
+    terminals: &[Vec<PackedM31>],
     i: usize,
 ) -> PackedGatePoly {
-    let half = arrays[0].len() / 2;
-    let linear = |array: usize| {
-        PackedBasePoly::linear(
-            packed_base_limb(arrays[array][i]),
-            packed_base_limb(arrays[array][i + half]),
-        )
-    };
-    let coefficient = PackedGatePoly::linear(arrays[0][i], arrays[0][i + half]);
+    let half = coefficient.len() / 2;
+    let linear =
+        |array: usize| PackedBasePoly::linear(terminals[array][i], terminals[array][i + half]);
+    let coefficient = PackedGatePoly::linear(coefficient[i], coefficient[i + half]);
     let gate = match kind {
         GateKind::Chi => {
-            let b0 = linear(1);
-            let b1 = linear(2);
-            let b2 = linear(3);
-            let q = linear(4);
+            let b0 = linear(0);
+            let b1 = linear(1);
+            let b2 = linear(2);
+            let q = linear(3);
             let and_not = PackedBasePoly::constant(M31::one()).sub(b1).mul(b2);
             packed_base_xor_polys(&[packed_base_xor_polys(&[b0, and_not]), q])
         }
-        GateKind::Theta => packed_base_xor_polys(&[linear(1), linear(2), linear(3)]),
+        GateKind::Theta => packed_base_xor_polys(&[linear(0), linear(1), linear(2)]),
         GateKind::Parity => {
-            packed_base_xor_polys(&[linear(1), linear(2), linear(3), linear(4), linear(5)])
+            packed_base_xor_polys(&[linear(0), linear(1), linear(2), linear(3), linear(4)])
         }
     };
     coefficient.mul_base(gate)
@@ -1121,6 +1111,29 @@ fn pack_arrays(arrays: Vec<Vec<SecureField>>) -> Vec<Vec<PackedQM31>> {
     arrays.into_iter().map(pack_values).collect()
 }
 
+#[cfg(test)]
+fn pack_base_values(values: Vec<SecureField>) -> Vec<PackedM31> {
+    assert_eq!(values.len() % N_LANES, 0);
+    values
+        .chunks_exact(N_LANES)
+        .map(|chunk| {
+            PackedM31::from_array(std::array::from_fn(|lane| {
+                let [base, b, c, d] = chunk[lane].to_m31_array();
+                assert!(b.is_zero() && c.is_zero() && d.is_zero());
+                base
+            }))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn pack_gate_arrays(arrays: Vec<Vec<SecureField>>) -> (Vec<PackedQM31>, Vec<Vec<PackedM31>>) {
+    let mut arrays = arrays.into_iter();
+    let coefficient = pack_values(arrays.next().expect("gate coefficient"));
+    let terminals = arrays.map(pack_base_values).collect();
+    (coefficient, terminals)
+}
+
 fn unpack_values(values: Vec<PackedQM31>) -> Vec<SecureField> {
     values
         .into_iter()
@@ -1128,8 +1141,42 @@ fn unpack_values(values: Vec<PackedQM31>) -> Vec<SecureField> {
         .collect()
 }
 
+#[cfg(test)]
+fn unpack_base_values(values: Vec<PackedM31>) -> Vec<SecureField> {
+    values
+        .into_iter()
+        .flat_map(|value| PackedQM31::from(value).to_array())
+        .collect()
+}
+
 fn unpack_arrays(arrays: Vec<Vec<PackedQM31>>) -> Vec<Vec<SecureField>> {
     arrays.into_iter().map(unpack_values).collect()
+}
+
+fn fold_packed_values(values: &mut Vec<PackedQM31>, coordinate: PackedQM31) {
+    let half = values.len() / 2;
+    {
+        let (left, right) = values.split_at_mut(half);
+        if half >= 512 {
+            left.par_iter_mut()
+                .zip(right.par_iter())
+                .for_each(|(left, &right)| *left += coordinate * (right - *left));
+        } else {
+            left.iter_mut()
+                .zip(right.iter())
+                .for_each(|(left, &right)| *left += coordinate * (right - *left));
+        }
+    }
+    values.truncate(half);
+}
+
+fn fold_base_values(values: Vec<PackedM31>, coordinate: PackedQM31) -> Vec<PackedQM31> {
+    let half = values.len() / 2;
+    let (left, right) = values.split_at(half);
+    (0..half)
+        .into_par_iter()
+        .map(|i| PackedQM31::from(left[i]) + coordinate * (right[i] - left[i]))
+        .collect()
 }
 
 fn fold_packed_arrays(arrays: &mut [Vec<PackedQM31>], coordinate: SecureField) {
@@ -1176,29 +1223,72 @@ fn polynomial_eval(coefficients: &[SecureField], point: SecureField) -> SecureFi
 fn prove_gate_sumcheck(
     kind: GateKind,
     mut claim: SecureField,
-    mut arrays: Vec<Vec<PackedQM31>>,
+    mut coefficient: Vec<PackedQM31>,
+    base_terminals: Vec<Vec<PackedM31>>,
     n_variables: usize,
     writer: &mut ProofWriter,
     channel: &mut impl Channel,
 ) -> (Vec<SecureField>, SecureField, Vec<SecureField>) {
     assert!(n_variables > LOG_N_LANES as usize);
     assert_eq!(
-        arrays[0].len(),
+        coefficient.len(),
         1usize << (n_variables - LOG_N_LANES as usize)
     );
+    assert_eq!(
+        base_terminals.len(),
+        kind.terminals() + usize::from(matches!(kind, GateKind::Chi))
+    );
+    assert!(base_terminals
+        .iter()
+        .all(|terminal| terminal.len() == coefficient.len()));
     let mut point = Vec::with_capacity(n_variables);
     let packed_rounds = n_variables - LOG_N_LANES as usize;
-    for packed_round in 0..packed_rounds {
+
+    let half = coefficient.len() / 2;
+    let polynomial = (0..half)
+        .into_par_iter()
+        .map(|i| {
+            packed_first_gate_pair_polynomial(kind, &coefficient, &base_terminals, i).coefficients
+        })
+        .reduce(
+            || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
+            |mut left, right| {
+                for i in 0..=kind.degree() {
+                    left[i] += right[i];
+                }
+                left
+            },
+        );
+    let coefficients = polynomial[..=kind.degree()]
+        .iter()
+        .copied()
+        .map(horizontal_sum)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        coefficients[0] + polynomial_eval(&coefficients, SecureField::one()),
+        claim,
+        "layered gate sumcheck claim mismatch"
+    );
+    writer.write_many(&coefficients);
+    channel.mix_felts(&coefficients);
+    let coordinate = draw_nonbinary(channel);
+    claim = polynomial_eval(&coefficients, coordinate);
+    point.push(coordinate);
+    let packed_coordinate = PackedQM31::broadcast(coordinate);
+    fold_packed_values(&mut coefficient, packed_coordinate);
+    let mut arrays = Vec::with_capacity(1 + base_terminals.len());
+    arrays.push(coefficient);
+    arrays.extend(
+        base_terminals
+            .into_iter()
+            .map(|terminal| fold_base_values(terminal, packed_coordinate)),
+    );
+
+    for _ in 1..packed_rounds {
         let half = arrays[0].len() / 2;
         let polynomial = (0..half)
             .into_par_iter()
-            .map(|i| {
-                if packed_round == 0 {
-                    packed_first_gate_pair_polynomial(kind, &arrays, i).coefficients
-                } else {
-                    packed_gate_pair_polynomial(kind, &arrays, i).coefficients
-                }
-            })
+            .map(|i| packed_gate_pair_polynomial(kind, &arrays, i).coefficients)
             .reduce(
                 || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
                 |mut left, right| {
@@ -1279,7 +1369,7 @@ fn verify_sumcheck(
     Ok((point, claim))
 }
 
-fn read_table(input: &BitMatrix, map: WireMap, p_log: usize, active: &[bool]) -> Vec<PackedQM31> {
+fn read_table(input: &BitMatrix, map: WireMap, p_log: usize, active: &[bool]) -> Vec<PackedM31> {
     let from_log = map.source_domain().local_log();
     let to_log = map.target_domain().local_log();
     assert_eq!(input.log_size, p_log + to_log);
@@ -1296,12 +1386,12 @@ fn read_table(input: &BitMatrix, map: WireMap, p_log: usize, active: &[bool]) ->
                         .is_some_and(|local| input.get((p << to_log) | local));
                 M31::from(u32::from(value))
             });
-            PackedQM31::from(PackedM31::from_array(values))
+            PackedM31::from_array(values)
         })
         .collect()
 }
 
-fn chi_q_table(p_log: usize, active: &[bool], round: usize) -> Vec<PackedQM31> {
+fn chi_q_table(p_log: usize, active: &[bool], round: usize) -> Vec<PackedM31> {
     let packed_local_log = A_LOCAL_LOG - LOG_N_LANES as usize;
     (0..1usize << (p_log + packed_local_log))
         .into_par_iter()
@@ -1309,12 +1399,12 @@ fn chi_q_table(p_log: usize, active: &[bool], round: usize) -> Vec<PackedQM31> {
             let p = pack >> packed_local_log;
             let local_pack = pack & ((1 << packed_local_log) - 1);
             if !active[p] || local_pack >= 64 / N_LANES {
-                return PackedQM31::zero();
+                return PackedM31::zero();
             }
             let first_z = local_pack * N_LANES;
-            PackedQM31::from(PackedM31::from_array(std::array::from_fn(|lane| {
+            PackedM31::from_array(std::array::from_fn(|lane| {
                 M31::from(((IOTA_RC[round] >> (first_z + lane)) & 1) as u32)
-            })))
+            }))
         })
         .collect()
 }
@@ -1367,22 +1457,30 @@ fn prove_gate(
     channel: &mut impl Channel,
 ) -> Vec<Claim> {
     let maps = gate_maps(kind);
-    let mut arrays = vec![combined.table(witness.p_log, &witness.active)];
+    let coefficient = combined.table(witness.p_log, &witness.active);
+    let mut terminals = Vec::with_capacity(maps.len() + usize::from(matches!(kind, GateKind::Chi)));
     for &map in &maps {
         let input = match map.target_domain() {
             LayerDomain::A => &witness.a[round],
             LayerDomain::B => &witness.b[round],
             LayerDomain::C => &witness.c[round],
         };
-        arrays.push(read_table(input, map, witness.p_log, &witness.active));
+        terminals.push(read_table(input, map, witness.p_log, &witness.active));
     }
     if matches!(kind, GateKind::Chi) {
-        arrays.push(chi_q_table(witness.p_log, &witness.active, round));
+        terminals.push(chi_q_table(witness.p_log, &witness.active, round));
     }
 
     let n_variables = witness.p_log + kind_domain(kind).local_log();
-    let (point, terminal_claim, all_terminals) =
-        prove_gate_sumcheck(kind, combined.value, arrays, n_variables, writer, channel);
+    let (point, terminal_claim, all_terminals) = prove_gate_sumcheck(
+        kind,
+        combined.value,
+        coefficient,
+        terminals,
+        n_variables,
+        writer,
+        channel,
+    );
     let terminals = &all_terminals[..kind.terminals()];
     let q = if matches!(kind, GateKind::Chi) {
         all_terminals[kind.terminals()]
@@ -2338,12 +2436,14 @@ mod tests {
         let n_arrays = 1 + kind.terminals() + usize::from(matches!(kind, GateKind::Chi));
         let arrays = deterministic_gate_arrays(n_arrays, n_variables, salt);
         let claim = gate_claim(kind, &arrays);
+        let (coefficient, terminals) = pack_gate_arrays(arrays);
         let mut packed_writer = ProofWriter::new(0);
         let mut packed_channel = Blake2sChannel::default();
         let packed = prove_gate_sumcheck(
             kind,
             claim,
-            pack_arrays(arrays),
+            coefficient,
+            terminals,
             n_variables,
             &mut packed_writer,
             &mut packed_channel,
@@ -2712,7 +2812,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
-                unpack_values(read_table(&input, map, p_log, &active)),
+                unpack_base_values(read_table(&input, map, p_log, &active)),
                 expected,
                 "wire map {case}"
             );
@@ -2995,7 +3095,7 @@ mod tests {
             assert_eq!(
                 chi_q_eval(&point, witness.p_log, &witness.active, round),
                 mle_eval(
-                    &unpack_values(chi_q_table(witness.p_log, &witness.active, round)),
+                    &unpack_base_values(chi_q_table(witness.p_log, &witness.active, round)),
                     &point,
                 ),
                 "Iota round {round}"
@@ -3039,19 +3139,13 @@ mod tests {
         };
         let coefficient = combined.table(p_log, &active);
         let coefficient_values = unpack_values(coefficient.clone());
-        let mut alternate_q_values = unpack_values(chi_q_table(p_log, &active, round));
+        let mut alternate_q_values = unpack_base_values(chi_q_table(p_log, &active, round));
         alternate_q_values[0] = SecureField::zero();
         assert!(alternate_q_values.iter().all(SecureField::is_zero));
-        let alternate_q = pack_values(alternate_q_values.clone());
+        let alternate_q = pack_base_values(alternate_q_values.clone());
 
-        let zero = vec![PackedQM31::zero(); 1usize << (n_variables - LOG_N_LANES as usize)];
-        let arrays = vec![
-            coefficient.clone(),
-            zero.clone(),
-            zero.clone(),
-            zero,
-            alternate_q.clone(),
-        ];
+        let zero = vec![PackedM31::zero(); 1usize << (n_variables - LOG_N_LANES as usize)];
+        let terminals = vec![zero.clone(), zero.clone(), zero, alternate_q.clone()];
         combined.value = coefficient_values
             .iter()
             .zip(&alternate_q_values)
@@ -3064,7 +3158,8 @@ mod tests {
         let (point, terminal_claim, all_terminals) = prove_gate_sumcheck(
             GateKind::Chi,
             combined.value,
-            arrays,
+            coefficient,
+            terminals,
             n_variables,
             &mut writer,
             &mut prover_channel,
@@ -3114,10 +3209,12 @@ mod tests {
             .sum();
         let mut prover_channel = Blake2sChannel::default();
         let mut writer = ProofWriter::new(0);
+        let (coefficient, terminals) = pack_gate_arrays(arrays);
         let (prover_point, prover_terminal, _) = prove_gate_sumcheck(
             GateKind::Theta,
             claim,
-            pack_arrays(arrays),
+            coefficient,
+            terminals,
             5,
             &mut writer,
             &mut prover_channel,
