@@ -40,6 +40,15 @@ const THETA_DEGREE: usize = 4;
 const PARITY_DEGREE: usize = 6;
 const MAX_GATE_SUMCHECK_COEFFICIENTS: usize = PARITY_DEGREE + 1;
 const EXTRACTION_DEGREE: usize = 17;
+const M31_INTEGER_INVERSES: [u32; MAX_GATE_SUMCHECK_COEFFICIENTS] = [
+    0,
+    1,
+    1_073_741_824,
+    1_431_655_765,
+    536_870_912,
+    858_993_459,
+    1_789_569_706,
+];
 
 /// Two MLE traces at the public row log size, with four base columns per
 /// secure column.
@@ -910,12 +919,6 @@ impl<const N: usize> PackedPolynomial<N> {
         }
     }
 
-    fn constant(value: SecureField) -> Self {
-        let mut output = Self::zero();
-        output.coefficients[0] = PackedQM31::broadcast(value);
-        output
-    }
-
     fn linear(left: PackedQM31, right: PackedQM31) -> Self {
         let mut output = Self::zero();
         output.coefficients[0] = left;
@@ -931,19 +934,6 @@ impl<const N: usize> PackedPolynomial<N> {
             output.coefficients[i] = self.coefficients[i] + rhs.coefficients[i];
         }
         output
-    }
-
-    fn sub(self, rhs: Self) -> Self {
-        let mut output = Self::zero();
-        output.degree = self.degree.max(rhs.degree);
-        for i in 0..=output.degree {
-            output.coefficients[i] = self.coefficients[i] - rhs.coefficients[i];
-        }
-        output
-    }
-
-    fn double(self) -> Self {
-        self.add(self)
     }
 
     fn mul(self, rhs: Self) -> Self {
@@ -971,13 +961,6 @@ impl<const N: usize> PackedPolynomial<N> {
         }
         output
     }
-}
-
-fn packed_xor_polys(values: &[PackedGatePoly]) -> PackedGatePoly {
-    let (first, rest) = values.split_first().expect("nonempty XOR");
-    rest.iter().copied().fold(*first, |sum, value| {
-        sum.add(value).sub(sum.mul(value).double())
-    })
 }
 
 fn packed_base_xor_polys(values: &[PackedBasePoly]) -> PackedBasePoly {
@@ -1046,29 +1029,76 @@ fn gate_pair_polynomial(kind: GateKind, arrays: &[Vec<SecureField>], i: usize) -
     coefficient.mul(gate)
 }
 
-fn packed_gate_pair_polynomial(
+#[inline(always)]
+fn packed_xor(left: PackedQM31, right: PackedQM31) -> PackedQM31 {
+    let product = left * right;
+    left + right - (product + product)
+}
+
+fn packed_gate_pair_evaluations(
     kind: GateKind,
     arrays: &[Vec<PackedQM31>],
     i: usize,
-) -> PackedGatePoly {
+) -> [PackedQM31; MAX_GATE_SUMCHECK_COEFFICIENTS] {
     let half = arrays[0].len() / 2;
-    let linear = |array: usize| PackedGatePoly::linear(arrays[array][i], arrays[array][i + half]);
-    let coefficient = linear(0);
-    let gate = match kind {
-        GateKind::Chi => {
-            let b0 = linear(1);
-            let b1 = linear(2);
-            let b2 = linear(3);
-            let q = linear(4);
-            let and_not = PackedGatePoly::constant(SecureField::one()).sub(b1).mul(b2);
-            packed_xor_polys(&[packed_xor_polys(&[b0, and_not]), q])
-        }
-        GateKind::Theta => packed_xor_polys(&[linear(1), linear(2), linear(3)]),
-        GateKind::Parity => {
-            packed_xor_polys(&[linear(1), linear(2), linear(3), linear(4), linear(5)])
-        }
+    let linear = |array: usize| {
+        let left = arrays[array][i];
+        (left, arrays[array][i + half] - left)
     };
-    coefficient.mul(gate)
+    let (mut coefficient, coefficient_step) = linear(0);
+    let mut output = [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
+    match kind {
+        GateKind::Chi => {
+            let (mut b0, b0_step) = linear(1);
+            let (mut b1, b1_step) = linear(2);
+            let (mut b2, b2_step) = linear(3);
+            let (mut q, q_step) = linear(4);
+            let one = PackedQM31::broadcast(SecureField::one());
+            let and_not = (one - b1) * b2;
+            output[0] = coefficient * packed_xor(packed_xor(b0, and_not), q);
+            for value in &mut output[1..=CHI_DEGREE] {
+                coefficient += coefficient_step;
+                b0 += b0_step;
+                b1 += b1_step;
+                b2 += b2_step;
+                q += q_step;
+                let and_not = (one - b1) * b2;
+                *value = coefficient * packed_xor(packed_xor(b0, and_not), q);
+            }
+        }
+        GateKind::Theta => {
+            let (mut a, a_step) = linear(1);
+            let (mut left, left_step) = linear(2);
+            let (mut right, right_step) = linear(3);
+            output[0] = coefficient * packed_xor(packed_xor(a, left), right);
+            for value in &mut output[1..=THETA_DEGREE] {
+                coefficient += coefficient_step;
+                a += a_step;
+                left += left_step;
+                right += right_step;
+                *value = coefficient * packed_xor(packed_xor(a, left), right);
+            }
+        }
+        GateKind::Parity => {
+            let (mut a, a_step) = linear(1);
+            let (mut b, b_step) = linear(2);
+            let (mut c, c_step) = linear(3);
+            let (mut d, d_step) = linear(4);
+            let (mut e, e_step) = linear(5);
+            output[0] = coefficient * packed_xor(packed_xor(packed_xor(packed_xor(a, b), c), d), e);
+            for value in &mut output[1..=PARITY_DEGREE] {
+                coefficient += coefficient_step;
+                a += a_step;
+                b += b_step;
+                c += c_step;
+                d += d_step;
+                e += e_step;
+                *value =
+                    coefficient * packed_xor(packed_xor(packed_xor(packed_xor(a, b), c), d), e);
+            }
+        }
+    }
+    output
 }
 
 fn packed_first_gate_pair_polynomial(
@@ -1219,6 +1249,46 @@ fn polynomial_eval(coefficients: &[SecureField], point: SecureField) -> SecureFi
         })
 }
 
+fn interpolate_integer_evaluations(
+    evaluations: &[SecureField],
+) -> [SecureField; MAX_GATE_SUMCHECK_COEFFICIENTS] {
+    assert!(!evaluations.is_empty());
+    assert!(evaluations.len() <= MAX_GATE_SUMCHECK_COEFFICIENTS);
+    let degree = evaluations.len() - 1;
+    let mut differences = [SecureField::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
+    differences[..evaluations.len()].copy_from_slice(evaluations);
+    let mut newton = [SecureField::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
+    let mut inverse_factorial = SecureField::one();
+    for order in 0..=degree {
+        newton[order] = differences[0] * inverse_factorial;
+        for i in 0..degree - order {
+            differences[i] = differences[i + 1] - differences[i];
+        }
+        if order < degree {
+            inverse_factorial *= SecureField::from(M31::from(M31_INTEGER_INVERSES[order + 1]));
+        }
+    }
+
+    let mut coefficients = [SecureField::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
+    let mut basis = [SecureField::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
+    basis[0] = SecureField::one();
+    for order in 0..=degree {
+        for i in 0..=order {
+            coefficients[i] += newton[order] * basis[i];
+        }
+        if order < degree {
+            let root = SecureField::from(order as u32);
+            let mut next = [SecureField::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS];
+            for i in 0..=order {
+                next[i] -= basis[i] * root;
+                next[i + 1] += basis[i];
+            }
+            basis = next;
+        }
+    }
+    coefficients
+}
+
 fn prove_gate_sumcheck(
     kind: GateKind,
     mut claim: SecureField,
@@ -1285,9 +1355,9 @@ fn prove_gate_sumcheck(
 
     for _ in 1..packed_rounds {
         let half = arrays[0].len() / 2;
-        let polynomial = (0..half)
+        let evaluations = (0..half)
             .into_par_iter()
-            .map(|i| packed_gate_pair_polynomial(kind, &arrays, i).coefficients)
+            .map(|i| packed_gate_pair_evaluations(kind, &arrays, i))
             .reduce(
                 || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
                 |mut left, right| {
@@ -1297,20 +1367,18 @@ fn prove_gate_sumcheck(
                     left
                 },
             );
-        let coefficients = polynomial[..=kind.degree()]
-            .iter()
-            .copied()
-            .map(horizontal_sum)
-            .collect::<Vec<_>>();
+        let evaluations = evaluations.map(horizontal_sum);
+        let coefficients = interpolate_integer_evaluations(&evaluations[..=kind.degree()]);
+        let coefficients = &coefficients[..=kind.degree()];
         assert_eq!(
-            coefficients[0] + polynomial_eval(&coefficients, SecureField::one()),
+            coefficients[0] + polynomial_eval(coefficients, SecureField::one()),
             claim,
             "layered gate sumcheck claim mismatch"
         );
-        writer.write_many(&coefficients);
-        channel.mix_felts(&coefficients);
+        writer.write_many(coefficients);
+        channel.mix_felts(coefficients);
         let coordinate = draw_nonbinary(channel);
-        claim = polynomial_eval(&coefficients, coordinate);
+        claim = polynomial_eval(coefficients, coordinate);
         point.push(coordinate);
         fold_packed_arrays(&mut arrays, coordinate);
     }
@@ -2920,13 +2988,30 @@ mod tests {
     }
 
     #[test]
+    fn integer_evaluation_interpolation_recovers_gate_coefficients() {
+        for degree in [THETA_DEGREE, CHI_DEGREE, PARITY_DEGREE] {
+            let coefficients = (0..=degree)
+                .map(|i| deterministic_field(i, 0x3f00 + degree as u32))
+                .collect::<Vec<_>>();
+            let evaluations = (0..=degree)
+                .map(|value| polynomial_eval(&coefficients, SecureField::from(value as u32)))
+                .collect::<Vec<_>>();
+            let recovered = interpolate_integer_evaluations(&evaluations);
+            assert_eq!(&recovered[..=degree], coefficients);
+            assert!(recovered[degree + 1..].iter().all(SecureField::is_zero));
+        }
+    }
+
+    #[test]
     fn packed_gate_sumchecks_match_scalar_at_boundary_and_product_size() {
         let one_packed_round = LOG_N_LANES as usize + 1;
+        let one_evaluation_round = one_packed_round + 1;
         for (case, kind) in [GateKind::Chi, GateKind::Theta, GateKind::Parity]
             .into_iter()
             .enumerate()
         {
             assert_gate_sumcheck_matches_scalar(kind, one_packed_round, 0x4000 + case as u32);
+            assert_gate_sumcheck_matches_scalar(kind, one_evaluation_round, 0x4800 + case as u32);
             assert_gate_sumcheck_matches_scalar(
                 kind,
                 PRODUCT_P_LOG as usize + kind_domain(kind).local_log(),
