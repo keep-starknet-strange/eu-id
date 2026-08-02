@@ -99,6 +99,47 @@ use crate::policy::Date;
 use crate::ts13_demo::{Ts13PublicContextBind, TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES};
 use crate::Error;
 
+const TS13_KECCAK_INPUT_ATTACK_ROW: usize = 0;
+const TS13_KECCAK_INPUT_ATTACK_BYTE: usize = 0;
+
+thread_local! {
+    static TS13_KECCAK_INPUT_NIBBLE_ATTACK: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(false) };
+}
+
+/// Scoped test attack for one recomposition-neutral Keccak input mutation.
+#[doc(hidden)]
+pub struct Ts13KeccakInputNibbleAttackGuard(core::marker::PhantomData<std::rc::Rc<()>>);
+
+impl Drop for Ts13KeccakInputNibbleAttackGuard {
+    fn drop(&mut self) {
+        TS13_KECCAK_INPUT_NIBBLE_ATTACK.with(|active| active.set(false));
+    }
+}
+
+/// Install the scoped Keccak input attack on the current prover thread.
+#[doc(hidden)]
+pub fn install_ts13_keccak_input_nibble_attack() -> Ts13KeccakInputNibbleAttackGuard {
+    TS13_KECCAK_INPUT_NIBBLE_ATTACK.with(|active| {
+        assert!(
+            !active.replace(true),
+            "TS13 Keccak input attack is already active"
+        );
+    });
+    Ts13KeccakInputNibbleAttackGuard(core::marker::PhantomData)
+}
+
+fn apply_ts13_keccak_input_nibble_attack(service: &mut KeccakServiceProver) {
+    TS13_KECCAK_INPUT_NIBBLE_ATTACK.with(|active| {
+        if active.get() {
+            service.tamper_input_nibble_pair(
+                TS13_KECCAK_INPUT_ATTACK_ROW,
+                TS13_KECCAK_INPUT_ATTACK_BYTE,
+            );
+        }
+    });
+}
+
 /// ISO/IEC 18013-5:2021 MobileSecurityObject version.
 const MDOC_PROFILE_VERSION: &str = "1.0";
 /// The document type that the fixture and parser use.
@@ -2806,6 +2847,7 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     }
     let mut mldsa_keccak_service =
         KeccakServiceProver::new(keccak_shapes, keccak_streams, mldsa_keccak_handle.clone());
+    apply_ts13_keccak_input_nibble_attack(&mut mldsa_keccak_service);
     // The fixed-width padded stream uses one namespaced SHA proof instance and
     // its fixed digest bridge.
     let mut attribute_sha =

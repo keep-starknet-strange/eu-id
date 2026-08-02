@@ -269,7 +269,7 @@ artifact check, and the diff check passed.
     inverse-NTT argument permits M31 aliases, and its NTT and SHA budgets do
     not match their stated column layouts.
   - [x] Send the exact correction request as main-repository mailbox Q-012.
-- [ ] Obtain independent acceptance for the current K candidate before using
+- [x] Obtain independent acceptance for the current K candidate before using
   it as soundness evidence.
   - [x] Reject A-012's K-only design because its private bit oracle has no
     terminal commitment, its theta and boundary maps conflict, and deleting
@@ -282,8 +282,11 @@ artifact check, and the diff check passed.
   - [x] Read A-013 and quarantine the current committed-nibble design.
   - [x] Read A-015, suspend the committed-bit v3 design, and promote the
     committed-nibble design to an acceptance candidate.
-  - [ ] Receive and reconcile the independent A-015 review.
+  - [x] Receive and reconcile the independent A-015 review.
   - [x] Resolve the whole-system soundness and A54 sub-gate conflict in A-016.
+  - [x] Select the truthful source-digest and payload-shape binding for F-1.
+  - [x] Add the exported off-domain input-nibble negative required by F-2.
+  - [x] Record the removed carrier baseline provenance required by F-3.
 - [ ] Implement and measure each authorized redesign stage at its hard stop
   gate.
   - [x] Build one layered Keccak acceptance candidate and delete the carrier,
@@ -308,11 +311,11 @@ artifact check, and the diff check passed.
 - [x] Record the quarantined package provenance in mailbox Q-015.
 - [x] Receive A-015 acceptance of the package provenance.
 - [ ] Receive the `A-014-confirmed` Google Cloud login note.
-- [ ] Run one exact three-phone matrix with the quarantined APK pair.
-- [ ] Upgrade that matrix to acceptance evidence only if A-015-review accepts
-  source commit `2111a1eb` and circuit hash `3fac1677...` without a code change.
-- [ ] If the review requires a code change, regenerate the source-bound
-  artifact, fixture, and APKs, rerun all release tests, and run a new matrix.
+- [ ] Commit F-1 through F-3 before artifact generation.
+- [ ] Regenerate the source-bound artifact, circuit hash, fixture, AAR, and
+  APKs after the F-2 source change.
+- [ ] Rerun all release, ignored, negative, unlinkability, and artifact tests.
+- [ ] Run one exact three-phone acceptance matrix with the final APK pair.
 
 ## Layered Keccak review
 
@@ -322,17 +325,17 @@ functionals, and two source-bound log-9 MLE components. The replacement adds
 212,992 cells. The complete Keccak service uses 1,534,720 cells after removal
 of product-dead SHAKE-128 absorb columns and lookup entries. Its conservative
 same-accounting error is `8468/(q-2)`, below the removed carrier's `8974/q`
-contribution. These facts describe the implementation. They do not complete
-the independent soundness review.
+contribution. A-015-review independently accepts the protocol as sound and
+reports no critical or high finding.
 
 A-013 quarantined this package after it selected a committed-bit route. A-015
 suspends that route and promotes this committed-nibble design to an acceptance
-candidate. The quarantine stays active until A-015-review accepts the exact
-source and circuit. A-016 requires unchanged-or-improved algebraic soundness
-under identical accounting and records the live baseline at about 105.91
-bits. It retires the unmeasurable A54 complete-Keccak sub-gate. Until the
-review arrives, the package and all measurements below are throughput and
-consistency data only.
+candidate. A-015-review accepts the protocol as sound with no critical or high
+finding. It requires F-1 through F-3 before final acceptance. F-2 changes the
+soundness source, so the old artifact and package remain throughput evidence
+only. A-016 requires unchanged-or-improved algebraic soundness under identical
+accounting and records the live baseline at about 105.91 bits. It retires the
+unmeasurable A54 complete-Keccak sub-gate.
 
 The candidate release freeze passed 30 layered-library tests and 31 service
 tests. The matrix includes row swaps, cross-permutation source attacks,
@@ -355,8 +358,8 @@ ignored tests. It also passed these gates:
 - Formatting and the quantum-only dependency check.
 - The artifact-drift check.
 
-The active quarantine prevents these results from serving as acceptance
-evidence before A-015-review.
+These results apply only to the old circuit hash. They cannot serve as final
+acceptance evidence after the mandatory F-2 source change.
 
 Seven separate desktop processes measured these `proveIdentity` times in
 milliseconds: 1,768, 1,834, 1,774, 1,852, 1,860, 1,784, and 1,782. The median
@@ -381,7 +384,7 @@ The candidate package has these SHA-256 values:
 
 The AAR and host APK contain the same ARM64 library. The test APK contains the
 exact checked-in fixture. The fixture names only `proveIdentity` and
-`verifyIdentity` and binds the candidate circuit hash. A three-phone matrix is
-pending. A-014 requires a Lucas-only Google Cloud login and an
-`A-014-confirmed` note before the upload. The matrix remains throughput-only
-unless A-015-review accepts the exact candidate without a code change.
+`verifyIdentity` and binds the old candidate circuit hash. A final-hash
+three-phone matrix is pending. A-014 requires a Lucas-only Google Cloud login
+and an `A-014-confirmed` note before the upload. The old package remains a
+throughput checkpoint because F-2 requires a code change and new circuit hash.

@@ -34,6 +34,7 @@ const N_LOCAL_LOG: usize = 9;
 const OUTPUT_SLOT_LOG: usize = 8;
 const MAX_SUMCHECK_COEFFICIENTS: usize = EXTRACTION_DEGREE + 1;
 const SPREAD_BYTE_SUM: u32 = 21_845;
+pub(crate) const NIBBLE_PAIR_RADIX: u32 = 256;
 
 const CHI_DEGREE: usize = 5;
 const THETA_DEGREE: usize = 4;
@@ -278,6 +279,12 @@ impl BitMatrix {
     }
 }
 
+#[derive(Clone, Copy)]
+struct InputNibbleTamper {
+    row: usize,
+    byte: usize,
+}
+
 struct LayeredWitness {
     p_log: usize,
     active: Vec<bool>,
@@ -286,6 +293,7 @@ struct LayeredWitness {
     a: Vec<BitMatrix>,
     b: Vec<BitMatrix>,
     c: Vec<BitMatrix>,
+    input_nibble_tamper: Option<InputNibbleTamper>,
 }
 
 impl LayeredWitness {
@@ -376,7 +384,19 @@ impl LayeredWitness {
             a,
             b,
             c,
+            input_nibble_tamper: None,
         }
+    }
+
+    fn tamper_input_nibble_pair(&mut self, coset_row: usize, byte: usize) {
+        let row = circle_row_to_coset(self.p_log as u32)
+            .into_iter()
+            .position(|row| row == coset_row)
+            .expect("layered input mutation row exists");
+        assert!(self.active[row]);
+        assert!(byte < N_BYTES_IN_STATE);
+        assert!(self.input_nibble_tamper.is_none());
+        self.input_nibble_tamper = Some(InputNibbleTamper { row, byte });
     }
 
     fn swap_permutation_rows(&mut self, left: usize, right: usize) {
@@ -431,6 +451,11 @@ impl LayeredWitness {
                     SecureField::from(M31::from(spread_u32(u32::from(value >> 4))));
             }
         }
+        if let Some(tamper) = self.input_nibble_tamper {
+            let low = (tamper.row << N_LOCAL_LOG) | (2 * tamper.byte);
+            values[low] += SecureField::from(NIBBLE_PAIR_RADIX);
+            values[low + 1] -= SecureField::one();
+        }
         values
     }
 
@@ -451,7 +476,7 @@ impl LayeredWitness {
     fn input_fold(&self, slot_point: &[SecureField]) -> Vec<SecureField> {
         assert_eq!(slot_point.len(), N_LOCAL_LOG);
         let weights = eq_weights(slot_point);
-        (0..1usize << self.p_log)
+        let mut values = (0..1usize << self.p_log)
             .into_par_iter()
             .map(|p| {
                 (0..N_BYTES_IN_STATE).fold(SecureField::zero(), |sum, byte| {
@@ -461,7 +486,12 @@ impl LayeredWitness {
                     sum + weights[2 * byte] * low + weights[2 * byte + 1] * high
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(tamper) = self.input_nibble_tamper {
+            values[tamper.row] += weights[2 * tamper.byte] * SecureField::from(NIBBLE_PAIR_RADIX)
+                - weights[2 * tamper.byte + 1];
+        }
+        values
     }
 }
 
@@ -1720,6 +1750,23 @@ fn packed_extraction_pair_polynomial(
     output
 }
 
+fn extraction_claim(arrays: &[Vec<SecureField>], lambda: SecureField) -> SecureField {
+    let (bit_polynomials, validity) = nibble_polynomials();
+    let half = arrays[0].len() / 2;
+    (0..half)
+        .into_par_iter()
+        .map(|i| {
+            let polynomial =
+                extraction_pair_polynomial(arrays, i, &bit_polynomials, &validity, lambda);
+            polynomial.coefficients[0]
+                + polynomial_eval(
+                    &polynomial.coefficients[..=EXTRACTION_DEGREE],
+                    SecureField::one(),
+                )
+        })
+        .sum()
+}
+
 fn prove_extraction_sumcheck(
     mut claim: SecureField,
     arrays: Vec<Vec<SecureField>>,
@@ -1869,8 +1916,15 @@ fn prove_extraction(
     let mut arrays = vec![witness.nibble_table()];
     arrays.extend(restricted_tables(&combined, witness.p_log, &witness.active));
     arrays.push(eq_weights(&tau));
+    // The scoped negative must emit a proof. It starts from the tampered sum.
+    // The verifier starts from `combined.value` and rejects the first equation.
+    let initial_claim = if witness.input_nibble_tamper.is_some() {
+        extraction_claim(&arrays, lambda)
+    } else {
+        combined.value
+    };
     let (point, terminal_claim, terminals) = prove_extraction_sumcheck(
-        combined.value,
+        initial_claim,
         arrays,
         witness.p_log + N_LOCAL_LOG,
         lambda,
@@ -2082,6 +2136,12 @@ impl LayeredKeccakProver {
     pub fn swap_permutation_rows(&mut self, left: usize, right: usize) {
         assert!(left != right);
         self.witness.swap_permutation_rows(left, right);
+    }
+
+    /// Change one input nibble pair while keeping the A0 bits unchanged.
+    #[doc(hidden)]
+    pub fn tamper_input_nibble_pair(&mut self, coset_row: usize, byte: usize) {
+        self.witness.tamper_input_nibble_pair(coset_row, byte);
     }
 
     pub fn prove(self, channel: &mut impl Channel) -> LayeredProof {
@@ -2525,22 +2585,6 @@ mod tests {
             .map(|index| SecureField::from(M31::from(VALID_NIBBLES[(7 * index + 3) % 16])))
             .collect();
         arrays
-    }
-
-    fn extraction_claim(arrays: &[Vec<SecureField>], lambda: SecureField) -> SecureField {
-        let (bit_polynomials, validity) = nibble_polynomials();
-        let half = arrays[0].len() / 2;
-        (0..half)
-            .map(|i| {
-                let polynomial =
-                    extraction_pair_polynomial(arrays, i, &bit_polynomials, &validity, lambda);
-                polynomial.coefficients[0]
-                    + polynomial_eval(
-                        &polynomial.coefficients[..=EXTRACTION_DEGREE],
-                        SecureField::one(),
-                    )
-            })
-            .sum()
     }
 
     fn assert_extraction_sumcheck_matches_scalar(n_variables: usize, salt: u32) {

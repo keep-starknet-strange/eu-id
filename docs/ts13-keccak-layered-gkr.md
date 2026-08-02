@@ -1,13 +1,11 @@
 # TS13 layered Keccak prototype
 
-Status: acceptance candidate under quarantine
+Status: independently reviewed; accepted as sound with conditions
 
-A-015 suspends the committed-bit v3 design and promotes this committed-nibble
-design to an acceptance candidate. The quarantine from A-013 stays active
-until the independent A-015 review accepts this exact design and source. Until
-then, the implementation and its measurements provide throughput and
-consistency data only. Do not make more cryptographic changes before the
-review. A-016 requires the candidate to preserve or improve the live
+A-015-review accepts this committed-nibble design as sound. It reports no
+critical or high finding. Final campaign acceptance still requires conditions
+F-1 through F-3, a new source-bound artifact, the full release matrix, and the
+three-phone run. A-016 requires the candidate to preserve or improve the live
 whole-system algebraic bound under the same accounting convention.
 
 This design replaces the removed Keccak round carrier. It does not change the
@@ -120,7 +118,12 @@ C_r(p9, x3, z6)     column parity bits
 `x >= 5` in `C` are zero. Values on an inactive permutation row are zero.
 
 The bit coordinate `z` is the little-endian bit position in a 64-bit Keccak
-lane. The artifact binds the live `RHO_OFFSETS` and `IOTA_RC` arrays.
+lane. The generation input does not list `RHO_OFFSETS`, `IOTA_RC`, the
+24-round control flow, or the gate degrees as separate constants. The circuit
+identity binds these values through the soundness-source-tree digest, which
+covers `crates/stwo-keccak`. The product payload gate separately requires
+`p_log = 9`, 8,894 QM31 values, and 142,304 bytes. It rejects noncanonical
+limbs and trailing bytes.
 
 For Boolean inputs, use this fixed parity polynomial:
 
@@ -252,7 +255,11 @@ f_i(X) = sum_(v in D, bit_i(v)=1) (
 )
 ```
 
-The artifact binds `D`, `P`, and all four `f_i` coefficient arrays.
+The generation input does not list `D`, `P`, or the four `f_i` coefficient
+arrays as separate constants. The circuit identity binds `VALID_NIBBLES` and
+the deterministic `nibble_polynomials` derivation through the same
+soundness-source-tree digest. The exact product payload gate stated in
+section 4 also applies to this sumcheck.
 
 The identity below holds over M31:
 
@@ -438,6 +445,10 @@ epsilon_K <= 8468/(q-2)
 
 The removed carrier uses `8974/q` under the same convention. The replacement
 improves that coefficient by 506, before the negligible denominator change.
+The `8974/q` carrier value is doc-asserted. Its supporting ledger,
+`759 + 23 + 1 + 8191`, was deleted with `round_gkr.rs`. No live generator or
+test independently recomputes it. Acceptance does not depend on this
+comparison because both Keccak terms are smaller than the retained OODS term.
 
 The two MLE constraints are also part of the one outer STARK composition and
 OODS event. A whole-system audit MUST not count them again after it counts
@@ -483,12 +494,14 @@ This is 1,534,720 AIR-reference cells. The physical system total is projected
 at 9,156,176 cells. The replacement passes the 320,000-cell prototype gate.
 A-013 supersedes the earlier 1.5-million complete-Keccak gate for the AIR
 track. A-015 suspends the committed-bit route and keeps the engine route open
-for future work. Neither route blocks review of this candidate.
+for future work. A-015-review accepts this candidate as sound, subject to the
+three recorded completion conditions.
 
 A-016 requires one cold full-proof run on all three gate phones. Keep the
-matching desktop phase record in the same evidence set. Do not start another
-cryptographic path before the review. If one phone misses the 2,000 ms gate,
-use a new accepted lever or obtain an explicit gate change.
+matching desktop phase record in the same evidence set. Complete the review
+conditions and final-hash evidence before starting another cryptographic path.
+If one phone misses the 2,000 ms gate, use a new accepted lever or obtain an
+explicit gate change.
 
 ## 13. Required checks
 

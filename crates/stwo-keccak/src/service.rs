@@ -15,9 +15,11 @@
 
 use stwo::core::air::Component;
 use stwo::core::channel::Blake2sChannel;
+use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::backend::Column;
 use stwo::prover::lookups::mle::Mle;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::mle_eval::{
@@ -30,6 +32,7 @@ use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
 
+use crate::constants::N_BYTES_IN_STATE;
 use crate::layered_gkr::{
     self, LayeredKeccakProver, SourceOpening, SourceTieBack, SpongeSourceOracle,
 };
@@ -37,6 +40,7 @@ use crate::relations::{KeccakRelations, SharedKeccakRelations};
 use crate::sponge::Shape;
 use crate::sponge_v::{self, JobList, SpongeVRun};
 use crate::tables_air::{self, TableKind, TableMultiplicities};
+use crate::utils::circle_row_to_coset;
 
 const POST_INTERACTION_TREE: usize = 3;
 const N_TABLES: usize = 2;
@@ -232,6 +236,22 @@ fn write_selected(
     tree.extend_evals(picked_columns);
 }
 
+#[derive(Clone, Copy)]
+struct RawColumnMutation {
+    column: usize,
+    coset_row: usize,
+    delta: M31,
+}
+
+fn mutate_coset_cell(column: &mut crate::utils::ColEval, coset_row: usize, delta: M31) {
+    let log_size = column.values.len().ilog2();
+    let domain_row = circle_row_to_coset(log_size)
+        .into_iter()
+        .position(|row| row == coset_row)
+        .expect("raw-column mutation row exists");
+    column.values.as_mut_slice()[domain_row] += delta;
+}
+
 pub struct KeccakServiceProver {
     jobs: JobList,
     handle: SharedKeccakRelations,
@@ -243,6 +263,7 @@ pub struct KeccakServiceProver {
     layered: Option<LayeredKeccakProver>,
     tie_backs: Option<[PendingTieBack; 2]>,
     payload: Vec<u8>,
+    raw_column_mutations: Vec<RawColumnMutation>,
 }
 
 impl KeccakServiceProver {
@@ -286,6 +307,7 @@ impl KeccakServiceProver {
             layered: Some(layered),
             tie_backs: None,
             payload: Vec::new(),
+            raw_column_mutations: Vec::new(),
         }
     }
 
@@ -307,6 +329,28 @@ impl KeccakServiceProver {
     #[doc(hidden)]
     pub fn layered_mut(&mut self) -> &mut LayeredKeccakProver {
         self.layered.as_mut().expect("layered prover is available")
+    }
+
+    /// Add 256 to the low nibble and subtract 1 from the high nibble.
+    /// This keeps `low + 256 * high` unchanged.
+    #[doc(hidden)]
+    pub fn tamper_input_nibble_pair(&mut self, coset_row: usize, byte: usize) {
+        assert!(coset_row < self.jobs.n_perms_total());
+        assert!(byte < N_BYTES_IN_STATE);
+        let low_column = self.jobs.input_nibble_col_start() + 2 * byte;
+        self.raw_column_mutations.extend([
+            RawColumnMutation {
+                column: low_column,
+                coset_row,
+                delta: M31::from(layered_gkr::NIBBLE_PAIR_RADIX),
+            },
+            RawColumnMutation {
+                column: low_column + 1,
+                coset_row,
+                delta: -M31::from(1u32),
+            },
+        ]);
+        self.layered_mut().tamper_input_nibble_pair(coset_row, byte);
     }
 
     fn relations(&self) -> &KeccakRelations {
@@ -421,6 +465,13 @@ impl AirProver for KeccakServiceProver {
 
     fn write_trace(&mut self, tree: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut columns = sponge_v::generate_base_trace(&self.run);
+        for mutation in self.raw_column_mutations.iter().copied() {
+            mutate_coset_cell(
+                &mut columns[mutation.column],
+                mutation.coset_row,
+                mutation.delta,
+            );
+        }
         columns.extend(tables_air::generate_trace(&self.table_mult));
         tree.extend_evals(columns);
     }

@@ -95,8 +95,9 @@ The prior 25-row all-ML-DSA-65 carrier used 9,102,656 committed cells. The
 layered acceptance candidate replaces that carrier. Its current Keccak
 AIR-reference count is 1,534,720 cells.
 
-The acceptance candidate remains quarantined until the independent A-015
-review accepts its exact design and source.
+A-015-review accepts the candidate as sound and reports no critical or high
+finding. Final acceptance requires its three completion conditions, a new
+source-bound artifact, the full release matrix, and the final-hash phone run.
 
 ### P3 — Private SHA-256
 
@@ -128,10 +129,14 @@ committed-nibble implementation to an acceptance candidate. The bit layer is
 internal. It is deterministically extracted from 400 committed spread-nibble
 columns. Both boundary claims tie back to committed columns.
 
-The quarantine stays active until both of these events occur:
+The soundness review is complete. Final acceptance requires all of these
+events:
 
-1. A-015-review accepts the exact design and implementation.
-2. The exact three-phone Firebase matrix completes.
+1. Complete the F-1 artifact-binding wording, F-2 exported off-domain nibble
+   negative, and F-3 carrier-baseline wording.
+2. Commit the source change and generate a new source-bound artifact.
+3. Pass the complete release matrix with the new circuit hash.
+4. Pass the exact three-phone Firebase matrix with that hash.
 
 The current candidate has this provenance:
 
@@ -146,23 +151,21 @@ The current candidate has this provenance:
 - Proof body capacity: 1,507,328 bytes.
 - Total envelope: 1,507,374 bytes.
 
-The current desktop median is 1,784 ms for proving and 80 ms for
-verification. Peak resident memory is 777,682,944 bytes. These values are
-throughput data while the quarantine is active.
-
-If A-015-review accepts the exact source and circuit without a code change,
-the matching phone run may become acceptance evidence. If the review requires
-a code change, regenerate the artifact, fixture, AAR, and APKs. Then rerun the
-full release, ignored, negative, unlinkability, artifact, and phone test sets.
+The current desktop median is 1,784 ms for proving and 80 ms for verification.
+Peak resident memory is 777,682,944 bytes. These values are a throughput
+checkpoint only. F-2 changes the soundness source and makes circuit-hash
+rotation mandatory. Regenerate the artifact, fixture, AAR, and APKs. Then
+rerun the full release, ignored, negative, unlinkability, artifact, and phone
+test sets.
 
 ## 6. Review gates
 
 A-016 withdraws the stale literal 108-bit soundness label. The retained OODS
 term is about 106 bits by itself. The named live partial union is about 105.91
-bits before global LogUp collision terms. A-015-review must show that the
-candidate replaces the removed carrier contribution without a net loss. It
-must use the same accounting convention. It must omit no new term class. Every
-other term must stay unchanged.
+bits before global LogUp collision terms. A-015-review confirms that the
+candidate replaces the removed carrier contribution without a net loss under
+the same accounting convention. It reports no omitted term class or changed
+term outside the replacement.
 
 A-016 also retires the earlier A54 complete-Keccak limit of 1,200 ms because
 the timing wire cannot measure it. The full cold `proveIdentity` result on all
