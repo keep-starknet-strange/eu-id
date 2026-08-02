@@ -1,10 +1,9 @@
 //! The vertical sponge component uses one constant-width trace row for each
-//! `Keccak-f[1600]` permutation in an ordered list of SHAKE-128 and SHAKE-256
+//! Keccak-f[1600] permutation in an ordered list of SHAKE-128 and SHAKE-256
 //! jobs.
 //!
 //! The rows contain every job's absorb and extra squeeze permutations. The
-//! width is [`N_BASE_COLS`] base columns, plus the capacity-only columns when
-//! the job list uses fixed-capacity messages.
+//! width is fixed at [`N_BASE_COLS`] base columns.
 //!
 //! ## Row semantics (job-local permutation index `r`, `0 ≤ r < n_perms`)
 //!
@@ -13,21 +12,18 @@
 //!   block `s = r − (n_absorb − 1)`. The last absorb row is also squeeze block
 //!   0, as specified by FIPS 202.
 //!
-//! ## Chaining (`[-1, 0]` masks on `post`)
+//! ## Chaining (Pattern B, `[-1, 0]` masks on `post`)
 //!
 //! The 200 `post` columns use a `[-1, 0]` mask. `post_prev` is the
 //! previous row's post-permutation state. The pre-state of row `r` is built by
-//! multiplicity-gated KeccakState input tuples. Five entries keep each tuple
-//! cell at degree 1 or less:
+//! multiplicity-gated KeccakState input tuples. The three variants keep each
+//! tuple cell at degree 1 or less:
 //!
-//! * first SHAKE-256 row → `[perm_id, block0_spread[136] | 0…0]`;
-//! * first SHAKE-128 row → `[perm_id, block0_spread[168] | 0…0]`;
-//! * later SHAKE-256 absorb row → `[perm_id, new_rate | post_prev.capacity]`;
-//! * extra squeeze row → `[perm_id, post_prev]`;
-//! * unused capacity row → `[perm_id, 0…0]`.
-//!
-//! The first-row entries prevent input from a previous job or the wraparound
-//! row. The XOR table checks `new_rate = prev_rate ⊕ block`.
+//! * `is_first`             → `[perm_id, IN, block0_spread | 0…0]` (capacity 0:
+//!   this prevents input from a previous job or the wraparound row).
+//! * `is_absorb − is_first` → `[perm_id, IN, new_rate | post_prev.capacity]`,
+//!   with `new_rate = prev_rate ⊕ block` witnessed and xor3-table-checked.
+//! * `is_active − is_absorb`→ `[perm_id, IN, post_prev]` (extra squeeze perm).
 //!
 //! The tree-0 root pins the committed schedule columns. The AIR derives rate,
 //! capacity-mode, and padding values from those columns. Plain constraints
@@ -35,9 +31,8 @@
 //!
 //! ## Relation signs
 //!
-//! The conversion and XOR lookups have a positive sign. HashIo consumes absorb
-//! bytes and yields squeeze bytes. KeccakState yields the computed sponge input
-//! and consumes the committed input.
+//! conv use (+), xor3 use (+), HashIo absorb consume (−) / squeeze yield (+),
+//! KeccakState IN yield (+) / OUT require (−).
 
 #![allow(clippy::needless_range_loop)]
 
@@ -46,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
+use stwo::core::pcs::TreeVec;
 use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -61,44 +57,25 @@ use crate::relations::{KeccakRelations, KECCAK_STATE_ARITY};
 use crate::sponge::{Shape, XofMode};
 use crate::utils::{circle_row_to_coset, col_eval, spread_u32, ColEval};
 
-/// Maximum squeeze width: SHAKE-128's 168-byte rate.
+/// Maximum supported rate: SHAKE-128's 168 bytes. SHAKE-256 rows gate off
+/// columns 136..168 through the preprocessed schedule.
 pub const MAX_RATE: usize = N_BYTES_IN_SHAKE128_RATE;
 
-/// Two spread-nibble columns for each byte in the Keccak state.
-pub const N_INPUT_NIBBLE_COLS: usize = 2 * N_BYTES_IN_STATE;
-
-/// Absorb witness width. Each row exposes at most 136 message bytes.
-pub const N_ABSORB_COLS: usize = N_BYTES_IN_RATE;
-
-/// SHAKE-256 is the only supported mode with later absorb rows.
-pub const N_NEW_RATE_COLS: usize = N_ABSORB_COLS;
-
-/// First `post` column in the fixed base layout.
-pub const POST_COL_START: usize = 2 * N_ABSORB_COLS + N_NEW_RATE_COLS;
-
-/// First `squeeze_byte` column in the fixed base layout.
-pub const SQUEEZE_COL_START: usize = POST_COL_START + N_BYTES_IN_STATE;
-
-/// First input-nibble column when the job list has no capacity-shaped job.
-pub const FIXED_INPUT_NIBBLE_COL_START: usize = SQUEEZE_COL_START + MAX_RATE;
-
-/// Base (witness) columns: `block_byte[N_ABSORB_COLS] |
-/// block_spread[N_ABSORB_COLS] |
-/// new_rate[N_NEW_RATE_COLS] | post[200] | squeeze_byte[MAX_RATE]`, followed
-/// by the capacity-only columns when present, then `input_nibble[400]`.
-pub const N_BASE_COLS: usize = FIXED_INPUT_NIBBLE_COL_START + N_INPUT_NIBBLE_COLS;
+/// Base (witness) columns: `block_byte[MAX_RATE] | block_spread[MAX_RATE] |
+/// new_rate[MAX_RATE] | post[200] | squeeze_byte[MAX_RATE]`.
+pub const N_BASE_COLS: usize = 3 * MAX_RATE + N_BYTES_IN_STATE + MAX_RATE;
 
 /// Capacity-mode-only base columns: the actual absorb selector, the actual
 /// squeeze selector, and the verifier-length-derived pad suffix mask.
-pub const N_CAPACITY_BASE_COLS: usize = 2 + N_ABSORB_COLS;
+pub const N_CAPACITY_BASE_COLS: usize = 2 + MAX_RATE;
 
 /// Scalar schedule columns. Padding masks add one column per distinct,
 /// nonzero fixed-job mask.
 pub const N_SCHEDULE_COLS: usize = 10;
 
-/// LogUp entries per row: three absorb families, two full-rate squeeze
-/// families, and five state entries.
-pub const N_LOGUP_ENTRIES: usize = 3 * N_ABSORB_COLS + 2 * MAX_RATE + 5;
+/// Logup entries per row: five MAX_RATE byte families plus six state entries
+/// (mode-gated first/absorb inputs, squeeze input, and output).
+pub const N_LOGUP_ENTRIES: usize = 5 * MAX_RATE + 6;
 
 /// Logup fractions batched per interaction column (`finalize_logup_batched`).
 /// Batch 4 needs constraint degree `1 + 4·1 = 5 ≤ D5`, available at
@@ -108,13 +85,6 @@ pub const LOGUP_BATCH: usize = 4;
 /// Interaction columns (batch-4 QM31 fractions, pre-expanded to M31).
 pub const N_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE * N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
-
-const _: () = assert!(N_NEW_RATE_COLS == 136);
-const _: () = assert!(POST_COL_START == 408);
-const _: () = assert!(FIXED_INPUT_NIBBLE_COL_START == 776);
-const _: () = assert!(N_BASE_COLS == 1_176);
-const _: () = assert!(N_LOGUP_ENTRIES == 749);
-const _: () = assert!(N_INTERACTION_COLS == 752);
 
 fn n_logup_entries(jobs: &JobList) -> usize {
     N_LOGUP_ENTRIES + usize::from(jobs.has_message_capacity())
@@ -143,10 +113,6 @@ impl JobList {
         let mut jobs = Vec::new();
         let mut base = 0usize;
         for shape in shapes {
-            assert!(
-                shape.xof_mode != XofMode::Shake128 || shape.message_len <= N_BYTES_IN_RATE,
-                "SHAKE-128 service messages must not exceed {N_BYTES_IN_RATE} bytes"
-            );
             assert_eq!(
                 shape.n_absorb,
                 (shape.geometry_message_len() + 1).div_ceil(shape.rate()),
@@ -202,11 +168,6 @@ impl JobList {
 
     pub fn n_base_cols(&self) -> usize {
         N_BASE_COLS + usize::from(self.has_message_capacity()) * N_CAPACITY_BASE_COLS
-    }
-
-    /// First input-nibble column in this job list's base trace.
-    pub fn input_nibble_col_start(&self) -> usize {
-        self.n_base_cols() - N_INPUT_NIBBLE_COLS
     }
 
     pub fn log_size(&self) -> u32 {
@@ -461,12 +422,10 @@ pub struct RowData {
     pub squeeze_active: bool,
     /// Dynamic pad suffix for capacity mode (and the mirrored static pad mask
     /// for fixed mode when a mixed job list carries these columns).
-    pub pad_gate: [u8; N_ABSORB_COLS],
-    pub block_byte: [u8; N_ABSORB_COLS],
-    pub new_rate: [u8; N_NEW_RATE_COLS],
+    pub pad_gate: [u8; MAX_RATE],
+    pub block_byte: [u8; MAX_RATE],
+    pub new_rate: [u8; MAX_RATE],
     pub prev_post: [u8; N_BYTES_IN_STATE],
-    /// Exact state passed to this row's Keccak permutation.
-    pub input: [u8; N_BYTES_IN_STATE],
     pub post: [u8; N_BYTES_IN_STATE],
     pub squeeze_byte: [u8; MAX_RATE],
 }
@@ -476,11 +435,10 @@ impl Default for RowData {
         Self {
             absorb_active: false,
             squeeze_active: false,
-            pad_gate: [0; N_ABSORB_COLS],
-            block_byte: [0; N_ABSORB_COLS],
-            new_rate: [0; N_NEW_RATE_COLS],
+            pad_gate: [0; MAX_RATE],
+            block_byte: [0; MAX_RATE],
+            new_rate: [0; MAX_RATE],
             prev_post: [0; N_BYTES_IN_STATE],
-            input: [0; N_BYTES_IN_STATE],
             post: [0; N_BYTES_IN_STATE],
             squeeze_byte: [0; MAX_RATE],
         }
@@ -492,9 +450,12 @@ pub struct SpongeVRun {
     pub jobs: JobList,
     /// Active rows in coset order (`len == jobs.n_perms_total()`).
     pub rows: Vec<RowData>,
-    /// XOR lookups for each non-first absorb row.
+    /// Permutation input rows `[spread_state(200) | perm_id]` for
+    /// [`crate::service::build_perm_witness`] (lane 0 real, splatted).
+    pub perm_inputs: Vec<[PackedM31; N_BYTES_IN_STATE + 1]>,
+    /// xor3 uses per non-first absorb row, for [`crate::tables_air::TableMultiplicities::add_sponge`].
     pub xor: Vec<Vec<[PackedM31; 2]>>,
-    /// Byte-conversion lookups for absorbed and squeezed bytes.
+    /// conv uses (block bytes + squeeze bytes), same destination.
     pub conv: Vec<[PackedM31; 2]>,
     /// Per-job full squeeze outputs (`shape.rate() · n_squeeze` bytes each).
     pub outputs: Vec<Vec<u8>>,
@@ -507,18 +468,11 @@ fn spread_splat(b: u8) -> PackedM31 {
     splat(spread_u32(b as u32))
 }
 
-fn spread_nibble(byte: u8, high: bool) -> u32 {
-    spread_u32(((byte >> (4 * usize::from(high))) & 0x0f) as u32)
-}
-
-fn recomposed_input_spread(byte: u8) -> u32 {
-    spread_nibble(byte, false) + 256 * spread_nibble(byte, true)
-}
-
 /// Run every job's sponge natively and record the per-permutation rows.
 pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
     assert_eq!(messages.len(), jobs.jobs.len(), "one message per job");
     let mut rows: Vec<RowData> = Vec::with_capacity(jobs.n_perms_total());
+    let mut perm_inputs = Vec::with_capacity(jobs.n_perms_total());
     let mut xor = Vec::new();
     let mut conv = Vec::new();
     let mut outputs = Vec::new();
@@ -559,20 +513,19 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
                 ..RowData::default()
             };
             if absorb_active {
-                row.block_byte.copy_from_slice(&blocks[r][..N_ABSORB_COLS]);
+                row.block_byte = blocks[r];
                 if r + 1 == actual_n_absorb {
-                    row.pad_gate[f..N_ABSORB_COLS].fill(1);
+                    row.pad_gate[f..rate].fill(1);
                 }
-                for j in 0..N_ABSORB_COLS {
+                for j in 0..rate {
                     conv.push([splat(blocks[r][j] as u32), spread_splat(blocks[r][j])]);
                 }
                 if r == 0 {
                     state[..rate].copy_from_slice(&blocks[0][..rate]);
                     // capacity stays 0.
                 } else {
-                    debug_assert_eq!(rate, N_NEW_RATE_COLS);
-                    let mut uses = Vec::with_capacity(N_NEW_RATE_COLS);
-                    for j in 0..N_NEW_RATE_COLS {
+                    let mut uses = Vec::with_capacity(rate);
+                    for j in 0..rate {
                         let old = state[j];
                         let m = blocks[r][j];
                         let newv = old ^ m;
@@ -583,12 +536,19 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
                     xor.push(uses);
                 }
             }
-            row.input = if unused_capacity_row {
+            let mut permutation_state = if unused_capacity_row {
                 [0u8; N_BYTES_IN_STATE]
             } else {
                 state
             };
-            let mut permutation_state = row.input;
+            // Pre-permutation state → perm input (spread, lane-0 splat).
+            let mut prow = [PackedM31::zero(); N_BYTES_IN_STATE + 1];
+            for i in 0..N_BYTES_IN_STATE {
+                prow[i] = spread_splat(permutation_state[i]);
+            }
+            prow[N_BYTES_IN_STATE] = splat((shape.perm_id_base + r) as u32);
+            perm_inputs.push(prow);
+
             crate::sponge::native_keccak_f_bytes(&mut permutation_state);
             row.post = permutation_state;
             if !unused_capacity_row {
@@ -611,6 +571,7 @@ pub fn generate_jobs(jobs: &JobList, messages: &[Vec<u8>]) -> SpongeVRun {
     SpongeVRun {
         jobs: jobs.clone(),
         rows,
+        perm_inputs,
         xor,
         conv,
         outputs,
@@ -625,18 +586,18 @@ pub fn generate_base_trace(run: &SpongeVRun) -> Vec<ColEval> {
     let mut cols: Vec<Vec<M31>> = vec![vec![M31::zero(); rows]; run.jobs.n_base_cols()];
     for (r, row) in run.rows.iter().enumerate() {
         let mut c = 0usize;
-        for j in 0..N_ABSORB_COLS {
+        for j in 0..MAX_RATE {
             cols[c + j][r] = m(row.block_byte[j] as u32);
         }
-        c += N_ABSORB_COLS;
-        for j in 0..N_ABSORB_COLS {
+        c += MAX_RATE;
+        for j in 0..MAX_RATE {
             cols[c + j][r] = m(spread_u32(row.block_byte[j] as u32));
         }
-        c += N_ABSORB_COLS;
-        for j in 0..N_NEW_RATE_COLS {
+        c += MAX_RATE;
+        for j in 0..MAX_RATE {
             cols[c + j][r] = m(spread_u32(row.new_rate[j] as u32));
         }
-        c += N_NEW_RATE_COLS;
+        c += MAX_RATE;
         for i in 0..N_BYTES_IN_STATE {
             cols[c + i][r] = m(spread_u32(row.post[i] as u32));
         }
@@ -650,19 +611,34 @@ pub fn generate_base_trace(run: &SpongeVRun) -> Vec<ColEval> {
             c += 1;
             cols[c][r] = m(row.squeeze_active as u32);
             c += 1;
-            for j in 0..N_ABSORB_COLS {
+            for j in 0..MAX_RATE {
                 cols[c + j][r] = m(row.pad_gate[j] as u32);
             }
-            c += N_ABSORB_COLS;
+            c += MAX_RATE;
         }
-        for (byte, input) in row.input.iter().copied().enumerate() {
-            cols[c + 2 * byte][r] = m(spread_nibble(input, false));
-            cols[c + 2 * byte + 1][r] = m(spread_nibble(input, true));
-        }
-        c += N_INPUT_NIBBLE_COLS;
         debug_assert_eq!(c, run.jobs.n_base_cols());
     }
     cols.into_iter().map(|c| col_eval(log_size, c)).collect()
+}
+
+// =============================================================================
+// Claim.
+// =============================================================================
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Claim {
+    pub jobs: JobList,
+}
+
+impl Claim {
+    pub fn log_sizes(&self) -> TreeVec<Vec<u32>> {
+        let ls = self.jobs.log_size();
+        TreeVec::new(vec![
+            vec![ls; self.jobs.n_schedule_cols()],
+            vec![ls; self.jobs.n_base_cols()],
+            vec![ls; n_interaction_cols(&self.jobs)],
+        ])
+    }
 }
 
 // =============================================================================
@@ -745,11 +721,9 @@ impl FrameworkEval for Eval {
         }
 
         // Base columns (commit order).
-        let block_byte: Vec<E::F> = (0..N_ABSORB_COLS).map(|_| eval.next_trace_mask()).collect();
-        let block_spread: Vec<E::F> = (0..N_ABSORB_COLS).map(|_| eval.next_trace_mask()).collect();
-        let new_rate: Vec<E::F> = (0..N_NEW_RATE_COLS)
-            .map(|_| eval.next_trace_mask())
-            .collect();
+        let block_byte: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
+        let block_spread: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
+        let new_rate: Vec<E::F> = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
         // post with the [-1, 0] chaining mask: [prev row's post, this row's post].
         let post_masks: Vec<[E::F; 2]> = (0..N_BYTES_IN_STATE)
             .map(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]))
@@ -761,7 +735,7 @@ impl FrameworkEval for Eval {
             if self.jobs.has_message_capacity() {
                 let absorb_masks = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]);
                 let squeeze_active = eval.next_trace_mask();
-                let pad_gate = (0..N_ABSORB_COLS).map(|_| eval.next_trace_mask()).collect();
+                let pad_gate = (0..MAX_RATE).map(|_| eval.next_trace_mask()).collect();
                 (
                     absorb_masks[0].clone(),
                     absorb_masks[1].clone(),
@@ -773,18 +747,11 @@ impl FrameworkEval for Eval {
                     is_absorb.clone(),
                     E::F::zero(),
                     is_squeeze_out.clone(),
-                    scheduled_pad_gate[..N_ABSORB_COLS].to_vec(),
+                    scheduled_pad_gate.clone(),
                 )
             };
-        let input_nibbles: Vec<E::F> = (0..N_INPUT_NIBBLE_COLS)
-            .map(|_| eval.next_trace_mask())
-            .collect();
         let one = E::F::one();
         let fixed_mode = one.clone() - capacity_mode.clone();
-
-        for nibble in &input_nibbles {
-            eval.add_constraint((one.clone() - is_active.clone()) * nibble.clone());
-        }
 
         if self.jobs.has_message_capacity() {
             // The actual absorb rows are a non-empty monotone prefix of the
@@ -814,7 +781,7 @@ impl FrameworkEval for Eval {
         // Fixed jobs use the preprocessed padding schedule. Capacity jobs
         // commit the padding suffix and bind its rising edge to the public
         // length. The last rate byte is always in the suffix.
-        for j in 0..N_ABSORB_COLS {
+        for j in 0..MAX_RATE {
             if self.jobs.has_message_capacity() {
                 eval.add_constraint(
                     fixed_mode.clone() * (pad_gate[j].clone() - scheduled_pad_gate[j].clone()),
@@ -867,6 +834,8 @@ impl FrameworkEval for Eval {
             let pad_start = scheduled_pad_gate[j].clone() - previous_pad;
             let final_gate = if j == N_BYTES_IN_RATE - 1 {
                 is_active.clone() - is_shake128.clone()
+            } else if j == N_BYTES_IN_SHAKE128_RATE - 1 {
+                is_shake128.clone()
             } else {
                 E::F::zero()
             };
@@ -884,13 +853,18 @@ impl FrameworkEval for Eval {
                     * (pad_gate[N_BYTES_IN_RATE - 1].clone() - squeeze_active.clone()),
             );
             let inactive_capacity = capacity_mode.clone() * (one.clone() - absorb_active.clone());
-            for j in 0..N_ABSORB_COLS {
+            for j in 0..MAX_RATE {
                 // Every cell unused by the fixed-capacity message is
                 // canonical. The unused permutation itself is tied to the
                 // zero Keccak input below, which uniquely fixes `post`.
                 eval.add_constraint(inactive_capacity.clone() * block_byte[j].clone());
                 eval.add_constraint(inactive_capacity.clone() * block_spread[j].clone());
                 eval.add_constraint(inactive_capacity.clone() * new_rate[j].clone());
+                let outside_rate = capacity_mode.clone() * (one.clone() - rate_gate[j].clone());
+                eval.add_constraint(outside_rate.clone() * block_byte[j].clone());
+                eval.add_constraint(outside_rate.clone() * block_spread[j].clone());
+                eval.add_constraint(outside_rate.clone() * new_rate[j].clone());
+                eval.add_constraint(outside_rate * squeeze_byte[j].clone());
                 eval.add_constraint(
                     capacity_mode.clone()
                         * (one.clone() - squeeze_active.clone())
@@ -898,13 +872,10 @@ impl FrameworkEval for Eval {
                 );
                 eval.add_constraint(capacity_mode.clone() * is_first.clone() * new_rate[j].clone());
             }
-            for byte in N_ABSORB_COLS..MAX_RATE {
-                eval.add_constraint(capacity_mode.clone() * squeeze_byte[byte].clone());
-            }
         }
 
         // 1. conv: bind every absorb-row block byte to its spread limb (+).
-        for j in 0..N_ABSORB_COLS {
+        for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.conv,
                 absorb_active.clone() * rate_gate[j].clone(),
@@ -913,7 +884,7 @@ impl FrameworkEval for Eval {
         }
         // 2. HashIo: consume the real message bytes (−). The message gate is
         // `absorb_active·rate_gate[j] − pad_gate[j]` (1 on message positions).
-        for j in 0..N_ABSORB_COLS {
+        for j in 0..MAX_RATE {
             let jf = E::F::from(BaseField::from(j as u32));
             eval.add_to_relation(RelationEntry::base(
                 &rel.hash_io,
@@ -927,22 +898,22 @@ impl FrameworkEval for Eval {
         }
         // 3. xor3: rate ^= block on non-first absorb rows (+). Key is the
         // degree-1 sum of the two committed spreads; output is the witnessed
-        // new_rate spread. The XOR table checks its range and value.
-        for j in 0..N_NEW_RATE_COLS {
+        // new_rate spread (range- and correctness-bound by dense-table rows).
+        for j in 0..MAX_RATE {
             eval.add_to_relation(RelationEntry::base(
                 &rel.xor3,
                 (absorb_active.clone() - is_first.clone()) * rate_gate[j].clone(),
                 &[post_prev(j) + block_spread[j].clone(), new_rate[j].clone()],
             ));
         }
-        // 4. KeccakState: mode-gated 136/168-byte IN variants (+) and the
-        // committed, recomposed input state (−).
+        // 4. KeccakState: mode-gated 136/168-byte IN variants (+) and OUT (−).
         // Keeping each variant's tuple linear avoids a conditional product in
         // the relation denominator.
         let mk_state =
             |rate_len: usize, rate: &dyn Fn(usize) -> E::F, cap: &dyn Fn(usize) -> E::F| {
                 let mut t: Vec<E::F> = Vec::with_capacity(KECCAK_STATE_ARITY);
                 t.push(perm_id.clone());
+                t.push(E::F::zero()); // direction::IN
                 for j in 0..rate_len {
                     t.push(rate(j));
                 }
@@ -961,22 +932,11 @@ impl FrameworkEval for Eval {
             is_first.clone() * shake256.clone(),
             &in_first_256,
         ));
-        let first_block_spread = |j: usize| {
-            if j < N_ABSORB_COLS {
-                return block_spread[j].clone();
-            }
-            let pad_start = scheduled_pad_gate[j].clone() - scheduled_pad_gate[j - 1].clone();
-            let final_gate = if j == N_BYTES_IN_SHAKE128_RATE - 1 {
-                is_shake128.clone()
-            } else {
-                E::F::zero()
-            };
-            pad_start * E::F::from(BaseField::from(spread_u32(DELIMITED_SUFFIX as u32)))
-                + final_gate * E::F::from(BaseField::from(spread_u32(FINAL_BIT as u32)))
-        };
-        let in_first_128 = mk_state(N_BYTES_IN_SHAKE128_RATE, &first_block_spread, &|_| {
-            E::F::zero()
-        });
+        let in_first_128 = mk_state(
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| block_spread[j].clone(),
+            &|_| E::F::zero(),
+        );
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_state,
             is_first.clone() * is_shake128.clone(),
@@ -988,6 +948,16 @@ impl FrameworkEval for Eval {
             &rel.keccak_state,
             (absorb_active.clone() - is_first.clone()) * shake256,
             &in_absorb_256,
+        ));
+        let in_absorb_128 = mk_state(
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| new_rate[j].clone(),
+            &post_prev,
+        );
+        eval.add_to_relation(RelationEntry::base(
+            &rel.keccak_state,
+            (absorb_active.clone() - is_first.clone()) * is_shake128,
+            &in_absorb_128,
         ));
         // extra squeeze perms: the whole pre-state chains from prev post.
         let in_squeeze = mk_state(MAX_RATE, &post_prev, &post_prev);
@@ -1007,19 +977,17 @@ impl FrameworkEval for Eval {
                 &in_unused,
             ));
         }
-        let spread_shift = E::F::from(BaseField::from(256u32));
-        let mut committed_input: Vec<E::F> = Vec::with_capacity(KECCAK_STATE_ARITY);
-        committed_input.push(perm_id.clone());
-        for byte in 0..N_BYTES_IN_STATE {
-            committed_input.push(
-                input_nibbles[2 * byte].clone()
-                    + spread_shift.clone() * input_nibbles[2 * byte + 1].clone(),
-            );
+        // OUT: require the witnessed post state from the keccak component (−).
+        let mut out_tuple: Vec<E::F> = Vec::with_capacity(KECCAK_STATE_ARITY);
+        out_tuple.push(perm_id.clone());
+        out_tuple.push(E::F::one()); // direction::OUT
+        for i in 0..N_BYTES_IN_STATE {
+            out_tuple.push(post(i));
         }
         eval.add_to_relation(RelationEntry::base(
             &rel.keccak_state,
             -is_active.clone(),
-            &committed_input,
+            &out_tuple,
         ));
         // 5. conv: bind squeeze bytes to this row's post rate spreads (+).
         for j in 0..MAX_RATE {
@@ -1059,6 +1027,12 @@ pub struct InteractionClaim {
     pub claimed_sum: SecureField,
 }
 
+impl InteractionClaim {
+    pub fn mix_into(&self, channel: &mut impl Channel) {
+        channel.mix_felts(&[self.claimed_sum]);
+    }
+}
+
 /// The per-row logup fractions in EXACTLY the AIR's emission order.
 /// Zero-multiplicity entries are `(0, 1)`. This is sound because the batch constraint
 /// evaluates the symbolic multiplicity (a preprocessed gate that IS zero
@@ -1083,7 +1057,7 @@ fn row_fracs(
     };
 
     // 1. conv block (+is_absorb·rate_gate).
-    for j in 0..N_ABSORB_COLS {
+    for j in 0..MAX_RATE {
         if row.absorb_active && j < rate {
             let den: SecureField = rel
                 .conv
@@ -1094,7 +1068,7 @@ fn row_fracs(
         }
     }
     // 2. io absorb consume (−(is_absorb·rate_gate − pad_gate)).
-    for j in 0..N_ABSORB_COLS {
+    for j in 0..MAX_RATE {
         if row.absorb_active && j < rate && row.pad_gate[j] == 0 {
             let den: SecureField = rel.hash_io.combine(&[
                 m(sched.absorb_stream),
@@ -1107,7 +1081,7 @@ fn row_fracs(
         }
     }
     // 3. xor3 (+(is_absorb − is_first)·rate_gate).
-    for j in 0..N_NEW_RATE_COLS {
+    for j in 0..MAX_RATE {
         if row.absorb_active && !sched.first && j < rate {
             let key = sp(row.prev_post[j]) + sp(row.block_byte[j]);
             let den: SecureField = rel.xor3.combine(&[key, sp(row.new_rate[j])]);
@@ -1116,21 +1090,24 @@ fn row_fracs(
             out.push((zero, one));
         }
     }
-    // 4. state: mode-gated sponge inputs and one committed input.
-    let state_tuple =
-        |rate_len: usize, rate_values: &dyn Fn(usize) -> M31, cap: &dyn Fn(usize) -> M31| {
-            let mut t = Vec::with_capacity(KECCAK_STATE_ARITY);
-            t.push(m(sched.perm_id));
-            for j in 0..rate_len {
-                t.push(rate_values(j));
-            }
-            for i in rate_len..N_BYTES_IN_STATE {
-                t.push(cap(i));
-            }
-            t
-        };
+    // 4. state: mode-gated IN_first/IN_absorb, IN_squeeze, OUT.
+    let state_tuple = |dir: u32,
+                       rate_len: usize,
+                       rate_values: &dyn Fn(usize) -> M31,
+                       cap: &dyn Fn(usize) -> M31| {
+        let mut t = Vec::with_capacity(KECCAK_STATE_ARITY);
+        t.push(m(sched.perm_id));
+        t.push(m(dir));
+        for j in 0..rate_len {
+            t.push(rate_values(j));
+        }
+        for i in rate_len..N_BYTES_IN_STATE {
+            t.push(cap(i));
+        }
+        t
+    };
     if sched.first && !sched.shake128 {
-        let t = state_tuple(N_BYTES_IN_RATE, &|j| sp(row.block_byte[j]), &|_| {
+        let t = state_tuple(0, N_BYTES_IN_RATE, &|j| sp(row.block_byte[j]), &|_| {
             M31::zero()
         });
         out.push((one, rel.keccak_state.combine(&t)));
@@ -1138,32 +1115,37 @@ fn row_fracs(
         out.push((zero, one));
     }
     if sched.first && sched.shake128 {
-        let first_block_spread = |j: usize| {
-            if j < N_ABSORB_COLS {
-                return sp(row.block_byte[j]);
-            }
-            let pad_start = u32::from(sched.pad_gate[j] - sched.pad_gate[j - 1]);
-            let final_gate = u32::from(j == N_BYTES_IN_SHAKE128_RATE - 1);
-            m(pad_start * spread_u32(DELIMITED_SUFFIX as u32)
-                + final_gate * spread_u32(FINAL_BIT as u32))
-        };
-        let t = state_tuple(N_BYTES_IN_SHAKE128_RATE, &first_block_spread, &|_| {
-            M31::zero()
-        });
+        let t = state_tuple(
+            0,
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| sp(row.block_byte[j]),
+            &|_| M31::zero(),
+        );
         out.push((one, rel.keccak_state.combine(&t)));
     } else {
         out.push((zero, one));
     }
     if row.absorb_active && !sched.first && !sched.shake128 {
-        let t = state_tuple(N_BYTES_IN_RATE, &|j| sp(row.new_rate[j]), &|i| {
+        let t = state_tuple(0, N_BYTES_IN_RATE, &|j| sp(row.new_rate[j]), &|i| {
             sp(row.prev_post[i])
         });
         out.push((one, rel.keccak_state.combine(&t)));
     } else {
         out.push((zero, one));
     }
+    if row.absorb_active && !sched.first && sched.shake128 {
+        let t = state_tuple(
+            0,
+            N_BYTES_IN_SHAKE128_RATE,
+            &|j| sp(row.new_rate[j]),
+            &|i| sp(row.prev_post[i]),
+        );
+        out.push((one, rel.keccak_state.combine(&t)));
+    } else {
+        out.push((zero, one));
+    }
     if !sched.absorb {
-        let t = state_tuple(MAX_RATE, &|j| sp(row.prev_post[j]), &|i| {
+        let t = state_tuple(0, MAX_RATE, &|j| sp(row.prev_post[j]), &|i| {
             sp(row.prev_post[i])
         });
         out.push((one, rel.keccak_state.combine(&t)));
@@ -1172,18 +1154,14 @@ fn row_fracs(
     }
     if has_message_capacity {
         if sched.capacity_mode && !row.absorb_active {
-            let t = state_tuple(MAX_RATE, &|_| M31::zero(), &|_| M31::zero());
+            let t = state_tuple(0, MAX_RATE, &|_| M31::zero(), &|_| M31::zero());
             out.push((one, rel.keccak_state.combine(&t)));
         } else {
             out.push((zero, one));
         }
     }
     {
-        let t = state_tuple(
-            MAX_RATE,
-            &|j| m(recomposed_input_spread(row.input[j])),
-            &|i| m(recomposed_input_spread(row.input[i])),
-        );
+        let t = state_tuple(1, MAX_RATE, &|j| sp(row.post[j]), &|i| sp(row.post[i]));
         out.push((-one, rel.keccak_state.combine(&t)));
     }
     // 5. conv squeeze (+is_squeeze_out).
@@ -1279,86 +1257,6 @@ pub fn generate_interaction_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stwo::prover::backend::Column;
-
-    #[test]
-    fn base_count_includes_appended_input_nibbles() {
-        let fixed = JobList::new([Shape::new(1, 1, 0, 1)]);
-        let capacity = JobList::new([Shape::with_message_capacity(1, 272, 1, 0, 1).unwrap()]);
-
-        assert_eq!(N_INPUT_NIBBLE_COLS, 400);
-        assert_eq!(N_ABSORB_COLS, 136);
-        assert_eq!(N_NEW_RATE_COLS, 136);
-        assert_eq!(fixed.n_base_cols(), 1_176);
-        assert_eq!(capacity.n_base_cols(), 1_314);
-        assert_eq!(fixed.input_nibble_col_start(), 776);
-        assert_eq!(capacity.input_nibble_col_start(), 914);
-        assert_eq!(N_LOGUP_ENTRIES, 749);
-        assert_eq!(n_logup_entries(&fixed), 749);
-        assert_eq!(n_logup_entries(&capacity), 750);
-        assert_eq!(N_INTERACTION_COLS, 752);
-        assert_eq!(n_interaction_cols(&fixed), 752);
-        assert_eq!(n_interaction_cols(&capacity), 752);
-    }
-
-    #[test]
-    fn shake128_rejects_messages_above_the_service_profile() {
-        assert!(std::panic::catch_unwind(|| Shape::shake128(137, 1, 0, 1)).is_err());
-
-        let mut shape = Shape::shake128(136, 1, 0, 1);
-        shape.message_len = 137;
-        assert!(std::panic::catch_unwind(|| JobList::new([shape])).is_err());
-    }
-
-    #[test]
-    fn input_nibble_columns_are_interleaved_by_byte() {
-        let jobs = JobList::new([Shape::new(2, 1, 0, 1)]);
-        let run = generate_jobs(&jobs, &[vec![0x3c, 0xa5]]);
-        let trace = generate_base_trace(&run);
-        let circle_row = circle_row_to_coset(jobs.log_size())
-            .iter()
-            .position(|&coset| coset == 0)
-            .unwrap();
-        let start = jobs.input_nibble_col_start();
-        let expected = [
-            spread_u32(0x0c),
-            spread_u32(0x03),
-            spread_u32(0x05),
-            spread_u32(0x0a),
-        ];
-
-        for (offset, expected) in expected.into_iter().enumerate() {
-            assert_eq!(
-                trace[start + offset].values.at(circle_row),
-                M31::from_u32_unchecked(expected),
-                "input nibble column {offset}"
-            );
-        }
-    }
-
-    #[test]
-    fn spread_nibbles_recompose_input_bytes() {
-        for byte in u8::MIN..=u8::MAX {
-            assert_eq!(
-                recomposed_input_spread(byte),
-                spread_u32(byte as u32),
-                "input byte {byte:#04x}"
-            );
-        }
-    }
-
-    #[test]
-    fn capacity_unused_rows_store_zero_input() {
-        let jobs = JobList::new([Shape::with_message_capacity(1, 272, 1, 0, 1).unwrap()]);
-        let run = generate_jobs(&jobs, &[vec![0x42]]);
-
-        assert_eq!(run.rows.len(), 3);
-        assert_ne!(run.rows[1].prev_post, [0; N_BYTES_IN_STATE]);
-        for row in &run.rows[1..] {
-            assert!(!row.absorb_active);
-            assert_eq!(row.input, [0; N_BYTES_IN_STATE]);
-        }
-    }
 
     #[test]
     fn schedule_reuses_equal_padding_masks_and_omits_derived_columns() {
@@ -1414,7 +1312,7 @@ mod tests {
             Shape::new(0, 1, 0, 1),
             Shape::new(N_BYTES_IN_RATE - 1, 1, 2, 3),
             Shape::shake128(0, 1, 4, 5),
-            Shape::shake128(N_BYTES_IN_RATE, 1, 6, 7),
+            Shape::shake128(N_BYTES_IN_SHAKE128_RATE - 1, 1, 6, 7),
         ];
         let messages = shapes
             .iter()
@@ -1440,12 +1338,7 @@ mod tests {
                     (pad_start * i16::from(DELIMITED_SUFFIX) + final_gate * i16::from(FINAL_BIT))
                         as u8
                 };
-                let actual = if byte < N_ABSORB_COLS {
-                    row.block_byte[byte]
-                } else {
-                    row.input[byte]
-                };
-                assert_eq!(actual, expected);
+                assert_eq!(row.block_byte[byte], expected);
             }
         }
     }

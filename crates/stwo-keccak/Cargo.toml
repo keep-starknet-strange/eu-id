@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 stwo.workspace = true
 stwo-constraint-framework.workspace = true
+stwo-air-utils.workspace = true
+stwo-air-utils-derive.workspace = true
 air-core = { path = "../air-core" }
 serde.workspace = true
 num-traits.workspace = true

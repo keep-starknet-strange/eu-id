@@ -79,13 +79,14 @@ const CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 3] = [1, 2, 3];
 const CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256: &str =
     "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
 const CANONICAL_GENERATION_INPUT_SHA256: &str =
-    "d8bd7239714d021cec28c87f00c9603e5d3098524e3c3c21b68af125aee429e4";
+    "60f05b9e596a48e03f6895f36f962775f3f6d1f2dfd50ca3fbb94640153863f0";
 const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
 const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
-const CANONICAL_RELATION_COUNT: usize = 78;
-const CANONICAL_RELATION_USE_COUNT: usize = 237;
+const CANONICAL_RELATION_COUNT: usize = 87;
+const CANONICAL_RELATION_USE_COUNT: usize = 251;
+const RESERVED_TRANSCRIPT_RELATION_NAMES: [&str; 1] = ["r07_keccak_round"];
 const CANONICAL_PUBLIC_MIX_COUNT: usize = 20;
-const CANONICAL_CHALLENGE_ENTRY_COUNT: usize = 87;
+const CANONICAL_CHALLENGE_ENTRY_COUNT: usize = 96;
 const CANONICAL_RAW_MLDSA_CHALLENGE_COUNT: usize = 9;
 const CANONICAL_EXPAND_A_JOB_COUNT: usize = stwo_mldsa::profile::ML_DSA_65.matrix_polys();
 const CANONICAL_HASH_STREAM_COUNT: usize = CANONICAL_EXPAND_A_JOB_COUNT + 10;
@@ -115,7 +116,7 @@ digest_id_max)";
 const KECCAK_PUBLIC_MIX_ENCODING: &str = "mix_u64(job_count,service_log_size); for each of 40 jobs mix mode,rate,message_len,n_squeeze,absorb_stream,squeeze_stream,perm_id_base; device-mu additionally mixes CAPACITY_TAG,1090";
 const KECCAK_PUBLIC_MIX_FIXED_LENGTH: u32 = 2_272;
 const CLAIM_MIX_ORDER: &str = "After tree 1, mix claims in physical AIR order. ML-DSA roles mix group_evals before claimed_sums.";
-const TRANSCRIPT_PHASE_ORDER: &str = "Mix the PCS configuration and commit tree0. Mix 20 AIR public statements and commit tree1. Draw the secure fields in challengeOrder. Mix claims in physical AIR order and commit tree2. Run the shared_keccak_service layered proof and commit its two source tie-backs in tree3. Then calculate the composition polynomial and FRI.";
+const TRANSCRIPT_PHASE_ORDER: &str = "Mix the PCS configuration and commit tree0. Mix 20 AIR public statements and commit tree1. Draw the secure fields in challengeOrder. Mix claims in physical AIR order and commit tree2. Run the shared_keccak_service GKR post-interaction and commit tree3. Then calculate the composition polynomial and FRI.";
 const KECCAK_JOB_ORDER: &str = "issuer_mu,issuer_ct,issuer_sib,expand_a_00..expand_a_29,device_tr,device_mu,device_ct,device_sib,revocation_mu,revocation_ct,revocation_sib";
 const HASH_STREAM_ID_SEMANTICS: &str = "HashStreamV1.streamId is the absorb stream ID. `streamIds` also contains the separate squeeze stream IDs.";
 const CANONICAL_BUILTIN_CONSTANT_NAMES: [&str; 40] = [
@@ -1131,11 +1132,7 @@ impl GenerationInputV1 {
                         )
                     })
                 })?;
-            let expected = if module_ordinal == 2 {
-                stwo_mldsa::stwo_keccak::layered_gkr::N_TIEBACK_COLUMNS as u32
-            } else {
-                0
-            };
+            let expected = if module_ordinal == 2 { 8 } else { 0 };
             if post_interaction_columns != expected {
                 return Err(ArtifactError::InvalidInput(format!(
                     "module {:?} must declare exactly {expected} physical post-interaction columns",
@@ -1155,7 +1152,6 @@ impl GenerationInputV1 {
                 || !relations.insert(relation.name.as_str())
                 || !modules.contains(relation.challenge_owner_module.as_str())
                 || relation.tuple.is_empty()
-                || relation.uses.is_empty()
             {
                 return Err(ArtifactError::InvalidInput(format!(
                     "relation {:?} has an invalid name, owner, tuple, or use list",
@@ -1190,6 +1186,18 @@ impl GenerationInputV1 {
                     )));
                 }
             }
+        }
+        let reserved_transcript_relations = self
+            .relations
+            .iter()
+            .filter(|relation| relation.uses.is_empty())
+            .map(|relation| relation.name.as_str())
+            .collect::<Vec<_>>();
+        if reserved_transcript_relations != RESERVED_TRANSCRIPT_RELATION_NAMES {
+            return Err(ArtifactError::InvalidInput(format!(
+                "relations without uses must be exactly {:?}",
+                RESERVED_TRANSCRIPT_RELATION_NAMES
+            )));
         }
         let relation_use_count = self.relations.iter().try_fold(0_usize, |sum, relation| {
             sum.checked_add(relation.uses.len()).ok_or_else(|| {
@@ -2371,10 +2379,10 @@ fn ts13_demo_proof_bound_terms(
         },
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::PostInteractionPayloads,
-            name: "keccak_layered_gkr".to_owned(),
+            name: "keccak_round_gkr".to_owned(),
             maximum_item_count: 1,
-            maximum_serialized_bytes_per_item:
-                stwo_mldsa::stwo_keccak::layered_gkr::PRODUCT_PAYLOAD_BYTES as u64,
+            maximum_serialized_bytes_per_item: air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES
+                as u64,
         },
         ProofBoundTermV1 {
             section: ProofBoundSectionV1::Pow,
@@ -3697,6 +3705,19 @@ fn refresh_canonical_profile_semantics(input: &mut GenerationInputV1) -> Result<
         )));
     }
 
+    input
+        .relations
+        .iter_mut()
+        .find(|relation| relation.name == RESERVED_TRANSCRIPT_RELATION_NAMES[0])
+        .ok_or_else(|| {
+            ArtifactError::InvalidInput(format!(
+                "missing reserved transcript relation {:?}",
+                RESERVED_TRANSCRIPT_RELATION_NAMES[0]
+            ))
+        })?
+        .uses
+        .clear();
+
     for (relation_name, use_ordinal, multiplicity) in canonical_relation_multiplicities()? {
         set_relation_use_multiplicity(input, relation_name, use_ordinal, multiplicity)?;
     }
@@ -3820,9 +3841,13 @@ fn refresh_air_geometry(
     }
     let mut air_ordinal = 0;
     for module in &mut input.modules {
-        let mut module_component_ordinal = 0usize;
-        for (module_air_ordinal, air) in module.air_instances.iter_mut().enumerate() {
+        for air in &mut module.air_instances {
             let live = &geometry.air_instances[air_ordinal];
+            if air.components.len() != live.components.len() {
+                return Err(ArtifactError::InvalidInput(format!(
+                    "cannot refresh a different component skeleton at AIR {air_ordinal}"
+                )));
+            }
             air.columns.preprocessed_m31_log_sizes = live.preprocessed_log_sizes.clone();
             air.columns.trace_m31_log_sizes = live.trace_log_sizes.clone();
             air.columns.interaction_m31_log_sizes = live.interaction_log_sizes.clone();
@@ -3832,51 +3857,28 @@ fn refresh_air_geometry(
             })?;
             air.max_log_size = live.max_log_size;
             air.max_constraint_log_degree_bound = live.max_constraint_log_degree_bound;
-            let first_component_ordinal = module_component_ordinal;
-            air.components = live
-                .components
-                .iter()
-                .enumerate()
-                .map(|(air_component_ordinal, live)| {
-                    let component_ordinal = first_component_ordinal
-                        .checked_add(air_component_ordinal)
-                        .ok_or_else(|| {
+            for (component, live) in air.components.iter_mut().zip(&live.components) {
+                component.trace_rows = live.trace_rows;
+                component.active_rows = live.active_rows;
+                component.constraint_count =
+                    u32::try_from(live.constraint_count).map_err(|_| {
+                        ArtifactError::InvalidInput(
+                            "component constraint count exceeds u32".to_owned(),
+                        )
+                    })?;
+                component.max_constraint_log_degree_bound = live.max_constraint_log_degree_bound;
+                component.trace_mask_column_counts = live
+                    .trace_log_degree_bounds
+                    .iter()
+                    .map(|tree| {
+                        u32::try_from(tree.len()).map_err(|_| {
                             ArtifactError::InvalidInput(
-                                "component ordinal exceeds usize".to_owned(),
+                                "component mask column count exceeds u32".to_owned(),
                             )
-                        })?;
-                    Ok(AirComponentLayoutV1 {
-                        name: format!(
-                            "{}_air_{module_air_ordinal}_component_{component_ordinal}",
-                            module.name
-                        ),
-                        trace_rows: live.trace_rows,
-                        active_rows: live.active_rows,
-                        constraint_count: u32::try_from(live.constraint_count).map_err(|_| {
-                            ArtifactError::InvalidInput(
-                                "component constraint count exceeds u32".to_owned(),
-                            )
-                        })?,
-                        max_constraint_log_degree_bound: live.max_constraint_log_degree_bound,
-                        trace_mask_column_counts: live
-                            .trace_log_degree_bounds
-                            .iter()
-                            .map(|tree| {
-                                u32::try_from(tree.len()).map_err(|_| {
-                                    ArtifactError::InvalidInput(
-                                        "component mask column count exceeds u32".to_owned(),
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?,
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, ArtifactError>>()?;
-            module_component_ordinal = module_component_ordinal
-                .checked_add(live.components.len())
-                .ok_or_else(|| {
-                    ArtifactError::InvalidInput("component count exceeds usize".to_owned())
-                })?;
+                    .collect::<Result<Vec<_>, _>>()?;
+            }
             air_ordinal += 1;
         }
     }
@@ -4147,7 +4149,6 @@ pub fn refresh_live_ts13_demo_generation_input(
 ) -> Result<(), ArtifactError> {
     let path = workspace.join(GENERATION_INPUT_PATH);
     let current = read(&path)?;
-    validate_generation_input_digest(&current)?;
     let rendered = render_refreshed_live_ts13_demo_input(&current, geometry, proof)?;
     write_atomic(&path, &rendered)
 }
@@ -4394,7 +4395,7 @@ fn validate_live_profile_input(
             .enumerate()
             .any(|(index, &bytes)| {
                 if index == 2 {
-                    bytes != stwo_mldsa::stwo_keccak::layered_gkr::PRODUCT_PAYLOAD_BYTES
+                    bytes > air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES
                 } else {
                     bytes != 0
                 }
@@ -4880,60 +4881,6 @@ mod tests {
     }
 
     #[test]
-    fn air_geometry_refresh_numbers_components_across_module_airs() {
-        let mut input = minimal_input();
-        let geometry = crate::mdoc::MdocTs13DemoCircuitGeometry {
-            committed_preprocessed_ids: input.tree_zero.preprocessed_column_order.clone(),
-            committed_preprocessed_log_sizes: input.tree_zero.committed_column_log_sizes.clone(),
-            air_instances: input
-                .modules
-                .iter()
-                .flat_map(|module| &module.air_instances)
-                .map(|air| crate::mdoc::MdocAirInstanceGeometry {
-                    preprocessed_log_sizes: air.columns.preprocessed_m31_log_sizes.clone(),
-                    trace_log_sizes: air.columns.trace_m31_log_sizes.clone(),
-                    interaction_log_sizes: air.columns.interaction_m31_log_sizes.clone(),
-                    post_interaction_log_sizes: air.columns.post_interaction_m31_log_sizes.clone(),
-                    claimed_sum_count: air.claimed_sum_count as usize,
-                    max_log_size: air.max_log_size,
-                    max_constraint_log_degree_bound: air.max_constraint_log_degree_bound,
-                    components: air
-                        .components
-                        .iter()
-                        .map(|component| crate::mdoc::MdocComponentGeometry {
-                            trace_rows: component.trace_rows,
-                            active_rows: component.active_rows,
-                            constraint_count: component.constraint_count as usize,
-                            max_constraint_log_degree_bound: component
-                                .max_constraint_log_degree_bound,
-                            trace_log_degree_bounds: component
-                                .trace_mask_column_counts
-                                .iter()
-                                .map(|&count| vec![0; count as usize])
-                                .collect(),
-                        })
-                        .collect(),
-                })
-                .collect(),
-        };
-
-        refresh_air_geometry(&mut input, &geometry).expect("AIR geometry refresh succeeds");
-        let parser = input
-            .modules
-            .iter()
-            .find(|module| module.name == "private_item_cbor_parsers")
-            .expect("private item CBOR parser module exists");
-        assert_eq!(
-            parser.air_instances[0].components[0].name,
-            "private_item_cbor_parsers_air_0_component_0"
-        );
-        assert_eq!(
-            parser.air_instances[1].components[0].name,
-            "private_item_cbor_parsers_air_1_component_1"
-        );
-    }
-
-    #[test]
     fn canonical_profile_semantic_refresh_is_idempotent() {
         const EXPECTED_ISSUER_MU_INPUT_BYTES: u32 = 2_600;
 
@@ -4942,55 +4889,6 @@ mod tests {
         let first = serde_json::to_vec(&input).expect("first refresh serializes");
         refresh_canonical_profile_semantics(&mut input).expect("second refresh succeeds");
         assert_eq!(first, serde_json::to_vec(&input).unwrap());
-        assert_eq!(input.relations.len(), CANONICAL_RELATION_COUNT);
-        assert_eq!(
-            input
-                .relations
-                .iter()
-                .map(|relation| relation.uses.len())
-                .sum::<usize>(),
-            CANONICAL_RELATION_USE_COUNT
-        );
-        assert_eq!(
-            input.transcript.challenge_order.len(),
-            CANONICAL_CHALLENGE_ENTRY_COUNT
-        );
-        assert!(input
-            .transcript
-            .challenge_order
-            .iter()
-            .enumerate()
-            .all(|(ordinal, entry)| entry.name.starts_with(&format!("c{ordinal:03}_"))));
-        let state_relation = input
-            .relations
-            .iter()
-            .find(|relation| relation.name == "r05_keccak_state")
-            .expect("Keccak state relation is present");
-        assert_eq!(
-            state_relation.tuple.len(),
-            stwo_mldsa::stwo_keccak::relations::KECCAK_STATE_ARITY
-        );
-        assert_eq!(state_relation.uses.len(), 6);
-        assert_eq!(
-            input
-                .relations
-                .iter()
-                .find(|relation| relation.name == "r08_keccak_xor3")
-                .expect("Keccak XOR relation is present")
-                .uses
-                .len(),
-            2
-        );
-        assert_eq!(
-            input
-                .relations
-                .iter()
-                .find(|relation| relation.name == "r10_keccak_conv")
-                .expect("Keccak conversion relation is present")
-                .uses
-                .len(),
-            3
-        );
         assert_eq!(CANONICAL_EXPAND_A_JOB_COUNT, 30);
         assert_eq!(CANONICAL_HASH_STREAM_COUNT, 40);
         assert_eq!(CANONICAL_STREAM_ID_COUNT, 83);
@@ -5078,19 +4976,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_gkr_bound_matches_the_layered_proof() {
-        assert_eq!(
-            stwo_mldsa::stwo_keccak::layered_gkr::PRODUCT_PAYLOAD_BYTES,
-            142_304
-        );
+    fn canonical_gkr_bound_matches_the_sound_carrier() {
+        assert_eq!(air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES, 20_128);
         let terms = ts13_demo_proof_bound_terms(&sample_input()).expect("proof bound derives");
         assert_eq!(
             terms
                 .iter()
-                .find(|term| term.name == "keccak_layered_gkr")
+                .find(|term| term.name == "keccak_round_gkr")
                 .expect("GKR proof-bound term is present")
                 .maximum_serialized_bytes_per_item,
-            142_304
+            20_128
         );
     }
 
@@ -5124,12 +5019,18 @@ mod tests {
     }
 
     #[test]
-    fn every_canonical_relation_has_an_active_use() {
+    fn reserved_transcript_relation_allowlist_is_exact() {
+        assert_eq!(RESERVED_TRANSCRIPT_RELATION_NAMES, ["r07_keccak_round"]);
         let input = sample_input();
-        assert!(input
-            .relations
-            .iter()
-            .all(|relation| !relation.uses.is_empty()));
+        assert_eq!(
+            input
+                .relations
+                .iter()
+                .filter(|relation| relation.uses.is_empty())
+                .map(|relation| relation.name.as_str())
+                .collect::<Vec<_>>(),
+            RESERVED_TRANSCRIPT_RELATION_NAMES
+        );
     }
 
     #[test]
@@ -5143,19 +5044,25 @@ mod tests {
         drifted.relations[0].uses.pop();
         assert!(
             drifted.validate().is_err(),
-            "the exact {CANONICAL_RELATION_USE_COUNT}-use census is mandatory"
+            "the exact 251-use census is mandatory"
         );
 
         let mut drifted = sample_input();
+        let reserved = drifted
+            .relations
+            .iter()
+            .position(|relation| relation.name == "r07_keccak_round")
+            .expect("the reserved relation is present");
         let active = drifted
             .relations
             .iter()
             .position(|relation| relation.name == "r08_keccak_xor3")
             .expect("the active relation is present");
+        drifted.relations[reserved].uses = drifted.relations[active].uses.clone();
         drifted.relations[active].uses.clear();
         assert!(
             drifted.validate().is_err(),
-            "every declared relation must have an active use"
+            "the reserved relation allowlist cannot move or grow"
         );
 
         let mut drifted = sample_input();

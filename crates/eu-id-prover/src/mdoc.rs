@@ -99,47 +99,6 @@ use crate::policy::Date;
 use crate::ts13_demo::{Ts13PublicContextBind, TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES};
 use crate::Error;
 
-const TS13_KECCAK_INPUT_ATTACK_ROW: usize = 0;
-const TS13_KECCAK_INPUT_ATTACK_BYTE: usize = 0;
-
-thread_local! {
-    static TS13_KECCAK_INPUT_NIBBLE_ATTACK: core::cell::Cell<bool> =
-        const { core::cell::Cell::new(false) };
-}
-
-/// Scoped test attack for one recomposition-neutral Keccak input mutation.
-#[doc(hidden)]
-pub struct Ts13KeccakInputNibbleAttackGuard(core::marker::PhantomData<std::rc::Rc<()>>);
-
-impl Drop for Ts13KeccakInputNibbleAttackGuard {
-    fn drop(&mut self) {
-        TS13_KECCAK_INPUT_NIBBLE_ATTACK.with(|active| active.set(false));
-    }
-}
-
-/// Install the scoped Keccak input attack on the current prover thread.
-#[doc(hidden)]
-pub fn install_ts13_keccak_input_nibble_attack() -> Ts13KeccakInputNibbleAttackGuard {
-    TS13_KECCAK_INPUT_NIBBLE_ATTACK.with(|active| {
-        assert!(
-            !active.replace(true),
-            "TS13 Keccak input attack is already active"
-        );
-    });
-    Ts13KeccakInputNibbleAttackGuard(core::marker::PhantomData)
-}
-
-fn apply_ts13_keccak_input_nibble_attack(service: &mut KeccakServiceProver) {
-    TS13_KECCAK_INPUT_NIBBLE_ATTACK.with(|active| {
-        if active.get() {
-            service.tamper_input_nibble_pair(
-                TS13_KECCAK_INPUT_ATTACK_ROW,
-                TS13_KECCAK_INPUT_ATTACK_BYTE,
-            );
-        }
-    });
-}
-
 /// ISO/IEC 18013-5:2021 MobileSecurityObject version.
 const MDOC_PROFILE_VERSION: &str = "1.0";
 /// The document type that the fixture and parser use.
@@ -1338,7 +1297,7 @@ pub struct MdocProof {
     ts13_mso_validity_interaction_claim: MdocPrivateMsoValidityInteractionClaim,
     ts13_revocation_range_interaction_claim: MdocRevocationRangeInteractionClaim,
     /// Opaque post-interaction payloads. The Keccak service carries its
-    /// layered proof in its module slot.
+    /// round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
     /// Prover-side executable geometry for artifact drift tests.
     /// The proof does not contain this value.
@@ -1448,9 +1407,7 @@ impl MdocProof {
                 .enumerate()
                 .all(|(index, payload)| {
                     if index == 2 {
-                        stwo_mldsa::stwo_keccak::layered_gkr::is_ts13_demo_layered_keccak_wire(
-                            payload,
-                        )
+                        air_core::gkr::is_ts13_demo_gkr_batch_proof_wire(payload)
                     } else {
                         payload.is_empty()
                     }
@@ -2847,7 +2804,6 @@ pub(crate) fn prove_mdoc_ts13_demo_circuit(
     }
     let mut mldsa_keccak_service =
         KeccakServiceProver::new(keccak_shapes, keccak_streams, mldsa_keccak_handle.clone());
-    apply_ts13_keccak_input_nibble_attack(&mut mldsa_keccak_service);
     // The fixed-width padded stream uses one namespaced SHA proof instance and
     // its fixed digest bridge.
     let mut attribute_sha =
@@ -2994,10 +2950,10 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
             "mdoc proof Keccak service claims do not match the statement".to_string(),
         ));
     }
-    // The Keccak service puts its layered proof in
+    // The Keccak service uses GKR for its round LogUp. Its proof is in
     // `post_interaction_payloads`. Verification gives each module its payload
-    // in proof order. `verify_post_interaction` rejects a missing, empty, or
-    // invalid payload.
+    // in proof order. `verify_post_interaction` rejects a missing or invalid
+    // payload. An empty payload fails GKR decoding.
     let issuer_message_field = SharedFieldRelation::new();
     let revocation_message_field = SharedFieldRelation::new();
     let attribute_digest = SharedDigestRelation::new();
@@ -3286,8 +3242,7 @@ const TS13_PCS_LIFTING_LOG_SIZE: Option<u32> = Some(19);
 
 pub(crate) fn mdoc_ts13_pcs_config() -> PcsConfig {
     // PCS query and proof-of-work label: 36×3 + 20 = 128 bits.
-    // This label is separate from the algebraic OODS bound. The verifier's
-    // recombined composition polynomial gives an OODS term of about 106 bits.
+    // This exceeds the 108-bit OODS bound that dominates the TS13 STARK.
     // The verifier pins this configuration and rejects other configurations.
     // TS13 accounts for OODS and binding-hash limits separately.
     PcsConfig {

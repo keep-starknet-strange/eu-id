@@ -158,8 +158,43 @@
               9,
               9,
               9,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
+              5,
               16,
               16,
+              16,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
               8,
               8
             ],
@@ -1206,279 +1241,926 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              5,
               16,
+              16,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
               8
             ],
             "interactionM31LogSizes": [
@@ -2234,35 +2916,155 @@
               9,
               9,
               9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              9,
+              5,
+              5,
+              5,
+              5,
               16,
               16,
               16,
               16,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
+              8,
               8,
               8,
               8,
               8
             ],
             "postInteractionM31LogSizes": [
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13,
+              13
             ]
           },
-          "claimedSumCount": 3,
+          "claimedSumCount": 12,
           "maxLogSize": 16,
           "maxConstraintLogDegreeBound": 17,
           "components": [
@@ -2270,28 +3072,51 @@
               "name": "shared_keccak_service_air_0_component_0",
               "traceRows": 512,
               "activeRows": 512,
-              "constraintCount": 2396,
+              "constraintCount": 3012,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 16,
-                1314,
-                752
+                1042,
+                848
               ]
             },
             {
               "name": "shared_keccak_service_air_0_component_1",
-              "traceRows": 65536,
-              "activeRows": 65536,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 17,
+              "traceRows": 8192,
+              "activeRows": 8192,
+              "constraintCount": 21,
+              "maxConstraintLogDegreeBound": 14,
               "traceMaskColumnCounts": [
-                2,
+                0,
+                910
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_2",
+              "traceRows": 32,
+              "activeRows": 32,
+              "constraintCount": 2,
+              "maxConstraintLogDegreeBound": 6,
+              "traceMaskColumnCounts": [
+                13,
                 1,
                 4
               ]
             },
             {
-              "name": "shared_keccak_service_air_0_component_2",
+              "name": "shared_keccak_service_air_0_component_3",
+              "traceRows": 65536,
+              "activeRows": 65536,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 17,
+              "traceMaskColumnCounts": [
+                3,
+                2,
+                4
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_4",
               "traceRows": 256,
               "activeRows": 256,
               "constraintCount": 1,
@@ -2303,24 +3128,95 @@
               ]
             },
             {
-              "name": "shared_keccak_service_air_0_component_3",
-              "traceRows": 512,
-              "activeRows": 512,
-              "constraintCount": 3,
-              "maxConstraintLogDegreeBound": 10,
+              "name": "shared_keccak_service_air_0_component_5",
+              "traceRows": 256,
+              "activeRows": 256,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                0,
-                0,
-                0,
-                8
+                3,
+                1,
+                4
               ]
             },
             {
-              "name": "shared_keccak_service_air_0_component_4",
-              "traceRows": 512,
-              "activeRows": 512,
+              "name": "shared_keccak_service_air_0_component_6",
+              "traceRows": 256,
+              "activeRows": 256,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 9,
+              "traceMaskColumnCounts": [
+                3,
+                1,
+                4
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_7",
+              "traceRows": 256,
+              "activeRows": 256,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 9,
+              "traceMaskColumnCounts": [
+                3,
+                1,
+                4
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_8",
+              "traceRows": 256,
+              "activeRows": 256,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 9,
+              "traceMaskColumnCounts": [
+                3,
+                1,
+                4
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_9",
+              "traceRows": 256,
+              "activeRows": 256,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 9,
+              "traceMaskColumnCounts": [
+                3,
+                1,
+                4
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_10",
+              "traceRows": 256,
+              "activeRows": 256,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 9,
+              "traceMaskColumnCounts": [
+                3,
+                1,
+                4
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_11",
+              "traceRows": 256,
+              "activeRows": 256,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 9,
+              "traceMaskColumnCounts": [
+                3,
+                1,
+                4
+              ]
+            },
+            {
+              "name": "shared_keccak_service_air_0_component_12",
+              "traceRows": 8192,
+              "activeRows": 8192,
               "constraintCount": 3,
-              "maxConstraintLogDegreeBound": 10,
+              "maxConstraintLogDegreeBound": 14,
               "traceMaskColumnCounts": [
                 0,
                 0,
@@ -7982,6 +8878,10 @@
           "scalar": "m31"
         },
         {
+          "name": "direction",
+          "scalar": "m31"
+        },
+        {
           "name": "state_000",
           "scalar": "m31"
         },
@@ -8787,37 +9687,25 @@
           "module": "shared_keccak_service",
           "component": "shared_keccak_service_air_0_component_0",
           "sign": "positive",
-          "multiplicity": "+first SHAKE-256 input"
-        },
-        {
-          "module": "shared_keccak_service",
-          "component": "shared_keccak_service_air_0_component_0",
-          "sign": "positive",
-          "multiplicity": "+first SHAKE-128 input"
-        },
-        {
-          "module": "shared_keccak_service",
-          "component": "shared_keccak_service_air_0_component_0",
-          "sign": "positive",
-          "multiplicity": "+later SHAKE-256 absorb input"
-        },
-        {
-          "module": "shared_keccak_service",
-          "component": "shared_keccak_service_air_0_component_0",
-          "sign": "positive",
-          "multiplicity": "+extra squeeze input"
-        },
-        {
-          "module": "shared_keccak_service",
-          "component": "shared_keccak_service_air_0_component_0",
-          "sign": "positive",
-          "multiplicity": "+unused-capacity zero input"
+          "multiplicity": "+is_job_start (sponge input state)"
         },
         {
           "module": "shared_keccak_service",
           "component": "shared_keccak_service_air_0_component_0",
           "sign": "negative",
-          "multiplicity": "-committed recomposed sponge input"
+          "multiplicity": "-is_job_end (sponge output state)"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_1",
+          "sign": "negative",
+          "multiplicity": "-is_permutation_input"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_1",
+          "sign": "positive",
+          "multiplicity": "+is_permutation_output"
         }
       ]
     },
@@ -9100,6 +9988,841 @@
       ]
     },
     {
+      "name": "r07_keccak_round",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "perm_id",
+          "scalar": "m31"
+        },
+        {
+          "name": "direction",
+          "scalar": "m31"
+        },
+        {
+          "name": "round_index",
+          "scalar": "m31"
+        },
+        {
+          "name": "round_constant_0",
+          "scalar": "m31"
+        },
+        {
+          "name": "round_constant_1",
+          "scalar": "m31"
+        },
+        {
+          "name": "round_constant_3",
+          "scalar": "m31"
+        },
+        {
+          "name": "round_constant_7",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_000",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_001",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_002",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_003",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_004",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_005",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_006",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_007",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_008",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_009",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_010",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_011",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_012",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_013",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_014",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_015",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_016",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_017",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_018",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_019",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_020",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_021",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_022",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_023",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_024",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_025",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_026",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_027",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_028",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_029",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_030",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_031",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_032",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_033",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_034",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_035",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_036",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_037",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_038",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_039",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_040",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_041",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_042",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_043",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_044",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_045",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_046",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_047",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_048",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_049",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_050",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_051",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_052",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_053",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_054",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_055",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_056",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_057",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_058",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_059",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_060",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_061",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_062",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_063",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_064",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_065",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_066",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_067",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_068",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_069",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_070",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_071",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_072",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_073",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_074",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_075",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_076",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_077",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_078",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_079",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_080",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_081",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_082",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_083",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_084",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_085",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_086",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_087",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_088",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_089",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_090",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_091",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_092",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_093",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_094",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_095",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_096",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_097",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_098",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_099",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_100",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_101",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_102",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_103",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_104",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_105",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_106",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_107",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_108",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_109",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_110",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_111",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_112",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_113",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_114",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_115",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_116",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_117",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_118",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_119",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_120",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_121",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_122",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_123",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_124",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_125",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_126",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_127",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_128",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_129",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_130",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_131",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_132",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_133",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_134",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_135",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_136",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_137",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_138",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_139",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_140",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_141",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_142",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_143",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_144",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_145",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_146",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_147",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_148",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_149",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_150",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_151",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_152",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_153",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_154",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_155",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_156",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_157",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_158",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_159",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_160",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_161",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_162",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_163",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_164",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_165",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_166",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_167",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_168",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_169",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_170",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_171",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_172",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_173",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_174",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_175",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_176",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_177",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_178",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_179",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_180",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_181",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_182",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_183",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_184",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_185",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_186",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_187",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_188",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_189",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_190",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_191",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_192",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_193",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_194",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_195",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_196",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_197",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_198",
+          "scalar": "m31"
+        },
+        {
+          "name": "state_199",
+          "scalar": "m31"
+        }
+      ],
+      "uses": []
+    },
+    {
       "name": "r08_keccak_xor3",
       "challengeOwnerModule": "shared_keccak_service",
       "tuple": [
@@ -9121,9 +10844,43 @@
         },
         {
           "module": "shared_keccak_service",
-          "component": "shared_keccak_service_air_0_component_1",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_xor_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_3",
           "sign": "negative",
-          "multiplicity": "-xor3_table_multiplicity"
+          "multiplicity": "-dense_table_xor3_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r09_keccak_and_not",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "key",
+          "scalar": "m31"
+        },
+        {
+          "name": "output",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_and_not_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_3",
+          "sign": "negative",
+          "multiplicity": "-dense_table_and_not_multiplicity"
         }
       ]
     },
@@ -9145,19 +10902,237 @@
           "module": "shared_keccak_service",
           "component": "shared_keccak_service_air_0_component_0",
           "sign": "positive",
-          "multiplicity": "+absorb byte conversion"
+          "multiplicity": "+sponge_conversion_gate"
         },
         {
           "module": "shared_keccak_service",
-          "component": "shared_keccak_service_air_0_component_0",
-          "sign": "positive",
-          "multiplicity": "+squeeze byte conversion"
+          "component": "shared_keccak_service_air_0_component_4",
+          "sign": "negative",
+          "multiplicity": "-conversion_table_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r11_keccak_split1",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "spread_byte",
+          "scalar": "m31"
         },
+        {
+          "name": "spread_hi",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_lo",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
         {
           "module": "shared_keccak_service",
           "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_split_1_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_5",
           "sign": "negative",
-          "multiplicity": "-conversion_table_multiplicity"
+          "multiplicity": "-split_1_table_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r12_keccak_split2",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "spread_byte",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_hi",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_lo",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_split_2_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_6",
+          "sign": "negative",
+          "multiplicity": "-split_2_table_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r13_keccak_split3",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "spread_byte",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_hi",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_lo",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_split_3_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_7",
+          "sign": "negative",
+          "multiplicity": "-split_3_table_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r14_keccak_split4",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "spread_byte",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_hi",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_lo",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_split_4_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_8",
+          "sign": "negative",
+          "multiplicity": "-split_4_table_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r15_keccak_split5",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "spread_byte",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_hi",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_lo",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_split_5_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_9",
+          "sign": "negative",
+          "multiplicity": "-split_5_table_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r16_keccak_split6",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "spread_byte",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_hi",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_lo",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_split_6_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_10",
+          "sign": "negative",
+          "multiplicity": "-split_6_table_multiplicity"
+        }
+      ]
+    },
+    {
+      "name": "r17_keccak_split7",
+      "challengeOwnerModule": "shared_keccak_service",
+      "tuple": [
+        {
+          "name": "spread_byte",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_hi",
+          "scalar": "m31"
+        },
+        {
+          "name": "spread_lo",
+          "scalar": "m31"
+        }
+      ],
+      "uses": [
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+round_split_7_gate"
+        },
+        {
+          "module": "shared_keccak_service",
+          "component": "shared_keccak_service_air_0_component_11",
+          "sign": "negative",
+          "multiplicity": "-split_7_table_multiplicity"
         }
       ]
     },
@@ -12032,481 +14007,535 @@
       },
       {
         "ownerModule": "shared_keccak_service",
-        "name": "c007_r08_keccak_xor3",
+        "name": "c007_r07_keccak_round",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "shared_keccak_service",
-        "name": "c008_r10_keccak_conv",
+        "name": "c008_r08_keccak_xor3",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c009_r09_keccak_and_not",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c010_r10_keccak_conv",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c011_r11_keccak_split1",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c012_r12_keccak_split2",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c013_r13_keccak_split3",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c014_r14_keccak_split4",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c015_r15_keccak_split5",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c016_r16_keccak_split6",
+        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
+        "fixedLength": 32
+      },
+      {
+        "ownerModule": "shared_keccak_service",
+        "name": "c017_r17_keccak_split7",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_issuer_message_provider",
-        "name": "c009_r18_issuer_field_bytes",
+        "name": "c018_r18_issuer_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_issuer_message_provider",
-        "name": "c010_r19_issuer_message_claim_blinder",
+        "name": "c019_r19_issuer_message_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c011_issuer_mldsa_rho_rlc",
+        "name": "c020_issuer_mldsa_rho_rlc",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c012_issuer_mldsa_r",
+        "name": "c021_issuer_mldsa_r",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c013_issuer_mldsa_s",
+        "name": "c022_issuer_mldsa_s",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c014_r20_issuer_mldsa_w_cell",
+        "name": "c023_r20_issuer_mldsa_w_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c015_r21_issuer_mldsa_c_cell",
+        "name": "c024_r21_issuer_mldsa_c_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c016_r22_issuer_mldsa_eval_at_rs",
+        "name": "c025_r22_issuer_mldsa_eval_at_rs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c017_r23_issuer_mldsa_decomp_rc4",
+        "name": "c026_r23_issuer_mldsa_decomp_rc4",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c018_r24_issuer_mldsa_decomp_rc13",
+        "name": "c027_r24_issuer_mldsa_decomp_rc13",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c019_r25_issuer_mldsa_decomp_rc7",
+        "name": "c028_r25_issuer_mldsa_decomp_rc7",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c020_r26_issuer_mldsa_decomp_rc8",
+        "name": "c029_r26_issuer_mldsa_decomp_rc8",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c021_r27_issuer_mldsa_sib_mem",
+        "name": "c030_r27_issuer_mldsa_sib_mem",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c022_r28_issuer_mldsa_sib_swap",
+        "name": "c031_r28_issuer_mldsa_sib_swap",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c023_r29_issuer_mldsa_sib_step_value",
+        "name": "c032_r29_issuer_mldsa_sib_step_value",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c024_r30_issuer_mldsa_sib_sign_bit",
+        "name": "c033_r30_issuer_mldsa_sib_sign_bit",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c025_r31_issuer_mldsa_sib_rc8",
+        "name": "c034_r31_issuer_mldsa_sib_rc8",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c026_r32_issuer_mldsa_sib_rc9",
+        "name": "c035_r32_issuer_mldsa_sib_rc9",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c027_r33_issuer_mldsa_sib_rc11",
+        "name": "c036_r33_issuer_mldsa_sib_rc11",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "requested_item_sha256",
-        "name": "c028_r34_requested_item_bridge_limbs",
+        "name": "c037_r34_requested_item_bridge_limbs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "requested_item_sha256",
-        "name": "c029_r34_requested_item_digest_bytes",
+        "name": "c038_r34_requested_item_digest_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "requested_item_sha256",
-        "name": "c030_r35_requested_item_field_bytes",
+        "name": "c039_r35_requested_item_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_sha256",
-        "name": "c031_r36_private_mso_bridge_limbs",
+        "name": "c040_r36_private_mso_bridge_limbs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_sha256",
-        "name": "c032_r36_private_mso_digest_bytes",
+        "name": "c041_r36_private_mso_digest_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_sha256",
-        "name": "c033_r37_private_mso_field_bytes",
+        "name": "c042_r37_private_mso_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_cbor_parsers",
-        "name": "c034_r38_outer_parsed_cbor_byte",
+        "name": "c043_r38_outer_parsed_cbor_byte",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_cbor_parsers",
-        "name": "c035_r39_inner_parsed_cbor_byte",
+        "name": "c044_r39_inner_parsed_cbor_byte",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c036_r40_inner_raw_field_bytes",
+        "name": "c045_r40_inner_raw_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c037_r41_private_digest_id",
+        "name": "c046_r41_private_digest_id",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c038_r42_private_item_key",
+        "name": "c047_r42_private_item_key",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c039_r43_private_item_claim_blinder",
+        "name": "c048_r43_private_item_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c040_r44_private_mso_start",
+        "name": "c049_r44_private_mso_start",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c041_r45_private_device_pk_start",
+        "name": "c050_r45_private_device_pk_start",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c042_r46_private_mso_validity_bytes",
+        "name": "c051_r46_private_mso_validity_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c043_r47_private_mso_claim_blinder",
+        "name": "c052_r47_private_mso_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "mdoc_private_mso_validity",
-        "name": "c044_r48_private_mso_validity_claim_blinder",
+        "name": "c053_r48_private_mso_validity_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_value_digests_scanner",
-        "name": "c045_r49_value_digest_id_multiset",
+        "name": "c054_r49_value_digest_id_multiset",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_value_digests_scanner",
-        "name": "c046_r50_value_digest_scanner_claim_blinder",
+        "name": "c055_r50_value_digest_scanner_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_expand_a",
-        "name": "c047_r51_expand_a_rho_cell",
+        "name": "c056_r51_expand_a_rho_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_expand_a",
-        "name": "c048_r52_expand_a_ntt_cell",
+        "name": "c057_r52_expand_a_ntt_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_key_binder",
-        "name": "c049_r53_private_t1_cell",
+        "name": "c058_r53_private_t1_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_key_binder",
-        "name": "c050_r54_private_device_key_claim_blinder",
+        "name": "c059_r54_private_device_key_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c051_device_mldsa_rho_rlc",
+        "name": "c060_device_mldsa_rho_rlc",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c052_device_mldsa_r",
+        "name": "c061_device_mldsa_r",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c053_device_mldsa_s",
+        "name": "c062_device_mldsa_s",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c054_r55_device_mldsa_w_cell",
+        "name": "c063_r55_device_mldsa_w_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c055_r56_device_mldsa_c_cell",
+        "name": "c064_r56_device_mldsa_c_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c056_r57_device_mldsa_eval_at_rs",
+        "name": "c065_r57_device_mldsa_eval_at_rs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c057_r58_device_mldsa_decomp_rc4",
+        "name": "c066_r58_device_mldsa_decomp_rc4",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c058_r59_device_mldsa_decomp_rc13",
+        "name": "c067_r59_device_mldsa_decomp_rc13",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c059_r60_device_mldsa_decomp_rc7",
+        "name": "c068_r60_device_mldsa_decomp_rc7",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c060_r61_device_mldsa_decomp_rc8",
+        "name": "c069_r61_device_mldsa_decomp_rc8",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c061_r62_device_mldsa_sib_mem",
+        "name": "c070_r62_device_mldsa_sib_mem",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c062_r63_device_mldsa_sib_swap",
+        "name": "c071_r63_device_mldsa_sib_swap",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c063_r64_device_mldsa_sib_step_value",
+        "name": "c072_r64_device_mldsa_sib_step_value",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c064_r65_device_mldsa_sib_sign_bit",
+        "name": "c073_r65_device_mldsa_sib_sign_bit",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c065_r66_device_mldsa_sib_rc8",
+        "name": "c074_r66_device_mldsa_sib_rc8",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c066_r67_device_mldsa_sib_rc9",
+        "name": "c075_r67_device_mldsa_sib_rc9",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c067_r68_device_mldsa_sib_rc11",
+        "name": "c076_r68_device_mldsa_sib_rc11",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_range",
-        "name": "c068_r69_revocation_message_field_bytes",
+        "name": "c077_r69_revocation_message_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_range",
-        "name": "c069_r70_revocation_range_claim_blinder",
+        "name": "c078_r70_revocation_range_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c070_revocation_mldsa_rho_rlc",
+        "name": "c079_revocation_mldsa_rho_rlc",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c071_revocation_mldsa_r",
+        "name": "c080_revocation_mldsa_r",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c072_revocation_mldsa_s",
+        "name": "c081_revocation_mldsa_s",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c073_r71_revocation_mldsa_w_cell",
+        "name": "c082_r71_revocation_mldsa_w_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c074_r72_revocation_mldsa_c_cell",
+        "name": "c083_r72_revocation_mldsa_c_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c075_r73_revocation_mldsa_eval_at_rs",
+        "name": "c084_r73_revocation_mldsa_eval_at_rs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c076_r74_revocation_mldsa_decomp_rc4",
+        "name": "c085_r74_revocation_mldsa_decomp_rc4",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c077_r75_revocation_mldsa_decomp_rc13",
+        "name": "c086_r75_revocation_mldsa_decomp_rc13",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c078_r76_revocation_mldsa_decomp_rc7",
+        "name": "c087_r76_revocation_mldsa_decomp_rc7",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c079_r77_revocation_mldsa_decomp_rc8",
+        "name": "c088_r77_revocation_mldsa_decomp_rc8",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c080_r78_revocation_mldsa_sib_mem",
+        "name": "c089_r78_revocation_mldsa_sib_mem",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c081_r79_revocation_mldsa_sib_swap",
+        "name": "c090_r79_revocation_mldsa_sib_swap",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c082_r80_revocation_mldsa_sib_step_value",
+        "name": "c091_r80_revocation_mldsa_sib_step_value",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c083_r81_revocation_mldsa_sib_sign_bit",
+        "name": "c092_r81_revocation_mldsa_sib_sign_bit",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c084_r82_revocation_mldsa_sib_rc8",
+        "name": "c093_r82_revocation_mldsa_sib_rc8",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c085_r83_revocation_mldsa_sib_rc9",
+        "name": "c094_r83_revocation_mldsa_sib_rc9",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c086_r84_revocation_mldsa_sib_rc11",
+        "name": "c095_r84_revocation_mldsa_sib_rc11",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       }
@@ -12578,11 +14607,11 @@
     {
       "name": "keccak_service_claimed_sums",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 56,
+      "fixedLength": 200,
       "fixedVectorLengths": [
         {
           "name": "claimed_sums",
-          "value": 3
+          "value": 12
         }
       ]
     },
@@ -12671,7 +14700,7 @@
     {
       "name": "post_interaction_payloads",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 142472,
+      "fixedLength": 20296,
       "fixedVectorLengths": [
         {
           "name": "nonempty_payloads",
@@ -12679,7 +14708,7 @@
         },
         {
           "name": "payload_bytes",
-          "value": 142304
+          "value": 20128
         },
         {
           "name": "payload_count",
@@ -13591,19 +15620,55 @@
     },
     {
       "name": "r05_keccak_state",
-      "value": 201
+      "value": 202
     },
     {
       "name": "r06_keccak_hash_io",
       "value": 3
     },
     {
+      "name": "r07_keccak_round",
+      "value": 207
+    },
+    {
       "name": "r08_keccak_xor3",
+      "value": 2
+    },
+    {
+      "name": "r09_keccak_and_not",
       "value": 2
     },
     {
       "name": "r10_keccak_conv",
       "value": 2
+    },
+    {
+      "name": "r11_keccak_split1",
+      "value": 3
+    },
+    {
+      "name": "r12_keccak_split2",
+      "value": 3
+    },
+    {
+      "name": "r13_keccak_split3",
+      "value": 3
+    },
+    {
+      "name": "r14_keccak_split4",
+      "value": 3
+    },
+    {
+      "name": "r15_keccak_split5",
+      "value": 3
+    },
+    {
+      "name": "r16_keccak_split6",
+      "value": 3
+    },
+    {
+      "name": "r17_keccak_split7",
+      "value": 3
     },
     {
       "name": "r18_issuer_field_bytes",
@@ -13908,28 +15973,28 @@
       "name": "impl.challenge.relation_instances",
       "value": {
         "kind": "unsigned",
-        "value": 78
+        "value": 87
       }
     },
     {
       "name": "impl.challenge.relation_secure_field_draws",
       "value": {
         "kind": "unsigned",
-        "value": 156
+        "value": 174
       }
     },
     {
       "name": "impl.challenge.total_secure_field_draws",
       "value": {
         "kind": "unsigned",
-        "value": 165
+        "value": 183
       }
     },
     {
       "name": "impl.component_count",
       "value": {
         "kind": "unsigned",
-        "value": 90
+        "value": 98
       }
     },
     {
@@ -13996,7 +16061,7 @@
       "name": "impl.keccak_service_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 3
+        "value": 12
       }
     },
     {
@@ -14059,7 +16124,7 @@
       "name": "impl.outer_claim_bytes_excluding_stark_and_post_payloads",
       "value": {
         "kind": "unsigned",
-        "value": 3728
+        "value": 3872
       }
     },
     {
@@ -14073,14 +16138,14 @@
       "name": "impl.post_interaction_nonempty_payload_bytes",
       "value": {
         "kind": "unsigned",
-        "value": 142304
+        "value": 20128
       }
     },
     {
       "name": "impl.post_interaction_payload_vector_wire_bytes",
       "value": {
         "kind": "unsigned",
-        "value": 142472
+        "value": 20296
       }
     },
     {
@@ -14094,7 +16159,7 @@
       "name": "impl.serialized_claim_bytes_excluding_stark",
       "value": {
         "kind": "unsigned",
-        "value": 146200
+        "value": 24168
       }
     },
     {
@@ -14136,14 +16201,14 @@
       "name": "impl.transcript.global_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 88
+        "value": 97
       }
     },
     {
       "name": "impl.transcript.phase_order",
       "value": {
         "kind": "text",
-        "value": "Mix the PCS configuration and commit tree0. Mix 20 AIR public statements and commit tree1. Draw the secure fields in challengeOrder. Mix claims in physical AIR order and commit tree2. Run the shared_keccak_service layered proof and commit its two source tie-backs in tree3. Then calculate the composition polynomial and FRI."
+        "value": "Mix the PCS configuration and commit tree0. Mix 20 AIR public statements and commit tree1. Draw the secure fields in challengeOrder. Mix claims in physical AIR order and commit tree2. Run the shared_keccak_service GKR post-interaction and commit tree3. Then calculate the composition polynomial and FRI."
       }
     },
     {
@@ -14182,10 +16247,38 @@
       "PreProcessedColumnId { id: \"keccak_svc/0a2c9d5e7cf471ca/pad_gate_86\" }",
       "PreProcessedColumnId { id: \"keccak_svc/0a2c9d5e7cf471ca/pad_gate_136\" }",
       "PreProcessedColumnId { id: \"keccak_svc/0a2c9d5e7cf471ca/capacity_job_0\" }",
-      "PreProcessedColumnId { id: \"keccak_xor3_0\" }",
-      "PreProcessedColumnId { id: \"keccak_xor3_1\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/valid\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/position\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/header\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/final\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_0\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_1\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_2\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_3\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_4\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_5\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_6\" }",
+      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_7\" }",
+      "PreProcessedColumnId { id: \"keccak_dense_0\" }",
+      "PreProcessedColumnId { id: \"keccak_dense_1\" }",
+      "PreProcessedColumnId { id: \"keccak_dense_2\" }",
       "PreProcessedColumnId { id: \"keccak_conv_0\" }",
-      "PreProcessedColumnId { id: \"keccak_conv_1\" }",
+      "PreProcessedColumnId { id: \"keccak_spread_byte_8\" }",
+      "PreProcessedColumnId { id: \"keccak_split_1_1\" }",
+      "PreProcessedColumnId { id: \"keccak_split_1_2\" }",
+      "PreProcessedColumnId { id: \"keccak_split_2_1\" }",
+      "PreProcessedColumnId { id: \"keccak_split_2_2\" }",
+      "PreProcessedColumnId { id: \"keccak_split_3_1\" }",
+      "PreProcessedColumnId { id: \"keccak_split_3_2\" }",
+      "PreProcessedColumnId { id: \"keccak_split_4_1\" }",
+      "PreProcessedColumnId { id: \"keccak_split_4_2\" }",
+      "PreProcessedColumnId { id: \"keccak_split_5_1\" }",
+      "PreProcessedColumnId { id: \"keccak_split_5_2\" }",
+      "PreProcessedColumnId { id: \"keccak_split_6_1\" }",
+      "PreProcessedColumnId { id: \"keccak_split_6_2\" }",
+      "PreProcessedColumnId { id: \"keccak_split_7_1\" }",
+      "PreProcessedColumnId { id: \"keccak_split_7_2\" }",
       "PreProcessedColumnId { id: \"mdoc/private_message/v1/len_2534/log_12/active\" }",
       "PreProcessedColumnId { id: \"mdoc/private_message/v1/len_2534/log_12/index\" }",
       "PreProcessedColumnId { id: \"mldsa_coeffs_MlDsa65_start\" }",
@@ -14475,8 +16568,36 @@
       9,
       9,
       9,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
+      5,
       16,
       16,
+      16,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
       8,
       8,
       12,
@@ -14743,7 +16864,7 @@
       5,
       5
     ],
-    "root": "ee50360a447db89ae2aa091b8092121cca260561c6892499667b3fb6cbfc135d"
+    "root": "e1a23c9ed3ed047896c600943ad60ed739c180f202aa74998538a24c016ef0ed"
   },
   "proofSystem": {
     "field": "M31",
@@ -14764,11 +16885,11 @@
         "name": "tree_0_preprocessed",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 291,
+        "maximumOpenedColumns": 319,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 291
+            "count": 319
           }
         ]
       },
@@ -14776,15 +16897,15 @@
         "name": "tree_1_trace",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 3638,
+        "maximumOpenedColumns": 4285,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 3038
+            "count": 3471
           },
           {
             "value": 2,
-            "count": 389
+            "count": 603
           },
           {
             "value": 3,
@@ -14816,15 +16937,15 @@
         "name": "tree_2_interaction",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 2252,
+        "maximumOpenedColumns": 2380,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 1852
+            "count": 1948
           },
           {
             "value": 2,
-            "count": 400
+            "count": 432
           }
         ]
       },
@@ -14832,11 +16953,11 @@
         "name": "tree_3_post_interaction",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 16,
+        "maximumOpenedColumns": 8,
         "sampledValueLengthHistogram": [
           {
             "value": 2,
-            "count": 16
+            "count": 8
           }
         ]
       },
