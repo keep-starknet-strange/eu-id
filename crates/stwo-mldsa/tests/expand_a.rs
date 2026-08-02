@@ -19,7 +19,7 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{FrameworkComponent, TraceLocationAllocator};
 
 use stwo_keccak::relations::{KeccakRelations, SharedKeccakRelations};
-use stwo_keccak::service::{KeccakServiceProver, KeccakServiceVerifier};
+use stwo_keccak::service::{service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier};
 use stwo_keccak::sponge::Shape;
 use stwo_mldsa::air_util::padded_log_size;
 use stwo_mldsa::balancer::{
@@ -877,7 +877,7 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
     let rho = [77u8; 32];
     let proof = prove_with_service(rho, rho).expect("real service proof");
     verify_with_service(&proof).expect("real service verify");
-    assert_eq!(proof.service_claims.len(), 12);
+    assert_eq!(proof.service_claims.len(), service_claimed_sums_len());
     let canonical =
         shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid canonical service shapes");
     let mut shape_attacks = Vec::new();
@@ -954,7 +954,7 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
         );
     }
 
-    for claim_index in [0, 2, 11] {
+    for claim_index in 0..proof.service_claims.len() {
         let mut tampered = proof.clone();
         tampered.service_claims[claim_index] += SecureField::one();
         assert!(
