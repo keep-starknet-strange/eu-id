@@ -35,6 +35,6 @@ pub mod witness;
 
 pub use reference::{verify, verify_internals, MlDsaError, RejectReason, VerifyTrace};
 
-/// Re-export the Keccak service types used by the hosted API.
+/// Export the input types used by the hosted API.
 pub use types::{MlDsaPrivateKeyPublicInput, MlDsaVerifyInput};
 pub use witness::{generate_witness, MlDsaWitness, WitnessError};
