@@ -694,16 +694,21 @@ impl CombinedKernel {
         factors
     }
 
-    fn table(&self, p_log: usize, active: &[bool]) -> Vec<SecureField> {
+    fn table(&self, p_log: usize, active: &[bool]) -> Vec<PackedQM31> {
         let local_size = 1usize << self.terms[0].1.target_domain().local_log();
         let factors = self.grouped_factors(p_log, active);
-        let mut output = vec![SecureField::zero(); (1usize << p_log) * local_size];
+        let factors = factors
+            .into_iter()
+            .map(|(p_weights, local_weights)| (p_weights, pack_values(local_weights)))
+            .collect::<Vec<_>>();
+        let packed_local_size = local_size / N_LANES;
+        let mut output = vec![PackedQM31::zero(); (1usize << p_log) * packed_local_size];
         output
-            .par_chunks_mut(local_size)
+            .par_chunks_mut(packed_local_size)
             .enumerate()
             .for_each(|(p, row)| {
                 for (p_weights, local_weights) in &factors {
-                    let p_weight = p_weights[p];
+                    let p_weight = PackedQM31::broadcast(p_weights[p]);
                     for (sum, &local_weight) in row.iter_mut().zip(local_weights) {
                         *sum += p_weight * local_weight;
                     }
@@ -1104,29 +1109,27 @@ fn packed_first_gate_pair_polynomial(
     coefficient.mul_base(gate)
 }
 
+fn pack_values(values: Vec<SecureField>) -> Vec<PackedQM31> {
+    assert_eq!(values.len() % N_LANES, 0);
+    values
+        .chunks_exact(N_LANES)
+        .map(|chunk| PackedQM31::from_array(chunk.try_into().expect("one SIMD pack")))
+        .collect()
+}
+
 fn pack_arrays(arrays: Vec<Vec<SecureField>>) -> Vec<Vec<PackedQM31>> {
-    arrays
+    arrays.into_iter().map(pack_values).collect()
+}
+
+fn unpack_values(values: Vec<PackedQM31>) -> Vec<SecureField> {
+    values
         .into_iter()
-        .map(|values| {
-            assert_eq!(values.len() % N_LANES, 0);
-            values
-                .chunks_exact(N_LANES)
-                .map(|chunk| PackedQM31::from_array(chunk.try_into().expect("one SIMD pack")))
-                .collect()
-        })
+        .flat_map(|value| value.to_array())
         .collect()
 }
 
 fn unpack_arrays(arrays: Vec<Vec<PackedQM31>>) -> Vec<Vec<SecureField>> {
-    arrays
-        .into_iter()
-        .map(|values| {
-            values
-                .into_iter()
-                .flat_map(|value| value.to_array())
-                .collect()
-        })
-        .collect()
+    arrays.into_iter().map(unpack_values).collect()
 }
 
 fn fold_packed_arrays(arrays: &mut [Vec<PackedQM31>], coordinate: SecureField) {
@@ -1173,30 +1176,27 @@ fn polynomial_eval(coefficients: &[SecureField], point: SecureField) -> SecureFi
 fn prove_gate_sumcheck(
     kind: GateKind,
     mut claim: SecureField,
-    arrays: Vec<Vec<SecureField>>,
+    mut arrays: Vec<Vec<PackedQM31>>,
     n_variables: usize,
     writer: &mut ProofWriter,
     channel: &mut impl Channel,
 ) -> (Vec<SecureField>, SecureField, Vec<SecureField>) {
-    assert_eq!(arrays[0].len(), 1usize << n_variables);
+    assert!(n_variables > LOG_N_LANES as usize);
+    assert_eq!(
+        arrays[0].len(),
+        1usize << (n_variables - LOG_N_LANES as usize)
+    );
     let mut point = Vec::with_capacity(n_variables);
-    let packed_rounds = n_variables.saturating_sub(LOG_N_LANES as usize);
-    let mut scalar = Some(arrays);
-    let mut packed = if packed_rounds == 0 {
-        None
-    } else {
-        Some(pack_arrays(scalar.take().expect("scalar sumcheck arrays")))
-    };
+    let packed_rounds = n_variables - LOG_N_LANES as usize;
     for packed_round in 0..packed_rounds {
-        let arrays = packed.as_mut().expect("packed sumcheck arrays");
         let half = arrays[0].len() / 2;
         let polynomial = (0..half)
             .into_par_iter()
             .map(|i| {
                 if packed_round == 0 {
-                    packed_first_gate_pair_polynomial(kind, arrays, i).coefficients
+                    packed_first_gate_pair_polynomial(kind, &arrays, i).coefficients
                 } else {
-                    packed_gate_pair_polynomial(kind, arrays, i).coefficients
+                    packed_gate_pair_polynomial(kind, &arrays, i).coefficients
                 }
             })
             .reduce(
@@ -1223,13 +1223,10 @@ fn prove_gate_sumcheck(
         let coordinate = draw_nonbinary(channel);
         claim = polynomial_eval(&coefficients, coordinate);
         point.push(coordinate);
-        fold_packed_arrays(arrays, coordinate);
+        fold_packed_arrays(&mut arrays, coordinate);
     }
 
-    let mut arrays = match packed {
-        Some(arrays) => unpack_arrays(arrays),
-        None => scalar.expect("scalar sumcheck arrays"),
-    };
+    let mut arrays = unpack_arrays(arrays);
     for _ in packed_rounds..n_variables {
         let half = arrays[0].len() / 2;
         let polynomial = (0..half)
@@ -1282,35 +1279,42 @@ fn verify_sumcheck(
     Ok((point, claim))
 }
 
-fn read_table(input: &BitMatrix, map: WireMap, p_log: usize, active: &[bool]) -> Vec<SecureField> {
+fn read_table(input: &BitMatrix, map: WireMap, p_log: usize, active: &[bool]) -> Vec<PackedQM31> {
     let from_log = map.source_domain().local_log();
     let to_log = map.target_domain().local_log();
     assert_eq!(input.log_size, p_log + to_log);
-    (0..1usize << (p_log + from_log))
+    (0..1usize << (p_log + from_log - LOG_N_LANES as usize))
         .into_par_iter()
-        .map(|index| {
-            let p = index >> from_log;
-            if !active[p] {
-                return SecureField::zero();
-            }
-            map.map_local(index & ((1 << from_log) - 1))
-                .map(|local| SecureField::from(u32::from(input.get((p << to_log) | local))))
-                .unwrap_or_else(SecureField::zero)
+        .map(|pack| {
+            let first = pack * N_LANES;
+            let values = std::array::from_fn(|lane| {
+                let index = first + lane;
+                let p = index >> from_log;
+                let value = active[p]
+                    && map
+                        .map_local(index & ((1 << from_log) - 1))
+                        .is_some_and(|local| input.get((p << to_log) | local));
+                M31::from(u32::from(value))
+            });
+            PackedQM31::from(PackedM31::from_array(values))
         })
         .collect()
 }
 
-fn chi_q_table(p_log: usize, active: &[bool], round: usize) -> Vec<SecureField> {
-    (0..1usize << (p_log + A_LOCAL_LOG))
+fn chi_q_table(p_log: usize, active: &[bool], round: usize) -> Vec<PackedQM31> {
+    let packed_local_log = A_LOCAL_LOG - LOG_N_LANES as usize;
+    (0..1usize << (p_log + packed_local_log))
         .into_par_iter()
-        .map(|index| {
-            let p = index >> A_LOCAL_LOG;
-            let local = index & ((1 << A_LOCAL_LOG) - 1);
-            let lane = local >> 6;
-            let z = local & 63;
-            SecureField::from(u32::from(
-                active[p] && lane == 0 && ((IOTA_RC[round] >> z) & 1 != 0),
-            ))
+        .map(|pack| {
+            let p = pack >> packed_local_log;
+            let local_pack = pack & ((1 << packed_local_log) - 1);
+            if !active[p] || local_pack >= 64 / N_LANES {
+                return PackedQM31::zero();
+            }
+            let first_z = local_pack * N_LANES;
+            PackedQM31::from(PackedM31::from_array(std::array::from_fn(|lane| {
+                M31::from(((IOTA_RC[round] >> (first_z + lane)) & 1) as u32)
+            })))
         })
         .collect()
 }
@@ -2339,7 +2343,7 @@ mod tests {
         let packed = prove_gate_sumcheck(
             kind,
             claim,
-            arrays,
+            pack_arrays(arrays),
             n_variables,
             &mut packed_writer,
             &mut packed_channel,
@@ -2679,6 +2683,43 @@ mod tests {
     }
 
     #[test]
+    fn packed_read_tables_match_scalar_index_order() {
+        let p_log = 3;
+        let active = (0..1usize << p_log).map(|p| p % 3 != 1).collect::<Vec<_>>();
+        let maps = [
+            gate_maps(GateKind::Chi),
+            gate_maps(GateKind::Theta),
+            gate_maps(GateKind::Parity),
+        ]
+        .concat();
+
+        for (case, map) in maps.into_iter().enumerate() {
+            let from_log = map.source_domain().local_log();
+            let to_log = map.target_domain().local_log();
+            let mut input = BitMatrix::zero(p_log + to_log);
+            for index in 0..1usize << (p_log + to_log) {
+                input.set(index, (7 * index + case) % 11 < 5);
+            }
+            let expected = (0..1usize << (p_log + from_log))
+                .map(|index| {
+                    let p = index >> from_log;
+                    SecureField::from(u32::from(
+                        active[p]
+                            && map
+                                .map_local(index & ((1 << from_log) - 1))
+                                .is_some_and(|local| input.get((p << to_log) | local)),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                unpack_values(read_table(&input, map, p_log, &active)),
+                expected,
+                "wire map {case}"
+            );
+        }
+    }
+
+    #[test]
     fn combined_kernel_groups_equal_row_factors_without_changing_the_table() {
         let p_log = 4;
         let active = (0..1usize << p_log).map(|p| p % 3 != 1).collect::<Vec<_>>();
@@ -2729,7 +2770,7 @@ mod tests {
         };
 
         assert_eq!(
-            combined.table(p_log, &active),
+            unpack_values(combined.table(p_log, &active)),
             naive_combined_table(&combined, p_log, &active)
         );
         assert_eq!(
@@ -2772,7 +2813,7 @@ mod tests {
                 ],
             };
             assert_eq!(
-                combined.table(p_log, &active),
+                unpack_values(combined.table(p_log, &active)),
                 naive_combined_table(&combined, p_log, &active),
                 "target domain {case}"
             );
@@ -2953,7 +2994,10 @@ mod tests {
         for round in 0..N_ROUNDS {
             assert_eq!(
                 chi_q_eval(&point, witness.p_log, &witness.active, round),
-                mle_eval(&chi_q_table(witness.p_log, &witness.active, round), &point),
+                mle_eval(
+                    &unpack_values(chi_q_table(witness.p_log, &witness.active, round)),
+                    &point,
+                ),
                 "Iota round {round}"
             );
         }
@@ -2994,11 +3038,13 @@ mod tests {
             )],
         };
         let coefficient = combined.table(p_log, &active);
-        let mut alternate_q = chi_q_table(p_log, &active, round);
-        alternate_q[0] = SecureField::zero();
-        assert!(alternate_q.iter().all(SecureField::is_zero));
+        let coefficient_values = unpack_values(coefficient.clone());
+        let mut alternate_q_values = unpack_values(chi_q_table(p_log, &active, round));
+        alternate_q_values[0] = SecureField::zero();
+        assert!(alternate_q_values.iter().all(SecureField::is_zero));
+        let alternate_q = pack_values(alternate_q_values.clone());
 
-        let zero = vec![SecureField::zero(); 1usize << n_variables];
+        let zero = vec![PackedQM31::zero(); 1usize << (n_variables - LOG_N_LANES as usize)];
         let arrays = vec![
             coefficient.clone(),
             zero.clone(),
@@ -3006,9 +3052,9 @@ mod tests {
             zero,
             alternate_q.clone(),
         ];
-        combined.value = coefficient
+        combined.value = coefficient_values
             .iter()
-            .zip(&alternate_q)
+            .zip(&alternate_q_values)
             .map(|(&weight, &q)| weight * q)
             .sum();
         assert_eq!(combined.value, SecureField::zero());
@@ -3025,7 +3071,7 @@ mod tests {
         );
         let terminals = &all_terminals[..GateKind::Chi.terminals()];
         let alternate_q_terminal = all_terminals[GateKind::Chi.terminals()];
-        assert_eq!(alternate_q_terminal, mle_eval(&alternate_q, &point));
+        assert_eq!(alternate_q_terminal, mle_eval(&alternate_q_values, &point));
         assert_eq!(
             terminal_claim,
             combined.evaluate(&point, p_log, &active)
@@ -3058,12 +3104,12 @@ mod tests {
     #[test]
     fn bounded_sumcheck_detects_polynomial_corruption() {
         let arrays = vec![
-            vec![SecureField::one(); 8],
-            (0..8).map(|i| SecureField::from(i & 1)).collect(),
-            (0..8).map(|i| SecureField::from((i >> 1) & 1)).collect(),
-            (0..8).map(|i| SecureField::from((i >> 2) & 1)).collect(),
+            vec![SecureField::one(); 32],
+            (0..32).map(|i| SecureField::from(i & 1)).collect(),
+            (0..32).map(|i| SecureField::from((i >> 1) & 1)).collect(),
+            (0..32).map(|i| SecureField::from((i >> 2) & 1)).collect(),
         ];
-        let claim: SecureField = (0..8)
+        let claim: SecureField = (0..32)
             .map(|i| arrays[0][i] * xor_values(&[arrays[1][i], arrays[2][i], arrays[3][i]]))
             .sum();
         let mut prover_channel = Blake2sChannel::default();
@@ -3071,8 +3117,8 @@ mod tests {
         let (prover_point, prover_terminal, _) = prove_gate_sumcheck(
             GateKind::Theta,
             claim,
-            arrays,
-            3,
+            pack_arrays(arrays),
+            5,
             &mut writer,
             &mut prover_channel,
         );
@@ -3082,7 +3128,7 @@ mod tests {
             cursor: 0,
         };
         let (verifier_point, verifier_terminal) =
-            verify_sumcheck(claim, 3, THETA_DEGREE, &mut reader, &mut verifier_channel).unwrap();
+            verify_sumcheck(claim, 5, THETA_DEGREE, &mut reader, &mut verifier_channel).unwrap();
         assert_eq!(prover_point, verifier_point);
         assert_eq!(prover_terminal, verifier_terminal);
 
@@ -3096,7 +3142,7 @@ mod tests {
         };
         assert!(verify_sumcheck(
             claim,
-            3,
+            5,
             THETA_DEGREE,
             &mut corrupt_reader,
             &mut corrupt_channel,
