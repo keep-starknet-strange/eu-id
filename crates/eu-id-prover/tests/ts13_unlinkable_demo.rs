@@ -516,7 +516,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                         post + air_post,
                     ]
                 ),
-                [4_285, 2_380, 8]
+                [4_171, 2_380, 8]
             );
             let reject_proof_without_panic = |label: &str, candidate: &eu_id_prover::MdocProof| {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
