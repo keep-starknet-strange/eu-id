@@ -96,8 +96,9 @@ layered acceptance candidate replaces that carrier. Its current Keccak
 AIR-reference count is 1,534,720 cells.
 
 A-015-review accepts the candidate as sound and reports no critical or high
-finding. Final acceptance requires its three completion conditions, a new
-source-bound artifact, the full release matrix, and the final-hash phone run.
+finding. Its three completion conditions, new source-bound artifact, and full
+release matrix are complete. Final acceptance requires the final-hash phone
+run.
 
 ### P3 — Private SHA-256
 
@@ -155,14 +156,11 @@ Conditions F-1 through F-3 are complete at soundness-source commit
 `cf8f2cec`. The regenerated circuit hash is
 `c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`.
 The shape and 1,507,328-byte proof-body capacity are unchanged. The final
-package and performance evidence are pending.
-
-The current desktop median is 1,784 ms for proving and 80 ms for verification.
-Peak resident memory is 777,682,944 bytes. These values are a throughput
-checkpoint only. F-2 changes the soundness source and makes circuit-hash
-rotation mandatory. Regenerate the artifact, fixture, AAR, and APKs. Then
-rerun the full release, ignored, negative, unlinkability, artifact, and phone
-test sets.
+release matrix and Android package checks passed. Seven fresh desktop
+processes measured a 1,780 ms median prove time, an 81 ms median verify time,
+and a maximum resident set size of 786,415,616 bytes. Every envelope was
+1,507,374 bytes. The tracked evidence is in
+`tasks/bench-results/ts13-layered-final-20260802`.
 
 ## 6. Review gates
 

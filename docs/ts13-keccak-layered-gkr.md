@@ -5,8 +5,9 @@ Status: independently reviewed; accepted as sound with conditions
 A-015-review accepts this committed-nibble design as sound. It reports no
 critical or high finding. Conditions F-1 through F-3 are complete at
 soundness-source commit `cf8f2cec`. Final campaign acceptance still requires
-the full release matrix and the three-phone run with circuit hash
+the three-phone run with circuit hash
 `c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`.
+A full release matrix and final package check passed for this hash.
 A-016 requires the candidate to preserve or improve the live whole-system
 algebraic bound under the same accounting convention.
 

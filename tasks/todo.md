@@ -314,8 +314,8 @@ artifact check, and the diff check passed.
 - [x] Commit F-1 through F-3 before artifact generation.
 - [x] Regenerate the source-bound artifact, circuit hash, and fixture after
   the F-2 source change.
-- [ ] Build the source-bound AAR and APK pair for the final circuit hash.
-- [ ] Rerun all release, ignored, negative, unlinkability, and artifact tests.
+- [x] Build the source-bound AAR and APK pair for the final circuit hash.
+- [x] Rerun all release, ignored, negative, unlinkability, and artifact tests.
 - [ ] Run one exact three-phone acceptance matrix with the final APK pair.
 
 ## Layered Keccak review
@@ -389,3 +389,17 @@ exact checked-in fixture. The fixture names only `proveIdentity` and
 three-phone matrix is pending. A-014 requires a Lucas-only Google Cloud login
 and an `A-014-confirmed` note before the upload. The old package remains a
 throughput checkpoint because F-2 requires a code change and new circuit hash.
+
+The post-review soundness-source commit is `cf8f2cec`. The artifact and fixture
+commit is `c2923bac`. The final circuit hash is
+`c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`.
+The full release matrix passed, including all 18 ignored tests, the focused
+unlinkability and negative tests, the 30-test layered freeze, and the 31-test
+service freeze.
+
+The final AAR and APK pair passed library, fixture, circuit-hash, and API
+parity checks. The final seven-process desktop median is 1,780 ms for proving
+and 81 ms for verification. The maximum resident set size is 786,415,616
+bytes. Every proof envelope is 1,507,374 bytes. Detailed evidence and package
+hashes are in `tasks/bench-results/ts13-layered-final-20260802`. The final
+three-phone matrix still waits for `A-014-confirmed`.
