@@ -13,7 +13,7 @@ use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::verifier::VerificationError;
 use stwo::core::ColumnVec;
 use stwo::prover::backend::simd::column::SecureColumn;
-use stwo::prover::backend::simd::m31::{LOG_N_LANES, N_LANES};
+use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::Column;
@@ -32,12 +32,13 @@ const A_LOCAL_LOG: usize = 11;
 const C_LOCAL_LOG: usize = 9;
 const N_LOCAL_LOG: usize = 9;
 const OUTPUT_SLOT_LOG: usize = 8;
-const MAX_SUMCHECK_COEFFICIENTS: usize = 18;
+const MAX_SUMCHECK_COEFFICIENTS: usize = EXTRACTION_DEGREE + 1;
 const SPREAD_BYTE_SUM: u32 = 21_845;
 
 const CHI_DEGREE: usize = 5;
 const THETA_DEGREE: usize = 4;
 const PARITY_DEGREE: usize = 6;
+const MAX_GATE_SUMCHECK_COEFFICIENTS: usize = PARITY_DEGREE + 1;
 const EXTRACTION_DEGREE: usize = 17;
 
 /// Two MLE traces at the public row log size, with four base columns per
@@ -588,6 +589,7 @@ impl Kernel {
         }
     }
 
+    #[cfg(test)]
     fn table(&self, p_log: usize, active: &[bool]) -> Vec<SecureField> {
         let (p_weights, local_weights) = self.factors(p_log, active);
         let local_log = self.target_domain().local_log();
@@ -665,17 +667,48 @@ struct CombinedKernel {
 }
 
 impl CombinedKernel {
-    fn table(&self, p_log: usize, active: &[bool]) -> Vec<SecureField> {
+    fn grouped_factors(
+        &self,
+        p_log: usize,
+        active: &[bool],
+    ) -> Vec<(Vec<SecureField>, Vec<SecureField>)> {
         let target = self.terms[0].1.target_domain();
-        let mut output = vec![SecureField::zero(); 1usize << (p_log + target.local_log())];
+        let mut factors: Vec<(Vec<SecureField>, Vec<SecureField>)> = Vec::new();
         for (coefficient, kernel) in &self.terms {
             assert_eq!(kernel.target_domain(), target);
-            let table = kernel.table(p_log, active);
-            output
-                .par_iter_mut()
-                .zip(table)
-                .for_each(|(sum, value)| *sum += *coefficient * value);
+            let (p_weights, mut local_weights) = kernel.factors(p_log, active);
+            for value in &mut local_weights {
+                *value *= *coefficient;
+            }
+            if let Some((_, sum)) = factors
+                .iter_mut()
+                .find(|(existing, _)| *existing == p_weights)
+            {
+                for (sum, value) in sum.iter_mut().zip(local_weights) {
+                    *sum += value;
+                }
+            } else {
+                factors.push((p_weights, local_weights));
+            }
         }
+        factors
+    }
+
+    fn table(&self, p_log: usize, active: &[bool]) -> Vec<SecureField> {
+        let local_size = 1usize << self.terms[0].1.target_domain().local_log();
+        let factors = self.grouped_factors(p_log, active);
+        let mut output = vec![SecureField::zero(); (1usize << p_log) * local_size];
+        output
+            .par_chunks_mut(local_size)
+            .enumerate()
+            .for_each(|(p, row)| {
+                for (p_weights, local_weights) in &factors {
+                    let p_weight = p_weights[p];
+                    for (sum, &local_weight) in row.iter_mut().zip(local_weights) {
+                        *sum += p_weight * local_weight;
+                    }
+                }
+            });
         output
     }
 
@@ -793,15 +826,82 @@ impl Poly {
 }
 
 #[derive(Clone, Copy)]
-struct PackedPoly {
-    coefficients: [PackedQM31; MAX_SUMCHECK_COEFFICIENTS],
+struct PackedBasePoly {
+    coefficients: [PackedM31; PARITY_DEGREE],
     degree: usize,
 }
 
-impl PackedPoly {
+impl PackedBasePoly {
     fn zero() -> Self {
         Self {
-            coefficients: [PackedQM31::zero(); MAX_SUMCHECK_COEFFICIENTS],
+            coefficients: [PackedM31::zero(); PARITY_DEGREE],
+            degree: 0,
+        }
+    }
+
+    fn constant(value: M31) -> Self {
+        let mut output = Self::zero();
+        output.coefficients[0] = PackedM31::broadcast(value);
+        output
+    }
+
+    fn linear(left: PackedM31, right: PackedM31) -> Self {
+        let mut output = Self::zero();
+        output.coefficients[0] = left;
+        output.coefficients[1] = right - left;
+        output.degree = 1;
+        output
+    }
+
+    fn add(self, rhs: Self) -> Self {
+        let mut output = Self::zero();
+        output.degree = self.degree.max(rhs.degree);
+        for i in 0..=output.degree {
+            output.coefficients[i] = self.coefficients[i] + rhs.coefficients[i];
+        }
+        output
+    }
+
+    fn sub(self, rhs: Self) -> Self {
+        let mut output = Self::zero();
+        output.degree = self.degree.max(rhs.degree);
+        for i in 0..=output.degree {
+            output.coefficients[i] = self.coefficients[i] - rhs.coefficients[i];
+        }
+        output
+    }
+
+    fn double(self) -> Self {
+        self.add(self)
+    }
+
+    fn mul(self, rhs: Self) -> Self {
+        let degree = self.degree + rhs.degree;
+        assert!(degree < PARITY_DEGREE);
+        let mut output = Self::zero();
+        output.degree = degree;
+        for i in 0..=self.degree {
+            for j in 0..=rhs.degree {
+                output.coefficients[i + j] += self.coefficients[i] * rhs.coefficients[j];
+            }
+        }
+        output
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PackedPolynomial<const N: usize> {
+    coefficients: [PackedQM31; N],
+    degree: usize,
+}
+
+type PackedGatePoly = PackedPolynomial<MAX_GATE_SUMCHECK_COEFFICIENTS>;
+type PackedExtractionPoly = PackedPolynomial<MAX_SUMCHECK_COEFFICIENTS>;
+
+impl<const N: usize> PackedPolynomial<N> {
+    fn zero() -> Self {
+        Self {
+            coefficients: [PackedQM31::zero(); N],
             degree: 0,
         }
     }
@@ -830,20 +930,34 @@ impl PackedPoly {
     }
 
     fn sub(self, rhs: Self) -> Self {
-        self.add(rhs.scale(-SecureField::one()))
+        let mut output = Self::zero();
+        output.degree = self.degree.max(rhs.degree);
+        for i in 0..=output.degree {
+            output.coefficients[i] = self.coefficients[i] - rhs.coefficients[i];
+        }
+        output
     }
 
-    fn scale(mut self, scalar: SecureField) -> Self {
-        let scalar = PackedQM31::broadcast(scalar);
-        for coefficient in &mut self.coefficients[..=self.degree] {
-            *coefficient *= scalar;
-        }
-        self
+    fn double(self) -> Self {
+        self.add(self)
     }
 
     fn mul(self, rhs: Self) -> Self {
         let degree = self.degree + rhs.degree;
-        assert!(degree < MAX_SUMCHECK_COEFFICIENTS);
+        assert!(degree < N);
+        let mut output = Self::zero();
+        output.degree = degree;
+        for i in 0..=self.degree {
+            for j in 0..=rhs.degree {
+                output.coefficients[i + j] += self.coefficients[i] * rhs.coefficients[j];
+            }
+        }
+        output
+    }
+
+    fn mul_base(self, rhs: PackedBasePoly) -> Self {
+        let degree = self.degree + rhs.degree;
+        assert!(degree < N);
         let mut output = Self::zero();
         output.degree = degree;
         for i in 0..=self.degree {
@@ -855,14 +969,18 @@ impl PackedPoly {
     }
 }
 
-fn packed_xor_polys(values: &[PackedPoly]) -> PackedPoly {
-    values
-        .iter()
-        .copied()
-        .fold(PackedPoly::zero(), |sum, value| {
-            sum.add(value)
-                .sub(sum.mul(value).scale(SecureField::from(2)))
-        })
+fn packed_xor_polys(values: &[PackedGatePoly]) -> PackedGatePoly {
+    let (first, rest) = values.split_first().expect("nonempty XOR");
+    rest.iter().copied().fold(*first, |sum, value| {
+        sum.add(value).sub(sum.mul(value).double())
+    })
+}
+
+fn packed_base_xor_polys(values: &[PackedBasePoly]) -> PackedBasePoly {
+    let (first, rest) = values.split_first().expect("nonempty XOR");
+    rest.iter().copied().fold(*first, |sum, value| {
+        sum.add(value).sub(sum.mul(value).double())
+    })
 }
 
 fn xor_polys(values: &[Poly]) -> Poly {
@@ -924,9 +1042,13 @@ fn gate_pair_polynomial(kind: GateKind, arrays: &[Vec<SecureField>], i: usize) -
     coefficient.mul(gate)
 }
 
-fn packed_gate_pair_polynomial(kind: GateKind, arrays: &[Vec<PackedQM31>], i: usize) -> PackedPoly {
+fn packed_gate_pair_polynomial(
+    kind: GateKind,
+    arrays: &[Vec<PackedQM31>],
+    i: usize,
+) -> PackedGatePoly {
     let half = arrays[0].len() / 2;
-    let linear = |array: usize| PackedPoly::linear(arrays[array][i], arrays[array][i + half]);
+    let linear = |array: usize| PackedGatePoly::linear(arrays[array][i], arrays[array][i + half]);
     let coefficient = linear(0);
     let gate = match kind {
         GateKind::Chi => {
@@ -934,7 +1056,7 @@ fn packed_gate_pair_polynomial(kind: GateKind, arrays: &[Vec<PackedQM31>], i: us
             let b1 = linear(2);
             let b2 = linear(3);
             let q = linear(4);
-            let and_not = PackedPoly::constant(SecureField::one()).sub(b1).mul(b2);
+            let and_not = PackedGatePoly::constant(SecureField::one()).sub(b1).mul(b2);
             packed_xor_polys(&[packed_xor_polys(&[b0, and_not]), q])
         }
         GateKind::Theta => packed_xor_polys(&[linear(1), linear(2), linear(3)]),
@@ -943,6 +1065,43 @@ fn packed_gate_pair_polynomial(kind: GateKind, arrays: &[Vec<PackedQM31>], i: us
         }
     };
     coefficient.mul(gate)
+}
+
+#[inline(always)]
+fn packed_base_limb(value: PackedQM31) -> PackedM31 {
+    let [base, b, c, d] = value.into_packed_m31s();
+    debug_assert!(b.is_zero() && c.is_zero() && d.is_zero());
+    base
+}
+
+fn packed_first_gate_pair_polynomial(
+    kind: GateKind,
+    arrays: &[Vec<PackedQM31>],
+    i: usize,
+) -> PackedGatePoly {
+    let half = arrays[0].len() / 2;
+    let linear = |array: usize| {
+        PackedBasePoly::linear(
+            packed_base_limb(arrays[array][i]),
+            packed_base_limb(arrays[array][i + half]),
+        )
+    };
+    let coefficient = PackedGatePoly::linear(arrays[0][i], arrays[0][i + half]);
+    let gate = match kind {
+        GateKind::Chi => {
+            let b0 = linear(1);
+            let b1 = linear(2);
+            let b2 = linear(3);
+            let q = linear(4);
+            let and_not = PackedBasePoly::constant(M31::one()).sub(b1).mul(b2);
+            packed_base_xor_polys(&[packed_base_xor_polys(&[b0, and_not]), q])
+        }
+        GateKind::Theta => packed_base_xor_polys(&[linear(1), linear(2), linear(3)]),
+        GateKind::Parity => {
+            packed_base_xor_polys(&[linear(1), linear(2), linear(3), linear(4), linear(5)])
+        }
+    };
+    coefficient.mul_base(gate)
 }
 
 fn pack_arrays(arrays: Vec<Vec<SecureField>>) -> Vec<Vec<PackedQM31>> {
@@ -972,13 +1131,18 @@ fn unpack_arrays(arrays: Vec<Vec<PackedQM31>>) -> Vec<Vec<SecureField>> {
 
 fn fold_packed_arrays(arrays: &mut [Vec<PackedQM31>], coordinate: SecureField) {
     let coordinate = PackedQM31::broadcast(coordinate);
-    for values in arrays {
+    let fold = |values: &mut Vec<PackedQM31>| {
         let half = values.len() / 2;
         let (left, right) = values.split_at_mut(half);
         for i in 0..half {
             left[i] += coordinate * (right[i] - left[i]);
         }
         values.truncate(half);
+    };
+    if arrays[0].len() / 2 >= 512 {
+        arrays.par_iter_mut().for_each(fold);
+    } else {
+        arrays.iter_mut().for_each(fold);
     }
 }
 
@@ -1023,14 +1187,20 @@ fn prove_gate_sumcheck(
     } else {
         Some(pack_arrays(scalar.take().expect("scalar sumcheck arrays")))
     };
-    for _ in 0..packed_rounds {
+    for packed_round in 0..packed_rounds {
         let arrays = packed.as_mut().expect("packed sumcheck arrays");
         let half = arrays[0].len() / 2;
         let polynomial = (0..half)
             .into_par_iter()
-            .map(|i| packed_gate_pair_polynomial(kind, arrays, i).coefficients)
+            .map(|i| {
+                if packed_round == 0 {
+                    packed_first_gate_pair_polynomial(kind, arrays, i).coefficients
+                } else {
+                    packed_gate_pair_polynomial(kind, arrays, i).coefficients
+                }
+            })
             .reduce(
-                || [PackedQM31::zero(); MAX_SUMCHECK_COEFFICIENTS],
+                || [PackedQM31::zero(); MAX_GATE_SUMCHECK_COEFFICIENTS],
                 |mut left, right| {
                     for i in 0..=kind.degree() {
                         left[i] += right[i];
@@ -1349,24 +1519,6 @@ fn compose_from_powers(coefficients: &[M31], powers: &[Poly; 17]) -> Poly {
         })
 }
 
-fn packed_polynomial_powers(linear: PackedPoly) -> [PackedPoly; 17] {
-    let mut powers = [PackedPoly::zero(); 17];
-    powers[0] = PackedPoly::constant(SecureField::one());
-    for degree in 1..powers.len() {
-        powers[degree] = powers[degree - 1].mul(linear);
-    }
-    powers
-}
-
-fn packed_compose_from_powers(coefficients: &[M31], powers: &[PackedPoly; 17]) -> PackedPoly {
-    coefficients
-        .iter()
-        .enumerate()
-        .fold(PackedPoly::zero(), |sum, (degree, &coefficient)| {
-            sum.add(powers[degree].scale(SecureField::from(coefficient)))
-        })
-}
-
 fn extraction_pair_polynomial(
     arrays: &[Vec<SecureField>],
     i: usize,
@@ -1396,20 +1548,26 @@ fn packed_extraction_pair_polynomial(
     bit_polynomials: &[[M31; 16]; 4],
     validity: &[M31; 17],
     lambda: SecureField,
-) -> PackedPoly {
+) -> PackedExtractionPoly {
     let half = arrays[0].len() / 2;
-    let linear = |array: usize| PackedPoly::linear(arrays[array][i], arrays[array][i + half]);
-    let powers = packed_polynomial_powers(linear(0));
-    let mut output = PackedPoly::zero();
-    for bit in 0..4 {
-        output = output
-            .add(packed_compose_from_powers(&bit_polynomials[bit], &powers).mul(linear(1 + bit)));
+    let linear =
+        |array: usize| PackedExtractionPoly::linear(arrays[array][i], arrays[array][i + half]);
+    let n = linear(0);
+    let lambda = PackedQM31::broadcast(lambda);
+    let validity_left = arrays[5][i] * lambda;
+    let validity_right = arrays[5][i + half] * lambda;
+    let mut output =
+        PackedExtractionPoly::linear(validity_left * validity[16], validity_right * validity[16]);
+    for degree in (0..16).rev() {
+        let mut left = validity_left * validity[degree];
+        let mut right = validity_right * validity[degree];
+        for bit in 0..4 {
+            left += arrays[1 + bit][i] * bit_polynomials[bit][degree];
+            right += arrays[1 + bit][i + half] * bit_polynomials[bit][degree];
+        }
+        output = output.mul(n).add(PackedExtractionPoly::linear(left, right));
     }
-    output.add(
-        packed_compose_from_powers(validity, &powers)
-            .mul(linear(5))
-            .scale(lambda),
-    )
+    output
 }
 
 fn prove_extraction_sumcheck(
@@ -1510,18 +1668,41 @@ fn restricted_tables(
     p_log: usize,
     active: &[bool],
 ) -> [Vec<SecureField>; 4] {
+    assert_eq!(
+        combined.terms[0].1.target_domain(),
+        LayerDomain::A,
+        "restricted tables require layer A"
+    );
     let size = 1usize << (p_log + N_LOCAL_LOG);
+    let local_size = 1usize << N_LOCAL_LOG;
+    let factors = combined
+        .grouped_factors(p_log, active)
+        .into_iter()
+        .map(|(p_weights, a_weights)| {
+            let mut local: [Vec<SecureField>; 4] =
+                std::array::from_fn(|_| vec![SecureField::zero(); local_size]);
+            for (a_local, value) in a_weights.into_iter().enumerate() {
+                let (_, nibble, bit) = a_to_nibble(a_local);
+                local[bit][nibble] += value;
+            }
+            (p_weights, local)
+        })
+        .collect::<Vec<_>>();
     let mut output: [Vec<SecureField>; 4] =
         std::array::from_fn(|_| vec![SecureField::zero(); size]);
-    for (coefficient, kernel) in &combined.terms {
-        assert_eq!(kernel.target_domain(), LayerDomain::A);
-        let table = kernel.table(p_log, active);
-        for (a_index, value) in table.into_iter().enumerate() {
-            let p = a_index >> A_LOCAL_LOG;
-            let (_, nibble, bit) = a_to_nibble(a_index & ((1 << A_LOCAL_LOG) - 1));
-            output[bit][(p << N_LOCAL_LOG) | nibble] += *coefficient * value;
-        }
-    }
+    output.par_iter_mut().enumerate().for_each(|(bit, table)| {
+        table
+            .par_chunks_mut(local_size)
+            .enumerate()
+            .for_each(|(p, row)| {
+                for (p_weights, local) in &factors {
+                    let p_weight = p_weights[p];
+                    for (sum, &value) in row.iter_mut().zip(&local[bit]) {
+                        *sum += p_weight * value;
+                    }
+                }
+            });
+    });
     output
 }
 
@@ -2069,6 +2250,20 @@ mod tests {
             .collect()
     }
 
+    fn deterministic_gate_arrays(
+        n_arrays: usize,
+        n_variables: usize,
+        salt: u32,
+    ) -> Vec<Vec<SecureField>> {
+        let mut arrays = deterministic_arrays(n_arrays, n_variables, salt);
+        for values in &mut arrays[1..] {
+            for value in values {
+                *value = SecureField::from(value.to_m31_array()[0]);
+            }
+        }
+        arrays
+    }
+
     fn scalar_sumcheck_reference(
         mut claim: SecureField,
         mut arrays: Vec<Vec<SecureField>>,
@@ -2137,7 +2332,7 @@ mod tests {
 
     fn assert_gate_sumcheck_matches_scalar(kind: GateKind, n_variables: usize, salt: u32) {
         let n_arrays = 1 + kind.terminals() + usize::from(matches!(kind, GateKind::Chi));
-        let arrays = deterministic_arrays(n_arrays, n_variables, salt);
+        let arrays = deterministic_gate_arrays(n_arrays, n_variables, salt);
         let claim = gate_claim(kind, &arrays);
         let mut packed_writer = ProofWriter::new(0);
         let mut packed_channel = Blake2sChannel::default();
@@ -2151,7 +2346,7 @@ mod tests {
         );
         let packed_next = packed_channel.draw_secure_felt();
 
-        let arrays = deterministic_arrays(n_arrays, n_variables, salt);
+        let arrays = deterministic_gate_arrays(n_arrays, n_variables, salt);
         assert_eq!(gate_claim(kind, &arrays), claim);
         let mut scalar_writer = ProofWriter::new(0);
         let mut scalar_channel = Blake2sChannel::default();
@@ -2254,6 +2449,39 @@ mod tests {
                 table
             }
         }
+    }
+
+    fn naive_combined_table(
+        combined: &CombinedKernel,
+        p_log: usize,
+        active: &[bool],
+    ) -> Vec<SecureField> {
+        let target = combined.terms[0].1.target_domain();
+        let mut output = vec![SecureField::zero(); 1usize << (p_log + target.local_log())];
+        for (coefficient, kernel) in &combined.terms {
+            for (sum, value) in output.iter_mut().zip(kernel.table(p_log, active)) {
+                *sum += *coefficient * value;
+            }
+        }
+        output
+    }
+
+    fn naive_restricted_tables(
+        combined: &CombinedKernel,
+        p_log: usize,
+        active: &[bool],
+    ) -> [Vec<SecureField>; 4] {
+        let size = 1usize << (p_log + N_LOCAL_LOG);
+        let mut output: [Vec<SecureField>; 4] =
+            std::array::from_fn(|_| vec![SecureField::zero(); size]);
+        for (coefficient, kernel) in &combined.terms {
+            for (a_index, value) in kernel.table(p_log, active).into_iter().enumerate() {
+                let p = a_index >> A_LOCAL_LOG;
+                let (_, nibble, bit) = a_to_nibble(a_index & ((1 << A_LOCAL_LOG) - 1));
+                output[bit][(p << N_LOCAL_LOG) | nibble] += *coefficient * value;
+            }
+        }
+        output
     }
 
     fn is_dead_local(domain: LayerDomain, local: usize) -> bool {
@@ -2447,6 +2675,107 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn combined_kernel_groups_equal_row_factors_without_changing_the_table() {
+        let p_log = 4;
+        let active = (0..1usize << p_log).map(|p| p % 3 != 1).collect::<Vec<_>>();
+        let common_row = (0..p_log)
+            .map(|i| deterministic_field(i, 0x3900))
+            .collect::<Vec<_>>();
+        let other_row = (0..p_log)
+            .map(|i| deterministic_field(i, 0x3a00))
+            .collect::<Vec<_>>();
+        let point = |row: &[SecureField], local_log: usize, salt: u32| {
+            row.iter()
+                .copied()
+                .chain((0..local_log).map(|i| deterministic_field(i, salt)))
+                .collect::<Vec<_>>()
+        };
+        let combined = CombinedKernel {
+            value: SecureField::zero(),
+            terms: vec![
+                (
+                    deterministic_field(0, 0x3b00),
+                    Kernel::Read {
+                        point: point(&common_row, C_LOCAL_LOG, 0x3c00),
+                        map: WireMap::Parity(0),
+                    },
+                ),
+                (
+                    deterministic_field(1, 0x3b00),
+                    Kernel::Read {
+                        point: point(&common_row, C_LOCAL_LOG, 0x3d00),
+                        map: WireMap::Parity(1),
+                    },
+                ),
+                (
+                    deterministic_field(2, 0x3b00),
+                    Kernel::Read {
+                        point: point(&common_row, A_LOCAL_LOG, 0x3e00),
+                        map: WireMap::ThetaA,
+                    },
+                ),
+                (
+                    deterministic_field(3, 0x3b00),
+                    Kernel::Read {
+                        point: point(&other_row, C_LOCAL_LOG, 0x3f00),
+                        map: WireMap::Parity(2),
+                    },
+                ),
+            ],
+        };
+
+        assert_eq!(
+            combined.table(p_log, &active),
+            naive_combined_table(&combined, p_log, &active)
+        );
+        assert_eq!(
+            restricted_tables(&combined, p_log, &active),
+            naive_restricted_tables(&combined, p_log, &active)
+        );
+
+        for (case, maps) in [
+            [WireMap::Chi(0), WireMap::Chi(1)],
+            [WireMap::ThetaCLeft, WireMap::ThetaCRight],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let source_log = maps[0].source_domain().local_log();
+            let combined = CombinedKernel {
+                value: SecureField::zero(),
+                terms: vec![
+                    (
+                        deterministic_field(3 * case, 0x4100),
+                        Kernel::Read {
+                            point: point(&common_row, source_log, 0x4200 + case as u32),
+                            map: maps[0],
+                        },
+                    ),
+                    (
+                        deterministic_field(3 * case + 1, 0x4100),
+                        Kernel::Read {
+                            point: point(&common_row, source_log, 0x4300 + case as u32),
+                            map: maps[1],
+                        },
+                    ),
+                    (
+                        deterministic_field(3 * case + 2, 0x4100),
+                        Kernel::Read {
+                            point: point(&other_row, source_log, 0x4400 + case as u32),
+                            map: maps[0],
+                        },
+                    ),
+                ],
+            };
+            assert_eq!(
+                combined.table(p_log, &active),
+                naive_combined_table(&combined, p_log, &active),
+                "target domain {case}"
+            );
         }
     }
 
