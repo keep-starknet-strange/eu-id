@@ -138,7 +138,7 @@ events:
 3. Pass the complete release matrix with the new circuit hash.
 4. Pass the exact three-phone Firebase matrix with that hash.
 
-The current candidate has this provenance:
+The reviewed pre-F-2 candidate has this provenance:
 
 - Design: `docs/ts13-keccak-layered-gkr.md`.
 - Soundness-source commit: `2111a1eb`.
@@ -150,6 +150,12 @@ The current candidate has this provenance:
 - Complete Keccak AIR-reference geometry: 1,534,720 cells.
 - Proof body capacity: 1,507,328 bytes.
 - Total envelope: 1,507,374 bytes.
+
+Conditions F-1 through F-3 are complete at soundness-source commit
+`cf8f2cec`. The regenerated circuit hash is
+`c7c99e7b6e7cddbfc27617b2597bea1315ebd39e34ed08c564d67220282af9bc`.
+The shape and 1,507,328-byte proof-body capacity are unchanged. The final
+package and performance evidence are pending.
 
 The current desktop median is 1,784 ms for proving and 80 ms for verification.
 Peak resident memory is 777,682,944 bytes. These values are a throughput

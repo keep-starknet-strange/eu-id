@@ -311,9 +311,10 @@ artifact check, and the diff check passed.
 - [x] Record the quarantined package provenance in mailbox Q-015.
 - [x] Receive A-015 acceptance of the package provenance.
 - [ ] Receive the `A-014-confirmed` Google Cloud login note.
-- [ ] Commit F-1 through F-3 before artifact generation.
-- [ ] Regenerate the source-bound artifact, circuit hash, fixture, AAR, and
-  APKs after the F-2 source change.
+- [x] Commit F-1 through F-3 before artifact generation.
+- [x] Regenerate the source-bound artifact, circuit hash, and fixture after
+  the F-2 source change.
+- [ ] Build the source-bound AAR and APK pair for the final circuit hash.
 - [ ] Rerun all release, ignored, negative, unlinkability, and artifact tests.
 - [ ] Run one exact three-phone acceptance matrix with the final APK pair.
 
