@@ -250,6 +250,7 @@ impl BitMatrix {
         (self.words[index / 64] >> (index % 64)) & 1 != 0
     }
 
+    #[cfg(test)]
     fn set(&mut self, index: usize, value: bool) {
         if value {
             self.words[index / 64] |= 1 << (index % 64);
@@ -385,29 +386,27 @@ impl LayeredWitness {
     }
 
     fn state_bits(p_log: usize, states: &[[u64; 25]]) -> BitMatrix {
+        assert_eq!(states.len(), 1 << p_log);
         let mut bits = BitMatrix::zero(p_log + A_LOCAL_LOG);
-        for (p, state) in states.iter().enumerate() {
-            for lane in 0..25 {
-                let word = state[lane];
-                for z in 0..64 {
-                    bits.set((p << A_LOCAL_LOG) | (lane << 6) | z, (word >> z) & 1 != 0);
-                }
-            }
+        for (row, state) in bits
+            .words
+            .chunks_exact_mut(1 << (A_LOCAL_LOG - 6))
+            .zip(states)
+        {
+            row[..25].copy_from_slice(state);
         }
         bits
     }
 
     fn parity_bits(p_log: usize, parity: &[[u64; 5]]) -> BitMatrix {
+        assert_eq!(parity.len(), 1 << p_log);
         let mut bits = BitMatrix::zero(p_log + C_LOCAL_LOG);
-        for (p, columns) in parity.iter().enumerate() {
-            for x in 0..5 {
-                for z in 0..64 {
-                    bits.set(
-                        (p << C_LOCAL_LOG) | (x << 6) | z,
-                        (columns[x] >> z) & 1 != 0,
-                    );
-                }
-            }
+        for (row, columns) in bits
+            .words
+            .chunks_exact_mut(1 << (C_LOCAL_LOG - 6))
+            .zip(parity)
+        {
+            row[..5].copy_from_slice(columns);
         }
         bits
     }
