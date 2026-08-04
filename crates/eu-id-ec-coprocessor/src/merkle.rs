@@ -64,6 +64,19 @@ impl MerkleCommitment {
         self.root
     }
 
+    /// Number of `Fp` values held in the transposed column copy of the
+    /// committed matrix. This copy lives alongside the caller's row-major
+    /// matrix for the whole life of the commitment, so it counts twice
+    /// towards prover peak memory.
+    pub fn column_values(&self) -> usize {
+        self.columns.iter().map(Vec::len).sum()
+    }
+
+    /// Number of 32-byte digests retained across every tree level.
+    pub fn node_count(&self) -> usize {
+        self.levels.iter().map(Vec::len).sum()
+    }
+
     pub fn open(&self, index: usize) -> Result<ColumnOpening, MerkleError> {
         if index >= self.columns.len() {
             return Err(MerkleError::ColumnOutOfRange);

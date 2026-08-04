@@ -456,6 +456,51 @@ pub enum ImplementedCircuitProofError {
     NonCanonicalBundle,
 }
 
+/// Runtime switch for the prove-side allocation log. Off unless
+/// `EUID_PROVE_PROFILE=1`, so the default prove path pays one env lookup.
+fn prove_profile_enabled() -> bool {
+    std::env::var_os("EUID_PROVE_PROFILE").is_some_and(|value| value == "1")
+}
+
+fn mib(bytes: usize) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+/// Logs the matrix sizes a Ligero commitment keeps alive, so prove-side RAM can
+/// be attributed without an RSS sampler. All three matrices below coexist for
+/// the whole bundle prove: openings are drawn only after the last sumcheck.
+fn log_ligero_matrix_footprint(
+    label: &str,
+    witness_values: usize,
+    commitment: &crate::ligero::LigeroCommitment,
+) {
+    if !prove_profile_enabled() {
+        return;
+    }
+    let footprint = commitment.matrix_footprint();
+    eprintln!(
+        "[euid-prove-profile] ligero-matrix {label}: rows={} row_len={} codeword_len={} \
+         elem={}B witness={} values ({:.2} MiB) encoded={}x{} values ({:.2} MiB) \
+         coefficients={} values ({:.2} MiB) merkle_columns={} values ({:.2} MiB) \
+         merkle_nodes={:.2} MiB total={:.2} MiB",
+        footprint.rows,
+        footprint.row_len,
+        footprint.codeword_len,
+        footprint.element_bytes,
+        witness_values,
+        mib(witness_values * footprint.element_bytes),
+        footprint.rows,
+        footprint.codeword_len,
+        mib(footprint.encoded_bytes()),
+        footprint.coefficient_values,
+        mib(footprint.coefficient_bytes()),
+        footprint.merkle_column_values,
+        mib(footprint.merkle_column_bytes()),
+        mib(footprint.merkle_node_bytes),
+        mib(footprint.total_bytes()),
+    );
+}
+
 pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
     let _r = parse_nonzero_scalar(input.r)?;
     let s = parse_nonzero_scalar(input.s)?;
@@ -1041,6 +1086,7 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
             .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_row_encode = commit_profile.row_encode;
     profile.ligero_merkle_build = commit_profile.merkle_build;
+    log_ligero_matrix_footprint("group_a", committed_values.len(), &commitment);
     profile.row_inventory = mdoc_p4b_row_inventory(
         params,
         committed_values.len(),
@@ -1066,6 +1112,16 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
             .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_row_encode += commit_profile_b.row_encode;
     profile.ligero_merkle_build += commit_profile_b.merkle_build;
+    log_ligero_matrix_footprint("group_b", committed_values_b.len(), &commitment_b);
+    if prove_profile_enabled() {
+        let resident = commitment.matrix_footprint().total_bytes()
+            + commitment_b.matrix_footprint().total_bytes();
+        eprintln!(
+            "[euid-prove-profile] ligero-matrix resident (group_a + group_b, both live until \
+             openings): {:.2} MiB",
+            mib(resident),
+        );
+    }
     let root_b = commitment_b.root();
     let full_root = mdoc_p4b_full_root(root, root_b);
 
