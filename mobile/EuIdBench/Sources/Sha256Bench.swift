@@ -2,13 +2,10 @@ import SwiftUI
 import CryptoKit
 import Foundation
 
-// SHA-256 benchmark: prove → verify the standalone SHA-256 STARK on-device for
-// four message sizes, cross-checking the prover's digest against CryptoKit.
-// All shared run/display/logging lives in BenchKit; this file is just the case
-// list + the per-case body.
+// Proves and verifies the standalone SHA-256 statement on the device.
+// CryptoKit independently calculates and checks the digest.
 enum Sha256Bench {
-    // The four sizes mirror the laptop snapshot: the FIPS "abc" vector plus
-    // 55 B / 512 B / 4 KiB filled with 0xAB.
+    // Uses the FIPS `abc` vector and three messages that contain `0xAB`.
     static let messages: [(label: String, bytes: [UInt8])] = [
         ("abc", Array("abc".utf8)),
         ("55B", Array(repeating: 0xAB, count: 55)),
@@ -24,7 +21,7 @@ enum Sha256Bench {
         }
     }
 
-    // Call the Rust C ABI and cross-check the digest with CryptoKit.
+    // Calls the Rust C ABI and checks the digest with CryptoKit.
     private static func bench(label: String, message: [UInt8]) -> BenchResult {
         let raw: EuIdBench = message.withUnsafeBufferPointer { buf in
             eu_id_bench_sha256(buf.baseAddress, buf.count, 1)
@@ -35,7 +32,7 @@ enum Sha256Bench {
         let expected = Array(SHA256.hash(data: Data(message)))
         let matches = digestBytes == expected
         let peakMiB = Double(raw.peak_bytes) / (1024 * 1024)
-        let ok = raw.ok == 1
+        let ok = raw.ok == 1 && matches
 
         logBenchResult(
             label: label, ok: ok, proveMs: raw.prove_ms, verifyMs: raw.verify_ms, peakMiB: peakMiB,
@@ -65,8 +62,8 @@ struct Sha256BenchView: View {
     var body: some View {
         BenchScreen(
             navigationTitle: "SHA-256 Bench",
-            blurb: "Runs the standalone SHA-256 STARK prover on-device. Each run does "
-                + "prove → verify and measures peak memory inside Rust.",
+            blurb: "Runs the standalone SHA-256 prover on the device. "
+                + "Each run proves and verifies the statement. Rust measures peak memory.",
             cases: Sha256Bench.cases
         )
     }

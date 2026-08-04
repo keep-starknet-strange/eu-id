@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# One-time setup: point git at the version-controlled hooks in .githooks/ so
-# the pre-commit lint gate runs before every commit.
+# Configure Git to use the version-controlled hooks in `.githooks`.
+# The pre-commit hook runs the lint check before each commit.
 #
 set -euo pipefail
 

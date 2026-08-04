@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Library AAR: no components, no permissions. The namespace is set in
-     build.gradle.kts (AGP 8+). -->
+<!-- This library AAR declares no components or permissions.
+     The build.gradle.kts file defines the namespace. -->
 <manifest />

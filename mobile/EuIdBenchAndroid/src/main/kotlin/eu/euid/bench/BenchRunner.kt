@@ -11,54 +11,19 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.util.zip.ZipFile
 
-internal enum class P256Variant(
-    val resultName: String,
-    val libraryName: String,
-    val manifestSlot: String,
-    val manifestAssetName: String,
-) {
-    RANGE16_BASELINE(
-        "A_range16_baseline",
-        "euid_zk_sdk_p256_range16",
-        "p256-range16",
-        "p256_range16_build_manifest.json",
-    ),
-    RANGE8_CANDIDATE(
-        "B_range8_candidate",
-        "euid_zk_sdk_p256_range8",
-        "p256-range8",
-        "p256_range8_build_manifest.json",
-    );
-
-    val fileName: String
-        get() = "lib$libraryName.so"
-}
-
+internal const val PRODUCT_LIBRARY_NAME = "euid_zk_sdk"
+internal const val PRODUCT_LIBRARY_FILE = "libeuid_zk_sdk.so"
+internal const val PRODUCT_LIBRARY_SLOT = "sdk-product"
+internal const val PRODUCT_MANIFEST_ASSET = "sdk_product_build_manifest.json"
+internal const val PRODUCT_STATEMENT = "sdk_identity_product"
+internal const val REQUIRED_CARGO_NDK_VERSION = "4.1.2"
 private const val MANUAL_SCENARIO = 0
-private const val SDK_IDENTITY_STATEMENT = "sdk_identity_v6_envelope"
-private const val TS13_NO_REVOCATION_STATEMENT = "ts13_n1_age_over_18_no_revocation"
-private const val TS13_REVOCATION_STATEMENT = "ts13_n1_age_over_18_revocation"
-private val GAME_LOOP_VARIANTS = listOf(
-    P256Variant.RANGE8_CANDIDATE,
-    P256Variant.RANGE16_BASELINE,
-    P256Variant.RANGE16_BASELINE,
-    P256Variant.RANGE8_CANDIDATE,
-    P256Variant.RANGE16_BASELINE,
-    P256Variant.RANGE8_CANDIDATE,
-    P256Variant.RANGE8_CANDIDATE,
-    P256Variant.RANGE16_BASELINE,
-)
-
-internal fun p256VariantForScenario(scenario: Int): P256Variant =
-    if (scenario == MANUAL_SCENARIO) {
-        P256Variant.RANGE16_BASELINE
-    } else {
-        requireNotNull(GAME_LOOP_VARIANTS.getOrNull(scenario - 1)) {
-            "P-256 Game Loop scenario must be in 1..${GAME_LOOP_VARIANTS.size}, got $scenario"
-        }
-    }
+private const val LAST_GAME_LOOP_SCENARIO = 8
 
 internal fun requireAllBigForGameLoop(scenario: Int, allPerformanceCores: Boolean) {
+    require(scenario in MANUAL_SCENARIO..LAST_GAME_LOOP_SCENARIO) {
+        "P-256 benchmark scenario must be in 0..$LAST_GAME_LOOP_SCENARIO, got $scenario"
+    }
     require(scenario == MANUAL_SCENARIO || allPerformanceCores) {
         "P-256 Game Loop scenarios must use all detected performance cores"
     }
@@ -73,23 +38,11 @@ internal data class BenchmarkProfile(
 
 internal fun benchmarkProfile(statement: String): BenchmarkProfile =
     when (statement) {
-        SDK_IDENTITY_STATEMENT -> BenchmarkProfile(
-            apiEntrypoint = "proveIdentity",
-            proofScope = "full_mdoc_identity_issuer_es256_device_es256_age_nationality",
-            proofEncoding = "v6_bincode_zstd_envelope",
-            revocation = false,
-        )
-        TS13_NO_REVOCATION_STATEMENT -> BenchmarkProfile(
-            apiEntrypoint = "native_ts13_circuit_core",
-            proofScope = "mdoc_issuer_es256_device_es256_age_over_18_equality",
-            proofEncoding = "raw_bincode",
-            revocation = false,
-        )
-        TS13_REVOCATION_STATEMENT -> BenchmarkProfile(
-            apiEntrypoint = "native_ts13_circuit_core",
+        PRODUCT_STATEMENT -> BenchmarkProfile(
+            apiEntrypoint = "proveIdentity/verifyIdentity",
             proofScope =
-                "mdoc_issuer_es256_device_es256_age_over_18_equality_sorted_pair_revocation",
-            proofEncoding = "raw_bincode",
+                "mdoc_issuer_es256_device_es256_age_nationality_validity_request_context_revocation",
+            proofEncoding = "v8_bincode_zstd_envelope",
             revocation = true,
         )
         else -> error("Unknown native benchmark statement: $statement")
@@ -101,23 +54,28 @@ object BenchRunner {
 
     fun runSuite(context: Context, allPerformanceCores: Boolean, scenario: Int): String {
         requireAllBigForGameLoop(scenario, allPerformanceCores)
-        val variant = p256VariantForScenario(scenario)
-        System.loadLibrary(variant.libraryName)
+        System.loadLibrary(PRODUCT_LIBRARY_NAME)
         val thermalBefore = thermalTemperatures()
         val thermalStatusBefore = thermalStatus(context)
         val benchmark = JSONObject(identity(allPerformanceCores))
         val statement = benchmark.getString("statement")
         val benchmarkProfile = benchmarkProfile(statement)
         val nativeBuild = JSONObject(
-            context.assets.open(variant.manifestAssetName).bufferedReader().use { it.readText() },
+            context.assets.open(PRODUCT_MANIFEST_ASSET).bufferedReader().use { it.readText() },
         )
-        require(nativeBuild.getString("library_slot") == variant.manifestSlot) {
-            "Native build manifest slot does not match loaded library ${variant.libraryName}"
+        require(nativeBuild.getString("library_slot") == PRODUCT_LIBRARY_SLOT) {
+            "Native build manifest slot does not match $PRODUCT_LIBRARY_NAME"
         }
         require(nativeBuild.getString("statement") == statement) {
             "Native build manifest statement does not match loaded library result"
         }
-        require(benchmark.getString("library_slot") == variant.manifestSlot) {
+        require(nativeBuild.getBoolean("revocation")) {
+            "Native build manifest must require revocation"
+        }
+        require(nativeBuild.getString("cargo_ndk") == REQUIRED_CARGO_NDK_VERSION) {
+            "Native build manifest reports the wrong cargo-ndk version"
+        }
+        require(benchmark.getString("library_slot") == PRODUCT_LIBRARY_SLOT) {
             "Loaded native library reports the wrong build slot"
         }
         require(benchmark.getString("build_id") == nativeBuild.getString("build_id")) {
@@ -147,9 +105,9 @@ object BenchRunner {
             .put("native_build", nativeBuild)
             .put("apk_sha256", apkSha256(context))
             .put("variant", statement)
-            .put("library_slot", variant.resultName)
-            .put("selected_so", variant.fileName)
-            .put("selected_so_sha256", selectedSoSha256(context, variant.fileName))
+            .put("library_slot", PRODUCT_LIBRARY_SLOT)
+            .put("selected_so", PRODUCT_LIBRARY_FILE)
+            .put("selected_so_sha256", selectedSoSha256(context, PRODUCT_LIBRARY_FILE))
             .put("thermal_before_c", thermalBefore)
             .put("thermal_after_c", thermalAfter)
             .put("thermal_status_before", thermalStatusBefore)

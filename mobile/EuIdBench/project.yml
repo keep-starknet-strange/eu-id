@@ -1,11 +1,11 @@
-# XcodeGen spec for the eu-id mobile benchmark harness.
-# Regenerate the project with:  cd mobile/EuIdBench && xcodegen generate
+# XcodeGen specification for the EU ID mobile benchmark harness.
+# Use this command to generate the project:
+# cd mobile/EuIdBench && xcodegen generate
 #
-# The app statically links EuId.xcframework (built by
-# crates/eu-id-ffi/build-xcframework.sh) and calls the prover C ABI via a
-# bridging header — one tab per workload: eu_id_bench_identity (the combined
-# proof, the default tab), eu_id_bench_sha256, and eu_id_bench_p256 — see
-# Sources/.
+# The application links `EuId.xcframework` as a static library.
+# `crates/eu-id-ffi/build-xcframework.sh` creates the framework.
+# A bridge header calls the prover C ABI.
+# The application has one tab for each benchmark workload.
 name: EuIdBench
 options:
   bundleIdPrefix: co.starkware.euid
@@ -20,28 +20,29 @@ targets:
     sources:
       - path: Sources
     dependencies:
-      # Static-lib xcframework: the .a is linked into the app binary.
+      # Link the XCFramework static library into the application binary.
       - framework: ../../crates/eu-id-ffi/EuId.xcframework
+        embed: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: co.starkware.euid.bench
-        # Automatic signing. Set your Apple Developer Team ID via the
-        # DEVELOPMENT_TEAM env var before `xcodegen generate`; `xcodebuild
-        # -allowProvisioningUpdates` then registers the device + mints a
-        # development profile on first device build.
+        # Use automatic code signing.
+        # Set `DEVELOPMENT_TEAM` before you run `xcodegen generate`.
+        # The `-allowProvisioningUpdates` option registers the device.
+        # It also creates a development profile for the first device build.
         DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: "0.1.0"
         CURRENT_PROJECT_VERSION: "1"
-        # Bridging header pulls in the C ABI declared by eu_id_ffi.h.
+        # The bridge header includes the C ABI from `eu_id_ffi.h`.
         SWIFT_OBJC_BRIDGING_HEADER: Sources/EuIdBench-Bridging-Header.h
-        # So the bridging header can find eu_id_ffi.h.
+        # Add the path for `eu_id_ffi.h`.
         HEADER_SEARCH_PATHS:
           - ../../crates/eu-id-ffi/include
-        # Rust staticlib needs the C++ runtime + standard system libs.
+        # The Rust static library needs the C++ runtime and system libraries.
         OTHER_LDFLAGS:
           - -lc++
-        # Phone-class compute can run a while; keep the app foregrounded.
+        # Keep the application in the foreground during a long phone benchmark.
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES

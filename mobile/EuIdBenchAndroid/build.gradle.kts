@@ -1,10 +1,13 @@
 plugins {
     id("com.android.application") version "9.2.1"
-    id("com.google.gms.google-services") version "4.5.0"
+}
+
+abstract class GeneratedDirectorySync : Sync() {
+    @get:OutputDirectory
+    abstract val outputDirectory: DirectoryProperty
 }
 
 dependencies {
-    implementation(platform("com.google.firebase:firebase-bom:34.16.0"))
     testImplementation("junit:junit:4.13.2")
 }
 
@@ -12,54 +15,34 @@ val workspaceRoot = file("$projectDir/../..")
 val jniLibsOut = layout.buildDirectory.dir("generated/jniLibs")
 val benchAssetsOut = layout.buildDirectory.dir("generated/benchAssets")
 val ndkVersionInstalled = "27.1.12297006"
-// Validate at resolution time, NOT in the Sync task's doFirst: a Sync task
-// whose source files are missing runs with an empty source set, skips doFirst
-// checks, and deletes everything already staged in the destination — a green
-// build that ships an APK with no native libraries.
+// Validate each input when Gradle resolves it.
+// A `Sync` task skips `doFirst` when its source set is empty.
+// That task can remove the staged native libraries and still succeed.
 fun requireBenchInput(property: String, path: File, description: String): File {
     require(path.isFile) {
         "$property must point to $description; set -P$property=/absolute/path"
     }
     return path
 }
-val p256Range16So = providers.gradleProperty("p256Range16So")
-    .orElse("$projectDir/prebuilt/p256-range16/arm64-v8a/libeuid_zk_sdk.so")
+val productSo = providers.gradleProperty("productSo")
+    .orElse("$projectDir/prebuilt/sdk-product/arm64-v8a/libeuid_zk_sdk.so")
     .map { path ->
         requireBenchInput(
-            "p256Range16So",
+            "productSo",
             file(path),
-            "the fat-LTO revocation-enabled arm64-v8a libeuid_zk_sdk.so",
+            "the fat-LTO product arm64-v8a libeuid_zk_sdk.so",
         )
     }
-val p256Range8So = providers.gradleProperty("p256Range8So")
-    .orElse("$projectDir/prebuilt/p256-range8/arm64-v8a/libeuid_zk_sdk.so")
+val productManifest = providers.gradleProperty("productManifest")
+    .orElse("$projectDir/prebuilt/sdk-product/build-manifest.json")
     .map { path ->
         requireBenchInput(
-            "p256Range8So",
+            "productManifest",
             file(path),
-            "the fat-LTO revocation-disabled arm64-v8a libeuid_zk_sdk.so",
+            "the product native build manifest",
         )
     }
-val p256Range16Manifest = providers.gradleProperty("p256Range16Manifest")
-    .orElse("$projectDir/prebuilt/p256-range16/build-manifest.json")
-    .map { path ->
-        requireBenchInput(
-            "p256Range16Manifest",
-            file(path),
-            "the revocation-enabled native build manifest",
-        )
-    }
-val p256Range8Manifest = providers.gradleProperty("p256Range8Manifest")
-    .orElse("$projectDir/prebuilt/p256-range8/build-manifest.json")
-    .map { path ->
-        requireBenchInput(
-            "p256Range8Manifest",
-            file(path),
-            "the revocation-disabled native build manifest",
-        )
-    }
-val p256Range16PackagedName = "libeuid_zk_sdk_p256_range16.so"
-val p256Range8PackagedName = "libeuid_zk_sdk_p256_range8.so"
+val productPackagedName = "libeuid_zk_sdk.so"
 val p256BigCores = providers.gradleProperty("p256BigCores")
     .orElse("true")
     .map { value ->
@@ -111,55 +94,57 @@ android {
         buildConfig = true
     }
 
-    sourceSets["main"].jniLibs.setSrcDirs(listOf(jniLibsOut))
-    sourceSets["main"].assets.srcDir(benchAssetsOut.get().asFile)
+    sourceSets.getByName("main").apply {
+        jniLibs.directories.clear()
+        assets.directories.clear()
+    }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Benchmark-only APK: sign the optimized build with the standard
-            // debug key so it can be installed locally and uploaded to Test Lab.
+            // Use the standard debug key for this benchmark-only APK.
+            // This permits local installation and Test Lab upload.
             signingConfig = signingConfigs.getByName("debug")
         }
     }
 }
 
-val stageP256BenchLibraries by tasks.registering(Sync::class) {
+val stageProductLibrary by tasks.registering(GeneratedDirectorySync::class) {
     group = "rust"
-    description = "Stage the prebuilt P-256 Range16 and Range8 JNI libraries into one APK."
-    inputs.file(p256Range16So)
-        .withPropertyName("p256Range16So")
+    description = "Stage the product P-256 JNI library into the benchmark APK."
+    inputs.file(productSo)
+        .withPropertyName("productSo")
         .withPathSensitivity(PathSensitivity.NONE)
-    inputs.file(p256Range8So)
-        .withPropertyName("p256Range8So")
-        .withPathSensitivity(PathSensitivity.NONE)
-    from(p256Range16So) {
-        rename { p256Range16PackagedName }
+    from(productSo) {
+        rename { productPackagedName }
     }
-    from(p256Range8So) {
-        rename { p256Range8PackagedName }
-    }
-    into(jniLibsOut.map { it.dir("arm64-v8a") })
+    outputDirectory.set(jniLibsOut)
+    into(outputDirectory.dir("arm64-v8a"))
 }
 
-val stageP256BenchManifests by tasks.registering(Sync::class) {
+val stageProductManifest by tasks.registering(GeneratedDirectorySync::class) {
     group = "rust"
-    description = "Package the exact native build provenance for both benchmark libraries."
-    inputs.file(p256Range16Manifest)
-        .withPropertyName("p256Range16Manifest")
+    description = "Package the native product build provenance."
+    inputs.file(productManifest)
+        .withPropertyName("productManifest")
         .withPathSensitivity(PathSensitivity.NONE)
-    inputs.file(p256Range8Manifest)
-        .withPropertyName("p256Range8Manifest")
-        .withPathSensitivity(PathSensitivity.NONE)
-    from(p256Range16Manifest) {
-        rename { "p256_range16_build_manifest.json" }
+    from(productManifest) {
+        rename { "sdk_product_build_manifest.json" }
     }
-    from(p256Range8Manifest) {
-        rename { "p256_range8_build_manifest.json" }
-    }
-    into(benchAssetsOut)
+    outputDirectory.set(benchAssetsOut)
+    into(outputDirectory)
 }
 
-tasks.named("preBuild") {
-    dependsOn(stageP256BenchLibraries, stageP256BenchManifests)
+androidComponents.onVariants { variant ->
+    variant.sources.jniLibs?.addGeneratedSourceDirectory(stageProductLibrary) {
+        it.outputDirectory
+    }
+    variant.sources.assets?.addGeneratedSourceDirectory(stageProductManifest) {
+        it.outputDirectory
+    }
+}
+
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
