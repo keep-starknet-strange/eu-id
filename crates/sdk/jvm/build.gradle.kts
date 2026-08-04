@@ -131,8 +131,7 @@ val buildNativeTasks = nativeTargets.map { t ->
             val targetName = t.rustTarget.uppercase().replace('-', '_')
             environment(
                 "CARGO_TARGET_${targetName}_RUSTFLAGS",
-                "-C link-arg=-Wl,-no_uuid " +
-                    "-C link-arg=-Wl,-install_name,@rpath/${t.libFile}",
+                "-C link-arg=-Wl,-install_name,@rpath/${t.libFile}",
             )
         }
         commandLine(
@@ -195,6 +194,7 @@ dependencies {
     // Export the JNA-based UniFFI runtime to consumers.
     api("net.java.dev.jna:jna:5.19.1")
     implementation(kotlin("stdlib"))
+    testImplementation(kotlin("test"))
 }
 
 tasks.withType<AbstractArchiveTask>().configureEach {
