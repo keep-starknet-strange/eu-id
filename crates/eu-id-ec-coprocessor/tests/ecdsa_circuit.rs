@@ -12,7 +12,8 @@ use eu_id_ec_coprocessor::ecdsa::{
     prove_implemented_circuit_proofs, prove_mdoc_p4b_circuit_bundle,
     verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
     verify_implemented_circuit_proofs, verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle,
-    verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot,
+    verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundle,
+    ImplementedCircuitBundleEntry, LayoutSlot,
     MdocP4bMacKeyShares, Witness, WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
     MDOC_P4B_MAC_HALF_COUNT, N_LIMBS,
 };
@@ -1434,4 +1435,227 @@ fn c14_transcript_without_statement_bundle_entry(
     let proof = prove_circuit(&circuit, &layers, &pads, root, &mut channel).unwrap();
 
     ImplementedCircuitBundleEntry { proof }
+}
+
+/// One row of the P4b bundle byte accounting, named after the bundle field it
+/// covers.
+struct BundleSection {
+    label: String,
+    bytes: usize,
+}
+
+fn serialized_len<T: serde::Serialize>(value: &T) -> usize {
+    bincode::serialized_size(value).expect("bundle field serializes") as usize
+}
+
+/// Attributes every serialized byte of an `ImplementedCircuitBundle` to the
+/// struct field it comes from.
+///
+/// bincode concatenates struct fields with no framing of its own, so per-field
+/// lengths add up to the whole serialized bundle. The residual returned
+/// alongside the sections is therefore only the length prefix of each `Vec`
+/// that got split into sub-field rows.
+fn bundle_byte_breakdown(
+    bundle: &ImplementedCircuitBundle,
+    entry_labels: &[String],
+) -> (Vec<BundleSection>, usize, usize) {
+    let mut sections = Vec::new();
+    let mut push = |label: String, bytes: usize| sections.push(BundleSection { label, bytes });
+
+    for (index, entry) in bundle.entries.iter().enumerate() {
+        let rounds = entry
+            .proof
+            .layers
+            .iter()
+            .map(|layer| layer.rounds.len())
+            .sum::<usize>();
+        let name = entry_labels
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or("unlabelled");
+        push(
+            format!(
+                "entries[{index:02}].proof sumcheck transcript — {name} ({} layers, {rounds} rounds)",
+                entry.proof.layers.len(),
+            ),
+            serialized_len(&entry.proof),
+        );
+    }
+
+    for (field, openings) in [
+        ("proximity_openings", &bundle.proximity_openings),
+        ("proximity_openings_b", &bundle.proximity_openings_b),
+    ] {
+        if openings.is_empty() {
+            continue;
+        }
+        let siblings = openings.iter().map(|o| o.path.len()).sum::<usize>();
+        push(
+            format!("{field}[*].column ligero openings ({})", openings.len()),
+            openings.iter().map(|o| serialized_len(&o.column)).sum(),
+        );
+        push(
+            format!("{field}[*].path merkle auth paths ({siblings} siblings)"),
+            openings.iter().map(|o| serialized_len(&o.path)).sum(),
+        );
+        push(
+            format!("{field}[*].index"),
+            openings.iter().map(|o| serialized_len(&o.index)).sum(),
+        );
+    }
+
+    push(
+        "proximity_claim.combined_row".to_string(),
+        serialized_len(&bundle.proximity_claim.combined_row),
+    );
+    push(
+        "claim_batch.coefficients".to_string(),
+        serialized_len(&bundle.claim_batch.coefficients),
+    );
+    push(
+        "claim_batch.blind_claim".to_string(),
+        serialized_len(&bundle.claim_batch.blind_claim),
+    );
+    push(
+        "claim_blind_check.combined_row".to_string(),
+        serialized_len(&bundle.claim_blind_check.combined_row),
+    );
+    push(
+        "quadratic_batch.quotient".to_string(),
+        serialized_len(&bundle.quadratic_batch.quotient),
+    );
+    push(
+        format!("mac_tags ({} gf128 tags)", bundle.mac_tags.len()),
+        serialized_len(&bundle.mac_tags),
+    );
+    push("root".to_string(), serialized_len(&bundle.root));
+    push("root_b".to_string(), serialized_len(&bundle.root_b));
+    push("params".to_string(), serialized_len(&bundle.params));
+
+    let total = serialized_len(bundle);
+    let accounted = sections.iter().map(|section| section.bytes).sum::<usize>();
+    let framing = total - accounted;
+    sections.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    (sections, total, framing)
+}
+
+fn mdoc_p4b_entry_labels(entries: usize) -> Vec<String> {
+    let families = implemented_circuit_family_labels().unwrap();
+    let roles = ["issuer", "device", "revocation"];
+    let mut labels = roles
+        .iter()
+        .flat_map(|role| {
+            families
+                .iter()
+                .map(move |family| format!("{role}/{}", String::from_utf8_lossy(family)))
+        })
+        .collect::<Vec<_>>();
+    labels.push("mac_batch".to_string());
+    assert_eq!(
+        labels.len(),
+        entries,
+        "P4b proves the implemented circuit families once per ECDSA role plus one MAC batch",
+    );
+    labels
+}
+
+/// Byte accounting of the P4b coprocessor bundle the mdoc proof embeds, the
+/// bundle `verify_mdoc_p4b_circuit_bundle_from_stwo` consumes.
+///
+/// The hard gate is sum-exactness: every serialized byte lands in a named
+/// section or in the printed framing residual.
+#[test]
+fn mdoc_p4b_bundle_byte_breakdown_accounts_every_serialized_byte() {
+    let issuer = signed_input();
+    let device = alternate_signed_input();
+    let revocation = revocation_signed_input();
+    let issuer_witness = generate_witness(&issuer).unwrap();
+    let device_witness = generate_witness(&device).unwrap();
+    let revocation_witness = generate_witness(&revocation).unwrap();
+    let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+    let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+    let revocation_public = EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
+    let mac_key_shares = test_mac_key_shares();
+
+    let bundle = prove_mdoc_p4b_circuit_bundle(
+        &issuer,
+        &issuer_public,
+        &issuer_witness,
+        &device,
+        &device_public,
+        &device_witness,
+        (&revocation, &revocation_public, &revocation_witness),
+        &mac_key_shares,
+        TEST_SEED,
+    )
+    .expect("demo P4b bundle proves");
+
+    let labels = mdoc_p4b_entry_labels(bundle.entries.len());
+    let (sections, total, framing) = bundle_byte_breakdown(&bundle, &labels);
+
+    let percent = |bytes: usize| 100.0 * bytes as f64 / total as f64;
+    println!("P4b coprocessor bundle byte breakdown");
+    println!(
+        "serialized bundle: {total} B ({:.2} KiB), {} instances, {} ligero openings per group, \
+         row_len {} codeword_len {}",
+        total as f64 / 1024.0,
+        bundle.entries.len(),
+        bundle.proximity_openings.len(),
+        bundle.params.row_len,
+        bundle.params.codeword_len,
+    );
+    println!("{:>12}  {:>6}  section", "bytes", "%");
+    for section in &sections {
+        println!(
+            "{:>12}  {:>5.2}%  {}",
+            section.bytes,
+            percent(section.bytes),
+            section.label,
+        );
+    }
+    println!(
+        "{:>12}  {:>5.2}%  framing/other (vec length prefixes)",
+        framing,
+        percent(framing),
+    );
+
+    let accounted = sections.iter().map(|section| section.bytes).sum::<usize>();
+    assert_eq!(
+        accounted + framing,
+        total,
+        "named sections plus framing must account for every serialized bundle byte",
+    );
+    assert_eq!(
+        total,
+        bincode::serialize(&bundle).unwrap().len(),
+        "serialized_size must agree with the bytes the proof actually carries",
+    );
+    // Independent completeness check on the taxonomy: the eleven top-level
+    // fields already cover the whole bundle, so no field was left out above.
+    let top_level = serialized_len(&bundle.params)
+        + serialized_len(&bundle.root)
+        + serialized_len(&bundle.root_b)
+        + serialized_len(&bundle.proximity_openings)
+        + serialized_len(&bundle.proximity_openings_b)
+        + serialized_len(&bundle.proximity_claim)
+        + serialized_len(&bundle.claim_batch)
+        + serialized_len(&bundle.claim_blind_check)
+        + serialized_len(&bundle.quadratic_batch)
+        + serialized_len(&bundle.mac_tags)
+        + serialized_len(&bundle.entries);
+    assert_eq!(
+        top_level, total,
+        "every bundle field must be represented in the breakdown",
+    );
+    // The residual is exactly the length prefix of the three Vec fields that
+    // were split into sub-field rows: entries, and both opening groups.
+    assert_eq!(
+        framing, 24,
+        "framing residual must stay the three split Vec length prefixes",
+    );
 }

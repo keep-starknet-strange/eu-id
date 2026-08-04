@@ -52,6 +52,46 @@ pub struct LigeroCommitProfile {
     pub rows: usize,
 }
 
+/// Prover-side allocation footprint of one committed Ligero matrix.
+///
+/// Every count is derived from the live vector lengths, so the totals answer
+/// "how much does holding this commitment cost" without sampling RSS. A
+/// commitment retains three matrices of comparable magnitude — the encoded
+/// codeword rows, their universal-basis coefficients, and the transposed
+/// column copy inside the Merkle commitment — plus the digest levels.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LigeroMatrixFootprint {
+    pub rows: usize,
+    pub row_len: usize,
+    pub codeword_len: usize,
+    pub element_bytes: usize,
+    pub encoded_values: usize,
+    pub coefficient_values: usize,
+    pub merkle_column_values: usize,
+    pub merkle_node_bytes: usize,
+}
+
+impl LigeroMatrixFootprint {
+    pub fn encoded_bytes(&self) -> usize {
+        self.encoded_values * self.element_bytes
+    }
+
+    pub fn coefficient_bytes(&self) -> usize {
+        self.coefficient_values * self.element_bytes
+    }
+
+    pub fn merkle_column_bytes(&self) -> usize {
+        self.merkle_column_values * self.element_bytes
+    }
+
+    pub fn total_bytes(&self) -> usize {
+        self.encoded_bytes()
+            + self.coefficient_bytes()
+            + self.merkle_column_bytes()
+            + self.merkle_node_bytes
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LigeroProximityClaim {
     pub combined_row: Vec<Fp>,
@@ -425,6 +465,20 @@ impl LigeroCommitment {
 
     pub fn params(&self) -> LigeroParams {
         self.params
+    }
+
+    /// Live allocation sizes of the matrices this commitment holds.
+    pub fn matrix_footprint(&self) -> LigeroMatrixFootprint {
+        LigeroMatrixFootprint {
+            rows: self.encoded_rows.len(),
+            row_len: self.params.row_len,
+            codeword_len: self.params.codeword_len,
+            element_bytes: size_of::<Fp>(),
+            encoded_values: self.encoded_rows.iter().map(Vec::len).sum(),
+            coefficient_values: self.coefficient_rows.iter().map(Vec::len).sum(),
+            merkle_column_values: self.merkle.column_values(),
+            merkle_node_bytes: self.merkle.node_count() * 32,
+        }
     }
 
     pub fn quadratic_batch(&self, challenges: &[Fp]) -> Result<LigeroQuadraticBatch, LigeroError> {
