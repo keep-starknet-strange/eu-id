@@ -34,9 +34,10 @@ pub fn prove_mdoc(
     let revocation = &request.revocation;
     mdoc::validate_product_mdoc_request(request).map_err(Error::Mdoc)?;
     if document.len() > mdoc::PRODUCT_MDOC_CBOR_MAX_BYTES {
-        return Err(Error::Mdoc(mdoc::MdocError::DocumentTooLarge {
-            len: document.len(),
-            max: mdoc::PRODUCT_MDOC_CBOR_MAX_BYTES,
+        return Err(Error::Mdoc(mdoc::MdocError::InputTooLarge {
+            input: "document",
+            actual: document.len(),
+            maximum: mdoc::PRODUCT_MDOC_CBOR_MAX_BYTES,
         }));
     }
     mdoc::validate_product_mdoc_cbor_structure(document).map_err(Error::Mdoc)?;

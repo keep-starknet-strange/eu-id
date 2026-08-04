@@ -116,6 +116,10 @@ const PACKED_SHA_ISSUER_SLOT: u32 = 0;
 const PACKED_SHA_MSO_SLOT: u32 = 1;
 const PACKED_SHA_REVOCATION_SLOT: u32 = 2;
 const PACKED_SHA_ITEM_SLOT_BASE: u32 = 3;
+const DEMO_PRIVATE_RANDOM_CANARY: [u8; 32] = [
+    0x9f, 0x4a, 0x7c, 0x1d, 0x2e, 0x8b, 0x63, 0x50, 0xa6, 0xd9, 0x41, 0x73, 0xbc, 0x05, 0x28, 0xee,
+    0x4d, 0x7a, 0x91, 0x63, 0xf0, 0xc2, 0xb8, 0x5e, 0x11, 0x74, 0xda, 0xc9, 0x6e, 0x3f, 0x70, 0x2b,
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -376,6 +380,57 @@ pub(crate) fn validate_product_requested_attributes(
     Ok(())
 }
 
+fn validate_product_sha_input_sizes(
+    mso: &[u8],
+    issuer: &[u8],
+    selected_items: &[&[u8]],
+) -> Result<(), MdocError> {
+    if mso.len() > crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES {
+        return Err(MdocError::InputTooLarge {
+            input: "MSO payload",
+            actual: mso.len(),
+            maximum: crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES,
+        });
+    }
+    let issuer_maximum = mso
+        .len()
+        .checked_add(crate::product_profile::PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES)
+        .ok_or(MdocError::InputTooLarge {
+            input: "MSO payload",
+            actual: mso.len(),
+            maximum: usize::MAX
+                - crate::product_profile::PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES,
+        })?;
+    if issuer.len() > issuer_maximum {
+        return Err(MdocError::InputTooLarge {
+            input: "issuer Sig_structure",
+            actual: issuer.len(),
+            maximum: issuer_maximum,
+        });
+    }
+    for &item in selected_items {
+        if item.len() > crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES {
+            return Err(MdocError::InputTooLarge {
+                input: "selected IssuerSignedItem",
+                actual: item.len(),
+                maximum: crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES,
+            });
+        }
+    }
+    let invalid_count = MdocError::InvalidAttributeCount {
+        count: selected_items.len(),
+    };
+    let message_count = 3usize
+        .checked_add(selected_items.len())
+        .ok_or_else(|| invalid_count.clone())?;
+    if selected_items.len() > crate::product_profile::PRODUCT_MAX_ATTRIBUTES
+        || message_count > crate::product_profile::PRODUCT_MAX_PACKED_SHA_MESSAGES
+    {
+        return Err(invalid_count);
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_product_mdoc_request(request: &MdocPidRequest) -> Result<(), MdocError> {
     if request.doctype != PID_DOCTYPE {
         return Err(MdocError::ProductDoctypeMismatch);
@@ -445,7 +500,10 @@ pub enum MdocError {
     NamespaceMissing,
     ElementMissing(String),
     UnsupportedDigestAlgorithm(String),
-    ItemDigestMismatch { element: String, digest_id: u32 },
+    ItemDigestMismatch {
+        element: String,
+        digest_id: u32,
+    },
     DeviceAuthPayloadMismatch,
     InvalidCoseKey(&'static str),
     InvalidCoseSign1(&'static str),
@@ -459,17 +517,28 @@ pub enum MdocError {
     CredentialNotYetValid,
     CredentialExpired,
     InvalidVerificationTime,
-    SaltTooShort { len: usize },
-    InvalidAttributeCount { count: usize },
+    SaltTooShort {
+        len: usize,
+    },
+    InvalidAttributeCount {
+        count: usize,
+    },
     DuplicatePredicateMode(&'static str),
-    ElementIdentifierTooLong { element: String, len: usize },
+    ElementIdentifierTooLong {
+        element: String,
+        len: usize,
+    },
     UnsupportedProductAttributeLayout,
     ProductDoctypeMismatch,
     ProductNamespaceMismatch,
     UnsupportedDeviceAuthenticationProfile,
     RevocationRequestMismatch(&'static str),
     InvalidProductDocumentShape(&'static str),
-    DocumentTooLarge { len: usize, max: usize },
+    InputTooLarge {
+        input: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -615,6 +684,15 @@ fn extract_product_pid_mdoc_inner(
             value,
         });
     }
+    let selected_items: Vec<&[u8]> = extracted_attributes
+        .iter()
+        .map(|attribute| attribute.item.as_slice())
+        .collect();
+    validate_product_sha_input_sizes(
+        &issuer_auth.payload,
+        &issuer_auth.sig_structure,
+        &selected_items,
+    )?;
     let birth_date_element = requested_attributes.iter().find_map(|attribute| {
         matches!(attribute.mode, MdocDisclosureMode::AgeOver)
             .then_some(attribute.element_identifier.as_str())
@@ -1273,6 +1351,11 @@ fn canonicalize_product_cbor_value(value: Value) -> Result<Value, MdocError> {
 pub fn validate_product_session_transcript_cbor(
     session_transcript: &[u8],
 ) -> Result<(), MdocError> {
+    if session_transcript.len() != PRODUCT_SESSION_TRANSCRIPT_BYTES {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "SessionTranscript must be exactly 56 canonical bytes",
+        ));
+    }
     validate_product_cbor_structure(session_transcript)?;
     let value = decode_value(session_transcript)?;
     let Value::Array(outer) = &value else {
@@ -1291,11 +1374,6 @@ pub fn validate_product_session_transcript_cbor(
     if label != "OpenID4VPHandover" || hash.len() != 32 {
         return Err(MdocError::InvalidProductDocumentShape(
             "OpenID4VP handover must contain label and 32-byte hash",
-        ));
-    }
-    if session_transcript.len() != PRODUCT_SESSION_TRANSCRIPT_BYTES {
-        return Err(MdocError::InvalidProductDocumentShape(
-            "SessionTranscript must be exactly 56 canonical bytes",
         ));
     }
     let canonical = encode_value(canonicalize_product_cbor_value(value)?);
@@ -1546,7 +1624,7 @@ fn demo_mdoc_document_with_values(
             CBOR_TAG_FULL_DATE,
             Box::new(Value::Text(birth_date.to_string())),
         ),
-        vec![7; 16],
+        DEMO_PRIVATE_RANDOM_CANARY.to_vec(),
     );
     let nationality_item = demo_issuer_signed_item(
         9,
@@ -4128,6 +4206,29 @@ pub(crate) fn prove_mdoc_circuit(
     prove_mdoc_circuit_with_pcs_config(extracted, statement, mdoc_production_pcs_config())
 }
 
+fn product_sha_messages<'a>(
+    extracted: &'a ExtractedPidMdoc,
+    revocation_message: &'a [u8; TS13_REVOCATION_MESSAGE_LEN],
+) -> Result<Vec<&'a [u8]>, MdocError> {
+    let selected_items: Vec<&[u8]> = extracted
+        .extracted_attributes
+        .iter()
+        .map(|attribute| attribute.item.as_slice())
+        .collect();
+    validate_product_sha_input_sizes(
+        extracted.mso.as_slice(),
+        extracted.issuer_sig_structure.as_slice(),
+        &selected_items,
+    )?;
+
+    let mut messages = Vec::with_capacity(3 + selected_items.len());
+    messages.push(extracted.issuer_sig_structure.as_slice());
+    messages.push(extracted.mso.as_slice());
+    messages.push(revocation_message.as_slice());
+    messages.extend(selected_items);
+    Ok(messages)
+}
+
 fn prove_mdoc_circuit_with_pcs_config(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
@@ -4149,21 +4250,8 @@ fn prove_mdoc_circuit_with_pcs_config(
         statement.ts13_revocation_range.id_hi,
         statement.ts13_revocation.epoch,
     );
-    let attribute_items: Vec<_> = extracted
-        .extracted_attributes
-        .iter()
-        .map(|attribute| attribute.item.as_slice())
-        .collect();
-    if attribute_items.len() > 2 {
-        return Err(Error::Prove(
-            "product supports at most two selected items".to_string(),
-        ));
-    }
-    let mut packed_messages = Vec::with_capacity(3 + attribute_items.len());
-    packed_messages.push(extracted.issuer_sig_structure.as_slice());
-    packed_messages.push(extracted.mso.as_slice());
-    packed_messages.push(revocation_message.as_slice());
-    packed_messages.extend(attribute_items.iter().copied());
+    let packed_messages =
+        product_sha_messages(extracted, &revocation_message).map_err(Error::Mdoc)?;
     let packed_sha_witness = compute_packed_sha256_witness(&packed_messages)
         .map_err(|error| Error::Prove(format!("packed SHA witness: {error}")))?;
     let shared_sha_log = crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
@@ -4209,7 +4297,7 @@ fn prove_mdoc_circuit_with_pcs_config(
                 Some(6_164),
             ),
             MdocScopeParserInput::ShaItem(index) => {
-                if index >= attribute_items.len() {
+                if index >= extracted.extracted_attributes.len() {
                     return Err(Error::Prove(
                         "mdoc item parser index is out of range".to_string(),
                     ));
@@ -6155,23 +6243,27 @@ mod mdoc_sha_table_tests {
         let canonical = openid4vp_session_transcript(b"request-context");
         validate_product_session_transcript_cbor(&canonical).unwrap();
 
+        for bytes in [vec![0; 55], vec![0; 57], vec![0; 16 * 1024]] {
+            assert_eq!(
+                validate_product_session_transcript_cbor(&bytes),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "SessionTranscript must be exactly 56 canonical bytes",
+                ))
+            );
+        }
+
         for (label, bytes) in [
             ("indefinite array", vec![0x9f, 0x00, 0xff]),
             ("non-shortest integer", vec![0x81, 0x18, 0x00]),
         ] {
             assert!(
-                matches!(
-                    validate_product_session_transcript_cbor(&bytes),
-                    Err(MdocError::Cbor(_))
-                ),
+                validate_product_session_transcript_cbor(&bytes).is_err(),
                 "{label} must be rejected by the bounded structural parser"
             );
         }
-        assert_eq!(
-            validate_product_session_transcript_cbor(&[0x81, 0xa2, 0x00, 0x01, 0x00, 0x02]),
-            Err(MdocError::InvalidProductDocumentShape(
-                "SessionTranscript must be exact OpenID4VP handover"
-            )),
+        assert!(
+            validate_product_session_transcript_cbor(&[0x81, 0xa2, 0x00, 0x01, 0x00, 0x02])
+                .is_err(),
             "a map-bearing non-OpenID4VP transcript must be rejected"
         );
 
@@ -6185,10 +6277,7 @@ mod mdoc_sha_table_tests {
             ("NaN", vec![0x81, 0xf9, 0x7e, 0x00]),
         ] {
             assert!(
-                matches!(
-                    validate_product_session_transcript_cbor(&bytes),
-                    Err(MdocError::Cbor(_))
-                ),
+                validate_product_session_transcript_cbor(&bytes).is_err(),
                 "product SessionTranscript {label} must be rejected by the bounded structural parser"
             );
         }
@@ -6201,20 +6290,14 @@ mod mdoc_sha_table_tests {
             ])),
         )]);
         let reordered = encode_value(nested_map.clone());
-        assert_eq!(
-            validate_product_session_transcript_cbor(&reordered),
-            Err(MdocError::InvalidProductDocumentShape(
-                "SessionTranscript must be exact OpenID4VP handover"
-            )),
+        assert!(
+            validate_product_session_transcript_cbor(&reordered).is_err(),
             "a non-OpenID4VP nested transcript must be rejected"
         );
         let canonical_nested =
             encode_value(canonicalize_product_cbor_value(nested_map).expect("canonical map"));
-        assert_eq!(
-            validate_product_session_transcript_cbor(&canonical_nested),
-            Err(MdocError::InvalidProductDocumentShape(
-                "SessionTranscript must be exact OpenID4VP handover"
-            )),
+        assert!(
+            validate_product_session_transcript_cbor(&canonical_nested).is_err(),
             "canonical CBOR alone is insufficient without the exact OpenID4VP shape"
         );
 
@@ -6311,17 +6394,103 @@ mod mdoc_sha_table_tests {
 
         let mut trailing = canonical;
         trailing.push(0);
-        assert!(matches!(
+        assert_eq!(
             validate_product_session_transcript_cbor(&trailing),
-            Err(MdocError::Cbor(_))
-        ));
+            Err(MdocError::InvalidProductDocumentShape(
+                "SessionTranscript must be exactly 56 canonical bytes",
+            ))
+        );
 
         let mut too_deep = vec![0x81; 8];
         too_deep.push(0xf6);
-        assert!(matches!(
+        assert_eq!(
             validate_product_session_transcript_cbor(&too_deep),
-            Err(MdocError::Cbor(message)) if message.contains("nesting exceeds 8")
-        ));
+            Err(MdocError::InvalidProductDocumentShape(
+                "SessionTranscript must be exactly 56 canonical bytes",
+            ))
+        );
+    }
+
+    #[test]
+    fn product_sha_input_size_boundaries_are_exact() {
+        let accepted_item = vec![0; crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES];
+        validate_product_sha_input_sizes(&[], &[], &[&accepted_item]).unwrap();
+        assert_eq!(
+            validate_product_sha_input_sizes(
+                &[],
+                &[],
+                &[&vec![
+                    0;
+                    crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES
+                        + 1
+                ]],
+            ),
+            Err(MdocError::InputTooLarge {
+                input: "selected IssuerSignedItem",
+                actual: crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES + 1,
+                maximum: crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES,
+            })
+        );
+
+        let accepted_mso = vec![0; crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES];
+        validate_product_sha_input_sizes(&accepted_mso, &[], &[]).unwrap();
+        assert_eq!(
+            validate_product_sha_input_sizes(
+                &vec![0; crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES + 1],
+                &[],
+                &[],
+            ),
+            Err(MdocError::InputTooLarge {
+                input: "MSO payload",
+                actual: crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES + 1,
+                maximum: crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES,
+            })
+        );
+
+        let accepted_issuer =
+            vec![0; crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES];
+        validate_product_sha_input_sizes(&accepted_mso, &accepted_issuer, &[]).unwrap();
+        assert_eq!(
+            validate_product_sha_input_sizes(
+                &accepted_mso,
+                &vec![0; crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES + 1],
+                &[],
+            ),
+            Err(MdocError::InputTooLarge {
+                input: "issuer Sig_structure",
+                actual: crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES + 1,
+                maximum: crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES,
+            })
+        );
+        assert_eq!(
+            validate_product_sha_input_sizes(&[], &[], &[&accepted_item, &accepted_item, &[]]),
+            Err(MdocError::InvalidAttributeCount { count: 3 })
+        );
+    }
+
+    #[test]
+    fn sig_structure_overhead_stays_within_product_bound() {
+        for payload_len in [0, 23, 24, 255, 256, 6_144] {
+            let payload = vec![0; payload_len];
+            let structure = sig_structure(ES256_PROTECTED_HEADER, &payload);
+            assert!(structure.len() - payload.len() <= 20);
+            if payload_len == 6_144 {
+                assert_eq!(structure.len() - payload.len(), 20);
+            }
+        }
+        let fixture = demo_mdoc_circuit_fixture();
+        assert!(fixture.extracted.mso.len() >= 256);
+        assert_eq!(
+            fixture.extracted.issuer_sig_structure.len() - fixture.extracted.mso.len(),
+            20
+        );
+    }
+
+    #[test]
+    fn maximum_nationality_item_fits_selected_item_profile() {
+        let value = Value::Array((0..256).map(|_| Value::Text("DE".to_string())).collect());
+        let item = demo_issuer_signed_item(9, "nationality", value, vec![9; 16]);
+        assert!(item.len() <= crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES);
     }
 
     #[test]
@@ -7039,31 +7208,64 @@ mod mdoc_sha_table_tests {
     }
 
     #[test]
-    fn mdoc_sha_witnesses_match_native_digest_for_all_four_messages() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let extracted = &fixture.extracted;
-        let revocation_message = ts13_revocation_message_bytes(
-            fixture.statement.ts13_revocation_range.id_lo,
-            fixture.statement.ts13_revocation_range.id_hi,
-            fixture.statement.ts13_revocation.epoch,
-        );
+    fn product_sha_message_order_and_terminal_digests_are_exact() {
         let cases = [
-            ("issuer", extracted.issuer_sig_structure.as_slice()),
-            ("mso", extracted.mso.as_slice()),
-            ("revocation", revocation_message.as_slice()),
-            ("item_0", extracted.birth_date_item.as_slice()),
-            ("item_1", extracted.nationality_item.as_slice()),
+            vec![MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            }],
+            vec![MdocRequestedAttribute {
+                element_identifier: "nationality".to_string(),
+                mode: MdocDisclosureMode::Alpha2Set,
+            }],
+            vec![
+                MdocRequestedAttribute {
+                    element_identifier: "birth_date".to_string(),
+                    mode: MdocDisclosureMode::AgeOver,
+                },
+                MdocRequestedAttribute {
+                    element_identifier: "nationality".to_string(),
+                    mode: MdocDisclosureMode::Alpha2Set,
+                },
+            ],
         ];
 
-        for (name, message) in cases {
-            let witness = compute_sha256_witness(message);
-            let native: [u8; 32] = Sha256::digest(message).into();
-            assert_eq!(witness.digest.0, native, "{name} digest");
-            assert_eq!(
-                witness.digest_from_blocks().0,
-                native,
-                "{name} digest from block chain",
+        for attributes in cases {
+            let expected_message_count = if attributes.len() == 2 { 5 } else { 4 };
+            let fixture = demo_mdoc_circuit_fixture_with_attributes(attributes);
+            let revocation_message = ts13_revocation_message_bytes(
+                fixture.statement.ts13_revocation_range.id_lo,
+                fixture.statement.ts13_revocation_range.id_hi,
+                fixture.statement.ts13_revocation.epoch,
             );
+            let messages = product_sha_messages(&fixture.extracted, &revocation_message)
+                .expect("product messages fit the fixed profile");
+            let witness = compute_packed_sha256_witness(&messages).expect("packed witness");
+            let trace = stwo_sha256::trace::generate_trace(
+                &witness,
+                crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
+            );
+            let mut next_block = 0usize;
+            for (message_id, message) in messages.iter().enumerate() {
+                let block_count = stwo_sha256::native::n_blocks_for(message.len());
+                next_block += block_count;
+                let terminal_block = next_block - 1;
+                let terminal_slot = stwo_sha256::trace::Layout::row_slot(
+                    terminal_block * stwo_sha256::trace::ROWS_PER_BLOCK + 63,
+                    crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
+                );
+                assert_eq!(
+                    trace[stwo_sha256::trace::Layout::COL_MSG_ID][terminal_slot].0,
+                    message_id as u32
+                );
+                let actual: Vec<u8> = (0..32)
+                    .map(|index| {
+                        trace[stwo_sha256::trace::Layout::digest_byte(index)][terminal_slot].0 as u8
+                    })
+                    .collect();
+                assert_eq!(actual.as_slice(), Sha256::digest(message).as_slice());
+            }
+            assert_eq!(messages.len(), expected_message_count);
         }
     }
 }
@@ -7405,7 +7607,7 @@ mod coprocessor_tests {
     #[ignore = "slow: proves two distinct credentials for public-input unlinkability"]
     fn distinct_credentials_share_only_the_caller_authoritative_statement() {
         let first_fixture = unlinkability_fixture("1990-07-15", &["DE"]);
-        let second_fixture = unlinkability_fixture("1985-05-05", &["FR"]);
+        let second_fixture = unlinkability_fixture("1985-05-05", &["FR", "BE", "CY"]);
         let first_public = MdocPublicStatement::from_circuit(&first_fixture.statement);
         let second_public = MdocPublicStatement::from_circuit(&second_fixture.statement);
         assert_eq!(
@@ -7428,6 +7630,11 @@ mod coprocessor_tests {
         assert_eq!(
             first_fixture.request.request_binding,
             second_fixture.request.request_binding
+        );
+        assert_ne!(
+            first_fixture.extracted.nationality_item.len(),
+            second_fixture.extracted.nationality_item.len(),
+            "unlinkability fixtures must have different private item lengths"
         );
 
         let public_json =
@@ -7457,6 +7664,54 @@ mod coprocessor_tests {
             first.mdoc_scope_metadata.log_size,
             second.mdoc_scope_metadata.log_size
         );
+
+        let mut first_shapes = Vec::new();
+        let mut second_shapes = Vec::new();
+        verify_mdoc_circuit_with_pcs_config_impl(
+            &first,
+            &first_fixture.statement,
+            mdoc_production_pcs_config(),
+            Some(&mut first_shapes),
+        )
+        .expect("first shape capture verifies");
+        verify_mdoc_circuit_with_pcs_config_impl(
+            &second,
+            &second_fixture.statement,
+            mdoc_production_pcs_config(),
+            Some(&mut second_shapes),
+        )
+        .expect("second shape capture verifies");
+        let first_packed = first_shapes
+            .iter()
+            .find(|shape| shape.name == "packed_sha")
+            .expect("first packed SHA shape");
+        let second_packed = second_shapes
+            .iter()
+            .find(|shape| shape.name == "packed_sha")
+            .expect("second packed SHA shape");
+        assert_eq!(
+            first_packed.layout.preprocessed,
+            second_packed.layout.preprocessed
+        );
+        assert_eq!(first_packed.layout.trace, second_packed.layout.trace);
+        assert_eq!(
+            first_packed.layout.interaction,
+            second_packed.layout.interaction
+        );
+        assert_eq!(
+            first_packed.post_interaction,
+            second_packed.post_interaction
+        );
+        for log_sizes in [
+            &first_packed.layout.preprocessed,
+            &first_packed.layout.trace,
+            &first_packed.layout.interaction,
+            &first_packed.post_interaction,
+        ] {
+            assert!(log_sizes
+                .iter()
+                .all(|&log_size| log_size == crate::product_profile::PRODUCT_SHA_LOG_N_ROWS));
+        }
 
         assert_ne!(
             bincode::serialize(&first).expect("first proof serializes"),

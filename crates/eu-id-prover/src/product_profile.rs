@@ -3,6 +3,7 @@
 use predicates::{Date, NatPublicInput, PublicInput as AgePublicInput};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use stwo_sha256::native::n_blocks_for;
 
 /// Returns whether `code` is an assigned ISO 3166-1 alpha-2 code.
 pub fn is_assigned_iso_alpha2(code: [u8; 2]) -> bool {
@@ -51,7 +52,9 @@ impl Policy {
 pub const PRODUCT_PROFILE_ID: &str = "eudi-pid-p256-identity";
 pub const PRODUCT_MAX_ATTRIBUTES: usize = 2;
 pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 6 * 1024;
-pub const PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES: usize = 6_164;
+pub const PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES: usize = 20;
+pub const PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES: usize =
+    PRODUCT_MAX_MSO_PAYLOAD_BYTES + PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES;
 pub const PRODUCT_MAX_SELECTED_ITEM_BYTES: usize = 1_024;
 pub const PRODUCT_SHA_LOG_N_ROWS: u32 = 14;
 pub const PRODUCT_MAX_PACKED_SHA_MESSAGES: usize = 5;
@@ -62,13 +65,12 @@ const _: () = assert!(stwo_sha256::native::n_blocks_for(6_164) == 97);
 const _: () = assert!(stwo_sha256::native::n_blocks_for(6_144) == 97);
 const _: () = assert!(stwo_sha256::native::n_blocks_for(20) == 1);
 const _: () = assert!(stwo_sha256::native::n_blocks_for(1_024) == 17);
-const _: () = assert!(
-    stwo_sha256::native::n_blocks_for(6_164)
-        + stwo_sha256::native::n_blocks_for(6_144)
-        + stwo_sha256::native::n_blocks_for(20)
-        + 2 * stwo_sha256::native::n_blocks_for(1_024)
-        <= 255
-);
+const PRODUCT_MAX_PACKED_SHA_BLOCKS: usize = n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES)
+    + n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES)
+    + n_blocks_for(20)
+    + PRODUCT_MAX_ATTRIBUTES * n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES);
+const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS == 229);
+const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS <= 255);
 const _: () = assert!(PRODUCT_MAX_PACKED_SHA_MESSAGES == 5);
 const _: () = assert!(PRODUCT_SHA_LOG_N_ROWS == 14);
 
@@ -191,5 +193,21 @@ mod tests {
             manifest["product_bounds"]["max_scope_log_size"],
             PRODUCT_MAX_SCOPE_LOG_SIZE
         );
+    }
+
+    #[test]
+    fn packed_sha_product_capacity_is_exact() {
+        assert_eq!(n_blocks_for(6_164), 97);
+        assert_eq!(n_blocks_for(6_144), 97);
+        assert_eq!(n_blocks_for(20), 1);
+        assert_eq!(n_blocks_for(1_024), 17);
+        assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 229);
+        let block_slots = 1usize << (PRODUCT_SHA_LOG_N_ROWS - 6);
+        assert_eq!(block_slots, 256);
+        assert_eq!(
+            block_slots - PRODUCT_MAX_PACKED_SHA_BLOCKS,
+            27
+        );
+        assert!(block_slots - PRODUCT_MAX_PACKED_SHA_BLOCKS >= 1);
     }
 }

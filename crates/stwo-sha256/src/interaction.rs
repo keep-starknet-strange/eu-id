@@ -330,17 +330,13 @@ fn range_k_interaction(
 /// Padding rows contribute the neutral fraction `(0, 1)`.
 /// They do not change the sum.
 /// The AIR uses `enabler` for the matching constraint gates.
-fn sha256_interaction(
+fn sha256_lookup_fractions(
     relations: &Sha256Relations,
     witness: &PackedSha256Witness,
     log_size: u32,
     expose_digest: bool,
     expose_field: bool,
-    claim_mask: Option<(&ClaimMaskTrace, SecureField)>,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
+) -> Vec<Vec<Frac>> {
     let n_rows = 1usize << log_size;
 
     // One fraction vector per lookup site (`lookup_idx`), each of length
@@ -378,10 +374,26 @@ fn sha256_interaction(
         }
     }
 
+    all_lookups
+}
+
+fn sha256_interaction(
+    relations: &Sha256Relations,
+    witness: &PackedSha256Witness,
+    log_size: u32,
+    expose_digest: bool,
+    expose_field: bool,
+    claim_mask: Option<(&ClaimMaskTrace, SecureField)>,
+) -> (
+    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
+    let mut lookups =
+        sha256_lookup_fractions(relations, witness, log_size, expose_digest, expose_field);
     if let Some((trace, beta)) = claim_mask {
-        all_lookups.push(claim_mask_fraction_column(trace, beta));
+        lookups.push(claim_mask_fraction_column(trace, beta));
     }
-    build_interaction_columns(log_size, all_lookups, SHA_CONSUMER_LOGUP_BATCH)
+    build_interaction_columns(log_size, lookups, SHA_CONSUMER_LOGUP_BATCH)
 }
 
 /// Write every lookup site for one `(block, round t)` row at its trace
@@ -751,6 +763,40 @@ mod tests {
             .sum()
     }
 
+    fn stream_sum_for_message(
+        relations: &Sha256Relations,
+        message_idx: usize,
+        padded: &[u8],
+    ) -> SecureField {
+        padded
+            .iter()
+            .enumerate()
+            .map(|(index, &byte)| {
+                let tuple = [
+                    BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + message_idx as u32),
+                    BaseField::from(index as u32),
+                    BaseField::from(u32::from(byte)),
+                ];
+                inverse(&relations.field.field, &tuple)
+            })
+            .sum()
+    }
+
+    fn digest_provider(relations: &Sha256Relations, witness: &PackedSha256Witness) -> SecureField {
+        -digest_consumer(relations, witness)
+    }
+
+    fn stream_provider(relations: &Sha256Relations, witness: &PackedSha256Witness) -> SecureField {
+        -stream_consumer(relations, witness)
+    }
+
+    fn packed_provider_sum(
+        relations: &Sha256Relations,
+        witness: &PackedSha256Witness,
+    ) -> SecureField {
+        digest_provider(relations, witness) + stream_provider(relations, witness)
+    }
+
     #[test]
     fn packed_lookup_width_is_fixed() {
         assert_eq!(sha_lookups_per_row(false, false), 58);
@@ -795,21 +841,22 @@ mod tests {
         let mut wrong_digest = digest_consumer(&relations, &witness);
         let message = &witness.messages[0];
         let bytes = h_out_digest_bytes(&message.blocks.last().unwrap().h_out);
-        let mut tuple = [BaseField::zero(); 1 + DIGEST_BYTES];
-        tuple[0] = BaseField::from(1u32);
+        let mut honest_tuple = [BaseField::zero(); 1 + DIGEST_BYTES];
+        honest_tuple[0] = BaseField::from(0u32);
         for (index, byte) in bytes.iter().enumerate() {
-            tuple[index + 1] = BaseField::from(*byte);
+            honest_tuple[index + 1] = BaseField::from(*byte);
         }
-        wrong_digest -= inverse(&relations.packed_digest, &tuple);
-        tuple[0] = BaseField::from(0u32);
-        wrong_digest += inverse(&relations.packed_digest, &tuple);
+        let mut forged_tuple = honest_tuple;
+        forged_tuple[0] = BaseField::from(1u32);
+        wrong_digest -= inverse(&relations.packed_digest, &honest_tuple);
+        wrong_digest += inverse(&relations.packed_digest, &forged_tuple);
         assert_ne!(
             claim.total() + wrong_digest + stream_consumer(&relations, &witness),
             SecureField::zero(),
         );
 
         let mut wrong_stream = stream_consumer(&relations, &witness);
-        let block = &witness.messages[0].blocks[0];
+        let block = &witness.messages[1].blocks[0];
         let byte = word_be_bytes(block.schedule[0].lo, block.schedule[0].hi)[0];
         let honest = [
             BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
@@ -818,7 +865,7 @@ mod tests {
         ];
         let wrong_index = [
             BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
-            BaseField::from(1u32),
+            BaseField::from(witness.messages[0].padding.padded.len() as u32),
             BaseField::from(byte),
         ];
         wrong_stream -= inverse(&relations.field.field, &honest);
@@ -827,6 +874,150 @@ mod tests {
             claim.total() + digest_consumer(&relations, &witness) + wrong_stream,
             SecureField::zero(),
         );
+
+        let first_a = b"A";
+        let first_b = b"B";
+        let swap_messages: [&[u8]; 5] = [first_a, first_b, b"revocation", b"item-0", b"item-1"];
+        let swap_witness = packed(&swap_messages);
+        let mut swapped = stream_consumer(&relations, &swap_witness);
+        let tuple_a = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'A')),
+        ];
+        let tuple_b = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + 1),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'B')),
+        ];
+        let forged_a = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + 1),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'A')),
+        ];
+        let forged_b = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'B')),
+        ];
+        swapped -= inverse(&relations.field.field, &tuple_a);
+        swapped -= inverse(&relations.field.field, &tuple_b);
+        swapped += inverse(&relations.field.field, &forged_a);
+        swapped += inverse(&relations.field.field, &forged_b);
+        assert_ne!(
+            packed_provider_sum(&relations, &swap_witness)
+                + digest_consumer(&relations, &swap_witness)
+                + swapped,
+            SecureField::zero(),
+        );
+    }
+
+    #[test]
+    fn packed_lookup_fractions_have_exact_real_and_disabled_shapes() {
+        let messages: [&[u8]; 3] = [b"a", &[0x42; 100], b"z"];
+        let witness = packed(&messages);
+        let log_size = 9;
+        let relations = Sha256Relations::dummy();
+        let base = sha256_lookup_fractions(&relations, &witness, log_size, false, false);
+        assert_eq!(base.len(), 58);
+        let real_blocks = witness.total_blocks();
+        for (start, end, expected) in [
+            (0, 2, 2 * real_blocks * 48),
+            (2, 10, 8 * real_blocks * 64),
+            (10, 26, real_blocks * 16),
+            (26, 58, real_blocks * 32),
+        ] {
+            let actual = base[start..end]
+                .iter()
+                .flat_map(|fractions| fractions.iter())
+                .filter(|(numerator, _)| !numerator.is_zero())
+                .count();
+            assert_eq!(actual, expected, "base lookup sites {start}..{end}");
+        }
+        for natural_row in real_blocks * crate::constants::N_ROUNDS..(1usize << log_size) {
+            let slot = Layout::row_slot(natural_row, log_size);
+            for fraction in &base {
+                assert_eq!(fraction[slot], (SecureField::zero(), SecureField::one()));
+            }
+        }
+
+        let product = sha256_lookup_fractions(&relations, &witness, log_size, true, true);
+        assert_eq!(product.len(), 123);
+        for natural_row in real_blocks * crate::constants::N_ROUNDS..(1usize << log_size) {
+            let slot = Layout::row_slot(natural_row, log_size);
+            for fraction in &product {
+                assert_eq!(fraction[slot], (SecureField::zero(), SecureField::one()));
+            }
+        }
+    }
+
+    #[test]
+    fn missing_and_extra_packed_messages_leave_global_logup_sum() {
+        let roles: [&[u8]; 6] = [b"issuer", b"mso", &[0; 20], b"item-0", b"item-1", b"extra"];
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        for (provider_count, consumer_count) in [(3usize, 4usize), (4, 5), (5, 4), (6, 5)] {
+            let provider = packed(&roles[..provider_count]);
+            let consumer = packed(&roles[..consumer_count]);
+            let sum = packed_provider_sum(&relations, &provider)
+                + digest_consumer(&relations, &consumer)
+                + stream_consumer(&relations, &consumer);
+            assert_ne!(
+                sum,
+                SecureField::zero(),
+                "{provider_count}/{consumer_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_role_rejects_each_malformed_padded_stream() {
+        let messages: [&[u8]; 5] = [b"A", b"B", b"C", b"D", b"E"];
+        let witness = packed(&messages);
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let honest_stream = stream_consumer(&relations, &witness);
+        let provider = packed_provider_sum(&relations, &witness);
+        let honest_digest = digest_consumer(&relations, &witness);
+        for role in 0..messages.len() {
+            let padded = witness.messages[role].padding.padded.clone();
+            let marker = padded
+                .iter()
+                .position(|&byte| byte == 0x80)
+                .expect("short fixture has marker");
+            let mutations = [
+                {
+                    let mut forged = padded.clone();
+                    forged[marker] = 0x81;
+                    forged
+                },
+                {
+                    let mut forged = padded.clone();
+                    forged[marker + 1] = 1;
+                    forged
+                },
+                {
+                    let mut forged = padded.clone();
+                    let last = forged.len() - 1;
+                    forged[last] ^= 1;
+                    forged
+                },
+                {
+                    let mut forged = padded[..padded.len() - 8].to_vec();
+                    forged.extend([0; 64]);
+                    forged.extend_from_slice(&padded[padded.len() - 8..]);
+                    forged
+                },
+            ];
+            for forged in mutations {
+                let total_stream = honest_stream
+                    - stream_sum_for_message(&relations, role, &padded)
+                    + stream_sum_for_message(&relations, role, &forged);
+                assert_ne!(
+                    provider + honest_digest + total_stream,
+                    SecureField::zero(),
+                    "role {role} malformed stream must not balance",
+                );
+            }
+        }
     }
 
     #[test]

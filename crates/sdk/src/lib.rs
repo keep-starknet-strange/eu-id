@@ -878,7 +878,7 @@ mod tests {
         (statement, mdoc_statement, extraction_device_hash)
     }
 
-    fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
+    fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness, Vec<Vec<u8>>) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let issuer_key = fixture.statement.issuer_input.public_key.clone();
         let (revocation, revocation_witness) =
@@ -892,6 +892,12 @@ mod tests {
             .collect::<Vec<_>>();
         accepted_alpha2_countries.sort_unstable();
         accepted_alpha2_countries.dedup();
+        let selected_items = fixture
+            .extracted
+            .extracted_attributes
+            .iter()
+            .map(|attribute| attribute.item.clone())
+            .collect();
         (
             ZkPublicStatement {
                 spec_id: "stwo-euid-pid-v1".to_string(),
@@ -919,6 +925,7 @@ mod tests {
                 revocation_signature_r: revocation_witness.signature.r.0.to_vec(),
                 revocation_signature_s: revocation_witness.signature.s.0.to_vec(),
             },
+            selected_items,
         )
     }
 
@@ -975,6 +982,14 @@ mod tests {
         let public = eu_id_prover::MdocStatement::from_circuit(&fixture.statement);
         let encoded = bincode::serialize(&public).expect("public mdoc statement serializes");
         let birth_date = fixture.extracted.birth_date_binding.0;
+        let private_canary: [u8; 32] = [
+            0x9f, 0x4a, 0x7c, 0x1d, 0x2e, 0x8b, 0x63, 0x50, 0xa6, 0xd9, 0x41, 0x73, 0xbc, 0x05,
+            0x28, 0xee, 0x4d, 0x7a, 0x91, 0x63, 0xf0, 0xc2, 0xb8, 0x5e, 0x11, 0x74, 0xda, 0xc9,
+            0x6e, 0x3f, 0x70, 0x2b,
+        ];
+        assert!(!encoded
+            .windows(private_canary.len())
+            .any(|window| window == private_canary));
         assert!(
             !encoded
                 .windows(birth_date.len())
@@ -1235,11 +1250,32 @@ mod tests {
     #[test]
     #[ignore = "runs the product mdoc STWO prover over the canonical v2 fixture"]
     fn identity_public_api_round_trips_canonical_v2_fixture() {
-        let (statement, witness) = canonical_v2_mdoc_sdk_fixture();
+        let (statement, witness, selected_items) = canonical_v2_mdoc_sdk_fixture();
+        let private_canary: [u8; 32] = [
+            0x9f, 0x4a, 0x7c, 0x1d, 0x2e, 0x8b, 0x63, 0x50, 0xa6, 0xd9, 0x41, 0x73, 0xbc, 0x05,
+            0x28, 0xee, 0x4d, 0x7a, 0x91, 0x63, 0xf0, 0xc2, 0xb8, 0x5e, 0x11, 0x74, 0xda, 0xc9,
+            0x6e, 0x3f, 0x70, 0x2b,
+        ];
+        let fixture_birth_date = eu_id_prover::mdoc::demo_mdoc_circuit_fixture()
+            .extracted
+            .birth_date_binding
+            .0;
         let proof = prove_identity(statement.clone(), witness).expect("identity proof builds");
         let envelope = decode_mdoc_proof_envelope(&proof).expect("V8 envelope decodes");
         assert_eq!(envelope.version, MDOC_PROOF_ENVELOPE_VERSION);
         assert!(!envelope.compressed_proof.is_empty());
+        let raw_proof = decompress_stark_proof_from_ffi(&envelope.compressed_proof)
+            .expect("proof decompression");
+        for bytes in std::iter::once(&private_canary[..])
+            .chain(selected_items.iter().map(Vec::as_slice))
+            .chain(std::iter::once(&fixture_birth_date[..]))
+        {
+            assert!(!envelope
+                .compressed_proof
+                .windows(bytes.len())
+                .any(|window| window == bytes));
+            assert!(!raw_proof.windows(bytes.len()).any(|window| window == bytes));
+        }
         assert!(
             verify_identity(statement.clone(), proof.clone())
                 .expect("identity verification returns")
@@ -1256,9 +1292,14 @@ mod tests {
         changed.now_epoch_seconds += 1;
         assert!(!verify_identity(changed, proof.clone()).unwrap().ok);
 
-        let mut changed = statement;
+        let mut changed = statement.clone();
         changed.age_threshold_years = Some(changed.age_threshold_years.unwrap() + 1);
-        assert!(!verify_identity(changed, proof).unwrap().ok);
+        assert!(!verify_identity(changed, proof.clone()).unwrap().ok);
+
+        let mut age_statement = statement.clone();
+        age_statement.predicate_mode = PredicateMode::Age;
+        age_statement.accepted_alpha2_countries = None;
+        assert!(!verify_identity(age_statement, proof).unwrap().ok);
     }
 
     #[test]
@@ -1266,18 +1307,19 @@ mod tests {
     fn identity_public_api_round_trips_single_predicate_modes() {
         // A nationality-only statement must not request birth date.
         // An age-only statement must not request nationality.
-        let (base, witness) = canonical_v2_mdoc_sdk_fixture();
+        let (base, witness, _) = canonical_v2_mdoc_sdk_fixture();
 
         let mut age_only = base.clone();
         age_only.predicate_mode = PredicateMode::Age;
         age_only.accepted_alpha2_countries = None;
         let proof = prove_identity(age_only.clone(), witness.clone()).expect("age-only proves");
         assert!(
-            verify_identity(age_only, proof)
+            verify_identity(age_only, proof.clone())
                 .expect("age-only verification returns")
                 .ok,
             "age-only statement must verify through the SDK identity API"
         );
+        assert!(!verify_identity(base.clone(), proof).unwrap().ok);
 
         let mut nat_only = base;
         nat_only.predicate_mode = PredicateMode::Nat;

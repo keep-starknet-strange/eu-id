@@ -2278,6 +2278,40 @@ mod tests {
     }
 
     #[test]
+    fn proof_side_sha_bounds_reject_exact_boundary_plus_one() {
+        fn canonical_byte_string(total_len: usize) -> Vec<u8> {
+            let payload_len = total_len - 3;
+            let mut bytes = vec![0x59, (payload_len >> 8) as u8, payload_len as u8];
+            bytes.resize(total_len, 0);
+            bytes
+        }
+
+        for limit in [1_024usize, 6_144, 6_164] {
+            let accepted = stwo_sha256::native::pad_message(&canonical_byte_string(limit));
+            let witness = MdocCborWitness::with_shape(
+                &accepted,
+                MdocCborInputMode::ShaPadded,
+                None,
+                Some(u32::try_from(limit).unwrap()),
+            )
+            .unwrap();
+            assert_eq!(witness.message_len, limit);
+
+            let rejected = stwo_sha256::native::pad_message(&canonical_byte_string(limit + 1));
+            assert!(matches!(
+                MdocCborWitness::with_shape(
+                    &rejected,
+                    MdocCborInputMode::ShaPadded,
+                    None,
+                    Some(u32::try_from(limit).unwrap()),
+                ),
+                Err(MdocCborStreamError::MessageTooLong { bytes, max })
+                    if bytes == limit + 1 && max == limit
+            ));
+        }
+    }
+
+    #[test]
     fn sha_padded_circle_trace_and_logup_satisfy_component() {
         let padded = sha_pad(&nested_nationality_cbor());
         let witness = MdocCborWitness::new(&padded, MdocCborInputMode::ShaPadded).unwrap();
@@ -2391,6 +2425,10 @@ mod tests {
         let mut marker = mdoc_cbor_base_columns(&witness);
         set_byte(&mut marker, witness.message_len, 0x81);
         assert!(!constraints_hold(&witness, &marker));
+
+        let mut nonzero_padding = mdoc_cbor_base_columns(&witness);
+        set_byte(&mut nonzero_padding, witness.message_len + 1, 1);
+        assert!(!constraints_hold(&witness, &nonzero_padding));
 
         let mut length = mdoc_cbor_base_columns(&witness);
         let last = padded.len() - 1;

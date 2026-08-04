@@ -1010,6 +1010,22 @@ struct Sha256Components {
     range: Vec<FrameworkComponent<RangeKEval>>, // 4
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_shared_table_masked_width_is_exact() {
+        assert_eq!(CLAIM_MASK_TRACE_COLUMNS, 4);
+        assert_eq!(Layout::TOTAL_COLS, 438);
+        assert_eq!(base_trace_log_sizes(14, 0, false, false).len(), 438);
+        assert_eq!(base_trace_log_sizes(14, 0, false, true).len(), 442);
+        assert!(base_trace_log_sizes(14, 0, false, true)
+            .iter()
+            .all(|&log_size| log_size == 14));
+    }
+}
+
 impl Sha256Components {
     #[allow(clippy::too_many_arguments)]
     fn new(
