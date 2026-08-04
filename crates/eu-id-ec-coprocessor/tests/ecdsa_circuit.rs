@@ -13,9 +13,8 @@ use eu_id_ec_coprocessor::ecdsa::{
     verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
     verify_implemented_circuit_proofs, verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle,
     verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundle,
-    ImplementedCircuitBundleEntry, LayoutSlot,
-    MdocP4bMacKeyShares, Witness, WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
-    MDOC_P4B_MAC_HALF_COUNT, N_LIMBS,
+    ImplementedCircuitBundleEntry, LayoutSlot, MdocP4bMacKeyShares, Witness, WitnessError,
+    MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, MDOC_P4B_MAC_HALF_COUNT, N_LIMBS,
 };
 use eu_id_ec_coprocessor::ligero::{commit_witness, product_circle_params};
 use eu_id_ec_coprocessor::sumcheck::{prove_circuit, CircuitPads};
