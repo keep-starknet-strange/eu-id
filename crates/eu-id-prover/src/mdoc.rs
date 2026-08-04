@@ -1273,11 +1273,6 @@ fn canonicalize_product_cbor_value(value: Value) -> Result<Value, MdocError> {
 pub fn validate_product_session_transcript_cbor(
     session_transcript: &[u8],
 ) -> Result<(), MdocError> {
-    if session_transcript.len() != PRODUCT_SESSION_TRANSCRIPT_BYTES {
-        return Err(MdocError::InvalidProductDocumentShape(
-            "SessionTranscript must be exactly 56 canonical bytes",
-        ));
-    }
     validate_product_cbor_structure(session_transcript)?;
     let value = decode_value(session_transcript)?;
     let Value::Array(outer) = &value else {
@@ -1296,6 +1291,11 @@ pub fn validate_product_session_transcript_cbor(
     if label != "OpenID4VPHandover" || hash.len() != 32 {
         return Err(MdocError::InvalidProductDocumentShape(
             "OpenID4VP handover must contain label and 32-byte hash",
+        ));
+    }
+    if session_transcript.len() != PRODUCT_SESSION_TRANSCRIPT_BYTES {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "SessionTranscript must be exactly 56 canonical bytes",
         ));
     }
     let canonical = encode_value(canonicalize_product_cbor_value(value)?);
@@ -7604,10 +7604,10 @@ mod coprocessor_tests {
         }
 
         let mut sha = proof.clone();
-        sha.packed_sha_interaction_claim.range.clear();
+        sha.packed_sha_interaction_claim.sha256.claimed_sum += QM31::from_u32_unchecked(1, 0, 0, 0);
         assert!(
             verify_mdoc_circuit(&sha, &statement).is_err(),
-            "downward product SHA log unexpectedly verified"
+            "tampered product SHA interaction claim unexpectedly verified"
         );
 
         let mut cbor = proof.clone();
