@@ -1,82 +1,107 @@
 # eu-id
 
-STARK-based zero-knowledge proofs for the EU Digital Identity Wallet — a research
-prototype showing that STARKs can do privacy-preserving selective disclosure on a
-signed identity credential (prove *"over 18"* and *"nationality in an accepted
-set"* without revealing the date of birth or nationality).
+`eu-id` is a research implementation of a private identity proof for an EU
+Digital Identity Wallet. The sole product path uses classical P-256 and
+SHA-256. It proves claims from an ISO mdoc without moving the private claim
+checks into the application.
 
-It is a concrete contribution to the EU's *Topic G* zero-knowledge technology
-decision for the Digital Identity Wallet.
+This code is not production-ready. The proof is transparent. STWO does not yet
+provide transcript-wide zero knowledge, so this repository does not claim that
+the complete proof hides every witness value. Transcript-wide zero knowledge is
+future work.
 
-## Status
+## Product contract
 
-**This code is not audited and is not production-ready.** It is a research
-prototype. The first iteration produces **succinct** proofs (small, fast to
-verify) but not yet **zero-knowledge** proofs (witness masking is a deferred
-follow-on). The product proof path now targets constrained ISO/IEC 18013-5 PID
-mdocs; the older simplified 11-byte credential path remains in-tree only as a
-parity benchmark and regression baseline.
+Applications use the UniFFI `proveIdentity` and `verifyIdentity` functions.
+The corresponding Rust functions are `prove_identity` and `verify_identity` in
+`crates/sdk`. No other identity-proof application flow is supported.
 
-The cryptographic components are built and individually sound:
+The SDK emits one V8 envelope. Its fixed-width body contains only:
 
-- **ECDSA P-256 verification** — full in-circuit verification of `(z, r, s, Q)`
-  with public-input binding; real arbitrary signatures prove and verify.
-- **SHA-256** — multi-block hashing with padding/IV/carry constraints and a
-  constraint-level negative-test suite.
-- **Predicates** — age-over-18 (two strategies) and nationality set-membership.
+- `version = 8`
+- one zstd-compressed STARK proof
 
-These compose into one `StarkProof` via the `air-core` orchestration layer,
-**cross-bound** to a *single* mdoc presentation: issuer auth, ISO device auth,
-MSO digest membership, device-key origin, credential validity, and the
-age/nationality predicates are bound in the mdoc proof. The product Rust API is
-`eu_id_prover::{prove_mdoc, verify_mdoc}` and the SDK product API is
-`prove_identity` / `verify_identity`. The core prover's POC
-`eu_id_prover::{prove_identity, verify_identity}` API and `eu-id` CLI remain for
-parity benchmarks but are not exposed through the SDK.
+The verifier does not accept a statement from the proof. It validates the
+caller statement and reconstructs every public circuit input. The statement
+pins the product profile, circuit source, root policy, issuer P-256 key,
+revocation key and epoch, UTC verification time, session transcript, and claim
+policy.
+
+The current credential profile accepts the PID 2.0 forms used by this product:
+
+- `birth_date` is a CBOR tag-1004 `YYYY-MM-DD` text value.
+- `nationality` is a nonempty array of ISO alpha-2 text values. The signed
+  domain also permits `QU` and `QS`, as required by the PID Rulebook.
+- A verifier nationality policy contains only assigned ISO alpha-2 codes.
+
+The proof enforces these checks together:
+
+- The issuerAuth ES256 signature verifies under the exact caller-authorized
+  P-256 key. The singleton x5chain leaf contains that same key.
+- The signed MSO and each requested IssuerSignedItem have the required CBOR and
+  SHA-256 bindings. Digest identifiers are unique.
+- The hidden device key comes from the MSO and verifies DeviceAuthentication
+  for the caller session transcript and document type.
+- Signed validity satisfies `validFrom < now < validUntil` at the caller UTC
+  time.
+- The private birth date satisfies the requested age threshold.
+- Every signed nationality is valid, and at least one satisfies the requested
+  accepted set when that predicate is active.
+- The MSO-derived revocation identifier is strictly inside the signed
+  revocation interval for the caller key and epoch.
 
 ## Workspace
 
-- `crates/stwo-p256` — ECDSA P-256 verification AIR, native reference, fake-GLV
-  scalar-mul, range checks, and the proof/composition surface.
-- `crates/stwo-p256-utils` — prover-independent limb/Solinas/scalar arithmetic and
-  the M31 headroom audit.
-- `crates/stwo-sha256` — SHA-256 AIR (M31 lookup-table design). See
-  `crates/stwo-sha256/docs/research/sha256-air-design.md`.
-- `crates/predicates` — age-over-N and nationality-in-set predicates, with
-  `prove`/`verify` CLI binaries. See `crates/predicates/USAGE.md`.
-- `crates/air-core` — composes `Air`/`AirProver` modules into one STARK proof
-  under a single channel, commitment scheme, and global LogUp balance.
-- `crates/eu-id-prover` — the end-to-end combined prover built on `air-core`;
-  exposes product `prove_mdoc` / `verify_mdoc` APIs plus the legacy
-  `prove_identity` / `verify_identity` POC benchmark path.
-- `crates/sdk` — UniFFI-facing SDK contract and product mdoc PID proof
-  envelope (`prove_identity` / `verify_identity`).
-- `crates/eu-id-ffi` — C-ABI surface for the mobile benchmark harness (`mobile/`).
+- `crates/sdk` provides the application contract, V8 envelope, UniFFI exports,
+  and Android benchmark adapter.
+- `crates/eu-id-prover` parses the supported mdoc and composes the product
+  proof.
+- `crates/eu-id-ec-coprocessor` proves the P-256 equality subprotocol.
+- `crates/stwo-p256` and `crates/stwo-p256-utils` implement the P-256 AIR and
+  arithmetic support.
+- `crates/stwo-sha256` implements the SHA-256 AIR.
+- `crates/predicates` implements the private age and nationality relations.
+- `crates/air-core` composes the STWO modules and shared relations.
+- `crates/eu-id-ffi` exposes only the standalone SHA-256 and P-256 C benchmark
+  functions.
 
-## Development
+## Build and test
 
-Use the pinned Rust toolchain from `rust-toolchain.toml`.
+The repository pins its Rust nightly in `rust-toolchain.toml`. Release builds
+use fat LTO and one code-generation unit. The commands default to 12 Cargo and
+Rayon workers. Proof-heavy tests use one test thread.
 
 ```bash
-cargo check
-cargo test
-cargo clippy --all-targets --all-features
-make check      # CI-equivalent: clippy -D warnings + fmt --check
+make check
+make build
+make test
+make test-ignored
 ```
 
-## Benchmarks
+`make check` runs release Clippy, rustfmt, locked dependency metadata, artifact
+drift, and shell syntax checks. `make check-reproducible` builds the shipped SDK
+library types and identity probe in two distinct target directories, then
+compares their bytes. Set `ALLOW_DIRTY=1` only when a deliberately dirty audit
+build must carry source provenance.
 
-End-to-end performance numbers for the combined identity proof — per-component
-breakdown (P256, SHA, age, nationality), the full pipeline, prove/verify time,
-proof size, and peak memory — are in `docs/benchmarks.md`, with machine-readable
-results under `docs/benchmarks/`.
+Regenerate source-bound product pins after an intentional circuit change:
 
 ```bash
-make bench          # criterion timing (per-stage + full pipeline)
-make bench-report   # peak-memory + proof-size JSON report
+python3 scripts/product_profile_artifacts.py
+python3 scripts/product_profile_artifacts.py --check
 ```
 
-The mobile harness (`mobile/EuIdBench`) runs the same combined prover on-device
-via the FFI surface; see `docs/benchmarks.md` for the device repro.
+## Benchmarks and mobile builds
 
-There is currently no repository license file.
+```bash
+make bench-identity    # exact proveIdentity / verifyIdentity API
+make bench-components  # standalone SHA-256 and P-256 C ABI
+make bench-mobile      # Android product benchmark APK
+```
+
+The Android SDK project is in `crates/sdk/android`. It builds arm64-v8a and
+x86_64 libraries and packages the generated UniFFI Kotlin bindings in one AAR.
+The benchmark APK is in `mobile/EuIdBenchAndroid`. The iOS component harness is
+in `mobile/EuIdBench`.
+
+There is no repository license file.
