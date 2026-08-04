@@ -9,9 +9,7 @@ use std::{cell::RefCell, rc::Rc};
 use air_core::claim_mask::{
     add_claim_mask_fraction, ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS,
 };
-use air_core::relations::{
-    field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
-};
+use air_core::relations::{field_id, FieldBytesRelation, SharedFieldRelation};
 use air_core::{fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint};
 use eu_id_ec_coprocessor::mac::{bits_to_bytes, bytes_to_bits, gf128_tag, Gf128};
 use rand::RngCore;
@@ -35,6 +33,7 @@ use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
     RelationEntry, TraceLocationAllocator,
 };
+use stwo_sha256::relations::{PackedShaDigestRelation, SharedPackedShaDigestRelation};
 
 const MACS_PER_PROOF: usize = eu_id_ec_coprocessor::ecdsa::MDOC_P4B_MAC_HALF_COUNT;
 const HALF_BYTES: usize = 16;
@@ -62,6 +61,8 @@ const CHECK_S_CONSTRAINTS: bool = true;
 const CHECK_POST_COLUMN_CONSTRAINTS: bool = true;
 const CHECK_POST_CONSTRAINTS: bool = true;
 const CHECK_POST_FINAL_TAG: bool = true;
+const ISSUER_SHA_MSG_ID: u32 = 0;
+const REVOCATION_SHA_MSG_ID: u32 = 2;
 
 type MacColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type ConsumerComponent = FrameworkComponent<MacConsumerEval>;
@@ -114,9 +115,8 @@ impl MdocP4bMacSharedState {
 pub(crate) struct MdocMacBind {
     rows: [MacHalfWitness; MACS_PER_PROOF],
     mac_state: Option<MdocP4bMacSharedState>,
-    issuer_digest_handle: Option<SharedDigestRelation>,
-    revocation_digest_handle: SharedDigestRelation,
-    revocation_digest_relation: Option<DigestBytesRelation>,
+    packed_sha_digest_handle: Option<SharedPackedShaDigestRelation>,
+    packed_sha_digest_relation: Option<PackedShaDigestRelation>,
     issuer_field_handle: Option<SharedFieldRelation>,
     av: Option<[u8; HALF_BYTES]>,
     tags: Option<[[u8; HALF_BYTES]; MACS_PER_PROOF]>,
@@ -134,9 +134,8 @@ impl Clone for MdocMacBind {
         Self {
             rows: self.rows.clone(),
             mac_state: self.mac_state.clone(),
-            issuer_digest_handle: self.issuer_digest_handle.clone(),
-            revocation_digest_handle: self.revocation_digest_handle.clone(),
-            revocation_digest_relation: None,
+            packed_sha_digest_handle: self.packed_sha_digest_handle.clone(),
+            packed_sha_digest_relation: None,
             issuer_field_handle: self.issuer_field_handle.clone(),
             tags: self.tags,
             av: self.av,
@@ -169,8 +168,7 @@ struct MacConsumerEval {
 struct MacBindingEval {
     mac_half_relation: MacHalfRelation,
     claim_mask_beta: Option<QM31>,
-    issuer_digest_relation: DigestBytesRelation,
-    revocation_digest_relation: DigestBytesRelation,
+    packed_sha_digest_relation: PackedShaDigestRelation,
     issuer_field_relation: FieldBytesRelation,
 }
 
@@ -179,8 +177,7 @@ impl MdocMacBind {
         mac_key_shares: &eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         mac_values: [Gf128; MACS_PER_PROOF],
         mac_state: MdocP4bMacSharedState,
-        issuer_digest_handle: SharedDigestRelation,
-        revocation_digest_handle: SharedDigestRelation,
+        packed_sha_digest_handle: SharedPackedShaDigestRelation,
         issuer_field_handle: SharedFieldRelation,
     ) -> Self {
         Self {
@@ -189,9 +186,8 @@ impl MdocMacBind {
                 x: mac_values[index],
             }),
             mac_state: Some(mac_state),
-            issuer_digest_handle: Some(issuer_digest_handle),
-            revocation_digest_handle,
-            revocation_digest_relation: None,
+            packed_sha_digest_handle: Some(packed_sha_digest_handle),
+            packed_sha_digest_relation: None,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
@@ -207,8 +203,7 @@ impl MdocMacBind {
 
     pub(crate) fn verifier(
         mac_state: MdocP4bMacSharedState,
-        issuer_digest_handle: SharedDigestRelation,
-        revocation_digest_handle: SharedDigestRelation,
+        packed_sha_digest_handle: SharedPackedShaDigestRelation,
         issuer_field_handle: SharedFieldRelation,
         interaction_claim: MdocMacInteractionClaim,
     ) -> Self {
@@ -218,9 +213,8 @@ impl MdocMacBind {
                 x: [0; HALF_BYTES],
             }),
             mac_state: Some(mac_state),
-            issuer_digest_handle: Some(issuer_digest_handle),
-            revocation_digest_handle,
-            revocation_digest_relation: None,
+            packed_sha_digest_handle: Some(packed_sha_digest_handle),
+            packed_sha_digest_relation: None,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
@@ -240,17 +234,10 @@ impl MdocMacBind {
             .expect("MAC half relation drawn before use")
     }
 
-    fn issuer_digest_relation(&self) -> DigestBytesRelation {
-        self.issuer_digest_handle
+    fn packed_sha_digest_relation(&self) -> PackedShaDigestRelation {
+        self.packed_sha_digest_relation
             .as_ref()
-            .expect("issuer digest handle is set")
-            .get()
-    }
-
-    fn revocation_digest_relation(&self) -> DigestBytesRelation {
-        self.revocation_digest_relation
-            .as_ref()
-            .expect("revocation digest relation drawn before use")
+            .expect("packed SHA digest relation drawn before use")
             .clone()
     }
 
@@ -334,7 +321,12 @@ impl Air for MdocMacBind {
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.mac_half_relation = Some(MacHalfRelation::draw(channel));
-        self.revocation_digest_relation = Some(self.revocation_digest_handle.get());
+        self.packed_sha_digest_relation = Some(
+            self.packed_sha_digest_handle
+                .as_ref()
+                .expect("packed SHA digest handle is set")
+                .get(),
+        );
     }
 
     fn layout(&self) -> air_core::TreeLayout {
@@ -427,8 +419,7 @@ impl Air for MdocMacBind {
             MacBindingEval {
                 mac_half_relation: self.mac_half_relation().clone(),
                 claim_mask_beta: self.claim_mask_beta(),
-                issuer_digest_relation: self.issuer_digest_relation(),
-                revocation_digest_relation: self.revocation_digest_relation(),
+                packed_sha_digest_relation: self.packed_sha_digest_relation(),
                 issuer_field_relation: self.issuer_field_relation(),
             },
             self.interaction_claim().binding,
@@ -515,8 +506,7 @@ impl AirProver for MdocMacBind {
         let (binding_trace, binding_claim) = binding_interaction_trace(
             &self.rows,
             self.mac_half_relation(),
-            &self.issuer_digest_relation(),
-            &self.revocation_digest_relation(),
+            &self.packed_sha_digest_relation(),
             &self.issuer_field_relation(),
             binding_mask,
             claim_mask_beta,
@@ -762,14 +752,18 @@ impl FrameworkEval for MacBindingEval {
         let bytes = (0..32).map(|_| eval.next_trace_mask()).collect::<Vec<_>>();
 
         eval.add_to_relation(RelationEntry::new(
-            &self.issuer_digest_relation,
+            &self.packed_sha_digest_relation,
             E::EF::from(issuer_digest_active.clone()),
-            &bytes,
+            &std::iter::once(m31_const::<E>(ISSUER_SHA_MSG_ID))
+                .chain(bytes.iter().cloned())
+                .collect::<Vec<_>>(),
         ));
         eval.add_to_relation(RelationEntry::new(
-            &self.revocation_digest_relation,
+            &self.packed_sha_digest_relation,
             E::EF::from(revocation_digest_active.clone()),
-            &bytes,
+            &std::iter::once(m31_const::<E>(REVOCATION_SHA_MSG_ID))
+                .chain(bytes.iter().cloned())
+                .collect::<Vec<_>>(),
         ));
 
         for (byte_idx, byte) in bytes.iter().enumerate() {
@@ -890,8 +884,7 @@ fn binding_trace(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> Vec<MacColumnEval> 
 fn binding_interaction_trace(
     rows: &[MacHalfWitness; MACS_PER_PROOF],
     mac_half_relation: &MacHalfRelation,
-    issuer_digest_relation: &DigestBytesRelation,
-    revocation_digest_relation: &DigestBytesRelation,
+    packed_sha_digest_relation: &PackedShaDigestRelation,
     issuer_field_relation: &FieldBytesRelation,
     claim_mask_trace: Option<&ClaimMaskTrace>,
     claim_mask_beta: Option<QM31>,
@@ -913,9 +906,14 @@ fn binding_interaction_trace(
                 let values = (0..32)
                     .map(|byte_idx| bytes[byte_idx].data[vec_row])
                     .collect::<Vec<_>>();
+                let values = std::iter::once(PackedM31::broadcast(M31::from_u32_unchecked(
+                    ISSUER_SHA_MSG_ID,
+                )))
+                .chain(values)
+                .collect::<Vec<_>>();
                 (
                     PackedQM31::from(issuer_digest_active.data[vec_row]),
-                    issuer_digest_relation.combine(&values),
+                    packed_sha_digest_relation.combine(&values),
                 )
             })
             .collect(),
@@ -926,9 +924,14 @@ fn binding_interaction_trace(
                 let values = (0..32)
                     .map(|byte_idx| bytes[byte_idx].data[vec_row])
                     .collect::<Vec<_>>();
+                let values = std::iter::once(PackedM31::broadcast(M31::from_u32_unchecked(
+                    REVOCATION_SHA_MSG_ID,
+                )))
+                .chain(values)
+                .collect::<Vec<_>>();
                 (
                     PackedQM31::from(revocation_digest_active.data[vec_row]),
-                    revocation_digest_relation.combine(&values),
+                    packed_sha_digest_relation.combine(&values),
                 )
             })
             .collect(),
@@ -1568,16 +1571,14 @@ mod tests {
         let rows = test_rows();
         let mut channel = Blake2sChannel::default();
         let mac_half_relation = MacHalfRelation::draw(&mut channel);
-        let issuer_digest_relation = DigestBytesRelation::draw(&mut channel);
-        let revocation_digest_relation = DigestBytesRelation::draw(&mut channel);
+        let packed_sha_digest_relation = PackedShaDigestRelation::draw(&mut channel);
         let issuer_field_relation = FieldBytesRelation::draw(&mut channel);
         let (_, mask, beta) = test_claim_masks();
 
         let (_, unmasked) = binding_interaction_trace(
             &rows,
             &mac_half_relation,
-            &issuer_digest_relation,
-            &revocation_digest_relation,
+            &packed_sha_digest_relation,
             &issuer_field_relation,
             None,
             None,
@@ -1585,8 +1586,7 @@ mod tests {
         let (_, masked) = binding_interaction_trace(
             &rows,
             &mac_half_relation,
-            &issuer_digest_relation,
-            &revocation_digest_relation,
+            &packed_sha_digest_relation,
             &issuer_field_relation,
             Some(&mask),
             Some(beta),
@@ -1641,8 +1641,7 @@ mod tests {
         let eval = MacBindingEval {
             mac_half_relation: MacHalfRelation::dummy(),
             claim_mask_beta: None,
-            issuer_digest_relation: DigestBytesRelation::dummy(),
-            revocation_digest_relation: DigestBytesRelation::dummy(),
+            packed_sha_digest_relation: PackedShaDigestRelation::dummy(),
             issuer_field_relation: FieldBytesRelation::dummy(),
         };
         let row = eval.evaluate(RowEval::inactive_binding_row());

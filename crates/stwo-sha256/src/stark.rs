@@ -17,13 +17,13 @@ use stwo::core::pcs::PcsConfig;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
 use stwo::core::verifier::VerificationError as StwoVerificationError;
-use stwo::prover::backend::simd::m31::LOG_N_LANES;
+
+pub use stwo::prover::backend::simd::m31::LOG_N_LANES;
 
 use crate::air::{Sha256Prover, Sha256Verifier};
-use crate::constants::DIGEST_BYTES;
 use crate::interaction::InteractionClaim;
-use crate::types::{Digest, Sha256Witness};
-use crate::witness::compute_sha256_witness;
+use crate::types::Digest;
+use crate::witness::{compute_packed_sha256_witness, PackedSha256Error};
 
 /// Tuning knobs for the prover.
 ///
@@ -36,7 +36,7 @@ pub struct ProverConfig {
     /// `log2` of the SHA-256 component's trace row count. Each row is one
     /// round of one padded block (64 rows per block).
     ///
-    /// **Must satisfy `log_n_rows ≥ trace::min_log_size(witness.blocks.len())`**
+    /// **Must satisfy `log_n_rows ≥ trace::min_log_size(n_blocks)`**
     /// or [`prove_sha256`] returns [`Sha256ProveError::TraceTooSmall`]. The
     /// SIMD backend additionally requires `log_n_rows ≥ LOG_N_LANES = 4`
     /// (one packed lane of rows). Below that, [`prove_sha256`] returns
@@ -46,15 +46,14 @@ pub struct ProverConfig {
     /// ```rust,no_run
     /// use stwo_sha256::stark::ProverConfig;
     /// use stwo_sha256::trace::min_log_size;
-    /// use stwo_sha256::witness::compute_sha256_witness;
+    /// use stwo_sha256::native::n_blocks_for;
     ///
     /// let message = b"a current SHA-256 message";
-    /// let witness = compute_sha256_witness(message);
     /// let config = ProverConfig {
-    ///     log_n_rows: min_log_size(witness.blocks.len()),
+    ///     log_n_rows: min_log_size(n_blocks_for(message.len())),
     ///     ..ProverConfig::default()
     /// };
-    /// assert_eq!(config.log_n_rows, min_log_size(witness.blocks.len()));
+    /// assert_eq!(config.log_n_rows, min_log_size(n_blocks_for(message.len())));
     /// ```
     /// `examples/prove_demo.rs` shows this pattern end-to-end. Passing a
     /// value larger than `min_log_size` absorbs additional padding rows
@@ -80,35 +79,15 @@ impl Default for ProverConfig {
     }
 }
 
-/// A STARK proof for a SHA-256 execution trace.
-///
-/// The `digest` and `n_blocks` fields contain metadata from the witness. The
-/// standalone AIR does not bind either field to the proof. The verifier does
-/// not mix these fields into its channel or compare them with the trace.
-///
-/// The optional digest provider emits the digest bytes on a shared LogUp
-/// relation. A composed proof must include a matching consumer to bind those
-/// bytes. Treat the fields on this standalone type as information from the
-/// prover.
+/// A STARK proof for one private SHA-256 message.
 #[derive(Clone, Debug)]
 pub struct Sha256Proof {
-    /// The 32-byte digest the prover claims the (private) message hashes
-    /// to. Witness-derived metadata. Not a cryptographic public input in
-    /// this standalone component — see the type-level doc-comment for the
-    /// binding plan.
-    pub digest: [u8; DIGEST_BYTES],
-    /// Number of blocks in the padded preimage. Witness-derived metadata.
-    /// Not verifier-checked in this standalone component.
-    pub n_blocks: usize,
     /// `log2` of the SHA-256 trace's row count.
     pub log_n_rows: u32,
     /// Per-component LogUp claimed sums. The total **must** be zero for
     /// the verifier to accept — the soundness backbone of the
     /// consumer ⇄ producer LogUp balance.
     pub interaction_claim: InteractionClaim,
-    /// Stwo PCS configuration that the prover used. The verifier uses this
-    /// value to reconstruct the same `CommitmentSchemeVerifier`.
-    pub pcs_config: PcsConfig,
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
@@ -189,25 +168,12 @@ impl core::fmt::Display for Sha256VerifyError {
 #[cfg(feature = "std")]
 impl std::error::Error for Sha256VerifyError {}
 
-/// Generate the witness, the trace, and the underlying STARK proof.
+/// Generate a one-message packed witness and its underlying STARK proof.
 pub fn prove_sha256(
     message: &[u8],
     config: &ProverConfig,
 ) -> Result<Sha256Proof, Sha256ProveError> {
-    let witness = compute_sha256_witness(message);
-    prove_sha256_from_witness(&witness, config)
-}
-
-/// Generate a proof directly from a pre-built [`Sha256Witness`].
-///
-/// This function runs the same pipeline as [`prove_sha256`]. It accepts a
-/// witness from a credential builder or another caller. Negative tests can
-/// also change this witness before they start the prover.
-pub fn prove_sha256_from_witness(
-    witness: &Sha256Witness,
-    config: &ProverConfig,
-) -> Result<Sha256Proof, Sha256ProveError> {
-    let required = crate::trace::min_log_size(witness.blocks.len());
+    let required = crate::trace::min_log_size(crate::native::n_blocks_for(message.len()));
     if config.log_n_rows < required {
         return Err(Sha256ProveError::TraceTooSmall {
             requested_log_n_rows: config.log_n_rows,
@@ -221,8 +187,27 @@ pub fn prove_sha256_from_witness(
         });
     }
 
-    prove_sha256_inner(witness, config)
-        .map_err(|e| Sha256ProveError::StwoProveFailed(format!("{e:?}")))
+    let witness = compute_packed_sha256_witness(&[message])
+        .map_err(|error| map_packed_error(error, config.log_n_rows))?;
+    prove_sha256_inner(&witness, config)
+}
+
+fn map_packed_error(error: PackedSha256Error, requested_log_n_rows: u32) -> Sha256ProveError {
+    match error {
+        PackedSha256Error::UnsupportedLogNRows {
+            log_n_rows,
+            min,
+            max: _,
+        } if log_n_rows < min => Sha256ProveError::LogSizeBelowSimdMin {
+            requested_log_n_rows: log_n_rows,
+            simd_min: min,
+        },
+        PackedSha256Error::TraceTooSmall { real_blocks, .. } => Sha256ProveError::TraceTooSmall {
+            requested_log_n_rows,
+            required_log_n_rows: crate::trace::min_log_size(real_blocks),
+        },
+        other => Sha256ProveError::StwoProveFailed(other.to_string()),
+    }
 }
 
 /// Run the prover after the caller validates `config`.
@@ -231,22 +216,20 @@ pub fn prove_sha256_from_witness(
 /// multiplicities, interaction trace, and components. This wrapper sends that
 /// module to [`air_core::prove`].
 fn prove_sha256_inner(
-    witness: &Sha256Witness,
+    witness: &crate::types::PackedSha256Witness,
     config: &ProverConfig,
-) -> Result<Sha256Proof, stwo::prover::ProvingError> {
+) -> Result<Sha256Proof, Sha256ProveError> {
     let log_n_rows = config.log_n_rows;
     let pcs_config = config.pcs_config;
 
-    let mut prover = Sha256Prover::new(witness, log_n_rows);
-    let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
+    let mut prover = Sha256Prover::new(witness, log_n_rows)
+        .map_err(|error| map_packed_error(error, log_n_rows))?;
+    let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)
+        .map_err(|error| Sha256ProveError::StwoProveFailed(format!("{error:?}")))?;
     let interaction_claim = prover.interaction_claim().clone();
-    let digest = witness.digest_from_blocks();
     Ok(Sha256Proof {
-        digest: digest.0,
-        n_blocks: witness.blocks.len(),
         log_n_rows,
         interaction_claim,
-        pcs_config,
         stark_proof,
     })
 }
@@ -298,80 +281,14 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
         .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
 }
 
-/// Native (out-of-circuit) digest. Useful for integration tests and as
-/// the claimed public input the prover stamps into a `Sha256Proof`.
+/// Native (out-of-circuit) digest for callers that need a reference value.
 pub fn native_digest(message: &[u8]) -> Digest {
     crate::native::hash(message)
-}
-
-/// Public-input contract for the SHA-256 component.
-///
-/// Two construction paths:
-/// - [`public_inputs_for`] — derives the contract from a message
-///   without running the prover. Used by the integration stream to
-///   assemble its Big-AIR public input contract ahead of proving.
-/// - [`Sha256Proof::public_inputs`] — extracts the contract from a
-///   proof. Used after proving. The returned value equals
-///   `public_inputs_for(message)` for the same message.
-///
-/// The standalone component does not bind `digest` or `n_blocks` to the AIR.
-/// See [`Sha256Proof`]. The optional digest provider emits the digest bytes on
-/// a shared LogUp channel. A matching consumer can bind those bytes in a
-/// composed proof.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sha256PublicInputs {
-    pub digest: [u8; DIGEST_BYTES],
-    pub n_blocks: usize,
-}
-
-/// Derive the public input shape (digest + block count) the prover
-/// *would* commit to, without running the prover. Equivalent to
-/// `prove_sha256(message, &config).map(|p| p.public_inputs())` but
-/// avoids the prover cost.
-pub fn public_inputs_for(message: &[u8]) -> Sha256PublicInputs {
-    let padded = crate::native::pad_message(message);
-    let n_blocks = padded.len() / crate::constants::BLOCK_BYTES;
-    Sha256PublicInputs {
-        digest: native_digest(message).0,
-        n_blocks,
-    }
-}
-
-impl Sha256Proof {
-    /// Extract the public-input contract this proof carries. The returned
-    /// value equals `public_inputs_for(message)` for the message the
-    /// prover ran on. See [`Sha256PublicInputs`] for the contract shape
-    /// and the standalone-component caveat about cryptographic binding.
-    pub fn public_inputs(&self) -> Sha256PublicInputs {
-        Sha256PublicInputs {
-            digest: self.digest,
-            n_blocks: self.n_blocks,
-        }
-    }
-}
-
-/// Helper consumed by integration tests: pad, witness, trace — but do not
-/// run the prover.
-pub fn build_trace_for(
-    message: &[u8],
-    config: &ProverConfig,
-) -> Result<(Sha256Witness, Vec<Vec<stwo::core::fields::m31::BaseField>>), Sha256ProveError> {
-    let witness = compute_sha256_witness(message);
-    let required = crate::trace::min_log_size(witness.blocks.len());
-    if config.log_n_rows < required {
-        return Err(Sha256ProveError::TraceTooSmall {
-            requested_log_n_rows: config.log_n_rows,
-            required_log_n_rows: required,
-        });
-    }
-    let trace = crate::trace::generate_trace(&witness, config.log_n_rows);
-    Ok((witness, trace))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::trace::Layout;
 
     #[test]
     fn prove_rejects_too_small_trace() {
@@ -383,76 +300,6 @@ mod tests {
         match prove_sha256(&msg, &config) {
             Err(Sha256ProveError::TraceTooSmall { .. }) => {}
             other => panic!("expected TraceTooSmall, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn build_trace_returns_a_full_trace() {
-        let msg = b"the quick brown fox jumps over the lazy dog";
-        let config = ProverConfig::default();
-        let (witness, trace) = build_trace_for(msg, &config).unwrap();
-        assert_eq!(trace.len(), Layout::TOTAL_COLS);
-        let pubs = public_inputs_for(msg);
-        assert_eq!(pubs.digest, native_digest(msg).0);
-        assert_eq!(pubs.n_blocks, witness.blocks.len());
-    }
-
-    #[test]
-    fn public_inputs_for_empty_and_boundary() {
-        let pubs = public_inputs_for(b"");
-        assert_eq!(pubs.n_blocks, 1);
-        let pubs = public_inputs_for(&[0u8; 56]);
-        assert_eq!(pubs.n_blocks, 2);
-        let pubs = public_inputs_for(&[0u8; 55]);
-        assert_eq!(pubs.n_blocks, 1);
-    }
-
-    /// Integration callers can give [`prove_sha256_from_witness`] an existing
-    /// [`Sha256Witness`]. The success case needs a real proof and has ignored
-    /// test coverage. This fast test checks the validation gate.
-    #[test]
-    fn prove_sha256_from_witness_rejects_too_small_log_n_rows() {
-        // 5 000-byte message ⇒ well above the `1 << LOG_N_LANES` row
-        // budget, so the `LOG_N_LANES`-sized default cannot fit it.
-        let witness = compute_sha256_witness(&[0u8; 5000]);
-        assert!(
-            witness.blocks.len() > (1usize << LOG_N_LANES),
-            "test premise: message must exceed the LOG_N_LANES = 4 row budget",
-        );
-        let config = ProverConfig {
-            log_n_rows: LOG_N_LANES,
-            ..ProverConfig::default()
-        };
-        match prove_sha256_from_witness(&witness, &config) {
-            Err(Sha256ProveError::TraceTooSmall {
-                requested_log_n_rows,
-                required_log_n_rows,
-            }) => {
-                assert_eq!(requested_log_n_rows, LOG_N_LANES);
-                assert!(required_log_n_rows > LOG_N_LANES);
-            }
-            other => panic!("expected TraceTooSmall, got {other:?}"),
-        }
-    }
-
-    /// Pin the `public_inputs_for(msg) == Sha256Proof::public_inputs()` contract.
-    /// Exercise every message shape used by downstream callers. Use the
-    /// witness-derived shape instead of the ignored prover. `prove_sha256_inner`
-    /// copies the witness digest and block count into the proof.
-    #[test]
-    fn public_inputs_for_matches_proof_public_inputs_shape() {
-        // Synthesize the proof metadata without running the prover.
-        // `Sha256Proof::public_inputs()` reads only the proof's metadata fields.
-        // Therefore, matching digest and block-count fields exercise the contract.
-        for msg in [&b""[..], b"abc", &[0u8; 56], &[0u8; 1024]] {
-            let from_message = public_inputs_for(msg);
-            let witness = compute_sha256_witness(msg);
-            let digest = witness.digest_from_blocks();
-            let from_proof = Sha256PublicInputs {
-                digest: digest.0,
-                n_blocks: witness.blocks.len(),
-            };
-            assert_eq!(from_message, from_proof, "msg = {msg:?}");
         }
     }
 

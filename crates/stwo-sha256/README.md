@@ -9,10 +9,12 @@ built on [Stwo](https://github.com/starkware-libs/stwo).
 
 ## What this crate proves
 
-For a private message `m`, `prove_sha256` produces a STARK proof for a valid SHA-256 trace.
+For a private message `m`, `prove_sha256` packs that one message through the
+sole packed component and produces a STARK proof for a valid SHA-256 trace.
 The AIR constrains each schedule word and each round state.
 It also constrains the block states, FIPS padding, and multi-block chain.
-The integration layer binds the digest to external public inputs.
+Product integration binds each digest and complete padded byte stream through
+the keyed cross-component relations.
 
 ## Quick start
 
@@ -37,24 +39,22 @@ Run it with `--ignored` or `make`.
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Every round word is bit-constrained | Enforced — the bit-plane identities reconstruct round words; each terminal `h_out` limb is recomposed from two explicit `Range_8`-checked bytes.                                              |
 | Every mod-2³² limb-add identity | Enforced — schedule recurrence, `T1`, `T2`/`e_new`/`a_new`, and the 8 finalization adds emit linear constraints **and** range-check their carries against `Range_{2,4,5}`. |
-| IV binding on the first block    | Enforced — `is_first_block · (h_in[j] − IV[j]) = 0`, both limbs, for `j ∈ 0..8`.                                                                                            |
-| Multi-block chain                | Enforced — `(enabler − is_first_block) · (h_in[j] − h_out_prev[j]) = 0` on every continuation row.                                                                          |
+| IV binding on every message start | Enforced — `msg_start · (h_in[j] − IV[j]) = 0`, both limbs, for `j ∈ 0..8`.                                                                                                |
+| Multi-block chain                | Enforced — `(enabler − msg_start) · (h_in[j] − h_out_prev[j]) = 0` on every continuation row.                                                                                |
 | FIPS 180-4 §5.1.1 padding        | Enforced — (P.A) binary flags, (P.B) one-hot sums, (P.C/C') aux flags, (P.D) marker-word byte assembly, (P.E) `0x80` marker pin, (P.F/G) post-marker zeros, (P.H) bit length.|
 | LogUp closure / soundness gate   | Enforced — every wired channel balances; `verify_sha256_proof` rejects any non-zero `interaction_claim.total()` before running Stwo's verifier.                            |
 
-The constraint degree remains 2.
+The direct AIR constraints have total degree at most 3.
 The main SHA evaluator uses `max_constraint_log_degree_bound = log_size + 2`
 for its degree-five batched LogUp recurrence. The prover owner also accounts
-for the fixed log-16 range table, taking `max(17, log_size + 2)`.
-The chain gate uses one `(enabler − is_first_block)` factor.
+for the fixed log-16 range table, taking `max(17, log_size + 2)` outside the shared-table path.
+The chain gate uses one `(enabler − msg_start)` factor.
 
 ## What this crate does **not** do
 
-- **Bind the digest as a cryptographic public input.** `Sha256Proof::digest`
-  is witness-derived metadata, **not** a verifier-checked input. The
-  standalone verifier never mixes `digest` into its channel and never
-  compares it to the trace's `h_out` columns. The integration layer must bind
-  the digest through the `valueDigests` and ECDSA `z` LogUp relations.
+- **Bind the digest as a cryptographic public input.** The standalone facade
+  proves trace validity; callers that need a public digest must bind it through
+  the keyed digest relation and a consuming component.
 - **Bind the bit length and marker position to the mdoc parser.**
   The padding layer constrains `W[14]` and `W[15]` to a committed length value.
   The integration layer must bind that length to the mdoc preimage.

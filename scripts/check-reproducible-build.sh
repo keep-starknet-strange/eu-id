@@ -13,6 +13,14 @@ if [[ $# -ne 0 ]]; then
     exit 2
 fi
 
+run_reproducible() {
+    if ((${#allow_dirty[@]})); then
+        bash "$workspace_root/scripts/reproducible-build.sh" "${allow_dirty[@]}" "$@"
+    else
+        bash "$workspace_root/scripts/reproducible-build.sh" "$@"
+    fi
+}
+
 host_target="$(rustc -vV | awk '/^host:/ { print $2 }')"
 release_profile="$(python3 -c '
 import pathlib, sys, tomllib
@@ -74,7 +82,12 @@ build_crate_type() {
         command+=("$target_rustflags_name=$library_rustflags")
     fi
     command+=(
-        bash "$workspace_root/scripts/reproducible-build.sh" "${allow_dirty[@]}"
+        bash "$workspace_root/scripts/reproducible-build.sh"
+    )
+    if ((${#allow_dirty[@]})); then
+        command+=("${allow_dirty[@]}")
+    fi
+    command+=(
         cargo rustc --locked --offline --release -j 12 -p sdk --lib
         --target "$host_target" --crate-type "$crate_type"
     )
@@ -91,7 +104,12 @@ build_probe() {
         command+=("$target_rustflags_name=$probe_rustflags")
     fi
     command+=(
-        bash "$workspace_root/scripts/reproducible-build.sh" "${allow_dirty[@]}"
+        bash "$workspace_root/scripts/reproducible-build.sh"
+    )
+    if ((${#allow_dirty[@]})); then
+        command+=("${allow_dirty[@]}")
+    fi
+    command+=(
         cargo build --locked --offline --release -j 12 -p sdk
         --target "$host_target" --example identity_probe
     )
@@ -108,22 +126,18 @@ build_once() {
 }
 
 source_id_before="$(
-    bash "$workspace_root/scripts/reproducible-build.sh" \
-        "${allow_dirty[@]}" --print-source-id
+    run_reproducible --print-source-id
 )"
 packaging_source_id_before="$(
-    bash "$workspace_root/scripts/reproducible-build.sh" \
-        "${allow_dirty[@]}" --print-packaging-source-id
+    run_reproducible --print-packaging-source-id
 )"
 build_once "$first_target_dir"
 build_once "$second_target_dir"
 source_id_after="$(
-    bash "$workspace_root/scripts/reproducible-build.sh" \
-        "${allow_dirty[@]}" --print-source-id
+    run_reproducible --print-source-id
 )"
 packaging_source_id_after="$(
-    bash "$workspace_root/scripts/reproducible-build.sh" \
-        "${allow_dirty[@]}" --print-packaging-source-id
+    run_reproducible --print-packaging-source-id
 )"
 if [[ "$source_id_before" != "$source_id_after" ]]; then
     echo "source inputs changed between reproducibility builds" >&2

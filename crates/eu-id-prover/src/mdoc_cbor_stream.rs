@@ -1422,23 +1422,27 @@ pub(crate) struct MdocCborStream {
 }
 
 impl MdocCborStream {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_log_size(
         bytes: Vec<u8>,
         mode: MdocCborInputMode,
         stream_id: u32,
+        input_field_id: u32,
         input: SharedFieldRelation,
         parsed: Option<SharedParsedCborByteRelation>,
         log_size: u32,
+        max_message_len: Option<u32>,
     ) -> Result<Self, MdocCborStreamError> {
         Self::new_shaped(
             bytes,
             mode,
             stream_id,
+            input_field_id,
             input,
             None,
             parsed,
             Some(log_size),
-            None,
+            max_message_len,
         )
     }
 
@@ -1458,16 +1462,13 @@ impl MdocCborStream {
             bytes,
             MdocCborInputMode::ShaPadded,
             stream_id,
+            sha_field_id,
             sha_input,
             Some((raw_field_id, raw_input)),
             parsed,
             Some(log_size),
             Some(max_message_len),
         )
-        .map(|mut stream| {
-            stream.input_field_id = sha_field_id;
-            stream
-        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1475,6 +1476,7 @@ impl MdocCborStream {
         bytes: Vec<u8>,
         mode: MdocCborInputMode,
         stream_id: u32,
+        input_field_id: u32,
         input: SharedFieldRelation,
         raw_input: Option<(u32, SharedFieldRelation)>,
         parsed: Option<SharedParsedCborByteRelation>,
@@ -1490,7 +1492,7 @@ impl MdocCborStream {
         Ok(Self {
             mode,
             stream_id,
-            input_field_id: stream_id,
+            input_field_id,
             log_size: witness.log_size,
             witness: Some(witness),
             input_handle: input,
@@ -1508,12 +1510,16 @@ impl MdocCborStream {
     pub(crate) fn verifier(
         mode: MdocCborInputMode,
         stream_id: u32,
+        input_field_id: u32,
         log_size: u32,
         input: SharedFieldRelation,
         parsed: Option<SharedParsedCborByteRelation>,
+        max_message_len: Option<u32>,
         interaction_claim: MdocCborStreamInteractionClaim,
     ) -> Result<Self, MdocCborStreamError> {
-        if !(MDOC_CBOR_MIN_LOG_SIZE..=MDOC_CBOR_MAX_LOG_SIZE).contains(&log_size) {
+        if !(MDOC_CBOR_MIN_LOG_SIZE..=MDOC_CBOR_MAX_LOG_SIZE).contains(&log_size)
+            || max_message_len.is_some_and(|max| max > 1 << MDOC_CBOR_MESSAGE_BOUND_BITS)
+        {
             return Err(MdocCborStreamError::TraceTooLarge {
                 bytes: 1usize << log_size.min(usize::BITS - 1),
             });
@@ -1521,12 +1527,12 @@ impl MdocCborStream {
         Ok(Self {
             mode,
             stream_id,
-            input_field_id: stream_id,
+            input_field_id,
             log_size,
             witness: None,
             input_handle: input,
             raw_input: None,
-            max_message_len: None,
+            max_message_len,
             parsed_handle: parsed,
             claim_mask_trace: None,
             claim_mask_challenge: None,

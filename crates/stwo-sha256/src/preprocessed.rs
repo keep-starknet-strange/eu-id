@@ -23,7 +23,7 @@
 //! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
 //! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
 //!   — value `1` at storage index `Layout::row_slot(0, log_n_rows) = 0`,
-//!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
+//!   zero elsewhere. The AIR pins `msg_start ≡ is_first_row`, which
 //!   anchors the §10.3 chain at block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 //! - 9 round-cyclic columns of the rotated one-row-per-round layout.
 //!
@@ -195,7 +195,7 @@ fn generate_preprocessed_trace_uncached(
     // Value `1` at the storage index that block 0 occupies (which is `0`
     // by `Layout::row_slot(0, log_n_rows)`), `0` elsewhere. The AIR
     // consumes this in `Sha256Eval::evaluate` to pin
-    // `is_first_block ≡ is_first_row`, anchoring the §10.3 chain on
+    // `msg_start ≡ is_first_row`, anchoring the §10.3 chain on
     // block 0's IV binding (closes design §11 L2).
     {
         let domain = CanonicCoset::new(log_n_rows).circle_domain();
@@ -369,7 +369,7 @@ mod tests {
     }
 
     /// The `is_first_row` selector is `1` at storage index 0 and `0`
-    /// elsewhere. This pins the `is_first_block ≡ is_first_row` constraint
+    /// elsewhere. This pins the `msg_start ≡ is_first_row` constraint
     /// in `Sha256Eval` to a single anchor at block 0's slot (which
     /// `Layout::row_slot(0, log_n_rows)` resolves to index 0).
     #[test]

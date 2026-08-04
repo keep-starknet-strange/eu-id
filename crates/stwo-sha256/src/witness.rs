@@ -18,12 +18,48 @@
 
 use crate::constants::{BLOCK_BYTES, IV, K, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS};
 use crate::native::{
-    big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj, pad_message, parse_blocks,
+    big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj, n_blocks_for, pad_message,
+    parse_blocks,
 };
 use crate::types::{
-    AddCarries, BlockWitness, Digest, HashState, PaddingWitness, RoundWitness, Schedule,
-    ScheduleEntryWitness, Sha256Witness, WordLimbs, LIMB_BITS,
+    AddCarries, BlockWitness, Digest, HashState, PackedSha256Witness, PaddingWitness, RoundWitness,
+    Schedule, ScheduleEntryWitness, Sha256Witness, WordLimbs, LIMB_BITS,
 };
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PackedSha256Error {
+    EmptyMessageSet,
+    BlockCountOverflow,
+    UnsupportedLogNRows {
+        log_n_rows: u32,
+        min: u32,
+        max: u32,
+    },
+    TraceTooSmall {
+        real_blocks: usize,
+        max_real_blocks: usize,
+    },
+}
+
+impl core::fmt::Display for PackedSha256Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EmptyMessageSet => write!(f, "packed SHA message collection is empty"),
+            Self::BlockCountOverflow => write!(f, "packed SHA block-count arithmetic overflowed"),
+            Self::UnsupportedLogNRows { log_n_rows, min, max } => write!(
+                f,
+                "log_n_rows = {log_n_rows} outside supported range [{min}, {max}]"
+            ),
+            Self::TraceTooSmall { real_blocks, max_real_blocks } => write!(
+                f,
+                "packed SHA trace needs {real_blocks} real blocks but permits at most {max_real_blocks}"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for PackedSha256Error {}
 
 /// Pad the message and assemble the padding witness used by the AIR.
 pub fn compute_padding_witness(msg: &[u8]) -> PaddingWitness {
@@ -230,6 +266,35 @@ pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
         blocks,
         digest,
     }
+}
+
+pub fn compute_packed_sha256_witness(
+    messages: &[&[u8]],
+) -> Result<PackedSha256Witness, PackedSha256Error> {
+    if messages.is_empty() {
+        return Err(PackedSha256Error::EmptyMessageSet);
+    }
+
+    let mut total_blocks = 0usize;
+    for message in messages {
+        message
+            .len()
+            .checked_add(9)
+            .and_then(|_| message.len().checked_mul(8))
+            .ok_or(PackedSha256Error::BlockCountOverflow)?;
+        total_blocks = total_blocks
+            .checked_add(n_blocks_for(message.len()))
+            .ok_or(PackedSha256Error::BlockCountOverflow)?;
+    }
+
+    let packed = PackedSha256Witness {
+        messages: messages
+            .iter()
+            .map(|message| compute_sha256_witness(message))
+            .collect(),
+    };
+    debug_assert_eq!(packed.total_blocks(), total_blocks);
+    Ok(packed)
 }
 
 /// Smoke check: assert `(result_word, carries)` consistency for one

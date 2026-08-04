@@ -139,16 +139,20 @@ pub fn hash(msg: &[u8]) -> Digest {
 }
 
 /// Number of blocks needed for a message of `n_bytes`.
-pub fn n_blocks_for(n_bytes: usize) -> usize {
+pub const fn n_blocks_for(n_bytes: usize) -> usize {
     // After appending 0x80 + 8 length bytes, round up to a multiple of 64.
-    let total = n_bytes + 9;
-    total.div_ceil(BLOCK_BYTES)
+    let total = n_bytes.saturating_add(9);
+    (total.saturating_add(BLOCK_BYTES - 1)) / BLOCK_BYTES
 }
 
 const _: () = {
     // Internal consistency: block/word/state sizing.
     assert!(BLOCK_BYTES == N_INPUT_WORDS * WORD_BYTES);
     assert!(N_STATE_WORDS == 8);
+    assert!(n_blocks_for(6_164) == 97);
+    assert!(n_blocks_for(6_144) == 97);
+    assert!(n_blocks_for(20) == 1);
+    assert!(n_blocks_for(1_024) == 17);
 };
 
 #[cfg(test)]

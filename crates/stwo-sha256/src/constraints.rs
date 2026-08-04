@@ -15,7 +15,6 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, ORIGINA
 
 use crate::components::{is_first_row_column_id, round_cyclic_column_ids};
 use crate::constants::{DIGEST_BYTES, IV, N_STATE_WORDS};
-use crate::field_exposure::FieldExposure;
 use crate::relations::Sha256Relations;
 use crate::trace::WORD_BIT_COLS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
@@ -43,15 +42,8 @@ pub struct Sha256Eval {
     /// The AIR always constrains the digest columns.
     /// This option controls only the cross-module yield.
     pub expose_digest: bool,
-    /// Credential field byte exposure.
-    ///
-    /// The AIR derives configured bytes from the boolean W bit planes.
-    /// It yields them on their target block through `Sha256Field`.
-    /// Predicate consumers require these exact bytes.
-    /// Multi-block exposure adds a block counter and one selector per target.
-    /// A standalone proof uses an empty exposure.
-    /// A yield without a consumer would leave a nonzero claim sum.
-    pub field_exposure: FieldExposure,
+    /// Whether the complete padded stream provider is active.
+    pub expose_field: bool,
     /// Post-tree-1 claimed-sum mask challenge. When present, the final logical
     /// LogUp site is `beta * mask / 1`, read from four committed trace columns.
     pub claim_mask_beta: Option<QM31>,
@@ -89,9 +81,7 @@ impl FrameworkEval for Sha256Eval {
         let r15 = eval.get_preprocessed_column(cyclic[6].clone());
         let r63 = eval.get_preprocessed_column(cyclic[7].clone());
         let is_sched = eval.get_preprocessed_column(cyclic[8].clone());
-        // `is_first_row` pins exactly one anchor row (natural row 0 = block
-        // 0, round 0) for IV binding.
-        let is_first_row = eval.get_preprocessed_column(is_first_row_column_id());
+        let first_row = eval.get_preprocessed_column(is_first_row_column_id());
 
         // ---- header ----
         //
@@ -126,10 +116,10 @@ impl FrameworkEval for Sha256Eval {
             ],
         );
         let w: [(E::F, E::F); 17] = std::array::from_fn(|k| (w_lo[k].clone(), w_hi[k].clone()));
-        // Consume each physical W-bit column exactly once. An empty exposure
-        // needs only the three SHA and padding offsets. Field exposures request
-        // all W[0..15] offsets so t=15 can form arbitrary message bytes.
-        let w_bits_m = if self.field_exposure.is_empty() {
+        // Consume each physical W-bit column exactly once. The standalone
+        // path needs only the three SHA and padding offsets; the optional
+        // packed-stream provider requests all W[0..15] offsets at t=15.
+        let w_bits_m = if !self.expose_field {
             WordBitMasks::Sparse(std::array::from_fn(|_| {
                 eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15])
             }))
@@ -206,14 +196,10 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- t = 0 family ----
         //
-        // Read `is_first_block` at offset −15.
-        // The field exposure on row `t = 15` uses this block-zero value.
-        let [is_first_block, is_first_block_m15] =
-            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -15]);
-        // C1 anchors: pin `is_first_block ≡ is_first_row` and require a real
-        // trace row at the anchor.
-        eval.add_constraint(is_first_block.clone() - is_first_row.clone());
-        eval.add_constraint(is_first_row.clone() * (E::F::one() - enabler.clone()));
+        // Read `msg_start` at offset −15.
+        // The packed-stream provider on row `t = 15` uses this block-zero value.
+        let [msg_start, _, msg_start_next] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -15, 1]);
 
         // `h_in`: this block's input state (t = 0 row), laid out (lo, hi)
         // per word — reads interleave accordingly. Offsets −1..−3 feed the
@@ -232,8 +218,8 @@ impl FrameworkEval for Sha256Eval {
         for (j, &iv_word) in IV.iter().enumerate() {
             let iv_lo = E::F::from(M31::from(iv_word & 0xFFFF));
             let iv_hi = E::F::from(M31::from(iv_word >> LIMB_BITS));
-            eval.add_constraint(is_first_block.clone() * (h_in_lo[j][0].clone() - iv_lo));
-            eval.add_constraint(is_first_block.clone() * (h_in_hi[j][0].clone() - iv_hi));
+            eval.add_constraint(msg_start.clone() * (h_in_lo[j][0].clone() - iv_lo));
+            eval.add_constraint(msg_start.clone() * (h_in_hi[j][0].clone() - iv_hi));
         }
 
         // Working-state words of `h_in` that recompose against committed
@@ -474,9 +460,9 @@ impl FrameworkEval for Sha256Eval {
 
         // Connect each continuation block input to the prior block output.
         // Offset −1 selects the prior `t = 63` row.
-        // `enabler·is_round_0 − is_first_block` enables only continuation rows.
+        // `enabler·is_round_0 − msg_start` enables only continuation rows.
         // IV binding controls the anchor row.
-        let chain_gate = gate_r0.clone() - is_first_block.clone();
+        let chain_gate = gate_r0.clone() - msg_start.clone();
         for j in 0..N_STATE_WORDS {
             eval.add_constraint(
                 chain_gate.clone() * (h_in_lo[j][0].clone() - h_out_prev[j].0.clone()),
@@ -486,14 +472,15 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
-        // ---- digest provider: is_last_block gate, byte view, yield ----
+        // ---- digest provider: is_msg_last gate, byte view, yield ----
         //
-        // `is_last_block = enabler · is_round_63 · (1 − enabler_next)`: 1
+        // `is_msg_last = enabler · is_round_63 · (1 − enabler_next)`: 1
         // only at the last real row. `min_log_size` always adds a padding
         // successor after the final block's t = 63 row.
-        let is_last_block = eval.next_trace_mask();
+        let is_msg_last = eval.next_trace_mask();
         eval.add_constraint(
-            is_last_block.clone() - gate_r63.clone() * (E::F::one() - enabler_next.clone()),
+            is_msg_last.clone()
+                - gate_r63.clone() * (msg_start_next.clone() + E::F::one() - enabler_next.clone()),
         );
 
         // Digest byte view (t = 63 rows): per state word `j` the cells are
@@ -525,14 +512,6 @@ impl FrameworkEval for Sha256Eval {
                 &self.relations,
             );
         }
-        if self.expose_digest {
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.digest.digest,
-                -is_last_block.clone(),
-                &digest_bytes,
-            ));
-        }
-
         // ---- §10.4 padding-role constraints (t = 15 rows) ----
         //
         // Identical algebra to the wide layout. The block's message words
@@ -680,121 +659,67 @@ impl FrameworkEval for Sha256Eval {
             is_length_block.clone() * (w_msg(15).1.clone() - bit_length_w15_hi.clone()),
         );
 
-        // ---- C1 contiguity (aux column `enabler_step`) ----
-        let enabler_step = eval.next_trace_mask();
+        // ---- packed active prefix and message metadata ----
         eval.add_constraint(
-            enabler_step.clone() - enabler.clone() * (E::F::one() - enabler_prev.clone()),
+            enabler.clone() * (E::F::one() - enabler_prev.clone()) - first_row.clone(),
         );
-        eval.add_constraint((E::F::one() - is_first_row.clone()) * enabler_step.clone());
+        eval.add_constraint(
+            enabler_prev.clone() * (E::F::one() - enabler.clone()) * (E::F::one() - r0.clone()),
+        );
+        eval.add_constraint(msg_start.clone() * (msg_start.clone() - E::F::one()));
+        eval.add_constraint(msg_start.clone() * (E::F::one() - gate_r0.clone()));
+        eval.add_constraint(first_row.clone() * (msg_start.clone() - E::F::one()));
 
-        // ---- field provider (target block t = 15 rows) ----
-        //
-        // Each exposed byte is a linear expression over the recomposed Boolean
-        // W bit planes. The existing first-block flag gates block-zero
-        // exposure. Multi-block exposure adds a witness block counter and one
-        // selector for each target block.
-        if !self.field_exposure.is_empty() {
-            // Block counter: read at [0, -1] to pin its step behaviour. It is a
-            // base/witness column carrying `block_idx` on every row.
-            let block_counter = if self.field_exposure.needs_dynamic_block_columns() {
-                let [b, b_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
-                // Base: 0 on block 0's anchor row.
-                eval.add_constraint(is_first_block.clone() * b.clone());
-                // Flat within a block (every real non-`t=0` row).
-                eval.add_constraint(
-                    enabler.clone() * (E::F::one() - r0.clone()) * (b.clone() - b_prev.clone()),
-                );
-                // +1 at each real continuation boundary (`chain_gate`, defined
-                // in the h-chaining section above).
-                eval.add_constraint(chain_gate.clone() * (b.clone() - b_prev - E::F::one()));
-                Some(b)
-            } else {
-                None
-            };
-            // One selector per distinct target block (multi-block only).
-            let selectors: Vec<E::F> = if self.field_exposure.needs_dynamic_block_columns() {
-                (0..self.field_exposure.target_blocks().len())
-                    .map(|_| eval.next_trace_mask())
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let block_zero_selector = is_first_block_m15;
-            if self.field_exposure.needs_dynamic_block_columns() {
-                let b = block_counter
-                    .as_ref()
-                    .expect("multi-block field exposure has a block counter");
-                // Pin each selector: boolean, live only on `t = 15`, and hot
-                // only when the counter equals its target block.
-                for (&target_block, selector) in
-                    self.field_exposure.target_blocks().iter().zip(&selectors)
-                {
-                    eval.add_constraint(selector.clone() * (selector.clone() - E::F::one()));
-                    eval.add_constraint(selector.clone() * (E::F::one() - gate_r15.clone()));
-                    eval.add_constraint(
-                        selector.clone() * (b.clone() - E::F::from(M31::from(target_block as u32))),
-                    );
-                }
-            }
+        let [msg_id, msg_id_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+        let [msg_block, msg_block_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+        eval.add_constraint(first_row.clone() * msg_id.clone());
+        eval.add_constraint(
+            (enabler.clone() - gate_r0.clone()) * (msg_id.clone() - msg_id_prev.clone()),
+        );
+        eval.add_constraint(
+            (gate_r0.clone() - first_row.clone())
+                * (msg_id.clone() - msg_id_prev.clone() - msg_start.clone()),
+        );
+        eval.add_constraint(msg_start.clone() * msg_block.clone());
+        eval.add_constraint(
+            (enabler.clone() - gate_r0.clone()) * (msg_block.clone() - msg_block_prev.clone()),
+        );
+        eval.add_constraint(
+            (gate_r0.clone() - msg_start.clone())
+                * (msg_block.clone() - msg_block_prev - E::F::one()),
+        );
 
-            for y in self.field_exposure.yields() {
-                let selector = if self.field_exposure.needs_dynamic_block_columns() {
-                    selectors[self
-                        .field_exposure
-                        .target_blocks()
-                        .binary_search(&y.block_idx)
-                        .expect("yield target is in target_blocks")]
-                    .clone()
-                } else {
-                    block_zero_selector.clone()
-                };
-                // W bits are LSB-first. Big-endian byte positions 0..3 map
-                // to bit ranges 24..31, 16..23, 8..15, and 0..7.
-                let first_bit = (BYTES_PER_WORD - 1 - y.byte_in_word) * 8;
-                let round_offset = 15 - y.word_idx;
+        if self.expose_digest {
+            let mut tuple = Vec::with_capacity(1 + DIGEST_BYTES);
+            tuple.push(msg_id.clone());
+            tuple.extend(digest_bytes.iter().cloned());
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.packed_digest,
+                -is_msg_last.clone(),
+                &tuple,
+            ));
+        }
+
+        // ---- full padded-message provider (t = 15 rows) ----
+        if self.expose_field {
+            let base = E::F::from(M31::from(crate::relations::PACKED_SHA_STREAM_FIELD_BASE));
+            for byte_in_block in 0..crate::constants::BLOCK_BYTES {
+                let word_idx = byte_in_block / BYTES_PER_WORD;
+                let byte_in_word = byte_in_block % BYTES_PER_WORD;
+                let first_bit = (BYTES_PER_WORD - 1 - byte_in_word) * 8;
+                let round_offset = 15 - word_idx;
                 let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
                     acc + w_bit_at(first_bit + bit, round_offset)
                         * E::F::from(M31::from(1u32 << bit))
                 });
-                let tuple = [
-                    E::F::from(M31::from(y.field_id)),
-                    E::F::from(M31::from(y.byte_index)),
-                    value,
-                ];
+                let byte_index = msg_block.clone()
+                    * E::F::from(M31::from(crate::constants::BLOCK_BYTES as u32))
+                    + E::F::from(M31::from(byte_in_block as u32));
                 eval.add_to_relation(RelationEntry::base(
                     &self.relations.field.field,
-                    -selector.clone(),
-                    &tuple,
+                    -gate_r15.clone(),
+                    &[base.clone() + msg_id.clone(), byte_index, value],
                 ));
-            }
-
-            // Full padded-message stream. One fixed lookup site per byte
-            // position emits on every real block's t=15 row, so the width is
-            // independent of the number of blocks. A consumer that walks
-            // byte_index 0..N sees the exact compression input. This input
-            // includes the SHA marker, zero padding, and length word.
-            if let Some(field_id) = self.field_exposure.padded_stream_field_id() {
-                let b = block_counter
-                    .as_ref()
-                    .expect("padded stream exposure has a block counter");
-                for byte_in_block in 0..crate::constants::BLOCK_BYTES {
-                    let word_idx = byte_in_block / BYTES_PER_WORD;
-                    let byte_in_word = byte_in_block % BYTES_PER_WORD;
-                    let first_bit = (BYTES_PER_WORD - 1 - byte_in_word) * 8;
-                    let round_offset = 15 - word_idx;
-                    let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
-                        acc + w_bit_at(first_bit + bit, round_offset)
-                            * E::F::from(M31::from(1u32 << bit))
-                    });
-                    let byte_index = b.clone()
-                        * E::F::from(M31::from(crate::constants::BLOCK_BYTES as u32))
-                        + E::F::from(M31::from(byte_in_block as u32));
-                    eval.add_to_relation(RelationEntry::base(
-                        &self.relations.field.field,
-                        -gate_r15.clone(),
-                        &[E::F::from(M31::from(field_id)), byte_index, value],
-                    ));
-                }
             }
         }
 
@@ -1058,495 +983,5 @@ fn wire_range_check<E: EvalAtRow>(
             mult,
             &[value],
         )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::air::Sha256Prover;
-    use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
-    use crate::field_exposure::FieldExposure;
-    use crate::relations::Sha256Relations;
-    use crate::trace::{generate_trace, min_log_size, Layout};
-    use crate::types::WORDS_PER_BLOCK;
-    use crate::witness::compute_sha256_witness;
-    use air_core::AirProver;
-    use stwo::core::fields::m31::BaseField;
-    use stwo_constraint_framework::expr::ExprEvaluator;
-    use stwo_constraint_framework::FrameworkEval;
-
-    use super::Sha256Eval;
-
-    type Trace = Vec<Vec<BaseField>>;
-
-    #[test]
-    fn sha_expression_degree_matches_declared_bound() {
-        const LOG_SIZE: u32 = 17;
-        let evaluator = Sha256Eval {
-            log_size: LOG_SIZE,
-            relations: Sha256Relations::dummy(),
-            expose_digest: false,
-            field_exposure: FieldExposure::empty(),
-            claim_mask_beta: None,
-        };
-        let declared = evaluator.max_constraint_log_degree_bound();
-        let max_degree = evaluator
-            .clone()
-            .evaluate(ExprEvaluator::new())
-            .constraint_degree_bounds()
-            .into_iter()
-            .max()
-            .unwrap_or(0) as u32;
-        let required = LOG_SIZE
-            + (max_degree.saturating_sub(1))
-                .next_power_of_two()
-                .trailing_zeros()
-                .max(1);
-
-        assert_eq!(
-            max_degree, 5,
-            "SHA AIR degree changed; review its owner bound"
-        );
-        assert_eq!(declared, required);
-    }
-
-    #[test]
-    fn sha_prover_owner_covers_main_and_fixed_table_bounds() {
-        let witness = compute_sha256_witness(b"owner-bound");
-        for (log_size, expected) in [(15, 17), (16, 18), (20, 22)] {
-            let prover = Sha256Prover::new(&witness, log_size);
-            assert_eq!(
-                prover.max_constraint_log_degree_bound(),
-                expected,
-                "log size {log_size}"
-            );
-        }
-    }
-
-    fn cell(trace: &[Vec<BaseField>], col: usize, slot: usize) -> i64 {
-        i64::from(trace[col][slot].0)
-    }
-
-    /// `(lo, hi)` of a two-column pair at a slot.
-    fn pair(trace: &Trace, cols: (usize, usize), slot: usize) -> (i64, i64) {
-        (cell(trace, cols.0, slot), cell(trace, cols.1, slot))
-    }
-
-    /// Return the state word for round `t` and slot position `k`.
-    ///
-    /// Use `h_in` from row `t = 0` when `t < k`.
-    /// Otherwise, use `a_new` or `e_new` from row `t − k`.
-    fn state_word(
-        trace: &Trace,
-        log_size: u32,
-        b: usize,
-        t: usize,
-        k: usize,
-        h_base: usize, // 0 for the a-side, 4 for the e-side
-        new_cols: (usize, usize),
-    ) -> (i64, i64) {
-        if t < k {
-            // h_in[h_base + (k − 1 − t)] on the t = 0 row.
-            let j = h_base + (k - 1 - t);
-            pair(
-                trace,
-                Layout::h_in_word(j),
-                Layout::round_row_slot(b, 0, log_size),
-            )
-        } else {
-            pair(trace, new_cols, Layout::round_row_slot(b, t - k, log_size))
-        }
-    }
-
-    /// Assert one mod-2³² limb-add identity: `Σ addends = result + carries`.
-    fn assert_add(addends: &[(i64, i64)], result: (i64, i64), carries: (i64, i64), ctx: &str) {
-        let sum_lo: i64 = addends.iter().map(|a| a.0).sum();
-        let sum_hi: i64 = addends.iter().map(|a| a.1).sum();
-        assert_eq!(sum_lo, result.0 + (carries.0 << 16), "lo residual: {ctx}");
-        assert_eq!(
-            sum_hi + carries.0,
-            result.1 + (carries.1 << 16),
-            "hi residual: {ctx}"
-        );
-    }
-
-    /// Verify all linear identities on an honest trace.
-    ///
-    /// The check covers round additions, schedule recurrence, IV binding,
-    /// block chaining, and finalization.
-    fn check_linear_constraints_on_message(msg: &[u8]) {
-        let witness = compute_sha256_witness(msg);
-        let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
-
-        let r = Layout::round_col();
-        let sigma0_c = (r[0], r[1]);
-        let sigma1_c = (r[2], r[3]);
-        let ch_c = (r[4], r[5]);
-        let maj_c = (r[6], r[7]);
-        let t1_c = (r[8], r[9]);
-        let t2_c = (r[10], r[11]);
-        let a_new_c = (r[12], r[13]);
-        let e_new_c = (r[14], r[15]);
-        let t1_carry = (r[16], r[17]);
-        let t2_carry = (r[18], r[19]);
-        let e_new_carry = (r[20], r[21]);
-        let a_new_carry = (r[22], r[23]);
-        let w_c = Layout::schedule_word();
-
-        for b in 0..witness.blocks.len() {
-            // IV binding / chain on the t = 0 row.
-            let slot0 = Layout::round_row_slot(b, 0, log_size);
-            for j in 0..N_STATE_WORDS {
-                let h_in = pair(&trace, Layout::h_in_word(j), slot0);
-                if b == 0 {
-                    let iv = IV[j];
-                    assert_eq!(h_in.0 as u32, iv & 0xFFFF, "IV lo j={j}");
-                    assert_eq!(h_in.1 as u32, iv >> 16, "IV hi j={j}");
-                } else {
-                    let prev63 = Layout::round_row_slot(b - 1, N_ROUNDS - 1, log_size);
-                    let h_out_prev = pair(&trace, Layout::h_out_word(j), prev63);
-                    assert_eq!(h_in, h_out_prev, "chain j={j} b={b}");
-                }
-            }
-
-            for t in 0..N_ROUNDS {
-                let slot = Layout::round_row_slot(b, t, log_size);
-                let d = state_word(&trace, log_size, b, t, 4, 0, a_new_c);
-                let h_state = state_word(&trace, log_size, b, t, 4, 4, e_new_c);
-                let k_t = (i64::from(K[t] & 0xFFFF), i64::from(K[t] >> 16));
-                let w_t = pair(&trace, w_c, slot);
-                let sigma0 = pair(&trace, sigma0_c, slot);
-                let sigma1 = pair(&trace, sigma1_c, slot);
-                let ch = pair(&trace, ch_c, slot);
-                let maj = pair(&trace, maj_c, slot);
-                let t1 = pair(&trace, t1_c, slot);
-                let t2 = pair(&trace, t2_c, slot);
-                let a_new = pair(&trace, a_new_c, slot);
-                let e_new = pair(&trace, e_new_c, slot);
-
-                assert_add(
-                    &[h_state, sigma1, ch, k_t, w_t],
-                    t1,
-                    pair(&trace, t1_carry, slot),
-                    &format!("t1 b={b} t={t}"),
-                );
-                assert_add(
-                    &[sigma0, maj],
-                    t2,
-                    pair(&trace, t2_carry, slot),
-                    &format!("t2 b={b} t={t}"),
-                );
-                assert_add(
-                    &[d, t1],
-                    e_new,
-                    pair(&trace, e_new_carry, slot),
-                    &format!("e_new b={b} t={t}"),
-                );
-                assert_add(
-                    &[t1, t2],
-                    a_new,
-                    pair(&trace, a_new_carry, slot),
-                    &format!("a_new b={b} t={t}"),
-                );
-
-                // Schedule recurrence (t ≥ 16 rows).
-                if t >= 16 {
-                    let e = Layout::schedule_entry();
-                    let s0 = (cell(&trace, e[0], slot), cell(&trace, e[1], slot));
-                    let s1 = (cell(&trace, e[2], slot), cell(&trace, e[3], slot));
-                    let carries = (cell(&trace, e[4], slot), cell(&trace, e[5], slot));
-                    let at =
-                        |k: usize| pair(&trace, w_c, Layout::round_row_slot(b, t - k, log_size));
-                    assert_add(
-                        &[s1, at(7), s0, at(16)],
-                        w_t,
-                        carries,
-                        &format!("schedule b={b} t={t}"),
-                    );
-                }
-            }
-
-            // Finalization on the t = 63 row.
-            let slot63 = Layout::round_row_slot(b, N_ROUNDS - 1, log_size);
-            for j in 0..N_STATE_WORDS {
-                let h_in = pair(&trace, Layout::h_in_word(j), slot0);
-                let working = if j < 4 {
-                    pair(
-                        &trace,
-                        a_new_c,
-                        Layout::round_row_slot(b, N_ROUNDS - 1 - j, log_size),
-                    )
-                } else {
-                    pair(
-                        &trace,
-                        e_new_c,
-                        Layout::round_row_slot(b, N_ROUNDS - 1 - (j - 4), log_size),
-                    )
-                };
-                let h_out = pair(&trace, Layout::h_out_word(j), slot63);
-                let carries = pair(&trace, Layout::final_carry(j), slot63);
-                assert_add(
-                    &[h_in, working],
-                    h_out,
-                    carries,
-                    &format!("finalization b={b} j={j}"),
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn linear_identities_hold_for_empty() {
-        check_linear_constraints_on_message(b"");
-    }
-
-    #[test]
-    fn linear_identities_hold_for_abc() {
-        check_linear_constraints_on_message(b"abc");
-    }
-
-    #[test]
-    fn linear_identities_hold_for_multi_block() {
-        check_linear_constraints_on_message(&[0x42; 150]);
-    }
-
-    /// Duplicate operand bits match their source cells.
-    ///
-    /// On non-boundary rows, `b_bits = a_bits@(t−1)`.
-    /// Also, `c_bits = a_bits@(t−2)`.
-    /// The e-side is symmetric.
-    /// AIR word recomposition binds boundary rows to `h_in`.
-    #[test]
-    fn reuse_chain_duplicates_match_their_sources() {
-        let witness = compute_sha256_witness(&[0x24; 100]);
-        let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
-        for b in 0..witness.blocks.len() {
-            for t in 0..N_ROUNDS {
-                let slot = Layout::round_row_slot(b, t, log_size);
-                for bit in 0..crate::trace::WORD_BIT_COLS {
-                    let b_dup = cell(&trace, Layout::round_operand_bit(1, bit), slot);
-                    let c_dup = cell(&trace, Layout::round_operand_bit(2, bit), slot);
-                    let f_dup = cell(&trace, Layout::round_operand_bit(4, bit), slot);
-                    let g_dup = cell(&trace, Layout::round_operand_bit(5, bit), slot);
-                    let a_at = |tt: usize| {
-                        cell(
-                            &trace,
-                            Layout::round_operand_bit(0, bit),
-                            Layout::round_row_slot(b, tt, log_size),
-                        )
-                    };
-                    let e_at = |tt: usize| {
-                        cell(
-                            &trace,
-                            Layout::round_operand_bit(3, bit),
-                            Layout::round_row_slot(b, tt, log_size),
-                        )
-                    };
-                    if t > 0 {
-                        assert_eq!(b_dup, a_at(t - 1), "b_bit b={b} t={t} bit={bit}");
-                        assert_eq!(f_dup, e_at(t - 1), "f_bit b={b} t={t} bit={bit}");
-                    }
-                    if t > 1 {
-                        assert_eq!(c_dup, a_at(t - 2), "c_bit b={b} t={t} bit={bit}");
-                        assert_eq!(g_dup, e_at(t - 2), "g_bit b={b} t={t} bit={bit}");
-                    }
-                }
-            }
-        }
-    }
-
-    /// Chain rejection: mutating block 1's `h_in` breaks the chain residual.
-    #[test]
-    fn chain_constraint_rejects_h_in_mutation_on_block_1() {
-        let witness = compute_sha256_witness(&[0x24; 100]); // 2 blocks
-        assert!(witness.blocks.len() >= 2);
-        let log_size = min_log_size(witness.blocks.len());
-        let mut trace = generate_trace(&witness, log_size);
-
-        let slot0_b1 = Layout::round_row_slot(1, 0, log_size);
-        let (lo_col, _) = Layout::h_in_word(3);
-        trace[lo_col][slot0_b1] += BaseField::from(1u32);
-
-        let prev63 = Layout::round_row_slot(0, N_ROUNDS - 1, log_size);
-        let h_in = cell(&trace, lo_col, slot0_b1);
-        let (out_lo, _) = Layout::h_out_word(3);
-        let h_out_prev = cell(&trace, out_lo, prev63);
-        assert_ne!(h_in, h_out_prev, "mutated chain must produce a residual");
-    }
-
-    /// Every padding-role identity (P.A–P.H), evaluated at each block's
-    /// `t = 15` row with the message words read from rows `t = 0..16`.
-    /// Returns the residuals so negative tests can assert non-zero.
-    fn padding_residuals(trace: &Trace, log_size: u32, b: usize) -> Vec<i64> {
-        let slot = Layout::round_row_slot(b, 15, log_size);
-        let w = |j: usize| -> (i64, i64) {
-            pair(
-                trace,
-                Layout::schedule_word(),
-                Layout::round_row_slot(b, j, log_size),
-            )
-        };
-        let is_marker = cell(trace, Layout::COL_IS_MARKER_BLOCK, slot);
-        let is_length = cell(trace, Layout::COL_IS_LENGTH_BLOCK, slot);
-        let is_length_only = cell(trace, Layout::COL_IS_LENGTH_ONLY_BLOCK, slot);
-        let is_marker_only = cell(trace, Layout::COL_IS_MARKER_ONLY_BLOCK, slot);
-        let post_strict_15 = cell(trace, Layout::COL_MARKER_WORD_POST_STRICT_15, slot);
-        let mword: Vec<i64> = (0..WORDS_PER_BLOCK)
-            .map(|j| cell(trace, Layout::is_marker_word(j), slot))
-            .collect();
-        let bsel: Vec<i64> = (0..4)
-            .map(|k| cell(trace, Layout::marker_byte_sel(k), slot))
-            .collect();
-        let mbyte: Vec<i64> = (0..4)
-            .map(|k| cell(trace, Layout::marker_word_byte(k), slot))
-            .collect();
-
-        let mut res = Vec::new();
-        // P.A binary
-        for &f in [
-            is_marker,
-            is_length,
-            is_length_only,
-            is_marker_only,
-            post_strict_15,
-        ]
-        .iter()
-        {
-            res.push(f * (1 - f));
-        }
-        for &f in mword.iter().chain(bsel.iter()) {
-            res.push(f * (1 - f));
-        }
-        // P.B one-hot sums
-        res.push(mword.iter().sum::<i64>() - is_marker);
-        res.push(bsel.iter().sum::<i64>() - is_marker);
-        // P.C aux definitions
-        res.push(is_length_only - (1 - is_marker) * is_length);
-        res.push(is_marker_only - is_marker * (1 - is_length));
-        // cumulative marker-word prefix
-        let mut cum = [0i64; WORDS_PER_BLOCK];
-        for j in 1..WORDS_PER_BLOCK {
-            cum[j] = cum[j - 1] + mword[j - 1];
-        }
-        // P.C'
-        res.push(post_strict_15 - cum[15] * (1 - is_length));
-        // P.D byte assembly
-        let mut sum_hi = 0i64;
-        let mut sum_lo = 0i64;
-        for j in 0..WORDS_PER_BLOCK {
-            sum_hi += mword[j] * w(j).1;
-            sum_lo += mword[j] * w(j).0;
-        }
-        res.push(sum_hi - 256 * mbyte[0] - mbyte[1]);
-        res.push(sum_lo - 256 * mbyte[2] - mbyte[3]);
-        // P.E marker byte is 0x80
-        for k in 0..4 {
-            res.push(bsel[k] * (mbyte[k] - 0x80));
-        }
-        // P.F bytes after the marker byte are zero
-        let mut cum_b = 0i64;
-        for k in 0..4 {
-            res.push(cum_b * mbyte[k]);
-            cum_b += bsel[k];
-        }
-        // P.G words after the marker are zero (length exception)
-        for j in 0..14 {
-            let gate = cum[j] + is_length_only;
-            res.push(gate * w(j).0);
-            res.push(gate * w(j).1);
-        }
-        res.push(post_strict_15 * w(15).0);
-        res.push(post_strict_15 * w(15).1);
-        // P.H length-field encoding
-        let w14 = w(14);
-        let w15 = w(15);
-        res.push(is_length * (w14.0 - cell(trace, Layout::COL_BIT_LENGTH_W14_LO, slot)));
-        res.push(is_length * (w14.1 - cell(trace, Layout::COL_BIT_LENGTH_W14_HI, slot)));
-        res.push(is_length * (w15.0 - cell(trace, Layout::COL_BIT_LENGTH_W15_LO, slot)));
-        res.push(is_length * (w15.1 - cell(trace, Layout::COL_BIT_LENGTH_W15_HI, slot)));
-        res
-    }
-
-    fn assert_padding_holds_for_message(msg: &[u8]) {
-        let witness = compute_sha256_witness(msg);
-        let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
-        for b in 0..witness.blocks.len() {
-            for (i, r) in padding_residuals(&trace, log_size, b).iter().enumerate() {
-                assert_eq!(*r, 0, "padding residual {i} on block {b}");
-            }
-        }
-    }
-
-    #[test]
-    fn padding_constraints_hold_for_empty_message() {
-        assert_padding_holds_for_message(b"");
-    }
-
-    #[test]
-    fn padding_constraints_hold_for_abc() {
-        assert_padding_holds_for_message(b"abc");
-    }
-
-    #[test]
-    fn padding_constraints_hold_for_56_byte_message() {
-        assert_padding_holds_for_message(&[7u8; 56]);
-    }
-
-    #[test]
-    fn padding_constraints_hold_for_multi_block_message() {
-        assert_padding_holds_for_message(&[9u8; 150]);
-    }
-
-    #[test]
-    fn padding_rejects_marker_byte_sel_mutation() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let mut trace = generate_trace(&witness, log_size);
-        let slot = Layout::round_row_slot(0, 15, log_size);
-        // Move the byte selector to a different position.
-        for k in 0..4 {
-            let c = Layout::marker_byte_sel(k);
-            let v = trace[c][slot];
-            trace[c][slot] = BaseField::from(1u32) - v;
-        }
-        let res = padding_residuals(&trace, log_size, 0);
-        assert!(
-            res.iter().any(|&r| r != 0),
-            "mutated byte selector must produce a residual"
-        );
-    }
-
-    #[test]
-    fn padding_rejects_bit_length_limb_mutation() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let mut trace = generate_trace(&witness, log_size);
-        let slot = Layout::round_row_slot(0, 15, log_size);
-        trace[Layout::COL_BIT_LENGTH_W15_LO][slot] += BaseField::from(8u32);
-        let res = padding_residuals(&trace, log_size, 0);
-        assert!(
-            res.iter().any(|&r| r != 0),
-            "mutated bit-length limb must produce a residual"
-        );
-    }
-
-    #[test]
-    fn padding_rejects_non_zero_fill_word_mutation() {
-        // A 3-byte message: marker at byte 3 of W[0], everything after must
-        // be zero. Injecting a non-zero fill word must trip P.G.
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let mut trace = generate_trace(&witness, log_size);
-        // W[5] lives on row t = 5.
-        let slot5 = Layout::round_row_slot(0, 5, log_size);
-        trace[Layout::COL_W_LO][slot5] += BaseField::from(3u32);
-        let res = padding_residuals(&trace, log_size, 0);
-        assert!(
-            res.iter().any(|&r| r != 0),
-            "non-zero fill word must produce a residual"
-        );
     }
 }

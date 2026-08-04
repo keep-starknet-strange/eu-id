@@ -1,10 +1,10 @@
 //! Shared SHA table-provider module.
 //!
 //! This module moves the message-agnostic split-pack/range table providers out
-//! of repeated SHA instances. Each SHA consumer still owns its main trace,
-//! digest relation, field exposure, and consumer-side lookups. This module owns
-//! only the fixed table preprocessed columns plus the union multiplicities that
-//! satisfy those lookups.
+//! of the packed SHA component. The SHA consumer still owns its main trace,
+//! digest relation, full-stream provider, and consumer-side lookups. This module owns
+//! only the fixed table preprocessed columns plus the packed-message union
+//! multiplicities that satisfy those lookups.
 
 use air_core::claim_mask::{ClaimMaskTrace, SharedClaimMaskChallenge};
 use air_core::{
@@ -30,12 +30,11 @@ use crate::components::{
     shared_table_preprocessed_column_ids, RangeKind, SharedProducer, SharedProducerPairEval,
     RANGE_TABLES,
 };
-use crate::field_exposure::FieldExposure;
 use crate::interaction::{
     build_interaction_columns, claim_mask_fraction_column, producer_blind_frac_column,
     ComponentClaim, Frac,
 };
-use crate::multiplicities::{range_k_multiplicities, sum_multiplicity_vectors};
+use crate::multiplicities::range_k_multiplicities_for_messages;
 use crate::preprocessed::{
     generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes,
 };
@@ -92,9 +91,9 @@ pub struct ShaTableMultiplicities {
 }
 
 impl ShaTableMultiplicities {
-    pub fn from_consumers(consumers: &[(&Sha256Witness, FieldExposure)]) -> Self {
+    pub fn from_messages(messages: &[Sha256Witness]) -> Self {
         assert!(
-            !consumers.is_empty(),
+            !messages.is_empty(),
             "shared SHA table provider needs at least one consumer",
         );
 
@@ -102,11 +101,7 @@ impl ShaTableMultiplicities {
         for &kind in RANGE_TABLES {
             let producer = SharedProducer::Range(kind);
             range.push(blind_extend(
-                sum_multiplicity_vectors(
-                    consumers
-                        .iter()
-                        .map(|(witness, _)| range_k_multiplicities(witness, kind)),
-                ),
+                range_k_multiplicities_for_messages(messages, kind),
                 1usize << (producer.blind_log_size() - 1),
             ));
         }

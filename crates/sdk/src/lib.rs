@@ -263,7 +263,6 @@ const MDOC_PROOF_ENVELOPE_VERSION: u16 = 8;
 const PRODUCT_STATEMENT_VERSION: u32 = 2;
 const REQUEST_BINDING_DOMAIN: &[u8] = b"eudi-mdoc-proof-request-v3\0";
 const P256_COORDINATE_BYTES: usize = 32;
-const MAX_SESSION_TRANSCRIPT_BYTES: usize = 16 * 1024;
 const MAX_ACCEPTED_ALPHA2_COUNTRIES: usize = 249;
 const MAX_PRODUCT_MDOC_DOCUMENT_BYTES: usize = eu_id_prover::mdoc::PRODUCT_MDOC_CBOR_MAX_BYTES;
 
@@ -369,16 +368,6 @@ fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<
         ));
     }
 
-    if statement.session_transcript.is_empty() {
-        return Err(ZkError::InvalidInput(
-            "session transcript must not be empty".to_string(),
-        ));
-    }
-    if statement.session_transcript.len() > MAX_SESSION_TRANSCRIPT_BYTES {
-        return Err(ZkError::InvalidInput(format!(
-            "session transcript exceeds {MAX_SESSION_TRANSCRIPT_BYTES} bytes"
-        )));
-    }
     eu_id_prover::mdoc::validate_product_session_transcript_cbor(&statement.session_transcript)
         .map_err(|_| {
             ZkError::InvalidInput(
@@ -537,8 +526,7 @@ fn map_prover_error(e: eu_id_prover::Error) -> ZkError {
         | WeakConfig { .. }
         | CoprocessorMissing
         | Verify(_)
-        | PreprocessedRootMismatch { .. }
-        | ShapeTooLarge { .. } => {
+        | PreprocessedRootMismatch { .. } => {
             ZkError::Verify(format!("{e:?}"))
         }
     }
@@ -843,8 +831,9 @@ mod tests {
         }
     }
 
-    fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::MdocStatement) {
+    fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::MdocStatement, [u8; 32]) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
+        let extraction_device_hash = fixture.extracted.device_ecdsa_input.message_hash.0;
         let issuer_key = fixture.statement.issuer_input.public_key.clone();
         let (revocation, revocation_witness) =
             eu_id_prover::ts13::demo_ts13_revocation_inputs(&fixture.extracted.mso);
@@ -886,7 +875,7 @@ mod tests {
         let mut mdoc_statement = eu_id_prover::MdocStatement::from_circuit(&fixture.statement);
         mdoc_statement.request_binding = request_binding(&statement);
         mdoc_statement.policy = mapping::to_policy(&statement).unwrap();
-        (statement, mdoc_statement)
+        (statement, mdoc_statement, extraction_device_hash)
     }
 
     fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
@@ -935,7 +924,12 @@ mod tests {
 
     #[test]
     fn mdoc_statement_match_recomputes_device_authentication_hash() {
-        let (statement, mdoc_statement) = honest_mdoc_statement();
+        let (statement, mdoc_statement, extraction_device_hash) = honest_mdoc_statement();
+        let reconstructed = reconstruct_mdoc_statement(&statement).unwrap();
+        assert_eq!(
+            reconstructed.device_message_hash.0, extraction_device_hash,
+            "SDK reconstruction must match extraction-time DeviceAuthentication hash"
+        );
         assert!(mdoc_statement_matches_public_statement(&mdoc_statement, &statement).unwrap());
 
         let mut changed_binding = mdoc_statement.clone();
@@ -1042,7 +1036,7 @@ mod tests {
     #[test]
     fn mdoc_verify_rejects_dropped_predicate_leg() {
         // Reject a requested attribute when its semantic proof is inactive.
-        let (statement, honest) = honest_mdoc_statement();
+        let (statement, honest, _) = honest_mdoc_statement();
         assert!(
             mdoc_statement_matches_public_statement(&honest, &statement).unwrap(),
             "honest And statement (both legs present) must be accepted"
@@ -1075,7 +1069,7 @@ mod tests {
 
     #[test]
     fn mdoc_verify_rejects_revocation_public_input_drift() {
-        let (statement, honest) = honest_mdoc_statement();
+        let (statement, honest, _) = honest_mdoc_statement();
         assert!(mdoc_statement_matches_public_statement(&honest, &statement).unwrap());
 
         let mut changed_key = honest.clone();
@@ -1102,7 +1096,7 @@ mod tests {
         // C2: prove the age predicate over the wrong signed element (e.g.
         // `issue_date` instead of `birth_date`). The disclosed element identity
         // must be pinned to the requested contract element.
-        let (statement, honest) = honest_mdoc_statement();
+        let (statement, honest, _) = honest_mdoc_statement();
         let age_index = honest
             .attributes
             .iter()
@@ -1133,7 +1127,7 @@ mod tests {
     fn mdoc_verify_rejects_attribute_count_mismatch() {
         // Fail-closed on an unexpected disclosed-attribute count (extra or fewer
         // legs than the SDK's own request).
-        let (statement, honest) = honest_mdoc_statement();
+        let (statement, honest, _) = honest_mdoc_statement();
 
         let mut extra = honest.clone();
         let extra_attr = extra.attributes[0].clone();
@@ -1480,7 +1474,7 @@ mod tests {
         rejects(changed);
 
         let mut changed = sample_statement();
-        changed.session_transcript = vec![0; MAX_SESSION_TRANSCRIPT_BYTES + 1];
+        changed.session_transcript = vec![0; 57];
         rejects(changed);
 
         let mut changed = sample_statement();

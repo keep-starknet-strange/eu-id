@@ -13,9 +13,8 @@
 //! contain the lower-sigma results and carry values.
 //!
 //! Boundary rows contain the input state, output state, digest bytes, and
-//! padding data. `enabler_step` marks the first real row. An optional tail
-//! contains credential-field selectors. Padding rows contain disabled random
-//! decoy data.
+//! padding data. Packed message IDs and per-message block numbers are private
+//! witness columns. Padding rows contain disabled random decoy data.
 
 use stwo::core::fields::m31::{BaseField, M31};
 use stwo::core::utils::{
@@ -25,9 +24,8 @@ use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 
 use crate::constants::{DIGEST_BYTES, N_ROUNDS, N_STATE_WORDS};
-use crate::field_exposure::FieldExposure;
 use crate::native::{lower_sigma0, lower_sigma1};
-use crate::types::{AddCarries, PaddingRowWitness, Sha256Witness, WordLimbs};
+use crate::types::{AddCarries, PackedSha256Witness, PaddingRowWitness, Sha256Witness, WordLimbs};
 
 use crate::constants::WORD_BYTES as BYTES_PER_WORD;
 use rand::RngCore;
@@ -103,8 +101,8 @@ impl Layout {
     pub const COL_SCHED_ENTRY_START: usize = Self::COL_ROUND_END;
     pub const COL_SCHED_ENTRY_END: usize = Self::COL_SCHED_ENTRY_START + SCHEDULE_ENTRY_COLS;
     /// `t = 0` family.
-    pub const COL_IS_FIRST_BLOCK: usize = Self::COL_SCHED_ENTRY_END;
-    pub const COL_H_IN_START: usize = Self::COL_IS_FIRST_BLOCK + 1;
+    pub const COL_MSG_START: usize = Self::COL_SCHED_ENTRY_END;
+    pub const COL_H_IN_START: usize = Self::COL_MSG_START + 1;
     pub const COL_H_IN_END: usize = Self::COL_H_IN_START + 2 * N_STATE_WORDS;
     /// `t = 63` family.
     pub const COL_FINAL_CARRIES_START: usize = Self::COL_H_IN_END;
@@ -112,14 +110,9 @@ impl Layout {
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
     pub const COL_H_OUT_END: usize = Self::COL_H_OUT_START + 2 * N_STATE_WORDS;
 
-    /// `is_last_block` flag (1 col): `1` on the `t = 63` row of the final
-    /// real block of a multi-block hash, `0` everywhere else. The AIR pins
-    /// it to `enabler · is_round_63 · (1 − enabler_next)` — with the
-    /// guaranteed padding row after the last real row ([`min_log_size`]),
-    /// this flags exactly the last real row. It gates the cross-component
-    /// digest yield to the final block, since the intermediate blocks'
-    /// `h_out` are multi-block chaining state, not the credential digest.
-    pub const COL_IS_LAST_BLOCK: usize = Self::COL_H_OUT_END;
+    /// `is_msg_last` flag (1 col): `1` on the `t = 63` row immediately before
+    /// the next message or disabled tail, `0` on continuation blocks.
+    pub const COL_IS_MSG_LAST: usize = Self::COL_H_OUT_END;
 
     /// The 32 big-endian digest-byte columns for this block.
     ///
@@ -127,7 +120,7 @@ impl Layout {
     /// `[hi.b1, hi.b0, lo.b1, lo.b0]`. The AIR checks
     /// `limb = 256 * b1 + b0`. Each `t = 63` row contains these bytes, but the
     /// `Sha256Digest` relation emits them only for the final block.
-    pub const COL_DIGEST_BYTES_START: usize = Self::COL_IS_LAST_BLOCK + 1;
+    pub const COL_DIGEST_BYTES_START: usize = Self::COL_IS_MSG_LAST + 1;
     pub const COL_DIGEST_BYTES_END: usize = Self::COL_DIGEST_BYTES_START + DIGEST_BYTES;
 
     /// Per-block padding-role region, live on the `t = 15` row.
@@ -149,39 +142,11 @@ impl Layout {
     pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 4;
     pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
 
-    /// C1 anchor:
-    /// `enabler_step[r] = enabler[r] * (1 - enabler_prev[r])`.
-    ///
-    /// This value is one at the first real row and zero elsewhere. The AIR
-    /// requires it at row zero. This rule prevents block skips and state
-    /// injection. The auxiliary column keeps the constraint degree at two.
-    pub const COL_ENABLER_STEP: usize = Self::COL_PADDING_END;
-
-    /// Number of **base** trace columns — the full width when no credential
-    /// field is exposed. The optional field-selector auxiliaries are a dynamic
-    /// tail appended after this (see [`Self::COL_FIELD_AUX_START`]).
-    pub const TOTAL_COLS: usize = Self::COL_ENABLER_STEP + 1;
-
-    /// First column of the optional credential-field selector auxiliaries.
-    ///
-    /// Multi-block exposure appends a block counter and one selector per
-    /// distinct target block. Single-block exposure adds no columns. The field
-    /// bytes themselves are linear expressions over the existing W bit planes.
-    pub const COL_FIELD_AUX_START: usize = Self::TOTAL_COLS;
-
-    /// Column of field auxiliary tail `slot` (`0` is the block counter,
-    /// followed by selectors in `FieldExposure::target_blocks()` order).
-    #[inline]
-    pub const fn field_aux_col(slot: usize) -> usize {
-        Self::COL_FIELD_AUX_START + slot
-    }
-
-    /// Total trace width when a field exposure adds `n_field_cols` dynamic
-    /// columns (`0` ⇒ [`Self::TOTAL_COLS`]).
-    #[inline]
-    pub const fn total_cols_with_fields(n_field_cols: usize) -> usize {
-        Self::TOTAL_COLS + n_field_cols
-    }
+    /// Private packed-message key, flat over each message's blocks.
+    pub const COL_MSG_ID: usize = Self::COL_PADDING_END;
+    /// Private block number, reset at each message start.
+    pub const COL_MSG_BLOCK: usize = Self::COL_MSG_ID + 1;
+    pub const TOTAL_COLS: usize = Self::COL_MSG_BLOCK + 1;
 
     /// `(lo, hi)` slot for the `j`-th word of `h_in` (`t = 0` row).
     #[inline]
@@ -315,89 +280,41 @@ impl Layout {
 pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BYTES] {
     let mut out = [0u32; DIGEST_BYTES];
     for (j, limb) in h_out.iter().enumerate() {
-        let bytes = crate::field_exposure::word_be_bytes(limb.lo, limb.hi);
+        let bytes = word_be_bytes(limb.lo, limb.hi);
         out[4 * j..4 * j + 4].copy_from_slice(&bytes);
     }
     out
 }
 
-/// Create the base trace for a `Sha256Witness`.
-///
-/// The result has one inner vector for each column. Each column has
-/// `1 << log_size` cells. Disabled decoy rows follow the real rows.
-///
-/// Choose `log_size` so that `(1 << log_size) >= 64 · witness.blocks.len()`
-/// (use [`min_log_size`]). The function panics otherwise.
-pub fn generate_trace(witness: &Sha256Witness, log_size: u32) -> Vec<Vec<BaseField>> {
-    generate_trace_with_fields(witness, log_size, &FieldExposure::empty())
+pub fn word_be_bytes(lo: u32, hi: u32) -> [u32; BYTES_PER_WORD] {
+    [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]
 }
 
-/// Create a trace with optional multi-block field-selector columns.
-///
-/// Field bytes are virtual expressions over existing W bit columns. An empty
-/// or single-block exposure adds no trace columns.
-pub fn generate_trace_with_fields(
-    witness: &Sha256Witness,
-    log_size: u32,
-    field_exposure: &FieldExposure,
-) -> Vec<Vec<BaseField>> {
-    generate_trace_with_fields_packed(witness, log_size, field_exposure)
-}
-
-fn generate_trace_with_fields_packed(
-    witness: &Sha256Witness,
-    log_size: u32,
-    field_exposure: &FieldExposure,
-) -> Vec<Vec<BaseField>> {
-    generate_trace_base_columns_with_fields(witness, log_size, field_exposure)
+pub fn generate_trace(witness: &PackedSha256Witness, log_size: u32) -> Vec<Vec<BaseField>> {
+    generate_trace_base_columns(witness, log_size)
         .into_iter()
         .map(BaseColumn::into_cpu_vec)
         .collect()
 }
 
-pub(crate) fn generate_trace_base_columns_with_fields(
-    witness: &Sha256Witness,
+pub(crate) fn generate_trace_base_columns(
+    witness: &PackedSha256Witness,
     log_size: u32,
-    field_exposure: &FieldExposure,
 ) -> Vec<BaseColumn> {
+    assert!(log_size < usize::BITS, "trace log size is too large");
     let n_rows = 1usize << log_size;
-    let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
+    let n_real_rows = witness.total_blocks() * ROWS_PER_BLOCK;
+    assert!(n_real_rows <= n_rows, "packed SHA trace is too small");
     let decoys = decoy_witnesses_for_padding(n_real_rows, n_rows);
-    generate_trace_base_columns_with_decoys(witness, log_size, field_exposure, &decoys)
-}
 
-fn generate_trace_base_columns_with_decoys(
-    witness: &Sha256Witness,
-    log_size: u32,
-    field_exposure: &FieldExposure,
-    decoys: &[Sha256Witness],
-) -> Vec<BaseColumn> {
     if log_size < LOG_N_LANES || rayon::current_num_threads() == 1 {
-        return generate_trace_with_fields_scalar_fallback_with_decoys(
-            witness,
-            log_size,
-            field_exposure,
-            decoys,
-        )
-        .into_iter()
-        .map(|values| values.into_iter().collect())
-        .collect();
+        return generate_trace_scalar(witness, log_size, &decoys)
+            .into_iter()
+            .map(|values| values.into_iter().collect())
+            .collect();
     }
 
     use rayon::prelude::*;
-
-    let n_rows = 1usize << log_size;
-    let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
-    assert!(
-        n_real_rows <= n_rows,
-        "trace too small: {} blocks × {ROWS_PER_BLOCK} rounds > {} rows",
-        witness.blocks.len(),
-        n_rows
-    );
-
-    let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
-    let last_block_idx = witness.blocks.len().saturating_sub(1);
-    let has_padding = n_real_rows < n_rows;
     let mut row_values = (0..n_rows)
         .into_par_iter()
         .map(|row_idx| {
@@ -405,23 +322,19 @@ fn generate_trace_base_columns_with_decoys(
                 return disabled_decoy_row_values(
                     &decoys[(row_idx - n_real_rows) / ROWS_PER_BLOCK],
                     (row_idx - n_real_rows) % ROWS_PER_BLOCK,
-                    n_rows,
-                    field_exposure,
-                    total_cols,
                 );
             }
-            let block_idx = row_idx / ROWS_PER_BLOCK;
-            let t = row_idx % ROWS_PER_BLOCK;
-            let mut values = vec![BaseField::from(0u32); total_cols];
+            let (message_idx, block_idx) = locate_block(witness, row_idx / ROWS_PER_BLOCK);
+            let mut values = vec![BaseField::from(0u32); Layout::TOTAL_COLS];
             write_round_row_values(
                 &mut values,
-                witness,
+                &witness.messages[message_idx],
                 block_idx,
-                t,
+                row_idx % ROWS_PER_BLOCK,
                 n_rows,
+                message_idx,
                 block_idx == 0,
-                block_idx == last_block_idx && has_padding,
-                field_exposure,
+                witness.messages[message_idx].blocks.len() - 1 == block_idx,
             );
             values
         })
@@ -429,7 +342,7 @@ fn generate_trace_base_columns_with_decoys(
     fill_schedule_sigma_bits_rows(&mut row_values);
 
     let packed_rows = 1usize << (log_size - LOG_N_LANES);
-    (0..total_cols)
+    (0..Layout::TOTAL_COLS)
         .into_par_iter()
         .map(|column| {
             let data = (0..packed_rows)
@@ -439,9 +352,6 @@ fn generate_trace_base_columns_with_decoys(
                         let circle_index = bit_reverse_index(storage_index, log_size);
                         let coset_index =
                             circle_domain_index_to_coset_index(circle_index, log_size);
-                        if column == Layout::COL_ENABLER_STEP && has_padding && coset_index == 0 {
-                            return BaseField::from(1u32);
-                        }
                         row_values[coset_index][column]
                     }))
                 })
@@ -451,57 +361,37 @@ fn generate_trace_base_columns_with_decoys(
         .collect()
 }
 
-fn generate_trace_with_fields_scalar_fallback_with_decoys(
-    witness: &Sha256Witness,
+fn generate_trace_scalar(
+    witness: &PackedSha256Witness,
     log_size: u32,
-    field_exposure: &FieldExposure,
     decoys: &[Sha256Witness],
 ) -> Vec<Vec<BaseField>> {
     let n_rows = 1usize << log_size;
-    let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
-    assert!(
-        n_real_rows <= n_rows,
-        "trace too small: {} blocks × {ROWS_PER_BLOCK} rounds > {} rows",
-        witness.blocks.len(),
-        n_rows
-    );
-
-    let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
-    let mut cols = vec![vec![BaseField::from(0u32); n_rows]; total_cols];
-    let last_block_idx = witness.blocks.len().saturating_sub(1);
-    let has_padding = n_real_rows < n_rows;
-    for block_idx in 0..witness.blocks.len() {
-        for t in 0..N_ROUNDS {
-            let slot = Layout::round_row_slot(block_idx, t, log_size);
-            write_round_row(
-                &mut cols,
-                slot,
-                witness,
-                block_idx,
-                t,
-                n_rows,
-                block_idx == 0,
-                block_idx == last_block_idx && has_padding,
-                field_exposure,
-            );
-        }
+    let n_real_rows = witness.total_blocks() * ROWS_PER_BLOCK;
+    let mut cols = vec![vec![BaseField::from(0u32); n_rows]; Layout::TOTAL_COLS];
+    for row_idx in 0..n_real_rows {
+        let (message_idx, block_idx) = locate_block(witness, row_idx / ROWS_PER_BLOCK);
+        let slot = Layout::row_slot(row_idx, log_size);
+        write_round_row(
+            &mut cols,
+            slot,
+            &witness.messages[message_idx],
+            block_idx,
+            row_idx % ROWS_PER_BLOCK,
+            n_rows,
+            message_idx,
+            block_idx == 0,
+            witness.messages[message_idx].blocks.len() - 1 == block_idx,
+        );
     }
     for row_idx in n_real_rows..n_rows {
         let slot = Layout::row_slot(row_idx, log_size);
-        let values = disabled_decoy_row_values(
+        for (column, value) in cols.iter_mut().zip(disabled_decoy_row_values(
             &decoys[(row_idx - n_real_rows) / ROWS_PER_BLOCK],
             (row_idx - n_real_rows) % ROWS_PER_BLOCK,
-            n_rows,
-            field_exposure,
-            total_cols,
-        );
-        for (column, value) in cols.iter_mut().zip(values) {
+        )) {
             column[slot] = value;
         }
-    }
-    if has_padding {
-        let first_slot = Layout::row_slot(0, log_size);
-        cols[Layout::COL_ENABLER_STEP][first_slot] = BaseField::from(1u32);
     }
     fill_schedule_sigma_bits_columns(&mut cols, log_size);
     cols
@@ -541,32 +431,15 @@ fn random_one_block_decoy_witness(rng: &mut impl RngCore) -> Sha256Witness {
     witness
 }
 
-fn disabled_decoy_row_values(
-    decoy: &Sha256Witness,
-    t: usize,
-    n_rows: usize,
-    field_exposure: &FieldExposure,
-    total_cols: usize,
-) -> Vec<BaseField> {
-    let mut values = vec![BaseField::from(0u32); total_cols];
-    write_round_row_values(
-        &mut values,
-        decoy,
-        0,
-        t,
-        n_rows,
-        false,
-        false,
-        field_exposure,
-    );
+fn disabled_decoy_row_values(decoy: &Sha256Witness, t: usize) -> Vec<BaseField> {
+    let mut values = vec![BaseField::from(0u32); Layout::TOTAL_COLS];
+    write_round_row_values(&mut values, decoy, 0, t, 64, 0, false, false);
     values[Layout::COL_ENABLER] = BaseField::from(0u32);
-    values[Layout::COL_IS_FIRST_BLOCK] = BaseField::from(0u32);
-    values[Layout::COL_IS_LAST_BLOCK] = BaseField::from(0u32);
-    values[Layout::COL_ENABLER_STEP] = BaseField::from(0u32);
+    values[Layout::COL_MSG_START] = BaseField::from(0u32);
+    values[Layout::COL_IS_MSG_LAST] = BaseField::from(0u32);
+    values[Layout::COL_MSG_ID] = BaseField::from(0u32);
+    values[Layout::COL_MSG_BLOCK] = BaseField::from(0u32);
     values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
-    if field_exposure.n_columns() != 0 {
-        values[Layout::COL_FIELD_AUX_START..].fill(BaseField::from(0u32));
-    }
     values
 }
 
@@ -579,9 +452,9 @@ fn write_round_row(
     block_idx: usize,
     t: usize,
     n_rows: usize,
-    is_first_block: bool,
-    is_last_block: bool,
-    field_exposure: &FieldExposure,
+    message_idx: usize,
+    msg_start: bool,
+    is_msg_last: bool,
 ) {
     let mut values = vec![BaseField::from(0u32); cols.len()];
     write_round_row_values(
@@ -590,9 +463,9 @@ fn write_round_row(
         block_idx,
         t,
         n_rows,
-        is_first_block,
-        is_last_block,
-        field_exposure,
+        message_idx,
+        msg_start,
+        is_msg_last,
     );
     for (column, value) in cols.iter_mut().zip(values) {
         column[row] = value;
@@ -607,9 +480,9 @@ fn write_round_row_values(
     block_idx: usize,
     t: usize,
     n_rows: usize,
-    is_first_block: bool,
-    is_last_block: bool,
-    field_exposure: &FieldExposure,
+    message_idx: usize,
+    msg_start: bool,
+    is_msg_last: bool,
 ) {
     let block = &witness.blocks[block_idx];
     let natural_row = block_idx * ROWS_PER_BLOCK + t;
@@ -667,7 +540,7 @@ fn write_round_row_values(
 
     // t = 0 family: block-input state.
     if t == 0 {
-        row[Layout::COL_IS_FIRST_BLOCK] = BaseField::from(is_first_block as u32);
+        row[Layout::COL_MSG_START] = BaseField::from(msg_start as u32);
         for j in 0..N_STATE_WORDS {
             let (lo, hi) = Layout::h_in_word(j);
             row[lo] = m31(block.h_in[j].lo);
@@ -687,34 +560,31 @@ fn write_round_row_values(
             row[lo] = m31(block.h_out[j].lo);
             row[hi] = m31(block.h_out[j].hi);
         }
-        row[Layout::COL_IS_LAST_BLOCK] = BaseField::from(is_last_block as u32);
+        row[Layout::COL_IS_MSG_LAST] = BaseField::from(is_msg_last as u32);
         let digest_bytes = h_out_digest_bytes(&block.h_out);
         for (idx, &byte) in digest_bytes.iter().enumerate() {
             row[Layout::digest_byte(idx)] = m31(byte);
         }
     }
 
-    // t = 15 family: padding-role witness + credential-field selectors.
+    row[Layout::COL_MSG_ID] = m31(message_idx as u32);
+    row[Layout::COL_MSG_BLOCK] = m31(block_idx as u32);
+
+    // t = 15 family: padding-role witness.
     if t == 15 {
         write_padding_row_values(row, &block.padding_row);
-        // Multi-block selectors: one per distinct target block, live only on
-        // that block's t = 15 row.
-        if field_exposure.needs_dynamic_block_columns() {
-            for &target_block in field_exposure.target_blocks() {
-                let slot = field_exposure
-                    .selector_column_slot(target_block)
-                    .expect("multi-block exposure has selector columns");
-                row[Layout::field_aux_col(slot)] =
-                    BaseField::from(u32::from(block_idx == target_block));
-            }
-        }
     }
+}
 
-    // Write `block_idx` on every row. The AIR pins it to zero in block zero.
-    // It remains constant within a block and increments at each real boundary.
-    if let Some(slot) = field_exposure.block_counter_column_slot() {
-        row[Layout::field_aux_col(slot)] = BaseField::from(block_idx as u32);
+fn locate_block(witness: &PackedSha256Witness, global_block: usize) -> (usize, usize) {
+    let mut offset = global_block;
+    for (message_idx, message) in witness.messages.iter().enumerate() {
+        if offset < message.blocks.len() {
+            return (message_idx, offset);
+        }
+        offset -= message.blocks.len();
     }
+    panic!("packed SHA block index is out of range");
 }
 
 #[inline]
@@ -838,7 +708,7 @@ fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
 ///
 /// The trace size is the smallest power of two greater than
 /// `64 * n_blocks`. This rule adds at least one padding row for the
-/// `is_last_block` gate. The result is also at least `LOG_MIN`.
+/// `is_msg_last` gate. The result is also at least `LOG_MIN`.
 pub fn min_log_size(n_blocks: usize) -> u32 {
     const LOG_MIN: u32 = 4; // SIMD lane count is 16 → at least 16 rows.
     let rows = n_blocks.max(1) * ROWS_PER_BLOCK;
@@ -850,7 +720,7 @@ pub fn min_log_size(n_blocks: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::witness::compute_sha256_witness;
+    use crate::witness::{compute_packed_sha256_witness, compute_sha256_witness};
     use sha2::{Digest as Sha2Digest, Sha256};
 
     fn sha2_reference(msg: &[u8]) -> [u8; 32] {
@@ -864,10 +734,11 @@ mod tests {
     fn round_trip_digest(msg: &[u8]) {
         let witness = compute_sha256_witness(msg);
         let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
+        let packed = compute_packed_sha256_witness(&[msg]).unwrap();
+        let trace = generate_trace(&packed, log_size);
 
-        let last_block = witness.blocks.len() - 1;
-        let slot = Layout::round_row_slot(last_block, N_ROUNDS - 1, log_size);
+        let last_real_block = witness.blocks.len() - 1;
+        let slot = Layout::round_row_slot(last_real_block, N_ROUNDS - 1, log_size);
         let mut digest = [0u8; 32];
         for j in 0..N_STATE_WORDS {
             let (lo_col, hi_col) = Layout::h_out_word(j);
@@ -899,9 +770,10 @@ mod tests {
     fn digest_byte_columns_match(msg: &[u8]) {
         let witness = compute_sha256_witness(msg);
         let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
-        let last_block = witness.blocks.len() - 1;
-        let slot = Layout::round_row_slot(last_block, N_ROUNDS - 1, log_size);
+        let packed = compute_packed_sha256_witness(&[msg]).unwrap();
+        let trace = generate_trace(&packed, log_size);
+        let last_real_block = witness.blocks.len() - 1;
+        let slot = Layout::round_row_slot(last_real_block, N_ROUNDS - 1, log_size);
         let mut digest = [0u8; DIGEST_BYTES];
         for (idx, d) in digest.iter_mut().enumerate() {
             *d = trace[Layout::digest_byte(idx)][slot].0 as u8;
@@ -920,45 +792,43 @@ mod tests {
     }
 
     /// Enabler is 1 on exactly the `64 · n_blocks` real rows. The boundary
-    /// flags live on their designated round rows only. `enabler_step` marks
-    /// row 0.
+    /// flags live on their designated round rows only. The preprocessed
+    /// first-row selector marks row 0.
     #[test]
     fn enabler_and_flags_are_correct() {
         let witness = compute_sha256_witness(&[0x11; 100]); // 2 blocks
         let n_blocks = witness.blocks.len();
         assert_eq!(n_blocks, 2);
         let log_size = min_log_size(n_blocks);
-        let trace = generate_trace(&witness, log_size);
+        let packed = compute_packed_sha256_witness(&[&[0x11; 100][..]]).unwrap();
+        let trace = generate_trace(&packed, log_size);
         let n_rows = 1usize << log_size;
 
-        let mut enabled = 0u32;
-        for slot in 0..n_rows {
-            enabled += trace[Layout::COL_ENABLER][slot].0;
-        }
+        let enabled: u32 = trace[Layout::COL_ENABLER]
+            .iter()
+            .take(n_rows)
+            .map(|value| value.0)
+            .sum();
         assert_eq!(enabled as usize, n_blocks * ROWS_PER_BLOCK);
 
-        // is_first_block: only at (block 0, t = 0).
+        // msg_start: only at (block 0, t = 0).
         for b in 0..n_blocks {
             for t in 0..N_ROUNDS {
                 let slot = Layout::round_row_slot(b, t, log_size);
                 let expected = u32::from(b == 0 && t == 0);
                 assert_eq!(
-                    trace[Layout::COL_IS_FIRST_BLOCK][slot].0,
+                    trace[Layout::COL_MSG_START][slot].0,
                     expected,
-                    "is_first_block at ({b}, {t})"
+                    "msg_start at ({b}, {t})"
                 );
                 let expected_last = u32::from(b == n_blocks - 1 && t == N_ROUNDS - 1);
                 assert_eq!(
-                    trace[Layout::COL_IS_LAST_BLOCK][slot].0,
+                    trace[Layout::COL_IS_MSG_LAST][slot].0,
                     expected_last,
-                    "is_last_block at ({b}, {t})"
+                    "is_msg_last at ({b}, {t})"
                 );
             }
         }
-        assert_eq!(
-            trace[Layout::COL_ENABLER_STEP][Layout::row_slot(0, log_size)].0,
-            1
-        );
     }
 
     /// `min_log_size` always leaves at least one padding row, including at
@@ -983,8 +853,9 @@ mod tests {
         let first_pad_slot = Layout::row_slot(real_rows, log_size);
         let pad_t15_slot = Layout::row_slot(real_rows + 15, log_size);
 
-        let first = generate_trace(&witness, log_size);
-        let second = generate_trace(&witness, log_size);
+        let packed = compute_packed_sha256_witness(&[b"abc"]).unwrap();
+        let first = generate_trace(&packed, log_size);
+        let second = generate_trace(&packed, log_size);
 
         assert_eq!(
             first[Layout::COL_W_LO][first_real_slot],
@@ -992,13 +863,17 @@ mod tests {
             "active witness rows must remain deterministic"
         );
         assert_eq!(first[Layout::COL_ENABLER][first_pad_slot].0, 0);
-        assert_eq!(first[Layout::COL_IS_FIRST_BLOCK][first_pad_slot].0, 0);
-        assert_eq!(first[Layout::COL_IS_LAST_BLOCK][first_pad_slot].0, 0);
-        assert_eq!(first[Layout::COL_ENABLER_STEP][first_pad_slot].0, 0);
+        assert_eq!(first[Layout::COL_MSG_START][first_pad_slot].0, 0);
+        assert_eq!(first[Layout::COL_IS_MSG_LAST][first_pad_slot].0, 0);
 
-        for col in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
+        for (col, column) in first
+            .iter()
+            .enumerate()
+            .skip(Layout::COL_PADDING_START)
+            .take(Layout::COL_PADDING_END - Layout::COL_PADDING_START)
+        {
             assert_eq!(
-                first[col][pad_t15_slot].0, 0,
+                column[pad_t15_slot].0, 0,
                 "disabled-row padding role col {col} must stay public-zero"
             );
         }
@@ -1027,11 +902,12 @@ mod tests {
 
     /// h_in of the first block (its `t = 0` row) is the IV.
     #[test]
-    fn h_in_of_first_block_is_iv() {
+    fn h_in_of_first_message_block_is_iv() {
         use crate::constants::IV;
         let witness = compute_sha256_witness(b"abc");
         let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
+        let packed = compute_packed_sha256_witness(&[b"abc"]).unwrap();
+        let trace = generate_trace(&packed, log_size);
         let slot = Layout::round_row_slot(0, 0, log_size);
         for (j, &iv) in IV.iter().enumerate() {
             let (lo_col, hi_col) = Layout::h_in_word(j);
@@ -1047,7 +923,8 @@ mod tests {
         let witness = compute_sha256_witness(&[0x22; 200]);
         assert!(witness.blocks.len() >= 2);
         let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
+        let packed = compute_packed_sha256_witness(&[&[0x22; 200][..]]).unwrap();
+        let trace = generate_trace(&packed, log_size);
         for b in 1..witness.blocks.len() {
             let cur = Layout::round_row_slot(b, 0, log_size);
             let prev = Layout::round_row_slot(b - 1, N_ROUNDS - 1, log_size);
@@ -1087,18 +964,18 @@ mod tests {
             + WORD_BIT_COLS
             + ROUND_COLS
             + SCHEDULE_ENTRY_COLS
-            + 1 // is_first_block
+            + 1 // msg_start
             + 2 * N_STATE_WORDS // h_in
             + 2 * N_STATE_WORDS // final carries
             + 2 * N_STATE_WORDS // h_out
-            + 1 // is_last_block
+            + 1 // is_msg_last
             + DIGEST_BYTES
             + PADDING_ROW_COLS
-            + 1; // enabler_step
+            + 2; // msg_id + msg_block
         assert_eq!(Layout::TOTAL_COLS, expected);
         assert_eq!(ROUND_COLS, 216);
         assert_eq!(SCHEDULE_ENTRY_COLS, 70);
-        assert_eq!(Layout::TOTAL_COLS, 437);
+        assert_eq!(Layout::TOTAL_COLS, 438);
     }
 
     /// Round family, schedule family, and boundary families round-trip a
@@ -1107,7 +984,8 @@ mod tests {
     fn families_round_trip_through_trace() {
         let witness = compute_sha256_witness(&[0x33; 100]);
         let log_size = min_log_size(witness.blocks.len());
-        let trace = generate_trace(&witness, log_size);
+        let packed = compute_packed_sha256_witness(&[&[0x33; 100][..]]).unwrap();
+        let trace = generate_trace(&packed, log_size);
 
         for (b, block) in witness.blocks.iter().enumerate() {
             for t in 0..N_ROUNDS {
@@ -1151,95 +1029,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn packed_trace_writer_matches_scalar_writer_with_field_exposure() {
-        use rand::{rngs::StdRng, SeedableRng};
-        let witness = compute_sha256_witness(&[0x44; 180]);
-        let log_size = min_log_size(witness.blocks.len());
-        let exposure = FieldExposure::from_preimage_windows(&[(7, 5, 4), (8, 70, 2)]);
-        // Both writers must consume the *same* decoy padding, else the boundary
-        // sigma-bit columns (recomputed from padding neighbours) diverge by
-        // design. Seed one decoy set and feed it to both.
-        let n_rows = 1usize << log_size;
-        let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
-        let decoys = decoy_witnesses_for_padding_with(
-            n_real_rows,
-            n_rows,
-            &mut StdRng::seed_from_u64(0xC1A55D),
-        );
-        let scalar = generate_trace_with_fields_scalar_fallback_with_decoys(
-            &witness, log_size, &exposure, &decoys,
-        );
-        let packed =
-            generate_trace_base_columns_with_decoys(&witness, log_size, &exposure, &decoys)
-                .into_iter()
-                .map(BaseColumn::into_cpu_vec)
-                .collect::<Vec<_>>();
-        let real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
-        let n_rows = 1usize << log_size;
-        let total_cols = Layout::total_cols_with_fields(exposure.n_columns());
-
-        for row_idx in 0..real_rows {
-            let slot = Layout::row_slot(row_idx, log_size);
-            for col in 0..total_cols {
-                assert_eq!(
-                    scalar[col][slot], packed[col][slot],
-                    "active row {row_idx} col {col}"
-                );
-            }
-        }
-
-        let mut public_pad_cols = vec![
-            Layout::COL_ENABLER,
-            Layout::COL_IS_FIRST_BLOCK,
-            Layout::COL_IS_LAST_BLOCK,
-            Layout::COL_ENABLER_STEP,
-        ];
-        public_pad_cols.extend(Layout::COL_PADDING_START..Layout::COL_PADDING_END);
-        public_pad_cols.extend(Layout::COL_FIELD_AUX_START..total_cols);
-        for row_idx in real_rows..n_rows {
-            let slot = Layout::row_slot(row_idx, log_size);
-            for &col in &public_pad_cols {
-                assert_eq!(
-                    scalar[col][slot], packed[col][slot],
-                    "pad row {row_idx} col {col}"
-                );
-            }
-        }
-    }
-
-    fn best_of(count: usize, mut f: impl FnMut()) -> std::time::Duration {
-        (0..count)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                f();
-                start.elapsed()
-            })
-            .min()
-            .expect("count > 0")
-    }
-
-    #[test]
-    #[ignore]
-    fn sha_trace_writer_timing() {
-        let witness = compute_sha256_witness(&[0x55; 2048]);
-        let log_size = min_log_size(witness.blocks.len());
-        let exposure = FieldExposure::from_preimage_windows(&[(7, 5, 4), (8, 9, 2)]);
-        let n_rows = 1usize << log_size;
-        let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
-        let decoys = decoy_witnesses_for_padding(n_real_rows, n_rows);
-        let scalar = best_of(5, || {
-            std::hint::black_box(generate_trace_with_fields_scalar_fallback_with_decoys(
-                &witness, log_size, &exposure, &decoys,
-            ));
-        });
-        let packed = best_of(5, || {
-            std::hint::black_box(generate_trace_with_fields_packed(
-                &witness, log_size, &exposure,
-            ));
-        });
-        eprintln!("sha trace scalar={scalar:?} packed={packed:?}");
     }
 }

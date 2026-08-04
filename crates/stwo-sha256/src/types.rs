@@ -191,7 +191,7 @@ pub struct AddCarries {
 
 /// One 16-bit limb split into two 8-bit chunks (`b0 + 256 · b1 == limb`).
 ///
-/// Used by field-exposure and terminal-byte helpers that need an explicit byte
+/// Used by packed-stream and terminal-byte helpers that need an explicit byte
 /// view of a limb.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct LimbBytes {
@@ -426,6 +426,21 @@ pub struct Sha256Witness {
     pub blocks: Vec<BlockWitness>,
     /// Final digest, recoverable from the last `BlockWitness.h_out`.
     pub digest: Digest,
+}
+
+/// Owning witness for one packed SHA-256 component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PackedSha256Witness {
+    pub(crate) messages: Vec<Sha256Witness>,
+}
+
+impl PackedSha256Witness {
+    pub(crate) fn total_blocks(&self) -> usize {
+        self.messages
+            .iter()
+            .map(|message| message.blocks.len())
+            .sum()
+    }
 }
 
 impl Sha256Witness {

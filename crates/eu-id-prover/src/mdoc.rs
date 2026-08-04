@@ -11,9 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use air_core::relations::{
-    DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
-};
+use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
@@ -58,14 +56,15 @@ use stwo_constraint_framework::{
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
 
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
-use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
-use stwo_sha256::relations::SharedShaTableRelations;
+use stwo_sha256::relations::{
+    PackedShaDigestRelation, SharedPackedShaDigestRelation, SharedShaTableRelations,
+    PACKED_SHA_STREAM_FIELD_BASE,
+};
 use stwo_sha256::shared_tables::{
     ShaTableMultiplicities, ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier,
 };
-use stwo_sha256::trace::min_log_size;
-use stwo_sha256::witness::compute_sha256_witness;
+use stwo_sha256::witness::{compute_packed_sha256_witness, compute_sha256_witness};
 
 use crate::mdoc_cbor_stream::{
     MdocCborInputMode, MdocCborStream, MdocCborStreamInteractionClaim, MdocCborWitness,
@@ -76,14 +75,12 @@ use crate::mdoc_mac::{
     MdocMacBind, MdocMacInteractionClaim, MdocP4bMacPublic, MdocP4bMacSharedState,
 };
 use crate::mdoc_scope::{
-    item_outer_stream_id, MdocScope, MdocScopeHandles, MdocScopeInteractionClaim, MdocScopeItem,
-    MdocScopeMode, MdocScopeParserInput, MdocScopeProofMetadata, MdocScopeStatement,
-    ISSUER_SIG_STRUCTURE_STREAM_ID, MDOC_SCOPE_MAX_DIGEST_ID, MDOC_SCOPE_MAX_ITEMS,
-    MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID, NORMALIZED_MSO_STREAM_ID,
+    MdocScope, MdocScopeHandles, MdocScopeInteractionClaim, MdocScopeItem, MdocScopeMode,
+    MdocScopeParserInput, MdocScopeProofMetadata, MdocScopeStatement, MDOC_SCOPE_MAX_DIGEST_ID,
+    MDOC_SCOPE_MAX_ITEMS, MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID, NORMALIZED_MSO_STREAM_ID,
 };
 use crate::mdoc_validity::{mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim};
 
-use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
 use crate::Error;
 use air_core::claim_mask::{
     add_claim_mask_fraction, ClaimMaskChallengeModule, ClaimMaskRing, ClaimMaskTrace,
@@ -114,6 +111,11 @@ const CBOR_TAG_FULL_DATE: u64 = 1004;
 pub(crate) const MDOC_MSO_PAYLOAD_FIELD_ID: u32 = MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID;
 const MDOC_REVOCATION_MESSAGE_FIELD_ID: u32 = 41;
 const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
+const PRODUCT_SESSION_TRANSCRIPT_BYTES: usize = 56;
+const PACKED_SHA_ISSUER_SLOT: u32 = 0;
+const PACKED_SHA_MSO_SLOT: u32 = 1;
+const PACKED_SHA_REVOCATION_SLOT: u32 = 2;
+const PACKED_SHA_ITEM_SLOT_BASE: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -408,7 +410,6 @@ pub struct ExtractedPidMdoc {
     pub mso: Vec<u8>,
     pub device_key: AffinePoint,
     pub issuer_sig_structure: Vec<u8>,
-    pub device_sig_structure: Vec<u8>,
     pub issuer_ecdsa_input: EcdsaVerifyInput,
     pub device_ecdsa_input: EcdsaVerifyInput,
     pub revocation: MdocRevocationRequest,
@@ -715,7 +716,6 @@ fn extract_product_pid_mdoc_inner(
         mso: issuer_auth.payload,
         device_key,
         issuer_sig_structure: issuer_auth.sig_structure,
-        device_sig_structure: device_signature.sig_structure,
         issuer_ecdsa_input,
         device_ecdsa_input,
         revocation: request.revocation.clone(),
@@ -1073,20 +1073,8 @@ fn mdoc_scope_statement(statement: &MdocCircuitStatement) -> MdocScopeStatement 
     }
 }
 
-fn issuer_scope_exposure() -> FieldExposure {
-    FieldExposure::empty().with_padded_stream(ISSUER_SIG_STRUCTURE_STREAM_ID)
-}
-
-fn attribute_scope_exposure(index: usize) -> FieldExposure {
-    FieldExposure::empty().with_padded_stream(item_outer_stream_id(index))
-}
-
 fn mdoc_scope_parser_count(attribute_count: usize) -> Option<usize> {
     attribute_count.checked_mul(2)?.checked_add(3)
-}
-
-fn exact_sha_message_exposure(field_id: u32) -> FieldExposure {
-    FieldExposure::empty().with_padded_stream(field_id)
 }
 
 fn ts13_revocation_message_bytes(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
@@ -1095,10 +1083,6 @@ fn ts13_revocation_message_bytes(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20]
     bytes[8..16].copy_from_slice(&id_hi.to_le_bytes());
     bytes[16..].copy_from_slice(&epoch.to_le_bytes());
     bytes
-}
-
-fn ts13_revocation_message_exposure(_statement: &MdocCircuitStatement) -> FieldExposure {
-    exact_sha_message_exposure(MDOC_REVOCATION_MESSAGE_FIELD_ID)
 }
 
 fn current_product_circuit_semantics(statement: &MdocCircuitStatement) -> bool {
@@ -1289,6 +1273,11 @@ fn canonicalize_product_cbor_value(value: Value) -> Result<Value, MdocError> {
 pub fn validate_product_session_transcript_cbor(
     session_transcript: &[u8],
 ) -> Result<(), MdocError> {
+    if session_transcript.len() != PRODUCT_SESSION_TRANSCRIPT_BYTES {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "SessionTranscript must be exactly 56 canonical bytes",
+        ));
+    }
     validate_product_cbor_structure(session_transcript)?;
     let value = decode_value(session_transcript)?;
     let Value::Array(outer) = &value else {
@@ -2749,22 +2738,11 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> Result<i64, MdocError> {
 pub struct MdocCircuitProof {
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
     sha_tables_interaction_claim: ShaTablesInteractionClaim,
-
-    device_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
+    packed_sha_interaction_claim: Sha256InteractionClaim,
 
     coprocessor_bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
 
     mdoc_mac_interaction_claim: MdocMacInteractionClaim,
-    issuer_sha_log_n_rows: u32,
-    issuer_sha_interaction_claim: Sha256InteractionClaim,
-    device_sha_log_n_rows: u32,
-    device_sha_interaction_claim: Sha256InteractionClaim,
-    mso_sha_log_n_rows: u32,
-    mso_sha_interaction_claim: Sha256InteractionClaim,
-    revocation_sha_log_n_rows: u32,
-    revocation_sha_interaction_claim: Sha256InteractionClaim,
-    attribute_sha_log_n_rows: Vec<u32>,
-    attribute_sha_interaction_claims: Vec<Sha256InteractionClaim>,
     mdoc_cbor_log_sizes: Vec<u32>,
     mdoc_cbor_interaction_claims: Vec<MdocCborStreamInteractionClaim>,
     mso_exact_cbor_interaction_claim: MdocCborStreamInteractionClaim,
@@ -2781,13 +2759,11 @@ pub struct MdocCircuitProof {
 }
 
 fn validate_product_fixed_shape_logs(
-    sha_log_sizes: impl IntoIterator<Item = u32>,
+    sha_log_size: u32,
     cbor_log_sizes: impl IntoIterator<Item = u32>,
     scope_log_size: u32,
 ) -> Result<(), Error> {
-    let sha_shape_is_fixed = sha_log_sizes
-        .into_iter()
-        .all(|log_size| log_size == crate::product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS);
+    let sha_shape_is_fixed = sha_log_size == crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
     let mut cbor_log_sizes = cbor_log_sizes.into_iter().peekable();
     let cbor_shape_is_fixed = cbor_log_sizes.peek().is_some()
         && cbor_log_sizes
@@ -2806,21 +2782,11 @@ fn validate_product_fixed_shape_logs(
 impl MdocCircuitProof {
     fn validate_product_fixed_shape(&self) -> Result<(), Error> {
         validate_product_fixed_shape_logs(
-            std::iter::once(self.issuer_sha_log_n_rows)
-                .chain(std::iter::once(self.device_sha_log_n_rows))
-                .chain(std::iter::once(self.mso_sha_log_n_rows))
-                .chain(std::iter::once(self.revocation_sha_log_n_rows))
-                .chain(self.attribute_sha_log_n_rows.iter().copied()),
+            crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
             self.mdoc_cbor_log_sizes.iter().copied(),
             self.mdoc_scope_metadata.log_size,
         )
     }
-}
-
-fn sha_params(bytes: &[u8]) -> (stwo_sha256::types::Sha256Witness, u32) {
-    let witness = compute_sha256_witness(bytes);
-    let log_n_rows = min_log_size(witness.blocks.len());
-    (witness, log_n_rows)
 }
 
 fn ecdsa_inputs_equal(left: &EcdsaVerifyInput, right: &EcdsaVerifyInput) -> bool {
@@ -2901,7 +2867,8 @@ struct MdocExactShaMessageBind {
     bytes: Option<Vec<u8>>,
     len: usize,
     namespace: &'static str,
-    field_id: u32,
+    source_field_id: u32,
+    sha_field_id: u32,
     source_multiplicity: i32,
     draw_source_relation: bool,
     source_field_handle: SharedFieldRelation,
@@ -2921,7 +2888,8 @@ struct MdocExactShaMessageInteractionClaim {
 struct MdocExactShaMessageEval {
     log_size: u32,
     namespace: &'static str,
-    field_id: u32,
+    source_field_id: u32,
+    sha_field_id: u32,
     source_multiplicity: i32,
     source_field_relation: FieldBytesRelation,
     sha_field_relation: FieldBytesRelation,
@@ -2931,7 +2899,8 @@ struct MdocExactShaMessageEval {
 impl MdocExactShaMessageBind {
     fn prover(
         namespace: &'static str,
-        field_id: u32,
+        source_field_id: u32,
+        sha_field_id: u32,
         source_multiplicity: i32,
         draw_source_relation: bool,
         bytes: Vec<u8>,
@@ -2943,7 +2912,8 @@ impl MdocExactShaMessageBind {
             len: bytes.len(),
             bytes: Some(bytes),
             namespace,
-            field_id,
+            source_field_id,
+            sha_field_id,
             source_multiplicity,
             draw_source_relation,
             source_field_handle,
@@ -2957,7 +2927,8 @@ impl MdocExactShaMessageBind {
 
     fn verifier(
         namespace: &'static str,
-        field_id: u32,
+        source_field_id: u32,
+        sha_field_id: u32,
         source_multiplicity: i32,
         draw_source_relation: bool,
         len: usize,
@@ -2970,7 +2941,8 @@ impl MdocExactShaMessageBind {
             bytes: None,
             len,
             namespace,
-            field_id,
+            source_field_id,
+            sha_field_id,
             source_multiplicity,
             draw_source_relation,
             source_field_handle,
@@ -3145,7 +3117,8 @@ fn exact_sha_message_base_trace(bytes: &[u8]) -> Vec<MdocExactShaMessageColumnEv
 
 fn exact_sha_message_interaction_trace(
     bytes: &[u8],
-    field_id: u32,
+    source_field_id: u32,
+    sha_field_id: u32,
     source_multiplicity: i32,
     source_field_relation: &FieldBytesRelation,
     sha_field_relation: &FieldBytesRelation,
@@ -3168,12 +3141,12 @@ fn exact_sha_message_interaction_trace(
         };
         let sha_numerator = PackedQM31::from(sha_active);
         let source_denominator: PackedQM31 = source_field_relation.combine(&[
-            PackedM31::broadcast(M31::from_u32_unchecked(field_id)),
+            PackedM31::broadcast(M31::from_u32_unchecked(source_field_id)),
             byte_index,
             value,
         ]);
         let sha_denominator: PackedQM31 = sha_field_relation.combine(&[
-            PackedM31::broadcast(M31::from_u32_unchecked(field_id)),
+            PackedM31::broadcast(M31::from_u32_unchecked(sha_field_id)),
             byte_index,
             value,
         ]);
@@ -3215,7 +3188,8 @@ impl FrameworkEval for MdocExactShaMessageEval {
         eval.add_constraint(
             (sha_active.clone() - raw_active.clone()) * (value.clone() - expected_padding),
         );
-        let field_id = m31_const::<E>(self.field_id);
+        let source_field_id = m31_const::<E>(self.source_field_id);
+        let sha_field_id = m31_const::<E>(self.sha_field_id);
         let source_multiplicity = if self.source_multiplicity == 1 {
             E::EF::from(raw_active)
         } else {
@@ -3224,12 +3198,12 @@ impl FrameworkEval for MdocExactShaMessageEval {
         eval.add_to_relation(RelationEntry::new(
             &self.source_field_relation,
             source_multiplicity,
-            &[field_id.clone(), byte_index.clone(), value.clone()],
+            &[source_field_id.clone(), byte_index.clone(), value.clone()],
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.sha_field_relation,
             E::EF::from(sha_active),
-            &[field_id, byte_index, value],
+            &[sha_field_id, byte_index, value],
         ));
         if let Some(beta) = self.claim_mask_beta {
             add_claim_mask_fraction(&mut eval, beta);
@@ -3243,7 +3217,8 @@ impl Air for MdocExactShaMessageBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(0x5453_3133_4558_5348);
         channel.mix_u64(self.len as u64);
-        channel.mix_u64(u64::from(self.field_id));
+        channel.mix_u64(u64::from(self.source_field_id));
+        channel.mix_u64(u64::from(self.sha_field_id));
         channel.mix_u64(self.source_multiplicity as i64 as u64);
         channel.mix_u64(u64::from(self.draw_source_relation));
         channel.mix_u64(self.namespace.len() as u64);
@@ -3304,7 +3279,8 @@ impl Air for MdocExactShaMessageBind {
             MdocExactShaMessageEval {
                 log_size: self.log_size(),
                 namespace: self.namespace,
-                field_id: self.field_id,
+                source_field_id: self.source_field_id,
+                sha_field_id: self.sha_field_id,
                 source_multiplicity: self.source_multiplicity,
                 source_field_relation: self.source_field_relation(),
                 sha_field_relation: self.sha_field_relation(),
@@ -3360,7 +3336,8 @@ impl AirProver for MdocExactShaMessageBind {
             self.bytes
                 .as_ref()
                 .expect("exact SHA message bytes are set"),
-            self.field_id,
+            self.source_field_id,
+            self.sha_field_id,
             self.source_multiplicity,
             &self.source_field_relation(),
             &self.sha_field_relation(),
@@ -3396,7 +3373,7 @@ struct MdocRevocationRangeBind {
     witness: Option<MdocRevocationRangeWitness>,
     mso_digest: Option<[u8; 32]>,
     epoch: u32,
-    mso_digest_handle: SharedDigestRelation,
+    mso_digest_handle: SharedPackedShaDigestRelation,
     message_field_handle: SharedFieldRelation,
     claim_mask_trace: Option<ClaimMaskTrace>,
     claim_mask_challenge: Option<SharedClaimMaskChallenge>,
@@ -3406,7 +3383,7 @@ struct MdocRevocationRangeBind {
 
 #[derive(Clone)]
 struct MdocRevocationRangeEval {
-    mso_digest_relation: DigestBytesRelation,
+    mso_digest_relation: stwo_sha256::relations::PackedShaDigestRelation,
     message_field_relation: FieldBytesRelation,
     epoch: u32,
     claim_mask_beta: Option<QM31>,
@@ -3421,7 +3398,7 @@ impl MdocRevocationRangeBind {
     fn prover(
         witness: MdocRevocationRangeWitness,
         mso_digest: [u8; 32],
-        mso_digest_handle: SharedDigestRelation,
+        mso_digest_handle: SharedPackedShaDigestRelation,
         epoch: u32,
         message_field_handle: SharedFieldRelation,
     ) -> Self {
@@ -3439,7 +3416,7 @@ impl MdocRevocationRangeBind {
     }
 
     fn verifier(
-        mso_digest_handle: SharedDigestRelation,
+        mso_digest_handle: SharedPackedShaDigestRelation,
         epoch: u32,
         message_field_handle: SharedFieldRelation,
         interaction_claim: MdocRevocationRangeInteractionClaim,
@@ -3457,7 +3434,7 @@ impl MdocRevocationRangeBind {
         }
     }
 
-    fn relation(&self) -> DigestBytesRelation {
+    fn relation(&self) -> stwo_sha256::relations::PackedShaDigestRelation {
         self.mso_digest_handle.get()
     }
 
@@ -3603,7 +3580,7 @@ fn revocation_range_base_trace(
 fn revocation_range_interaction_trace(
     witness: &MdocRevocationRangeWitness,
     mso_digest: &[u8; 32],
-    relation: &DigestBytesRelation,
+    relation: &PackedShaDigestRelation,
     epoch: u32,
     message_relation: &FieldBytesRelation,
     claim_mask: Option<(&ClaimMaskTrace, QM31)>,
@@ -3618,12 +3595,13 @@ fn revocation_range_interaction_trace(
         (0..n_vec_rows)
             .map(|vec_row| {
                 let numerator = PackedQM31::from(active.data[vec_row]);
-                let mut values = [PackedM31::broadcast(M31::from_u32_unchecked(0)); 32];
+                let mut values = vec![PackedM31::broadcast(M31::from_u32_unchecked(0)); 33];
+                values[0] = PackedM31::broadcast(M31::from_u32_unchecked(PACKED_SHA_MSO_SLOT));
                 for byte_idx in 0..REVOCATION_U64_BYTES {
-                    values[byte_idx] = base[byte_idx].data[vec_row];
+                    values[byte_idx + 1] = base[byte_idx].data[vec_row];
                 }
                 for byte_idx in REVOCATION_U64_BYTES..32 {
-                    values[byte_idx] =
+                    values[byte_idx + 1] =
                         base[digest_tail_offset + byte_idx - REVOCATION_U64_BYTES].data[vec_row];
                 }
                 (numerator, relation.combine(&values))
@@ -3763,13 +3741,13 @@ impl FrameworkEval for MdocRevocationRangeEval {
         eval.add_constraint(active.clone() * values[upper_carries_offset + 7].clone());
 
         let digest_tail_offset = upper_carries_offset + REVOCATION_U64_BYTES;
-        let mut digest_values = Vec::with_capacity(32);
-        for byte_idx in 0..REVOCATION_U64_BYTES {
-            digest_values.push(values[byte_idx].clone());
-        }
-        for byte_idx in 0..REVOCATION_RANGE_DIGEST_TAIL_COLS {
-            digest_values.push(values[digest_tail_offset + byte_idx].clone());
-        }
+        let mut digest_values = Vec::with_capacity(33);
+        digest_values.push(m31_const::<E>(PACKED_SHA_MSO_SLOT));
+        digest_values.extend((0..REVOCATION_U64_BYTES).map(|index| values[index].clone()));
+        digest_values.extend(
+            (0..REVOCATION_RANGE_DIGEST_TAIL_COLS)
+                .map(|index| values[digest_tail_offset + index].clone()),
+        );
         eval.add_to_relation(RelationEntry::new(
             &self.mso_digest_relation,
             E::EF::from(active.clone()),
@@ -4163,67 +4141,39 @@ fn prove_mdoc_circuit_with_pcs_config(
 
     let revocation_p256_input = ts13_revocation_p256_input(statement);
 
-    // All SHA instances use one `log_n_rows` value.
-    // The large SHA tables use the fixed `LOG_SIZE_16` and share columns.
-    // Ten preprocessed columns depend on `log_n_rows`.
-    // Their identifiers do not depend on the log size, but their contents do.
-    // Thus, all instances must use the same log size for tree-0 deduplication.
-    // Separate sizes would require separate namespaces and duplicate the large tables.
-    // The shared size adds 529,792 cells to a total of 79.99 million cells.
-    let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
-    let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let mso_sha_params = sha_params(&extracted.mso);
+    // The product owns exactly one packed SHA component at the fixed profile
+    // size. Its five message slots are ordered by the contract and exclude
+    // DeviceAuthentication, whose hash is bound by the EC coprocessor path.
     let revocation_message = ts13_revocation_message_bytes(
         statement.ts13_revocation_range.id_lo,
         statement.ts13_revocation_range.id_hi,
         statement.ts13_revocation.epoch,
     );
-    let revocation_sha_params = sha_params(revocation_message.as_slice());
     let attribute_items: Vec<_> = extracted
         .extracted_attributes
         .iter()
         .map(|attribute| attribute.item.as_slice())
         .collect();
-    let attribute_sha_params: Vec<_> = attribute_items
-        .iter()
-        .map(|item| sha_params(item))
-        .collect();
-    let natural_shared_sha_log = std::iter::once(issuer_sha_log)
-        .chain(std::iter::once(device_sha_log))
-        .chain(std::iter::once(mso_sha_params.1))
-        .chain(std::iter::once(revocation_sha_params.1))
-        .chain(attribute_sha_params.iter().map(|(_, log)| *log))
-        .max()
-        .expect("sha log list is non-empty");
-    if natural_shared_sha_log > crate::product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS {
+    if attribute_items.len() > 2 {
         return Err(Error::Prove(
-            "mdoc SHA trace exceeds the fixed product profile".to_string(),
+            "product supports at most two selected items".to_string(),
         ));
     }
-    let shared_sha_log = crate::product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS;
-    let issuer_digest = SharedDigestRelation::new();
-    let device_digest = SharedDigestRelation::new();
-    let mso_digest = SharedDigestRelation::new();
-    let revocation_digest = SharedDigestRelation::new();
+    let mut packed_messages = Vec::with_capacity(3 + attribute_items.len());
+    packed_messages.push(extracted.issuer_sig_structure.as_slice());
+    packed_messages.push(extracted.mso.as_slice());
+    packed_messages.push(revocation_message.as_slice());
+    packed_messages.extend(attribute_items.iter().copied());
+    let packed_sha_witness = compute_packed_sha256_witness(&packed_messages)
+        .map_err(|error| Error::Prove(format!("packed SHA witness: {error}")))?;
+    let shared_sha_log = crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
+    let packed_sha_digest = SharedPackedShaDigestRelation::new();
+    let sha_field = SharedFieldRelation::new();
     let scope_statement = mdoc_scope_statement(statement);
-    let scope_handles = MdocScopeHandles::fresh(&scope_statement)
+    let scope_handles = MdocScopeHandles::fresh(&scope_statement, packed_sha_digest.clone())
         .map_err(|error| Error::Prove(format!("mdoc scope handles: {error}")))?;
-    let attribute_digests = scope_handles.item_digests.clone();
-    let issuer_field = SharedFieldRelation::new();
-    let mso_field = SharedFieldRelation::new();
     let revocation_message_field = SharedFieldRelation::new();
-    let revocation_sha_field = SharedFieldRelation::new();
-    let attribute_fields: Vec<_> = (0..attribute_sha_params.len())
-        .map(|_| SharedFieldRelation::new())
-        .collect();
     let sha_table_relations = SharedShaTableRelations::new();
-
-    let issuer_exposure = issuer_scope_exposure();
-    let mso_exposure = exact_sha_message_exposure(MDOC_MSO_PAYLOAD_FIELD_ID);
-    let revocation_exposure = ts13_revocation_message_exposure(statement);
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(attribute_scope_exposure)
-        .collect();
 
     let item_outer_streams: Vec<_> = extracted
         .extracted_attributes
@@ -4252,14 +4202,25 @@ fn prove_mdoc_circuit_with_pcs_config(
     }
     let mut mdoc_cbor_streams = Vec::with_capacity(parser_specs.len());
     for (slot, spec) in parser_specs.into_iter().enumerate() {
-        let input_handle = match spec.input {
-            MdocScopeParserInput::ShaIssuer => issuer_field.clone(),
+        let (input_handle, input_field_id, max_message_len) = match spec.input {
+            MdocScopeParserInput::ShaIssuer => (
+                sha_field.clone(),
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ISSUER_SLOT,
+                Some(6_164),
+            ),
             MdocScopeParserInput::ShaItem(index) => {
-                attribute_fields.get(index).cloned().ok_or_else(|| {
-                    Error::Prove("mdoc item parser index is out of range".to_string())
-                })?
+                if index >= attribute_items.len() {
+                    return Err(Error::Prove(
+                        "mdoc item parser index is out of range".to_string(),
+                    ));
+                }
+                (
+                    sha_field.clone(),
+                    PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ITEM_SLOT_BASE + index as u32,
+                    Some(1_024),
+                )
             }
-            MdocScopeParserInput::Raw(handle) => handle,
+            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id, None),
         };
         let bytes = match spec.mode {
             MdocCborInputMode::ShaPadded => {
@@ -4271,9 +4232,11 @@ fn prove_mdoc_circuit_with_pcs_config(
             bytes,
             spec.mode,
             spec.stream_id,
+            input_field_id,
             input_handle,
             Some(spec.parsed),
             crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE,
+            max_message_len,
         )
         .map_err(|error| Error::Prove(format!("mdoc CBOR parser: {error}")))?;
         mdoc_cbor_streams.push(parser);
@@ -4281,8 +4244,8 @@ fn prove_mdoc_circuit_with_pcs_config(
     let mut mso_exact_cbor = MdocCborStream::new_exact_sha(
         stwo_sha256::native::pad_message(&extracted.mso),
         NORMALIZED_MSO_STREAM_ID,
-        MDOC_MSO_PAYLOAD_FIELD_ID,
-        mso_field.clone(),
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+        sha_field.clone(),
         MDOC_MSO_PAYLOAD_FIELD_ID,
         scope_handles.payload_hash_fields.clone(),
         None,
@@ -4292,54 +4255,18 @@ fn prove_mdoc_circuit_with_pcs_config(
     )
     .map_err(|error| Error::Prove(format!("exact MSO CBOR/SHA binding: {error}")))?;
 
-    // The device signature requires a separate preprocessed namespace.
-    // Its multiplication schedule depends on the witness.
-    // Eighteen schedule columns differ between the issuer and device signatures.
-    // A shared namespace would bind the device module to the issuer schedule.
-
-    let mut sha_consumers = vec![
-        (&issuer_sha_witness, issuer_exposure.clone()),
-        (&device_sha_witness, FieldExposure::empty()),
-    ];
-    sha_consumers.push((&mso_sha_params.0, mso_exposure.clone()));
-    sha_consumers.push((&revocation_sha_params.0, revocation_exposure.clone()));
-    for ((witness, _), exposure) in attribute_sha_params.iter().zip(attribute_exposures.iter()) {
-        sha_consumers.push((witness, exposure.clone()));
-    }
-    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
+    let packed_sha_messages = packed_messages
+        .iter()
+        .map(|message| compute_sha256_witness(message))
+        .collect::<Vec<_>>();
+    let sha_table_multiplicities = ShaTableMultiplicities::from_messages(&packed_sha_messages);
     let mut sha_tables =
         ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
-    let mut issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log)
+    let mut packed_sha = Sha256Prover::new(&packed_sha_witness, shared_sha_log)
+        .map_err(|error| Error::Prove(format!("packed SHA prover: {error}")))?
         .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(issuer_digest.clone())
-        .with_field_handle(issuer_exposure.clone(), issuer_field.clone());
-    let mut device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(device_digest.clone());
-    let mut mso_sha = Sha256Prover::new(&mso_sha_params.0, shared_sha_log)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(mso_digest.clone())
-        .with_field_handle(mso_exposure.clone(), mso_field.clone());
-    let mut revocation_sha = Sha256Prover::new(&revocation_sha_params.0, shared_sha_log)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(revocation_digest.clone())
-        .with_field_handle(revocation_exposure.clone(), revocation_sha_field.clone());
-
-    let mut attribute_sha = Vec::with_capacity(attribute_sha_params.len());
-    for index in 0..attribute_sha_params.len() {
-        attribute_sha.push(
-            Sha256Prover::new(&attribute_sha_params[index].0, shared_sha_log)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(attribute_digests[index].clone())
-                .with_field_handle(
-                    attribute_exposures[index].clone(),
-                    attribute_fields[index].clone(),
-                ),
-        );
-    }
-
-    let mut device_public_digest_bind =
-        PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
+        .with_digest_handle(packed_sha_digest.clone())
+        .with_field_handle(sha_field.clone());
     let mut mdoc_validity = MdocValidityBind::new(
         statement.verification_time_epoch_seconds,
         mdoc_validity_rows(
@@ -4351,11 +4278,12 @@ fn prove_mdoc_circuit_with_pcs_config(
     let mut revocation_message_bind = MdocExactShaMessageBind::prover(
         "revocation_message",
         MDOC_REVOCATION_MESSAGE_FIELD_ID,
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
         -1,
         true,
         revocation_message.to_vec(),
         revocation_message_field.clone(),
-        revocation_sha_field.clone(),
+        sha_field.clone(),
     );
 
     let mac_key_shares = random_mdoc_p4b_mac_key_shares();
@@ -4366,8 +4294,7 @@ fn prove_mdoc_circuit_with_pcs_config(
         &mac_key_shares,
         mdoc_p4b_mac_values(statement, &revocation_p256_input),
         mac_state.clone(),
-        issuer_digest.clone(),
-        revocation_digest.clone(),
+        packed_sha_digest.clone(),
         scope_handles.semantic_fields.clone(),
     );
 
@@ -4420,7 +4347,7 @@ fn prove_mdoc_circuit_with_pcs_config(
     let mut ts13_revocation_range = MdocRevocationRangeBind::prover(
         statement.ts13_revocation_range.clone(),
         mso_digest_bytes,
-        mso_digest.clone(),
+        packed_sha_digest.clone(),
         statement.ts13_revocation.epoch,
         revocation_message_field.clone(),
     );
@@ -4431,13 +4358,7 @@ fn prove_mdoc_circuit_with_pcs_config(
     let claim_mask_challenge = SharedClaimMaskChallenge::new();
     let mut claim_mask_log_sizes = Vec::new();
     claim_mask_log_sizes.extend(sha_tables.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(issuer_sha.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(device_sha.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(mso_sha.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(revocation_sha.ordered_claim_mask_log_sizes());
-    for sha in &attribute_sha {
-        claim_mask_log_sizes.extend(sha.ordered_claim_mask_log_sizes());
-    }
+    claim_mask_log_sizes.extend(packed_sha.ordered_claim_mask_log_sizes());
     for parser in &mdoc_cbor_streams {
         claim_mask_log_sizes.extend(parser.ordered_claim_mask_log_sizes());
     }
@@ -4465,46 +4386,12 @@ fn prove_mdoc_circuit_with_pcs_config(
         .with_claim_masks(masks, claim_mask_challenge.clone())
         .map_err(|error| Error::Prove(format!("SHA-table claim masks: {error}")))?;
 
-    let logs = issuer_sha.ordered_claim_mask_log_sizes();
+    let logs = packed_sha.ordered_claim_mask_log_sizes();
     let masks = take_claim_masks(&mut claim_mask_ring, &logs)
-        .map_err(|error| Error::Prove(format!("issuer SHA claim masks: {error}")))?;
-    issuer_sha = issuer_sha
+        .map_err(|error| Error::Prove(format!("packed SHA claim masks: {error}")))?;
+    packed_sha = packed_sha
         .with_claim_masks(masks, claim_mask_challenge.clone())
-        .map_err(|error| Error::Prove(format!("issuer SHA claim masks: {error}")))?;
-
-    let logs = device_sha.ordered_claim_mask_log_sizes();
-    let masks = take_claim_masks(&mut claim_mask_ring, &logs)
-        .map_err(|error| Error::Prove(format!("device SHA claim masks: {error}")))?;
-    device_sha = device_sha
-        .with_claim_masks(masks, claim_mask_challenge.clone())
-        .map_err(|error| Error::Prove(format!("device SHA claim masks: {error}")))?;
-
-    let logs = mso_sha.ordered_claim_mask_log_sizes();
-    let masks = take_claim_masks(&mut claim_mask_ring, &logs)
-        .map_err(|error| Error::Prove(format!("MSO SHA claim masks: {error}")))?;
-    mso_sha = mso_sha
-        .with_claim_masks(masks, claim_mask_challenge.clone())
-        .map_err(|error| Error::Prove(format!("MSO SHA claim masks: {error}")))?;
-    let logs = revocation_sha.ordered_claim_mask_log_sizes();
-    let masks = take_claim_masks(&mut claim_mask_ring, &logs)
-        .map_err(|error| Error::Prove(format!("revocation SHA claim masks: {error}")))?;
-    revocation_sha = revocation_sha
-        .with_claim_masks(masks, claim_mask_challenge.clone())
-        .map_err(|error| Error::Prove(format!("revocation SHA claim masks: {error}")))?;
-    attribute_sha = attribute_sha
-        .into_iter()
-        .enumerate()
-        .map(|(index, sha)| {
-            let logs = sha.ordered_claim_mask_log_sizes();
-            let masks = take_claim_masks(&mut claim_mask_ring, &logs).map_err(|error| {
-                Error::Prove(format!("attribute SHA {index} claim masks: {error}"))
-            })?;
-            sha.with_claim_masks(masks, claim_mask_challenge.clone())
-                .map_err(|error| {
-                    Error::Prove(format!("attribute SHA {index} claim masks: {error}"))
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        .map_err(|error| Error::Prove(format!("packed SHA claim masks: {error}")))?;
     mdoc_cbor_streams = mdoc_cbor_streams
         .into_iter()
         .enumerate()
@@ -4580,19 +4467,7 @@ fn prove_mdoc_circuit_with_pcs_config(
             .map_err(|error| Error::Prove(format!("claim-mask anchor: {error}")))?;
 
     let stark_proof = {
-        let mut modules: Vec<&mut dyn AirProver> = vec![
-            &mut sha_tables,
-            &mut issuer_sha,
-            &mut device_sha,
-            &mut device_public_digest_bind,
-        ];
-
-        modules.push(&mut mso_sha);
-        modules.push(&mut revocation_sha);
-
-        for sha in &mut attribute_sha {
-            modules.push(sha);
-        }
+        let mut modules: Vec<&mut dyn AirProver> = vec![&mut sha_tables, &mut packed_sha];
         for parser in &mut mdoc_cbor_streams {
             modules.push(parser);
         }
@@ -4626,27 +4501,11 @@ fn prove_mdoc_circuit_with_pcs_config(
     Ok(MdocCircuitProof {
         stark_proof,
         sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
-
-        device_public_digest_bind_interaction_claim: device_public_digest_bind
-            .interaction_claim()
-            .clone(),
+        packed_sha_interaction_claim: packed_sha.interaction_claim().clone(),
 
         coprocessor_bundle,
 
         mdoc_mac_interaction_claim: mdoc_mac.interaction_claim().clone(),
-        issuer_sha_log_n_rows: shared_sha_log,
-        issuer_sha_interaction_claim: issuer_sha.interaction_claim().clone(),
-        device_sha_log_n_rows: shared_sha_log,
-        device_sha_interaction_claim: device_sha.interaction_claim().clone(),
-        mso_sha_log_n_rows: shared_sha_log,
-        mso_sha_interaction_claim: mso_sha.interaction_claim().clone(),
-        revocation_sha_log_n_rows: shared_sha_log,
-        revocation_sha_interaction_claim: revocation_sha.interaction_claim().clone(),
-        attribute_sha_log_n_rows: vec![shared_sha_log; attribute_sha.len()],
-        attribute_sha_interaction_claims: attribute_sha
-            .iter()
-            .map(|sha| sha.interaction_claim().clone())
-            .collect(),
         mdoc_cbor_log_sizes: mdoc_cbor_streams
             .iter()
             .map(MdocCborStream::log_size)
@@ -4739,21 +4598,10 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
         return Err(Error::NatPolicyMismatch);
     }
 
-    let issuer_digest = SharedDigestRelation::new();
-    let device_digest = SharedDigestRelation::new();
-    let mso_digest = SharedDigestRelation::new();
-    let mso_field = SharedFieldRelation::new();
-    let revocation_digest = SharedDigestRelation::new();
+    let packed_sha_digest = SharedPackedShaDigestRelation::new();
+    let sha_field = SharedFieldRelation::new();
     let revocation_message_field = SharedFieldRelation::new();
-    let revocation_sha_field = SharedFieldRelation::new();
-    let attribute_count = proof.attribute_sha_interaction_claims.len();
-    if attribute_count != proof.attribute_sha_log_n_rows.len()
-        || attribute_count != statement.attributes.len()
-    {
-        return Err(Error::Verify(
-            "mdoc proof carries an unsupported attribute count".to_string(),
-        ));
-    }
+    let attribute_count = statement.attributes.len();
     let expected_parser_count = mdoc_scope_parser_count(attribute_count)
         .ok_or_else(|| Error::Verify("mdoc parser count overflow".to_string()))?;
     if proof.mdoc_cbor_log_sizes.len() != expected_parser_count
@@ -4764,44 +4612,9 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
         ));
     }
 
-    // Limit each prover-controlled SHA trace size before the tree-0 rebuild.
-    // `compute_canonical_preprocessed_root` uses these values to size the tree and twiddles.
-    // An unlimited value can exhaust verifier resources.
-    // The SHA AIR fixes its sole supported round grouping.
-    for (field, log_n_rows) in
-        std::iter::once(("issuer_sha_log_n_rows", proof.issuer_sha_log_n_rows))
-            .chain(std::iter::once((
-                "device_sha_log_n_rows",
-                proof.device_sha_log_n_rows,
-            )))
-            .chain(std::iter::once((
-                "mso_sha_log_n_rows",
-                proof.mso_sha_log_n_rows,
-            )))
-            .chain(std::iter::once((
-                "revocation_sha_log_n_rows",
-                proof.revocation_sha_log_n_rows,
-            )))
-            .chain(
-                proof
-                    .attribute_sha_log_n_rows
-                    .iter()
-                    .map(|&n| ("attribute_sha_log_n_rows", n)),
-            )
-    {
-        crate::check_product_sha_shape(field, log_n_rows)?;
-    }
-    // Classical build also carries prover-steered digest-bind bridge log-sizes,
-    // whose preprocessed selector lives at that log-size — same DoS surface.
-
     let scope_statement = mdoc_scope_statement(statement);
-    let scope_handles = MdocScopeHandles::fresh(&scope_statement)
+    let scope_handles = MdocScopeHandles::fresh(&scope_statement, packed_sha_digest.clone())
         .map_err(|error| Error::Verify(format!("mdoc scope handles: {error}")))?;
-    let attribute_digests = scope_handles.item_digests.clone();
-    let issuer_field = SharedFieldRelation::new();
-    let attribute_fields: Vec<_> = (0..attribute_count)
-        .map(|_| SharedFieldRelation::new())
-        .collect();
     let sha_table_relations = SharedShaTableRelations::new();
 
     if proof.stark_proof.config != expected_pcs_config {
@@ -4815,79 +4628,47 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
         proof.sha_tables_interaction_claim.clone(),
         sha_table_relations.clone(),
     );
-    let mut issuer_sha = Sha256Verifier::new(
-        proof.issuer_sha_log_n_rows,
-        proof.issuer_sha_interaction_claim.clone(),
+    let mut packed_sha = Sha256Verifier::new(
+        crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
+        proof.packed_sha_interaction_claim.clone(),
     )
     .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(issuer_digest.clone())
-    .with_field_handle(issuer_scope_exposure(), issuer_field.clone());
-    let mut device_sha = Sha256Verifier::new(
-        proof.device_sha_log_n_rows,
-        proof.device_sha_interaction_claim.clone(),
-    )
-    .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(device_digest.clone());
-    let mut mso_sha = Sha256Verifier::new(
-        proof.mso_sha_log_n_rows,
-        proof.mso_sha_interaction_claim.clone(),
-    )
-    .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(mso_digest.clone())
-    .with_field_handle(
-        exact_sha_message_exposure(MDOC_MSO_PAYLOAD_FIELD_ID),
-        mso_field.clone(),
-    );
-    let mut revocation_sha = Sha256Verifier::new(
-        proof.revocation_sha_log_n_rows,
-        proof.revocation_sha_interaction_claim.clone(),
-    )
-    .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(revocation_digest.clone())
-    .with_field_handle(
-        ts13_revocation_message_exposure(statement),
-        revocation_sha_field.clone(),
-    );
-
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(attribute_scope_exposure)
-        .collect();
-    let mut attribute_sha = Vec::with_capacity(attribute_count);
-    for index in 0..attribute_count {
-        attribute_sha.push(
-            Sha256Verifier::new(
-                proof.attribute_sha_log_n_rows[index],
-                proof.attribute_sha_interaction_claims[index].clone(),
-            )
-            .with_shared_tables(sha_table_relations.clone())
-            .with_digest_handle(attribute_digests[index].clone())
-            .with_field_handle(
-                attribute_exposures[index].clone(),
-                attribute_fields[index].clone(),
-            ),
-        );
-    }
+    .with_digest_handle(packed_sha_digest.clone())
+    .with_field_handle(sha_field.clone());
     let parser_specs = scope_handles
         .stream_specs(&scope_statement)
         .map_err(|error| Error::Verify(format!("mdoc parser specs: {error}")))?;
     let mut mdoc_cbor_streams = Vec::with_capacity(expected_parser_count);
     for (index, spec) in parser_specs.into_iter().enumerate() {
-        let input_handle = match spec.input {
-            MdocScopeParserInput::ShaIssuer => issuer_field.clone(),
+        let (input_handle, input_field_id, max_message_len) = match spec.input {
+            MdocScopeParserInput::ShaIssuer => (
+                sha_field.clone(),
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ISSUER_SLOT,
+                Some(6_164),
+            ),
             MdocScopeParserInput::ShaItem(item_index) => {
-                attribute_fields.get(item_index).cloned().ok_or_else(|| {
-                    Error::Verify("mdoc item parser index is out of range".to_string())
-                })?
+                if item_index >= attribute_count {
+                    return Err(Error::Verify(
+                        "mdoc item parser index is out of range".to_string(),
+                    ));
+                }
+                (
+                    sha_field.clone(),
+                    PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ITEM_SLOT_BASE + item_index as u32,
+                    Some(1_024),
+                )
             }
-            MdocScopeParserInput::Raw(handle) => handle,
+            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id, None),
         };
         mdoc_cbor_streams.push(
             MdocCborStream::verifier(
                 spec.mode,
                 spec.stream_id,
+                input_field_id,
                 proof.mdoc_cbor_log_sizes[index],
                 input_handle,
                 Some(spec.parsed),
+                max_message_len,
                 proof.mdoc_cbor_interaction_claims[index].clone(),
             )
             .map_err(|error| Error::Verify(format!("mdoc CBOR parser: {error}")))?,
@@ -4895,8 +4676,8 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
     }
     let mut mso_exact_cbor = MdocCborStream::verifier_exact_sha(
         NORMALIZED_MSO_STREAM_ID,
-        MDOC_MSO_PAYLOAD_FIELD_ID,
-        mso_field.clone(),
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+        sha_field.clone(),
         MDOC_MSO_PAYLOAD_FIELD_ID,
         scope_handles.payload_hash_fields.clone(),
         None,
@@ -4915,12 +4696,6 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
     .map_err(|error| Error::Verify(format!("mdoc semantic scope: {error}")))?;
     mdoc_scope = mdoc_scope.with_payload_hash_binding();
 
-    let mut device_public_digest_bind = PublicDigestBind::verifier(
-        statement.device_input.message_hash.0,
-        device_digest,
-        proof.device_public_digest_bind_interaction_claim.clone(),
-    );
-
     let mut mdoc_validity = MdocValidityBind::verifier(
         statement.verification_time_epoch_seconds,
         mdoc_validity_rows([0; 20], [0; 20]),
@@ -4930,11 +4705,12 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
     let mut revocation_message_bind = MdocExactShaMessageBind::verifier(
         "revocation_message",
         MDOC_REVOCATION_MESSAGE_FIELD_ID,
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
         -1,
         true,
         TS13_REVOCATION_MESSAGE_LEN,
         revocation_message_field.clone(),
-        revocation_sha_field.clone(),
+        sha_field.clone(),
         proof.revocation_message_bind_interaction_claim.clone(),
     );
     let mut age = if statement.age_attribute_index.is_some() {
@@ -4970,8 +4746,7 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
 
     let mut mdoc_mac = MdocMacBind::verifier(
         mac_state.clone(),
-        issuer_digest.clone(),
-        revocation_digest.clone(),
+        packed_sha_digest.clone(),
         scope_handles.semantic_fields.clone(),
         proof.mdoc_mac_interaction_claim.clone(),
     );
@@ -4995,7 +4770,7 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
     let mut ts13_revocation_public =
         MdocRevocationPublicBind::new(statement.ts13_revocation.clone());
     let mut ts13_revocation_range = MdocRevocationRangeBind::verifier(
-        mso_digest.clone(),
+        packed_sha_digest.clone(),
         statement.ts13_revocation.epoch,
         revocation_message_field.clone(),
         proof.ts13_revocation_range_interaction_claim.clone(),
@@ -5004,13 +4779,7 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
     let claim_mask_challenge = SharedClaimMaskChallenge::new();
     let mut claim_mask_log_sizes = Vec::new();
     claim_mask_log_sizes.extend(sha_tables.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(issuer_sha.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(device_sha.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(mso_sha.ordered_claim_mask_log_sizes());
-    claim_mask_log_sizes.extend(revocation_sha.ordered_claim_mask_log_sizes());
-    for sha in &attribute_sha {
-        claim_mask_log_sizes.extend(sha.ordered_claim_mask_log_sizes());
-    }
+    claim_mask_log_sizes.extend(packed_sha.ordered_claim_mask_log_sizes());
     for parser in &mdoc_cbor_streams {
         claim_mask_log_sizes.extend(parser.ordered_claim_mask_log_sizes());
     }
@@ -5029,14 +4798,7 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
     claim_mask_log_sizes.extend(mdoc_mac.ordered_claim_mask_log_sizes());
 
     sha_tables = sha_tables.with_claim_masks(claim_mask_challenge.clone());
-    issuer_sha = issuer_sha.with_claim_masks(claim_mask_challenge.clone());
-    device_sha = device_sha.with_claim_masks(claim_mask_challenge.clone());
-    mso_sha = mso_sha.with_claim_masks(claim_mask_challenge.clone());
-    revocation_sha = revocation_sha.with_claim_masks(claim_mask_challenge.clone());
-    attribute_sha = attribute_sha
-        .into_iter()
-        .map(|sha| sha.with_claim_masks(claim_mask_challenge.clone()))
-        .collect();
+    packed_sha = packed_sha.with_claim_masks(claim_mask_challenge.clone());
     mdoc_cbor_streams = mdoc_cbor_streams
         .into_iter()
         .map(|parser| parser.with_claim_mask_verifier(claim_mask_challenge.clone()))
@@ -5062,19 +4824,7 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
     let has_age = age.is_some();
     let has_nationality = nat.is_some();
 
-    let mut modules: Vec<&mut dyn Air> = vec![
-        &mut sha_tables,
-        &mut issuer_sha,
-        &mut device_sha,
-        &mut device_public_digest_bind,
-    ];
-
-    modules.push(&mut mso_sha);
-    modules.push(&mut revocation_sha);
-
-    for sha in &mut attribute_sha {
-        modules.push(sha);
-    }
+    let mut modules: Vec<&mut dyn Air> = vec![&mut sha_tables, &mut packed_sha];
     for parser in &mut mdoc_cbor_streams {
         modules.push(parser);
     }
@@ -5154,23 +4904,15 @@ struct MdocModuleShape {
 /// [`verify_mdoc_circuit_with_pcs_config_impl`] asserts the lengths agree, so a
 /// module added or removed without a label here fails loudly.
 fn mdoc_module_names(
-    attribute_count: usize,
+    _attribute_count: usize,
     parser_count: usize,
     has_age: bool,
     has_nationality: bool,
 ) -> Vec<String> {
-    let mut names: Vec<String> = [
-        "sha_tables",
-        "issuer_sha",
-        "device_sha",
-        "device_public_digest_bind",
-        "mso_sha",
-        "revocation_sha",
-    ]
-    .iter()
-    .map(|name| (*name).to_string())
-    .collect();
-    names.extend((0..attribute_count).map(|index| format!("attribute_sha[{index}]")));
+    let mut names: Vec<String> = ["sha_tables", "packed_sha"]
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
     names.extend((0..parser_count).map(|index| format!("mdoc_cbor_stream[{index}]")));
     names.push("mso_exact_cbor".to_string());
     names.push("mdoc_scope".to_string());
@@ -6775,6 +6517,7 @@ mod mdoc_sha_table_tests {
         let (_, unmasked) = exact_sha_message_interaction_trace(
             bytes,
             MDOC_MSO_PAYLOAD_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
             1,
             &source_relation,
             &sha_relation,
@@ -6783,6 +6526,7 @@ mod mdoc_sha_table_tests {
         let (_, masked) = exact_sha_message_interaction_trace(
             bytes,
             MDOC_MSO_PAYLOAD_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
             1,
             &source_relation,
             &sha_relation,
@@ -6802,7 +6546,7 @@ mod mdoc_sha_table_tests {
         let mut mso_digest = [0x5a; 32];
         mso_digest[..REVOCATION_U64_BYTES].copy_from_slice(&witness.id.to_le_bytes());
         let mut channel = Blake2sChannel::default();
-        let digest_relation = DigestBytesRelation::draw(&mut channel);
+        let digest_relation = PackedShaDigestRelation::draw(&mut channel);
         let message_relation = FieldBytesRelation::draw(&mut channel);
         let (mask, beta) = test_claim_mask(MDOC_REVOCATION_RANGE_LOG_SIZE);
         let (_, unmasked) = revocation_range_interaction_trace(
@@ -6854,6 +6598,7 @@ mod mdoc_sha_table_tests {
         let (_, mso_bridge) = exact_sha_message_interaction_trace(
             mso_payload,
             MDOC_MSO_PAYLOAD_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
             1,
             &source_relation,
             &sha_relation,
@@ -6861,7 +6606,11 @@ mod mdoc_sha_table_tests {
         );
         let mso_total = mso_bridge
             - field_lookup_sum(&source_relation, MDOC_MSO_PAYLOAD_FIELD_ID, mso_payload)
-            - field_lookup_sum(&sha_relation, MDOC_MSO_PAYLOAD_FIELD_ID, &mso_padded);
+            - field_lookup_sum(
+                &sha_relation,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+                &mso_padded,
+            );
         assert_eq!(mso_total, zero);
 
         let mut extended_mso = mso_payload.to_vec();
@@ -6871,7 +6620,7 @@ mod mdoc_sha_table_tests {
             - field_lookup_sum(&source_relation, MDOC_MSO_PAYLOAD_FIELD_ID, mso_payload)
             - field_lookup_sum(
                 &sha_relation,
-                MDOC_MSO_PAYLOAD_FIELD_ID,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
                 &extended_mso_padded,
             );
         assert_ne!(extended_mso_total, zero);
@@ -6881,6 +6630,7 @@ mod mdoc_sha_table_tests {
         let (_, revocation_bridge) = exact_sha_message_interaction_trace(
             &revocation_message,
             MDOC_REVOCATION_MESSAGE_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
             -1,
             &source_relation,
             &sha_relation,
@@ -6894,7 +6644,7 @@ mod mdoc_sha_table_tests {
             )
             - field_lookup_sum(
                 &sha_relation,
-                MDOC_REVOCATION_MESSAGE_FIELD_ID,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
                 &revocation_padded,
             );
         assert_eq!(revocation_total, zero);
@@ -6910,7 +6660,7 @@ mod mdoc_sha_table_tests {
             )
             - field_lookup_sum(
                 &sha_relation,
-                MDOC_REVOCATION_MESSAGE_FIELD_ID,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
                 &extended_revocation_padded,
             );
         assert_ne!(extended_revocation_total, zero);
@@ -6918,15 +6668,15 @@ mod mdoc_sha_table_tests {
 
     #[test]
     fn product_fixed_shape_rejects_downward_log_mutations() {
-        const SHA: u32 = crate::product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS;
+        const SHA: u32 = crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
         const CBOR: u32 = crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE;
         const SCOPE: u32 = crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE;
 
-        validate_product_fixed_shape_logs([SHA, SHA], [CBOR, CBOR], SCOPE).unwrap();
+        validate_product_fixed_shape_logs(SHA, [CBOR, CBOR], SCOPE).unwrap();
         for (sha, cbor, scope, label) in [
-            ([SHA - 1, SHA], [CBOR, CBOR], SCOPE, "SHA"),
-            ([SHA, SHA], [CBOR - 1, CBOR], SCOPE, "CBOR"),
-            ([SHA, SHA], [CBOR, CBOR], SCOPE - 1, "scope"),
+            (SHA - 1, [CBOR, CBOR], SCOPE, "SHA"),
+            (SHA, [CBOR - 1, CBOR], SCOPE, "CBOR"),
+            (SHA, [CBOR, CBOR], SCOPE - 1, "scope"),
         ] {
             assert!(
                 matches!(
@@ -6976,37 +6726,10 @@ mod mdoc_sha_table_tests {
             &proof_b.sha_tables_interaction_claim.claimed_sums(),
         );
         assert_all_claims_fresh(
-            "issuer SHA",
-            &sha_claimed_sums(&proof_a.issuer_sha_interaction_claim),
-            &sha_claimed_sums(&proof_b.issuer_sha_interaction_claim),
+            "packed SHA",
+            &sha_claimed_sums(&proof_a.packed_sha_interaction_claim),
+            &sha_claimed_sums(&proof_b.packed_sha_interaction_claim),
         );
-        assert_all_claims_fresh(
-            "device SHA",
-            &sha_claimed_sums(&proof_a.device_sha_interaction_claim),
-            &sha_claimed_sums(&proof_b.device_sha_interaction_claim),
-        );
-        assert_all_claims_fresh(
-            "MSO SHA",
-            &sha_claimed_sums(&proof_a.mso_sha_interaction_claim),
-            &sha_claimed_sums(&proof_b.mso_sha_interaction_claim),
-        );
-        assert_all_claims_fresh(
-            "revocation SHA",
-            &sha_claimed_sums(&proof_a.revocation_sha_interaction_claim),
-            &sha_claimed_sums(&proof_b.revocation_sha_interaction_claim),
-        );
-        for (index, (first, second)) in proof_a
-            .attribute_sha_interaction_claims
-            .iter()
-            .zip(&proof_b.attribute_sha_interaction_claims)
-            .enumerate()
-        {
-            assert_all_claims_fresh(
-                &format!("attribute SHA {index}"),
-                &sha_claimed_sums(first),
-                &sha_claimed_sums(second),
-            );
-        }
         for (index, (first, second)) in proof_a
             .mdoc_cbor_interaction_claims
             .iter()
@@ -7068,28 +6791,17 @@ mod mdoc_sha_table_tests {
                 .expect("product nationality claim"),
         );
 
-        {
-            assert_ne!(
-                proof_a
-                    .device_public_digest_bind_interaction_claim
-                    .claimed_sum,
-                proof_b
-                    .device_public_digest_bind_interaction_claim
-                    .claimed_sum,
-                "device public-digest binding published a deterministic claim"
-            );
-            assert_all_claims_fresh(
-                "mdoc MAC",
-                &[
-                    proof_a.mdoc_mac_interaction_claim.consumer,
-                    proof_a.mdoc_mac_interaction_claim.binding,
-                ],
-                &[
-                    proof_b.mdoc_mac_interaction_claim.consumer,
-                    proof_b.mdoc_mac_interaction_claim.binding,
-                ],
-            );
-        }
+        assert_all_claims_fresh(
+            "mdoc MAC",
+            &[
+                proof_a.mdoc_mac_interaction_claim.consumer,
+                proof_a.mdoc_mac_interaction_claim.binding,
+            ],
+            &[
+                proof_b.mdoc_mac_interaction_claim.consumer,
+                proof_b.mdoc_mac_interaction_claim.binding,
+            ],
+        );
 
         let serialized = serde_json::to_string(&proof_a).expect("proof serializes");
         assert!(
@@ -7155,13 +6867,7 @@ mod mdoc_sha_table_tests {
         // Modules the product profile always commits columns for. The
         // coprocessor is absent by design: it commits no STARK column, its data
         // is the opaque bundle asserted above.
-        for expected in [
-            "mso_sha",
-            "revocation_sha",
-            "attribute_sha[0]",
-            "mdoc_cbor_stream[0]",
-            "mdoc_validity",
-        ] {
+        for expected in ["packed_sha", "mdoc_cbor_stream[0]", "mdoc_validity"] {
             assert!(
                 breakdown
                     .modules
@@ -7215,7 +6921,7 @@ mod mdoc_sha_table_tests {
         );
 
         let mut extra_sha_claim = proof.clone();
-        extra_sha_claim.issuer_sha_interaction_claim.range.push(
+        extra_sha_claim.packed_sha_interaction_claim.range.push(
             stwo_sha256::interaction::ComponentClaim {
                 claimed_sum: QM31::from_u32_unchecked(0, 0, 0, 0),
             },
@@ -7336,15 +7042,21 @@ mod mdoc_sha_table_tests {
     fn mdoc_sha_witnesses_match_native_digest_for_all_four_messages() {
         let fixture = demo_mdoc_circuit_fixture();
         let extracted = &fixture.extracted;
+        let revocation_message = ts13_revocation_message_bytes(
+            fixture.statement.ts13_revocation_range.id_lo,
+            fixture.statement.ts13_revocation_range.id_hi,
+            fixture.statement.ts13_revocation.epoch,
+        );
         let cases = [
             ("issuer", extracted.issuer_sig_structure.as_slice()),
-            ("device", extracted.device_sig_structure.as_slice()),
-            ("birth_date", extracted.birth_date_item.as_slice()),
-            ("nationality", extracted.nationality_item.as_slice()),
+            ("mso", extracted.mso.as_slice()),
+            ("revocation", revocation_message.as_slice()),
+            ("item_0", extracted.birth_date_item.as_slice()),
+            ("item_1", extracted.nationality_item.as_slice()),
         ];
 
         for (name, message) in cases {
-            let (witness, _log_n_rows) = sha_params(message);
+            let witness = compute_sha256_witness(message);
             let native: [u8; 32] = Sha256::digest(message).into();
             assert_eq!(witness.digest.0, native, "{name} digest");
             assert_eq!(
@@ -7736,16 +7448,9 @@ mod coprocessor_tests {
         verify_product_mdoc_public_statement(&second, &second_public)
             .expect("second distinct credential verifies");
 
-        assert_eq!(first.issuer_sha_log_n_rows, second.issuer_sha_log_n_rows);
-        assert_eq!(first.device_sha_log_n_rows, second.device_sha_log_n_rows);
-        assert_eq!(first.mso_sha_log_n_rows, second.mso_sha_log_n_rows);
         assert_eq!(
-            first.revocation_sha_log_n_rows,
-            second.revocation_sha_log_n_rows
-        );
-        assert_eq!(
-            first.attribute_sha_log_n_rows,
-            second.attribute_sha_log_n_rows
+            first.packed_sha_interaction_claim.range.len(),
+            second.packed_sha_interaction_claim.range.len()
         );
         assert_eq!(first.mdoc_cbor_log_sizes, second.mdoc_cbor_log_sizes);
         assert_eq!(
@@ -7899,7 +7604,7 @@ mod coprocessor_tests {
         }
 
         let mut sha = proof.clone();
-        sha.issuer_sha_log_n_rows -= 1;
+        sha.packed_sha_interaction_claim.range.clear();
         assert!(
             verify_mdoc_circuit(&sha, &statement).is_err(),
             "downward product SHA log unexpectedly verified"

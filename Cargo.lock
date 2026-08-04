@@ -1699,7 +1699,6 @@ version = "0.1.0"
 dependencies = [
  "air-core",
  "ecdsa",
- "hex",
  "itertools 0.12.1",
  "num-bigint",
  "num-integer",

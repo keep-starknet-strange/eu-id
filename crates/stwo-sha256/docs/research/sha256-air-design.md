@@ -80,8 +80,10 @@ requires the SHA-256 initial value on that block.
 Each round reads the prior round state. The AIR checks all eight state words.
 Round 63 produces the compression result.
 
-Each later block receives the prior block output. A contiguity constraint
-prevents disabled rows inside the real row region.
+Each continuation block receives the prior block output. Every message start
+resets to the IV, and the packed metadata columns enforce message/block
+ordering. A contiguity constraint prevents disabled rows inside the real row
+region.
 
 Finalization adds the input hash state to the compression result. The final
 real block supplies the digest bytes.
@@ -118,17 +120,15 @@ require the same tuple on the shared digest relation.
 The standalone proof has no digest consumer. It keeps the provider off by
 default. A provider without a consumer gives a nonzero LogUp total.
 
-## Field relation
+## Full-stream field relation
 
-Field exposure emits selected preimage bytes. Each tuple contains a field
-identifier, byte index, and byte value.
+The optional packed-stream provider emits every padded-stream byte. Each tuple
+contains `(BASE + message_id, byte_index, byte_value)`, where `byte_index`
+starts at zero for each message and advances across its 64-byte blocks.
+The AIR derives the bytes from the existing `W` bit planes at `t = 15`.
 
-The AIR derives each byte from existing `W` bit planes. A field window can
-cross a SHA block boundary. Block counters and selectors constrain the target
-block when the exposure needs multiple blocks.
-
-A predicate component must consume each emitted byte. The standalone proof
-uses an empty field exposure.
+A consumer component must require each emitted byte on the same shared field
+relation. The standalone proof leaves this provider off by default.
 
 ## Shared range tables
 
@@ -148,9 +148,9 @@ claimed-sum tamper rejection.
 The AIR constrains SHA execution, block chaining, finalization, and padding.
 Range relations constrain carries and digest bytes.
 
-The `digest` and `n_blocks` fields on `Sha256Proof` are metadata from the
-prover. The standalone verifier does not bind these fields to the trace.
-A composed proof must bind the digest through the shared relation.
+`Sha256Proof` contains no digest or block-count metadata. The standalone
+verifier intentionally has no exact consumer. A composed product proof must
+bind each digest and padded stream through the keyed shared relations.
 
 Claim masks and dummy rows hide selected interaction values. They do not give
 proof-wide zero knowledge. The current proof is transparent and does not

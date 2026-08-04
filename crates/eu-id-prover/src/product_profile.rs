@@ -50,10 +50,27 @@ impl Policy {
 
 pub const PRODUCT_PROFILE_ID: &str = "eudi-pid-p256-identity";
 pub const PRODUCT_MAX_ATTRIBUTES: usize = 2;
-pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 16_384;
-pub const PRODUCT_MAX_SHA_LOG_N_ROWS: u32 = 15;
+pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 6 * 1024;
+pub const PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES: usize = 6_164;
+pub const PRODUCT_MAX_SELECTED_ITEM_BYTES: usize = 1_024;
+pub const PRODUCT_SHA_LOG_N_ROWS: u32 = 14;
+pub const PRODUCT_MAX_PACKED_SHA_MESSAGES: usize = 5;
 pub const PRODUCT_MAX_CBOR_LOG_SIZE: u32 = 15;
 pub const PRODUCT_MAX_SCOPE_LOG_SIZE: u32 = 16;
+
+const _: () = assert!(stwo_sha256::native::n_blocks_for(6_164) == 97);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(6_144) == 97);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(20) == 1);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(1_024) == 17);
+const _: () = assert!(
+    stwo_sha256::native::n_blocks_for(6_164)
+        + stwo_sha256::native::n_blocks_for(6_144)
+        + stwo_sha256::native::n_blocks_for(20)
+        + 2 * stwo_sha256::native::n_blocks_for(1_024)
+        <= 255
+);
+const _: () = assert!(PRODUCT_MAX_PACKED_SHA_MESSAGES == 5);
+const _: () = assert!(PRODUCT_SHA_LOG_N_ROWS == 14);
 
 const PROFILE_MANIFEST: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -141,8 +158,30 @@ mod tests {
             PRODUCT_MAX_MSO_PAYLOAD_BYTES
         );
         assert_eq!(
-            manifest["product_bounds"]["max_sha_log_n_rows"],
-            PRODUCT_MAX_SHA_LOG_N_ROWS
+            manifest["product_bounds"]["max_issuer_sig_structure_bytes"],
+            PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES
+        );
+        assert_eq!(
+            manifest["product_bounds"]["max_selected_item_bytes"],
+            PRODUCT_MAX_SELECTED_ITEM_BYTES
+        );
+        assert_eq!(
+            manifest["product_bounds"]["sha_log_n_rows"],
+            PRODUCT_SHA_LOG_N_ROWS
+        );
+        assert_eq!(
+            manifest["product_bounds"]["max_packed_sha_messages"],
+            PRODUCT_MAX_PACKED_SHA_MESSAGES
+        );
+        assert_eq!(
+            manifest["product_bounds"]["packed_sha_message_order"],
+            serde_json::json!([
+                "issuer_sig_structure",
+                "mso",
+                "revocation",
+                "selected_item_0",
+                "selected_item_1_if_and",
+            ])
         );
         assert_eq!(
             manifest["product_bounds"]["max_cbor_log_size"],

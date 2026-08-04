@@ -18,6 +18,14 @@ if [[ "${EUID_ALLOW_DIRTY_BUILD:-0}" == "1" ]]; then
   REPRO_ARGS=(--allow-dirty)
 fi
 
+run_reproducible() {
+  if ((${#REPRO_ARGS[@]})); then
+    bash scripts/reproducible-build.sh "${REPRO_ARGS[@]}" "$@"
+  else
+    bash scripts/reproducible-build.sh "$@"
+  fi
+}
+
 # Use the iOS application deployment target.
 # Otherwise, Rust uses iOS 10 and can conflict with the selected Xcode SDK.
 export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
@@ -25,14 +33,14 @@ export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
 TARGETS=(aarch64-apple-ios aarch64-apple-ios-sim)
 for t in "${TARGETS[@]}"; do
   echo "building $t..."
-  bash scripts/reproducible-build.sh "${REPRO_ARGS[@]}" \
+  run_reproducible \
     cargo rustc --locked --offline --release -j 12 -p eu-id-ffi --lib \
     --target "$t" --crate-type staticlib
 done
 
 OUT="crates/eu-id-ffi/EuId.xcframework"
 rm -rf "$OUT"
-bash scripts/reproducible-build.sh "${REPRO_ARGS[@]}" \
+run_reproducible \
   xcodebuild -create-xcframework \
   -library "$TARGET_DIR/aarch64-apple-ios/release/libeu_id_ffi.a"     -headers crates/eu-id-ffi/include/ \
   -library "$TARGET_DIR/aarch64-apple-ios-sim/release/libeu_id_ffi.a" -headers crates/eu-id-ffi/include/ \

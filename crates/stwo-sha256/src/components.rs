@@ -138,7 +138,7 @@ pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessed
 /// committed at the main `Sha256Eval` trace's `log_n_rows`. The selector
 /// is `1` at storage index `Layout::block_slot(0, log_n_rows) = 0` and
 /// `0` elsewhere. `Sha256Eval` reads it via `eval.get_preprocessed_column`
-/// and pins `is_first_block ≡ is_first_row`, anchoring the §10.3 chain
+/// and pins `msg_start ≡ is_first_row`, anchoring the §10.3 chain
 /// on block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 pub fn is_first_row_column_id() -> PreProcessedColumnId {
     id("is_first_row")
@@ -377,9 +377,8 @@ impl SharedProducer {
 }
 
 /// One component owning one or two same-`log_size` shared-SHA producers whose
-/// fractions pair into a single interaction column. A one-producer instance is
-/// the odd remainder and behaves exactly like the corresponding standalone
-/// producer eval.
+/// fractions pair into a single interaction column. A one-producer group is
+/// the odd remainder and behaves exactly like the corresponding producer eval.
 #[derive(Clone)]
 pub struct SharedProducerPairEval {
     pub log_size: u32,

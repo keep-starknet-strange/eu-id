@@ -11,7 +11,7 @@
 //! - [`constraints`] checks SHA rounds, schedule, chaining, and FIPS padding.
 //! - [`tables_local`], [`components`], [`multiplicities`], and [`interaction`]
 //!   implement the active range checks and LogUp balance.
-//! - [`field_exposure`] and [`relations`] define composition interfaces.
+//! - [`relations`] defines composition interfaces.
 //! - [`air`] and [`stark`] provide module and standalone proof entry points.
 //!
 //! See `docs/research/sha256-air-design.md` for the active design and security
@@ -22,7 +22,6 @@ pub mod claim_mask;
 pub mod components;
 pub mod constants;
 pub mod constraints;
-pub mod field_exposure;
 pub mod headroom;
 pub mod interaction;
 pub mod multiplicities;
@@ -35,3 +34,6 @@ pub mod tables_local;
 pub mod trace;
 pub mod types;
 pub mod witness;
+
+pub use types::{PackedSha256Witness, Sha256Witness};
+pub use witness::{compute_packed_sha256_witness, PackedSha256Error};

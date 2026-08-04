@@ -1,6 +1,6 @@
 //! Runs the FFI benchmark surface on the host.
 //!
-//! The mobile app calls the same SHA-256 and P-256 functions.
+//! The mobile app calls the same packed SHA-256 and P-256 functions.
 //! The benchmark runs four SHA-256 message sizes and one P-256 signature.
 //! It prints a table and one machine-readable line for each case.
 //!
@@ -29,21 +29,25 @@ fn main() {
     );
     println!(
         "{:<6} {:>7} {:>10} {:>11} {:>11} {:>8}",
-        "label", "blocks", "prove_ms", "verify_ms", "peak_mib", "digest"
+        "label", "native_blocks", "prove_ms", "verify_ms", "peak_mib", "ok"
     );
 
     for (label, msg) in &cases {
         // Three iterations produce a median that matches the laptop method.
         let r = unsafe { eu_id_bench_sha256(msg.as_ptr(), msg.len(), 3) };
         let peak_mib = r.peak_bytes as f64 / (1024.0 * 1024.0);
-        let digest_ok = if r.ok == 1 { "ok" } else { "FAIL" };
+        let native_digest = r
+            .digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         println!(
             "{label:<6} {:>7} {:>10} {:>11} {:>11.0} {:>8}",
-            r.n_blocks, r.prove_ms, r.verify_ms, peak_mib, digest_ok
+            r.n_blocks, r.prove_ms, r.verify_ms, peak_mib, r.ok
         );
         println!(
-            "RESULT label={label} ok={} blocks={} prove_ms={} verify_ms={} peak_mib={:.0}",
-            r.ok, r.n_blocks, r.prove_ms, r.verify_ms, peak_mib
+            "RESULT label={label} ok={} native_blocks={} native_digest={} prove_ms={} verify_ms={} peak_mib={:.0}",
+            r.ok, r.n_blocks, native_digest, r.prove_ms, r.verify_ms, peak_mib
         );
     }
 

@@ -23,7 +23,6 @@ serde = { workspace = true }
 [dev-dependencies]
 p256 = { version = "0.13", features = ["ecdsa"] }
 ecdsa = { version = "0.16", features = ["signing", "verifying"] }
-hex = "0.4"
 sha2 = "0.10"
 
 [lints]

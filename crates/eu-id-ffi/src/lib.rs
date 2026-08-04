@@ -5,7 +5,7 @@
 //! This design excludes FFI and UI overhead from the measurement.
 //!
 //! Two entry points share that rule:
-//! - [`eu_id_bench_sha256`] — the standalone SHA-256 STARK prover.
+//! - [`eu_id_bench_sha256`] — the standalone packed SHA-256 workload.
 //! - [`eu_id_bench_p256`] — the standalone P-256 ECDSA verification prover.
 //!
 //! A background thread samples mach `phys_footprint` at a fixed interval.
@@ -30,9 +30,9 @@ use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo_p256::proof::{verify_current_air_monolithic, P256ProofDraft};
 use stwo_p256::public_inputs::PublicEcdsaInputClaim;
 use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
+use stwo_sha256::native::n_blocks_for;
 use stwo_sha256::stark::{native_digest, prove_sha256, verify_sha256_proof, ProverConfig};
 use stwo_sha256::trace::min_log_size;
-use stwo_sha256::witness::compute_sha256_witness;
 
 const MAX_FFI_PREIMAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_BENCH_ITERATIONS: u32 = 100;
@@ -44,7 +44,7 @@ const PEAK_SAMPLE_INTERVAL: Duration = Duration::from_millis(10);
 /// layout matches the hand-written `eu_id_ffi.h` struct exactly.
 ///
 /// Check `ok` before all other fields.
-/// A value of `1` means that the timing and digest fields are valid.
+/// A value of `1` means that the timing and native digest metadata are valid.
 /// A value of `0` means that proof work failed.
 /// In this case, all other fields are zero.
 #[repr(C)]
@@ -56,10 +56,10 @@ pub struct EuIdBench {
     /// Peak `phys_footprint` observed across the whole measured window,
     /// bytes. Compare against the iOS jetsam budget (~1.3–1.5 GB).
     pub peak_bytes: u64,
-    /// Number of padded 512-bit blocks the message hashed to.
+    /// Native number of padded 512-bit blocks for the message.
     pub n_blocks: u64,
-    /// The 32-byte digest the prover claims, for the caller to check
-    /// against an independent SHA-256.
+    /// The native 32-byte SHA-256 digest, for the caller to check
+    /// independently of the standalone proof.
     pub digest: [u8; 32],
     /// `1` = success, `0` = prove/verify failed or panicked.
     pub ok: i32,
@@ -78,9 +78,9 @@ impl EuIdBench {
     }
 }
 
-/// Prove → verify SHA-256 of `preimage[..len]` `iters` times under a peak
-/// memory sampler, and return the median timings, peak footprint, and
-/// claimed digest.
+/// Run the standalone packed SHA-256 arithmetic workload for `preimage[..len]`
+/// `iters` times under a peak memory sampler, and return the median timings,
+/// peak footprint, and native digest metadata.
 ///
 /// # Safety
 /// `preimage` must point to at least `len` readable bytes (or `len` may be
@@ -111,24 +111,23 @@ pub unsafe extern "C" fn eu_id_bench_sha256(
 }
 
 fn run_bench(message: &[u8], iters: u32) -> EuIdBench {
-    // Size `log_n_rows` to the witness so any message length proves — the
-    // same shaping `prove_demo` does (ProverConfig::default()'s
-    // log_n_rows = 4 only fits ~1 KiB messages).
-    let witness = compute_sha256_witness(message);
-    let n_blocks = witness.blocks.len();
+    // Size `log_n_rows` to the native padded message shape so any message
+    // length proves through the one-message packed facade.
+    let n_blocks = n_blocks_for(message.len());
     let config = ProverConfig {
         log_n_rows: min_log_size(n_blocks),
         ..ProverConfig::default()
     };
-    let expected = native_digest(message);
+    let digest = native_digest(message).0;
 
-    // prove → verify the message `iters` times inside the shared peak-footprint
-    // sampler window. The witness sizing above is excluded, matching the laptop
-    // harness (only the prove/verify path is measured).
-    let ((mut prove_samples, mut verify_samples, digest, mut ok), peak) = with_peak_sampler(|| {
+    // Prove → verify the one-message packed workload `iters` times inside the
+    // shared peak-footprint sampler window. The native metadata shaping above
+    // is excluded, matching the laptop harness (only the arithmetic workload
+    // is measured). The standalone facade intentionally has no exact digest or
+    // padded-stream consumer.
+    let ((mut prove_samples, mut verify_samples, ok), peak) = with_peak_sampler(|| {
         let mut prove_samples = Vec::with_capacity(iters as usize);
         let mut verify_samples = Vec::with_capacity(iters as usize);
-        let mut digest = [0u8; 32];
         let mut ok = true;
 
         for _ in 0..iters {
@@ -141,7 +140,6 @@ fn run_bench(message: &[u8], iters: u32) -> EuIdBench {
                 }
             };
             prove_samples.push(t0.elapsed().as_millis() as u64);
-            digest = proof.digest;
 
             let t1 = Instant::now();
             if verify_sha256_proof(&proof).is_err() {
@@ -150,14 +148,8 @@ fn run_bench(message: &[u8], iters: u32) -> EuIdBench {
             }
             verify_samples.push(t1.elapsed().as_millis() as u64);
         }
-        (prove_samples, verify_samples, digest, ok)
+        (prove_samples, verify_samples, ok)
     });
-
-    // A digest disagreement with the independent native hash is also a
-    // failure, even if prove+verify both "succeeded".
-    if digest != expected.0 {
-        ok = false;
-    }
 
     if !ok {
         return EuIdBench::failed();
@@ -422,11 +414,14 @@ mod tests {
     ];
 
     #[test]
-    fn bench_abc_round_trips() {
+    fn standalone_packed_abc_benchmark_round_trips() {
         let msg = b"abc";
         let r = unsafe { eu_id_bench_sha256(msg.as_ptr(), msg.len(), 1) };
-        assert_eq!(r.ok, 1, "prove/verify should succeed");
-        assert_eq!(r.digest, ABC_DIGEST, "digest must match FIPS test vector");
+        assert_eq!(r.ok, 1, "packed arithmetic prove/verify should succeed");
+        assert_eq!(
+            r.digest, ABC_DIGEST,
+            "native digest must match FIPS test vector"
+        );
         assert_eq!(r.n_blocks, 1);
         assert!(r.peak_bytes > 0, "sampler should observe nonzero footprint");
     }

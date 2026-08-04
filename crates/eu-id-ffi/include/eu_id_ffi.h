@@ -1,6 +1,6 @@
 // C ABI for the eu-id mobile benchmark harness.
 //
-// Each function creates and verifies proofs in Rust.
+// Each function runs and verifies its standalone packed workload in Rust.
 // Each result includes the peak memory footprint.
 //
 // Keep these declarations synchronized with the `#[repr(C)]` types in
@@ -20,8 +20,8 @@ typedef struct EuIdBench {
     uint64_t prove_ms;    // median prove wall-clock over `iters`, ms
     uint64_t verify_ms;   // median verify wall-clock over `iters`, ms
     uint64_t peak_bytes;  // peak phys_footprint across the window, bytes
-    uint64_t n_blocks;    // padded 512-bit blocks the message hashed to
-    uint8_t  digest[32];  // claimed SHA-256 digest
+    uint64_t n_blocks;    // native padded 512-bit block count
+    uint8_t  digest[32];  // native SHA-256 benchmark metadata
     int32_t  ok;          // 1 = success, 0 = prove/verify failed or panicked
 } EuIdBench;
 

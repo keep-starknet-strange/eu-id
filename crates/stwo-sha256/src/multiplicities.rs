@@ -1,6 +1,6 @@
 //! Per-key multiplicity counting for the range tables consumed by SHA-256.
 //!
-//! This module counts lookup uses from a [`Sha256Witness`].
+//! This module counts lookup uses from a packed SHA witness.
 //! It returns one `Vec<u32>` for each active range table.
 //! The vector length equals the table row count.
 //! Entry `i` counts relation uses for table row `i`.
@@ -10,23 +10,7 @@
 
 use crate::components::{range_log_size, RangeKind};
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
-use crate::types::Sha256Witness;
-
-pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> Vec<u32> {
-    let mut iter = vectors.into_iter();
-    let mut acc = iter.next().unwrap_or_default();
-    for v in iter {
-        assert_eq!(
-            acc.len(),
-            v.len(),
-            "cannot sum multiplicity vectors of different lengths"
-        );
-        for (a, b) in acc.iter_mut().zip(v) {
-            *a += b;
-        }
-    }
-    acc
-}
+use crate::types::{PackedSha256Witness, Sha256Witness};
 
 /// Build the per-row multiplicity vector for one `Range_k` table.
 ///
@@ -44,44 +28,53 @@ pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> 
 ///     two finalization carry limbs for each of eight words.
 ///   - One `Range_8` increment per terminal `h_out` byte (4 bytes × 8
 ///     words per block).
-pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u32> {
+pub fn range_k_multiplicities(witness: &PackedSha256Witness, kind: RangeKind) -> Vec<u32> {
+    range_k_multiplicities_for_messages(&witness.messages, kind)
+}
+
+pub(crate) fn range_k_multiplicities_for_messages(
+    messages: &[Sha256Witness],
+    kind: RangeKind,
+) -> Vec<u32> {
     let log_size = range_log_size(kind);
     let mut mults = vec![0u32; 1usize << log_size];
     let bump = |m: &mut [u32], value: u32| {
         m[value as usize] += 1;
     };
 
-    for block in &witness.blocks {
-        match kind {
-            RangeKind::Range4 => {
-                for entry in &block.schedule_entries {
-                    bump(&mut mults, entry.carries.lo);
-                    bump(&mut mults, entry.carries.hi);
+    for message in messages {
+        for block in &message.blocks {
+            match kind {
+                RangeKind::Range4 => {
+                    for entry in &block.schedule_entries {
+                        bump(&mut mults, entry.carries.lo);
+                        bump(&mut mults, entry.carries.hi);
+                    }
                 }
-            }
-            RangeKind::Range5 => {
-                for round in &block.rounds {
-                    bump(&mut mults, round.t1_carries.lo);
-                    bump(&mut mults, round.t1_carries.hi);
+                RangeKind::Range5 => {
+                    for round in &block.rounds {
+                        bump(&mut mults, round.t1_carries.lo);
+                        bump(&mut mults, round.t1_carries.hi);
+                    }
                 }
-            }
-            RangeKind::Range2 => {
-                for round in &block.rounds {
-                    bump(&mut mults, round.t2_carries.lo);
-                    bump(&mut mults, round.t2_carries.hi);
-                    bump(&mut mults, round.e_new_carries.lo);
-                    bump(&mut mults, round.e_new_carries.hi);
-                    bump(&mut mults, round.a_new_carries.lo);
-                    bump(&mut mults, round.a_new_carries.hi);
+                RangeKind::Range2 => {
+                    for round in &block.rounds {
+                        bump(&mut mults, round.t2_carries.lo);
+                        bump(&mut mults, round.t2_carries.hi);
+                        bump(&mut mults, round.e_new_carries.lo);
+                        bump(&mut mults, round.e_new_carries.hi);
+                        bump(&mut mults, round.a_new_carries.lo);
+                        bump(&mut mults, round.a_new_carries.hi);
+                    }
+                    for c in &block.finalization_carries {
+                        bump(&mut mults, c.lo);
+                        bump(&mut mults, c.hi);
+                    }
                 }
-                for c in &block.finalization_carries {
-                    bump(&mut mults, c.lo);
-                    bump(&mut mults, c.hi);
-                }
-            }
-            RangeKind::Range8 => {
-                for byte in crate::trace::h_out_digest_bytes(&block.h_out) {
-                    bump(&mut mults, byte);
+                RangeKind::Range8 => {
+                    for byte in crate::trace::h_out_digest_bytes(&block.h_out) {
+                        bump(&mut mults, byte);
+                    }
                 }
             }
         }
@@ -100,8 +93,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::field_exposure::FieldExposure;
-    use crate::witness::compute_sha256_witness;
+    use crate::witness::compute_packed_sha256_witness;
 
     /// Confirm that each `Range_k` total matches the AIR lookup count.
     ///
@@ -109,7 +101,7 @@ mod tests {
     #[test]
     fn range_k_per_block_totals_match_structural_counts() {
         use crate::components::RangeKind;
-        let w = compute_sha256_witness(b"abc");
+        let w = compute_packed_sha256_witness(&[&b"abc"[..]]).unwrap();
         let n_entries = (N_ROUNDS - 16) as u32; // 48 schedule entries
         let n_rounds = N_ROUNDS as u32;
         let n_words = N_STATE_WORDS as u32;
@@ -148,7 +140,7 @@ mod tests {
     #[test]
     fn range_k_honest_counts_live_within_table_bounds() {
         use crate::components::RangeKind;
-        let w = compute_sha256_witness(&[0x42u8; 200]); // multi-block, mixed bytes
+        let w = compute_packed_sha256_witness(&[&[0x42u8; 200][..]]).unwrap();
         for kind in [
             RangeKind::Range2,
             RangeKind::Range4,
@@ -178,7 +170,7 @@ mod tests {
     #[test]
     fn out_of_range_carry_mutation_shifts_multiplicity_outside_table() {
         use crate::components::RangeKind;
-        let mut w = compute_sha256_witness(b"abc");
+        let mut w = compute_packed_sha256_witness(&[&b"abc"[..]]).unwrap();
 
         let baseline = range_k_multiplicities(&w, RangeKind::Range2);
         let k = RangeKind::Range2.bound() as usize;
@@ -186,7 +178,7 @@ mod tests {
         // Match the mutation in the end-to-end release test.
         // Change finalization word seven from an honest carry to five.
         // Five is outside the `Range_2` producer table.
-        let last = w.blocks.last_mut().expect("at least one block");
+        let last = w.messages[0].blocks.last_mut().expect("at least one block");
         let original = last.finalization_carries[7].lo;
         assert!(
             (original as usize) < k,
@@ -230,24 +222,14 @@ mod tests {
     #[test]
     fn shared_table_multiplicities_sum_per_consumer_vectors() {
         use crate::components::RANGE_TABLES;
-        let first = compute_sha256_witness(b"abc");
-        let second = compute_sha256_witness(&[0x42u8; 200]);
-        let consumers = [
-            (&first, FieldExposure::empty()),
-            (&second, FieldExposure::empty()),
-        ];
-
-        let shared = crate::shared_tables::ShaTableMultiplicities::from_consumers(&consumers);
+        let packed = compute_packed_sha256_witness(&[&b"abc"[..], &[0x42u8; 200][..]]).unwrap();
+        let shared = crate::shared_tables::ShaTableMultiplicities::from_messages(&packed.messages);
 
         // Class D doubles each vector and fills the dummy upper half with a
         // random mask. Only the real lower half contains the deterministic
         // union sum. Compare that lower half with the union here.
         for (i, &kind) in RANGE_TABLES.iter().enumerate() {
-            let expected: Vec<u32> = range_k_multiplicities(&first, kind)
-                .into_iter()
-                .zip(range_k_multiplicities(&second, kind))
-                .map(|(a, b)| a + b)
-                .collect();
+            let expected = range_k_multiplicities(&packed, kind);
             assert_eq!(&shared.range[i][..expected.len()], &expected[..]);
             let producer = crate::components::SharedProducer::Range(kind);
             let real_len = 1usize << (producer.blind_log_size() - 1);

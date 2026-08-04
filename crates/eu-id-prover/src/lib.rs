@@ -11,7 +11,6 @@ pub(crate) mod mdoc_mac;
 pub(crate) mod mdoc_scope;
 mod mdoc_validity;
 pub mod product_profile;
-mod public_digest_bind;
 pub mod ts13;
 
 pub use mdoc::{
@@ -231,20 +230,6 @@ pub enum Error {
         got: air_core::CommitmentRoot,
         expected: air_core::CommitmentRoot,
     },
-    ShapeTooLarge {
-        field: &'static str,
-        got: u32,
-        max: u32,
-    },
-}
-
-/// Rejects an oversized SHA trace before canonical-tree reconstruction.
-pub(crate) fn check_product_sha_shape(field: &'static str, got: u32) -> Result<(), Error> {
-    let max = product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS;
-    if got > max {
-        return Err(Error::ShapeTooLarge { field, got, max });
-    }
-    Ok(())
 }
 
 fn mix_channel_bytes(channel: &mut air_core::Ch, bytes: &[u8]) {
@@ -335,27 +320,5 @@ mod tests {
             prove_mdoc(&fixture.document, &request, fixture.statement.policy),
             Err(Error::RequestBindingMissing)
         ));
-    }
-
-    #[test]
-    fn product_sha_shape_accepts_the_fixed_size() {
-        assert!(check_product_sha_shape(
-            "sha_log_n_rows",
-            product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS,
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn product_sha_shape_rejects_oversized_log_n_rows() {
-        let max = product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS;
-        match check_product_sha_shape("sha_log_n_rows", max + 1) {
-            Err(Error::ShapeTooLarge { field, got, max }) => {
-                assert_eq!(field, "sha_log_n_rows");
-                assert_eq!(got, product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS + 1);
-                assert_eq!(max, product_profile::PRODUCT_MAX_SHA_LOG_N_ROWS);
-            }
-            other => panic!("unexpected result: {other:?}"),
-        }
     }
 }

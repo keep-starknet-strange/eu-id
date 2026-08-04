@@ -3,6 +3,9 @@ name = "eu-id-prover"
 version.workspace = true
 edition.workspace = true
 
+[features]
+prove-profile = ["air-core/prove-profile"]
+
 [dependencies]
 air-core = { path = "../air-core" }
 eu-id-ec-coprocessor = { path = "../eu-id-ec-coprocessor" }

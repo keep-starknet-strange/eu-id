@@ -20,9 +20,7 @@ use std::io::Cursor;
 use air_core::claim_mask::{
     add_claim_mask_fraction, ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS,
 };
-use air_core::relations::{
-    field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
-};
+use air_core::relations::{field_id, FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
@@ -53,6 +51,7 @@ use crate::mdoc_cbor_stream::{
     parsed_cbor_tuple, MdocCborInputMode, MdocCborStreamError, MdocCborWitness, MdocCborWitnessRow,
     ParsedCborByteRelation, SharedParsedCborByteRelation,
 };
+use stwo_sha256::relations::{PackedShaDigestRelation, SharedPackedShaDigestRelation};
 
 pub(crate) const MDOC_SCOPE_MAX_ITEMS: usize = 4;
 pub(crate) const MDOC_SCOPE_MIN_LOG_SIZE: u32 = 9;
@@ -64,6 +63,7 @@ const MDOC_SCOPE_UNORDERED_MAP_DEPTH: usize = 3;
 const _: () = assert!(MAX_PRESENTED_NATIONALITIES == 1usize << MDOC_SCOPE_NATIONALITY_SLACK_BITS);
 const DIGEST_EXIT_REQUIRES_SELECTED_ITEMS: u32 = 1;
 const DIGEST_ID_UNIVERSE_LOG_SIZE: u32 = 16;
+const ITEM_DIGEST_MESSAGE_ID_BASE: u32 = 3;
 
 pub(crate) const ISSUER_SIG_STRUCTURE_STREAM_ID: u32 = 0x4d53_0000;
 pub(crate) const ISSUER_PAYLOAD_STREAM_ID: u32 = 0x4d53_0001;
@@ -1236,11 +1236,14 @@ pub(crate) struct MdocScopeHandles {
     pub(crate) raw_streams: Vec<SharedFieldRelation>,
     pub(crate) semantic_fields: SharedFieldRelation,
     pub(crate) payload_hash_fields: SharedFieldRelation,
-    pub(crate) item_digests: Vec<SharedDigestRelation>,
+    pub(crate) item_digest: SharedPackedShaDigestRelation,
 }
 
 impl MdocScopeHandles {
-    pub(crate) fn fresh(statement: &MdocScopeStatement) -> Result<Self, MdocScopeError> {
+    pub(crate) fn fresh(
+        statement: &MdocScopeStatement,
+        item_digest: SharedPackedShaDigestRelation,
+    ) -> Result<Self, MdocScopeError> {
         statement.validate()?;
         let stream_count = 3 + statement.items.len() * 2;
         Ok(Self {
@@ -1252,9 +1255,7 @@ impl MdocScopeHandles {
                 .collect(),
             semantic_fields: SharedFieldRelation::new(),
             payload_hash_fields: SharedFieldRelation::new(),
-            item_digests: (0..statement.items.len())
-                .map(|_| SharedDigestRelation::new())
-                .collect(),
+            item_digest,
         })
     }
 
@@ -1293,9 +1294,9 @@ impl MdocScopeHandles {
 
 #[derive(Clone)]
 pub(crate) enum MdocScopeParserInput {
-    /// The orchestrator supplies the issuer SHA field-exposure handle.
+    /// The orchestrator supplies the issuer SHA full-stream field handle.
     ShaIssuer,
-    /// The orchestrator supplies item `i`'s SHA field-exposure handle.
+    /// The orchestrator supplies item `i`'s packed SHA full-stream field handle.
     ShaItem(usize),
     /// The scope itself provides this reindexed raw stream.
     Raw(SharedFieldRelation),
@@ -1327,13 +1328,6 @@ fn validate_handle_counts(
             kind: "raw stream",
             expected: expected_raw,
             actual: handles.raw_streams.len(),
-        });
-    }
-    if handles.item_digests.len() != statement.items.len() {
-        return Err(MdocScopeError::HandleCount {
-            kind: "item digest",
-            expected: statement.items.len(),
-            actual: handles.item_digests.len(),
         });
     }
     Ok(())
@@ -2425,7 +2419,8 @@ struct MdocScopeEval {
     raw_relations: Vec<FieldBytesRelation>,
     semantic_relation: FieldBytesRelation,
     payload_hash_relation: Option<FieldBytesRelation>,
-    item_digest_relations: Vec<DigestBytesRelation>,
+    item_digest_relation: PackedShaDigestRelation,
+    item_count: usize,
     dfa_relation: MdocScopeDfaRelation,
     state_relation: MdocScopeStateRelation,
     digest_id_relation: MdocScopeDigestIdRelation,
@@ -2482,11 +2477,11 @@ impl FrameworkEval for MdocScopeEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        scope_constraint_log_degree_bound(self.log_size, self.item_digest_relations.len())
+        scope_constraint_log_degree_bound(self.log_size, self.item_count)
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let item_count = self.item_digest_relations.len();
+        let item_count = self.item_count;
         let stream_count = self.parsed_relations.len();
         let raw_count = self.raw_relations.len();
         let columns = ScopeTraceColumns::new(stream_count, raw_count);
@@ -3129,7 +3124,7 @@ impl FrameworkEval for MdocScopeEval {
             &[trace[columns.p0].clone(), trace[columns.p1].clone(), byte],
         ));
 
-        for (item, digest_relation) in self.item_digest_relations.iter().enumerate() {
+        for item in 0..item_count {
             let values = trace[columns.digest_values.clone()].to_vec();
             for (byte_index, value) in values.iter().enumerate() {
                 eval.add_to_relation(RelationEntry::new(
@@ -3142,10 +3137,16 @@ impl FrameworkEval for MdocScopeEval {
                     ],
                 ));
             }
+            let mut digest_tuple = Vec::with_capacity(1 + values.len());
+            digest_tuple.push(f_const::<E>(
+                ITEM_DIGEST_MESSAGE_ID_BASE
+                    + u32::try_from(item).expect("item digest index fits u32"),
+            ));
+            digest_tuple.extend(values.iter().cloned());
             eval.add_to_relation(RelationEntry::new(
-                digest_relation,
+                &self.item_digest_relation,
                 E::EF::from(aggregate[item].clone()),
-                &values,
+                &digest_tuple,
             ));
         }
 
@@ -3354,7 +3355,8 @@ fn scope_interaction_trace(
     raw_relations: &[FieldBytesRelation],
     semantic_relation: &FieldBytesRelation,
     payload_hash_relation: Option<&FieldBytesRelation>,
-    item_digest_relations: &[DigestBytesRelation],
+    item_digest_relation: &PackedShaDigestRelation,
+    item_count: usize,
     dfa_relation: &MdocScopeDfaRelation,
     state_relation: &MdocScopeStateRelation,
     digest_id_relation: &MdocScopeDigestIdRelation,
@@ -3524,7 +3526,7 @@ fn scope_interaction_trace(
             .collect(),
     );
 
-    for (item, digest_relation) in item_digest_relations.iter().enumerate() {
+    for item in 0..item_count {
         let aggregate = &walk_preprocessed[item];
         for byte in 0..SCOPE_DIGEST_BYTES {
             sites.push(
@@ -3549,7 +3551,13 @@ fn scope_interaction_trace(
                         .iter()
                         .map(|column| column.data[row])
                         .collect();
-                    (numerator, digest_relation.combine(&values))
+                    let mut digest_tuple = Vec::with_capacity(1 + values.len());
+                    digest_tuple.push(broadcast(
+                        ITEM_DIGEST_MESSAGE_ID_BASE
+                            + u32::try_from(item).expect("item digest index fits u32"),
+                    ));
+                    digest_tuple.extend(values);
+                    (numerator, item_digest_relation.combine(&digest_tuple))
                 })
                 .collect(),
         );
@@ -3934,12 +3942,8 @@ impl MdocScope {
             .collect()
     }
 
-    fn item_digest_relations(&self) -> Vec<DigestBytesRelation> {
-        self.handles
-            .item_digests
-            .iter()
-            .map(SharedDigestRelation::get)
-            .collect()
+    fn item_digest_relation(&self) -> PackedShaDigestRelation {
+        self.handles.item_digest.get()
     }
 
     pub(crate) fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
@@ -4148,7 +4152,8 @@ impl Air for MdocScope {
                 payload_hash_relation: self
                     .payload_hash_binding
                     .then(|| self.handles.payload_hash_fields.get()),
-                item_digest_relations: self.item_digest_relations(),
+                item_digest_relation: self.item_digest_relation(),
+                item_count: self.statement.items.len(),
                 dfa_relation: self
                     .dfa_relation
                     .clone()
@@ -4311,7 +4316,7 @@ impl AirProver for MdocScope {
             scope_walk_preprocessed_columns(self.metadata.log_size, self.statement.items.len());
         let parsed_relations = self.parsed_relations();
         let raw_relations = self.raw_relations();
-        let item_digest_relations = self.item_digest_relations();
+        let item_digest_relation = self.item_digest_relation();
         let dfa_relation = self.dfa_relation.as_ref().expect("DFA relation drawn");
         let state_relation = self.state_relation.as_ref().expect("state relation drawn");
         let digest_id_relation = self
@@ -4343,7 +4348,8 @@ impl AirProver for MdocScope {
             &raw_relations,
             &self.handles.semantic_fields.get(),
             payload_hash_relation.as_ref(),
-            &item_digest_relations,
+            &item_digest_relation,
+            self.statement.items.len(),
             dfa_relation,
             state_relation,
             digest_id_relation,
@@ -4440,9 +4446,8 @@ mod tests {
             raw_relations: vec![FieldBytesRelation::dummy()],
             semantic_relation: FieldBytesRelation::dummy(),
             payload_hash_relation: Some(FieldBytesRelation::dummy()),
-            item_digest_relations: (0..item_count)
-                .map(|_| DigestBytesRelation::dummy())
-                .collect(),
+            item_digest_relation: PackedShaDigestRelation::dummy(),
+            item_count,
             dfa_relation: MdocScopeDfaRelation::dummy(),
             state_relation: MdocScopeStateRelation::dummy(),
             digest_id_relation: MdocScopeDigestIdRelation::dummy(),
@@ -4679,7 +4684,7 @@ mod tests {
         };
         let issuer = sig_structure(b"Signature1", &[0xa1, 0x01, 0x26], &[], &payload);
         let items = item_inners.iter().map(|inner| item_outer(inner)).collect();
-        let handles = MdocScopeHandles::fresh(&statement)?;
+        let handles = MdocScopeHandles::fresh(&statement, SharedPackedShaDigestRelation::new())?;
         MdocScope::new(statement, issuer, items, handles)
     }
 
@@ -4809,7 +4814,8 @@ mod tests {
             sig_structure(b"Signature1", &[0xa1, 0x01, 0x27], &[], &payload),
             sig_structure(b"Signature1", &[0xa1, 0x01, 0x26], &[0], &payload),
         ] {
-            let handles = MdocScopeHandles::fresh(&statement).unwrap();
+            let handles =
+                MdocScopeHandles::fresh(&statement, SharedPackedShaDigestRelation::new()).unwrap();
             let error = MdocScope::new(
                 statement.clone(),
                 issuer,
@@ -5296,9 +5302,7 @@ mod tests {
         let raw_relations = (0..scope.handles.raw_streams.len())
             .map(|_| FieldBytesRelation::dummy())
             .collect::<Vec<_>>();
-        let item_digest_relations = (0..scope.statement.items.len())
-            .map(|_| DigestBytesRelation::dummy())
-            .collect::<Vec<_>>();
+        let item_digest_relation = PackedShaDigestRelation::dummy();
         let semantic_relation = FieldBytesRelation::dummy();
         let payload_hash_relation = FieldBytesRelation::dummy();
         let dfa_relation = MdocScopeDfaRelation::dummy();
@@ -5317,7 +5321,8 @@ mod tests {
             &raw_relations,
             &semantic_relation,
             Some(&payload_hash_relation),
-            &item_digest_relations,
+            &item_digest_relation,
+            scope.statement.items.len(),
             &dfa_relation,
             &state_relation,
             &digest_id_relation,
@@ -5341,7 +5346,8 @@ mod tests {
             &raw_relations,
             &semantic_relation,
             Some(&payload_hash_relation),
-            &item_digest_relations,
+            &item_digest_relation,
+            scope.statement.items.len(),
             &dfa_relation,
             &state_relation,
             &digest_id_relation,
@@ -5375,7 +5381,8 @@ mod tests {
             raw_relations,
             semantic_relation,
             payload_hash_relation: Some(payload_hash_relation),
-            item_digest_relations,
+            item_digest_relation,
+            item_count: scope.statement.items.len(),
             dfa_relation,
             state_relation,
             digest_id_relation,

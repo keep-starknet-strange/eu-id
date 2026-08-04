@@ -132,17 +132,21 @@ impl SharedShaTableRelations {
 /// serialized in big-endian order (FIPS 180-4 §5). The 32 cells are laid out
 /// per state word `j` as `[hi.b1, hi.b0, lo.b1, lo.b0]` — i.e.
 /// `word_j.to_be_bytes()` — so cell `4j+k` is digest byte `4j+k`.
-pub const DIGEST_REL_SIZE: usize = crate::constants::DIGEST_BYTES;
+pub const PACKED_SHA_DIGEST_REL_SIZE: usize = 1 + crate::constants::DIGEST_BYTES;
+relation!(PackedShaDigestRelation, PACKED_SHA_DIGEST_REL_SIZE);
+pub type SharedPackedShaDigestRelation = SharedRelation<PackedShaDigestRelation>;
+
+pub const PACKED_SHA_STREAM_FIELD_BASE: u32 = 0x5348_0000;
 
 /// The digest provider and consumer share this channel. Their terms cancel
 /// only when both use identical `LookupElements`. [`air_core`] defines the
 /// common type, and this crate uses an alias.
-pub use air_core::relations::DigestBytesRelation as Sha256Digest;
+pub use air_core::relations::DigestBytesRelation;
 
 // The shared arity must match this crate's digest-byte count, or the provider
 // and consumer would size their relation tuples differently and silently fail
 // to balance.
-const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY);
+const _: () = assert!(crate::constants::DIGEST_BYTES == air_core::relations::DIGEST_BYTES_ARITY);
 
 /// Cross-component channel from a SHA digest to an ECDSA `z` input.
 ///
@@ -158,31 +162,6 @@ const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY
 /// The SHA AIR decomposes each limb with `limb = 256·b1 + b0`.
 /// It yields the 32 big-endian bytes.
 /// `Range_8` constrains each byte before it crosses the module boundary.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DigestRelation {
-    pub digest: Sha256Digest,
-}
-
-impl DigestRelation {
-    pub fn draw(channel: &mut impl Channel) -> Self {
-        Self {
-            digest: Sha256Digest::draw(channel),
-        }
-    }
-
-    pub fn dummy() -> Self {
-        Self {
-            digest: Sha256Digest::dummy(),
-        }
-    }
-}
-
-impl Default for DigestRelation {
-    fn default() -> Self {
-        Self::dummy()
-    }
-}
-
 /// The shared credential-field channel.
 ///
 /// [`air_core`] defines this three-cell relation as
@@ -196,12 +175,8 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 
 /// Cross-component channel from credential bytes to predicate inputs.
 ///
-/// A nonempty [`crate::field_exposure::FieldExposure`] enables this provider.
-/// It yields `(field_id, byte_index, value)` for each selected byte.
-/// The target block gates each tuple.
-/// A downstream predicate requires the same byte window.
-/// These yields need an external consumer to balance.
-/// The standalone SHA proof uses an empty exposure.
+/// The packed provider yields `(field_id, byte_index, value)` for each byte of
+/// every complete SHA-padded message stream.
 ///
 /// **Representation bridge (interface-contract item 4).** Every message word
 /// already has 32 committed LSB-first bit planes. The AIR constrains each bit
@@ -237,14 +212,7 @@ impl Default for FieldRelation {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sha256Relations {
     pub range: RangeRelations,
-    /// Cross-component digest channel — provider side. Always drawn so the
-    /// relation bundle is uniform. Only *used* when `Sha256Eval::expose_digest`
-    /// is set (the combined-proof path). See [`DigestRelation`].
-    pub digest: DigestRelation,
-    /// Cross-component credential-field channel — provider side. Always drawn so
-    /// the relation bundle is uniform. Only *used* when a non-empty field
-    /// exposure is configured (the predicate-binding path). See
-    /// [`FieldRelation`].
+    pub packed_digest: PackedShaDigestRelation,
     pub field: FieldRelation,
 }
 
@@ -255,7 +223,7 @@ impl Sha256Relations {
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             range: RangeRelations::draw(channel),
-            digest: DigestRelation::draw(channel),
+            packed_digest: PackedShaDigestRelation::draw(channel),
             field: FieldRelation::draw(channel),
         }
     }
@@ -263,7 +231,7 @@ impl Sha256Relations {
     pub fn draw_sha_tables_provider(channel: &mut impl Channel) -> Self {
         Self {
             range: RangeRelations::draw(channel),
-            digest: DigestRelation::dummy(),
+            packed_digest: PackedShaDigestRelation::dummy(),
             field: FieldRelation::dummy(),
         }
     }
@@ -274,7 +242,7 @@ impl Sha256Relations {
     ) -> Self {
         Self {
             range: shared.range.get(),
-            digest: DigestRelation::draw(channel),
+            packed_digest: PackedShaDigestRelation::draw(channel),
             field: FieldRelation::draw(channel),
         }
     }
@@ -283,7 +251,7 @@ impl Sha256Relations {
     pub fn dummy() -> Self {
         Self {
             range: RangeRelations::dummy(),
-            digest: DigestRelation::dummy(),
+            packed_digest: PackedShaDigestRelation::dummy(),
             field: FieldRelation::dummy(),
         }
     }
@@ -318,10 +286,7 @@ mod tests {
         assert_eq!(RANGE_REL_SIZE, 1);
     }
 
-    /// The cross-component digest channel exposes row width 32 — the 32
-    /// big-endian bytes of the SHA-256 digest. A regression here would
-    /// desync the provider tuple from the consumer (P256 `z`) tuple and
-    /// silently break the combined-proof balance.
+    /// The packed digest channel keys the 32 digest bytes by message slot.
     #[test]
     fn digest_relation_has_row_width_32() {
         use stwo::core::fields::m31::BaseField;
@@ -329,10 +294,12 @@ mod tests {
         use stwo_constraint_framework::Relation;
         let r = Sha256Relations::dummy();
         assert_eq!(
-            <Sha256Digest as Relation<BaseField, SecureField>>::get_size(&r.digest.digest),
-            DIGEST_REL_SIZE
+            <PackedShaDigestRelation as Relation<BaseField, SecureField>>::get_size(
+                &r.packed_digest,
+            ),
+            PACKED_SHA_DIGEST_REL_SIZE
         );
-        assert_eq!(DIGEST_REL_SIZE, 32);
+        assert_eq!(PACKED_SHA_DIGEST_REL_SIZE, 33);
     }
 
     /// The cross-component credential-field channel exposes row width 3 —
