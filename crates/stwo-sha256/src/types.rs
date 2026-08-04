@@ -44,40 +44,9 @@ impl WordLimbs {
 
     /// True iff both limbs are in `[0, 2¹⁶)`.
     #[inline]
-    pub const fn is_canonical(self) -> bool {
+    #[cfg(test)]
+    pub(crate) const fn is_canonical(self) -> bool {
         self.lo <= LIMB_MAX && self.hi <= LIMB_MAX
-    }
-}
-
-/// The SHA-256 working state `(a, b, c, d, e, f, g, h)`, in that order.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct WorkingState(pub [u32; N_STATE_WORDS]);
-
-impl WorkingState {
-    /// Index-into-name helpers — naming follows FIPS 180-4 §6.2.2 step 2.
-    pub fn a(&self) -> u32 {
-        self.0[0]
-    }
-    pub fn b(&self) -> u32 {
-        self.0[1]
-    }
-    pub fn c(&self) -> u32 {
-        self.0[2]
-    }
-    pub fn d(&self) -> u32 {
-        self.0[3]
-    }
-    pub fn e(&self) -> u32 {
-        self.0[4]
-    }
-    pub fn f(&self) -> u32 {
-        self.0[5]
-    }
-    pub fn g(&self) -> u32 {
-        self.0[6]
-    }
-    pub fn h(&self) -> u32 {
-        self.0[7]
     }
 }
 
@@ -130,14 +99,8 @@ impl Digest {
 /// constrained padded byte stream that the AIR consumes block-by-block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaddingWitness {
-    /// The raw message bytes in the witness.
-    pub message: Vec<u8>,
     /// The padded message — a multiple of `BLOCK_BYTES` bytes (FIPS §5.1.1).
     pub padded: Vec<u8>,
-    /// Number of blocks in `padded`.
-    pub n_blocks: usize,
-    /// Bit length of the message (the last 64 bits of `padded` encode this BE).
-    pub bit_length: u64,
 }
 
 /// The witness values for one compression round.
@@ -146,15 +109,9 @@ pub struct PaddingWitness {
 /// This representation also permits tests that do not import field types.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundWitness {
-    /// Round index `t ∈ [0, 64)`.
-    pub t: u32,
     /// Working state at the *start* of the round, as `(lo, hi)` limbs for
-    /// each of `a..h`. Index by `WorkingStateIdx`.
+    /// each of the eight working-state words.
     pub state_in: [WordLimbs; N_STATE_WORDS],
-    /// `W[t]` for this round as `(lo, hi)` limbs.
-    pub w_t: WordLimbs,
-    /// `K[t]` for this round as `(lo, hi)` limbs (hard-wired by the AIR).
-    pub k_t: WordLimbs,
     /// `Σ0(a)` and `Σ1(e)` results as `(lo, hi)` limbs.
     pub sigma0: WordLimbs,
     pub sigma1: WordLimbs,
@@ -189,61 +146,16 @@ pub struct AddCarries {
     pub hi: u32,
 }
 
-/// One 16-bit limb split into two 8-bit chunks (`b0 + 256 · b1 == limb`).
-///
-/// Used by packed-stream and terminal-byte helpers that need an explicit byte
-/// view of a limb.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct LimbBytes {
-    /// Low byte of the limb (`limb & 0xFF`).
-    pub b0: u32,
-    /// High byte of the limb (`limb >> 8`).
-    pub b1: u32,
-}
-
-impl LimbBytes {
-    /// Decompose a 16-bit limb into its two 8-bit chunks.
-    #[inline]
-    pub const fn from_u16(limb: u32) -> Self {
-        Self {
-            b0: limb & 0xFF,
-            b1: (limb >> 8) & 0xFF,
-        }
-    }
-
-    /// Recompose `b0 + 256 · b1`. Wraps if either byte exceeds `[0, 256)`.
-    #[inline]
-    pub const fn to_u16(self) -> u32 {
-        self.b0 | (self.b1 << 8)
-    }
-}
-
 /// Witness for one message-schedule entry `W[t]`, for `t ∈ [16, 64)`.
 ///
 /// `W[t] = σ1(W[t−2]) + W[t−7] + σ0(W[t−15]) + W[t−16]` (mod 2³²).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScheduleEntryWitness {
-    /// Schedule index `t ∈ [16, 64)`.
-    pub t: u32,
-    pub w_t_minus_2: WordLimbs,
-    pub w_t_minus_7: WordLimbs,
-    pub w_t_minus_15: WordLimbs,
-    pub w_t_minus_16: WordLimbs,
     pub lower_sigma0: WordLimbs,
     pub lower_sigma1: WordLimbs,
     /// The four-word `+` carries.
     pub carries: AddCarries,
-    pub w_t: WordLimbs,
 }
-
-/// Number of 32-bit words in one padded block (= `N_INPUT_WORDS = 16`).
-/// Exposed as a witness-layer constant so [`PaddingRowWitness`]'s one-hot
-/// marker-word indicator vector has a stable size.
-pub const WORDS_PER_BLOCK: usize = 16;
-
-/// Number of bytes in a 32-bit word — the marker-byte selector vector's
-/// length. Mirrors [`crate::constants::WORD_BYTES`] at the witness layer.
-pub const BYTES_PER_WORD: usize = 4;
 
 /// Padding data for one block.
 ///
@@ -275,15 +187,15 @@ pub struct PaddingRowWitness {
     /// One-hot indicator: `is_marker_word[j] == 1` iff word index `j` holds
     /// the `0x80` byte. All-zero on non-marker rows. Sums to
     /// `is_marker_block`.
-    pub is_marker_word: [u32; WORDS_PER_BLOCK],
+    pub is_marker_word: [u32; N_INPUT_WORDS],
     /// One-hot indicator: `marker_byte_sel[b] == 1` iff byte position `b`
     /// within the marker word holds `0x80`. BE order — `b = 0` is the MSB
     /// of `W[k]`. All-zero on non-marker rows. Sums to `is_marker_block`.
-    pub marker_byte_sel: [u32; BYTES_PER_WORD],
+    pub marker_byte_sel: [u32; WORD_BYTES],
     /// Big-endian byte decomposition of the marker word, in MSB-first
     /// order. All-zero on non-marker rows. The constraint layer binds
     /// these to `W[marker_word_idx]` via the `is_marker_word` selector.
-    pub marker_word_byte: [u32; BYTES_PER_WORD],
+    pub marker_word_byte: [u32; WORD_BYTES],
     /// Aux: `cumulative_marker_word_sel[15] · (1 − is_length_block)`.
     /// 1 iff this row is a marker-only block whose marker sits strictly
     /// before `W[15]` — i.e., marker at `W[14]` (overflow Case B with
@@ -312,7 +224,7 @@ impl PaddingRowWitness {
     ///
     /// The marker offset equals `message_byte_length` as specified in FIPS
     /// 180-4 section 5.1.1. Division by `BLOCK_BYTES` gives its block.
-    /// Division by `BYTES_PER_WORD` gives its word and byte positions.
+    /// Division by `WORD_BYTES` gives its word and byte positions.
     ///
     /// The final block contains the length. The marker and length share one
     /// block when `message_byte_length % 64` is below 56. Otherwise, the
@@ -339,21 +251,21 @@ impl PaddingRowWitness {
         let is_length_only_block = (1 - is_marker_block) * is_length_block;
         let is_marker_only_block = is_marker_block * (1 - is_length_block);
 
-        let mut is_marker_word = [0u32; WORDS_PER_BLOCK];
-        let mut marker_byte_sel = [0u32; BYTES_PER_WORD];
-        let mut marker_word_byte = [0u32; BYTES_PER_WORD];
+        let mut is_marker_word = [0u32; N_INPUT_WORDS];
+        let mut marker_byte_sel = [0u32; WORD_BYTES];
+        let mut marker_word_byte = [0u32; WORD_BYTES];
 
         if is_marker_block == 1 {
             let off = marker_byte_offset % block_bytes;
-            let word_idx = off / BYTES_PER_WORD;
-            let byte_in_word = off % BYTES_PER_WORD;
+            let word_idx = off / WORD_BYTES;
+            let byte_in_word = off % WORD_BYTES;
             is_marker_word[word_idx] = 1;
             marker_byte_sel[byte_in_word] = 1;
             // Marker word bytes in BE order (byte 0 = MSB). Bytes before
             // the marker come from the tail of the message. The marker
             // byte is 0x80. Bytes after it are 0 (per FIPS §5.1.1).
-            let word_start = block_idx * block_bytes + word_idx * BYTES_PER_WORD;
-            for p in 0..BYTES_PER_WORD {
+            let word_start = block_idx * block_bytes + word_idx * WORD_BYTES;
+            for p in 0..WORD_BYTES {
                 marker_word_byte[p] = padded[word_start + p] as u32;
             }
         }
@@ -419,13 +331,11 @@ pub struct BlockWitness {
 
 /// Top-level witness for an arbitrary-length SHA-256 hash.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Sha256Witness {
+pub(crate) struct Sha256Witness {
     /// The padding witness (raw message → padded blocks).
     pub padding: PaddingWitness,
     /// One block witness per padded block.
     pub blocks: Vec<BlockWitness>,
-    /// Final digest, recoverable from the last `BlockWitness.h_out`.
-    pub digest: Digest,
 }
 
 /// Owning witness for one packed SHA-256 component.
@@ -441,32 +351,6 @@ impl PackedSha256Witness {
             .map(|message| message.blocks.len())
             .sum()
     }
-}
-
-impl Sha256Witness {
-    /// Recompose the digest from the last block's `h_out` and assert
-    /// consistency. Returns the canonical digest.
-    pub fn digest_from_blocks(&self) -> Digest {
-        let last = self.blocks.last().expect("at least one block");
-        let mut state = HashState::default();
-        for (i, slot) in state.0.iter_mut().enumerate() {
-            *slot = last.h_out[i].to_u32();
-        }
-        Digest::from_state(&state)
-    }
-}
-
-/// Working-state index mnemonics — useful for trace column naming.
-#[derive(Copy, Clone, Debug)]
-pub enum WorkingStateIdx {
-    A = 0,
-    B = 1,
-    C = 2,
-    D = 3,
-    E = 4,
-    F = 5,
-    G = 6,
-    H = 7,
 }
 
 #[cfg(test)]

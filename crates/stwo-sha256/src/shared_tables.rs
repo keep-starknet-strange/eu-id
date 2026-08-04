@@ -34,12 +34,12 @@ use crate::interaction::{
     build_interaction_columns, claim_mask_fraction_column, producer_blind_frac_column,
     ComponentClaim, Frac,
 };
-use crate::multiplicities::range_k_multiplicities_for_messages;
+use crate::multiplicities::range_k_multiplicities;
 use crate::preprocessed::{
     generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes,
 };
 use crate::relations::{Sha256Relations, SharedShaTableRelations};
-use crate::types::Sha256Witness;
+use crate::types::PackedSha256Witness;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShaTablesInteractionClaim {
@@ -86,14 +86,14 @@ fn range_index(kind: RangeKind) -> usize {
 }
 
 #[derive(Clone, Debug)]
-pub struct ShaTableMultiplicities {
+pub(crate) struct ShaTableMultiplicities {
     pub range: Vec<Vec<u32>>,
 }
 
 impl ShaTableMultiplicities {
-    pub fn from_messages(messages: &[Sha256Witness]) -> Self {
+    pub(crate) fn from_packed(packed: &PackedSha256Witness) -> Self {
         assert!(
-            !messages.is_empty(),
+            !packed.messages.is_empty(),
             "shared SHA table provider needs at least one consumer",
         );
 
@@ -101,7 +101,7 @@ impl ShaTableMultiplicities {
         for &kind in RANGE_TABLES {
             let producer = SharedProducer::Range(kind);
             range.push(blind_extend(
-                range_k_multiplicities_for_messages(messages, kind),
+                range_k_multiplicities(packed, kind),
                 1usize << (producer.blind_log_size() - 1),
             ));
         }
@@ -145,37 +145,6 @@ fn blind_extend(mut real: Vec<u32>, real_len: usize) -> Vec<u32> {
     out
 }
 
-/// Per-tree committed-column counts of one shared-SHA producer *component*.
-/// After R2 fraction batching a component may own two co-located producers
-/// (e.g. `sp_sigma0_lo+sp_sigma0_hi`) sharing one interaction column. The name
-/// joins the producer tags so the probe emits TRUE per-component rows instead
-/// of aggregating every producer under one `(tree, log_size)` bucket.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShaTableComponentShape {
-    pub name: String,
-    pub log_size: u32,
-    pub preprocessed_columns: usize,
-    pub trace_columns: usize,
-    pub interaction_columns: usize,
-}
-
-/// Number of preprocessed columns each producer table reads: the row-content
-/// value columns plus the Class-D `is_dummy` selector (excludes the
-/// multiplicity trace column).
-fn producer_preprocessed_cols(producer: SharedProducer) -> usize {
-    let value_cols = match producer {
-        SharedProducer::Range(..) => 1,
-    };
-    value_cols + 1 // + Class-D is_dummy selector
-}
-
-/// Stable per-producer tag, matching its preprocessed-column family.
-fn producer_name(producer: SharedProducer) -> &'static str {
-    match producer {
-        SharedProducer::Range(kind) => kind.tag(),
-    }
-}
-
 pub struct ShaTablesProver {
     multiplicities: ShaTableMultiplicities,
     shared: SharedShaTableRelations,
@@ -187,9 +156,9 @@ pub struct ShaTablesProver {
 }
 
 impl ShaTablesProver {
-    pub fn new(multiplicities: ShaTableMultiplicities, shared: SharedShaTableRelations) -> Self {
+    pub fn new(packed: &PackedSha256Witness, shared: SharedShaTableRelations) -> Self {
         Self {
-            multiplicities,
+            multiplicities: ShaTableMultiplicities::from_packed(packed),
             shared,
             relations: None,
             interaction_claim: None,
@@ -233,44 +202,6 @@ impl ShaTablesProver {
                 .require()
                 .expect("claim-mask challenge anchor must follow all masked SHA modules")
         })
-    }
-
-    /// TRUE per-component committed shape, one row per component (chunk of
-    /// `PRODUCER_PAIRS`), in registration/commit order. Reconciles exactly to
-    /// `layout()` (Σ preprocessed / trace / interaction columns per tree). A
-    /// two-producer component pairs its fractions into ONE `SecureField`
-    /// interaction column (`SECURE_EXTENSION_DEGREE` base columns). Its
-    /// preprocessed count is the sum of both producers' tables and its trace
-    /// count is 2 (one multiplicity column each).
-    pub fn component_shapes(&self) -> Vec<ShaTableComponentShape> {
-        PRODUCER_PAIRS
-            .iter()
-            .map(|chunk| {
-                let name = chunk
-                    .iter()
-                    .map(|&p| producer_name(p))
-                    .collect::<Vec<_>>()
-                    .join("+");
-                let preprocessed_columns =
-                    chunk.iter().map(|&p| producer_preprocessed_cols(p)).sum();
-                ShaTableComponentShape {
-                    name,
-                    log_size: chunk[0].blind_log_size(),
-                    preprocessed_columns,
-                    trace_columns: chunk.len()
-                        + usize::from(self.claim_masks.is_some())
-                            * air_core::claim_mask::CLAIM_MASK_TRACE_COLUMNS,
-                    // Class D uses one gated fraction per producer. Each producer
-                    // emits `-(1 − is_dummy)·mult`. Two producers share one
-                    // interaction column. One producer also uses one column.
-                    // An enabled claim mask adds a final site, which may pair with
-                    // another fraction.
-                    interaction_columns: (chunk.len() + usize::from(self.claim_masks.is_some()))
-                        .div_ceil(2)
-                        * SECURE_EXTENSION_DEGREE,
-                }
-            })
-            .collect()
     }
 
     fn relations(&self) -> &Sha256Relations {

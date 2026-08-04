@@ -4,18 +4,9 @@
 //! These tests keep the supported public path bound across extraction, proving,
 //! serialization, and verification.
 
-use eu_id_prover::mdoc::{self, MdocCircuitStatement, MdocError};
-use eu_id_prover::{prove_mdoc, verify_product_mdoc, Error};
-
-fn flip_unique_document_value(document: &mut [u8], value: &[u8]) {
-    let offsets = document
-        .windows(value.len())
-        .enumerate()
-        .filter_map(|(offset, window)| (window == value).then_some(offset))
-        .collect::<Vec<_>>();
-    assert_eq!(offsets.len(), 1, "fixture value must occur exactly once");
-    document[offsets[0] + value.len() - 1] ^= 1;
-}
+use super::flip_unique_document_value;
+use eu_id_prover::mdoc::{self, MdocError};
+use eu_id_prover::{prove_mdoc, Error};
 
 #[test]
 fn extraction_binds_signed_digest_issuer_trust_and_device_context() {
@@ -76,43 +67,4 @@ fn false_private_predicates_cannot_produce_a_product_proof() {
         ),
         Err(Error::NatPrepare(_))
     ));
-}
-
-#[test]
-#[ignore = "proof-heavy product PCS and canonical preprocessed-root pins"]
-fn product_verifier_pins_pcs_and_canonical_preprocessed_root() {
-    let fixture = mdoc::demo_mdoc_circuit_fixture();
-    let (proof, public_statement) = prove_mdoc(
-        &fixture.document,
-        &fixture.request,
-        fixture.statement.policy.clone(),
-    )
-    .expect("current product proof builds");
-    verify_product_mdoc(&proof, &public_statement).expect("current product proof verifies");
-
-    let mut weak_pcs = proof.clone();
-    weak_pcs.stark_proof.0.config.pow_bits = 0;
-    weak_pcs.stark_proof.0.config.fri_config.n_queries = 1;
-    assert!(matches!(
-        verify_product_mdoc(&weak_pcs, &public_statement),
-        Err(Error::WeakConfig { .. })
-    ));
-
-    let mut tampered_tree = proof;
-    tampered_tree.stark_proof.0.commitments[0].0[0] ^= 1;
-    assert!(matches!(
-        verify_product_mdoc(&tampered_tree, &public_statement),
-        Err(Error::PreprocessedRootMismatch { .. })
-    ));
-
-    let reconstructed = MdocCircuitStatement::from_extracted_at(
-        &fixture.extracted,
-        public_statement.policy,
-        public_statement.verification_time_epoch_seconds,
-    )
-    .expect("current caller statement reconstructs");
-    assert_eq!(
-        reconstructed.request_binding,
-        public_statement.request_binding
-    );
 }

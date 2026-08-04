@@ -34,6 +34,3 @@ pub mod tables_local;
 pub mod trace;
 pub mod types;
 pub mod witness;
-
-pub use types::{PackedSha256Witness, Sha256Witness};
-pub use witness::{compute_packed_sha256_witness, PackedSha256Error};

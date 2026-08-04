@@ -10,7 +10,7 @@
 
 use crate::components::{range_log_size, RangeKind};
 use crate::constants::{N_ROUNDS, N_STATE_WORDS};
-use crate::types::{PackedSha256Witness, Sha256Witness};
+use crate::types::PackedSha256Witness;
 
 /// Build the per-row multiplicity vector for one `Range_k` table.
 ///
@@ -28,21 +28,14 @@ use crate::types::{PackedSha256Witness, Sha256Witness};
 ///     two finalization carry limbs for each of eight words.
 ///   - One `Range_8` increment per terminal `h_out` byte (4 bytes × 8
 ///     words per block).
-pub fn range_k_multiplicities(witness: &PackedSha256Witness, kind: RangeKind) -> Vec<u32> {
-    range_k_multiplicities_for_messages(&witness.messages, kind)
-}
-
-pub(crate) fn range_k_multiplicities_for_messages(
-    messages: &[Sha256Witness],
-    kind: RangeKind,
-) -> Vec<u32> {
+pub(crate) fn range_k_multiplicities(witness: &PackedSha256Witness, kind: RangeKind) -> Vec<u32> {
     let log_size = range_log_size(kind);
     let mut mults = vec![0u32; 1usize << log_size];
     let bump = |m: &mut [u32], value: u32| {
         m[value as usize] += 1;
     };
 
-    for message in messages {
+    for message in &witness.messages {
         for block in &message.blocks {
             match kind {
                 RangeKind::Range4 => {
@@ -223,7 +216,7 @@ mod tests {
     fn shared_table_multiplicities_sum_per_consumer_vectors() {
         use crate::components::RANGE_TABLES;
         let packed = compute_packed_sha256_witness(&[&b"abc"[..], &[0x42u8; 200][..]]).unwrap();
-        let shared = crate::shared_tables::ShaTableMultiplicities::from_messages(&packed.messages);
+        let shared = crate::shared_tables::ShaTableMultiplicities::from_packed(&packed);
 
         // Class D doubles each vector and fills the dummy upper half with a
         // random mask. Only the real lower half contains the deterministic

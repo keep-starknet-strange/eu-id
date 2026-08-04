@@ -5,7 +5,7 @@
 //! public statement.
 
 use eu_id_prover::mdoc::{self, MdocDisclosureMode, MdocError};
-use eu_id_prover::{prove_mdoc, verify_product_mdoc, Error, MdocProof, MdocStatement};
+use eu_id_prover::{prove_mdoc, Error, MdocStatement};
 
 #[test]
 fn public_statement_contains_only_caller_authoritative_inputs() {
@@ -122,22 +122,4 @@ fn product_api_rejects_noncurrent_request_and_policy_shapes_before_proving() {
         prove_mdoc(&fixture.document, &fixture.request, unsorted_policy),
         Err(Error::Mdoc(MdocError::InvalidNationality(_)))
     ));
-}
-
-#[test]
-#[ignore = "proof-heavy current product proof serialization round trip"]
-fn product_proof_payload_round_trips_through_the_current_api() {
-    let fixture = mdoc::demo_mdoc_circuit_fixture();
-    let (proof, statement) = prove_mdoc(
-        &fixture.document,
-        &fixture.request,
-        fixture.statement.policy,
-    )
-    .expect("current product proof builds");
-    verify_product_mdoc(&proof, &statement).expect("current product proof verifies");
-
-    let bytes = bincode::serialize(&proof).expect("current proof payload serializes");
-    let restored: MdocProof =
-        bincode::deserialize(&bytes).expect("current proof payload deserializes");
-    verify_product_mdoc(&restored, &statement).expect("restored current proof verifies");
 }

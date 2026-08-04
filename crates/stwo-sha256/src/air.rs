@@ -155,15 +155,15 @@ impl<'a> Sha256Prover<'a> {
 
     /// Enable the cross-component digest provider.
     ///
-    /// The module yields the final digest on the `Sha256Digest` channel.
+    /// The module yields the final digest on the packed digest channel.
     /// A composed consumer can then require the digest.
     /// The standalone claim sum stays nonzero without that consumer.
     /// The default configuration keeps this provider off.
     /// `Stmt0` binds the flag to the transcript.
     /// The matching [`Sha256Verifier`] must use the same value.
     /// As [`Self::with_digest_handle`], plus **share** the drawn
-    /// `Sha256Digest` relation through `handle` so a sibling module (the P256
-    /// digest-bind bridge) consumes it over the identical `LookupElements`.
+    /// digest relation through `handle` so a sibling module (the P256 binding
+    /// relation) consumes it over identical lookup elements.
     /// [`Air::draw_relations`] stores the relation in the handle.
     pub fn with_digest_handle(mut self, handle: SharedPackedShaDigestRelation) -> Self {
         self.expose_digest = true;
@@ -1010,22 +1010,6 @@ struct Sha256Components {
     range: Vec<FrameworkComponent<RangeKEval>>, // 4
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn packed_shared_table_masked_width_is_exact() {
-        assert_eq!(CLAIM_MASK_TRACE_COLUMNS, 4);
-        assert_eq!(Layout::TOTAL_COLS, 438);
-        assert_eq!(base_trace_log_sizes(14, 0, false, false).len(), 438);
-        assert_eq!(base_trace_log_sizes(14, 0, false, true).len(), 442);
-        assert!(base_trace_log_sizes(14, 0, false, true)
-            .iter()
-            .all(|&log_size| log_size == 14));
-    }
-}
-
 impl Sha256Components {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -1099,5 +1083,21 @@ impl Sha256Components {
                 .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_shared_table_masked_width_is_exact() {
+        assert_eq!(CLAIM_MASK_TRACE_COLUMNS, 4);
+        assert_eq!(Layout::TOTAL_COLS, 438);
+        assert_eq!(base_trace_log_sizes(14, 0, false, false).len(), 438);
+        assert_eq!(base_trace_log_sizes(14, 0, false, true).len(), 442);
+        assert!(base_trace_log_sizes(14, 0, false, true)
+            .iter()
+            .all(|&log_size| log_size == 14));
     }
 }

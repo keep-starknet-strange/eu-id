@@ -1,22 +1,9 @@
 //! Current ISO mdoc device-binding and request-context tests.
 
+use super::{decode, flip_unique_document_value};
 use ciborium::value::Value;
 use eu_id_prover::mdoc::{self, MdocError};
 use eu_id_prover::{prove_mdoc, Error, MdocStatement};
-
-fn decode(bytes: &[u8]) -> Value {
-    ciborium::de::from_reader(bytes).expect("fixture CBOR decodes")
-}
-
-fn flip_unique_document_value(document: &mut [u8], value: &[u8]) {
-    let offsets = document
-        .windows(value.len())
-        .enumerate()
-        .filter_map(|(offset, window)| (window == value).then_some(offset))
-        .collect::<Vec<_>>();
-    assert_eq!(offsets.len(), 1, "fixture value must occur exactly once");
-    document[offsets[0] + value.len() - 1] ^= 1;
-}
 
 #[test]
 fn device_authentication_is_tag24_wrapped_and_context_bound() {

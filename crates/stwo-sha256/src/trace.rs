@@ -23,15 +23,11 @@ use stwo::core::utils::{
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 
-use crate::constants::{DIGEST_BYTES, N_ROUNDS, N_STATE_WORDS};
+use crate::constants::{DIGEST_BYTES, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS, WORD_BYTES};
 use crate::native::{lower_sigma0, lower_sigma1};
 use crate::types::{AddCarries, PackedSha256Witness, PaddingRowWitness, Sha256Witness, WordLimbs};
 
-use crate::constants::WORD_BYTES as BYTES_PER_WORD;
 use rand::RngCore;
-
-/// Words per 512-bit block: 16.
-pub const WORDS_PER_BLOCK: usize = 16;
 
 /// Rows one block occupies in the rotated layout: one per round.
 pub const ROWS_PER_BLOCK: usize = N_ROUNDS;
@@ -53,9 +49,6 @@ pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + ROUND_OPERAND_BIT_COLS;
 /// Columns of the schedule family (live for `t ≥ 16`):
 /// `σ0`, `σ1`, carries (= 6), then lower-sigma output bits.
 pub const SCHEDULE_ENTRY_COLS: usize = 6 + SCHEDULE_SIGMA_OUTPUT_BIT_COLS;
-/// Number of schedule entries: `W[16..64]` ⇒ 48.
-pub const N_SCHEDULE_ENTRIES: usize = N_ROUNDS - 16;
-
 /// Columns dedicated to the per-block padding-role witness (§10.4 of the
 /// validated design), live on each block's `t = 15` row. Laid out in the
 /// order `write_padding_row_values` writes them:
@@ -79,7 +72,7 @@ pub const N_SCHEDULE_ENTRIES: usize = N_ROUNDS - 16;
 /// A valid trace always has `marker_word_post_strict_14 = 0`. No marker block
 /// puts the marker before `W[14]`. Thus, the trace does not contain that
 /// symmetric auxiliary value. See [`crate::types::PaddingRowWitness`].
-pub const PADDING_ROW_COLS: usize = 4 + WORDS_PER_BLOCK + BYTES_PER_WORD + BYTES_PER_WORD + 1 + 4;
+pub const PADDING_ROW_COLS: usize = 4 + N_INPUT_WORDS + WORD_BYTES + WORD_BYTES + 1 + 4;
 
 /// Named column-range layout. Every range is in `[start, end)`. The column
 /// index in `Vec<Vec<BaseField>>` equals the start-of-range offset plus any
@@ -119,7 +112,7 @@ impl Layout {
     /// For each state word, the order is
     /// `[hi.b1, hi.b0, lo.b1, lo.b0]`. The AIR checks
     /// `limb = 256 * b1 + b0`. Each `t = 63` row contains these bytes, but the
-    /// `Sha256Digest` relation emits them only for the final block.
+    /// packed digest relation emits them only for the final block.
     pub const COL_DIGEST_BYTES_START: usize = Self::COL_IS_MSG_LAST + 1;
     pub const COL_DIGEST_BYTES_END: usize = Self::COL_DIGEST_BYTES_START + DIGEST_BYTES;
 
@@ -130,11 +123,11 @@ impl Layout {
     pub const COL_IS_LENGTH_ONLY_BLOCK: usize = Self::COL_PADDING_START + 2;
     pub const COL_IS_MARKER_ONLY_BLOCK: usize = Self::COL_PADDING_START + 3;
     pub const COL_IS_MARKER_WORD_START: usize = Self::COL_PADDING_START + 4;
-    pub const COL_IS_MARKER_WORD_END: usize = Self::COL_IS_MARKER_WORD_START + WORDS_PER_BLOCK;
+    pub const COL_IS_MARKER_WORD_END: usize = Self::COL_IS_MARKER_WORD_START + N_INPUT_WORDS;
     pub const COL_MARKER_BYTE_SEL_START: usize = Self::COL_IS_MARKER_WORD_END;
-    pub const COL_MARKER_BYTE_SEL_END: usize = Self::COL_MARKER_BYTE_SEL_START + BYTES_PER_WORD;
+    pub const COL_MARKER_BYTE_SEL_END: usize = Self::COL_MARKER_BYTE_SEL_START + WORD_BYTES;
     pub const COL_MARKER_WORD_BYTE_START: usize = Self::COL_MARKER_BYTE_SEL_END;
-    pub const COL_MARKER_WORD_BYTE_END: usize = Self::COL_MARKER_WORD_BYTE_START + BYTES_PER_WORD;
+    pub const COL_MARKER_WORD_BYTE_END: usize = Self::COL_MARKER_WORD_BYTE_START + WORD_BYTES;
     pub const COL_MARKER_WORD_POST_STRICT_15: usize = Self::COL_MARKER_WORD_BYTE_END;
     pub const COL_BIT_LENGTH_W14_LO: usize = Self::COL_MARKER_WORD_BYTE_END + 1;
     pub const COL_BIT_LENGTH_W14_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 2;
@@ -156,11 +149,6 @@ impl Layout {
     }
 
     /// `(lo, hi)` slot for the row's schedule word `W[t]`.
-    #[inline]
-    pub const fn schedule_word() -> (usize, usize) {
-        (Self::COL_W_LO, Self::COL_W_HI)
-    }
-
     /// Columns of the schedule family's leading cells, in order:
     /// `σ0_lo, σ0_hi, σ1_lo, σ1_hi, carry_lo, carry_hi`. Live on rows with
     /// `t ≥ 16`.
@@ -275,7 +263,7 @@ impl Layout {
 /// Return the 32 big-endian bytes of one `h_out` value.
 ///
 /// Each state word has the order `[hi.b1, hi.b0, lo.b1, lo.b0]`. The trace,
-/// constraints, and `Sha256Digest` relation use this same order. Each limb
+/// constraints, and packed digest relation use this same order. Each limb
 /// satisfies `limb = 256 * b1 + b0`.
 pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BYTES] {
     let mut out = [0u32; DIGEST_BYTES];
@@ -286,7 +274,7 @@ pub fn h_out_digest_bytes(h_out: &[WordLimbs; N_STATE_WORDS]) -> [u32; DIGEST_BY
     out
 }
 
-pub fn word_be_bytes(lo: u32, hi: u32) -> [u32; BYTES_PER_WORD] {
+pub fn word_be_bytes(lo: u32, hi: u32) -> [u32; WORD_BYTES] {
     [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff]
 }
 

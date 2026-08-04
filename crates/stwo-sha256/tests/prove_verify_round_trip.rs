@@ -5,9 +5,10 @@ use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::interaction::InteractionClaim;
 use stwo_sha256::stark::{prove_sha256, verify_sha256_proof, ProverConfig, Sha256ProveError};
 use stwo_sha256::trace::{generate_trace, min_log_size, Layout, ROWS_PER_BLOCK};
+use stwo_sha256::types::PackedSha256Witness;
 use stwo_sha256::witness::{compute_packed_sha256_witness, PackedSha256Error};
 
-fn packed(message_set: &[&[u8]]) -> stwo_sha256::PackedSha256Witness {
+fn packed(message_set: &[&[u8]]) -> PackedSha256Witness {
     compute_packed_sha256_witness(message_set).expect("packed witness")
 }
 
@@ -92,7 +93,8 @@ fn packed_four_and_five_message_traces_match_native_sha_and_geometry() {
             let actual: Vec<u8> = (0..32)
                 .map(|index| trace[Layout::digest_byte(index)][slot].0 as u8)
                 .collect();
-            assert_eq!(actual.as_slice(), Sha256::digest(message).as_slice());
+            let expected = Sha256::digest(message);
+            assert_eq!(actual.as_slice(), &expected[..]);
         }
         assert!(
             (1usize << log_size) - next_block * ROWS_PER_BLOCK >= ROWS_PER_BLOCK,

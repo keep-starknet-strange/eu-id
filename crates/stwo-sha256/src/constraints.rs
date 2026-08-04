@@ -14,10 +14,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry, ORIGINAL_TRACE_IDX};
 
 use crate::components::{is_first_row_column_id, round_cyclic_column_ids};
-use crate::constants::{DIGEST_BYTES, IV, N_STATE_WORDS};
+use crate::constants::{DIGEST_BYTES, IV, N_INPUT_WORDS, N_STATE_WORDS, WORD_BYTES};
 use crate::relations::Sha256Relations;
 use crate::trace::WORD_BIT_COLS;
-use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
+use crate::types::LIMB_BITS;
 
 enum WordBitMasks<F> {
     Sparse([[F; 3]; WORD_BIT_COLS]),
@@ -33,7 +33,7 @@ pub struct Sha256Eval {
     /// The four active `Range_k` channels plus cross-component digest and
     /// selected-field channels.
     pub relations: Sha256Relations,
-    /// Yield the final digest bytes on the `Sha256Digest` channel when set.
+    /// Yield the final digest bytes on the packed digest channel when set.
     ///
     /// This yield is the producer side of the digest binding.
     /// A standalone proof has no digest consumer.
@@ -522,12 +522,9 @@ impl FrameworkEval for Sha256Eval {
         let is_length_block = eval.next_trace_mask();
         let is_length_only_block = eval.next_trace_mask();
         let is_marker_only_block = eval.next_trace_mask();
-        let is_marker_word: [E::F; WORDS_PER_BLOCK] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let marker_byte_sel: [E::F; BYTES_PER_WORD] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let marker_word_byte: [E::F; BYTES_PER_WORD] =
-            std::array::from_fn(|_| eval.next_trace_mask());
+        let is_marker_word: [E::F; N_INPUT_WORDS] = std::array::from_fn(|_| eval.next_trace_mask());
+        let marker_byte_sel: [E::F; WORD_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
+        let marker_word_byte: [E::F; WORD_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
         let marker_word_post_strict_15 = eval.next_trace_mask();
         let bit_length_w14_lo = eval.next_trace_mask();
         let bit_length_w14_hi = eval.next_trace_mask();
@@ -588,9 +585,9 @@ impl FrameworkEval for Sha256Eval {
         );
 
         // Cumulative one-hot marker-word prefix sums.
-        let mut cum_marker_word: [E::F; WORDS_PER_BLOCK] =
+        let mut cum_marker_word: [E::F; N_INPUT_WORDS] =
             std::array::from_fn(|_| E::F::from(M31::from(0u32)));
-        for j in 1..WORDS_PER_BLOCK {
+        for j in 1..N_INPUT_WORDS {
             cum_marker_word[j] = cum_marker_word[j - 1].clone() + is_marker_word[j - 1].clone();
         }
 
@@ -604,7 +601,7 @@ impl FrameworkEval for Sha256Eval {
         let byte_base = E::F::from(M31::from(1u32 << 8));
         let mut sum_w_hi = E::F::from(M31::from(0u32));
         let mut sum_w_lo = E::F::from(M31::from(0u32));
-        for (j, is_marker) in is_marker_word.iter().enumerate().take(WORDS_PER_BLOCK) {
+        for (j, is_marker) in is_marker_word.iter().enumerate().take(N_INPUT_WORDS) {
             sum_w_hi += is_marker.clone() * w_msg(j).1.clone();
             sum_w_lo += is_marker.clone() * w_msg(j).0.clone();
         }
@@ -621,7 +618,7 @@ impl FrameworkEval for Sha256Eval {
 
         // (P.E) The marker byte is `0x80`.
         let marker_value = E::F::from(M31::from(0x80u32));
-        for b in 0..BYTES_PER_WORD {
+        for b in 0..WORD_BYTES {
             eval.add_constraint(
                 marker_byte_sel[b].clone() * (marker_word_byte[b].clone() - marker_value.clone()),
             );
@@ -629,7 +626,7 @@ impl FrameworkEval for Sha256Eval {
 
         // (P.F) Bytes strictly after the marker byte are zero.
         let mut cum_byte_sel = E::F::from(M31::from(0u32));
-        for b in 0..BYTES_PER_WORD {
+        for b in 0..WORD_BYTES {
             eval.add_constraint(cum_byte_sel.clone() * marker_word_byte[b].clone());
             cum_byte_sel += marker_byte_sel[b].clone();
         }
@@ -704,9 +701,9 @@ impl FrameworkEval for Sha256Eval {
         if self.expose_field {
             let base = E::F::from(M31::from(crate::relations::PACKED_SHA_STREAM_FIELD_BASE));
             for byte_in_block in 0..crate::constants::BLOCK_BYTES {
-                let word_idx = byte_in_block / BYTES_PER_WORD;
-                let byte_in_word = byte_in_block % BYTES_PER_WORD;
-                let first_bit = (BYTES_PER_WORD - 1 - byte_in_word) * 8;
+                let word_idx = byte_in_block / WORD_BYTES;
+                let byte_in_word = byte_in_block % WORD_BYTES;
+                let first_bit = (WORD_BYTES - 1 - byte_in_word) * 8;
                 let round_offset = 15 - word_idx;
                 let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
                     acc + w_bit_at(first_bit + bit, round_offset)

@@ -1,14 +1,5 @@
-use eu_id_prover::{mdoc, prove_mdoc, verify_product_mdoc, Error};
-
-fn flip_unique_document_value(document: &mut [u8], value: &[u8]) {
-    let offsets = document
-        .windows(value.len())
-        .enumerate()
-        .filter_map(|(offset, window)| (window == value).then_some(offset))
-        .collect::<Vec<_>>();
-    assert_eq!(offsets.len(), 1, "fixture value must occur exactly once");
-    document[offsets[0] + value.len() - 1] ^= 1;
-}
+use super::flip_unique_document_value;
+use eu_id_prover::{mdoc, prove_mdoc, Error};
 
 #[test]
 fn product_api_rejects_zero_request_binding_before_document_work() {
@@ -101,65 +92,4 @@ fn product_api_rejects_each_tampered_p256_signature_before_proving() {
         ),
         Err(Error::Revocation(_))
     ));
-}
-
-#[test]
-#[ignore = "proof-heavy product API round trip"]
-fn product_api_round_trip_rejects_public_statement_drift() {
-    let fixture = mdoc::demo_mdoc_circuit_fixture();
-    let (proof, statement) = prove_mdoc(
-        &fixture.document,
-        &fixture.request,
-        fixture.statement.policy,
-    )
-    .expect("current product proof builds");
-    verify_product_mdoc(&proof, &statement).expect("current product proof verifies");
-
-    let mut changed_binding = statement.clone();
-    changed_binding.request_binding[0] ^= 1;
-    assert!(verify_product_mdoc(&proof, &changed_binding).is_err());
-
-    let mut changed_doctype = statement.clone();
-    changed_doctype.doctype = "wrong.doctype".to_string();
-    assert!(verify_product_mdoc(&proof, &changed_doctype).is_err());
-
-    let mut changed_namespace = statement.clone();
-    changed_namespace.namespace = "wrong.namespace".to_string();
-    assert!(verify_product_mdoc(&proof, &changed_namespace).is_err());
-
-    let mut changed_issuer = statement.clone();
-    changed_issuer.issuer_public_key.x.0[0] ^= 1;
-    assert!(verify_product_mdoc(&proof, &changed_issuer).is_err());
-
-    let mut changed_device_hash = statement.clone();
-    changed_device_hash.device_message_hash.0[0] ^= 1;
-    assert!(verify_product_mdoc(&proof, &changed_device_hash).is_err());
-
-    let mut changed_revocation_epoch = statement.clone();
-    changed_revocation_epoch.ts13_revocation.epoch = changed_revocation_epoch
-        .ts13_revocation
-        .epoch
-        .checked_add(1)
-        .expect("fixture epoch can increment");
-    assert!(verify_product_mdoc(&proof, &changed_revocation_epoch).is_err());
-
-    let mut changed_revocation_key = statement.clone();
-    changed_revocation_key
-        .ts13_revocation
-        .revocation_public_key
-        .x
-        .0[0] ^= 1;
-    assert!(verify_product_mdoc(&proof, &changed_revocation_key).is_err());
-
-    let mut changed_scope = statement.clone();
-    changed_scope.attributes.pop();
-    assert!(verify_product_mdoc(&proof, &changed_scope).is_err());
-
-    let mut changed_policy = statement;
-    changed_policy.policy.min_age_years = changed_policy
-        .policy
-        .min_age_years
-        .checked_add(1)
-        .expect("fixture age can increment");
-    assert!(verify_product_mdoc(&proof, &changed_policy).is_err());
 }

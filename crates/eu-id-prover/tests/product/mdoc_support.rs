@@ -1,5 +1,6 @@
 //! Current mdoc 2.0 grammar, validity, digest, and mandatory revocation tests.
 
+use super::decode;
 use ciborium::value::Value;
 use ecdsa::signature::Signer;
 use eu_id_prover::mdoc::{self, MdocCircuitStatement, MdocError, MdocTimestamp};
@@ -12,10 +13,6 @@ use p256::ecdsa::{Signature as P256Signature, SigningKey};
 use sha2::{Digest as _, Sha256};
 
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
-
-fn decode(bytes: &[u8]) -> Value {
-    ciborium::de::from_reader(bytes).expect("fixture CBOR decodes")
-}
 
 fn encode(value: Value) -> Vec<u8> {
     let mut bytes = Vec::new();

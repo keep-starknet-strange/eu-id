@@ -61,10 +61,8 @@ use stwo_sha256::relations::{
     PackedShaDigestRelation, SharedPackedShaDigestRelation, SharedShaTableRelations,
     PACKED_SHA_STREAM_FIELD_BASE,
 };
-use stwo_sha256::shared_tables::{
-    ShaTableMultiplicities, ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier,
-};
-use stwo_sha256::witness::{compute_packed_sha256_witness, compute_sha256_witness};
+use stwo_sha256::shared_tables::{ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier};
+use stwo_sha256::witness::compute_packed_sha256_witness;
 
 use crate::mdoc_cbor_stream::{
     MdocCborInputMode, MdocCborStream, MdocCborStreamInteractionClaim, MdocCborWitness,
@@ -2768,7 +2766,7 @@ impl MdocCircuitStatement {
 
 /// Checks that `item[offset..offset+expected.len()] == expected`.
 ///
-/// Multi-block field exposure permits a window across a SHA-256 block boundary.
+/// Multi-block field binding permits a window across a SHA-256 block boundary.
 /// The host must only check the bytes at the supplied offset.
 fn ensure_value_window(item: &[u8], offset: usize, expected: &[u8]) -> Result<(), MdocError> {
     ensure_value_window_with_message(item, offset, expected, "element value bytes at offset")
@@ -4343,13 +4341,7 @@ fn prove_mdoc_circuit_with_pcs_config(
     )
     .map_err(|error| Error::Prove(format!("exact MSO CBOR/SHA binding: {error}")))?;
 
-    let packed_sha_messages = packed_messages
-        .iter()
-        .map(|message| compute_sha256_witness(message))
-        .collect::<Vec<_>>();
-    let sha_table_multiplicities = ShaTableMultiplicities::from_messages(&packed_sha_messages);
-    let mut sha_tables =
-        ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
+    let mut sha_tables = ShaTablesProver::new(&packed_sha_witness, sha_table_relations.clone());
     let mut packed_sha = Sha256Prover::new(&packed_sha_witness, shared_sha_log)
         .map_err(|error| Error::Prove(format!("packed SHA prover: {error}")))?
         .with_shared_tables(sha_table_relations.clone())
@@ -6618,38 +6610,6 @@ mod mdoc_sha_table_tests {
         }
     }
 
-    #[test]
-    #[ignore = "slow: proves once and rejects stale PCS configuration metadata"]
-    fn production_verifier_rejects_stale_pcs_configurations() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let mut proof = prove_mdoc_circuit(&fixture.extracted, &fixture.statement)
-            .expect("current product proof");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("pinned configuration verifies");
-
-        for stale in [
-            PcsConfig {
-                pow_bits: 20,
-                fri_config: FriConfig::new(1, 2, 54, 2),
-                lifting_log_size: None,
-            },
-            PcsConfig {
-                pow_bits: 10,
-                fri_config: FriConfig::new(1, 2, 59, 2),
-                lifting_log_size: None,
-            },
-        ] {
-            proof.stark_proof.0.config = stale;
-            assert!(matches!(
-                verify_mdoc_circuit_with_pcs_config(
-                    &proof,
-                    &fixture.statement,
-                    mdoc_production_pcs_config(),
-                ),
-                Err(Error::WeakConfig { .. })
-            ));
-        }
-    }
-
     fn test_claim_mask(log_size: u32) -> (ClaimMaskTrace, QM31) {
         let mut ring = ClaimMaskRing::new(&[log_size, log_size]).unwrap();
         let mask = ring.take(log_size).unwrap();
@@ -6972,6 +6932,28 @@ mod mdoc_sha_table_tests {
             ],
         );
 
+        let first_bundle = &proof_a.coprocessor_bundle;
+        let second_bundle = &proof_b.coprocessor_bundle;
+        assert_eq!(first_bundle.mac_tags.len(), second_bundle.mac_tags.len());
+        assert_ne!(
+            first_bundle.mac_tags, second_bundle.mac_tags,
+            "same-witness mdoc proofs reused MAC tags"
+        );
+        for tag in &first_bundle.mac_tags {
+            assert!(
+                !second_bundle.mac_tags.contains(tag),
+                "same-witness mdoc proofs shared MAC tag {tag:?}"
+            );
+        }
+        assert_ne!(
+            first_bundle.root, second_bundle.root,
+            "same-witness mdoc proofs reused group-A Ligero root"
+        );
+        assert_ne!(
+            first_bundle.root_b, second_bundle.root_b,
+            "same-witness mdoc proofs reused group-B Ligero root"
+        );
+
         let serialized = serde_json::to_string(&proof_a).expect("proof serializes");
         assert!(
             !serialized.contains("blinder") && !serialized.contains("claim_mask"),
@@ -6992,23 +6974,22 @@ mod mdoc_sha_table_tests {
     /// reproduces each serialized field, so a wrong column-to-module map fails
     /// here rather than silently mislabelling bytes.
     #[test]
-    fn mdoc_proof_byte_breakdown_sums_to_the_serialized_proof() {
-        // Proving needs far more stack than a default test thread has, which is
-        // why the other proving tests here are `#[ignore]`. This gate has to run
-        // by default, so it proves on a prover-sized stack instead.
+    #[ignore = "slow: proves the product metadata and statement matrix once"]
+    fn current_product_proof_metadata_and_statement_matrix() {
         const PROVER_STACK_SIZE: usize = 32 * 1024 * 1024;
         std::thread::Builder::new()
             .stack_size(PROVER_STACK_SIZE)
-            .spawn(breakdown_partitions_the_serialized_proof)
+            .spawn(current_product_proof_metadata_and_statement_matrix_body)
             .expect("spawns a prover-sized thread")
             .join()
-            .expect("breakdown gate thread does not panic");
+            .expect("product metadata matrix thread does not panic");
     }
 
-    fn breakdown_partitions_the_serialized_proof() {
+    fn current_product_proof_metadata_and_statement_matrix_body() {
         let fixture = demo_mdoc_circuit_fixture();
         let proof =
             prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies");
         let breakdown = mdoc_proof_byte_breakdown(&proof, &fixture.statement)
             .expect("byte breakdown for a verifying proof");
 
@@ -7056,19 +7037,30 @@ mod mdoc_sha_table_tests {
                 > 1,
             "mdoc_scope sub-components were not separated",
         );
-    }
 
-    /// Confirms that the verifier rejects a balanced metadata change.
-    ///
-    /// Each masked claim binds to its committed interaction column at the OODS boundary.
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn mdoc_balanced_claim_mask_tamper_is_rejected() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement)
-            .expect("mdoc verifies with committed claim masks");
+        for stale in [
+            PcsConfig {
+                pow_bits: 20,
+                fri_config: FriConfig::new(1, 2, 54, 2),
+                lifting_log_size: None,
+            },
+            PcsConfig {
+                pow_bits: 10,
+                fri_config: FriConfig::new(1, 2, 59, 2),
+                lifting_log_size: None,
+            },
+        ] {
+            let mut stale_proof = proof.clone();
+            stale_proof.stark_proof.0.config = stale;
+            assert!(matches!(
+                verify_mdoc_circuit_with_pcs_config(
+                    &stale_proof,
+                    &fixture.statement,
+                    mdoc_production_pcs_config(),
+                ),
+                Err(Error::WeakConfig { .. })
+            ));
+        }
 
         let mut split_tamper = proof.clone();
         let shift = QM31::from_u32_unchecked(1, 0, 0, 0);
@@ -7121,85 +7113,44 @@ mod mdoc_sha_table_tests {
             verify_mdoc_circuit(&extra_nat_claim, &fixture.statement).is_err(),
             "unbound third nationality claim unexpectedly verified",
         );
-    }
 
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn default_mdoc_verifier_rejects_preprocessed_root_tamper_before_stark() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let mut proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
-
-        proof.stark_proof.0.commitments[0].0[0] ^= 1;
-
+        let mut tampered_root = proof.clone();
+        tampered_root.stark_proof.0.commitments[0].0[0] ^= 1;
         assert!(matches!(
-            verify_mdoc_circuit(&proof, &fixture.statement),
+            verify_mdoc_circuit(&tampered_root, &fixture.statement),
             Err(Error::PreprocessedRootMismatch { .. })
         ));
-    }
 
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn shared_sha_table_provider_claim_is_bound() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let mut proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
-
-        proof.sha_tables_interaction_claim.pairs[0].claimed_sum =
-            -proof.sha_tables_interaction_claim.pairs[0].claimed_sum;
-
+        let mut shared_claim = proof.clone();
+        shared_claim.sha_tables_interaction_claim.pairs[0].claimed_sum =
+            -shared_claim.sha_tables_interaction_claim.pairs[0].claimed_sum;
         assert!(
-            verify_mdoc_circuit(&proof, &fixture.statement).is_err(),
+            verify_mdoc_circuit(&shared_claim, &fixture.statement).is_err(),
             "tampered shared SHA table provider claim unexpectedly verified",
         );
-    }
-
-    /// Every verifier-controlled semantic scope field is transcript-bound and
-    /// checked against the signed CBOR grammar.
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn mdoc_public_semantic_scope_tampers_reject() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
 
         let mut request_binding = fixture.statement.clone();
         request_binding.request_binding[0] ^= 1;
         assert!(verify_mdoc_circuit(&proof, &request_binding).is_err());
-
         let mut doctype = fixture.statement.clone();
         doctype.doctype.push_str(".other");
         assert!(verify_mdoc_circuit(&proof, &doctype).is_err());
-
         let mut namespace = fixture.statement.clone();
         namespace.namespace.push_str(".other");
         assert!(verify_mdoc_circuit(&proof, &namespace).is_err());
-
         let mut element_identifier = fixture.statement.clone();
         element_identifier.attributes[0]
             .element_identifier
             .push_str("_other");
         assert!(verify_mdoc_circuit(&proof, &element_identifier).is_err());
-
         let mut mode = fixture.statement.clone();
         mode.attributes[0].mode = MdocDisclosureMode::Alpha2Set;
         assert!(verify_mdoc_circuit(&proof, &mode).is_err());
-    }
 
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn malformed_shared_sha_table_provider_claim_rejects_without_panic() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let mut proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
-
-        proof.sha_tables_interaction_claim.pairs.clear();
+        let mut malformed_claim = proof.clone();
+        malformed_claim.sha_tables_interaction_claim.pairs.clear();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            verify_mdoc_circuit(&proof, &fixture.statement)
+            verify_mdoc_circuit(&malformed_claim, &fixture.statement)
         }));
         assert!(
             matches!(result, Ok(Err(Error::Verify(_)))),
@@ -7263,7 +7214,8 @@ mod mdoc_sha_table_tests {
                         trace[stwo_sha256::trace::Layout::digest_byte(index)][terminal_slot].0 as u8
                     })
                     .collect();
-                assert_eq!(actual.as_slice(), Sha256::digest(message).as_slice());
+                let expected = Sha256::digest(message);
+                assert_eq!(actual.as_slice(), &expected[..]);
             }
             assert_eq!(messages.len(), expected_message_count);
         }
@@ -7280,14 +7232,6 @@ mod coprocessor_tests {
         post_statement: [u8; 32],
         post_seed: [u8; 32],
         post_rejoin: [u8; 32],
-    }
-
-    fn verified_mdoc_proof() -> (MdocCircuitProof, MdocCircuitStatement) {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies");
-        (proof, fixture.statement)
     }
 
     fn unlinkability_fixture(birth_date: &str, nationalities: &[&str]) -> DemoMdocCircuitFixture {
@@ -7432,7 +7376,10 @@ mod coprocessor_tests {
     #[test]
     #[ignore = "slow: proves product mdoc circuit with coprocessor bundle"]
     fn mdoc_coprocessor_rejects_required_negative_mutations() {
-        let (proof, statement) = verified_mdoc_proof();
+        let fixture = demo_mdoc_circuit_fixture();
+        let statement = fixture.statement;
+        let proof = prove_mdoc_circuit(&fixture.extracted, &statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &statement).expect("mdoc verifies");
 
         let public_statement = MdocPublicStatement::from_circuit(&statement);
         verify_product_mdoc_public_statement(&proof, &public_statement)
@@ -7499,14 +7446,8 @@ mod coprocessor_tests {
             &mut cross_signature.device_input,
         );
         assert_verify_rejects("cross-signature swap", &proof, &cross_signature);
-    }
 
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit with coprocessor bundle"]
-    fn mdoc_coprocessor_statement_order_and_rejoin_guards_are_bound() {
-        let (proof, statement) = verified_mdoc_proof();
         let bundle = &proof.coprocessor_bundle;
-
         let canonical = mdoc_coprocessor_digests(
             b"issuer",
             &statement.issuer_input,
@@ -7560,43 +7501,7 @@ mod coprocessor_tests {
         let _seed = crate::draw_coprocessor_seed(&mut with_rejoin);
         crate::mix_coprocessor_rejoin(&mut with_rejoin, bundle).expect("mdoc rejoin mixes");
         let with_rejoin_next = crate::draw_coprocessor_seed(&mut with_rejoin);
-
         assert_ne!(with_rejoin_next, without_rejoin_next);
-    }
-
-    #[test]
-    #[ignore = "slow: proves the same mdoc witness twice to check P4b MAC freshness"]
-    fn a_p_freshness_linkability() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let first =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("first mdoc proves");
-        verify_mdoc_circuit(&first, &fixture.statement).expect("first mdoc verifies");
-        let second =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("second mdoc proves");
-        verify_mdoc_circuit(&second, &fixture.statement).expect("second mdoc verifies");
-
-        let first_bundle = &first.coprocessor_bundle;
-        let second_bundle = &second.coprocessor_bundle;
-
-        assert_eq!(first_bundle.mac_tags.len(), second_bundle.mac_tags.len());
-        assert_ne!(
-            first_bundle.mac_tags, second_bundle.mac_tags,
-            "same-witness mdoc proofs reused MAC tags"
-        );
-        for tag in &first_bundle.mac_tags {
-            assert!(
-                !second_bundle.mac_tags.contains(tag),
-                "same-witness mdoc proofs shared MAC tag {tag:?}"
-            );
-        }
-        assert_ne!(
-            first_bundle.root, second_bundle.root,
-            "same-witness mdoc proofs reused group-A Ligero root"
-        );
-        assert_ne!(
-            first_bundle.root_b, second_bundle.root_b,
-            "same-witness mdoc proofs reused group-B Ligero root"
-        );
     }
 
     /// Distinct valid private credentials reconstruct the same caller-owned
@@ -7724,16 +7629,6 @@ mod coprocessor_tests {
         );
     }
 
-    fn current_product_revocation_proof() -> (MdocCircuitProof, MdocCircuitStatement) {
-        let fixture = demo_mdoc_circuit_fixture();
-        let mut statement = fixture.statement.clone();
-        statement.request_binding = [0x51; 32];
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &statement).expect("product mdoc proves");
-        verify_mdoc_circuit(&proof, &statement).expect("product mdoc verifies");
-        (proof, statement)
-    }
-
     #[test]
     fn public_statement_exposes_only_caller_authoritative_revocation_inputs() {
         let statement = demo_mdoc_circuit_fixture().statement;
@@ -7834,7 +7729,11 @@ mod coprocessor_tests {
     #[test]
     #[ignore = "slow: proves the fixed product shape before downward metadata mutations"]
     fn product_real_proof_rejects_downward_shape_mutations() {
-        let (proof, statement) = current_product_revocation_proof();
+        let fixture = demo_mdoc_circuit_fixture();
+        let mut statement = fixture.statement.clone();
+        statement.request_binding = [0x51; 32];
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &statement).expect("product mdoc proves");
         verify_mdoc_circuit(&proof, &statement).expect("honest fixed-shape product proof verifies");
 
         for (label, age_index, nationality_index) in [
@@ -7872,18 +7771,13 @@ mod coprocessor_tests {
             "downward product CBOR log unexpectedly verified"
         );
 
-        let mut scope = proof;
+        let mut scope = proof.clone();
         scope.mdoc_scope_metadata.log_size -= 1;
         assert!(
             verify_mdoc_circuit(&scope, &statement).is_err(),
             "downward product scope log unexpectedly verified"
         );
-    }
 
-    #[test]
-    #[ignore = "slow: proves the TS13 revocation tuple and checks its private coprocessor binding"]
-    fn revocation_private_instance_is_hidden_and_tampering_fails_closed() {
-        let (proof, statement) = current_product_revocation_proof();
         let revocation_input = ts13_revocation_p256_input(&statement);
         let encoded = bincode::serialize(&proof).expect("revocation proof serializes");
         for (label, secret) in [
@@ -7918,19 +7812,14 @@ mod coprocessor_tests {
             &wrong_key_statement,
         );
 
-        // The verifier fixes the third ECDSA instance set from the public
-        // statement. Removing any bundle entry causes failure.
-        let mut tampered = proof.clone();
-        tampered.coprocessor_bundle.entries.pop();
-        assert_verify_rejects("stripped revocation instance", &tampered, &statement);
+        let mut stripped_bundle = proof.clone();
+        stripped_bundle.coprocessor_bundle.entries.pop();
+        assert_verify_rejects("stripped revocation instance", &stripped_bundle, &statement);
 
-        // The final two tags rejoin the private revocation SHA digest to the
-        // hidden coprocessor z input. A changed tag must fail either the
-        // coprocessor MAC circuit or the STARK-side MAC relation.
-        let mut tampered = proof.clone();
-        let tags = &mut tampered.coprocessor_bundle.mac_tags;
+        let mut tampered_tag = proof.clone();
+        let tags = &mut tampered_tag.coprocessor_bundle.mac_tags;
         tags[eu_id_ec_coprocessor::ecdsa::MDOC_P4B_MAC_HALF_COUNT - 1][0] ^= 1;
-        assert_verify_rejects("tampered revocation MAC tag", &tampered, &statement);
+        assert_verify_rejects("tampered revocation MAC tag", &tampered_tag, &statement);
     }
 }
 

@@ -21,9 +21,11 @@ use crate::native::{
     big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj, n_blocks_for, pad_message,
     parse_blocks,
 };
+#[cfg(test)]
+use crate::types::Schedule;
 use crate::types::{
-    AddCarries, BlockWitness, Digest, HashState, PackedSha256Witness, PaddingWitness, RoundWitness,
-    Schedule, ScheduleEntryWitness, Sha256Witness, WordLimbs, LIMB_BITS,
+    AddCarries, BlockWitness, HashState, PackedSha256Witness, PaddingWitness, RoundWitness,
+    ScheduleEntryWitness, Sha256Witness, WordLimbs, LIMB_BITS,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,16 +64,9 @@ impl core::fmt::Display for PackedSha256Error {
 impl std::error::Error for PackedSha256Error {}
 
 /// Pad the message and assemble the padding witness used by the AIR.
-pub fn compute_padding_witness(msg: &[u8]) -> PaddingWitness {
+pub(crate) fn compute_padding_witness(msg: &[u8]) -> PaddingWitness {
     let padded = pad_message(msg);
-    let n_blocks = padded.len() / BLOCK_BYTES;
-    let bit_length = (msg.len() as u64).checked_mul(8).expect("message too long");
-    PaddingWitness {
-        message: msg.to_vec(),
-        padded,
-        n_blocks,
-        bit_length,
-    }
+    PaddingWitness { padded }
 }
 
 /// Add `k` 32-bit words modulo `2³²`, producing the result *and* the lo/hi
@@ -106,31 +101,26 @@ fn add_words_with_carries(words: &[u32]) -> (u32, AddCarries) {
 
 /// Build the witness for one message-schedule entry `W[t]` (for `t ≥ 16`).
 fn compute_schedule_entry_witness(
-    t: u32,
     w_t_minus_2: u32,
     w_t_minus_7: u32,
     w_t_minus_15: u32,
     w_t_minus_16: u32,
-) -> ScheduleEntryWitness {
+) -> (u32, ScheduleEntryWitness) {
     let s1 = lower_sigma1(w_t_minus_2);
     let s0 = lower_sigma0(w_t_minus_15);
     let (w_t, carries) = add_words_with_carries(&[s1, w_t_minus_7, s0, w_t_minus_16]);
-    ScheduleEntryWitness {
-        t,
-        w_t_minus_2: WordLimbs::from_u32(w_t_minus_2),
-        w_t_minus_7: WordLimbs::from_u32(w_t_minus_7),
-        w_t_minus_15: WordLimbs::from_u32(w_t_minus_15),
-        w_t_minus_16: WordLimbs::from_u32(w_t_minus_16),
-        lower_sigma0: WordLimbs::from_u32(s0),
-        lower_sigma1: WordLimbs::from_u32(s1),
-        carries,
-        w_t: WordLimbs::from_u32(w_t),
-    }
+    (
+        w_t,
+        ScheduleEntryWitness {
+            lower_sigma0: WordLimbs::from_u32(s0),
+            lower_sigma1: WordLimbs::from_u32(s1),
+            carries,
+        },
+    )
 }
 
 /// Build the witness for one compression round.
 fn compute_round_witness(
-    t: u32,
     state: [u32; N_STATE_WORDS],
     w_t: u32,
     k_t: u32,
@@ -148,10 +138,7 @@ fn compute_round_witness(
     let (a_new, a_new_carries) = add_words_with_carries(&[t1, t2]);
 
     let wit = RoundWitness {
-        t,
         state_in: limbify_state(&state),
-        w_t: WordLimbs::from_u32(w_t),
-        k_t: WordLimbs::from_u32(k_t),
         sigma0: WordLimbs::from_u32(s0_val),
         sigma1: WordLimbs::from_u32(s1_val),
         ch: WordLimbs::from_u32(ch_val),
@@ -179,7 +166,7 @@ fn limbify_state(state: &[u32; N_STATE_WORDS]) -> [WordLimbs; N_STATE_WORDS] {
 }
 
 /// Build the witness for one block: schedule + 64 rounds + finalization.
-pub fn compute_block_witness(
+pub(crate) fn compute_block_witness(
     h_in_state: &HashState,
     block_bytes: &[u8; BLOCK_BYTES],
 ) -> BlockWitness {
@@ -190,9 +177,8 @@ pub fn compute_block_witness(
     w[..N_INPUT_WORDS].copy_from_slice(&block.0);
     let mut schedule_entries = Vec::with_capacity(N_ROUNDS - N_INPUT_WORDS);
     for t in N_INPUT_WORDS..N_ROUNDS {
-        let entry =
-            compute_schedule_entry_witness(t as u32, w[t - 2], w[t - 7], w[t - 15], w[t - 16]);
-        w[t] = entry.w_t.to_u32();
+        let (w_t, entry) = compute_schedule_entry_witness(w[t - 2], w[t - 7], w[t - 15], w[t - 16]);
+        w[t] = w_t;
         schedule_entries.push(entry);
     }
     let schedule_limbs: Vec<WordLimbs> = w.iter().copied().map(WordLimbs::from_u32).collect();
@@ -201,7 +187,7 @@ pub fn compute_block_witness(
     let mut state = h_in_state.0;
     let mut rounds = Vec::with_capacity(N_ROUNDS);
     for t in 0..N_ROUNDS {
-        let (next_state, round) = compute_round_witness(t as u32, state, w[t], K[t]);
+        let (next_state, round) = compute_round_witness(state, w[t], K[t]);
         rounds.push(round);
         state = next_state;
     }
@@ -232,11 +218,11 @@ pub fn compute_block_witness(
 /// per padded block. The returned digest is recoverable from the last
 /// block's `h_out`. We attach it explicitly so consumers do not have to
 /// recompose.
-pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
+pub(crate) fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
     let padding = compute_padding_witness(msg);
     let blocks_parsed = parse_blocks(&padding.padded);
     let n_blocks = blocks_parsed.len();
-    let message_byte_length = padding.message.len() as u64;
+    let message_byte_length = msg.len() as u64;
 
     let mut h_state = HashState(IV);
     let mut blocks = Vec::with_capacity(n_blocks);
@@ -260,12 +246,7 @@ pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
         blocks.push(bw);
     }
 
-    let digest = Digest::from_state(&h_state);
-    Sha256Witness {
-        padding,
-        blocks,
-        digest,
-    }
+    Sha256Witness { padding, blocks }
 }
 
 pub fn compute_packed_sha256_witness(
@@ -300,7 +281,8 @@ pub fn compute_packed_sha256_witness(
 /// Smoke check: assert `(result_word, carries)` consistency for one
 /// `add_words_with_carries` call. Available so the trace generator can
 /// reuse the same identity at constraint-emit time without duplicating it.
-pub fn add_identity_holds(addends: &[u32], result: u32, carries: AddCarries) -> bool {
+#[cfg(test)]
+fn add_identity_holds(addends: &[u32], result: u32, carries: AddCarries) -> bool {
     let lo_sum: u32 = addends.iter().map(|w| w & 0xFFFF).sum();
     let hi_sum: u32 = addends.iter().map(|w| w >> LIMB_BITS).sum();
     let lhs_lo = lo_sum;
@@ -313,7 +295,8 @@ pub fn add_identity_holds(addends: &[u32], result: u32, carries: AddCarries) -> 
 /// Sanity: rebuild the final schedule from a `BlockWitness` and confirm it
 /// matches the native expansion. Used by the tests. Useful as a debug
 /// helper if a constraint ever disagrees.
-pub fn schedule_from_block_witness(b: &BlockWitness) -> Schedule {
+#[cfg(test)]
+fn schedule_from_block_witness(b: &BlockWitness) -> Schedule {
     let mut s = [0u32; N_ROUNDS];
     for (i, slot) in s.iter_mut().enumerate() {
         *slot = b.schedule[i].to_u32();
@@ -378,9 +361,15 @@ mod tests {
 
         let recovered = schedule_from_block_witness(&bw);
         assert_eq!(recovered.0, native_schedule.0);
-        // And every schedule entry's `w_t` matches the recurrence.
-        for entry in &bw.schedule_entries {
-            assert_eq!(entry.w_t.to_u32(), native_schedule.0[entry.t as usize]);
+        for (offset, entry) in bw.schedule_entries.iter().enumerate() {
+            assert_eq!(
+                bw.schedule[16 + offset].to_u32(),
+                native_schedule.0[16 + offset]
+            );
+            assert_eq!(
+                entry.lower_sigma0.to_u32(),
+                lower_sigma0(native_schedule.0[1 + offset])
+            );
         }
     }
 
@@ -410,7 +399,7 @@ mod tests {
         bytes[BLOCK_BYTES - 1] = 24;
 
         let bw = compute_block_witness(&HashState(IV), &bytes);
-        for w in bw.rounds.windows(2) {
+        for (i, w) in bw.rounds.windows(2).enumerate() {
             // Compute the next state from w[0]'s witness fields.
             let r = &w[0];
             let next = [
@@ -424,7 +413,7 @@ mod tests {
                 r.state_in[6].to_u32(),
             ];
             let next_from_witness: [u32; 8] = std::array::from_fn(|i| w[1].state_in[i].to_u32());
-            assert_eq!(next, next_from_witness, "state chain broke at t={}", r.t);
+            assert_eq!(next, next_from_witness, "state chain broke at round {i}");
         }
     }
 
@@ -441,14 +430,11 @@ mod tests {
         let sched = schedule_from_block_witness(&bw);
         for (t, &k_t) in K.iter().enumerate().take(N_ROUNDS) {
             let r = &bw.rounds[t];
-            assert_eq!(r.t, t as u32);
             let [a, b, c, _d, e, f, g, _h] = state;
             assert_eq!(r.sigma0.to_u32(), big_sigma0(a));
             assert_eq!(r.sigma1.to_u32(), big_sigma1(e));
             assert_eq!(r.ch.to_u32(), ch(e, f, g));
             assert_eq!(r.maj.to_u32(), maj(a, b, c));
-            assert_eq!(r.w_t.to_u32(), sched.0[t]);
-            assert_eq!(r.k_t.to_u32(), k_t);
 
             // The recurrence drives state forward to the next round.
             let t1 = state[7]
@@ -481,12 +467,12 @@ mod tests {
         for n in [0usize, 1, 55, 56, 63, 64, 65, 127, 128, 255, 1024] {
             let msg: Vec<u8> = (0..n).map(|i| ((i * 17) ^ 0x5A) as u8).collect();
             let witness = compute_sha256_witness(&msg);
-            assert_eq!(witness.digest.0, sha2_reference(&msg), "size = {n}");
+            assert_eq!(native::hash(&msg).0, sha2_reference(&msg), "size = {n}");
 
             // n_blocks consistent.
             assert_eq!(
                 witness.blocks.len(),
-                witness.padding.n_blocks,
+                witness.padding.padded.len() / BLOCK_BYTES,
                 "block count mismatch at n={n}"
             );
             // The first block always starts at IV.
@@ -555,7 +541,12 @@ mod tests {
             &[0u8; 1024][..],
         ] {
             let w = compute_sha256_witness(msg);
-            assert_eq!(w.digest.0, native::hash(msg).0);
+            let last = w.blocks.last().expect("one padded block");
+            let mut h = HashState::default();
+            for (i, value) in h.0.iter_mut().enumerate() {
+                *value = last.h_out[i].to_u32();
+            }
+            assert_eq!(crate::types::Digest::from_state(&h).0, native::hash(msg).0);
         }
     }
 }

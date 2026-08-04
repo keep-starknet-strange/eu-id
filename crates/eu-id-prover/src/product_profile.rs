@@ -204,10 +204,7 @@ mod tests {
         assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 229);
         let block_slots = 1usize << (PRODUCT_SHA_LOG_N_ROWS - 6);
         assert_eq!(block_slots, 256);
-        assert_eq!(
-            block_slots - PRODUCT_MAX_PACKED_SHA_BLOCKS,
-            27
-        );
+        assert_eq!(block_slots - PRODUCT_MAX_PACKED_SHA_BLOCKS, 27);
         assert!(block_slots - PRODUCT_MAX_PACKED_SHA_BLOCKS >= 1);
     }
 }

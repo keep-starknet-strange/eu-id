@@ -27,9 +27,7 @@
 use stwo::core::fields::qm31::QM31;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
-};
+use stwo_constraint_framework::{EvalAtRow, FrameworkEval, Relation, RelationEntry};
 
 use crate::tables_local::RANGE_8;
 
@@ -287,8 +285,6 @@ impl FrameworkEval for RangeKEval {
     }
 }
 
-pub type RangeKComponent = FrameworkComponent<RangeKEval>;
-
 // ---------------------------------------------------------------------------
 // Paired shared-table producer component (R2 fraction batching)
 // ---------------------------------------------------------------------------
@@ -410,8 +406,6 @@ impl FrameworkEval for SharedProducerPairEval {
         eval
     }
 }
-
-pub type SharedProducerPairComponent = FrameworkComponent<SharedProducerPairEval>;
 
 // ---------------------------------------------------------------------------
 // Aggregate IDs
