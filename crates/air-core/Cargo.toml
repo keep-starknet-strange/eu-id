@@ -3,10 +3,19 @@ name = "air-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Per-phase peak-RSS sampling in `prove_profiled`. Off by default; also needs
+# `EUID_PROVE_PROFILE=1` at runtime before any sampler thread is spawned.
+prove-profile = ["dep:memory-stats"]
+
 [dependencies]
 stwo = { workspace = true }
 stwo-constraint-framework = { workspace = true }
 num-traits = { workspace = true }
+memory-stats = { version = "1.2", optional = true, features = ["always_use_statm"] }
+
+[dev-dependencies]
+predicates = { path = "../predicates" }
 
 [lints]
 workspace = true

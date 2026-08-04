@@ -25,8 +25,10 @@ pub mod claim_mask;
 pub mod relations;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hash::{Hash, Hasher as _};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use num_traits::Zero;
 use stwo::core::air::Component;
@@ -338,6 +340,14 @@ pub trait AirProver: Air {
         false
     }
 
+    /// Human-readable module label for per-stage profiling. Defaults to the
+    /// concrete type name (the default body is monomorphized per implementor, so
+    /// `type_name::<Self>()` resolves to the real type through the vtable) — no
+    /// module needs to override it.
+    fn profile_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Appends preprocessed columns to the shared tree.
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
@@ -392,12 +402,275 @@ pub trait AirProver: Air {
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>>;
 }
 
+/// The prove stages tagged for wall-time and peak-RSS attribution, in execution
+/// order. The discriminant indexes both [`PHASE_LABELS`] and the per-phase
+/// high-water marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Twiddles,
+    Tree0Write,
+    Tree0Commit,
+    Tree1Write,
+    Tree1Commit,
+    DrawRelations,
+    Tree2Write,
+    Tree2Commit,
+    PostInteraction,
+    BuildComponents,
+    EngineProve,
+}
+
+const PHASE_COUNT: usize = 11;
+
+const PHASE_LABELS: [&str; PHASE_COUNT] = [
+    "twiddles",
+    "tree0_write",
+    "tree0_commit",
+    "tree1_write",
+    "tree1_commit",
+    "draw_relations",
+    "tree2_write",
+    "tree2_commit",
+    "post_interaction",
+    "build_components",
+    "engine_prove",
+];
+
+/// Tag the phase the sampler should attribute to, then start its timer.
+fn stage_start(phase: Phase) -> Instant {
+    rss_sampler::set_phase(phase as usize);
+    Instant::now()
+}
+
+#[cfg(feature = "prove-profile")]
+mod rss_sampler {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    use super::PHASE_COUNT;
+
+    /// Environment flag that arms the sampler. Timing is always collected by
+    /// [`super::prove_profiled`]; the sampler thread only starts when this is set
+    /// to `PROFILE_ENV_ON`.
+    const PROFILE_ENV: &str = "EUID_PROVE_PROFILE";
+    const PROFILE_ENV_ON: &str = "1";
+    const TICK: Duration = Duration::from_millis(10);
+    const BYTES_PER_MIB: f64 = (1024 * 1024) as f64;
+
+    fn sampling_requested() -> bool {
+        std::env::var_os(PROFILE_ENV).is_some_and(|value| value == PROFILE_ENV_ON)
+    }
+
+    // ponytail: process-global, so two concurrent profiled proves in one process
+    // would share one phase tag and one set of peaks. Key these per prove call if
+    // concurrent profiled proves ever matter.
+    static PHASE: AtomicUsize = AtomicUsize::new(0);
+    static PEAKS: [AtomicUsize; PHASE_COUNT] = [const { AtomicUsize::new(0) }; PHASE_COUNT];
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn set_phase(phase: usize) {
+        PHASE.store(phase, Ordering::Relaxed);
+    }
+
+    /// A running sampler thread, or nothing at all when sampling is not armed.
+    pub(super) struct Sampler(Option<JoinHandle<()>>);
+
+    impl Sampler {
+        pub(super) fn start() -> Self {
+            if !sampling_requested() {
+                return Self(None);
+            }
+            for peak in &PEAKS {
+                peak.store(0, Ordering::Relaxed);
+            }
+            PHASE.store(0, Ordering::Relaxed);
+            RUNNING.store(true, Ordering::Release);
+            Self(Some(thread::spawn(|| {
+                while RUNNING.load(Ordering::Acquire) {
+                    sample();
+                    thread::sleep(TICK);
+                }
+                sample();
+            })))
+        }
+
+        /// Stop the thread and read the per-phase high-water marks, in phase
+        /// order. Empty when sampling was never armed.
+        pub(super) fn finish(mut self) -> Vec<f64> {
+            let Some(handle) = self.0.take() else {
+                return Vec::new();
+            };
+            RUNNING.store(false, Ordering::Release);
+            let _ = handle.join();
+            PEAKS
+                .iter()
+                .map(|peak| peak.load(Ordering::Relaxed) as f64 / BYTES_PER_MIB)
+                .collect()
+        }
+    }
+
+    impl Drop for Sampler {
+        fn drop(&mut self) {
+            if self.0.take().is_some() {
+                RUNNING.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    fn sample() {
+        let Some(stats) = memory_stats::memory_stats() else {
+            return;
+        };
+        PEAKS[PHASE.load(Ordering::Relaxed)].fetch_max(stats.physical_mem, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "prove-profile"))]
+mod rss_sampler {
+    pub(super) fn set_phase(_phase: usize) {}
+
+    pub(super) struct Sampler;
+
+    impl Sampler {
+        pub(super) fn start() -> Self {
+            Self
+        }
+
+        pub(super) fn finish(self) -> Vec<f64> {
+            Vec::new()
+        }
+    }
+}
+
+/// Per-module wall-time for one write phase (tree-1 trace or tree-2
+/// interaction), so trace-gen cost is attributable per module.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleWriteTime {
+    /// Module position in the `prove` call's module slice.
+    pub index: usize,
+    /// Module type name (from [`AirProver::profile_name`]).
+    pub name: String,
+    /// Wall-time for this module's write in this phase, in milliseconds.
+    pub ms: f64,
+}
+
+/// Wall-time breakdown of one [`prove_profiled`] call, in milliseconds, plus the
+/// per-phase peak physical memory when the sampler is armed. `Instant`-only
+/// timestamps — near-zero overhead, always on. The stage fields (plus
+/// `post_interaction` and `build_components`) sum to `total`.
+#[derive(Clone, Debug, Default)]
+pub struct StarkProveProfile {
+    /// FRI twiddle setup (cached across calls — near-zero when warm).
+    pub twiddles: f64,
+    /// Tree-0 preprocessed write (all modules).
+    pub tree0_write: f64,
+    /// Tree-0 commit.
+    pub tree0_commit: f64,
+    /// Tree-1 trace write (all modules).
+    pub tree1_write: f64,
+    /// Tree-1 commit.
+    pub tree1_commit: f64,
+    /// Tree-2 interaction write (all modules).
+    pub tree2_write: f64,
+    /// Tree-2 commit.
+    pub tree2_commit: f64,
+    /// Relation draws (all modules).
+    pub draw_relations: f64,
+    /// Post-interaction transcript block (GKR lookup proofs, the coprocessor
+    /// p4b bundle prove, and any post-interaction tree commit).
+    pub post_interaction: f64,
+    /// Component assembly against the shared allocator.
+    pub build_components: f64,
+    /// The stwo engine `prove` call: composition + OODS + FRI + openings.
+    pub engine_prove: f64,
+    /// Total wall-time of the whole `prove_profiled` call.
+    pub total: f64,
+    /// Per-phase peak physical memory in MiB, indexed by [`Phase`] order (the
+    /// same order as [`PHASE_LABELS`]). Empty unless the crate is built with the
+    /// `prove-profile` feature and `EUID_PROVE_PROFILE=1` is set. Untagged gaps
+    /// between stages are attributed to the preceding phase.
+    pub peak_rss_mib: Vec<f64>,
+    /// Per-module tree-1 (trace) write times, in module order.
+    pub tree1_write_per_module: Vec<ModuleWriteTime>,
+    /// Per-module tree-2 (interaction) write times, in module order.
+    pub tree2_write_per_module: Vec<ModuleWriteTime>,
+}
+
+impl StarkProveProfile {
+    /// Per-phase wall-times in [`Phase`] order, for tabular rendering.
+    fn phase_ms(&self) -> [f64; PHASE_COUNT] {
+        [
+            self.twiddles,
+            self.tree0_write,
+            self.tree0_commit,
+            self.tree1_write,
+            self.tree1_commit,
+            self.draw_relations,
+            self.tree2_write,
+            self.tree2_commit,
+            self.post_interaction,
+            self.build_components,
+            self.engine_prove,
+        ]
+    }
+}
+
+impl fmt::Display for StarkProveProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{:<20} {:>10} {:>14}", "phase", "ms", "peak_rss_mib")?;
+        let phase_ms = self.phase_ms();
+        for (index, label) in PHASE_LABELS.iter().enumerate() {
+            write!(f, "{label:<20} {:>10.3} ", phase_ms[index])?;
+            match self.peak_rss_mib.get(index) {
+                Some(mib) => writeln!(f, "{mib:>14.1}")?,
+                None => writeln!(f, "{:>14}", "-")?,
+            }
+        }
+        write!(f, "{:<20} {:>10.3} ", "total", self.total)?;
+        match self.peak_rss_mib.iter().copied().max_by(f64::total_cmp) {
+            Some(mib) => writeln!(f, "{mib:>14.1}")?,
+            None => writeln!(f, "{:>14}", "-")?,
+        }
+
+        for (phase, per_module) in [
+            ("tree1_write", &self.tree1_write_per_module),
+            ("tree2_write", &self.tree2_write_per_module),
+        ] {
+            for module in per_module.iter() {
+                writeln!(
+                    f,
+                    "  {phase}[{}] {:>10.3} ms  {}",
+                    module.index, module.ms, module.name
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn ms_since(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
+}
+
 /// Drive every module through the four phases against one shared channel and one
 /// shared commitment scheme, producing a single STARK proof.
 pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
 ) -> Result<StarkProof<Hasher>, ProvingError> {
+    prove_profiled(modules, config).map(|(proof, _profile)| proof)
+}
+
+/// Same as [`prove`], but also returns a per-phase [`StarkProveProfile`].
+pub fn prove_profiled(
+    modules: &mut [&mut dyn AirProver],
+    config: PcsConfig,
+) -> Result<(StarkProof<Hasher>, StarkProveProfile), ProvingError> {
+    let sampler = rss_sampler::Sampler::start();
+    let total_start = Instant::now();
+    let mut profile = StarkProveProfile::default();
+
     // Size the twiddles to the largest constraint-evaluation domain any module
     // needs, plus the FRI blow-up — unless the config pins an explicit lifting
     // size. With the default (degree-2) bound this is `max_log_size + 1 +
@@ -411,7 +684,9 @@ pub fn prove(
         .lifting_log_size
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
+    let stage = stage_start(Phase::Twiddles);
     let twiddles = cached_twiddles(twiddle_log_size);
+    profile.twiddles = ms_since(stage);
 
     let channel = &mut Ch::default();
     config.mix_into(channel);
@@ -431,42 +706,69 @@ pub fn prove(
         .collect();
     let (preprocessed_ids, selected_preprocessed_ids) =
         select_first_preprocessed_ids(&module_preprocessed_ids);
+    let stage = stage_start(Phase::Tree0Write);
     let mut tb = commitment_scheme.tree_builder();
     for (module, selected_ids) in modules.iter_mut().zip(&selected_preprocessed_ids) {
         module.write_selected_preprocessed(&mut tb, selected_ids);
     }
+    profile.tree0_write = ms_since(stage);
+    let stage = stage_start(Phase::Tree0Commit);
     tb.commit(channel);
+    profile.tree0_commit = ms_since(stage);
 
     for m in modules.iter() {
         m.mix_public(channel);
     }
 
     // Tree 1: every module's witness + multiplicity columns.
+    let stage = stage_start(Phase::Tree1Write);
     let mut tb = commitment_scheme.tree_builder();
-    for m in modules.iter_mut() {
+    for (index, m) in modules.iter_mut().enumerate() {
+        let m_start = Instant::now();
         m.write_trace(&mut tb);
+        profile.tree1_write_per_module.push(ModuleWriteTime {
+            index,
+            name: m.profile_name().to_string(),
+            ms: ms_since(m_start),
+        });
     }
+    profile.tree1_write = ms_since(stage);
+    let stage = stage_start(Phase::Tree1Commit);
     tb.commit(channel);
+    profile.tree1_commit = ms_since(stage);
 
+    let stage = stage_start(Phase::DrawRelations);
     for m in modules.iter_mut() {
         m.draw_relations(channel);
     }
+    profile.draw_relations = ms_since(stage);
 
     // Tree 2: every module's interaction columns. Claimed sums are mixed before
     // the commit, matching the standalone transcript order.
+    let stage = stage_start(Phase::Tree2Write);
     let mut tb = commitment_scheme.tree_builder();
-    for m in modules.iter_mut() {
+    for (index, m) in modules.iter_mut().enumerate() {
+        let m_start = Instant::now();
         m.write_interaction(&mut tb);
+        profile.tree2_write_per_module.push(ModuleWriteTime {
+            index,
+            name: m.profile_name().to_string(),
+            ms: ms_since(m_start),
+        });
     }
+    profile.tree2_write = ms_since(stage);
     for m in modules.iter() {
         m.mix_claimed_sums(channel);
     }
+    let stage = stage_start(Phase::Tree2Commit);
     tb.commit(channel);
+    profile.tree2_commit = ms_since(stage);
 
     // Optional transcript block after tree 2. GKR lookup proofs use this block.
     // Trees 1 and 2 already commit their inputs and relation draws.
     // MLE tie-back columns follow the GKR proof messages.
     // The verifier uses the same Fiat-Shamir order.
+    let stage = stage_start(Phase::PostInteraction);
     for m in modules.iter_mut() {
         m.prove_post_interaction(channel);
     }
@@ -480,19 +782,27 @@ pub fn prove(
         }
         tb.commit(channel);
     }
+    profile.post_interaction = ms_since(stage);
 
     // Build every module's components with one shared allocator.
     // Seed it with unique preprocessed column IDs. A repeated deterministic table
     // resolves to the first matching ID. This keeps the static allocator defined
     // for repeated modules.
+    let stage = stage_start(Phase::BuildComponents);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
     for m in modules.iter_mut() {
         m.build_components(&mut allocator);
     }
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         modules.iter().flat_map(|m| m.prover_components()).collect();
-    let proof = stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)?;
-    Ok(proof)
+    profile.build_components = ms_since(stage);
+
+    let stage = stage_start(Phase::EngineProve);
+    let proof = stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme);
+    profile.engine_prove = ms_since(stage);
+    profile.total = ms_since(total_start);
+    profile.peak_rss_mib = sampler.finish();
+    Ok((proof?, profile))
 }
 
 /// Errors from [`verify_with_expected_preprocessed_root`].

@@ -6,7 +6,9 @@ version = 4
 name = "air-core"
 version = "0.1.0"
 dependencies = [
+ "memory-stats",
  "num-traits",
+ "predicates",
  "stwo",
  "stwo-constraint-framework",
 ]
