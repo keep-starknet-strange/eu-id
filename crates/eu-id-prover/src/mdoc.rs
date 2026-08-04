@@ -4696,13 +4696,18 @@ fn verify_mdoc_circuit_with_pcs_config(
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
 ) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_impl(proof, statement, expected_pcs_config)
+    verify_mdoc_circuit_with_pcs_config_impl(proof, statement, expected_pcs_config, None)
 }
 
+/// `shape_sink` is instrumentation only. Verification behaviour is identical
+/// whether or not a sink is supplied; [`mdoc_proof_byte_breakdown`] passes one
+/// so the byte accounting reads the verifier's own module list instead of a
+/// copy that could drift from it.
 fn verify_mdoc_circuit_with_pcs_config_impl(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
+    shape_sink: Option<&mut Vec<MdocModuleShape>>,
 ) -> Result<(), Error> {
     strict_verification_timestamp(statement.verification_time_epoch_seconds)
         .map_err(|_| Error::Verify("invalid verifier timestamp".to_string()))?;
@@ -5043,6 +5048,10 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
         ClaimMaskChallengeModule::new(claim_mask_challenge, claim_mask_log_sizes)
             .map_err(|error| Error::Verify(format!("claim-mask anchor: {error}")))?;
 
+    // Read before the module list borrows `age`/`nat` mutably.
+    let has_age = age.is_some();
+    let has_nationality = nat.is_some();
+
     let mut modules: Vec<&mut dyn Air> = vec![
         &mut sha_tables,
         &mut issuer_sha,
@@ -5076,6 +5085,29 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
 
     modules.push(&mut mdoc_mac);
     modules.push(&mut claim_mask_anchor);
+    if let Some(sink) = shape_sink {
+        let names = mdoc_module_names(
+            attribute_count,
+            expected_parser_count,
+            has_age,
+            has_nationality,
+        );
+        assert_eq!(
+            names.len(),
+            modules.len(),
+            "mdoc module name list drifted from the verifier module list"
+        );
+        *sink = names
+            .into_iter()
+            .zip(modules.iter())
+            .map(|(name, module)| MdocModuleShape {
+                name,
+                preprocessed_ids: module.preprocessed_column_ids(),
+                layout: module.layout(),
+                post_interaction: module.post_interaction_log_sizes(),
+            })
+            .collect();
+    }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let canonical_root = air_core::compute_canonical_preprocessed_root(
             modules.as_mut_slice(),
@@ -5096,6 +5128,379 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
             "malformed mdoc proof panicked during verification".to_string(),
         )),
     }
+}
+
+/// One module's committed shape, captured from the verifier's own module list.
+struct MdocModuleShape {
+    name: String,
+    preprocessed_ids: Vec<PreProcessedColumnId>,
+    layout: TreeLayout,
+    post_interaction: Vec<u32>,
+}
+
+/// Module labels in the exact order the prover and verifier push them.
+///
+/// Kept beside the two module lists it names; the capture in
+/// [`verify_mdoc_circuit_with_pcs_config_impl`] asserts the lengths agree, so a
+/// module added or removed without a label here fails loudly.
+fn mdoc_module_names(
+    attribute_count: usize,
+    parser_count: usize,
+    has_age: bool,
+    has_nationality: bool,
+) -> Vec<String> {
+    let mut names: Vec<String> = [
+        "sha_tables",
+        "issuer_sha",
+        "device_sha",
+        "device_public_digest_bind",
+        "mso_sha",
+        "revocation_sha",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
+    names.extend((0..attribute_count).map(|index| format!("attribute_sha[{index}]")));
+    names.extend((0..parser_count).map(|index| format!("mdoc_cbor_stream[{index}]")));
+    names.push("mso_exact_cbor".to_string());
+    names.push("mdoc_scope".to_string());
+    names.push("mdoc_validity".to_string());
+    names.push("revocation_message_bind".to_string());
+    if has_age {
+        names.push("age_predicate".to_string());
+    }
+    if has_nationality {
+        names.push("nationality_predicate".to_string());
+    }
+    names.push("ts13_revocation_public".to_string());
+    names.push("ts13_revocation_range".to_string());
+    names.push("coprocessor".to_string());
+    names.push("mdoc_mac".to_string());
+    names.push("claim_mask_anchor".to_string());
+    names
+}
+
+/// Bytes a single module (or one sub-component group inside it) contributes.
+///
+/// Only per-column proof data is attributable to a module. Commitment roots and
+/// Merkle/FRI decommitments are per-tree, not per-column, so they live in
+/// [`MdocProofByteBreakdown::shared`] instead of being split here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocModuleByteBreakdown {
+    /// Module label, suffixed with the column log-size when a module commits
+    /// several differently-sized sub-components. `mdoc_scope` splits this way
+    /// into its stream trace and its DFA edge table.
+    ///
+    /// Sub-components that share a log size cannot be told apart from
+    /// [`TreeLayout`] alone and are reported as one bucket — `mdoc_scope`'s
+    /// digest-id universe shares log-size 16 with its stream trace, so those
+    /// two are pooled. Splitting them further needs per-component sizes from
+    /// the module itself, not just its layout.
+    pub label: String,
+    pub oods_sampled_values: usize,
+    pub queried_values: usize,
+    pub columns: usize,
+}
+
+impl MdocModuleByteBreakdown {
+    pub fn total(&self) -> usize {
+        self.oods_sampled_values + self.queried_values
+    }
+}
+
+/// Proof bytes that exist once for the whole proof rather than per module.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MdocSharedByteBreakdown {
+    pub pcs_config: usize,
+    pub commitment_roots: usize,
+    pub trace_decommitments: usize,
+    pub proof_of_work: usize,
+    pub fri_proof: usize,
+    /// Composition-tree OODS samples and queried values. The composition
+    /// polynomial mixes every module, so these bytes have no single owner.
+    pub composition_oods_sampled_values: usize,
+    pub composition_queried_values: usize,
+}
+
+impl MdocSharedByteBreakdown {
+    pub fn total(&self) -> usize {
+        self.pcs_config
+            + self.commitment_roots
+            + self.trace_decommitments
+            + self.proof_of_work
+            + self.fri_proof
+            + self.composition_oods_sampled_values
+            + self.composition_queried_values
+    }
+}
+
+/// Exact byte attribution for a serialized [`MdocCircuitProof`].
+///
+/// `modules`, `shared`, `coprocessor_bundle` and `framing_other` partition
+/// [`Self::proof_bytes`] exactly — see [`Self::attributed_bytes`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocProofByteBreakdown {
+    /// `bincode::serialize(proof).len()`: the raw bytes the SDK compresses into
+    /// the V8 transport envelope.
+    pub proof_bytes: usize,
+    pub modules: Vec<MdocModuleByteBreakdown>,
+    pub shared: MdocSharedByteBreakdown,
+    /// The EC coprocessor bundle as one opaque blob. Its internals are broken
+    /// down inside `eu-id-ec-coprocessor`, not here.
+    pub coprocessor_bundle: usize,
+    /// Bincode container framing plus the proof's non-STARK metadata fields
+    /// (per-module interaction claims, log sizes, predicate public inputs).
+    /// Derived by subtraction so nothing can go unreported.
+    pub framing_other: usize,
+}
+
+impl MdocProofByteBreakdown {
+    pub fn attributed_bytes(&self) -> usize {
+        self.modules
+            .iter()
+            .map(MdocModuleByteBreakdown::total)
+            .sum::<usize>()
+            + self.shared.total()
+            + self.coprocessor_bundle
+            + self.framing_other
+    }
+}
+
+fn bincode_len<T: Serialize>(value: &T) -> usize {
+    bincode::serialize(value)
+        .expect("mdoc proof byte breakdown value serializes")
+        .len()
+}
+
+/// Split one tree's per-column byte costs across the modules that own them.
+///
+/// `column_owners` is the tree's column list in commit order, each entry the
+/// index of the owning label. Returns the per-label totals plus the container
+/// framing that belongs to no column.
+fn attribute_tree_columns<T: Serialize>(
+    columns: &[Vec<T>],
+    column_owners: &[usize],
+    label_count: usize,
+) -> (Vec<usize>, usize) {
+    assert_eq!(
+        columns.len(),
+        column_owners.len(),
+        "committed column count does not match the module layout"
+    );
+    let mut per_label = vec![0usize; label_count];
+    for (column, &owner) in columns.iter().zip(column_owners) {
+        per_label[owner] += bincode_len(column);
+    }
+    // Every tree is a `Vec`, so it carries a length prefix of its own.
+    (per_label, bincode_len(&Vec::<Vec<T>>::new()))
+}
+
+/// Byte-exact breakdown of the V8 mdoc identity proof.
+///
+/// Runs verification to capture the committed module shape, so a proof that
+/// does not verify against `statement` returns that verification error rather
+/// than a breakdown of unvalidated bytes.
+pub fn mdoc_proof_byte_breakdown(
+    proof: &MdocCircuitProof,
+    statement: &MdocCircuitStatement,
+) -> Result<MdocProofByteBreakdown, Error> {
+    let mut shapes = Vec::new();
+    verify_mdoc_circuit_with_pcs_config_impl(
+        proof,
+        statement,
+        mdoc_production_pcs_config(),
+        Some(&mut shapes),
+    )?;
+
+    // Label modules, splitting any module that commits several differently
+    // sized sub-components into one label per contiguous same-log-size run.
+    // This is what separates `mdoc_scope`'s DFA edge table and digest-id
+    // universe from its main stream trace without hard-coding their widths.
+    let mut labels: Vec<String> = Vec::new();
+    // Per tree, the owning label index of each column in commit order.
+    let mut preprocessed_owners: Vec<usize> = Vec::new();
+    let mut trace_owners: Vec<usize> = Vec::new();
+    let mut interaction_owners: Vec<usize> = Vec::new();
+    let mut post_interaction_owners: Vec<usize> = Vec::new();
+    let mut seen_preprocessed_ids: HashSet<PreProcessedColumnId> = HashSet::new();
+
+    for shape in &shapes {
+        // One label per distinct log size this module commits, so a module's
+        // sub-components stay separable across all four trees.
+        let mut label_of_log_size: HashMap<u32, usize> = HashMap::new();
+        let mut multi_size = shape
+            .layout
+            .preprocessed
+            .iter()
+            .chain(&shape.layout.trace)
+            .chain(&shape.layout.interaction)
+            .chain(&shape.post_interaction)
+            .collect::<Vec<_>>();
+        multi_size.sort_unstable();
+        multi_size.dedup();
+        let names_by_log_size: HashMap<u32, String> = if multi_size.len() > 1 {
+            multi_size
+                .iter()
+                .map(|&&log_size| (log_size, format!("{} (log_size={log_size})", shape.name)))
+                .collect()
+        } else {
+            multi_size
+                .iter()
+                .map(|&&log_size| (log_size, shape.name.clone()))
+                .collect()
+        };
+        let mut owner_of = |log_size: u32| -> usize {
+            *label_of_log_size.entry(log_size).or_insert_with(|| {
+                labels.push(names_by_log_size[&log_size].clone());
+                labels.len() - 1
+            })
+        };
+
+        // Tree 0 is deduplicated by column id, first declaring module wins.
+        for (id, &log_size) in shape
+            .preprocessed_ids
+            .iter()
+            .zip(&shape.layout.preprocessed)
+        {
+            if seen_preprocessed_ids.insert(id.clone()) {
+                preprocessed_owners.push(owner_of(log_size));
+            }
+        }
+        for &log_size in &shape.layout.trace {
+            trace_owners.push(owner_of(log_size));
+        }
+        for &log_size in &shape.layout.interaction {
+            interaction_owners.push(owner_of(log_size));
+        }
+        for &log_size in &shape.post_interaction {
+            post_interaction_owners.push(owner_of(log_size));
+        }
+    }
+
+    let commitment_scheme_proof = &proof.stark_proof.0;
+    let sampled_values = &commitment_scheme_proof.sampled_values;
+    let queried_values = &commitment_scheme_proof.queried_values;
+
+    // Trees in commit order: preprocessed, trace, interaction, then the
+    // optional post-interaction tree, then composition. Composition is always
+    // last and belongs to no module.
+    let mut owners_by_tree = vec![preprocessed_owners, trace_owners, interaction_owners];
+    if !post_interaction_owners.is_empty() {
+        owners_by_tree.push(post_interaction_owners);
+    }
+    if sampled_values.len() != owners_by_tree.len() + 1 {
+        return Err(Error::Verify(format!(
+            "mdoc proof has {} committed trees, expected {} module trees plus composition",
+            sampled_values.len(),
+            owners_by_tree.len()
+        )));
+    }
+
+    let label_count = labels.len();
+    let mut oods_per_label = vec![0usize; label_count];
+    let mut queried_per_label = vec![0usize; label_count];
+    let mut columns_per_label = vec![0usize; label_count];
+    // Container framing: the outer `TreeVec` length prefix plus one per tree.
+    let mut oods_framing = bincode_len(&Vec::<Vec<Vec<QM31>>>::new());
+    let mut queried_framing = bincode_len(&Vec::<Vec<Vec<M31>>>::new());
+
+    for (tree, owners) in owners_by_tree.iter().enumerate() {
+        let (oods, framing) = attribute_tree_columns(&sampled_values[tree], owners, label_count);
+        oods_framing += framing;
+        let (queried, framing) = attribute_tree_columns(&queried_values[tree], owners, label_count);
+        queried_framing += framing;
+        for (label, bytes) in oods.into_iter().enumerate() {
+            oods_per_label[label] += bytes;
+        }
+        for (label, bytes) in queried.into_iter().enumerate() {
+            queried_per_label[label] += bytes;
+        }
+        for &owner in owners {
+            columns_per_label[owner] += 1;
+        }
+    }
+
+    let composition = owners_by_tree.len();
+    let composition_oods: usize = sampled_values[composition].iter().map(bincode_len).sum();
+    let composition_queried: usize = queried_values[composition].iter().map(bincode_len).sum();
+    oods_framing += bincode_len(&Vec::<Vec<QM31>>::new());
+    queried_framing += bincode_len(&Vec::<Vec<M31>>::new());
+
+    // Falsifiable: the per-column attribution plus container framing must
+    // reproduce the serialized field exactly.
+    let oods_total: usize = oods_per_label.iter().sum::<usize>() + composition_oods + oods_framing;
+    assert_eq!(
+        oods_total,
+        bincode_len(sampled_values),
+        "OODS sampled-value attribution does not reproduce the serialized field"
+    );
+    let queried_total: usize =
+        queried_per_label.iter().sum::<usize>() + composition_queried + queried_framing;
+    assert_eq!(
+        queried_total,
+        bincode_len(queried_values),
+        "queried-value attribution does not reproduce the serialized field"
+    );
+
+    let shared = MdocSharedByteBreakdown {
+        pcs_config: bincode_len(&commitment_scheme_proof.config),
+        commitment_roots: bincode_len(&commitment_scheme_proof.commitments),
+        trace_decommitments: bincode_len(&commitment_scheme_proof.decommitments),
+        proof_of_work: bincode_len(&commitment_scheme_proof.proof_of_work),
+        fri_proof: bincode_len(&commitment_scheme_proof.fri_proof),
+        composition_oods_sampled_values: composition_oods,
+        composition_queried_values: composition_queried,
+    };
+
+    // Falsifiable: a bincode struct is its fields concatenated, so the seven
+    // `CommitmentSchemeProof` fields must sum to the serialized `StarkProof`.
+    let stark_proof_bytes = bincode_len(&proof.stark_proof);
+    assert_eq!(
+        shared.pcs_config
+            + shared.commitment_roots
+            + shared.trace_decommitments
+            + shared.proof_of_work
+            + shared.fri_proof
+            + oods_total
+            + queried_total,
+        stark_proof_bytes,
+        "STARK proof field attribution does not reproduce the serialized proof"
+    );
+
+    let proof_bytes = bincode_len(proof);
+    let coprocessor_bundle = bincode_len(&proof.coprocessor_bundle);
+    let modules: Vec<MdocModuleByteBreakdown> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(label, name)| MdocModuleByteBreakdown {
+            label: name,
+            oods_sampled_values: oods_per_label[label],
+            queried_values: queried_per_label[label],
+            columns: columns_per_label[label],
+        })
+        .collect();
+
+    // Everything not attributed above: bincode container framing for the
+    // sampled/queried trees plus the proof's non-STARK metadata fields.
+    let attributed = modules
+        .iter()
+        .map(MdocModuleByteBreakdown::total)
+        .sum::<usize>()
+        + shared.total()
+        + coprocessor_bundle;
+    let framing_other = proof_bytes.checked_sub(attributed).ok_or_else(|| {
+        Error::Verify(format!(
+            "mdoc proof byte attribution ({attributed}) exceeds the serialized proof ({proof_bytes})"
+        ))
+    })?;
+
+    Ok(MdocProofByteBreakdown {
+        proof_bytes,
+        modules,
+        shared,
+        coprocessor_bundle,
+        framing_other,
+    })
 }
 
 pub fn mdoc_production_pcs_config() -> PcsConfig {
@@ -6685,6 +7090,86 @@ mod mdoc_sha_table_tests {
             bincode::serialize(&proof_a).expect("proof A serializes"),
             bincode::serialize(&proof_b).expect("proof B serializes"),
             "same-witness product proofs must not serialize identically"
+        );
+    }
+
+    /// The byte breakdown must partition the serialized proof exactly.
+    ///
+    /// This is the accounting gate: bytes that cannot be attributed to a module
+    /// or a shared bucket have to surface in `framing_other`, never vanish. The
+    /// breakdown also asserts internally that its per-column attribution
+    /// reproduces each serialized field, so a wrong column-to-module map fails
+    /// here rather than silently mislabelling bytes.
+    #[test]
+    fn mdoc_proof_byte_breakdown_sums_to_the_serialized_proof() {
+        // Proving needs far more stack than a default test thread has, which is
+        // why the other proving tests here are `#[ignore]`. This gate has to run
+        // by default, so it proves on a prover-sized stack instead.
+        const PROVER_STACK_SIZE: usize = 32 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(PROVER_STACK_SIZE)
+            .spawn(breakdown_partitions_the_serialized_proof)
+            .expect("spawns a prover-sized thread")
+            .join()
+            .expect("breakdown gate thread does not panic");
+    }
+
+    fn breakdown_partitions_the_serialized_proof() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        let breakdown = mdoc_proof_byte_breakdown(&proof, &fixture.statement)
+            .expect("byte breakdown for a verifying proof");
+
+        assert_eq!(
+            breakdown.proof_bytes,
+            bincode::serialize(&proof).expect("proof serializes").len(),
+            "breakdown total is not the raw serialized proof length",
+        );
+        assert_eq!(
+            breakdown.attributed_bytes(),
+            breakdown.proof_bytes,
+            "byte buckets do not partition the serialized proof",
+        );
+        assert!(
+            breakdown.coprocessor_bundle > 0,
+            "coprocessor bundle bucket is empty",
+        );
+        for module in &breakdown.modules {
+            assert!(
+                module.columns > 0,
+                "module bucket '{}' owns no committed column",
+                module.label,
+            );
+        }
+        // Modules the product profile always commits columns for. The
+        // coprocessor is absent by design: it commits no STARK column, its data
+        // is the opaque bundle asserted above.
+        for expected in [
+            "mso_sha",
+            "revocation_sha",
+            "attribute_sha[0]",
+            "mdoc_cbor_stream[0]",
+            "mdoc_validity",
+        ] {
+            assert!(
+                breakdown
+                    .modules
+                    .iter()
+                    .any(|module| module.label == expected),
+                "breakdown is missing module bucket '{expected}'",
+            );
+        }
+        // `mdoc_scope` commits its DFA edge table at its own log size, so scope
+        // must appear as several log-size-suffixed buckets.
+        assert!(
+            breakdown
+                .modules
+                .iter()
+                .filter(|module| module.label.starts_with("mdoc_scope"))
+                .count()
+                > 1,
+            "mdoc_scope sub-components were not separated",
         );
     }
 
