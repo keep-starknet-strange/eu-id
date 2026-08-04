@@ -4132,6 +4132,12 @@ impl Air for MdocCoprocessorBindingVerifier {
     }
 }
 
+/// Runtime switch for the per-phase prove profile. Off unless
+/// `EUID_PROVE_PROFILE=1`, so the default prove path pays one env lookup.
+fn prove_profile_enabled() -> bool {
+    std::env::var_os("EUID_PROVE_PROFILE").is_some_and(|value| value == "1")
+}
+
 pub(crate) fn prove_mdoc_circuit(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
@@ -4607,8 +4613,12 @@ fn prove_mdoc_circuit_with_pcs_config(
 
         modules.push(&mut mdoc_mac);
         modules.push(&mut claim_mask_anchor);
-        air_core::prove(modules.as_mut_slice(), config)
-            .map_err(|e| Error::Prove(format!("{e:?}")))?
+        let (proof, profile) = air_core::prove_profiled(modules.as_mut_slice(), config)
+            .map_err(|e| Error::Prove(format!("{e:?}")))?;
+        if prove_profile_enabled() {
+            eprintln!("[euid-prove-profile] mdoc stark\n{profile}");
+        }
+        proof
     };
 
     let coprocessor_bundle = coprocessor.bundle.take().ok_or(Error::CoprocessorMissing)?;
