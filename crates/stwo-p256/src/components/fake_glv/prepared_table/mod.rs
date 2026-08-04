@@ -34,7 +34,7 @@ pub const CERT_BASE_RELATION_ARITY: usize = 2 + 2 * N_LIMBS;
 /// `(sig_id, cert_id, role, point[PREPARED_TABLE_EC_POINT_COLUMNS])`.
 pub const PREPARED_TABLE_CANONICAL_RELATION_ARITY: usize = 3 + PREPARED_TABLE_EC_POINT_COLUMNS;
 
-// Canonical roles. P is handled by `CertBaseRelation`; these cover the rest.
+// Canonical roles. P is handled by `CertBaseRelation`. These cover the rest.
 pub const PREPARED_TABLE_CANONICAL_ROLE_P3: u32 = 0;
 pub const PREPARED_TABLE_CANONICAL_ROLE_R: u32 = 1;
 pub const PREPARED_TABLE_CANONICAL_ROLE_R3: u32 = 2;
@@ -57,13 +57,15 @@ pub const PREPARED_TABLE_EC_OP_DOUBLE: u32 = 1;
 pub const PREPARED_TABLE_EC_POINT_COLUMNS: usize = 2 * N_LIMBS + 1;
 pub const PREPARED_TABLE_EC_ROW_RELATION_ARITY: usize = 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
 
-/// Number of signed carry columns for the in-AIR negation identity
-/// `neg.y + src.y = p` (one carry per limb; the top carry is constrained to 0).
+/// Number of signed carry columns for `neg.y + src.y = p`.
+///
+/// The identity has one carry per limb.
+/// The top carry is zero.
 pub const PREPARED_TABLE_EC_NEG_CARRY_COLUMNS: usize = N_LIMBS;
 
 /// The negation aux block appended to every EC-row's base trace: a full point
 /// `neg` (= `-src`) plus its `neg.y + src.y = p` carries. Populated with `-R`
-/// on `DoubleR` rows and `-R3` on `AddR2R` rows; zero elsewhere.
+/// on `DoubleR` rows and `-R3` on `AddR2R` rows. Zero elsewhere.
 pub const PREPARED_TABLE_EC_NEG_AUX_COLUMNS: usize =
     PREPARED_TABLE_EC_POINT_COLUMNS + PREPARED_TABLE_EC_NEG_CARRY_COLUMNS;
 
@@ -73,9 +75,10 @@ pub const PREPARED_TABLE_EC_ROW_TRACE_COLUMNS: usize = 1
     + 2
     + 3 * PREPARED_TABLE_EC_POINT_COLUMNS
     + PREPARED_TABLE_EC_NEG_AUX_COLUMNS;
-/// Consumer base-trace width: metadata (`active`, `source_index`, `sig_id`,
-/// `cert_id`, `op`, `table_index`) plus the three committed points. The old
-/// consumed-mul + formula blocks moved into the hinted_mul silo (Phase 3).
+/// Consumer base-trace width.
+///
+/// The layout contains metadata and three committed points.
+/// The hinted multiplication silo owns multiplication and formula columns.
 pub const PREPARED_TABLE_PROJECTIVE_SOURCE_TRACE_COLUMNS: usize =
     1 + 5 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
 

@@ -1,12 +1,10 @@
 //! Native witness builder for the hinted mod-p multiplication.
 //!
-//! Computes, for one mul `a · b ≡ r (mod p)`, the quotients `q1, q2, q3`, the
-//! half-products `m1, m2`, the canonical result `r`, and the three carry
-//! polynomials `h1, h2, h3` of the identities documented in [`super`] (the
-//! module docs carry the full integer-lifting bounds worksheet). Every bound
-//! the AIR relies on is asserted here, so an honest witness that violates the
-//! worksheet fails loudly at build time rather than producing an unprovable
-//! trace.
+//! Builds a native witness for `a · b ≡ r (mod p)`.
+//!
+//! The witness contains three quotients, two half-products, and three carry polynomials.
+//! It also contains canonical result `r`.
+//! The builder checks all bounds required by the AIR.
 
 use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 
@@ -20,7 +18,7 @@ pub const HINTED_MUL_BETA: i64 = 1 << LIMB_BITS;
 /// `b` is split as `b = b_lo + β^HINTED_MUL_B_SPLIT · b_hi`.
 pub const HINTED_MUL_B_SPLIT: usize = N_LIMBS / 2;
 
-/// Quotient width: `a < 2^260`, `b_half < 2^130` ⟹ `q < 2^134`; and
+/// Quotient width: `a < 2^260`, `b_half < 2^130` ⟹ `q < 2^134`. And
 /// `m1 + β^10·m2 < 2^391` ⟹ `q3 < 2^135`. Both fit 11 limbs (143 bits).
 pub const HINTED_MUL_Q_LIMBS: usize = 11;
 
@@ -29,9 +27,14 @@ pub const HINTED_MUL_Q_LIMBS: usize = 11;
 pub const HINTED_MUL_C_COEFFS: usize = HINTED_MUL_Q_LIMBS + N_LIMBS - 1;
 pub const HINTED_MUL_H_COEFFS: usize = HINTED_MUL_C_COEFFS - 1;
 
-/// Maximum absolute value of any identity coefficient:
-/// `11·(β−1)² + (β−1)` (the `Q·P` convolution side; the positive side is at
-/// most `10·(β−1)²` for the half-product or `2·(β−1)` for the recombination).
+/// Maximum absolute value of an identity coefficient.
+///
+/// ```text
+/// 11 · (β − 1)² + (β − 1)
+/// ```
+///
+/// The half-product bound is `10 · (β − 1)²`.
+/// The recombination bound is `2 · (β − 1)`.
 pub const HINTED_MUL_MAX_COEFF: i64 =
     (HINTED_MUL_Q_LIMBS as i64) * (HINTED_MUL_BETA - 1) * (HINTED_MUL_BETA - 1)
         + (HINTED_MUL_BETA - 1);
@@ -87,7 +90,7 @@ pub struct HintedMulWitness {
 
 impl HintedMulWitness {
     /// Builds the witness for `a · b mod p`. Operands may be any 20×13-bit
-    /// values (non-canonical representatives included); `r` is the canonical
+    /// values (non-canonical representatives included). `r` is the canonical
     /// `(a · b) mod p`.
     pub fn new(a: &[u32; N_LIMBS], b: &[u32; N_LIMBS]) -> Result<Self, HintedMulWitnessError> {
         check_operand("a", a)?;
@@ -149,10 +152,10 @@ impl HintedMulWitness {
         Ok(witness)
     }
 
-    /// Re-checks every coefficient relation `c_k = h_{k−1} − β·h_k` over the
-    /// integers plus all range bounds — exactly what the AIR enforces (the AIR
-    /// checks the relations mod p_M31 at `z`; the worksheet margins make that
-    /// equivalent to this integer check).
+    /// Checks each integer coefficient relation and all range bounds.
+    ///
+    /// The relation is `c_k = h_{k−1} − β·h_k`.
+    /// The AIR checks the equivalent relation modulo `p_M31` at `z`.
     pub fn verify(&self) -> Result<(), HintedMulWitnessError> {
         check_operand("a", &self.a)?;
         check_operand("b", &self.b)?;
@@ -181,7 +184,7 @@ impl HintedMulWitness {
 }
 
 /// Coefficients of `A·B_half − Q·P − M` (30 entries). `shift` offsets the
-/// half-product (unused for identities 1/2; kept for symmetry with the
+/// half-product (unused for identities 1 and 2, but kept for symmetry with the
 /// recombination builder).
 fn identity_coefficients(
     a: &[u32; N_LIMBS],
@@ -359,7 +362,7 @@ mod tests {
 
     /// Worksheet margin: no coefficient relation can wrap mod p_M31 within
     /// the committed range bounds. This constant inequality is the load-
-    /// bearing soundness fact of the whole design (module docs); if a
+    /// bearing soundness fact of the whole design (module docs). If a
     /// refactor changes any bound, this test fails before the AIR lies.
     #[test]
     fn wrap_margin_is_respected() {

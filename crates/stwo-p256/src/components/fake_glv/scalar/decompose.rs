@@ -4,7 +4,6 @@
 //! Algorithm: Garaga `precompute_lattice` (Crypto-2001 GLV Algorithm 3.7,
 //! half-GCD lattice basis on `(n, k)`).
 //!     <https://www.iacr.org/archive/crypto2001/21390189.pdf>
-//! Reference: `~/garaga/hydra/garaga/hints/fake_glv.py::precompute_lattice`.
 //!
 //! Identity proven (Garaga form):
 //! ```text
@@ -19,15 +18,16 @@
 //! ```
 //! The polarity matches `signed_hint_point` (`bit = 1` ⇒ `R = −h`).
 //!
-//! Three witness-time identities are checked via `debug_assert!` to catch
-//! every sign/polarity bug immediately:
-//!     (1) Garaga:      `s1_signed + k · s2_signed ≡ 0 mod n`
-//!     (2) AIR integer: `k · s2_abs − q · n ± s1 = 0` in the chosen branch
-//!     (3) Result:      `k · s2_abs ≡ selected_s1 (mod n)`
+//! Debug assertions check three witness identities:
 //!
-//! This module is a witness builder — verifier soundness must not depend on
-//! the `num_bigint` / `num_integer` crates; the AIR proves the identity
-//! independently.
+//! ```text
+//! s1_signed + k · s2_signed ≡ 0 mod n
+//! k · s2_abs − q · n ± s1 = 0
+//! k · s2_abs ≡ selected_s1 (mod n)
+//! ```
+//!
+//! This module builds the witness.
+//! The AIR proves the identity independently of `num_bigint` and `num_integer`.
 
 use num_bigint::{BigInt, BigUint, Sign};
 use num_integer::Integer;
@@ -58,7 +58,7 @@ pub struct FakeGlvDecomposition {
 }
 
 impl FakeGlvDecomposition {
-    /// All-zero decomposition; corresponds to `scalar == 0`.
+    /// All-zero decomposition. Corresponds to `scalar == 0`.
     pub const ZERO: Self = Self {
         s1: U256::ZERO,
         s2_abs: U256::ZERO,
@@ -95,7 +95,7 @@ pub fn decompose_scalar_mod_n(scalar: &U256) -> Option<FakeGlvDecomposition> {
         s2_signed = -s2_signed;
     }
     if s1_signed.is_zero() || s2_signed.is_zero() {
-        // Pathological scalar (e.g. `k = n − 1` can degenerate); caller may
+        // Pathological scalar (e.g. `k = n − 1` can degenerate). Caller may
         // special-case via a Garaga-style remap (`k → 1` with adjusted hint
         // point). For now signal that no bounded hint was found.
         return None;

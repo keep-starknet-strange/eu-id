@@ -1,25 +1,21 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use jni::objects::JClass;
 use jni::sys::{jboolean, jstring};
 use jni::JNIEnv;
 
-use crate::{
-    prove_identity, verify_identity, IssuerKey, NatMode, PredicateMode, TrustedIssuers,
-    ZkMdocWitness, ZkPublicStatement, ZkSystemKind,
-};
+use crate::{prove_identity, verify_identity, PredicateMode, ZkMdocWitness, ZkPublicStatement};
 
 const CORE_METRIC_HOST_AVAILABLE: u32 = 0;
+const PRODUCT_STATEMENT: &str = "sdk_identity_product";
 #[cfg(target_os = "android")]
 const CORE_METRIC_CPU_CAPACITY: u32 = 1;
 #[cfg(target_os = "android")]
 const CORE_METRIC_CPUINFO_MAX_FREQ: u32 = 2;
-
-const FAILED_JSON: &str = r#"{"prove_ms":0,"process_cpu_ms":0,"verify_ms":0,"peak_bytes":0,"proof_bytes":0,"rayon_threads":0,"worker_cpu_ids":[],"performance_cpu_ids":[],"efficiency_cpu_ids":[],"cpu_metric_values":[],"frequency_before":{"scaling_max_khz":[],"scaling_cur_khz":[]},"frequency_after":{"scaling_max_khz":[],"scaling_cur_khz":[]},"core_metric":"unknown","ok":false}"#;
 
 type CpuMetric = (usize, u64);
 
@@ -99,15 +95,20 @@ fn frequency_snapshot_json(snapshot: &CpuFrequencySnapshot) -> String {
     format!(r#"{{"scaling_max_khz":{scaling_max_khz},"scaling_cur_khz":{scaling_cur_khz}}}"#)
 }
 
-/// The statement this build actually benchmarks, so result JSONs stay honest
-/// even when the TS13 revocation A/B pair ships under the legacy range16/
-/// range8 library names.
-fn bench_statement_label() -> &'static str {
-    match TS13_REVOCATION_MODE {
-        None => "sdk_identity_v6_envelope",
-        Some("1") => "ts13_n1_age_over_18_revocation",
-        Some(_) => "ts13_n1_age_over_18_no_revocation",
-    }
+fn build_metadata() -> (&'static str, &'static str, &'static str, &'static str) {
+    (
+        option_env!("EUID_BENCH_BUILD_ID").unwrap_or("untracked"),
+        option_env!("EUID_BENCH_LIBRARY_SLOT").unwrap_or("untracked"),
+        option_env!("EUID_BENCH_CARGO_PROFILE").unwrap_or("untracked"),
+        option_env!("EUID_BENCH_LTO").unwrap_or("untracked"),
+    )
+}
+
+fn failed_json() -> String {
+    let (build_id, library_slot, cargo_profile, lto) = build_metadata();
+    format!(
+        r#"{{"statement":"{PRODUCT_STATEMENT}","build_id":"{build_id}","library_slot":"{library_slot}","cargo_profile":"{cargo_profile}","lto":"{lto}","prove_ms":0,"process_cpu_ms":0,"verify_ms":0,"peak_bytes":0,"proof_bytes":0,"rayon_threads":0,"worker_cpu_ids":[],"performance_cpu_ids":[],"efficiency_cpu_ids":[],"cpu_metric_values":[],"frequency_before":{{"scaling_max_khz":[],"scaling_cur_khz":[]}},"frequency_after":{{"scaling_max_khz":[],"scaling_cur_khz":[]}},"core_metric":"unknown","ok":false}}"#
+    )
 }
 
 fn result_json(result: IdentityBenchResult) -> String {
@@ -118,11 +119,8 @@ fn result_json(result: IdentityBenchResult) -> String {
     let frequency_before = frequency_snapshot_json(&result.frequency_before);
     let frequency_after = frequency_snapshot_json(&result.frequency_after);
     let core_metric = core_metric_name(result.threading.core_metric);
-    let statement = bench_statement_label();
-    let build_id = option_env!("EUID_BENCH_BUILD_ID").unwrap_or("untracked");
-    let library_slot = option_env!("EUID_BENCH_LIBRARY_SLOT").unwrap_or("untracked");
-    let cargo_profile = option_env!("EUID_BENCH_CARGO_PROFILE").unwrap_or("untracked");
-    let lto = option_env!("EUID_BENCH_LTO").unwrap_or("untracked");
+    let statement = PRODUCT_STATEMENT;
+    let (build_id, library_slot, cargo_profile, lto) = build_metadata();
     let rayon_threads = result.threading.worker_cpu_ids.len();
     let IdentityBenchResult {
         prove_ms,
@@ -141,62 +139,50 @@ fn result_json(result: IdentityBenchResult) -> String {
 fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
     let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
     let issuer_key = fixture.statement.issuer_input.public_key.clone();
-    let mut accepted_numeric_countries = fixture.statement.policy.accepted_nationalities.clone();
-    accepted_numeric_countries.sort_unstable();
-    accepted_numeric_countries.dedup();
+    let (revocation, revocation_witness) =
+        eu_id_prover::ts13::demo_ts13_revocation_inputs(&fixture.extracted.mso);
+    let mut accepted_alpha2_countries = fixture
+        .statement
+        .policy
+        .accepted_nationalities
+        .iter()
+        .map(|country| String::from_utf8(country.to_vec()).expect("fixture alpha-2 is ASCII"))
+        .collect::<Vec<_>>();
+    accepted_alpha2_countries.sort_unstable();
+    accepted_alpha2_countries.dedup();
     (
         ZkPublicStatement {
             spec_id: "stwo-euid-pid-v1".to_string(),
-            version: 1,
+            version: 2,
+            profile_id: crate::product_profile_id(),
+            circuit_hash: crate::product_circuit_hash(),
+            root_policy_hash: crate::product_root_policy_hash(),
             doctype: fixture.request.doctype,
             namespace: fixture.request.namespace,
-            issuer_key: IssuerKey::P256 {
-                x: issuer_key.x.0.to_vec(),
-                y: issuer_key.y.0.to_vec(),
-            },
-            today_epoch_day: 20637,
-            nonce: fixture.request.session_transcript,
+            issuer_public_key_x: issuer_key.x.0.to_vec(),
+            issuer_public_key_y: issuer_key.y.0.to_vec(),
+            now_epoch_seconds: 20_637 * 86_400 + 43_200,
+            session_transcript: fixture.request.session_transcript,
             predicate_mode: PredicateMode::And,
             age_threshold_years: Some(fixture.statement.policy.min_age_years),
-            accepted_numeric_countries: Some(accepted_numeric_countries),
-            nat_mode: NatMode::Any,
+            accepted_alpha2_countries: Some(accepted_alpha2_countries),
+            revocation_public_key_x: revocation.revocation_public_key.x.0.to_vec(),
+            revocation_public_key_y: revocation.revocation_public_key.y.0.to_vec(),
+            revocation_epoch: revocation.epoch,
         },
         ZkMdocWitness {
             document: fixture.document,
-            trusted_issuers: TrustedIssuers::Certificates(
-                fixture.request.trusted_issuer_certificates,
-            ),
+            revocation_id_lo: revocation_witness.id_lo,
+            revocation_id_hi: revocation_witness.id_hi,
+            revocation_signature_r: revocation_witness.signature.r.0.to_vec(),
+            revocation_signature_s: revocation_witness.signature.s.0.to_vec(),
         },
     )
 }
 
-// Compile-time bench statement selector. Unset (the default build) keeps the
-// SDK proveIdentity/verifyIdentity path. "0"/"1" switches the benchmark body
-// to the TS13 N=1 age_over_18 circuit without/with in-STARK sorted-pair
-// revocation (proof_bytes is then the bincode circuit proof, not the v6
-// envelope). Used to package a revocation A/B pair under the two legacy
-// variant .so names.
-const TS13_REVOCATION_MODE: Option<&str> = option_env!("EUID_BENCH_TS13_REVOCATION");
-
 fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult {
-    if !matches!(crate::zk_system(), ZkSystemKind::P256) {
-        eprintln!("identity benchmark requires the P-256 SDK build");
-        return IdentityBenchResult {
-            prove_ms: 0,
-            process_cpu_ms: 0,
-            verify_ms: 0,
-            peak_bytes: 0,
-            proof_bytes: 0,
-            frequency_before: CpuFrequencySnapshot::default(),
-            frequency_after: CpuFrequencySnapshot::default(),
-            threading,
-            ok: false,
-        };
-    }
-    if let Some(mode) = TS13_REVOCATION_MODE {
-        return run_ts13_benchmark(threading, mode == "1");
-    }
     let (statement, witness) = benchmark_fixture();
+    let (prove_statement, verify_statement) = (statement.clone(), statement);
     let monitored_cpu_ids = threading.performance_cpu_ids.clone();
     let (
         (prove_ms, process_cpu_ms, verify_ms, proof_bytes, frequency_before, frequency_after, ok),
@@ -205,7 +191,7 @@ fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult 
         let frequency_before = cpu_frequency_snapshot(&monitored_cpu_ids);
         let cpu_started = process_cpu_time();
         let started = Instant::now();
-        let proof = match prove_identity(statement.clone(), witness) {
+        let proof = match prove_identity(prove_statement, witness) {
             Ok(proof) => proof,
             Err(error) => {
                 eprintln!("SDK proveIdentity benchmark failed: {error}");
@@ -226,7 +212,7 @@ fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult 
         let proof_bytes = proof.len() as u64;
 
         let started = Instant::now();
-        let ok = match verify_identity(statement, proof) {
+        let ok = match verify_identity(verify_statement, proof) {
             Ok(result) => result.ok,
             Err(error) => {
                 eprintln!("SDK verifyIdentity benchmark failed: {error}");
@@ -257,142 +243,69 @@ fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult 
     }
 }
 
-fn run_ts13_benchmark(threading: BenchmarkThreading, revocation: bool) -> IdentityBenchResult {
-    use eu_id_prover::mdoc::{
-        demo_mdoc_circuit_fixture_with_attributes, prove_mdoc_circuit, MdocDisclosureMode,
-        MdocPublicStatement, MdocRequestedAttribute, MdocRevocationRangeWitness,
-    };
-    use eu_id_prover::ts13::{
-        demo_ts13_revocation_inputs, verify_ts13_mdoc_public_statement,
-        verify_ts13_no_revocation_ablation_public_statement,
-    };
-
-    let mut value_bytes = Vec::new();
-    ciborium::ser::into_writer(&ciborium::value::Value::Bool(true), &mut value_bytes)
-        .expect("age_over_18 value encodes");
-    let fixture = demo_mdoc_circuit_fixture_with_attributes(vec![MdocRequestedAttribute {
-        element_identifier: "age_over_18".to_string(),
-        mode: MdocDisclosureMode::ValueEquality(value_bytes),
-    }]);
-    let statement = if revocation {
-        let (revocation_statement, revocation_witness) =
-            demo_ts13_revocation_inputs(&fixture.extracted.mso);
-        fixture
-            .statement
-            .clone()
-            .with_ts13_revocation((&revocation_statement).into())
-            .with_ts13_revocation_range(MdocRevocationRangeWitness {
-                id: revocation_witness.id,
-                id_lo: revocation_witness.id_lo,
-                id_hi: revocation_witness.id_hi,
-            })
-            .with_ts13_revocation_signature(revocation_witness.signature.clone())
-    } else {
-        fixture.statement.clone()
-    };
-    let public_statement = MdocPublicStatement::from_circuit(&statement);
-
-    let monitored_cpu_ids = threading.performance_cpu_ids.clone();
-    let (
-        (prove_ms, process_cpu_ms, verify_ms, proof_bytes, frequency_before, frequency_after, ok),
-        peak_bytes,
-    ) = with_peak_sampler(|| {
-        let frequency_before = cpu_frequency_snapshot(&monitored_cpu_ids);
-        let cpu_started = process_cpu_time();
-        let started = Instant::now();
-        let proof = match prove_mdoc_circuit(&fixture.extracted, &statement) {
-            Ok(proof) => proof,
-            Err(error) => {
-                eprintln!("TS13 bench prove failed: {error:?}");
-                return (
-                    0,
-                    0,
-                    0,
-                    0,
-                    frequency_before,
-                    CpuFrequencySnapshot::default(),
-                    false,
-                );
-            }
-        };
-        let prove_ms = started.elapsed().as_millis() as u64;
-        let process_cpu_ms = process_cpu_time().saturating_sub(cpu_started).as_millis() as u64;
-        let frequency_after = cpu_frequency_snapshot(&monitored_cpu_ids);
-        let proof_bytes = match bincode::serialize(&proof) {
-            Ok(bytes) => bytes.len() as u64,
-            Err(error) => {
-                eprintln!("TS13 bench proof serialization failed: {error}");
-                return (
-                    prove_ms,
-                    process_cpu_ms,
-                    0,
-                    0,
-                    frequency_before,
-                    frequency_after,
-                    false,
-                );
-            }
-        };
-
-        let started = Instant::now();
-        let verification = if revocation {
-            verify_ts13_mdoc_public_statement(&proof, &public_statement)
-        } else {
-            verify_ts13_no_revocation_ablation_public_statement(&proof, &public_statement)
-        };
-        let ok = match verification {
-            Ok(()) => true,
-            Err(error) => {
-                eprintln!("TS13 bench verify failed: {error:?}");
-                false
-            }
-        };
-        (
-            prove_ms,
-            process_cpu_ms,
-            started.elapsed().as_millis() as u64,
-            proof_bytes,
-            frequency_before,
-            frequency_after,
-            ok,
-        )
-    });
-
-    IdentityBenchResult {
-        prove_ms,
-        process_cpu_ms,
-        verify_ms,
-        peak_bytes,
-        proof_bytes,
-        frequency_before,
-        frequency_after,
-        threading,
-        ok,
-    }
+fn with_peak_sampler<T>(work: impl FnOnce() -> T) -> (T, u64) {
+    let sampler = PeakSampler::start();
+    let result = work();
+    (result, sampler.finish())
 }
 
-fn with_peak_sampler<T>(work: impl FnOnce() -> T) -> (T, u64) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let peak = Arc::new(AtomicU64::new(0));
-    let sampler = {
-        let stop = Arc::clone(&stop);
-        let peak = Arc::clone(&peak);
-        thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
+struct PeakSampler {
+    stop: Arc<AtomicBool>,
+    peak: Arc<AtomicU64>,
+    thread: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    finished: Arc<AtomicBool>,
+}
+
+impl PeakSampler {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let peak = Arc::new(AtomicU64::new(0));
+        let sampler_stop = Arc::clone(&stop);
+        let sampler_peak = Arc::clone(&peak);
+        #[cfg(test)]
+        let finished = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let sampler_finished = Arc::clone(&finished);
+        let thread = thread::spawn(move || {
+            while !sampler_stop.load(Ordering::Relaxed) {
                 if let Some(stats) = memory_stats::memory_stats() {
-                    peak.fetch_max(stats.physical_mem as u64, Ordering::Relaxed);
+                    sampler_peak.fetch_max(stats.physical_mem as u64, Ordering::Relaxed);
                 }
                 thread::sleep(Duration::from_millis(10));
             }
             if let Some(stats) = memory_stats::memory_stats() {
-                peak.fetch_max(stats.physical_mem as u64, Ordering::Relaxed);
+                sampler_peak.fetch_max(stats.physical_mem as u64, Ordering::Relaxed);
             }
-        })
-    };
-    let result = work();
-    stop.store(true, Ordering::Relaxed);
-    let _ = sampler.join();
-    (result, peak.load(Ordering::Relaxed))
+            #[cfg(test)]
+            sampler_finished.store(true, Ordering::SeqCst);
+        });
+        Self {
+            stop,
+            peak,
+            thread: Some(thread),
+            #[cfg(test)]
+            finished,
+        }
+    }
+
+    fn finish(mut self) -> u64 {
+        self.stop_and_join();
+        self.peak.load(Ordering::Relaxed)
+    }
+
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+impl Drop for PeakSampler {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
 }
 
 static THREADING: OnceLock<Result<BenchmarkThreading, String>> = OnceLock::new();
@@ -494,7 +407,7 @@ fn android_allowed_cpu_ids() -> Result<Vec<usize>, String> {
         return Err(std::io::Error::last_os_error().to_string());
     }
     let cpu_ids = (0..libc::CPU_SETSIZE)
-        // SAFETY: sched_getaffinity initialized `mask`; indices are bounded by CPU_SETSIZE.
+        // SAFETY: sched_getaffinity initialized `mask`. Indices are bounded by CPU_SETSIZE.
         .filter(|cpu_id| unsafe { libc::CPU_ISSET(*cpu_id, &mask) })
         .collect::<Vec<_>>();
     if cpu_ids.is_empty() {
@@ -646,6 +559,15 @@ fn into_jstring(env: &JNIEnv<'_>, value: String) -> jstring {
         .unwrap_or(std::ptr::null_mut())
 }
 
+fn catch_json(work: impl FnOnce() -> String) -> String {
+    catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|_| failed_json())
+}
+
+fn jni_json(env: &JNIEnv<'_>, work: impl FnOnce() -> String) -> jstring {
+    let value = catch_json(work);
+    catch_unwind(AssertUnwindSafe(|| into_jstring(env, value))).unwrap_or(std::ptr::null_mut())
+}
+
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_eu_euid_bench_BenchRunner_identity(
@@ -653,18 +575,16 @@ pub extern "system" fn Java_eu_euid_bench_BenchRunner_identity(
     _class: JClass<'_>,
     all_performance_cores: jboolean,
 ) -> jstring {
-    let json = catch_unwind(AssertUnwindSafe(|| {
+    jni_json(&env, || {
         let threading = match configure_threading(all_performance_cores != 0) {
             Ok(threading) => threading,
             Err(error) => {
                 eprintln!("SDK identity benchmark thread setup failed: {error}");
-                return FAILED_JSON.to_string();
+                return failed_json();
             }
         };
         result_json(run_identity_benchmark(threading))
-    }))
-    .unwrap_or_else(|_| FAILED_JSON.to_string());
-    into_jstring(&env, json)
+    })
 }
 
 #[cfg(test)]
@@ -707,9 +627,37 @@ mod tests {
             },
             ok: true,
         };
+        let (build_id, library_slot, cargo_profile, lto) = build_metadata();
         assert_eq!(
             result_json(result),
-            r#"{"prove_ms":1,"process_cpu_ms":2,"verify_ms":3,"peak_bytes":4,"proof_bytes":5,"rayon_threads":2,"worker_cpu_ids":[2,3],"performance_cpu_ids":[2,3],"efficiency_cpu_ids":[0,1],"cpu_metric_values":[[0,512],[1,512],[2,768],[3,1024]],"frequency_before":{"scaling_max_khz":[[2,2000000],[3,3000000]],"scaling_cur_khz":[[2,1500000],[3,2500000]]},"frequency_after":{"scaling_max_khz":[[2,2000000],[3,3000000]],"scaling_cur_khz":[[2,1800000],[3,2800000]]},"core_metric":"cpu_capacity","ok":true}"#
+            format!(
+                r#"{{"statement":"sdk_identity_product","build_id":"{build_id}","library_slot":"{library_slot}","cargo_profile":"{cargo_profile}","lto":"{lto}","prove_ms":1,"process_cpu_ms":2,"verify_ms":3,"peak_bytes":4,"proof_bytes":5,"rayon_threads":2,"worker_cpu_ids":[2,3],"performance_cpu_ids":[2,3],"efficiency_cpu_ids":[0,1],"cpu_metric_values":[[0,512],[1,512],[2,768],[3,1024]],"frequency_before":{{"scaling_max_khz":[[2,2000000],[3,3000000]],"scaling_cur_khz":[[2,1500000],[3,2500000]]}},"frequency_after":{{"scaling_max_khz":[[2,2000000],[3,3000000]],"scaling_cur_khz":[[2,1800000],[3,2800000]]}},"core_metric":"cpu_capacity","ok":true}}"#
+            )
         );
+    }
+
+    #[test]
+    fn failed_json_keeps_the_product_metadata_schema() {
+        let failed = failed_json();
+        assert!(failed.contains(r#""statement":"sdk_identity_product""#));
+        assert!(failed.contains(r#""library_slot":""#));
+        assert!(failed.ends_with(r#""ok":false}"#));
+    }
+
+    #[test]
+    fn sampler_thread_is_joined_when_work_panics() {
+        let sampler = PeakSampler::start();
+        let finished = Arc::clone(&sampler.finished);
+        let outcome = catch_unwind(AssertUnwindSafe(move || {
+            let _sampler = sampler;
+            panic!("injected sampler-work panic");
+        }));
+        assert!(outcome.is_err());
+        assert!(finished.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn wrapper_panics_become_failed_json() {
+        assert_eq!(catch_json(|| panic!("injected JNI panic")), failed_json());
     }
 }

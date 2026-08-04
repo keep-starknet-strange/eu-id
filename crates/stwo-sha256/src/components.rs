@@ -1,32 +1,28 @@
 //! Producer-side lookup components.
 //!
-//! The main `crate::constraints::Sha256Eval` is the **consumer**: it fires
-//! `add_to_relation(rel, +1, …)` on each lookup. For the LogUp protocol
-//! to balance to zero, every consumed row must be produced — yielded with
-//! a negative multiplicity equal to how many times the consumer used it.
+//! The main `crate::constraints::Sha256Eval` consumes each lookup row.
+//! It calls `add_to_relation(rel, +1, …)` for each use.
+//! A producer yields the same row with a negative use count.
+//! These terms make the LogUp sum zero.
 //!
 //! Each table here is a small `FrameworkEval` with one preprocessed-column
 //! group (the table's row content) plus one main-trace **multiplicity**
 //! column per relation it serves. It emits `add_to_relation(rel,
 //! −multiplicity_cell, &row_cells)`, then `finalize_logup_in_pairs()`.
 //!
-//! The active standalone path wires [`RangeKEval`] × 4 — one per
-//! `RangeKind::{Range2, Range4, Range5,
-//!   Range8}` channel. The first three bound carries to 2, 4, or 5 values;
-//!   `Range8` bounds terminal digest bytes to 256 values. Each table has one
-//!   preprocessed value column plus one multiplicity column; small tables are
-//!   padded to the backend's minimum SIMD domain. See [`range_log_size`] and
-//!   [`crate::preprocessed`].
+//! The standalone path uses four [`RangeKEval`] components.
+//! Each `RangeKind::{Range2, Range4, Range5, Range8}` channel has one component.
+//! The first three tables bound carries to two, four, or five values.
+//! `Range8` bounds terminal digest bytes to 256 values.
 //!
-//! The decode, Maj/Ch, and Xor evaluator types below are retained only for
-//! standalone table tests and compatibility; the bit-plane SHA AIR does not
-//! instantiate them.
+//! Each table has one value column and one multiplicity column.
+//! Small tables use the minimum SIMD domain.
+//! See [`range_log_size`] and [`crate::preprocessed`].
 //!
 //! Every preprocessed-column ID is namespaced under the `"sha256_"` prefix
-//! so it cannot collide with the ECDSA-stream tables in a future combined
-//! workspace proof. The `id()` constructors live next to their evaluators
-//! so the matching trace generator (`crate::preprocessed`) and the
-//! evaluator stay in lock-step.
+//! to prevent a collision with ECDSA-stream tables. The `id()` constructors
+//! stay next to their evaluators. This structure keeps the trace generator and
+//! evaluator in the same order.
 
 use stwo::core::fields::qm31::QM31;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
@@ -35,8 +31,6 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, Relation, RelationEntry,
 };
 
-use crate::partitions::SigmaFn;
-use crate::tables::Half;
 use crate::tables_local::RANGE_8;
 
 // Re-export shorthand so the `stark` module imports types from one place.
@@ -64,30 +58,12 @@ fn shared_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
-/// Tag the (function, half) of one σ/Σ decode table.
-fn decode_tag(f: SigmaFn, half: Half) -> &'static str {
-    match (f, half) {
-        (SigmaFn::Sigma0, Half::S) => "sigma0_s",
-        (SigmaFn::Sigma0, Half::SComplement) => "sigma0_sp",
-        (SigmaFn::Sigma1, Half::S) => "sigma1_s",
-        (SigmaFn::Sigma1, Half::SComplement) => "sigma1_sp",
-        (SigmaFn::LowerSigma0, Half::S) => "lsigma0_s",
-        (SigmaFn::LowerSigma0, Half::SComplement) => "lsigma0_sp",
-        (SigmaFn::LowerSigma1, Half::S) => "lsigma1_s",
-        (SigmaFn::LowerSigma1, Half::SComplement) => "lsigma1_sp",
-    }
-}
-
 /// Which `Range_k` table a producer or consumer fires against. The lookup
 /// pins one value into `[0, k)`.
 ///
-/// **N1 — `Range8` is reserved for terminal-byte checks.**
-/// `Range2`/`Range4`/`Range5` size mod-2³² add-carry checks (per the
-/// `crate::headroom` audit, the carry of a `k`-addend add lives in
-/// `[0, k)`). `Range8`, by contrast, is the 2⁸-row table used only for
-/// terminal digest-byte checks. Passing `Range8`
-/// to `crate::constraints::emit_mod_2_32_add_linear` is rejected by an
-/// explicit `panic!` because no mod-2³² add carry uses the byte range.
+/// `Range2`, `Range4`, and `Range5` check addition carries. A `k`-addend carry
+/// is in `[0, k)`. `Range8` checks only terminal digest bytes. The addition
+/// helper rejects `Range8` because no addition carry uses that range.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RangeKind {
     /// Carries from 2-addend mod-2³² adds (`T2`, `e_new`, `a_new`, finalization).
@@ -129,11 +105,9 @@ impl RangeKind {
 
 /// `log2` of the row count committed for a `Range_k` producer.
 ///
-/// Stwo's SIMD backend requires `log_size ≥ LOG_N_LANES` (one packed lane
-/// minimum), so the small `Range_2`/`Range_4`/`Range_5` tables are padded
-/// up to `2^LOG_N_LANES = 16` rows. Padding rows hold value `0` with
-/// multiplicity `0`; they do not contribute to the LogUp balance because
-/// the consumer only fires lookups on real carries.
+/// Stwo's SIMD backend requires `log_size ≥ LOG_N_LANES`. Extend small tables
+/// to `2^LOG_N_LANES = 16` rows. Extra rows contain value zero and
+/// multiplicity zero, so they do not affect the LogUp balance.
 #[inline]
 pub fn range_log_size(kind: RangeKind) -> u32 {
     let k = kind.bound();
@@ -150,11 +124,12 @@ pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     shared_id(kind.tag())
 }
 
-/// Class-D `is_dummy` selector id for a shared producer's blinded table
-/// (Q-015 §4b / p4c Class D). `1` over the reserved dummy-key upper half
-/// `[2^L, 2^(L+1))`, `0` over the real lower half `[0, 2^L)`. Keyed by the
-/// producer's stable tag so no two producers alias, and namespaced under
-/// `sha_shared_` so it never collides with the standalone tables.
+/// Class D `is_dummy` selector ID for a blinded shared table.
+///
+/// The selector is one in the reserved upper half `[2^L, 2^(L+1))`.
+/// It is zero in the real lower half `[0, 2^L)`.
+/// The stable producer tag prevents aliasing.
+/// The `sha_shared_` namespace prevents collisions with standalone tables.
 pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessedColumnId {
     shared_id(&format!("{}_isdummy", producer.tag()))
 }
@@ -169,14 +144,14 @@ pub fn is_first_row_column_id() -> PreProcessedColumnId {
     id("is_first_row")
 }
 
-/// IDs of the 9 round-cyclic preprocessed columns of the rotated
-/// one-row-per-round layout, all at the main trace's `log_n_rows` and all
-/// functions of `t = natural_row mod 64` alone: `k_lo`/`k_hi` (the round
-/// constant `K[t]`'s 16-bit limbs), the `is_round_{0,1,2,3,15,63}`
-/// indicators (working-state boundary selects, padding-row gate,
-/// finalization gate), and `is_schedule` (`t ≥ 16` — the schedule-family
-/// gate). Emission order here matches
-/// `crate::preprocessed::generate_preprocessed_trace`.
+/// IDs for the nine cyclic columns in the one-row-per-round layout.
+///
+/// All columns use the main trace `log_n_rows`.
+/// They depend only on `t = natural_row mod 64`.
+/// `k_lo` and `k_hi` hold the limbs of `K[t]`.
+/// The `is_round_{0,1,2,3,15,63}` columns select boundaries and gates.
+/// `is_schedule` is the `t ≥ 16` schedule gate.
+/// This order matches `crate::preprocessed::generate_preprocessed_trace`.
 pub fn round_cyclic_column_ids() -> [PreProcessedColumnId; 9] {
     [
         id("k_lo"),
@@ -191,135 +166,6 @@ pub fn round_cyclic_column_ids() -> [PreProcessedColumnId; 9] {
     ]
 }
 
-/// IDs of the 5 preprocessed columns of one decode table.
-/// Order matches `crate::relations::SIGMA_DECODE_REL_SIZE`'s row shape:
-/// `(key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi)`.
-pub fn decode_column_ids(f: SigmaFn, half: Half) -> [PreProcessedColumnId; 5] {
-    let t = decode_tag(f, half);
-    [
-        id(&format!("decode_{t}_key")),
-        id(&format!("decode_{t}_omain_lo")),
-        id(&format!("decode_{t}_omain_hi")),
-        id(&format!("decode_{t}_o2_lo")),
-        id(&format!("decode_{t}_o2_hi")),
-    ]
-}
-
-/// IDs of the 5 preprocessed columns of the packed Maj/Ch table.
-/// Order: `(a, b, c, maj, ch)`.
-pub fn maj_ch_column_ids() -> [PreProcessedColumnId; 5] {
-    [
-        id("maj_ch_a"),
-        id("maj_ch_b"),
-        id("maj_ch_c"),
-        id("maj_ch_maj"),
-        id("maj_ch_ch"),
-    ]
-}
-
-/// IDs of the 3 preprocessed columns of the xor_8 table.
-/// Order: `(x, y, z)`.
-pub fn xor_8_column_ids() -> [PreProcessedColumnId; 3] {
-    [id("xor_8_x"), id("xor_8_y"), id("xor_8_z")]
-}
-
-// ---------------------------------------------------------------------------
-// σ/Σ decode-table component
-// ---------------------------------------------------------------------------
-
-/// Producer for one of the eight σ/Σ decode tables.
-///
-/// Reads its 5 preprocessed columns and 1 multiplicity column, yields each
-/// row at `-multiplicity` against the matching `Sigma{0,1}{,Lower}Decode{S,SPrime}`
-/// relation tag. The relation is selected via `f` × `half`.
-#[derive(Clone)]
-pub struct SigmaDecodeEval {
-    pub log_size: u32,
-    pub f: SigmaFn,
-    pub half: Half,
-    pub relations: Sha256Relations,
-}
-
-impl FrameworkEval for SigmaDecodeEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = decode_column_ids(self.f, self.half);
-        let key = eval.get_preprocessed_column(cols[0].clone());
-        let o_main_lo = eval.get_preprocessed_column(cols[1].clone());
-        let o_main_hi = eval.get_preprocessed_column(cols[2].clone());
-        let o2_partial_lo = eval.get_preprocessed_column(cols[3].clone());
-        let o2_partial_hi = eval.get_preprocessed_column(cols[4].clone());
-        let mult = eval.next_trace_mask();
-
-        let values = [key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi];
-
-        // Select the matching relation handle, kept generic by branching
-        // through a small `dyn Relation`-style closure. Stwo's
-        // `add_to_relation` is generic on `R: Relation<…>`; we can't pass
-        // a `&dyn Relation` so we inline the 8-way match.
-        let neg_mult = -mult;
-        use crate::relations::*;
-        match (self.f, self.half) {
-            (SigmaFn::Sigma0, Half::S) => emit::<E, Sigma0DecodeS>(
-                &mut eval,
-                &self.relations.sigma_decode.sigma0_s,
-                neg_mult,
-                &values,
-            ),
-            (SigmaFn::Sigma0, Half::SComplement) => emit::<E, Sigma0DecodeSPrime>(
-                &mut eval,
-                &self.relations.sigma_decode.sigma0_s_complement,
-                neg_mult,
-                &values,
-            ),
-            (SigmaFn::Sigma1, Half::S) => emit::<E, Sigma1DecodeS>(
-                &mut eval,
-                &self.relations.sigma_decode.sigma1_s,
-                neg_mult,
-                &values,
-            ),
-            (SigmaFn::Sigma1, Half::SComplement) => emit::<E, Sigma1DecodeSPrime>(
-                &mut eval,
-                &self.relations.sigma_decode.sigma1_s_complement,
-                neg_mult,
-                &values,
-            ),
-            (SigmaFn::LowerSigma0, Half::S) => emit::<E, LowerSigma0DecodeS>(
-                &mut eval,
-                &self.relations.sigma_decode.lower_sigma0_s,
-                neg_mult,
-                &values,
-            ),
-            (SigmaFn::LowerSigma0, Half::SComplement) => emit::<E, LowerSigma0DecodeSPrime>(
-                &mut eval,
-                &self.relations.sigma_decode.lower_sigma0_s_complement,
-                neg_mult,
-                &values,
-            ),
-            (SigmaFn::LowerSigma1, Half::S) => emit::<E, LowerSigma1DecodeS>(
-                &mut eval,
-                &self.relations.sigma_decode.lower_sigma1_s,
-                neg_mult,
-                &values,
-            ),
-            (SigmaFn::LowerSigma1, Half::SComplement) => emit::<E, LowerSigma1DecodeSPrime>(
-                &mut eval,
-                &self.relations.sigma_decode.lower_sigma1_s_complement,
-                neg_mult,
-                &values,
-            ),
-        }
-
-        eval.finalize_logup_in_pairs();
-        eval
-    }
-}
-
 /// Tiny helper: emit one `RelationEntry` with the given multiplicity, then
 /// finalize. Generic over `R: Relation<E::F, E::EF>` so each table can pick
 /// its relation type without a `dyn` indirection.
@@ -332,28 +178,24 @@ fn emit<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval.add_to_relation(RelationEntry::base(rel, mult, values));
 }
 
-/// Class-D blinded yield of one shared-table producer row (Q-015 §4b).
+/// Class D blinded yield for one shared-table row.
 ///
 /// Emits ONE gated entry against the relation: numerator `-(1 − is_dummy)·mult`
 /// at the row key.
 ///
-/// On a real row (`is_dummy = 0`) the numerator is `-mult` — identical to the
-/// unblinded producer. On a dummy row (`is_dummy = 1`) the numerator is
-/// identically `0`, so the dummy row contributes nothing to the LogUp sum for
-/// ANY committed `m`. The fresh random blind multiplicities on the reserved
-/// upper half therefore stay in the COMMITTED multiplicity column exactly as
-/// before (same masking: same blind region, same column, same openings masked)
-/// while costing no second fraction — this is what the earlier cancelling PAIR
-/// (`-mult` and `+is_dummy·mult`) achieved at twice the interaction/quotient
-/// cost.
+/// A real row has `is_dummy = 0` and numerator `-mult`.
+/// A dummy row has `is_dummy = 1` and numerator zero.
+/// Thus, a dummy row does not change the LogUp sum.
+/// Fresh upper-half values remain in the committed multiplicity column.
+/// One gated fraction replaces the earlier two-fraction form.
 ///
-/// Soundness: `is_dummy` is PREPROCESSED (trusted), so a malicious prover
-/// cannot un-gate a dummy row to emit a real key — on the whole dummy region
-/// the emitted numerator is forced to `0`. Dummy keys (`≥ 2^16`, unreachable by
-/// honest consumers) therefore remain unreachable, and the resulting LogUp
-/// balance is exactly that of the unblinded table. Both the key and the gate
-/// come from committed/preprocessed data the verifier reconstructs, so there is
-/// no free claimed-sum term (P4b blind_claim-hole caution).
+/// The trusted preprocessed data supplies `is_dummy`.
+/// A prover cannot enable a dummy row as a real key.
+/// Every dummy row has a zero numerator.
+/// Honest consumers cannot use dummy keys of at least `2^16`.
+///
+/// The verifier reconstructs both the key and the gate.
+/// The claimed sum has no free term.
 ///
 /// Degree: `(1 − is_dummy)·mult` = preprocessed × trace = degree 2, within the
 /// `D ≤ 3` budget under `max_constraint_log_degree_bound = blind_log_size + 1`.
@@ -372,97 +214,6 @@ fn emit_blind<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval.add_to_relation(RelationEntry::base(rel, -((one - is_dummy) * mult), values));
 }
 
-pub type SigmaDecodeComponent = FrameworkComponent<SigmaDecodeEval>;
-
-// ---------------------------------------------------------------------------
-// Packed Maj/Ch component
-// ---------------------------------------------------------------------------
-
-/// Producer for the packed Maj/Ch lookup table at group-width `W`.
-///
-/// One physical table, two relations: Maj keys on `(a, b, c, maj)`, Ch
-/// keys on `(a, b, c, ch)`. The component reads 5 preprocessed columns
-/// (`a, b, c, maj, ch`) and 2 multiplicity columns (one per relation),
-/// emitting two `add_to_relation` calls per row.
-#[derive(Clone)]
-pub struct MajChEval {
-    pub log_size: u32,
-    pub relations: Sha256Relations,
-}
-
-impl FrameworkEval for MajChEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = maj_ch_column_ids();
-        let a = eval.get_preprocessed_column(cols[0].clone());
-        let b = eval.get_preprocessed_column(cols[1].clone());
-        let c = eval.get_preprocessed_column(cols[2].clone());
-        let maj_val = eval.get_preprocessed_column(cols[3].clone());
-        let ch_val = eval.get_preprocessed_column(cols[4].clone());
-
-        let mult_maj = eval.next_trace_mask();
-        let mult_ch = eval.next_trace_mask();
-
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.maj,
-            -mult_maj,
-            &[a.clone(), b.clone(), c.clone(), maj_val],
-        ));
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.ch,
-            -mult_ch,
-            &[a, b, c, ch_val],
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
-    }
-}
-
-pub type MajChComponent = FrameworkComponent<MajChEval>;
-
-// ---------------------------------------------------------------------------
-// xor_8 component
-// ---------------------------------------------------------------------------
-
-/// Producer for the generic 2¹⁶-row byte-XOR table.
-#[derive(Clone)]
-pub struct Xor8Eval {
-    pub log_size: u32,
-    pub relations: Sha256Relations,
-}
-
-impl FrameworkEval for Xor8Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = xor_8_column_ids();
-        let x = eval.get_preprocessed_column(cols[0].clone());
-        let y = eval.get_preprocessed_column(cols[1].clone());
-        let z = eval.get_preprocessed_column(cols[2].clone());
-        let mult = eval.next_trace_mask();
-
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.xor_8,
-            -mult,
-            &[x, y, z],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
-    }
-}
-
-pub type Xor8Component = FrameworkComponent<Xor8Eval>;
-
 // ---------------------------------------------------------------------------
 // Range_k component
 // ---------------------------------------------------------------------------
@@ -475,14 +226,15 @@ pub type Xor8Component = FrameworkComponent<Xor8Eval>;
 /// multiplicity column. Yields each row at `-multiplicity` against the
 /// matching range relation.
 ///
-/// **Soundness role.** Together with the consumer-side
-/// `add_to_relation(rel, +1, &[carry])` calls inside
-/// `crate::constraints::emit_mod_2_32_add_linear` and the terminal
-/// `Range_8` lookups on every real-block `h_out` byte (inlined in
-/// `Sha256Eval::evaluate` via `wire_range_check`), this component
-/// completes the LogUp loop that pins each carry to its audited range and
-/// each digest byte into `[0, 2⁸)`. The AIR recomposes every byte pair into
-/// its corresponding 16-bit `h_out` limb.
+/// **Soundness role.**
+/// The consumer emits one relation use for each carry.
+/// See `crate::constraints::emit_mod_2_32_add_linear`.
+/// It also emits `Range_8` uses for each real `h_out` byte.
+///
+/// This component supplies the matching LogUp values.
+/// The relation pins carries to their audited ranges.
+/// It also pins digest bytes to `[0, 2⁸)`.
+/// The AIR recomposes each byte pair into an `h_out` limb.
 #[derive(Clone)]
 pub struct RangeKEval {
     pub log_size: u32,
@@ -541,13 +293,14 @@ pub type RangeKComponent = FrameworkComponent<RangeKEval>;
 // Paired shared-table producer component (R2 fraction batching)
 // ---------------------------------------------------------------------------
 
-/// One shared-SHA producer table, identified by which lookup it serves. Used
-/// to co-locate two same-`log_size` producers in a single component so their
-/// LogUp fractions pair into one `SecureField` interaction column
-/// (`finalize_logup_in_pairs`), halving the committed interaction width for
-/// the paired half. The producer's preprocessed columns, multiplicity column,
-/// relation, and fraction are byte-for-byte identical to the standalone
-/// `RangeKEval` form — only the column packaging changes.
+/// One shared SHA producer table, identified by its lookup.
+///
+/// One component can contain two producers with the same `log_size`.
+/// `finalize_logup_in_pairs` puts their fractions in one `SecureField` column.
+/// This pair halves the committed interaction width.
+/// The values, multiplicities, relations, and fractions match standalone
+/// `RangeKEval`.
+/// Only the column package changes.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SharedProducer {
     Range(RangeKind),
@@ -561,11 +314,10 @@ impl SharedProducer {
         }
     }
 
-    /// Class-D committed row count: one log above the real width. The upper
-    /// half is the reserved dummy-key region carrying fresh random blind
-    /// multiplicities (Q-015 §4b / p4c Class D). Every committed column of this
-    /// producer — preprocessed value/group cells, `is_dummy` selector,
-    /// multiplicity trace, interaction fraction — lives at this size.
+    /// Class D row count, one log above the real width.
+    ///
+    /// The upper half contains reserved dummy keys and fresh multiplicities.
+    /// Every producer column uses this size.
     pub fn blind_log_size(self) -> u32 {
         (self.log_size() + 1).max(air_core::claim_mask::CLAIM_MASK_MIN_LOG_SIZE)
     }
@@ -631,7 +383,7 @@ impl SharedProducer {
 #[derive(Clone)]
 pub struct SharedProducerPairEval {
     pub log_size: u32,
-    /// 1 or 2 producers, all of `log_size`. Read in this order; the trace and
+    /// 1 or 2 producers, all of `log_size`. Read in this order. The trace and
     /// interaction generators must lay their multiplicity/fraction columns in
     /// the same order (see `shared_tables::PRODUCER_PAIRS`).
     pub producers: Vec<SharedProducer>,
@@ -677,10 +429,9 @@ pub fn all_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     for &kind in RANGE_TABLES {
         out.push(range_column_id(kind));
     }
-    // 1 `is_first_row` selector sized to the main `Sha256Eval` trace. Read
-    // by the consumer eval via `get_preprocessed_column` (not by any
-    // producer component), so it lives at the tail of the ID list and is
-    // not allocated to any producer component.
+    // One `is_first_row` selector uses the main `Sha256Eval` size.
+    // The consumer reads it with `get_preprocessed_column`.
+    // No producer owns this column.
     out.push(is_first_row_column_id());
     // 9 round-cyclic columns of the rotated layout (K limbs + round
     // indicators + schedule gate), also consumer-read via
@@ -697,11 +448,10 @@ pub fn consumer_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
 }
 
 pub fn shared_table_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
-    // Class D: each producer contributes its value/group columns followed by
-    // its `is_dummy` selector, in the exact order `SharedProducer::emit_entry`
-    // reads them (value cols via `get_preprocessed_column`, then the dummy
-    // selector). `crate::preprocessed::generate_shared_table_preprocessed_trace`
-    // emits the matching `CircleEvaluation`s in this same per-producer order.
+    // Each Class D producer contributes its value columns first.
+    // Its `is_dummy` selector follows those columns.
+    // `SharedProducer::emit_entry` reads the same order.
+    // `generate_shared_table_preprocessed_trace` also emits this order.
     let mut out = Vec::new();
     for &kind in RANGE_TABLES {
         let producer = SharedProducer::Range(kind);
@@ -710,19 +460,6 @@ pub fn shared_table_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     }
     out
 }
-
-/// The 8 decode tables in the canonical (function, side) ordering. Shared
-/// across `components`, `preprocessed`, `multiplicities`, and `interaction`.
-pub const DECODE_TABLES: &[(SigmaFn, Half)] = &[
-    (SigmaFn::Sigma0, Half::S),
-    (SigmaFn::Sigma0, Half::SComplement),
-    (SigmaFn::Sigma1, Half::S),
-    (SigmaFn::Sigma1, Half::SComplement),
-    (SigmaFn::LowerSigma0, Half::S),
-    (SigmaFn::LowerSigma0, Half::SComplement),
-    (SigmaFn::LowerSigma1, Half::S),
-    (SigmaFn::LowerSigma1, Half::SComplement),
-];
 
 /// The 4 range-check tables in canonical order. Shared across `components`,
 /// `preprocessed`, `multiplicities`, and `interaction` so an enum drift is
@@ -733,44 +470,3 @@ pub const RANGE_TABLES: &[RangeKind] = &[
     RangeKind::Range5,
     RangeKind::Range8,
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The per-table column-ID arrays are load-bearing: their order is what
-    /// the verifier's preprocessed-mask reads resolve against (via the
-    /// `TraceLocationAllocator`), so it must stay in lock-step with the
-    /// emission order in `crate::preprocessed`. That emission side is guarded
-    /// by `preprocessed::tests::emitted_columns_match_documented_field_order`;
-    /// this pins the ID side to its documented strings, so a one-sided
-    /// reorder here fails fast instead of silently mislabelling a column for
-    /// the verifier.
-    #[test]
-    fn column_ids_follow_documented_order() {
-        assert_eq!(
-            decode_column_ids(SigmaFn::Sigma0, Half::S),
-            [
-                id("decode_sigma0_s_key"),
-                id("decode_sigma0_s_omain_lo"),
-                id("decode_sigma0_s_omain_hi"),
-                id("decode_sigma0_s_o2_lo"),
-                id("decode_sigma0_s_o2_hi"),
-            ],
-        );
-        assert_eq!(
-            maj_ch_column_ids(),
-            [
-                id("maj_ch_a"),
-                id("maj_ch_b"),
-                id("maj_ch_c"),
-                id("maj_ch_maj"),
-                id("maj_ch_ch"),
-            ],
-        );
-        assert_eq!(
-            xor_8_column_ids(),
-            [id("xor_8_x"), id("xor_8_y"), id("xor_8_z")],
-        );
-    }
-}

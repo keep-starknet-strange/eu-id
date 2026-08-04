@@ -42,22 +42,18 @@ impl CoprocessorChannel {
         Fp::random(bytes)
     }
 
-    /// Draws `n` field elements in one batch (WO-P2 bulk pad drawing).
+    /// Draws `n` field elements in one batch.
     ///
-    /// Same per-element reduction rule as [`draw_fp`] — each element is
-    /// `Fp::random` over 32 fresh transcript bytes, so the reduction bias is
-    /// identical (single conditional subtraction, no modular bias beyond it).
-    /// Only the *squeeze* changes: instead of one Blake2s finalize per element,
-    /// this call squeezes a single 32-byte block key from the channel state
-    /// (folding in the domain separation carried by `self.state`), seeds a
-    /// ChaCha20 stream cipher with it, and fills `n · 32` fresh keystream bytes
-    /// in one pass. Each 32-byte lane is mapped through `Fp::random` exactly as
-    /// `draw_fp` would map its digest. The channel counter advances by one, so
-    /// this call stays deterministic in the seed and distinct from every other
-    /// draw on the channel. Switching a per-element `draw_fp` loop to a single
-    /// `draw_fps` therefore changes the concrete pad values (re-pin required if
-    /// any pad is pinned) but preserves the hiding distribution: the pads remain
-    /// uniform and independent of the witness, sourced solely from this channel.
+    /// Uses the same per-element reduction as [`Self::draw_fp`].
+    ///
+    /// Each element uses 32 fresh transcript bytes with one conditional
+    /// subtraction. This function changes only the squeeze operation.
+    /// It derives one 32-byte key from the channel state.
+    /// A ChaCha20 stream then supplies `n · 32` bytes.
+    /// `Fp::random` maps each 32-byte lane.
+    /// The channel counter advances once.
+    /// Concrete pad values differ from repeated [`Self::draw_fp`] calls.
+    /// The pads remain uniform and independent of the witness.
     pub fn draw_fps(&mut self, n: usize) -> Vec<Fp> {
         let mut key_hasher = self.state.clone();
         key_hasher.update(self.counter.to_be_bytes());

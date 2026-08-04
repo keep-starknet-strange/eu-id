@@ -1,9 +1,9 @@
 //! Per-key multiplicity counting for the range tables consumed by SHA-256.
 //!
-//! For each table produced in [`crate::tables`], this module walks a
-//! [`Sha256Witness`] and returns a `Vec<u32>` of length equal to the table's
-//! row count — the i-th entry holds the number of times the AIR fires a
-//! `add_to_relation(rel, +1, …)` keyed on table row `i`.
+//! This module counts lookup uses from a [`Sha256Witness`].
+//! It returns one `Vec<u32>` for each active range table.
+//! The vector length equals the table row count.
+//! Entry `i` counts relation uses for table row `i`.
 //!
 //! Keeping the witness-to-table-row mapping here keeps trace generation,
 //! witness emission, and AIR wiring separate.
@@ -30,19 +30,18 @@ pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> 
 
 /// Build the per-row multiplicity vector for one `Range_k` table.
 ///
-/// The vector's length is `2^range_log_size(kind)`. For `k < 2^LOG_N_LANES`
-/// the producer is padded with leading zero-valued rows; consumer-side
-/// lookups on carry values `c ∈ [0, k)` increment the row indexed by `c`.
+/// The vector's length is `2^range_log_size(kind)`. Extra rows after the first
+/// `k` rows have value zero and multiplicity zero. A consumer lookup for
+/// `c ∈ [0, k)` increments row `c`.
 ///
-/// Firing rule (mirrors `crate::constraints::emit_mod_2_32_add_linear` and
-/// the terminal `Range_8` wiring in `Sha256Eval::evaluate`):
+/// The count rules mirror the AIR relation uses:
 ///   - One `Range_4` increment per schedule-recurrence carry-limb pair (2
 ///     limbs × 48 entries per block).
 ///   - One `Range_5` increment per `T1` carry-limb pair (2 limbs × 64
 ///     rounds per block).
-///   - One `Range_2` increment per `T2`/`e_new`/`a_new` carry-limb pair (2
-///     limbs × 3 families × 64 rounds per block) plus per finalization
-///     carry-limb pair (2 limbs × 8 words per block).
+///   - One `Range_2` increment for each `T2`, `e_new`, and `a_new` carry limb.
+///     Each block has two limbs in three families for 64 rounds. It also has
+///     two finalization carry limbs for each of eight words.
 ///   - One `Range_8` increment per terminal `h_out` byte (4 bytes × 8
 ///     words per block).
 pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u32> {
@@ -91,7 +90,7 @@ pub fn range_k_multiplicities(witness: &Sha256Witness, kind: RangeKind) -> Vec<u
     mults
 }
 
-// Compile-time sanity: no callers should accidentally use deprecated APIs.
+// Compile-time checks for the fixed SHA dimensions.
 #[allow(dead_code)]
 const _: () = {
     assert!(N_ROUNDS == 64);
@@ -104,12 +103,9 @@ mod tests {
     use crate::field_exposure::FieldExposure;
     use crate::witness::compute_sha256_witness;
 
-    /// Per-block totals for each `Range_k` multiplicity vector match the
-    /// structural per-block lookup counts the AIR's `Sha256Eval` fires.
-    /// Drift between this and the consumer-side wiring is the same kind
-    /// of soundness-relevant gap the existing `*_per_row_totals_*` tests
-    /// guard against — kept here so a future edit to either side fails
-    /// closed at unit-test time, not at integration-test time.
+    /// Confirm that each `Range_k` total matches the AIR lookup count.
+    ///
+    /// This unit test detects drift between multiplicities and consumer wiring.
     #[test]
     fn range_k_per_block_totals_match_structural_counts() {
         use crate::components::RangeKind;
@@ -144,12 +140,11 @@ mod tests {
         assert_eq!(total, 4 * n_words);
     }
 
-    /// Honest `Range_k` carry counts never fall outside `[0, k)` — the
-    /// witness layer's `add_words_with_carries` already guarantees this,
-    /// and the multiplicity helper bumps `mults[value]`, so an
-    /// out-of-bound carry would either panic (index out of bounds) or
-    /// silently land in a padding slot. This test pins the property at
-    /// the multiplicity layer.
+    /// Confirm that honest `Range_k` counts stay in `[0, k)`.
+    ///
+    /// The witness addition helper creates an in-range carry.
+    /// The multiplicity helper increments `mults[value]`.
+    /// All later padding slots must remain zero.
     #[test]
     fn range_k_honest_counts_live_within_table_bounds() {
         use crate::components::RangeKind;
@@ -162,8 +157,8 @@ mod tests {
         ] {
             let mults = range_k_multiplicities(&w, kind);
             let k = kind.bound() as usize;
-            // Any multiplicity past row k-1 means an out-of-range carry
-            // got counted — the witness is malformed.
+            // A nonzero multiplicity after row k-1 identifies an invalid
+            // carry in the witness.
             for (i, &m) in mults.iter().enumerate() {
                 if i >= k {
                     assert_eq!(m, 0, "{kind:?}: row {i} > k-1 = {} has m = {m}", k - 1);
@@ -176,18 +171,10 @@ mod tests {
     /// — pins the `Range_k` LogUp soundness gate from the multiplicity side
     /// without paying for a real proof.
     ///
-    /// The end-to-end equivalent is
-    /// `tests/prove_verify_round_trip.rs::rejects_out_of_range_carry_witness_mutation`,
-    /// but that test is `#[ignore]`d (release-only) because a real proof
-    /// dominates wall time. This debug-mode test exercises the same
-    /// soundness invariant by checking the *necessary condition* the
-    /// LogUp argument enforces: a witness carry outside `[0, k)` shows
-    /// up as a consumer-side multiplicity bump at an index the producer
-    /// `Range_k` table has no row for, so the consumer/producer claimed
-    /// sums cannot balance. Together with the producer-side parity
-    /// invariants further up this module, this closes audit lesson L4
-    /// (docs/research/sha256-air-design.md §11) on the LogUp side at debug
-    /// cadence.
+    /// The release test proves the equivalent end-to-end property.
+    /// This debug test checks the LogUp count condition.
+    /// An out-of-range carry increments a row absent from the producer table.
+    /// The consumer and producer claim sums then cannot balance.
     #[test]
     fn out_of_range_carry_mutation_shifts_multiplicity_outside_table() {
         use crate::components::RangeKind;
@@ -196,10 +183,9 @@ mod tests {
         let baseline = range_k_multiplicities(&w, RangeKind::Range2);
         let k = RangeKind::Range2.bound() as usize;
 
-        // Mirror the witness mutation that
-        // `rejects_out_of_range_carry_witness_mutation` runs end-to-end:
-        // bump finalization carry word 7 lo from its honest `< 2` value
-        // to `5` — outside the `Range_2` producer table.
+        // Match the mutation in the end-to-end release test.
+        // Change finalization word seven from an honest carry to five.
+        // Five is outside the `Range_2` producer table.
         let last = w.blocks.last_mut().expect("at least one block");
         let original = last.finalization_carries[7].lo;
         assert!(
@@ -212,7 +198,7 @@ mod tests {
 
         // Bucket 5 is outside `[0, k = 2)`, so the producer Range_2 table
         // has no row for it. The mutation moves exactly one count from
-        // `mults[original]` to `mults[5]`; every other bucket is unchanged.
+        // `mults[original]` to `mults[5]`. All other buckets stay unchanged.
         assert_eq!(
             mutated[5],
             baseline[5] + 1,
@@ -253,10 +239,9 @@ mod tests {
 
         let shared = crate::shared_tables::ShaTableMultiplicities::from_consumers(&consumers);
 
-        // Class D: the stored vectors are blinded (2× length, random dummy upper
-        // half). Only the REAL lower half is the deterministic union sum; the
-        // upper half is fresh per-proof mask and is asserted equal to neither
-        // witness. We compare the lower half against the union sum here.
+        // Class D doubles each vector and fills the dummy upper half with a
+        // random mask. Only the real lower half contains the deterministic
+        // union sum. Compare that lower half with the union here.
         for (i, &kind) in RANGE_TABLES.iter().enumerate() {
             let expected: Vec<u32> = range_k_multiplicities(&first, kind)
                 .into_iter()

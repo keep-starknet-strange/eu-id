@@ -59,19 +59,15 @@ impl RangeCheck {
         }
     }
 
-    // ---- Class D multiplicity blinding (Q-015 §4b / p4c Class D) ----
+    // Class-D multiplicity blinding.
     //
-    // The committed multiplicity column of a range table leaks: each row's
-    // count is a function of the private witness (which delta value the proof
-    // looked up), and every proof-side opening of the column is a linear
-    // functional over the full domain. Class D pads the table to a masking
-    // domain and fills its reserved suffix with fresh random multiplicities
-    // over dummy keys starting at `field_size`. Those keys are
-    // UNREACHABLE by honest consumers, which only ever look up values proven
-    // `< field_size` (the membership lookup against the real `[0, N]` region is
-    // exactly what forces that), so soundness is unaffected. Balance is
-    // preserved because the trusted `is_dummy` selector gates the provider
-    // numerator to zero on every dummy row for any random multiplicity.
+    // A committed range multiplicity column can reveal witness-dependent counts.
+    // Class D extends the table to a masking domain.
+    // Its reserved suffix contains fresh random multiplicities over dummy keys.
+    // Dummy keys start at `field_size`.
+    // Honest consumers use only values below `field_size`.
+    // The trusted `is_dummy` selector gives each dummy row a zero numerator.
+    // Thus, the random suffix does not change the balance.
 
     /// The blinded (Class-D) preprocessed value column id. Namespaced apart
     /// from [`id`](Self::id) so a blinded and a plain table of the same range
@@ -97,7 +93,7 @@ impl RangeCheck {
     }
 
     /// Class-D preprocessed value column. The reachable prefix is the real range
-    /// `[0, N]` followed by the same zero padding as [`preprocessed_column`];
+    /// `[0, N]` followed by the same zero padding as [`Self::preprocessed_column`].
     /// remaining rows hold reserved dummy keys starting at `field_size`.
     pub fn blind_preprocessed_column(&self) -> Column {
         let field_size = self.field_size();
@@ -168,7 +164,7 @@ impl Claim {
 
     /// Class-D blinded multiplicity column over the padded blinded domain: real
     /// counts in the reachable range capacity, fresh random cells on every
-    /// reserved dummy row. The dummy cells are the mask; the [`BlindEval`]'s
+    /// reserved dummy row. The dummy cells are the mask. The [`BlindEval`]'s
     /// `+is_dummy·mult` twin makes any value there balance to zero.
     pub fn gen_blind_multiplicity_col(&self, values: &[Vec<M31>]) -> Column {
         let real = 1usize << self.log_size as usize;
@@ -223,23 +219,23 @@ impl FrameworkEval for Eval {
 
 pub type Component = FrameworkComponent<Eval>;
 
-/// Class-D multiplicity-blinded range-table provider (Q-015 §4b / p4c Class D).
+/// Provides a Class-D multiplicity-blinded range table.
 ///
-/// Identical to [`Eval`] but over the padded blinded domain. Reads the
-/// preprocessed value column (real range in the reachable prefix, reserved
-/// dummy keys in the suffix) and the `is_dummy` selector, then emits ONE gated entry
-/// per row against the relation and value: numerator
-/// `-(1 − is_dummy) · multiplicity`.
+/// Evaluates the padded blinded domain.
 ///
-/// On a real row (`is_dummy = 0`) the numerator is `-multiplicity` — exactly the
-/// unblinded table. On a dummy row it is identically `0` for ANY random `m`, so
-/// the blind multiplicities never touch the global balance while staying in the
-/// committed multiplicity column as the mask. `is_dummy` is preprocessed
-/// (trusted), so a malicious prover cannot un-gate a dummy row; both key and gate
-/// come from committed/preprocessed data, so there is no free claimed-sum term.
-/// `(1 − is_dummy) · multiplicity` is preprocessed × trace = degree 2, within the
-/// `D ≤ 3` budget under `max_constraint_log_degree_bound = log_size + 1`. Replaces
-/// the earlier cancelling pair at half the interaction/quotient cost.
+/// The reachable prefix contains the real range.
+/// The suffix contains reserved dummy keys.
+/// Each row emits one gated relation entry.
+/// Its numerator is `-(1 − is_dummy) · multiplicity`.
+///
+/// A real row has numerator `-multiplicity`.
+/// This is the same value as the unblinded table.
+/// A dummy row has numerator `0` for every random multiplicity.
+///
+/// Thus, blind multiplicities do not change the global balance.
+/// The trusted `is_dummy` selector prevents a prover from activating a dummy row.
+/// Both the key and gate use committed or preprocessed data.
+/// The gated product has degree 2 and stays within the degree-3 budget.
 #[derive(Clone)]
 pub struct BlindEval {
     pub log_size: u32,
@@ -295,7 +291,7 @@ mod class_d_tests {
 
     /// Class-D: the blinded range table keeps `[0, N]` (then zero padding) in
     /// the reachable prefix and reserves every remaining row for unreachable
-    /// dummy keys; `is_dummy` selects exactly that suffix.
+    /// dummy keys. `is_dummy` selects exactly that suffix.
     #[test]
     fn blinded_range_reserves_unreachable_dummy_keys() {
         let rc = RangeCheck(31);
@@ -323,9 +319,10 @@ mod class_d_tests {
         assert!(rc.blind_log_size() >= CLAIM_MASK_MIN_LOG_SIZE);
     }
 
-    /// Class-D: the blinded multiplicity column carries real counts in the
-    /// reachable prefix and fresh randomness in the reserved dummy suffix, so its
-    /// committed openings mask the real counts.
+    /// Confirms that the blinded multiplicity column masks real counts.
+    ///
+    /// The reachable prefix contains real counts.
+    /// The dummy suffix contains fresh random cells.
     #[test]
     fn blinded_multiplicity_masks_real_counts_with_fresh_dummies() {
         let rc = RangeCheck(31);

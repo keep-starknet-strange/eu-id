@@ -8,12 +8,10 @@
 //! Range7 instance can only be balanced by a provide against the same
 //! instance.
 //!
-//! Pair each relation instance with **exactly one** provider component.
-//! The LogUp sum is balanced across every use and every provide of the
-//! same relation: a missing provider leaves the proof unbalanced, and a
-//! duplicated provider lets the prover over-account multiplicities.
+//! Pair each relation instance with one provider component.
+//! A missing or duplicate provider makes the relation balance invalid.
 //!
-//! ## Phases
+//! ## Modules
 //!
 //! - [`component`] — constraints emitted by each provider.
 //! - [`trace`]     — preprocessed and multiplicity columns.
@@ -62,11 +60,11 @@ pub fn range_check_value_column_id(log_size: u32) -> PreProcessedColumnId {
     }
 }
 
-/// Preprocessed `is_dummy` selector for the Class-D blind region of a plain
-/// range table (Q-015 §4b / p4c-degree-inventory Class D). `1` over the upper
-/// half `[2^log_size, 2^(log_size+1))` (reserved dummy keys), `0` over the real
-/// `[0, 2^log_size)` region. Keyed by the *real* `log_size` so a Class-D table
-/// and any non-blinded table of the same width never alias.
+/// Returns the `is_dummy` selector for a Class-D range table.
+///
+/// The upper half contains reserved dummy keys and has selector value one.
+/// The real lower half has selector value zero.
+/// The real `log_size` keeps blinded and unblinded table IDs separate.
 pub fn range_check_dummy_column_id(real_log_size: u32) -> PreProcessedColumnId {
     PreProcessedColumnId {
         id: format!("p256_range{real_log_size}_dummy"),
@@ -86,7 +84,7 @@ pub fn signed_carry_active_column_id(equation_name: &str) -> PreProcessedColumnI
 }
 
 /// Centered M31 encoding of a signed carry. Inputs must satisfy
-/// `|carry| ≤ M31_HALF`; outside that range the encoding wraps modulo
+/// `|carry| ≤ M31_HALF`. Outside that range the encoding wraps modulo
 /// `M31_MODULUS` and the round-trip with [`decode_signed_carry`] no longer
 /// holds.
 /// Sum of `1 / denominator_i` with one Montgomery batch inversion
@@ -128,10 +126,9 @@ pub fn decode_signed_carry(value: M31) -> i64 {
 
 /// Add a single use of a range check at `value`, weighted by `gate`.
 ///
-/// The LogUp sum on this relation balances iff `value` appears in the
-/// table provided by the [`RangeCheckEval`] (or [`SignedCarryRangeEval`])
-/// that shares this relation instance. Pass `E::F::one()` as `gate` for an
-/// unconditional check.
+/// The LogUp sum balances only when a shared range table contains `value`.
+/// [`RangeCheckEval`] and [`SignedCarryRangeEval`] can provide the table.
+/// Pass `E::F::one()` as `gate` for an unconditional check.
 pub fn add_range_check<E: EvalAtRow>(
     eval: &mut E,
     relation: &RangeCheckRelation,

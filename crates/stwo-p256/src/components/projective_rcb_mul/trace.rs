@@ -36,7 +36,7 @@ pub struct ProjectiveRcbAirTraceClaim {
 
 impl ProjectiveRcbAirTraceClaim {
     /// Build the claim from the projective EC trace: every mul row carries
-    /// real lhs/rhs/result, natively verified; the muls themselves are proven
+    /// real lhs/rhs/result, natively verified. The muls themselves are proven
     /// by the hinted-mul component.
     pub fn from_projective_trace_lite(
         trace: &ProjectiveEcTraceClaim,
@@ -109,7 +109,7 @@ pub struct ProjectiveRcbAirRow {
     /// the `ProjectiveEcRow`'s `PreparedAffinePoint`s (`inf.0 == 1`). Threaded
     /// through the silo schedule for the `EcOpHeaderRelation` header tuple
     /// `(source_index, op, output_inf, lhs_inf, rhs_inf)`. Only meaningful for
-    /// proj-scope rows; final_add / public_key_curve constructors fill `false`
+    /// proj-scope rows. Final_add / public_key_curve constructors fill `false`
     /// (their flags are never read).
     pub lhs_inf: bool,
     pub rhs_inf: bool,
@@ -185,17 +185,17 @@ impl ProjectiveRcbAirRow {
 pub struct ProjectiveRcbMulRow {
     pub step: ProjectiveRcbMulStep,
     pub trace: FpSolinasMulTrace,
-    /// Identity fast-path: `true` iff this is a `lhs · 1` mul (ladder affine
+    /// Identity fast path: `true` if and only if this is a `lhs · 1` multiplication (ladder affine
     /// `z = 1`). Identity rows carry `rhs = 1`, `result = lhs` (RAW — `lhs`
     /// may be non-canonical, which is harmless mod p) with zeroed schoolbook
-    /// internals, so `trace.verify()` is skipped; the hinted-mul component
+    /// internals, so `trace.verify()` is skipped. The hinted-mul component
     /// recomputes and proves the mul like any other.
     pub is_identity: bool,
 }
 
 impl ProjectiveRcbMulRow {
     /// Build a mul row: real `FpSolinasMulTrace` (the native
-    /// `lhs·rhs = result` check runs and consumers read the same limbs); the
+    /// `lhs·rhs = result` check runs and consumers read the same limbs). The
     /// mul is proven by the hinted-mul component.
     pub(crate) fn new_lite(
         step: ProjectiveRcbMulStep,
@@ -231,7 +231,7 @@ impl ProjectiveRcbMulRow {
 
     pub fn verify(&self) -> Result<(), ProjectiveRcbAirError> {
         if self.is_identity {
-            // Identity row: `result = lhs · 1` by construction; the zeroed
+            // Identity row: `result = lhs · 1` by construction. The zeroed
             // schoolbook internals would fail `trace.verify()`, and the
             // hinted-mul component proves the mul anyway.
             return Ok(());
@@ -241,15 +241,14 @@ impl ProjectiveRcbMulRow {
     }
 }
 
-/// Field-muls one EC op contributes to the silo. The first 13 are the
-/// renes-costello-batina (RCB) formula muls (`Double`: 13 always; `MixedAdd`:
-/// 13 for a finite operand, 0 for an infinity operand — the no-op early-returns
-/// before any mul). The last 2 (`M13`, `M14`) are the affine-normalization muls
-/// `output_affine.{x,y} · output_projective.z`; C5-2a-ii will bind their
-/// operands/result to prove `output_affine = to_affine(output_projective)`. The
-/// silo proves all 15 products via its Solinas reduction; this constant is the
-/// SINGLE source of truth for the per-op mul count (consumer column widths and
-/// every count test scale from it).
+/// Maximum silo multiplication rows for one EC operation.
+///
+/// The first 13 rows implement the Renes-Costello-Batina formula.
+/// A doubling operation always uses 13 rows.
+/// A finite mixed-add operation also uses 13 rows.
+/// An infinity mixed-add operation uses no rows.
+/// Rows `M13` and `M14` normalize the affine output.
+/// The silo proves all 15 products through Solinas reduction.
 pub const PROJECTIVE_RCB_MAX_MUL_ROWS_PER_OP: usize = 15;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -494,9 +493,8 @@ fn rcb_mixed_add_with_mul_rows(
     muls: &mut Vec<ProjectiveRcbMulRow>,
 ) -> Result<ProjectivePoint, ProjectiveRcbAirError> {
     let Some(operand) = operand.to_option() else {
-        // Infinity-operand no-op: the silo emits ZERO muls for this op (including
-        // no affine-norm muls), so the consumer gates its consumes off via
-        // `has_muls = false` and the 3-way balance stays closed.
+        // An operation with an infinity operand emits no multiplication rows.
+        // Value `has_muls = false` disables its consumer terms.
         return Ok(state.clone());
     };
 
@@ -560,7 +558,7 @@ fn rcb_mixed_add_with_mul_rows(
 /// Append the 2 affine-normalization muls (M13, M14) for an EC op that emitted
 /// the full RCB formula muls: `M13 = output_affine.x · output_projective.z` and
 /// `M14 = output_affine.y · output_projective.z`. For a finite output these
-/// equal `output_projective.{x,y}` (the to-affine identity); for the canonical
+/// equal `output_projective.{x,y}` (the to-affine identity). For the canonical
 /// infinity output (`z = 0`) both products are `0`. Either way the silo proves
 /// the honest product via [`ProjectiveRcbMulRow::new`]'s Solinas reduction. The
 /// downstream C5-2a-ii constraint binds these operands/result to the consumer's

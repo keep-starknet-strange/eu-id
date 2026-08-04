@@ -53,29 +53,15 @@ impl FrameworkEval for AgeRangeCheckEval {
         let day_borrow = eval.next_trace_mask();
         let month_borrow = eval.next_trace_mask();
 
-        // Credential-field binding columns. Read here, immediately after the
-        // base witness columns, so they occupy this component's trace slots — the
-        // order the witness generator commits them and the `air_core` allocator
-        // assigns. The base-value clones are captured before the statement
-        // constraints below consume `birth_*`. The single-row require selector is
-        // the preprocessed `active` column (no `bind_active` trace column).
+        // Read credential binding columns after the base witness columns.
+        // This order matches the witness writer and `air_core` allocator.
+        // Clone base values before statement constraints consume `birth_*`.
+        // The preprocessed `active` column selects the single require row.
         let dob_binding = self.dob_binding.as_ref().map(|relation| {
             match self
                 .dob_binding_mode
                 .expect("DOB binding mode must be set with DOB relation")
             {
-                DobBindingMode::Packed => {
-                    let year_hi = eval.next_trace_mask();
-                    let year_lo = eval.next_trace_mask();
-                    DobBindingMasks::Packed {
-                        relation,
-                        year_hi,
-                        year_lo,
-                        birth_year: birth_year.clone(),
-                        birth_month: birth_month.clone(),
-                        birth_day: birth_day.clone(),
-                    }
-                }
                 DobBindingMode::Text => {
                     let bytes: [E::F; DOB_TEXT_LEN] =
                         std::array::from_fn(|_| eval.next_trace_mask());
@@ -157,9 +143,8 @@ impl FrameworkEval for AgeRangeCheckEval {
         // Credential-field binding, after the statement's own lookups so the
         // existing interaction columns are unchanged and the binding fractions
         // append. The preprocessed `active` selects the single row whose requires
-        // fire; the reconciliation ties the packed `birth_year` to its two
-        // exposed bytes (`month`/`day` are single bytes, bound directly); the
-        // four requires cancel SHA's `−is_first_block` yield iff the bytes the
+        // fire. The reconciliation ties the parsed `YYYY-MM-DD` bytes to the
+        // age witness. The requirements cancel the matching field yields if and only if the bytes
         // age module reasons about are the credential's signed DOB bytes.
         if let Some(binding) = dob_binding {
             emit_dob_binding(&mut eval, active.clone(), binding);
@@ -175,18 +160,9 @@ impl FrameworkEval for AgeRangeCheckEval {
 
 pub type AgeRangeCheckComponent = FrameworkComponent<AgeRangeCheckEval>;
 
-/// The DOB-binding trace masks, per mode. `Packed` exposes the two big-endian
-/// year bytes; `Text` exposes the ten `YYYY-MM-DD` bytes plus the per-digit
+/// The DOB-binding trace masks for ten `YYYY-MM-DD` bytes and their per-digit
 /// 4-bit decomposition columns.
 enum DobBindingMasks<'a, F> {
-    Packed {
-        relation: &'a FieldBytesRelation,
-        year_hi: F,
-        year_lo: F,
-        birth_year: F,
-        birth_month: F,
-        birth_day: F,
-    },
     Text {
         relation: &'a FieldBytesRelation,
         bytes: [F; DOB_TEXT_LEN],
@@ -199,28 +175,6 @@ enum DobBindingMasks<'a, F> {
 
 fn emit_dob_binding<E: EvalAtRow>(eval: &mut E, active: E::F, binding: DobBindingMasks<'_, E::F>) {
     match binding {
-        DobBindingMasks::Packed {
-            relation,
-            year_hi,
-            year_lo,
-            birth_year,
-            birth_month,
-            birth_day,
-        } => {
-            eval.add_constraint(
-                active.clone()
-                    * (birth_year - field_const::<E>(256) * year_hi.clone() - year_lo.clone()),
-            );
-            let mult = E::EF::from(active);
-            for (byte_index, value) in [
-                (0u32, year_hi),
-                (1, year_lo),
-                (2, birth_month),
-                (3, birth_day),
-            ] {
-                require_dob_byte(eval, relation, mult.clone(), byte_index, value);
-            }
-        }
         DobBindingMasks::Text {
             relation,
             bytes,
@@ -237,9 +191,9 @@ fn emit_dob_binding<E: EvalAtRow>(eval: &mut E, active: E::F, binding: DobBindin
                 active.clone() * (bytes[7].clone() - field_const::<E>(b'-' as u32)),
             );
 
-            // Recompose each digit from four booleans and cap it at 9 (bits 3&2
-            // and 3&1 cannot both be set) — a range check without a table. Every
-            // constraint gated by `active`.
+            // Recompose each digit from four Boolean values. Cap the result at 9
+            // by excluding bit pairs 3-and-2 and 3-and-1. This range check needs
+            // no table. Gate every constraint with `active`.
             let digit_positions = [0usize, 1, 2, 3, 5, 6, 8, 9];
             let mut digits = Vec::with_capacity(DOB_TEXT_DIGITS);
             for (digit_idx, &byte_pos) in digit_positions.iter().enumerate() {

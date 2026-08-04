@@ -48,11 +48,12 @@ fn write_paired_entries(logup: &mut LogupTraceGenerator, entries: &[LogupEntry])
     }
 }
 
-/// Build a Class-D blinded delta-table interaction column mirroring
-/// [`crate::range_check::BlindEval`]'s SINGLE gated entry: numerator
-/// `-(1 − is_dummy)·mult` over one column (`finalize_logup`). `-mult` on real
-/// rows and `0` on dummy rows regardless of the random `m` committed there — the
-/// claimed sum is identical to the unblinded table's over the same real uses.
+/// Builds a Class-D blinded delta-table interaction column.
+///
+/// It matches the single gated entry in [`crate::range_check::BlindEval`].
+/// Real rows use numerator `-mult`.
+/// Dummy rows use numerator `0`, independent of their random value.
+/// Thus, the claimed sum matches the unblinded real rows.
 fn blind_delta_interaction(
     log_size: u32,
     value_col: &crate::types::Column,
@@ -169,7 +170,7 @@ impl InteractionTraces {
         // byte. The numerator is the preprocessed `active` selector (1 on a single
         // row), so each byte is required exactly once — matching SHA's single
         // `−is_first_block` yield. Appended after the statement's own five
-        // fractions so those columns are unchanged; the eval emits the same order
+        // fractions so those columns are unchanged. The eval emits the same order
         // before paired finalization.
         if let (Some(field), Some(bytes)) = (dob_field, witness_data.dob_bytes.as_ref()) {
             for (byte_index, &value) in bytes.iter().enumerate() {
@@ -211,7 +212,7 @@ impl InteractionTraces {
         }
         let (cal_interaction, cal_claimed_sum) = logup_gen.finalize_last();
 
-        // Valid-day table: real rows emit `-mult`; reserved dummy rows are
+        // Valid-day table: real rows emit `-mult`. Reserved dummy rows are
         // gated out while their multiplicities remain fresh committed blinds.
         let mut logup_gen = LogupTraceGenerator::new(valid_day_log_size);
         logup_gen.col_from_fn(|vec_row| {

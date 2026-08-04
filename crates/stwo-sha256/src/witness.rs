@@ -1,6 +1,7 @@
-//! Witness emitter — produces every intermediate value the AIR refers to,
-//! from raw message bytes through the per-round limb representation and the
-//! carries of every mod-2³² add.
+//! SHA-256 witness construction.
+//!
+//! This module derives all intermediate values that the AIR reads. These
+//! values include message blocks, round limbs, and addition carries.
 //!
 //! Pipeline:
 //!
@@ -11,10 +12,9 @@
 //! 3. `compute_sha256_witness(msg)` — chains blocks: `H⁽⁰⁾ = IV`, then
 //!    `H⁽ᵗ⁺¹⁾ = compress(H⁽ᵗ⁾, blockₜ)` for each block.
 //!
-//! Every numeric value is reproduced from the native reference in
-//! `crate::native` and cross-checked by the tests. The witness layer never
-//! diverges from the FIPS spec; it just adds the *intermediate* values that
-//! the AIR's linear constraints reference.
+//! The functions use the native implementation in `crate::native`. Tests
+//! compare the witness with the FIPS computation. The witness adds only the
+//! intermediate values that the AIR reads.
 
 use crate::constants::{BLOCK_BYTES, IV, K, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS};
 use crate::native::{
@@ -42,8 +42,8 @@ pub fn compute_padding_witness(msg: &[u8]) -> PaddingWitness {
 /// limb carries the AIR enforces.
 ///
 /// Returns `(result_word, AddCarries { lo, hi })`. `lo` is the carry from
-/// the low-limb sum into the high-limb sum (`< k`); `hi` is the carry out of
-/// the high-limb sum (also `< k`; discarded under `mod 2³²`).
+/// the low-limb sum into the high-limb sum (`< k`). `hi` is the carry out of
+/// the high-limb sum. Modulo 2³² discards `hi`.
 fn add_words_with_carries(words: &[u32]) -> (u32, AddCarries) {
     let mut lo_sum: u32 = 0;
     let mut hi_sum: u32 = 0;
@@ -194,7 +194,7 @@ pub fn compute_block_witness(
 
 /// Top-level witness emitter — pads, parses, and produces one BlockWitness
 /// per padded block. The returned digest is recoverable from the last
-/// block's `h_out`; we attach it explicitly so consumers don't have to
+/// block's `h_out`. We attach it explicitly so consumers do not have to
 /// recompose.
 pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
     let padding = compute_padding_witness(msg);
@@ -246,7 +246,7 @@ pub fn add_identity_holds(addends: &[u32], result: u32, carries: AddCarries) -> 
 }
 
 /// Sanity: rebuild the final schedule from a `BlockWitness` and confirm it
-/// matches the native expansion. Used by the tests; useful as a debug
+/// matches the native expansion. Used by the tests. Useful as a debug
 /// helper if a constraint ever disagrees.
 pub fn schedule_from_block_witness(b: &BlockWitness) -> Schedule {
     let mut s = [0u32; N_ROUNDS];

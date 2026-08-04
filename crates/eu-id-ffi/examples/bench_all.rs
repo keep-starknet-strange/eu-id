@@ -1,17 +1,17 @@
-//! Host-side driver for the FFI benchmark surface — the same
-//! `eu_id_bench_sha256` / `eu_id_bench_identity` the mobile app calls, so laptop
-//! and phone numbers come from one code path. Runs the four SHA-256 message
-//! sizes, then the combined, cross-bound identity proof (driven from the
-//! canonical honest fixture). Prints a table plus a machine-readable line per
-//! case.
+//! Runs the FFI benchmark surface on the host.
+//!
+//! The mobile app calls the same SHA-256 and P-256 functions.
+//! The benchmark runs four SHA-256 message sizes and one P-256 signature.
+//! It prints a table and one machine-readable line for each case.
 //!
 //! ```bash
-//! cargo run --release -p eu-id-ffi --example bench_all                 # single-threaded
-//! cargo run --release -p eu-id-ffi --example bench_all --features parallel  # rayon
+//! cargo run --release -p eu-id-ffi --example bench_all
 //! ```
 
-use eu_id_ffi::{eu_id_bench_identity, eu_id_bench_sha256, EuIdIdentityInput};
-use eu_id_prover::fixtures;
+use eu_id_ffi::{eu_id_bench_p256, eu_id_bench_sha256};
+use p256::ecdsa::signature::Signer;
+use p256::ecdsa::{Signature, SigningKey};
+use sha2::{Digest, Sha256};
 
 fn main() {
     let cases: [(&str, Vec<u8>); 4] = [
@@ -21,14 +21,8 @@ fn main() {
         ("4KiB", vec![0xAB; 4096]),
     ];
 
-    let threaded = cfg!(feature = "parallel");
     println!(
-        "build: {} | {} logical cores",
-        if threaded {
-            "parallel (rayon)"
-        } else {
-            "single-threaded"
-        },
+        "build: parallel (rayon) | {} logical cores",
         std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(0),
@@ -39,7 +33,7 @@ fn main() {
     );
 
     for (label, msg) in &cases {
-        // iters = 3: best-of/median, matching the laptop snapshot.
+        // Three iterations produce a median that matches the laptop method.
         let r = unsafe { eu_id_bench_sha256(msg.as_ptr(), msg.len(), 3) };
         let peak_mib = r.peak_bytes as f64 / (1024.0 * 1024.0);
         let digest_ok = if r.ok == 1 { "ok" } else { "FAIL" };
@@ -53,51 +47,48 @@ fn main() {
         );
     }
 
-    bench_identity();
+    bench_p256();
 }
 
-/// Run the combined, cross-bound identity proof (P256 + SHA + bridge + age +
-/// nationality) over the canonical honest fixture. One iteration — the combined
-/// prove is P256-dominated and slow.
-fn bench_identity() {
-    let fixture = fixtures::valid_over_18();
-    let cred = fixture.signed.credential;
-    let policy = fixture.policy;
-    // `accepted` must outlive the call — `input` holds a raw pointer into it.
-    let accepted = policy.accepted_nationalities.clone();
-    let input = EuIdIdentityInput {
-        birth_year: cred.birth_year,
-        birth_month: cred.birth_month,
-        birth_day: cred.birth_day,
-        nationality: cred.nationality,
-        current_year: policy.current_date.year as u16,
-        current_month: policy.current_date.month as u8,
-        current_day: policy.current_date.day as u8,
-        min_age_years: policy.min_age_years,
-        accepted: accepted.as_ptr(),
-        accepted_len: accepted.len(),
+fn bench_p256() {
+    let signing_key = SigningKey::from_bytes((&[7u8; 32]).into()).expect("valid signing key");
+    let message = b"eu-id-ffi p256 bench fixture";
+    let signature: Signature = signing_key.sign(message);
+    let public_key = signing_key.verifying_key().to_encoded_point(false);
+    let z: [u8; 32] = Sha256::digest(message).into();
+    let r: [u8; 32] = signature.r().to_bytes().into();
+    let s: [u8; 32] = signature.s().to_bytes().into();
+    let qx: [u8; 32] = public_key.x().expect("x")[..].try_into().expect("x len");
+    let qy: [u8; 32] = public_key.y().expect("y")[..].try_into().expect("y len");
+
+    let result = unsafe {
+        eu_id_bench_p256(
+            z.as_ptr(),
+            r.as_ptr(),
+            s.as_ptr(),
+            qx.as_ptr(),
+            qy.as_ptr(),
+            1,
+        )
     };
+    let peak_mib = result.peak_bytes as f64 / (1024.0 * 1024.0);
 
-    let r = unsafe { eu_id_bench_identity(&input, 1) };
-    let peak_mib = r.peak_bytes as f64 / (1024.0 * 1024.0);
-    let proof_kib = r.proof_bytes as f64 / 1024.0;
-
-    println!("\ncombined identity proof (P256 + SHA + bridge + age + nat):");
+    println!("\nP-256 ECDSA proof:");
     println!(
-        "{:<14} {:>10} {:>11} {:>11} {:>11} {:>6}",
-        "fixture", "prove_ms", "verify_ms", "peak_mib", "proof_kib", "ok"
+        "{:<14} {:>10} {:>11} {:>11} {:>9} {:>6}",
+        "fixture", "prove_ms", "verify_ms", "peak_mib", "verified", "ok"
     );
     println!(
-        "{:<14} {:>10} {:>11} {:>11.0} {:>11.1} {:>6}",
-        fixture.name,
-        r.prove_ms,
-        r.verify_ms,
+        "{:<14} {:>10} {:>11} {:>11.0} {:>9} {:>6}",
+        "fixed key",
+        result.prove_ms,
+        result.verify_ms,
         peak_mib,
-        proof_kib,
-        if r.ok == 1 { "ok" } else { "FAIL" }
+        result.verified,
+        if result.ok == 1 { "ok" } else { "FAIL" }
     );
     println!(
-        "RESULT label=identity:{} ok={} prove_ms={} verify_ms={} peak_mib={:.0} proof_kib={:.1}",
-        fixture.name, r.ok, r.prove_ms, r.verify_ms, peak_mib, proof_kib
+        "RESULT label=p256 ok={} verified={} prove_ms={} verify_ms={} peak_mib={:.0}",
+        result.ok, result.verified, result.prove_ms, result.verify_ms, peak_mib
     );
 }

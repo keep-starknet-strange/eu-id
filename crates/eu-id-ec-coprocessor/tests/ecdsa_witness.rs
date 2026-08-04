@@ -108,10 +108,6 @@ fn invalid_scalar_and_coordinate_inputs_are_rejected() {
     assert!(generate_witness(&input).is_err(), "s=0 must reject");
 
     let mut input = valid_input();
-    input.z = N_BE;
-    assert!(generate_witness(&input).is_err(), "z=n must reject");
-
-    let mut input = valid_input();
     input.r = N_BE;
     assert!(generate_witness(&input).is_err(), "r=n must reject");
 

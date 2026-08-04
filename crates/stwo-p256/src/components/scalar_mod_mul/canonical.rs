@@ -83,9 +83,11 @@ pub fn add_canonical_lt_n<E: EvalAtRow>(
 
 /// Prove a scalar is canonical and provide its limbs for scalar mod-mul rows.
 ///
-/// The role determines the exact LogUp multiplicity: each `A`, `B`, and
-/// `QUOTIENT` limb is consumed once for every limb on the opposite side of the
-/// product, while `RESULT` limbs are consumed once by reduction digit rows.
+/// Proves a canonical scalar and provides its limbs.
+///
+/// The role determines the LogUp multiplicity.
+/// Product rows consume operand and quotient limbs.
+/// Reduction rows consume result limbs.
 pub fn add_canonical_scalar_limb_provider<E: EvalAtRow>(
     eval: &mut E,
     relations: CanonicalScalarLimbRelations<'_>,

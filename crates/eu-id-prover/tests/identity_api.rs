@@ -1,205 +1,143 @@
-//! Tests for the relying-party API (`prove_identity` / `verify_identity`) and
-//! the combined-proof serialization the `eu-id` CLI relies on.
+//! Current product proof API integration tests.
 //!
-//! `prove_identity` signs a credential with an issuer key and a policy and
-//! returns one bound proof; `verify_identity` checks it against a
-//! `PublicStatement` `{ issuer key Q, policy }` only. The headline properties:
-//!
-//! - an honest credential proves and verifies against its statement;
-//! - caller-argument binding rejects a mismatched statement — wrong issuer key,
-//!   wrong age threshold, or wrong accepted set — *before* the STARK check;
-//! - the proof round-trips through bincode (the CLI's prove→file→verify path);
-//! - a false statement (under-age) cannot be proved at all.
-//!
-//! Marked `#[ignore]` — a real STARK prove/verify dominated by P256 is slow; run
-//! with `--release --ignored`.
+//! The SDK owns the `proveIdentity`/`verifyIdentity` application API. This
+//! crate exposes only its current mdoc proof payload and caller-authoritative
+//! public statement.
 
-use eu_id_prover::generator::IssuerKey;
-use eu_id_prover::{
-    fixtures, identity_expected_preprocessed_root, prove_identity, verify_identity,
-    verify_identity_with_preprocessed_root, Error, Policy, Proof, PublicStatement,
-};
+use eu_id_prover::mdoc::{self, MdocDisclosureMode, MdocError};
+use eu_id_prover::{prove_mdoc, verify_product_mdoc, Error, MdocProof, MdocStatement};
 
-/// The relying party's statement for a policy: the demo issuer's *public* key
-/// (the trusted anchor) plus the policy. Rebuilt independently of any proof.
-fn demo_statement(policy: &Policy) -> PublicStatement {
-    PublicStatement::new(
-        IssuerKey::demo().public_key(),
-        policy.clone(),
-        fixtures::demo_nonce_statement(),
-    )
+#[test]
+fn public_statement_contains_only_caller_authoritative_inputs() {
+    let fixture = mdoc::demo_mdoc_circuit_fixture();
+    let public = MdocStatement::from_circuit(&fixture.statement);
+
+    assert_eq!(public.request_binding, fixture.request.request_binding);
+    assert_eq!(public.doctype, fixture.request.doctype);
+    assert_eq!(public.namespace, fixture.request.namespace);
+    assert_eq!(
+        public.issuer_public_key,
+        fixture.request.required_issuer_public_key
+    );
+    assert_eq!(
+        public.device_message_hash,
+        fixture.extracted.device_ecdsa_input.message_hash
+    );
+    assert_eq!(
+        public.verification_time_epoch_seconds,
+        fixture.request.verification_time_epoch_seconds
+    );
+    assert_eq!(
+        public.ts13_revocation,
+        fixture.request.revocation.public_inputs
+    );
+    assert_eq!(public.attributes, fixture.request.attributes);
+    assert_eq!(public.policy, fixture.statement.policy);
+
+    let object = serde_json::to_value(&public)
+        .expect("public statement serializes")
+        .as_object()
+        .expect("public statement is an object")
+        .clone();
+    for private_field in [
+        "birth_date",
+        "nationality",
+        "issuer_signature",
+        "device_signature",
+        "ts13_revocation_range",
+        "ts13_revocation_signature",
+        "id",
+        "id_lo",
+        "id_hi",
+    ] {
+        assert!(
+            !object.contains_key(private_field),
+            "private field {private_field} leaked into the public statement"
+        );
+    }
 }
 
-/// The headline happy path: prove an honest credential through `prove_identity`
-/// and verify it through `verify_identity` against its public statement.
 #[test]
-#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
-fn prove_identity_then_verify_identity_round_trips() {
-    let fixture = fixtures::valid_over_18();
-    let proof = prove_identity(
-        &fixture.signed.credential,
-        &IssuerKey::demo(),
-        &fixture.policy,
-        &fixtures::demo_nonce_statement(),
-    )
-    .expect("honest credential proves");
+fn product_api_rejects_noncurrent_request_and_policy_shapes_before_proving() {
+    let fixture = mdoc::demo_mdoc_circuit_fixture();
 
-    verify_identity(&proof, &demo_statement(&fixture.policy))
-        .expect("bound proof verifies against its statement");
+    let mut wrong_doctype = fixture.request.clone();
+    wrong_doctype.doctype = "org.iso.18013.5.1.mDL".to_string();
+    assert!(matches!(
+        prove_mdoc(
+            &fixture.document,
+            &wrong_doctype,
+            fixture.statement.policy.clone()
+        ),
+        Err(Error::Mdoc(MdocError::ProductDoctypeMismatch))
+    ));
+
+    let mut wrong_namespace = fixture.request.clone();
+    wrong_namespace.namespace = "org.iso.18013.5.1".to_string();
+    assert!(matches!(
+        prove_mdoc(
+            &fixture.document,
+            &wrong_namespace,
+            fixture.statement.policy.clone()
+        ),
+        Err(Error::Mdoc(MdocError::ProductNamespaceMismatch))
+    ));
+
+    let mut wrong_attribute_order = fixture.request.clone();
+    wrong_attribute_order.attributes.reverse();
+    assert!(matches!(
+        prove_mdoc(
+            &fixture.document,
+            &wrong_attribute_order,
+            fixture.statement.policy.clone()
+        ),
+        Err(Error::Mdoc(MdocError::UnsupportedProductAttributeLayout))
+    ));
+
+    let mut duplicate_mode = fixture.request.clone();
+    duplicate_mode.attributes[1].mode = MdocDisclosureMode::AgeOver;
+    assert!(matches!(
+        prove_mdoc(
+            &fixture.document,
+            &duplicate_mode,
+            fixture.statement.policy.clone()
+        ),
+        Err(Error::Mdoc(MdocError::DuplicatePredicateMode("AgeOver")))
+    ));
+
+    let mut invalid_time = fixture.request.clone();
+    invalid_time.verification_time_epoch_seconds = 0;
+    assert!(matches!(
+        prove_mdoc(
+            &fixture.document,
+            &invalid_time,
+            fixture.statement.policy.clone()
+        ),
+        Err(Error::Mdoc(MdocError::InvalidVerificationTime))
+    ));
+
+    let mut unsorted_policy = fixture.statement.policy;
+    unsorted_policy.accepted_nationalities = vec![*b"FR", *b"DE"];
+    assert!(matches!(
+        prove_mdoc(&fixture.document, &fixture.request, unsorted_policy),
+        Err(Error::Mdoc(MdocError::InvalidNationality(_)))
+    ));
 }
 
-/// Caller-argument binding (requirement: the verifier rejects unless the proof's
-/// public values equal the caller's statement). One proof, checked against
-/// several wrong statements — each must be rejected, and each before the STARK
-/// check, with a distinct error.
 #[test]
-#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
-fn verify_identity_binds_the_full_statement() {
-    let fixture = fixtures::valid_over_18();
-    let proof = prove_identity(
-        &fixture.signed.credential,
-        &IssuerKey::demo(),
-        &fixture.policy,
-        &fixtures::demo_nonce_statement(),
+#[ignore = "proof-heavy current product proof serialization round trip"]
+fn product_proof_payload_round_trips_through_the_current_api() {
+    let fixture = mdoc::demo_mdoc_circuit_fixture();
+    let (proof, statement) = prove_mdoc(
+        &fixture.document,
+        &fixture.request,
+        fixture.statement.policy,
     )
-    .expect("honest credential proves");
+    .expect("current product proof builds");
+    verify_product_mdoc(&proof, &statement).expect("current product proof verifies");
 
-    // Correct statement verifies.
-    verify_identity(&proof, &demo_statement(&fixture.policy)).expect("correct statement verifies");
-
-    // Wrong issuer key Q (a different signing key's public key).
-    let wrong_issuer = IssuerKey::from_seed(&[9u8; 32]).public_key();
-    let wrong_q = PublicStatement::new(
-        wrong_issuer,
-        fixture.policy.clone(),
-        fixtures::demo_nonce_statement(),
-    );
-    assert!(
-        matches!(
-            verify_identity(&proof, &wrong_q),
-            Err(Error::IssuerKeyMismatch)
-        ),
-        "a statement with the wrong issuer key must be rejected",
-    );
-
-    // Wrong age threshold.
-    let mut higher_threshold = fixture.policy.clone();
-    higher_threshold.min_age_years = 21;
-    assert!(
-        matches!(
-            verify_identity(&proof, &demo_statement(&higher_threshold)),
-            Err(Error::AgePolicyMismatch)
-        ),
-        "a statement with a different age threshold must be rejected",
-    );
-
-    // Wrong accepted-nationality set.
-    let mut other_set = fixture.policy.clone();
-    other_set.accepted_nationalities = vec![999];
-    assert!(
-        matches!(
-            verify_identity(&proof, &demo_statement(&other_set)),
-            Err(Error::NatPolicyMismatch)
-        ),
-        "a statement with a different accepted set must be rejected",
-    );
-}
-
-/// The CLI's persistence path: a proof serialized with bincode and read back
-/// verifies identically (the combined `Proof` is serde-serializable end to end).
-#[test]
-#[ignore = "slow: full P256 + SHA + bridge + predicates STARK prove/verify; run with --release --ignored"]
-fn proof_round_trips_through_bincode() {
-    let fixture = fixtures::valid_over_18();
-    let proof = prove_identity(
-        &fixture.signed.credential,
-        &IssuerKey::demo(),
-        &fixture.policy,
-        &fixtures::demo_nonce_statement(),
-    )
-    .expect("honest credential proves");
-
-    let bytes = bincode::serialize(&proof).expect("proof serializes");
-    let restored: Proof = bincode::deserialize(&bytes).expect("proof deserializes");
-
-    verify_identity(&restored, &demo_statement(&fixture.policy))
-        .expect("a deserialized proof verifies against its statement");
-}
-
-/// The F-ROOT pin end to end: the default verifier reconstructs tree 0 from
-/// canonical verifier-side columns. The explicit-root API additionally checks
-/// a caller-derived root, and both paths reject tampering before the STARK.
-#[test]
-#[ignore = "slow: full identity STARK prove/verify plus a tree-0 rebuild; run with --release --ignored"]
-fn verify_identity_pins_the_preprocessed_root() {
-    let fixture = fixtures::valid_over_18();
-    let mut proof = prove_identity(
-        &fixture.signed.credential,
-        &IssuerKey::demo(),
-        &fixture.policy,
-        &fixtures::demo_nonce_statement(),
-    )
-    .expect("honest credential proves");
-
-    verify_identity(&proof, &demo_statement(&fixture.policy))
-        .expect("the default verifier pins and accepts the canonical tree-0 root");
-
-    // The verifier's own derivation of the tree-0 root — from trusted module
-    // constructions, never from the proof.
-    let expected_root = identity_expected_preprocessed_root(
-        &fixture.signed.credential,
-        &IssuerKey::demo(),
-        &fixture.policy,
-        &fixtures::demo_nonce_statement(),
-    )
-    .expect("expected preprocessed root computes");
-
-    verify_identity_with_preprocessed_root(&proof, &demo_statement(&fixture.policy), expected_root)
-        .expect("honest proof verifies against the derived preprocessed root");
-
-    // A proof whose tree-0 root does not match the pin is rejected fail-closed.
-    let mut wrong_root = expected_root;
-    wrong_root.0[0] ^= 1;
-    assert!(
-        matches!(
-            verify_identity_with_preprocessed_root(
-                &proof,
-                &demo_statement(&fixture.policy),
-                wrong_root,
-            ),
-            Err(Error::PreprocessedRootMismatch { .. })
-        ),
-        "a mismatched preprocessed root must be rejected before the STARK check",
-    );
-
-    // A proof whose tree-0 root is TAMPERED is rejected by the default verifier;
-    // no caller-supplied root is needed to close F-ROOT.
-    proof.stark_proof.0.commitments[0].0[0] ^= 1;
-    assert!(
-        matches!(
-            verify_identity(&proof, &demo_statement(&fixture.policy)),
-            Err(Error::PreprocessedRootMismatch { .. })
-        ),
-        "the default verifier must reject a tampered tree-0 root before the STARK check",
-    );
-}
-
-/// A false statement cannot be proved: `prove_identity` for an under-age
-/// credential is rejected at the age module's witness generation — there is no
-/// proof to verify.
-#[test]
-#[ignore = "slow: builds the P256 draft before the age module rejects; run with --release --ignored"]
-fn prove_identity_rejects_under_age() {
-    let fixture = fixtures::under_18();
-    let result = prove_identity(
-        &fixture.signed.credential,
-        &IssuerKey::demo(),
-        &fixture.policy,
-        &fixtures::demo_nonce_statement(),
-    );
-    assert!(
-        matches!(result, Err(Error::AgePrepare(_))),
-        "an under-age credential must not be provable, got: {:?}",
-        result.err(),
-    );
+    let bytes = bincode::serialize(&proof).expect("current proof payload serializes");
+    let restored: MdocProof =
+        bincode::deserialize(&bytes).expect("current proof payload deserializes");
+    verify_product_mdoc(&restored, &statement).expect("restored current proof verifies");
 }

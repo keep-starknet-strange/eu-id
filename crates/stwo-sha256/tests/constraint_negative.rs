@@ -1,45 +1,16 @@
 //! Constraint-layer negative tests for the SHA-256 AIR.
 //!
-//! Direct response to audit lesson **L4** (docs/research/sha256-air-design.md §11):
-//! `../sha256-air`'s suite passes *only because* every test feeds an honest
-//! trace — the broken constraints (no range checks, IV not bound) are never
-//! exercised. The eu-id component must not repeat that failure mode.
+//! Each test constructs a valid trace and changes one class of cell. It sends
+//! the changed trace to `Sha256Eval::evaluate`. At least one constraint must
+//! have a nonzero residual.
 //!
-//! Each test below builds an honest witness, generates a trace, mutates a
-//! single cell (one mutation class per test), drives the trace through
-//! `Sha256Eval::evaluate`, and asserts that **at least one constraint goes
-//! non-zero** — i.e. the AIR rejects.
+//! `LinearConstraintCollector` implements `EvalAtRow` for the main trace. It
+//! records all linear residuals without a full interaction trace. It also
+//! reproduces the circle-domain index rules for cross-row masks.
 //!
-//! The driver is a custom `LinearConstraintCollector` that implements
-//! `EvalAtRow` directly against the main trace. The motivation:
-//!
-//! - `AssertEvaluator` would be the obvious fit, but it `panic!`s on the
-//!   first non-zero constraint and requires a finalized interaction trace.
-//!   Building one here would duplicate `crate::interaction`'s walk over
-//!   the entire trace; the linear collector keeps the negative-test driver
-//!   self-contained and fast.
-//! - `InfoEvaluator` only counts constraints; it doesn't actually evaluate
-//!   them against trace data.
-//!
-//! `LinearConstraintCollector` therefore mirrors `AssertEvaluator`'s
-//! `next_interaction_mask` (including the circle-domain coset bit-reverse
-//! arithmetic for the `[0, -1]` cross-row reads used by the §10.3
-//! block-chain copy constraint) but records non-zero residuals instead of
-//! panicking, and no-ops `add_to_relation`. The recorded residuals cover
-//! every linear constraint `Sha256Eval::evaluate` emits: IV binding,
-//! schedule recurrence, T1/T2/e_new/a_new adds, σ-output reassembly,
-//! O2 chunk-bind, finalization, multi-block chain, and the whole §10.4
-//! padding-role family — exactly the classes the mutations below break.
-//!
-//! **Lookup-side rejection (the complement of this file).** This driver
-//! deliberately ignores `add_to_relation` calls, so the four `Range_k`
-//! channels, the σ/Σ decode tables, the packed Maj/Ch lookup, the
-//! `xor_8` chunk-combine, and the eight split-and-pack lookups are not
-//! exercised here. End-to-end coverage of those — including a
-//! carry-out-of-range witness mutation that closes L4 from the lookup
-//! side — lives in `tests/prove_verify_round_trip.rs`
-//! (`rejects_out_of_range_carry_witness_mutation`,
-//! `verify_rejects_range_k_claimed_sum_mutations`).
+//! This driver ignores `add_to_relation`, so it does not test `Range_k`
+//! balance. `tests/prove_verify_round_trip.rs` tests that balance with real
+//! proofs and claimed-sum mutations.
 
 use num_traits::Zero;
 use stwo::core::fields::m31::BaseField;
@@ -85,12 +56,12 @@ struct Residual {
 /// constraint whose algebraic value is not zero. See file-level docs for
 /// the rationale vs. `AssertEvaluator` / `InfoEvaluator`.
 struct LinearConstraintCollector<'a> {
-    /// Main trace; one inner `Vec` per column, indexed `[col][row]`.
+    /// Main trace. One inner `Vec` per column, indexed `[col][row]`.
     trace: &'a [Vec<BaseField>],
     /// `log2` of the trace row count (needed for the cross-row coset math
     /// `AssertEvaluator` uses).
     log_size: u32,
-    /// Row this evaluator is evaluating at.
+    /// Row that this evaluator checks.
     row: usize,
     /// Next column index for the main trace.
     col_index: usize,
@@ -122,12 +93,12 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         interaction: usize,
         offsets: [isize; N],
     ) -> [Self::F; N] {
-        // The SHA-256 AIR's main-trace reads land here; preprocessed-table
+        // The SHA-256 AIR's main-trace reads land here. Preprocessed-table
         // cells are matched via `add_to_relation` (which this evaluator
         // no-ops) and the `is_first_row` selector is served via the
         // dedicated `get_preprocessed_column` override below. A non-
         // `ORIGINAL_TRACE_IDX` interaction here would mean the AIR has
-        // grown a read this evaluator doesn't model — fail loudly rather
+        // grown a read this evaluator does not model — fail loudly rather
         // than silently.
         assert_eq!(
             interaction, ORIGINAL_TRACE_IDX,
@@ -223,38 +194,30 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         &mut self,
         _entry: RelationEntry<'_, Self::F, Self::EF, R>,
     ) {
-        // **This collector deliberately no-ops every lookup.** It only
-        // records non-zero residuals from `add_constraint`, i.e. the
-        // *linear* identities the AIR emits — IV binding, schedule
-        // recurrence, T1/T2/e_new/a_new adds, σ-output reassembly, O2
-        // chunk-bind, finalization, multi-block chain, and the §10.4
-        // padding-role block. Every mutation class in the suite below
-        // is caught by exactly those identities.
+        // This collector ignores each lookup. It records nonzero residuals
+        // only from `add_constraint`. These residuals cover IV binding,
+        // schedule recurrence, round additions, bit-plane recomposition,
+        // finalization, the block chain, and padding roles.
         //
-        // Carry range-check lookups (`Range_2`/`4`/`5` per family) and
-        // the terminal `Range_8` byte checks on `h_out` *are* wired in
-        // `crate::constraints` today, but their soundness lives in the
-        // LogUp interaction layer this evaluator does not model. The
-        // `prove_verify_round_trip` suite exercises that path end-to-end.
-        // The follow-up that migrates this driver to `AssertEvaluator`
-        // — once the assert backend's interaction-trace setup is wired
-        // in — should add a "carry-set-to-out-of-range" mutation class
-        // to close L4 on the LogUp side too.
+        // `crate::constraints` wires each family's carry lookups for Range_2,
+        // Range_4, and Range_5. It also wires the terminal Range_8 byte checks on
+        // `h_out`. Their soundness depends on the LogUp interaction layer, which
+        // this evaluator does not model. The `prove_verify_round_trip` suite
+        // exercises that path end to end.
     }
 
-    /// `Sha256Eval::evaluate` ends with `finalize_logup_batched(..)` so
-    /// that real prover/verifier evaluators batch the lookup fractions
-    /// into interaction columns. This linear-only collector does **not**
-    /// model the LogUp interaction trace, so the finalize step is a
-    /// no-op here — the recorded `non_zero` residuals stay scoped to the
-    /// linear identities `add_constraint` saw.
+    /// `Sha256Eval::evaluate` ends with `finalize_logup_batched(..)`.
+    /// Real prover and verifier evaluators batch lookup fractions into
+    /// interaction columns. This linear collector does not model the LogUp
+    /// interaction trace. Therefore, finalization does nothing here. Recorded
+    /// `non_zero` residuals cover only identities passed to `add_constraint`.
     fn finalize_logup_batched(&mut self, _batch_size: usize) {}
     fn finalize_logup_in_pairs(&mut self) {}
 }
 
 /// Run `Sha256Eval::evaluate` against `trace` at every row and return every
 /// non-zero residual collected. An empty return value means the AIR's
-/// linear constraint layer accepts the trace; a non-empty return means
+/// linear constraint layer accepts the trace. A non-empty return means
 /// the AIR rejects.
 fn collect_constraint_residuals_with_fields(
     trace: &[Vec<BaseField>],
@@ -265,7 +228,7 @@ fn collect_constraint_residuals_with_fields(
         log_size,
         relations: Sha256Relations::dummy(),
         // The digest yield is a LogUp term, not a linear constraint, so it
-        // does not affect this linear-residual collector either way; keep it
+        // does not affect this linear-residual collector either way. Keep it
         // off to mirror the standalone (self-balancing) AIR.
         expose_digest: false,
         field_exposure,
@@ -287,7 +250,7 @@ fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<
 
 /// Honest-trace sanity: every linear constraint `Sha256Eval::evaluate`
 /// emits is zero on an unmutated single-block trace. If this fails, the
-/// negative tests below are meaningless — they'd report rejections that
+/// negative tests below are meaningless — they would report rejections that
 /// the honest baseline already produces.
 #[test]
 fn honest_single_block_trace_yields_no_residuals() {
@@ -303,9 +266,7 @@ fn honest_single_block_trace_yields_no_residuals() {
     );
 }
 
-/// Honest-trace sanity, multi-block: confirms the block-chain copy
-/// constraint and the multi-block padding paths are also clean on an
-/// unmutated trace before the mutation tests rely on them.
+/// Check the block chain and padding paths on a valid multi-block trace.
 #[test]
 fn honest_multi_block_trace_yields_no_residuals() {
     let witness = compute_sha256_witness(&[0xABu8; 200]);
@@ -327,7 +288,7 @@ fn honest_multi_block_field_exposure_trace_yields_no_residuals() {
     let witness = compute_sha256_witness(&message);
     assert!(witness.blocks.len() >= 2, "need multi-block message");
     let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[
+    let exposure = FieldExposure::from_preimage_windows(&[
         (field_id::DOB, 62, 4),
         (field_id::NATIONALITY, 70, 3),
     ]);
@@ -349,7 +310,7 @@ fn honest_large_multi_block_field_exposure_trace_yields_no_residuals() {
     let witness = compute_sha256_witness(&message);
     assert!(witness.blocks.len() >= 3, "need at least three blocks");
     let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(2, 96, 32), (3, 128, 32)]);
+    let exposure = FieldExposure::from_preimage_windows(&[(2, 96, 32), (3, 128, 32)]);
     let trace = generate_trace_with_fields(&witness, log_size, &exposure);
     let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
     assert!(
@@ -366,7 +327,7 @@ fn rejects_field_selector_on_wrong_block() {
     let witness = compute_sha256_witness(&message);
     assert!(witness.blocks.len() >= 2, "need multi-block message");
     let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
+    let exposure = FieldExposure::from_preimage_windows(&[(field_id::NATIONALITY, 70, 2)]);
     let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
 
     assert!(
@@ -393,7 +354,7 @@ fn rejects_field_selector_on_padding_r15_row() {
     let message = [0xABu8; 200];
     let witness = compute_sha256_witness(&message);
     let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
+    let exposure = FieldExposure::from_preimage_windows(&[(field_id::NATIONALITY, 70, 2)]);
     let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
 
     assert!(
@@ -426,7 +387,7 @@ fn rejects_virtual_field_byte_w_bit_tamper() {
     let witness = compute_sha256_witness(&message);
     let log_size = min_log_size(witness.blocks.len());
     // Offset 70 = block 1, W[1], big-endian byte 2 = W bits 8..15.
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 1)]);
+    let exposure = FieldExposure::from_preimage_windows(&[(field_id::NATIONALITY, 70, 1)]);
     let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
 
     assert!(
@@ -451,7 +412,7 @@ fn rejects_frozen_field_block_counter() {
     let witness = compute_sha256_witness(&message);
     assert!(witness.blocks.len() >= 2, "need multi-block message");
     let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
+    let exposure = FieldExposure::from_preimage_windows(&[(field_id::NATIONALITY, 70, 2)]);
     let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
 
     assert!(
@@ -481,11 +442,10 @@ fn rejects_frozen_field_block_counter() {
 
 /// Mutation class: corrupt a single limb in a single row.
 ///
-/// Picks the `lo` limb of `W[0]` (a schedule word, used as `W[t-16]` in the
-/// schedule recurrence at `t=16` and as the `T1` add operand at round 0)
-/// and replaces it with a value the algebra cannot satisfy. The schedule
-/// recurrence add identity `s1.lo + W[t-7].lo + s0.lo + W[t-16].lo =
-/// W[t].lo + 2¹⁶·carry_lo` and the round-0 `T1` identity both go non-zero.
+/// Change the low limb of `W[0]`.
+///
+/// The schedule recurrence at `t = 16` and the `T1` addition at round zero
+/// both read this value. At least one identity must have a nonzero residual.
 #[test]
 fn rejects_corrupted_schedule_word_limb() {
     let witness = compute_sha256_witness(b"abc");
@@ -516,12 +476,10 @@ fn rejects_corrupted_schedule_word_limb() {
 
 /// Mutation class: swap a carry value within a row.
 ///
-/// At round 0, the `T1` add emits a `(carry_lo, carry_hi)` pair. Swapping
-/// these two cells inside the same row (no change to any other cell)
-/// breaks the limb-add identity unless the two values happen to coincide
-/// — and on a real message they almost never do. The assertion below
-/// guards against the rare coincidence by asserting the original values
-/// differ before swapping.
+/// Swap the two `T1` carry cells at round zero.
+///
+/// The addition identity fails when the values differ. The test checks this
+/// premise before it swaps the cells.
 #[test]
 fn rejects_swapped_carry_within_row() {
     let witness = compute_sha256_witness(b"abc");
@@ -560,9 +518,8 @@ fn rejects_swapped_carry_within_row() {
 ///
 /// Post-C1-fix, the rejection path is a single linear identity:
 /// `is_first_block − is_first_row = 0` (`constraints.rs`). The
-/// `is_first_row` preprocessed selector is `1` only at storage index 0
-/// (block 0's slot) and `0` elsewhere, so any cell-level flip on
-/// `is_first_block` immediately produces a non-zero residual at that row.
+/// `is_first_row` is one only at the first storage slot. A change to
+/// `is_first_block` gives a nonzero residual at that row.
 /// The IV-binding / chain-gate consequences the pre-fix version relied on
 /// are still present — they just fire downstream of this anchor
 /// constraint.
@@ -600,14 +557,9 @@ fn rejects_flipped_is_first_block_flag() {
 
 /// Mutation class: scramble a σ-output column.
 ///
-/// The schedule entry for `W[16]` (i.e. `j = 0`) commits `σ0(W[1])`'s
-/// `(lo, hi)` and `σ1(W[14])`'s `(lo, hi)` to the first four cells of
-/// `Layout::schedule_entry(0)`. The σ-output reassembly identity emitted
-/// by `wire_sigma_decode` (constraints.rs:1064–1080) ties each output to
-/// `o_main_s + o_main_s_complement + o2_combined`; flipping the σ0 `lo`
-/// alone without touching the decode-block intermediates breaks that
-/// identity. The matching schedule-recurrence limb-add identity also
-/// catches the mutation.
+/// The row for `W[16]` contains `σ0(W[1])` and `σ1(W[14])`. Bit recomposition
+/// ties these limbs to the lower-sigma output planes. A change to one limb
+/// breaks recomposition or the schedule addition.
 #[test]
 fn rejects_scrambled_sigma_output() {
     let witness = compute_sha256_witness(b"abc");
@@ -643,9 +595,8 @@ fn rejects_scrambled_sigma_output() {
 /// The §10.3 block-chain copy constraint `(enabler − is_first_block) ·
 /// (h_in[block r] − h_out[block r-1]) = 0` rejects exactly this class.
 /// `chain_constraint_rejects_h_in_mutation_on_block_1` in constraints.rs
-/// already exercises this at the trace-residual level; this version
-/// drives it through `Sha256Eval::evaluate` for the L4 audit-lesson
-/// closure.
+/// already exercises this at the trace-residual level. This version uses
+/// `Sha256Eval::evaluate`.
 #[test]
 fn rejects_mutated_h_in_on_continuation_block() {
     let witness = compute_sha256_witness(&[0xABu8; 200]);
@@ -675,13 +626,12 @@ fn rejects_mutated_h_in_on_continuation_block() {
 
 /// Mutation class: shift the padding's `0x80` marker.
 ///
-/// The padding-role witness in `b"abc"`'s sole block has the marker at
-/// byte 3 of `W[0]` (i.e. `W[0].lo = 0x6380` — `'c' = 0x63` followed by
-/// the `0x80` marker). Moving the `marker_byte_sel` one-hot to byte 0
-/// claims the marker is the MSB instead, while leaving `W[0]` unchanged
-/// — the (P.E) `marker_byte_sel[b] · (marker_word_byte[b] − 0x80) = 0`
-/// constraint then goes non-zero because `marker_word_byte[0]` is `'a' =
-/// 0x61`, not `0x80`.
+/// The only block for `b"abc"` places the marker at byte 3 of `W[0]`.
+/// Thus, `W[0].lo = 0x6380`, with `'c' = 0x63` before the marker.
+/// Move the `marker_byte_sel` one-hot value to byte 0. This claims the marker is
+/// the most significant byte without changing `W[0]`.
+/// The constraint is `marker_byte_sel[b] · (marker_word_byte[b] − 0x80) = 0`.
+/// It becomes nonzero because byte 0 contains `'a' = 0x61`, not `0x80`.
 #[test]
 fn rejects_shifted_marker_byte_sel() {
     let witness = compute_sha256_witness(b"abc");
@@ -713,26 +663,17 @@ fn rejects_shifted_marker_byte_sel() {
 /// Mutation class: C1 IV-anchor exploit — clear `is_first_block` on block 0
 /// **and** plant an attacker-chosen `h_out` on the wraparound padding row.
 ///
-/// Pre-fix soundness gap (`docs/research/sha256-air-design.md` §11 L2): with
-/// `is_first_block = 0` on the real row, IV binding was vacuous. With the
-/// padding-row `h_out` cells unconstrained (Range_8/finalization both
-/// gated by `enabler`), the prover could inject any state `X` into block
-/// 0's `h_in` via the chain's `[0, -1]` mask wraparound — yielding a
-/// "digest" of `compression(X, W)` instead of `SHA-256(W) = compression(IV, W)`.
+/// This mutation models an IV-anchor attack. It clears `is_first_block` and
+/// puts an arbitrary `h_out` state in the cyclic predecessor row. Without the
+/// anchor, the chain could read that state as block zero input.
 ///
-/// Post-fix rejection path: the preprocessed `is_first_row` selector is
-/// `1` at storage index 0, so the anchor constraint
-/// `is_first_block − is_first_row = 0` fails immediately when the mutator
-/// clears `is_first_block`. The mutation that *would* have completed the
-/// exploit (setting padding-row `h_out` to a chosen `X`) is preserved here
-/// to document the threat model, but the AIR rejects on the anchor before
-/// the chain ever reads the planted `h_out`.
+/// The AIR requires `is_first_block = is_first_row`. It rejects the changed
+/// flag before the chain can use the planted state.
 #[test]
 fn rejects_iv_anchor_exploit_via_padding_h_out_injection() {
     let witness = compute_sha256_witness(b"abc");
-    // Single-block message; min_log_size = 4 (the SIMD floor) gives one
-    // real slot and 15 padding slots — exactly the layout an attacker
-    // would target. The cyclic predecessor of slot 0 wraps to slot N-1.
+    // A single block uses 64 real rows. `min_log_size = 7` adds 64 padding
+    // rows. The cyclic predecessor of row zero wraps to the last row.
     let log_size = min_log_size(witness.blocks.len()).max(4);
     let mut trace = generate_trace(&witness, log_size);
 
@@ -772,22 +713,15 @@ fn rejects_iv_anchor_exploit_via_padding_h_out_injection() {
 /// continuation row to splice in a padding-row `h_out` as the next block's
 /// `h_in`.
 ///
-/// Pre-fix surface: even with `is_first_block = 1` correctly anchored at
-/// block 0, a prover could disable an interior block (`enabler = 0`) so
-/// the next real block's chain reads its `h_out_prev` from a now-padding
-/// predecessor (`h_out` unconstrained). Compression at that row runs from
-/// the planted state — not an honestly chained SHA-256 state.
+/// This mutation disables an interior continuation row. The next real row
+/// would then read an unchecked predecessor state.
 ///
-/// Post-fix rejection path: the contiguity constraint
-/// `(1 − is_first_row) · enabler · (1 − enabler_prev) = 0` rejects the
-/// transition from a disabled predecessor (`enabler_prev = 0`) to a real
-/// row (`enabler = 1`). Only block 0's slot is exempt (via
-/// `is_first_row = 1`).
+/// The contiguity constraint rejects a transition from a disabled predecessor
+/// to a real row. Only the first row has an exemption.
 #[test]
 fn rejects_block_skip_via_disabled_interior_row() {
-    // Use enough blocks that we have at least three contiguous real slots
-    // — disable the middle one to create a padding-to-real transition at
-    // the third.
+    // Use at least three contiguous real block slots. Disable the middle slot.
+    // This creates a padding-to-real transition at the third slot.
     let witness = compute_sha256_witness(&[0xABu8; 200]);
     assert!(witness.blocks.len() >= 3, "need ≥3 blocks for block-skip");
     let log_size = min_log_size(witness.blocks.len());
@@ -817,8 +751,8 @@ fn rejects_block_skip_via_disabled_interior_row() {
 /// Pre-fix: padding-role flags fired unconditionally (no `enabler` gate),
 /// so a malicious prover could mark a disabled row as a marker block.
 /// While not a direct soundness break in isolation, it interacts with C1
-/// and is undesirable defense-in-depth: disabled rows should carry no
-/// padding metadata.
+/// and is undesirable defense-in-depth. Disabled rows must contain no padding
+/// metadata.
 ///
 /// Post-fix rejection path: the gate `(1 − enabler) · is_marker_block = 0`
 /// (Mn1) fails immediately on a disabled row with `is_marker_block ≠ 0`.
@@ -851,11 +785,8 @@ fn rejects_padding_role_flag_on_disabled_row() {
     );
 }
 
-/// Split-pack removal — soundness pin (i): a keyed limb mutated off its
-/// committed bit-planes is rejected by the ungated `maj`/`ch`/`σ`
-/// recomposition constraint, NOT by any split-pack lookup (those are
-/// deleted). This proves the range/consistency check the removed lookup used
-/// to advertise now lives in the surviving bit recomposition.
+/// Check that bit recomposition rejects a limb that does not match its bit
+/// planes.
 #[test]
 fn rejects_maj_limb_off_bit_recomposition() {
     let witness = compute_sha256_witness(b"abc");
@@ -869,8 +800,8 @@ fn rejects_maj_limb_off_bit_recomposition() {
     );
 
     // `maj.lo` is round-family column 6. The AIR recomposes it ungated as
-    // `maj.lo == Σ maj_bits[i]·2^i` from the committed a/b/c bit-planes;
-    // flipping one bit of the limb (bits unchanged) breaks that identity.
+    // `maj.lo == Σ maj_bits[i]·2^i` from the committed a/b/c bit-planes.
+    // Flipping one bit of the limb (bits unchanged) breaks that identity.
     let maj_lo = Layout::round_col()[6];
     let original = trace[maj_lo][slot].0;
     trace[maj_lo][slot] = BaseField::from(original ^ 0x0001u32);
@@ -878,16 +809,13 @@ fn rejects_maj_limb_off_bit_recomposition() {
     let residuals = collect_constraint_residuals(&trace, log_size);
     assert!(
         !residuals.is_empty(),
-        "AIR must reject a maj limb disagreeing with its bit recomposition \
-         (range check lives in recomposition, not the deleted split-pack lookup)",
+        "AIR must reject a maj limb that does not match its bit recomposition",
     );
 }
 
-/// Split-pack removal — soundness pin (ii): a non-boolean value planted in a
-/// bit-plane cell on an inactive/padding row is rejected by the *ungated*
-/// `constrain_boolean_bits`. This is the work the split-pack lookup was
-/// (wrongly) credited with; deleting the lookup does not open the
-/// junk-in-inactive-rows attack because booleanity fires on every row.
+/// Check that an inactive row cannot contain a non-Boolean bit-plane value.
+///
+/// The ungated `constrain_boolean_bits` constraint applies to every row.
 #[test]
 fn rejects_non_boolean_bit_on_padding_row() {
     let witness = compute_sha256_witness(b"abc");

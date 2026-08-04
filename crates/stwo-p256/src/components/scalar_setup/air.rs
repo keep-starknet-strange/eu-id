@@ -468,7 +468,7 @@ impl FrameworkEval for ScalarSetupAirEval {
         ));
 
         // Provide the public-key binding tuple `[sig_id, pub_x.., pub_y..]`
-        // (yield, `-active`). The public-key curve-check consumes it; LogUp
+        // (yield, `-active`). The public-key curve-check consumes it. LogUp
         // balance forces the curve-checked `(x, y)` to equal this
         // public-input-bound public key.
         add_public_key_point_provider(&mut eval, &self.public_key_point, active.clone(), &public);

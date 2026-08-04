@@ -1,27 +1,22 @@
-//! Fake-GLV scalar-hint AIR: binds each cert scalar `u` to its Garaga-style
-//! decomposition `(s1, s2)` with `s1 + u·s2 ≡ 0 (mod n)`.
+//! Binds each certificate scalar `u` to a fake-GLV decomposition.
 //!
-//! # Zero-scalar semantics (settled, Option A: allow zero scalars)
+//! The AIR proves `s1 + u · s2 ≡ 0 (mod n)`.
 //!
-//! `u1 = z·s⁻¹ mod n` is *legally zero* in ECDSA (a message hash with
-//! `z ≡ 0 mod n`), so zero scalars are accepted, not rejected:
+//! # Zero-scalar behavior
 //!
-//! - **`u = 0` (zero branch).** `cert_active = 0`; every hint cell is pinned
-//!   to zero in-AIR and the EC chain produces the point at infinity for that
-//!   half (`R = O + u2·Q`), handled by the prepared-point/final-add infinity
-//!   flags. Covered end-to-end (full STARK prove + verify) by
-//!   `current_p256_proof_pipeline_proves_and_verifies_current_air_monolithic_proof`
-//!   on the `(u1, u2) = (0, 11)` fixture.
-//! - **`s2_abs ≠ 0` on the active branch** is enforced *in-AIR* by the
-//!   degree-1 M31 inverse gadget below (`sum(s2_abs)·s2_abs_inv =
-//!   cert_active`; the limb sum of a 20×13-bit value cannot wrap M31).
-//! - **`s1 = 0` on the active branch needs no in-AIR gadget**: the
-//!   ScalarModMul binding proves `u·s2_abs ≡ ±s1 (mod n)`, so `s1 = 0`
-//!   forces `u·s2_abs ≡ 0 (mod n)`; both factors are below the prime `n`
-//!   and `s2_abs ≠ 0` is enforced, hence `u ≡ 0 (mod n)` — i.e. the zero
-//!   branch. A malicious prover cannot place `s1 = 0` on an active cert; the
-//!   host-side `FakeGlvScalarHintRow::verify` rejection of `s1 = 0` is an
-//!   early error for honest builders, not a soundness boundary.
+//! ECDSA permits `u1 = z · s⁻¹ mod n` to equal zero.
+//! Thus, the AIR accepts zero scalars.
+//!
+//! - For `u = 0`, `cert_active` is zero.
+//!   The AIR sets each hint cell to zero.
+//!   The EC chain produces the point at infinity for that certificate.
+//! - An active certificate requires nonzero `s2_abs`.
+//!   A degree-one M31 inverse constraint enforces this condition.
+//! - `ScalarModMul` proves `u · s2_abs ≡ ±s1 (mod n)`.
+//!   This relation prevents `s1 = 0` on an active certificate.
+//!
+//! `FakeGlvScalarHintRow::verify` also rejects zero `s1` during witness construction.
+//! This native check gives an early error but does not provide verifier soundness.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -460,9 +455,11 @@ struct FakeGlvScalarAirRow<F> {
     /// `cert_active · s2_sign_bit` — witnessed to keep the
     /// `selected_s1 = ±s1 mod n` selector at degree 2.
     active_bit: F,
-    /// Canonical positive residue of `±s1 (mod n)`, fed as `Result` to the
-    /// `ScalarModMul` external-limb consumer in Task 4. Locked convention:
-    /// `bit = 1 ⇒ selected_s1 = s1`; `bit = 0 ⇒ selected_s1 = n − s1`.
+    /// Canonical positive residue of `±s1 (mod n)`.
+    ///
+    /// `ScalarModMul` consumes this value as `Result`.
+    /// The sign convention is:
+    /// `bit = 1 ⇒ selected_s1 = s1`. `bit = 0 ⇒ selected_s1 = n − s1`.
     selected_s1: [F; N_LIMBS],
     /// Borrow chain witnessing the `n − s1` subtraction limb-by-limb when
     /// `bit = 0`. `selected_borrow[i]` is the borrow OUT of limb `i`. The
@@ -550,14 +547,12 @@ impl FakeGlvScalarHint {
         })
     }
 
-    /// Build a bounded fake-GLV hint for an arbitrary scalar in `[0, n)`
-    /// via Garaga's `precompute_lattice` (CT-2001 GLV Algorithm 3.7).
+    /// Builds a bounded fake-GLV hint for a scalar in `[0, n)`.
     ///
-    /// Returns [`FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint`] if
-    /// the lattice decomposer fails to produce a triple `(s1, s2_abs, q)`
-    /// each `< 2^128` — for production P-256 ECDSA scalars this should
-    /// never happen (the algorithm is complete on prime-order curves), but
-    /// the failure mode is preserved to surface pathological inputs early.
+    /// The function uses Garaga `precompute_lattice`.
+    ///
+    /// Returns [`FakeGlvScalarHintError::ScalarDoesNotFitTrivialHint`] for an invalid decomposition.
+    /// Each value in `(s1, s2_abs, q)` must be less than `2^128`.
     pub fn decompose(scalar: &P256M31BigInt) -> Result<Self, FakeGlvScalarHintError> {
         use crate::scalar::fake_glv_decompose::decompose_scalar_mod_n;
         let decomposition = decompose_scalar_mod_n(&scalar.to_u256())
@@ -790,7 +785,7 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
     });
 
     // Sign-bit provider column: yield each active cert's s2_sign_bit to the
-    // final-add sub-graph. Numerator `-cert_active`; tuple (sig_id, cert_id,
+    // final-add sub-graph. Numerator `-cert_active`. Tuple (sig_id, cert_id,
     // s2_sign_bit) read from the scalar relation packed values (positions 0, 1,
     // and 2 + 2·FAKE_GLV_SMALL_LIMBS). MUST mirror the AIR-eval emission order
     // (right after the scalar provide).
@@ -832,15 +827,11 @@ pub(crate) fn gen_fake_glv_scalar_air_interaction_trace(
     (trace, FakeGlvScalarAirInteractionClaim { claimed_sum })
 }
 
-/// Per-limb `(role, base-trace column index)` provider tuples used by both
-/// the AIR-eval (`add_scalar_mod_mul_limb_links`) and the trace-gen logup
-/// column / provider-sum loops. Role B and Quotient zero-pad above
-/// `FAKE_GLV_SMALL_LIMBS` (the bound on Garaga's decomposition); when
-/// `value_col` is `SCALAR_ROW_ZERO_PAD_COL` the trace cell is guaranteed to
-/// be zero (the storage `active` column at base index 0 — every padding cell
-/// holds zero, and on active rows it's `1`, but for the zero-pad role we
-/// instead pass an explicit `M31(0)` via a sentinel offset that points at a
-/// known-zero cell).
+/// Returns provider column tuples for one limb.
+///
+/// The AIR and interaction generator use the same tuple order.
+/// Roles B and Quotient use zero above `FAKE_GLV_SMALL_LIMBS`.
+/// `SCALAR_ROW_ZERO_PAD_COL` selects an explicit zero value.
 fn scalar_mod_mul_limb_value_columns(limb: usize) -> [(u32, usize); 4] {
     let b_col = if limb < FAKE_GLV_SMALL_LIMBS {
         SCALAR_ROW_S2_ABS_START + limb
@@ -913,11 +904,12 @@ fn scalar_mod_mul_mul_id_packed(base: &[M31ColumnEval], vec_row: usize) -> Packe
 /// ```text
 ///     scalar · s2_abs − q · n − selected_s1 = 0   (over Z)
 /// ```
-/// where `selected_s1 = s1` when `s2_sign_bit == 1` and `selected_s1 = n − s1`
-/// when `s2_sign_bit == 0`. This matches ScalarModMul's `A · B = Q · n + R`
-/// (with `A = scalar`, `B = s2_abs`, `Q = q`, `R = selected_s1`) exactly, so
-/// the AIR-provided `q` limbs balance against the per-cert ScalarModMul
-/// component's external-limb consumption.
+/// Use `selected_s1 = s1` when `s2_sign_bit == 1`.
+/// Use `selected_s1 = n − s1` when `s2_sign_bit == 0`.
+/// This exactly matches ScalarModMul's `A · B = Q · n + R` equation.
+/// Here, `A = scalar`, `B = s2_abs`, `Q = q`, and `R = selected_s1`.
+/// Therefore, the AIR-provided `q` limbs balance the external limbs consumed by
+/// the per-certificate ScalarModMul component.
 fn verify_scalar_equation(
     scalar: &P256M31BigInt,
     hint: &FakeGlvScalarHint,
@@ -1008,8 +1000,8 @@ fn read_cert_relation_values<E: EvalAtRow>(
 /// where the sign is `+` when `s2_sign_bit = 0` (Garaga `s2_signed = +s2_abs`)
 /// and `−` when `s2_sign_bit = 1` (Garaga `s2_signed = −s2_abs`).
 ///
-/// The algebraic multiplication is proven by an external `ScalarModMul`
-/// component (wired in Task 4). This helper's job is to:
+/// An external `ScalarModMul` component proves the algebraic multiplication.
+/// This helper:
 /// 1. Bind cert/flags/scalar/zero-active hint to existing trace cells.
 /// 2. Witness `selected_s1 ≡ k · s2_abs (mod n)` as the canonical positive
 ///    residue in `[0, n)`, with the correct sign-dependent value:
@@ -1018,8 +1010,8 @@ fn read_cert_relation_values<E: EvalAtRow>(
 /// 3. Constrain `selected_s1` against `(s1, s2_sign_bit, n)` so that an
 ///    adversary cannot decouple it from the witnessed hint.
 ///
-/// `selected_s1` is fed to the `ScalarModMul` component as `Result`,
-/// `scalar` as `A`, `s2_abs` as `B`, `q` as `Quotient` (Task 4 wiring).
+/// `ScalarModMul` receives `selected_s1` as `Result`.
+/// It receives `scalar` as `A`, `s2_abs` as `B`, and `q` as `Quotient`.
 fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
     eval: &mut E,
     active: E::F,
@@ -1053,16 +1045,10 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
         );
     }
 
-    // (1b) Garaga `assert(_s2_abs != 0)` (src/src/ec/ec_ops.cairo:254): on the
-    //      nonzero branch the lattice's second component must be nonzero. If a
-    //      prover sets s1 = s2_abs = 0 the certificate degenerates —
-    //      `[s1]P + [s2_abs]·H_signed = O` holds for an *arbitrary* hinted H,
-    //      forging the scalar multiplication. Standard inverse gadget: the
-    //      s2_abs limbs are 13-bit (range-checked via the ScalarModMul role-B
-    //      link, so their sum cannot wrap M31), hence
-    //      `sum(s2_abs) * s2_abs_inv = cert_active` forces
-    //      `sum(s2_abs) != 0  <=>  s2_abs != 0` exactly when cert_active = 1,
-    //      and is vacuous (sum = 0) on the zero / inactive branches.
+    // Require a nonzero second lattice component on an active certificate.
+    // Otherwise, zero scalar values could accept an arbitrary hint point.
+    // Range13 checks prevent the limb sum from wrapping M31.
+    // The inverse constraint proves that the sum is nonzero.
     let s2_abs_sum = row
         .s2_abs
         .iter()
@@ -1084,11 +1070,8 @@ fn constrain_fake_glv_scalar_general<E: EvalAtRow>(
         );
     }
 
-    // (3) Zero-active branch: hint and derived witnesses are all zero. This
-    //     replaces the trivial-helper's piecewise zero constraints and
-    //     extends them over the new `active_bit`, `selected_s1`,
-    //     `selected_borrow` cells. (Universal `(1 − active) · value = 0`
-    //     elsewhere already zeros everything on padding rows.)
+    // (3) Set hint and derived values to zero on the zero branch.
+    // Other constraints set all padding values to zero.
     for limb in 0..FAKE_GLV_SMALL_LIMBS {
         eval.add_constraint(cert_zero_active.clone() * row.s1[limb].clone());
         eval.add_constraint(cert_zero_active.clone() * row.s2_abs[limb].clone());
@@ -1246,7 +1229,7 @@ fn write_fake_glv_scalar_row(
 ///   - `active_bit = cert_active · s2_sign_bit`
 ///   - `selected_s1 = bit ? s1 : (n − s1)` as `N_LIMBS` 13-bit limbs
 ///   - `selected_borrow[i]` = borrow OUT of limb `i` during the `n − s1`
-///     subtraction (`N_LIMBS − 1` cells; the top borrow is zero by
+///     subtraction (`N_LIMBS − 1` cells, the top borrow is zero by
 ///     construction since `n − s1 ∈ [1, n)` fits in `N_LIMBS` limbs).
 ///
 /// On inactive rows or in the `cert_zero_active` branch, every output is
@@ -1305,9 +1288,11 @@ fn derive_selected_s1_witness(
 
 /// Witness for the Garaga `s2_abs != 0` check (`assert(_s2_abs != 0)`,
 /// `src/src/ec/ec_ops.cairo:254`). On the nonzero branch (`cert_active == 1`)
-/// returns the M31 inverse of the `s2_abs` limb sum; the limbs are 13-bit
+/// returns the M31 inverse of the `s2_abs` limb sum. The limbs are 13-bit
 /// (range-checked through the `ScalarModMul` role-`B` link), so the sum never
-/// wraps M31 and is nonzero iff `s2_abs` is. Zero on the zero / inactive branch.
+/// wraps M31.
+/// It is nonzero if and only if `s2_abs` is nonzero.
+/// It is zero on the inactive branch.
 fn fake_glv_small_scalar_nonzero_inverse(row: &FakeGlvScalarHintRow) -> M31 {
     if row.cert_active.0 != 1 {
         return M31::from_u32_unchecked(0);
@@ -1358,11 +1343,9 @@ const SCALAR_ROW_S2_ABS_START: usize = SCALAR_ROW_S1_START + FAKE_GLV_SMALL_LIMB
 const SCALAR_ROW_S2_SIGN_BIT: usize = SCALAR_ROW_S2_ABS_START + FAKE_GLV_SMALL_LIMBS;
 const SCALAR_ROW_Q_START: usize = SCALAR_ROW_S2_SIGN_BIT + 1;
 const SCALAR_ROW_SELECTED_S1_START: usize = SCALAR_ROW_Q_START + FAKE_GLV_SMALL_LIMBS + 1;
-/// Sentinel used in [`scalar_mod_mul_limb_value_columns`] to mark a tuple
-/// whose value is a constant zero (because the corresponding role-limb is
-/// above `FAKE_GLV_SMALL_LIMBS` for `s2_abs` and `q`, which Garaga bounds at
-/// `2^128`). Callers swap in `M31(0)` / `PackedM31(0)` instead of indexing
-/// into the base trace.
+/// Marks a relation value that must use constant zero.
+///
+/// Callers use `M31(0)` or `PackedM31(0)` instead of a base-trace column.
 const SCALAR_ROW_ZERO_PAD_COL: usize = usize::MAX;
 
 fn scalar_relation_column_index(index: usize) -> usize {
@@ -1556,11 +1539,9 @@ mod tests {
         fake_glv.mix_into(&mut channel);
     }
 
-    /// Asserts that a near-`n` full-width scalar — far outside the trivial
-    /// hint's 128-bit window — yields a valid hint via the Garaga / CT-2001
-    /// `precompute_lattice` decomposer (`FakeGlvScalarHint::decompose`) that
-    /// satisfies both the algebraic equation (`verify_scalar_equation`) and
-    /// the three 128-bit bounds.
+    /// Confirms decomposition of a full-width scalar near `n`.
+    ///
+    /// The hint must satisfy the scalar equation and all 128-bit bounds.
     #[test]
     fn fake_glv_hint_supports_near_order_scalar() {
         use stwo_p256_utils::scalar_arithmetic::P256_ORDER;

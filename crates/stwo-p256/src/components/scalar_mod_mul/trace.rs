@@ -129,7 +129,7 @@ pub struct ScalarModMulTraceRows {
 
 /// Vertical concatenation of several `ScalarModMulTraceRows` instances into a
 /// single merged component set. Each sub-family's rows are laid out block-major
-/// (instance 0's rows, then instance 1's, ...); every row carries the `mul_id`
+/// (instance 0's rows, then instance 1's, ...). Every row carries the `mul_id`
 /// of its originating instance so the merged LogUp tuples stay keyed per
 /// instance. Per-instance row counts are input-independent, so the merged
 /// schedule remains a valid preprocessed (circuit-fixed) trace.

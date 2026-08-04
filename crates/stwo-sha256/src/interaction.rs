@@ -1,33 +1,27 @@
 //! LogUp interaction-trace generator for every SHA-256 component.
 //!
-//! The main `Sha256Eval` (consumer) and the 22 producer table components
-//! (8 σ/Σ decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4
-//! `Range_k`) each emit their own interaction trace. When the digest provider
-//! is exposed, `Sha256Eval` *also* yields the final-block digest on the
-//! `Sha256Digest` channel — the one provider-side term it contributes — which
-//! is why its claimed sum is non-zero on its own in that mode. Each is built by
-//! walking that component's fractions row-by-row through
-//! [`stwo_constraint_framework::LogupTraceGenerator`] — consecutive
-//! fractions share an interaction column in chunks of `batch` (matching the
-//! eval-side `eval.finalize_logup_batched(batch)`). Single-fraction producers
-//! use pairs; the fat `Sha256Eval` consumer uses [`SHA_CONSUMER_LOGUP_BATCH`].
+//! The main `Sha256Eval` consumer emits one interaction trace.
+//! Four `Range_k` table producers emit their interaction traces.
+//! An enabled digest provider also yields the final digest through `Sha256Digest`.
+//! This extra yield makes the isolated SHA claim sum nonzero.
+//! [`LogupTraceGenerator`] builds each trace from row fractions.
+//! Consecutive fractions share a column in batches.
 //!
-//! **Sum-to-zero invariant.** For a valid proof, the total of every
-//! component's `claimed_sum` must be zero — every consumer "use" cancels
-//! against the producer's "yield" at the same row key. The verifier
-//! checks this implicitly through the cumulative-sum constraint inside
-//! each component plus the OODS-evaluation balance across the proof.
+//! Single-fraction producers use pairs.
+//! `Sha256Eval` uses [`SHA_CONSUMER_LOGUP_BATCH`].
+//!
+//! **Sum-to-zero invariant.**
+//! Each consumer use cancels a producer yield at the same row key.
+//! Their `claimed_sum` values total zero in a balanced composition.
+//! Component constraints and the proof OODS balance enforce this invariant.
 //!
 //! Lookup orders **must** match the order `Sha256Eval::evaluate` /
 //! `components::*::evaluate` fire `add_to_relation`. Drift between this
 //! generator and the AIR evaluator silently invalidates the proof
 //! (denominator mismatch ⇒ verifier rejects).
 //!
-//! Performance choice: this implementation uses the **scalar**
-//! `write_frac` path one row at a time. The reference `xor_8_8` example
-//! does SIMD packing for its 2¹⁶-row tables; we follow the simpler
-//! single-row path here for correctness; SIMD-packing the producers is
-//! a benchmark-driven future micro-optimisation.
+//! This implementation uses the scalar `write_frac` path one row at a time.
+//! The simple scalar path is the active implementation.
 
 use air_core::claim_mask::ClaimMaskTrace;
 use num_traits::{One, Zero};
@@ -53,7 +47,7 @@ use crate::types::Sha256Witness;
 
 /// Lookup sites the main `Sha256Eval` fires per **row**, **excluding** the
 /// optional digest yield. Breakdown (W=6), matching the firing order in
-/// [`write_round_row_lookups`] and `crate::constraints::Sha256Eval::evaluate`:
+/// `write_round_row_lookups` and `crate::constraints::Sha256Eval::evaluate`:
 ///
 /// ```text
 ///   2 (schedule family: Range_4 carry pair; t ≥ 16 rows)
@@ -63,31 +57,29 @@ use crate::types::Sha256Witness;
 /// = 58
 /// ```
 ///
-/// Σ0/Σ1/Maj/Ch and the σ inputs are computed from committed boolean
-/// bit-planes and recomposed against them — no split-pack lookups fire, so
-/// only the mod-2³² add-carry and terminal-limb range checks remain.
+/// Committed boolean bit planes calculate Σ0, Σ1, Maj, Ch, and the σ inputs.
+/// Recomposition binds these results to the words.
+/// The lookup set contains only addition carry checks and terminal byte range
+/// checks.
 ///
 /// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
 pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 58;
 
-/// LogUp batch size for the fat `Sha256Eval` consumer: how many per-row
-/// fractions share one interaction column. Batch-4 (vs the pair default)
-/// roughly halves the consumer's interaction-column count — fewer queried
-/// values in the proof — at the cost of a degree-≤5 batched constraint,
-/// which needs `max_constraint_log_degree_bound = log_size + 2` and the
-/// derived composition split the unlocked engine supports. The witness
-/// builder (`sha256_interaction` → `build_interaction_columns`), the
-/// eval-side `finalize_logup_batched`, and the column-count sizing in
-/// `crate::air` all read this constant so they never drift.
+/// Number of `Sha256Eval` fractions in one interaction column.
+///
+/// A batch of four reduces the consumer column count.
+/// The resulting constraint has degree five or less.
+/// It requires `max_constraint_log_degree_bound = log_size + 2`.
+/// The witness builder, evaluator, and column sizing use this constant.
 pub const SHA_CONSUMER_LOGUP_BATCH: usize = 4;
 
 /// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
-/// exactly one width-32 yield site when `expose_digest` is set; the
+/// exactly one width-32 yield site when `expose_digest` is set. The
 /// credential-field provider adds one width-3 yield per exposed window byte
-/// plus 64 sites for an optional full padded-message stream (all firing on
+/// plus 64 sites for an optional full padded-message stream. These sites act on
 /// `t = 15` rows).
-/// The byte value is derived from existing W bit planes, so it adds no range
-/// lookups. Both the interaction generator here and `crate::air`'s
+/// Existing W bit planes determine the byte value, so it adds no range
+/// lookups. Both this generator and `crate::air`'s
 /// interaction-column sizing read this so the two never drift.
 #[inline]
 pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
@@ -100,7 +92,7 @@ pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) 
 
 /// One component's slot in the aggregate interaction claim. `claimed_sum`
 /// is what the verifier checks each component's interaction column
-/// cumulatively reaches; the total over every component must be zero.
+/// cumulatively reaches. The total over every component must be zero.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComponentClaim {
     pub claimed_sum: SecureField,
@@ -114,7 +106,7 @@ impl ComponentClaim {
 
 /// Aggregate of every component's claim, in proving / verifying order.
 ///
-/// Field order **must** match the order components are added to the proof
+/// Field order **must** match the component order in the proof
 /// (`crate::stark::commit_base_trace` / `crate::stark::component_provers`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
@@ -123,9 +115,10 @@ pub struct InteractionClaim {
 }
 
 impl InteractionClaim {
-    /// Sum of every component's claimed sum. The verifier checks this is
-    /// zero — modulo cross-component LogUp wiring outside this crate
-    /// (currently none). Used as the soundness backbone.
+    /// Sum all component claim sums.
+    ///
+    /// Cross-component consumers can cancel enabled SHA provider terms.
+    /// A complete proof requires a zero global LogUp sum.
     pub fn total(&self) -> SecureField {
         let mut s = self.sha256.claimed_sum;
         for c in &self.range {
@@ -151,7 +144,7 @@ impl InteractionClaim {
 
 /// One (numerator, denominator) at a particular row. Numerator carries
 /// the lookup's multiplicity (positive on the consumer side, negative on
-/// the producer); denominator is `combine(values) = sum α^i · v_i − z`.
+/// the producer). Denominator is `combine(values) = sum α^i · v_i − z`.
 pub(crate) type Frac = (SecureField, SecureField);
 
 pub(crate) fn claim_mask_fraction_column(trace: &ClaimMaskTrace, beta: SecureField) -> Vec<Frac> {
@@ -252,17 +245,14 @@ where
     out
 }
 
-/// Class-D blinded producer fraction (Q-015 §4b). Mirrors the SINGLE gated
-/// `add_to_relation` entry `crate::components::emit_blind` fires per row —
-/// numerator `-(1 − is_dummy)·mult` — over the doubled (blinded) domain.
-/// Returns one `Vec<Frac>` of length `mults.len() = 2^(L+1)`: on a real row
-/// (`idx < real_len`) the numerator is `-mult`, identical to the unblinded emit;
-/// on a dummy row (`idx ≥ real_len`, `is_dummy = 1`) the numerator is `0`, so
-/// the fresh random blind multiplicity committed there never enters the LogUp
-/// sum — yet stays in the committed multiplicity column as the mask. The caller
-/// pushes one such fraction per producer so `build_interaction_columns` pairs
-/// two producers' fractions into one interaction column (down from one column
-/// per producer in the old cancelling-pair form).
+/// Build one Class D blinded producer fraction column.
+///
+/// This mirrors the gated entry from `crate::components::emit_blind`.
+/// Its numerator is `-(1 − is_dummy)·mult`.
+/// A real row uses numerator `-mult`.
+/// A dummy row uses numerator zero.
+/// Thus, dummy multiplicities remain committed but do not enter the LogUp sum.
+/// The caller pairs two producer fractions in one interaction column.
 pub(crate) fn producer_blind_frac_column<R, const N: usize>(
     rel: &R,
     mults: &[u32],
@@ -275,7 +265,7 @@ where
     let mut out = Vec::with_capacity(mults.len());
     for (idx, (m, row)) in mults.iter().zip(rows).enumerate() {
         let denom = rel.combine(&row);
-        // Dummy rows are gated to a zero numerator; real rows yield `-mult`.
+        // Dummy rows have a zero numerator. Real rows yield `-mult`.
         let num = if idx >= real_len {
             SecureField::zero()
         } else {
@@ -286,10 +276,8 @@ where
     out
 }
 
-// (Padding helper removed — every per-table producer column is sized
-// exactly to its `log_size` by construction, and the consumer-side
-// builder pre-allocates `n_rows` per lookup with the zero-fraction
-// default.)
+// Each producer column uses its exact `log_size`.
+// The consumer builder initializes `n_rows` neutral fractions per lookup.
 
 // ---------------------------------------------------------------------------
 // Producer-side per-table interaction columns
@@ -341,11 +329,10 @@ fn range_k_interaction(
 /// fires. Each lookup produces one fraction column at log_size = the
 /// trace's log_size. Pairs share an interaction column.
 ///
-/// The cell values for each lookup come from the main trace at the row
-/// representing the block. Padding rows contribute `(0, 1)` (zero
-/// numerator, unit denominator) so they don't perturb the sum — the
-/// `enabler` column the AIR multiplies into every constraint takes care
-/// of the algebraic side.
+/// Lookup cells come from the corresponding main trace row.
+/// Padding rows contribute the neutral fraction `(0, 1)`.
+/// They do not change the sum.
+/// The AIR uses `enabler` for the matching constraint gates.
 fn sha256_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
@@ -368,7 +355,7 @@ fn sha256_interaction(
     let last_block_idx = n_blocks.saturating_sub(1);
 
     // One fraction vector per lookup site (`lookup_idx`), each of length
-    // `n_rows`, default-filled with the neutral `(0, 1)`; real rows
+    // `n_rows`, default-filled with the neutral `(0, 1)`. Real rows
     // overwrite the sites that fire on them. See
     // [`SHA_LOOKUPS_PER_ROW_BASE`] for the per-row site breakdown.
     let lookups_per_row = sha_lookups_per_row(expose_digest, field_exposure);
@@ -406,7 +393,7 @@ fn sha256_interaction(
 /// Write every lookup site for one `(block, round t)` row at its trace
 /// slot, in **exactly** the `Sha256Eval::evaluate` firing order. Bumps
 /// `cursor` past each site so the same site index always lands at the same
-/// fraction column across rows; sites that do not fire on this row keep
+/// fraction column across rows. Sites that do not fire on this row keep
 /// their neutral `(0, 1)` fill and the cursor skips over them.
 #[allow(clippy::too_many_arguments)]
 fn write_round_row_lookups(
@@ -421,7 +408,7 @@ fn write_round_row_lookups(
     field_exposure: &FieldExposure,
     block_idx: usize,
 ) {
-    // ---- 1. Schedule family (Range_4 carry pair; t ≥ 16 rows) ----
+    // ---- 1. Schedule family: Range_4 carry pair on rows t ≥ 16 ----
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
         write_carry_range_pair(
@@ -436,7 +423,7 @@ fn write_round_row_lookups(
         *cursor += 2;
     }
 
-    // ---- 2. Round family carry range-checks (4 pairs; every real row) ----
+    // ---- 2. Round family carry range-checks (4 pairs, every real row) ----
     let round = &block.rounds[t];
 
     write_carry_range_pair(
@@ -595,7 +582,6 @@ pub fn generate_interaction_trace(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
     expose_digest: bool,
     field_exposure: &FieldExposure,
 ) -> (
@@ -606,7 +592,6 @@ pub fn generate_interaction_trace(
         relations,
         witness,
         sha256_log_size,
-        group_width,
         expose_digest,
         field_exposure,
         true,
@@ -618,7 +603,6 @@ pub fn generate_consumer_interaction_trace(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
     expose_digest: bool,
     field_exposure: &FieldExposure,
 ) -> (
@@ -629,7 +613,6 @@ pub fn generate_consumer_interaction_trace(
         relations,
         witness,
         sha256_log_size,
-        group_width,
         expose_digest,
         field_exposure,
         false,
@@ -642,7 +625,6 @@ pub(crate) fn generate_interaction_trace_with_claim_masks(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
     expose_digest: bool,
     field_exposure: &FieldExposure,
     include_table_providers: bool,
@@ -656,7 +638,6 @@ pub(crate) fn generate_interaction_trace_with_claim_masks(
         relations,
         witness,
         sha256_log_size,
-        group_width,
         expose_digest,
         field_exposure,
         include_table_providers,
@@ -669,7 +650,6 @@ fn generate_interaction_trace_inner(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
     expose_digest: bool,
     field_exposure: &FieldExposure,
     include_table_providers: bool,
@@ -682,7 +662,7 @@ fn generate_interaction_trace_inner(
 
     // Sha256Eval consumer first — its slot in the proof's component list.
     // `expose_digest` adds the cross-component digest yield to this component's
-    // fractions; `field_exposure` adds one credential-field yield per exposed
+    // fractions. `field_exposure` adds one credential-field yield per exposed
     // byte (and hence to its claimed sum).
     let (sha_trace, sha_sum) = sha256_interaction(
         relations,
@@ -697,7 +677,6 @@ fn generate_interaction_trace_inner(
         claimed_sum: sha_sum,
     };
 
-    let _ = group_width;
     // 4 range producers (Range_2, Range_4, Range_5, Range_8).
     let mut range = Vec::with_capacity(4);
     if include_table_providers {
@@ -722,14 +701,13 @@ fn generate_interaction_trace_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::partitions::MAX_ROUND_GROUP_BITS;
     use crate::trace::min_log_size;
     use crate::witness::compute_sha256_witness;
     use stwo::core::channel::Blake2sChannel;
 
-    /// With the digest provider **off**, the SHA module's claimed sums still
-    /// net to zero — the standalone consumer ⇄ producer balance is untouched,
-    /// so a standalone SHA proof keeps self-verifying.
+    /// Confirm that the disabled digest provider preserves a zero claim sum.
+    ///
+    /// The standalone consumer and producers remain balanced.
     #[test]
     fn digest_provider_off_keeps_module_self_balanced() {
         let witness = compute_sha256_witness(b"abc");
@@ -739,7 +717,6 @@ mod tests {
             &relations,
             &witness,
             log_size,
-            MAX_ROUND_GROUP_BITS,
             false,
             &FieldExposure::empty(),
         );
@@ -806,14 +783,12 @@ mod tests {
         );
     }
 
-    /// With the digest provider **on**, the module yields the 32 final-block
-    /// digest bytes. Every other lookup still self-cancels, so the module's
-    /// claimed-sum total is exactly the outstanding provider term
-    /// `−1/combine(digest)`. A synthetic consumer that *requires* the same
-    /// digest tuple contributes `+1/combine(digest)` — exactly the claimed sum
-    /// of a consumer interaction column that fires `+1` on the final-block row
-    /// and `0` elsewhere — and the two cancel. This is the producer-half
-    /// balance check, at the claimed-sum level (no full proof needed).
+    /// Confirm that a synthetic digest consumer balances the enabled provider.
+    ///
+    /// The provider yields 32 final digest bytes.
+    /// Its outstanding term is `−1/combine(digest)`.
+    /// The matching consumer contributes `+1/combine(digest)`.
+    /// All other lookups cancel within the SHA module.
     #[test]
     fn digest_provider_balances_against_synthetic_consumer() {
         let witness = compute_sha256_witness(b"abc");
@@ -824,14 +799,13 @@ mod tests {
             &relations,
             &witness,
             log_size,
-            MAX_ROUND_GROUP_BITS,
             true,
             &FieldExposure::empty(),
         );
         let module_total = claim.total();
 
-        // Synthesize the consumer term: +1 / combine(final-block digest bytes),
-        // using the same drawn relation the provider yielded against.
+        // Synthesize the consumer term with the provider relation:
+        // +1 / combine(final-block digest bytes).
         let last = witness.blocks.last().expect("at least one block");
         let bytes = h_out_digest_bytes(&last.h_out);
         let values: [BaseField; DIGEST_BYTES] = std::array::from_fn(|i| BaseField::from(bytes[i]));
@@ -858,10 +832,9 @@ mod tests {
         );
     }
 
-    /// A consumer requiring a *different* digest (one bit flipped) does not
-    /// cancel the provider's yield — the balance closes only for the exact
-    /// bytes SHA computed. This is the binding's core property (a signature
-    /// over the wrong hash is rejected) exercised at the digest-provider level.
+    /// A consumer with a different digest does not cancel the provider yield.
+    /// The balance closes only for the digest that SHA computed. This test
+    /// checks that binding property at the digest-provider level.
     #[test]
     fn digest_provider_rejects_mismatched_consumer() {
         let witness = compute_sha256_witness(b"abc");
@@ -872,7 +845,6 @@ mod tests {
             &relations,
             &witness,
             log_size,
-            MAX_ROUND_GROUP_BITS,
             true,
             &FieldExposure::empty(),
         );
@@ -891,14 +863,12 @@ mod tests {
         );
     }
 
-    // ---- credential-field provider ----
+    // ---- field provider ----
 
     use air_core::relations::field_id;
 
-    /// A credential-shaped 11-byte preimage (`docs/credential-format.md`):
-    /// `"EUID" | ver | year(2007) | month(3) | day(15) | nat(276=0x0114)`. The
-    /// DOB window is `c[5..9]`, the nationality window `c[9..11]`.
-    const SAMPLE_CREDENTIAL: [u8; 11] = [b'E', b'U', b'I', b'D', 1, 0x07, 0xD7, 3, 15, 0x01, 0x14];
+    /// A generic preimage with sample windows at offsets 5..9 and 9..11.
+    const SAMPLE_MESSAGE: [u8; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
     /// Sum a synthetic consumer that *requires* each `(field_id, byte_index,
     /// value)` tuple over the same drawn field relation the provider yielded
@@ -917,27 +887,21 @@ mod tests {
         acc
     }
 
-    /// The credential-field provider smoke test: with **only** the DOB window exposed, the
-    /// SHA module yields the four DOB bytes, and a synthetic consumer requiring
-    /// exactly `(DOB, i, c[5+i])` cancels the module's outstanding provider term.
-    /// Balancing for the credential's *actual* DOB bytes is the proof that SHA
-    /// exposed the bytes that were hashed.
+    /// Confirm that a DOB consumer balances the exact exposed bytes.
+    ///
+    /// The SHA module yields four DOB bytes.
+    /// A synthetic consumer requires `(DOB, i, c[5+i])`.
+    /// The exact tuple cancels the provider term.
     #[test]
     fn field_provider_dob_window_balances_against_synthetic_consumer() {
-        let c = SAMPLE_CREDENTIAL;
+        let c = SAMPLE_MESSAGE;
         let witness = compute_sha256_witness(&c);
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
         let exposure = FieldExposure::from_preimage_windows(&[(field_id::DOB, 5, 4)]);
 
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, false, &exposure);
         let module_total = claim.total();
 
         let dob: Vec<(u32, u32, u32)> = (0..4)
@@ -963,8 +927,8 @@ mod tests {
     /// nationality) balances. Confirms one shared channel carries both fields,
     /// keyed by `field_id`.
     #[test]
-    fn field_provider_balances_full_credential_exposure() {
-        let c = SAMPLE_CREDENTIAL;
+    fn field_provider_balances_all_exposed_windows() {
+        let c = SAMPLE_MESSAGE;
         let witness = compute_sha256_witness(&c);
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
@@ -973,14 +937,8 @@ mod tests {
             (field_id::NATIONALITY, 9, 2),
         ]);
 
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, false, &exposure);
 
         let mut tuples: Vec<(u32, u32, u32)> = (0..4)
             .map(|i| (field_id::DOB, i as u32, c[5 + i] as u32))
@@ -1005,16 +963,10 @@ mod tests {
         let witness = compute_sha256_witness(&message);
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::DOB, 62, 6)]);
+        let exposure = FieldExposure::from_preimage_windows(&[(field_id::DOB, 62, 6)]);
 
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, false, &exposure);
         let module_total = claim.total();
         let tuples = |bytes: &[u8]| {
             bytes
@@ -1048,27 +1000,20 @@ mod tests {
         );
     }
 
-    /// A consumer requiring a *different* field byte (DOB day off by one) does
-    /// not cancel the provider's yield — the balance closes only for the exact
-    /// credential bytes SHA hashed. This is the DOB binding's core property
-    /// (proving age from a date other than the signed one is rejected) at the
-    /// credential-field provider level.
+    /// Confirm that a different DOB byte cannot balance the provider.
+    ///
+    /// The balance closes only for the exact bytes that SHA hashed.
+    /// This property rejects an age proof from a different date.
     #[test]
     fn field_provider_rejects_mismatched_consumer() {
-        let c = SAMPLE_CREDENTIAL;
+        let c = SAMPLE_MESSAGE;
         let witness = compute_sha256_witness(&c);
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
         let exposure = FieldExposure::from_preimage_windows(&[(field_id::DOB, 5, 4)]);
 
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, false, &exposure);
 
         // Require the DOB window but with the day byte tampered (15 → 16).
         let mut dob: Vec<(u32, u32, u32)> = (0..4)
@@ -1115,14 +1060,8 @@ mod tests {
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
         let exposure = FieldExposure::empty().with_padded_stream(STREAM_FIELD_ID);
 
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, false, &exposure);
         let tuples = padded_stream_tuples(&witness, STREAM_FIELD_ID);
         assert_eq!(
             tuples.len(),
@@ -1143,14 +1082,8 @@ mod tests {
         let log_size = min_log_size(witness.blocks.len());
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
         let exposure = FieldExposure::empty().with_padded_stream(STREAM_FIELD_ID);
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
+        let (_, claim) =
+            generate_interaction_trace(&relations, &witness, log_size, false, &exposure);
 
         let mut wrong_value = padded_stream_tuples(&witness, STREAM_FIELD_ID);
         wrong_value[crate::constants::BLOCK_BYTES].2 ^= 1;

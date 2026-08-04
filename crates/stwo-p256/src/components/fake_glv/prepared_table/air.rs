@@ -1,8 +1,7 @@
-//! AIR constraint evaluation for the prepared-table family: the EC-row and
-//! projective-source `FrameworkEval` impls, the in-AIR negation/pinning
-//! constraint builders, and the eval-side point reader.
+//! Evaluates AIR constraints for the prepared-table family.
 //!
-//! Split out of `mod.rs` (pure relocation, no behavioral change).
+//! This module contains EC-row and projective-source evaluators.
+//! It also contains negation constraints, pinning constraints, and the point reader.
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::{EvalAtRow, FrameworkEval, RelationEntry};
@@ -20,7 +19,7 @@ use super::*;
 pub struct PreparedTableEcRowEval {
     pub log_size: u32,
     pub relation: PreparedTableEcRowRelation,
-    /// Monolithic full-table pinning relations. `None` => legacy slice.
+    /// Optional full-table pinning relations for the monolithic proof.
     pub pinning: Option<PreparedTablePinningRelations>,
 }
 
@@ -30,10 +29,8 @@ impl FrameworkEval for PreparedTableEcRowEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Must stay at +1: the prove pipeline rejects a per-component bound of
-        // `log_size + 2` (OODS composition check fails even with degree-3
-        // constraints), so every constraint here is kept at degree <= 3 by
-        // solo LogUp batching (see PREPARED_CONSUMER_LOGUP_BATCH).
+        // Keep the component bound at `log_size + 1`.
+        // Solo LogUp batches keep each constraint at degree 3 or less.
         self.log_size + 1
     }
 
@@ -86,7 +83,7 @@ impl FrameworkEval for PreparedTableEcRowEval {
         output.add_constraints(&mut eval, &active, &one);
         neg.add_constraints(&mut eval, &active, &one);
 
-        // In-AIR negation: on DoubleR, `neg = -lhs (= -R)`; on AddR2R,
+        // In-AIR negation: on DoubleR, `neg = -lhs (= -R)`. On AddR2R,
         // `neg = -output (= -R3)`. Prove `neg.x = src.x` and the limb addition
         // `neg.y + src.y = p` via the witnessed boolean carries. On all other
         // rows `neg = 0` and `neg_carries = 0` (gated away below).
@@ -159,12 +156,9 @@ impl FrameworkEval for PreparedTableEcRowEval {
 
 // --- Shared pinning emission schedule ---------------------------------------
 //
-// Both `add_pinning_emissions` (AIR) and `gen_prepared_table_ec_row_pinned_*`
-// (interaction trace) iterate this single static list so the AIR numerators and
-// the committed logup fractions are the SAME low-degree polynomials in the same
-// order (lessons.md #39, #42). Each entry contributes exactly one logup fraction
-// per row; the numerator is the signed multiplicity times the gate product
-// (which is zero unless the row's kind/cert matches).
+// The AIR and interaction generator use this common emission order.
+// Each entry contributes one LogUp fraction to each row.
+// Its numerator is the signed multiplicity times the gate product.
 
 /// Select the negation source point: `lhs` on `DoubleR` rows, `output` on
 /// `AddR2R` rows, `0` elsewhere. Exactly one kind flag is set on a neg row.
@@ -200,7 +194,7 @@ fn add_negation_constraints<E: EvalAtRow>(
     eval.add_constraint(neg_flag.clone() * (neg.inf.clone() - src.inf.clone()));
     for i in 0..N_LIMBS {
         eval.add_constraint(neg_flag.clone() * (neg.x[i].clone() - src.x[i].clone()));
-        // Boolean carry (ungated; degree 2).
+        // Boolean carry (ungated, degree 2).
         let carry = neg_carries[i].clone();
         eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
         let prev_carry = if i == 0 {
@@ -267,7 +261,7 @@ fn three_g_point<F: Clone + From<M31>>() -> PreparedTableEcEvalPoint<F> {
 
 /// Emit the fixed `PIN_SCHEDULE` of `CertBaseRelation` +
 /// `PreparedTableCanonicalRelation` fractions for one EC row. Every row emits the
-/// SAME ordered set of entries; numerators are gated to zero when the row's
+/// SAME ordered set of entries. Numerators are gated to zero when the row's
 /// kind/cert does not match. Mirrored exactly by
 /// `gen_prepared_table_ec_row_pinned_interaction_trace`.
 #[allow(clippy::too_many_arguments)]
@@ -358,12 +352,12 @@ fn signed_numerator<E: EvalAtRow>(gate: E::F, mult: i32) -> E::F {
 pub struct PreparedTableProjectiveSourceEval {
     pub log_size: u32,
     pub relation: PreparedTableEcRowRelation,
-    /// The hinted provider's mul relation: 6 narrow per-group consumes
-    /// (M0/M1 lhs+rhs, M13/M14 lhs) bind the consumer's committed points to
-    /// the silo group's operand columns; all other operand/result binding
-    /// lives silo-side (hinted_mul formula_bind).
+    /// Hinted multiplication relation for six narrow group slots.
+    ///
+    /// These consumes bind committed points to silo operand columns.
+    /// The hinted multiplication component binds all other operands and results.
     pub mul_result: crate::projective_air::ProjectiveRcbMulResultRelation,
-    /// EC-op header link: PROVIDED (`−has_muls`) here, CONSUMED by the silo.
+    /// Provides the EC operation header link for the silo.
     pub header: crate::components::hinted_mul::EcOpHeaderRelation,
 }
 
@@ -443,7 +437,7 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
 
         // Infinity-operand no-op: `lhs + ∞ = lhs` has no silo group, so pin the
         // output to the accumulator directly. `noop = (1−op)·rhs.inf` equals
-        // `active·(1−op)·rhs.inf` on every row (padding zeroing above); the
+        // `active·(1−op)·rhs.inf` on every row (padding zeroing above). The
         // copies are degree 3.
         let noop = (one.clone() - op.clone()) * rhs.inf();
         let (lhs_x, lhs_y) = (lhs.x_bigint(), lhs.y_bigint());
@@ -480,17 +474,20 @@ impl FrameworkEval for PreparedTableProjectiveSourceEval {
     }
 }
 
-/// Emit the 6 narrow `ProjectiveRcbMulResultRelation` consumes shared by both
-/// projective-source consumers (prepared_table + fake_glv ec_source), in this
-/// fixed order: M0.lhs, M0.rhs, M1.lhs, M1.rhs, M13.lhs, M14.lhs. Tuples are
-/// built from the consumer's OWN committed point columns per the op kind:
+/// Emits six narrow multiplication relation uses in a fixed order.
+///
+/// Prepared-table and fake-GLV consumers use the same order:
+///
+/// ```text
+/// M0.lhs, M0.rhs, M1.lhs, M1.rhs, M13.lhs, M14.lhs.
 ///   M0.lhs = lhs.x (both kinds)      M0.rhs = op·lhs.x + (1−op)·rhs.x
 ///   M1.lhs = lhs.y                   M1.rhs = op·lhs.y + (1−op)·rhs.y
 ///   M13.lhs = output.x               M14.lhs = output.y
-/// matching the silo's per-group operand layout (Double: M0 = x1·x1,
-/// MixedAdd: M0 = x1·x2, …; M13/M14 lhs = affine output coords). The numerator
-/// is the group-existence `gate`; the silo provides exactly these slots on proj
-/// rows (per-slot provide masks).
+/// ```
+///
+/// The tuples use committed consumer point columns.
+/// This order matches the silo group operand layout.
+/// The group-existence `gate` is the numerator.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn add_projective_source_narrow_mul_consumes<E: EvalAtRow>(
     eval: &mut E,
@@ -562,7 +559,7 @@ impl<F: Clone> PreparedTableEcEvalPoint<F> {
     }
 
     /// The affine `y` coordinate limbs as a [`P256BigInt`] (C5-2 Double-op
-    /// formula operand binding; see [`Self::x_bigint`]).
+    /// formula operand binding. See [`Self::x_bigint`]).
     pub(crate) fn y_bigint(&self) -> crate::limbs::P256BigInt<F> {
         crate::limbs::P256BigInt::from_limbs(self.y.clone())
     }

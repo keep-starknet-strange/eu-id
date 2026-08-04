@@ -3,60 +3,34 @@ name = "eu-id-ffi"
 version.workspace = true
 edition.workspace = true
 
-# Thin C-ABI surface over the eu-id provers, built for the mobile benchmark
-# harness. One function per workload — the standalone SHA-256 and P-256 ECDSA
-# provers, plus the combined cross-bound identity proof — each measured inside
-# Rust and returned as a flat C struct. iOS links the `staticlib`; Android
-# (later) the `cdylib`.
+# This crate provides a small C ABI for the standalone component provers.
+# The mobile benchmark harness uses one function for each component.
+# Rust measures each workload and returns a flat C structure.
+# The iOS component benchmark links an explicitly built `staticlib`.
 [lib]
 name = "eu_id_ffi"
-crate-type = ["staticlib", "cdylib", "rlib"]
-
-[features]
-# Pass through to multi-threaded Stwo proving (rayon). Off by default. Reaches
-# the SHA module (in the standalone SHA bench and the SHA part of the combined
-# identity bench); the combined proof is P256-dominated and P256 has no rayon
-# path yet, so this barely moves the identity number — see `eu_id_bench_identity`.
-# (Note: stwo itself is already built with parallel because stwo-p256 requires
-# it — see the dependency note below.)
-parallel = ["stwo-sha256/parallel"]
-jni = ["dep:jni"]
+# Keep Rust builds to one rlib so the final binary can use whole-program LTO.
+# The iOS packaging script requests the shipped staticlib explicitly.
+crate-type = ["rlib"]
 
 [dependencies]
-# Production allocator: the provers churn short-lived trace buffers; system
-# malloc showed up at ~4% of single-core prove in profiles. Same allocator the
-# criterion benches pin, so bench and production numbers agree.
+# Use mimalloc for short-lived trace buffers.
+# The standalone component harness uses this allocator for every measurement.
 mimalloc = { workspace = true }
-# The combined, cross-bound identity prover (`prove_identity`/`verify_identity`)
-# the identity bench wraps, plus the standalone SHA-256 prover the SHA bench
-# wraps. eu-id-prover re-pulls stwo-sha256, but the SHA bench depends on it
-# directly too.
-eu-id-prover = { path = "../eu-id-prover" }
+# The SHA benchmark calls the standalone SHA-256 prover directly.
 stwo-sha256 = { path = "../stwo-sha256" }
-# P-256 ECDSA verification prover. NOTE: stwo-p256 hardwires stwo's
-# `parallel` feature, and Cargo unifies features across the build graph, so
-# pulling it in turns stwo's rayon paths on for the SHA-256 side too. That is
-# desirable on-device (faster), just not gated by the `parallel` feature below.
+# P-256 ECDSA verification prover. It enables the one Rayon-backed Stwo path.
 stwo-p256 = { path = "../stwo-p256" }
-# Direct dep purely to name the concrete `Blake2sMerkleChannel` the p256
-# prove/verify entry points are generic over.
+# This direct dependency names the `Blake2sMerkleChannel` concrete type.
 stwo = { workspace = true }
-# Peak-footprint sampler. On Apple `physical_mem` resolves to mach
-# `phys_footprint` — the iOS jetsam metric — the same crate the laptop
-# harness used.
+# Sample the peak memory footprint.
+# On Apple systems, `physical_mem` uses the `phys_footprint` jetsam metric.
 memory-stats = "1.2"
-# Serialize the combined proof to report its size from `eu_id_bench_identity`.
-bincode = "1"
-# Android benchmark entry points. Optional so the existing C/iOS surface and
-# host builds do not pull in JNI.
-jni = { version = "0.21", optional = true, default-features = false }
-
-# Test-only: produce a real P-256 signature to exercise the big-endian
-# (z, r, s, qx, qy) marshalling contract end-to-end. The host build does the
-# signing in Swift/CryptoKit, so these never enter the iOS staticlib.
+# Test only.
+# Produce a real P-256 signature for the big-endian `(z, r, s, qx, qy)` contract.
+# The host build uses Swift CryptoKit and does not include these dependencies.
 [dev-dependencies]
 p256 = { version = "0.13", features = ["ecdsa"] }
-ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 sha2 = "0.10"
 
 [lints]

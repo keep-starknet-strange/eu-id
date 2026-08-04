@@ -16,7 +16,7 @@ use super::{
 
 // Each trace-bearing sub-component appends a `mul_id` base column LAST so the
 // four merged instances key their LogUp tuples by their own mul_id. The column
-// carries no polynomial constraint; LogUp balance pins it.
+// carries no polynomial constraint. LogUp balance pins it.
 pub const CANONICAL_SCALAR_TRACE_COLUMNS: usize = 3 + 3 * N_LIMBS + 1;
 pub const PRODUCT_METADATA_TRACE_COLUMNS: usize =
     3 + 3 * SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS + SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;

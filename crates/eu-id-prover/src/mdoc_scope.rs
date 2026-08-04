@@ -5,8 +5,8 @@
 //! consumes every resulting [`ParsedCborByteRelation`] tuple.  A public DFA
 //! recognizes the complete byte language for:
 //!
-//! * the issuer COSE `Sig_structure`;
-//! * the optional tag-24 MSO wrapper and the normalized MSO;
+//! * the issuer COSE `Sig_structure`.
+//! * the optional tag-24 MSO wrapper and the normalized MSO.
 //! * every requested `IssuerSignedItemBytes` wrapper and inner item map.
 //!
 //! Variable byte strings are handled by a relation-linked `(state, remaining,
@@ -62,17 +62,15 @@ pub(crate) const MDOC_SCOPE_MAX_DIGEST_ID: u32 = u16::MAX as u32;
 const MDOC_SCOPE_NATIONALITY_SLACK_BITS: usize = 8;
 const MDOC_SCOPE_UNORDERED_MAP_DEPTH: usize = 3;
 const _: () = assert!(MAX_PRESENTED_NATIONALITIES == 1usize << MDOC_SCOPE_NATIONALITY_SLACK_BITS);
-const ISO_MDL_DOCTYPE: &[u8] = b"org.iso.18013.5.1.mDL";
-const ISO_MDL_NAMESPACE: &[u8] = b"org.iso.18013.5.1";
-const ISO_MDL_AAMVA_NAMESPACE: &[u8] = b"org.iso.18013.5.1.aamva";
 const DIGEST_EXIT_REQUIRES_SELECTED_ITEMS: u32 = 1;
+const DIGEST_ID_UNIVERSE_LOG_SIZE: u32 = 16;
 
 pub(crate) const ISSUER_SIG_STRUCTURE_STREAM_ID: u32 = 0x4d53_0000;
 pub(crate) const ISSUER_PAYLOAD_STREAM_ID: u32 = 0x4d53_0001;
 pub(crate) const NORMALIZED_MSO_STREAM_ID: u32 = 0x4d53_0002;
 pub(crate) const ITEM_STREAM_ID_BASE: u32 = 0x4d49_0000;
-/// Existing TS13 `mso_payload_exposure` field tag.  This output is the exact
-/// issuerAuth payload, before optional tag-24 normalization.
+/// Existing TS13 `mso_payload_exposure` field tag. This output is the exact
+/// issuerAuth payload before required tag-24 normalization.
 pub(crate) const MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID: u32 = 40;
 
 pub(crate) const fn item_outer_stream_id(index: usize) -> u32 {
@@ -83,49 +81,12 @@ pub(crate) const fn item_inner_stream_id(index: usize) -> u32 {
     item_outer_stream_id(index) + 1
 }
 
-/// A public, value-free profile selector.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum MdocScopeProfile {
-    V1,
-    V2,
-}
-
-impl MdocScopeProfile {
-    fn version_bytes(self) -> &'static [u8] {
-        match self {
-            Self::V1 => b"1.0",
-            Self::V2 => b"2.0",
-        }
-    }
-
-    fn transcript_tag(self) -> u64 {
-        match self {
-            Self::V1 => 1,
-            Self::V2 => 2,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum MdocScopeBirthDateEncoding {
-    Packed,
-    Text,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum MdocScopeNationalityEncoding {
-    Numeric,
-    Alpha2,
-}
-
 /// The verifier-selected semantics for one requested issuer-signed item.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum MdocScopeMode {
-    /// The complete definite-length, minimally encoded CBOR `elementValue`.
-    ValueEquality(Vec<u8>),
-    AgeOver(MdocScopeBirthDateEncoding),
-    /// Every signed scalar/array element is emitted at indices `2*i,2*i+1`.
-    Alpha2Set(MdocScopeNationalityEncoding),
+    AgeOver,
+    /// Every element in the signed array is emitted at indices `2*i,2*i+1`.
+    Alpha2Set,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,7 +98,6 @@ pub(crate) struct MdocScopeItem {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct MdocScopeStatement {
     pub(crate) request_binding: [u8; 32],
-    pub(crate) profile: MdocScopeProfile,
     pub(crate) doc_type: Vec<u8>,
     pub(crate) namespace: Vec<u8>,
     pub(crate) items: Vec<MdocScopeItem>,
@@ -178,21 +138,13 @@ impl MdocScopeStatement {
             if item.element_identifier.len() > MDOC_SCOPE_MAX_PUBLIC_IDENTIFIER_BYTES {
                 return Err(MdocScopeError::TraceTooLarge(item.element_identifier.len()));
             }
-            match &item.mode {
-                MdocScopeMode::ValueEquality(value) => {
-                    if value.len() > MDOC_SCOPE_MAX_VALUE_EQUALITY_BYTES {
-                        return Err(MdocScopeError::TraceTooLarge(value.len()));
-                    }
-                    MdocCborWitness::new(value, MdocCborInputMode::Raw)
-                        .map_err(MdocScopeError::Cbor)?;
-                    decode_exact(value, "value equality")?;
-                }
-                MdocScopeMode::AgeOver(_) => {
+            match item.mode {
+                MdocScopeMode::AgeOver => {
                     if std::mem::replace(&mut age, true) {
                         return Err(MdocScopeError::DuplicateMode("AgeOver"));
                     }
                 }
-                MdocScopeMode::Alpha2Set(_) => {
+                MdocScopeMode::Alpha2Set => {
                     if std::mem::replace(&mut nationality, true) {
                         return Err(MdocScopeError::DuplicateMode("Alpha2Set"));
                     }
@@ -225,6 +177,7 @@ pub(crate) enum MdocScopeError {
         stream_id: u32,
         paths: usize,
     },
+    DuplicateDigestId(u32),
     TraceTooLarge(usize),
 }
 
@@ -256,6 +209,7 @@ impl fmt::Display for MdocScopeError {
                 f,
                 "semantic DFA has {paths} accepting paths for stream {stream_id:#x}"
             ),
+            Self::DuplicateDigestId(id) => write!(f, "duplicate valueDigests digestID {id}"),
             Self::TraceTooLarge(rows) => {
                 write!(f, "mdoc semantic scope needs too many rows ({rows})")
             }
@@ -268,70 +222,65 @@ impl std::error::Error for MdocScopeError {}
 relation!(MdocScopeDfaRelation, 6);
 relation!(MdocScopeStateRelation, 20);
 relation!(MdocScopeDigestIdRelation, 2);
+relation!(MdocScopeDigestIdUniquenessRelation, 1);
 relation!(MdocScopeDigestByteRelation, 3);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u32)]
 enum ScopeAction {
     Exact = 0,
-    Any = 1,
-    Argument = 2,
-    BeginBstr0 = 3,
-    BeginBstr1 = 4,
-    BeginBstr2 = 5,
-    RawStay = 6,
-    RawExit = 7,
-    IgnoreStay = 8,
-    IgnoreExit = 9,
-    DirectMapStart = 10,
-    CopyStay = 11,
-    CopyExit = 12,
-    FieldByte = 13,
-    BeginArray0 = 14,
-    BeginArray1 = 15,
-    BeginArray2 = 16,
-    NatAlphaFirst = 17,
-    NatAlphaStay = 18,
-    NatAlphaExit = 19,
-    NatNumericFirst = 20,
-    NatNumericStay = 21,
-    NatNumericExit = 22,
-    ItemDigestId0 = 23,
-    ItemDigestId1 = 24,
-    ItemDigestId2 = 25,
-    BeginDigestMap0 = 26,
-    BeginDigestMap1 = 27,
-    BeginDigestMap2 = 28,
-    SelectedDigestId0 = 29,
-    SelectedDigestId1 = 30,
-    SelectedDigestId2 = 31,
-    UnknownDigestId0 = 32,
-    UnknownDigestId1 = 33,
-    UnknownDigestId2 = 34,
-    SelectedDigestByte = 35,
-    SelectedDigestStay = 36,
-    SelectedDigestExit = 37,
-    UnknownDigestByte = 38,
-    UnknownDigestStay = 39,
-    UnknownDigestExit = 40,
+    Any,
+    Argument,
+    BeginBstr0,
+    BeginBstr1,
+    BeginBstr2,
+    RawStay,
+    RawExit,
+    IgnoreStay,
+    IgnoreExit,
+    FieldByte,
+    BeginArray0,
+    BeginArray1,
+    BeginArray2,
+    NatAlphaFirst,
+    NatAlphaStay,
+    NatAlphaExit,
+    ItemDigestId0,
+    ItemDigestId1,
+    ItemDigestId2,
+    BeginDigestMap0,
+    BeginDigestMap1,
+    BeginDigestMap2,
+    SelectedDigestId0,
+    SelectedDigestId1,
+    SelectedDigestId2,
+    UnknownDigestId0,
+    UnknownDigestId1,
+    UnknownDigestId2,
+    SelectedDigestByte,
+    SelectedDigestStay,
+    SelectedDigestExit,
+    UnknownDigestByte,
+    UnknownDigestStay,
+    UnknownDigestExit,
     /// Emit a byte that is also fixed by `p1 = index*256 + byte`.
-    FieldExact = 41,
+    FieldExact,
     /// Match one private ASCII decimal digit.
-    AsciiDigit = 42,
+    AsciiDigit,
     /// Match and emit one private ASCII decimal digit (`p0=field`, `p1=index`).
-    FieldDigit = 43,
-    BeginMap0 = 44,
-    BeginMap1 = 45,
-    BeginMap2 = 46,
-    MapKeyStay0 = 47,
-    MapKeyStay1 = 48,
-    MapKeyStay2 = 49,
-    MapKeyExit0 = 50,
-    MapKeyExit1 = 51,
-    MapKeyExit2 = 52,
+    FieldDigit,
+    BeginMap0,
+    BeginMap1,
+    BeginMap2,
+    MapKeyStay0,
+    MapKeyStay1,
+    MapKeyStay2,
+    MapKeyExit0,
+    MapKeyExit1,
+    MapKeyExit2,
 }
 
-const ALL_SCOPE_ACTIONS: [ScopeAction; 53] = [
+const ALL_SCOPE_ACTIONS: [ScopeAction; 47] = [
     ScopeAction::Exact,
     ScopeAction::Any,
     ScopeAction::Argument,
@@ -342,9 +291,6 @@ const ALL_SCOPE_ACTIONS: [ScopeAction; 53] = [
     ScopeAction::RawExit,
     ScopeAction::IgnoreStay,
     ScopeAction::IgnoreExit,
-    ScopeAction::DirectMapStart,
-    ScopeAction::CopyStay,
-    ScopeAction::CopyExit,
     ScopeAction::FieldByte,
     ScopeAction::BeginArray0,
     ScopeAction::BeginArray1,
@@ -352,9 +298,6 @@ const ALL_SCOPE_ACTIONS: [ScopeAction; 53] = [
     ScopeAction::NatAlphaFirst,
     ScopeAction::NatAlphaStay,
     ScopeAction::NatAlphaExit,
-    ScopeAction::NatNumericFirst,
-    ScopeAction::NatNumericStay,
-    ScopeAction::NatNumericExit,
     ScopeAction::ItemDigestId0,
     ScopeAction::ItemDigestId1,
     ScopeAction::ItemDigestId2,
@@ -401,10 +344,7 @@ impl ScopeAction {
     }
 
     fn emits_raw(self) -> bool {
-        matches!(
-            self,
-            Self::RawStay | Self::RawExit | Self::DirectMapStart | Self::CopyStay | Self::CopyExit
-        )
+        matches!(self, Self::RawStay | Self::RawExit)
     }
 
     fn emits_digest_byte(self) -> bool {
@@ -474,10 +414,10 @@ enum Grammar {
         minimum_len: u32,
         output_raw_slot: Option<usize>,
     },
-    Nationality(MdocScopeNationalityEncoding),
+    Nationality,
     DynamicItemDigestId(usize),
     DynamicDigestMap(usize),
-    DirectOrWrappedMso {
+    WrappedMso {
         output_raw_slot: usize,
     },
 }
@@ -569,13 +509,13 @@ impl ProgramBuilder {
                 minimum_len,
                 output_raw_slot,
             } => self.compile_variable_bstr(*minimum_len, *output_raw_slot, continuation),
-            Grammar::Nationality(encoding) => self.compile_nationality(*encoding, continuation),
+            Grammar::Nationality => self.compile_nationality(continuation),
             Grammar::DynamicItemDigestId(item) => {
                 self.compile_dynamic_uint(true, *item, continuation)
             }
             Grammar::DynamicDigestMap(items) => self.compile_digest_map(*items, continuation),
-            Grammar::DirectOrWrappedMso { output_raw_slot } => {
-                self.compile_direct_or_wrapped(*output_raw_slot, continuation)
+            Grammar::WrappedMso { output_raw_slot } => {
+                self.compile_wrapped_mso(*output_raw_slot, continuation)
             }
         }
     }
@@ -754,36 +694,15 @@ impl ProgramBuilder {
         start
     }
 
-    fn compile_nationality(
-        &mut self,
-        encoding: MdocScopeNationalityEncoding,
-        continuation: u32,
-    ) -> u32 {
-        let (header, first, stay, exit) = match encoding {
-            MdocScopeNationalityEncoding::Alpha2 => (
-                0x62,
-                ScopeAction::NatAlphaFirst,
-                ScopeAction::NatAlphaStay,
-                ScopeAction::NatAlphaExit,
-            ),
-            MdocScopeNationalityEncoding::Numeric => (
-                0x42,
-                ScopeAction::NatNumericFirst,
-                ScopeAction::NatNumericStay,
-                ScopeAction::NatNumericExit,
-            ),
-        };
-
-        let scalar = Grammar::Sequence(vec![
-            Grammar::Exact(vec![header]),
-            Grammar::Action(ScopeAction::FieldByte, field_id::NATIONALITY, 0),
-            Grammar::Action(ScopeAction::FieldByte, field_id::NATIONALITY, 1),
-        ]);
-        let scalar_start = self.compile(&scalar, continuation);
+    fn compile_nationality(&mut self, continuation: u32) -> u32 {
+        let header = 0x62u32;
+        let first = ScopeAction::NatAlphaFirst;
+        let stay = ScopeAction::NatAlphaStay;
+        let exit = ScopeAction::NatAlphaExit;
 
         let element = self.state();
         let second = self.state();
-        self.edge(element, second, ScopeAction::Exact, u32::from(header), 0);
+        self.edge(element, second, ScopeAction::Exact, header, 0);
         let first_state = self.state();
         self.edge(second, first_state, first, field_id::NATIONALITY, 0);
         self.edge(first_state, element, stay, field_id::NATIONALITY, 0);
@@ -796,30 +715,20 @@ impl ProgramBuilder {
         self.edge(array_start, element, ScopeAction::BeginArray0, 1, 0);
         self.edge(array_start, arg1, ScopeAction::BeginArray1, 1, 0);
         self.edge(array_start, arg2_first, ScopeAction::BeginArray2, 1, 0);
-
-        self.merge_starts(&[scalar_start, array_start])
+        array_start
     }
 
-    fn compile_direct_or_wrapped(&mut self, output_raw_slot: usize, continuation: u32) -> u32 {
-        let copy = self.state();
-        self.edge(copy, copy, ScopeAction::CopyStay, output_raw_slot as u32, 0);
-        self.edge(
-            copy,
+    fn compile_wrapped_mso(&mut self, output_raw_slot: usize, continuation: u32) -> u32 {
+        self.compile(
+            &Grammar::Sequence(vec![
+                Grammar::Exact(cbor_head(6, 24)),
+                Grammar::VariableBstr {
+                    minimum_len: 1,
+                    output_raw_slot: Some(output_raw_slot),
+                },
+            ]),
             continuation,
-            ScopeAction::CopyExit,
-            output_raw_slot as u32,
-            0,
-        );
-        let direct = self.action(ScopeAction::DirectMapStart, output_raw_slot as u32, 0, copy);
-        let wrapped = Grammar::Sequence(vec![
-            Grammar::Exact(cbor_head(6, 24)),
-            Grammar::VariableBstr {
-                minimum_len: 1,
-                output_raw_slot: Some(output_raw_slot),
-            },
-        ]);
-        let wrapped = self.compile(&wrapped, continuation);
-        self.merge_starts(&[direct, wrapped])
+        )
     }
 
     fn finish(mut self, start: u32) -> DfaProgram {
@@ -897,7 +806,7 @@ fn fixed_bstr_field(field: u32, len: usize) -> Grammar {
 }
 
 fn tdate_byte(field: Option<u32>, index: usize, byte: u8) -> Grammar {
-    match field.filter(|_| index < 10) {
+    match field {
         Some(field) => Grammar::Action(
             ScopeAction::FieldExact,
             field,
@@ -1093,41 +1002,30 @@ fn private_tdate(field: Option<u32>) -> Grammar {
                 tdate_byte(field, 9, b'9'),
             ]),
         ]),
-        Grammar::Exact(vec![b'T']),
-        tdate_hour(None, 11),
-        Grammar::Exact(vec![b':']),
-        tdate_minute_or_second(None, 14),
-        Grammar::Exact(vec![b':']),
-        tdate_minute_or_second(None, 17),
-        Grammar::Exact(vec![b'Z']),
+        tdate_byte(field, 10, b'T'),
+        tdate_hour(field, 11),
+        tdate_byte(field, 13, b':'),
+        tdate_minute_or_second(field, 14),
+        tdate_byte(field, 16, b':'),
+        tdate_minute_or_second(field, 17),
+        tdate_byte(field, 19, b'Z'),
     ])
 }
 
 fn value_grammar(item: &MdocScopeItem) -> Grammar {
-    match &item.mode {
-        MdocScopeMode::ValueEquality(value) => Grammar::Exact(value.clone()),
-        MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Packed) => {
-            fixed_bstr_field(field_id::DOB, 4)
-        }
-        MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Text) => {
+    match item.mode {
+        MdocScopeMode::AgeOver => {
             let date = Grammar::Sequence(vec![
                 Grammar::Exact(cbor_head(3, 10)),
                 fixed_private_bytes(field_id::DOB, 10),
             ]);
-            Grammar::Choice(vec![
-                date.clone(),
-                Grammar::Sequence(vec![Grammar::Exact(cbor_head(6, 1004)), date]),
-            ])
+            Grammar::Sequence(vec![Grammar::Exact(cbor_head(6, 1004)), date])
         }
-        MdocScopeMode::Alpha2Set(encoding) => Grammar::Nationality(*encoding),
+        MdocScopeMode::Alpha2Set => Grammar::Nationality,
     }
 }
 
-fn item_inner_grammar(
-    profile: MdocScopeProfile,
-    item_index: usize,
-    item: &MdocScopeItem,
-) -> Grammar {
+fn item_inner_grammar(item_index: usize, item: &MdocScopeItem) -> Grammar {
     let fields = vec![
         (
             cbor_text(b"random"),
@@ -1146,17 +1044,12 @@ fn item_inner_grammar(
             exact_text(&item.element_identifier),
         ),
     ];
-    match profile {
-        MdocScopeProfile::V1 => Grammar::UnorderedMap { level: 0, fields },
-        MdocScopeProfile::V2 => {
-            let mut parts = vec![Grammar::Exact(cbor_head(5, fields.len() as u64))];
-            for (key, value) in fields {
-                parts.push(Grammar::Exact(key));
-                parts.push(value);
-            }
-            Grammar::Sequence(parts)
-        }
+    let mut parts = vec![Grammar::Exact(cbor_head(5, fields.len() as u64))];
+    for (key, value) in fields {
+        parts.push(Grammar::Exact(key));
+        parts.push(value);
     }
+    Grammar::Sequence(parts)
 }
 
 fn cose_key_grammar() -> Grammar {
@@ -1214,29 +1107,11 @@ fn validity_grammar() -> Grammar {
 
 fn mso_grammar(statement: &MdocScopeStatement) -> Grammar {
     let selected_digests = Grammar::DynamicDigestMap(statement.items.len());
-    let selected_namespace_only = Grammar::Sequence(vec![
+    let value_digests = Grammar::Sequence(vec![
         Grammar::Exact(cbor_head(5, 1)),
         exact_text(&statement.namespace),
-        selected_digests.clone(),
+        selected_digests,
     ]);
-    let value_digests =
-        if statement.doc_type == ISO_MDL_DOCTYPE && statement.namespace == ISO_MDL_NAMESPACE {
-            Grammar::Choice(vec![
-                selected_namespace_only,
-                Grammar::UnorderedMap {
-                    level: 1,
-                    fields: vec![
-                        (cbor_text(&statement.namespace), selected_digests),
-                        (
-                            cbor_text(ISO_MDL_AAMVA_NAMESPACE),
-                            Grammar::DynamicDigestMap(0),
-                        ),
-                    ],
-                },
-            ])
-        } else {
-            selected_namespace_only
-        };
     let device_key_info = Grammar::UnorderedMap {
         level: 1,
         fields: vec![(cbor_text(b"deviceKey"), cose_key_grammar())],
@@ -1244,10 +1119,7 @@ fn mso_grammar(statement: &MdocScopeStatement) -> Grammar {
     Grammar::UnorderedMap {
         level: 0,
         fields: vec![
-            (
-                cbor_text(b"version"),
-                exact_text(statement.profile.version_bytes()),
-            ),
+            (cbor_text(b"version"), exact_text(b"2.0")),
             (cbor_text(b"docType"), exact_text(&statement.doc_type)),
             (cbor_text(b"digestAlgorithm"), exact_text(b"SHA-256")),
             (cbor_text(b"valueDigests"), value_digests),
@@ -1329,22 +1201,17 @@ fn stream_specs(items: usize) -> Vec<StreamSpec> {
 fn programs(statement: &MdocScopeStatement) -> Vec<DfaProgram> {
     let mut result = vec![
         compile_program(sig_structure_grammar()),
-        compile_program(Grammar::DirectOrWrappedMso { output_raw_slot: 1 }),
+        compile_program(Grammar::WrappedMso { output_raw_slot: 1 }),
         compile_program(mso_grammar(statement)),
     ];
     for (index, item) in statement.items.iter().enumerate() {
         result.push(compile_program(item_outer_grammar(2 + index)));
-        result.push(compile_program(item_inner_grammar(
-            statement.profile,
-            index,
-            item,
-        )));
+        result.push(compile_program(item_inner_grammar(index, item)));
     }
     result
 }
 
 const MDOC_SCOPE_MAX_PUBLIC_IDENTIFIER_BYTES: usize = 256;
-const MDOC_SCOPE_MAX_VALUE_EQUALITY_BYTES: usize = 256;
 const MDOC_SCOPE_MAX_STREAM_BYTES: usize = 130_000;
 const MDOC_SCOPE_MAX_TOTAL_STREAM_BYTES: usize = 520_000;
 const MDOC_SCOPE_MAX_DFA_CONFIGURATIONS: usize = 4096;
@@ -1353,15 +1220,15 @@ const MDOC_SCOPE_MAX_DFA_CONFIGURATIONS: usize = 4096;
 ///
 /// Recommended module order:
 ///
-/// 1. issuer/item SHA modules, then the SHA-padded outer parsers;
-/// 2. `MdocScope` (draws each raw-stream relation and `semantic_fields`);
-/// 3. payload/MSO/item-inner raw parsers;
+/// 1. issuer/item SHA modules, then the SHA-padded outer parsers.
+/// 2. `MdocScope` (draws each raw-stream relation and `semantic_fields`).
+/// 3. payload/MSO/item-inner raw parsers.
 /// 4. age/nationality/validity/device-key consumers.
 ///
 /// `air_core` draws every module before writing interactions, so the scope may
 /// consume parsed handles drawn by the later raw parsers.  Relation signs are:
-/// parser parsed-byte providers `-1`, scope parsed consumers `+1`; scope raw
-/// and semantic providers `-1`, raw-parser/predicate consumers `+1`; item SHA
+/// parser parsed-byte providers `-1`, scope parsed consumers `+1`. Scope raw
+/// and semantic providers `-1`, raw-parser/predicate consumers `+1`. Item SHA
 /// digest providers `-1`, scope digest consumers `+1`.
 #[derive(Clone)]
 pub(crate) struct MdocScopeHandles {
@@ -1540,7 +1407,7 @@ fn apply_edge_native(
     edge: DfaEdge,
     before: MachineContext,
     row: &MdocCborWitnessRow,
-    is_last: bool,
+    _is_last: bool,
     item_count: usize,
     expected_item_digest_ids: Option<&[u32]>,
 ) -> Option<AppliedEdge> {
@@ -1579,31 +1446,6 @@ fn apply_edge_native(
             let ok = !row.header && before.remaining == 1;
             if ok {
                 after.remaining = 0;
-                after.position += 1;
-            }
-            ok
-        }
-        ScopeAction::DirectMapStart => {
-            let ok = row.header
-                && row.major == 5
-                && row.depth == 0
-                && row.parent_header_index == 0
-                && row.child_ordinal == 0;
-            if ok {
-                after.position = 1;
-            }
-            ok
-        }
-        ScopeAction::CopyStay => {
-            let ok = !is_last;
-            if ok {
-                after.position += 1;
-            }
-            ok
-        }
-        ScopeAction::CopyExit => {
-            let ok = is_last;
-            if ok {
                 after.position += 1;
             }
             ok
@@ -1680,17 +1522,9 @@ fn apply_edge_native(
             }
             ok
         }
-        ScopeAction::NatAlphaFirst | ScopeAction::NatNumericFirst => {
-            !row.header && before.remaining != 0
-        }
-        ScopeAction::NatAlphaStay
-        | ScopeAction::NatNumericStay
-        | ScopeAction::NatAlphaExit
-        | ScopeAction::NatNumericExit => {
-            let stay = matches!(
-                action,
-                ScopeAction::NatAlphaStay | ScopeAction::NatNumericStay
-            );
+        ScopeAction::NatAlphaFirst => !row.header && before.remaining != 0,
+        ScopeAction::NatAlphaStay | ScopeAction::NatAlphaExit => {
+            let stay = action == ScopeAction::NatAlphaStay;
             let ok = !row.header
                 && if stay {
                     before.remaining > 1
@@ -1912,7 +1746,6 @@ fn extract_nested_streams(
     let payload = bytes_value(&issuer[3], "issuer payload")?.to_vec();
     let decoded_payload = decode_exact(&payload, "issuer payload")?;
     let normalized_mso = match decoded_payload {
-        Value::Map(_) => payload.clone(),
         Value::Tag(24, inner) => bytes_value(&inner, "MobileSecurityObjectBytes")?.to_vec(),
         _ => return Err(MdocScopeError::WrongShape("issuer payload")),
     };
@@ -1943,8 +1776,10 @@ struct ScopeActiveRow {
 struct MdocScopeWitness {
     active_rows: Vec<ScopeActiveRow>,
     table_multiplicities: Vec<u32>,
+    digest_id_multiplicities: Vec<u32>,
     item_digest_bytes: Vec<[u8; 32]>,
     raw_stream_bytes: Vec<Vec<u8>>,
+    #[cfg(test)]
     nationality_count: Option<u16>,
 }
 
@@ -2020,7 +1855,9 @@ impl MdocScopeWitness {
 
         let mut active_rows = Vec::new();
         let mut use_counts: BTreeMap<(usize, DfaEdge), u32> = BTreeMap::new();
+        let mut digest_id_multiplicities = vec![0u32; 1 << DIGEST_ID_UNIVERSE_LOG_SIZE];
         let mut item_digest_bytes = vec![[0u8; 32]; statement.items.len()];
+        #[cfg(test)]
         let mut nationality_max_index = None::<u32>;
         for (slot, ((parsed, program), spec)) in parsed_streams
             .iter()
@@ -2037,24 +1874,39 @@ impl MdocScopeWitness {
             )?;
             for (index, (row, applied)) in parsed.rows.iter().zip(path).enumerate() {
                 *use_counts.entry((slot, applied.edge)).or_default() += 1;
+                if matches!(
+                    applied.edge.action,
+                    ScopeAction::SelectedDigestId0
+                        | ScopeAction::SelectedDigestId1
+                        | ScopeAction::SelectedDigestId2
+                        | ScopeAction::UnknownDigestId0
+                        | ScopeAction::UnknownDigestId1
+                        | ScopeAction::UnknownDigestId2
+                ) {
+                    let id = usize::try_from(row.argument)
+                        .expect("digestID is constrained to the u16 universe");
+                    digest_id_multiplicities[id] += 1;
+                    if digest_id_multiplicities[id] > 1 {
+                        return Err(MdocScopeError::DuplicateDigestId(id as u32));
+                    }
+                }
                 if applied.edge.action.emits_digest_byte() {
                     let item = applied.edge.p0 as usize;
                     let byte_index = applied.edge.p1 as usize;
                     item_digest_bytes[item][byte_index] = row.byte;
                 }
+                #[cfg(test)]
                 let nationality_index = match applied.edge.action {
                     ScopeAction::FieldByte if applied.edge.p0 == field_id::NATIONALITY => {
                         Some(applied.edge.p1)
                     }
-                    ScopeAction::NatAlphaFirst | ScopeAction::NatNumericFirst => {
-                        Some(applied.before.position * 2)
+                    ScopeAction::NatAlphaFirst => Some(applied.before.position * 2),
+                    ScopeAction::NatAlphaStay | ScopeAction::NatAlphaExit => {
+                        Some(applied.before.position * 2 + 1)
                     }
-                    ScopeAction::NatAlphaStay
-                    | ScopeAction::NatAlphaExit
-                    | ScopeAction::NatNumericStay
-                    | ScopeAction::NatNumericExit => Some(applied.before.position * 2 + 1),
                     _ => None,
                 };
+                #[cfg(test)]
                 if let Some(index) = nationality_index {
                     nationality_max_index =
                         Some(nationality_max_index.map_or(index, |old| old.max(index)));
@@ -2092,8 +1944,10 @@ impl MdocScopeWitness {
         Ok(Self {
             active_rows,
             table_multiplicities,
+            digest_id_multiplicities,
             item_digest_bytes,
             raw_stream_bytes: streams,
+            #[cfg(test)]
             nationality_count: nationality_max_index
                 .map(|index| u16::try_from(index / 2 + 1).expect("parser count fits u16")),
         })
@@ -2307,9 +2161,14 @@ fn scope_table_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     ]
 }
 
+fn digest_id_universe_col_id() -> PreProcessedColumnId {
+    scope_col_id("digest_id_u16_universe")
+}
+
 fn scope_preprocessed_ids(item_count: usize) -> Vec<PreProcessedColumnId> {
     let mut ids = scope_table_preprocessed_ids();
     ids.extend((0..item_count).map(|item| scope_col_id(&format!("digest_item_{item}"))));
+    ids.push(digest_id_universe_col_id());
     ids
 }
 
@@ -2348,8 +2207,15 @@ fn scope_walk_preprocessed_columns(log_size: u32, item_count: usize) -> Vec<Mdoc
         .collect()
 }
 
+fn digest_id_universe_column() -> MdocScopeColumnEval {
+    scope_column(
+        DIGEST_ID_UNIVERSE_LOG_SIZE,
+        (0..=u16::MAX).map(|value| m31(u32::from(value))).collect(),
+    )
+}
+
 /// All scope preprocessed columns in [`scope_preprocessed_ids`] order: the DFA
-/// edge table at the table log size, then the walk's digest-item flags.
+/// edge table, the walk's digest-item flags, and the fixed `u16` ID universe.
 fn scope_preprocessed_columns(
     log_size: u32,
     table_log_size: u32,
@@ -2358,11 +2224,12 @@ fn scope_preprocessed_columns(
 ) -> Vec<MdocScopeColumnEval> {
     let mut columns = scope_table_preprocessed_columns(table_log_size, table_edges);
     columns.extend(scope_walk_preprocessed_columns(log_size, item_count));
+    columns.push(digest_id_universe_column());
     columns
 }
 
 /// Committed multiplicity column for the DFA edge table. Rows past the edge
-/// list stay freshly blinded; the preprocessed `dfa_active` flag gates them out
+/// list stay freshly blinded. The preprocessed `dfa_active` flag gates them out
 /// of the LogUp yield.
 fn scope_table_trace(table_log_size: u32, multiplicities: &[u32]) -> MdocScopeColumnEval {
     let domain = 1usize << table_log_size;
@@ -2371,6 +2238,14 @@ fn scope_table_trace(table_log_size: u32, multiplicities: &[u32]) -> MdocScopeCo
         values[row] = m31(multiplicity);
     }
     scope_column(table_log_size, values)
+}
+
+fn digest_id_uniqueness_trace(multiplicities: &[u32]) -> MdocScopeColumnEval {
+    assert_eq!(multiplicities.len(), 1usize << DIGEST_ID_UNIVERSE_LOG_SIZE);
+    scope_column(
+        DIGEST_ID_UNIVERSE_LOG_SIZE,
+        multiplicities.iter().copied().map(m31).collect(),
+    )
 }
 
 /// Table-side LogUp: yield `multiplicity` uses of every active edge tuple,
@@ -2511,14 +2386,11 @@ fn scope_base_trace(
             ScopeAction::FieldByte => (applied.edge.p0, applied.edge.p1),
             ScopeAction::FieldExact => (applied.edge.p0, applied.edge.p1 / 256),
             ScopeAction::FieldDigit => (applied.edge.p0, applied.edge.p1),
-            ScopeAction::NatAlphaFirst | ScopeAction::NatNumericFirst => (
+            ScopeAction::NatAlphaFirst => (
                 field_id::NATIONALITY,
                 applied.before.position.saturating_mul(2),
             ),
-            ScopeAction::NatAlphaStay
-            | ScopeAction::NatAlphaExit
-            | ScopeAction::NatNumericStay
-            | ScopeAction::NatNumericExit => (
+            ScopeAction::NatAlphaStay | ScopeAction::NatAlphaExit => (
                 field_id::NATIONALITY,
                 applied.before.position.saturating_mul(2) + 1,
             ),
@@ -2557,6 +2429,7 @@ struct MdocScopeEval {
     dfa_relation: MdocScopeDfaRelation,
     state_relation: MdocScopeStateRelation,
     digest_id_relation: MdocScopeDigestIdRelation,
+    digest_id_uniqueness_relation: MdocScopeDigestIdUniquenessRelation,
     digest_byte_relation: MdocScopeDigestByteRelation,
     claim_mask_beta: Option<QM31>,
 }
@@ -2589,14 +2462,27 @@ fn item_selector<E: EvalAtRow>(value: E::F, item: usize, item_count: usize) -> E
     selector
 }
 
+fn scope_constraint_log_degree_bound(log_size: u32, item_count: usize) -> u32 {
+    debug_assert!((1..=MDOC_SCOPE_MAX_ITEMS).contains(&item_count));
+    // The highest-degree constraint updates `seen`: a linear selected-id flag
+    // times the degree-(item_count - 1) item selector, a linear unseen flag,
+    // and the outer active gate. Its degree is item_count + 2, so the quotient
+    // needs ceil(log2(item_count + 1)) extra domain bits.
+    let quotient_factor = u32::try_from(item_count + 1)
+        .expect("the fixed mdoc item count fits u32")
+        .next_power_of_two()
+        .trailing_zeros()
+        .max(1);
+    log_size + quotient_factor
+}
+
 impl FrameworkEval for MdocScopeEval {
     fn log_size(&self) -> u32 {
         self.log_size
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // The item selector is degree <= 3, multiplied by one action flag.
-        self.log_size + 4
+        scope_constraint_log_degree_bound(self.log_size, self.item_digest_relations.len())
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -2661,13 +2547,7 @@ impl FrameworkEval for MdocScopeEval {
         let emit_raw = action_sum::<E>(
             &trace,
             &columns,
-            &[
-                ScopeAction::RawStay,
-                ScopeAction::RawExit,
-                ScopeAction::DirectMapStart,
-                ScopeAction::CopyStay,
-                ScopeAction::CopyExit,
-            ],
+            &[ScopeAction::RawStay, ScopeAction::RawExit],
         );
         let raw_sum = raw_selectors
             .iter()
@@ -2779,8 +2659,6 @@ impl FrameworkEval for MdocScopeEval {
                 ScopeAction::IgnoreExit,
                 ScopeAction::NatAlphaStay,
                 ScopeAction::NatAlphaExit,
-                ScopeAction::NatNumericStay,
-                ScopeAction::NatNumericExit,
                 ScopeAction::SelectedDigestStay,
                 ScopeAction::SelectedDigestExit,
                 ScopeAction::UnknownDigestStay,
@@ -2795,13 +2673,8 @@ impl FrameworkEval for MdocScopeEval {
                 ScopeAction::RawExit,
                 ScopeAction::IgnoreStay,
                 ScopeAction::IgnoreExit,
-                ScopeAction::DirectMapStart,
-                ScopeAction::CopyStay,
-                ScopeAction::CopyExit,
                 ScopeAction::NatAlphaStay,
                 ScopeAction::NatAlphaExit,
-                ScopeAction::NatNumericStay,
-                ScopeAction::NatNumericExit,
             ],
         );
         let content_len =
@@ -2960,7 +2833,6 @@ impl FrameworkEval for MdocScopeEval {
                 ScopeAction::RawStay,
                 ScopeAction::IgnoreStay,
                 ScopeAction::NatAlphaStay,
-                ScopeAction::NatNumericStay,
                 ScopeAction::SelectedDigestStay,
                 ScopeAction::UnknownDigestStay,
             ],
@@ -2972,7 +2844,6 @@ impl FrameworkEval for MdocScopeEval {
                 ScopeAction::RawExit,
                 ScopeAction::IgnoreExit,
                 ScopeAction::NatAlphaExit,
-                ScopeAction::NatNumericExit,
                 ScopeAction::SelectedDigestExit,
                 ScopeAction::UnknownDigestExit,
             ],
@@ -2986,11 +2857,6 @@ impl FrameworkEval for MdocScopeEval {
 
         let header = trace[columns.parsed_meta.start + parsed_cbor_tuple::HEADER - 3].clone();
         let major = trace[columns.parsed_meta.start + parsed_cbor_tuple::MAJOR - 3].clone();
-        let depth = trace[columns.parsed_meta.start + parsed_cbor_tuple::DEPTH - 3].clone();
-        let parent =
-            trace[columns.parsed_meta.start + parsed_cbor_tuple::PARENT_HEADER_INDEX - 3].clone();
-        let ordinal =
-            trace[columns.parsed_meta.start + parsed_cbor_tuple::CHILD_ORDINAL - 3].clone();
         let byte = trace[columns.byte].clone();
         eval.add_constraint(decimal_digit * (byte.clone() - f_const::<E>(u32::from(b'0')) - slack));
         let exact = action(ScopeAction::Exact);
@@ -3042,9 +2908,6 @@ impl FrameworkEval for MdocScopeEval {
                 ScopeAction::NatAlphaFirst,
                 ScopeAction::NatAlphaStay,
                 ScopeAction::NatAlphaExit,
-                ScopeAction::NatNumericFirst,
-                ScopeAction::NatNumericStay,
-                ScopeAction::NatNumericExit,
                 ScopeAction::SelectedDigestByte,
                 ScopeAction::SelectedDigestStay,
                 ScopeAction::SelectedDigestExit,
@@ -3140,15 +3003,6 @@ impl FrameworkEval for MdocScopeEval {
         eval.add_constraint(id1 * (byte.clone() - f_const::<E>(0x18)));
         eval.add_constraint(id2 * (byte.clone() - f_const::<E>(0x19)));
 
-        let direct = action(ScopeAction::DirectMapStart);
-        eval.add_constraint(direct.clone() * (header.clone() - one.clone()));
-        eval.add_constraint(direct.clone() * (major.clone() - f_const::<E>(5)));
-        eval.add_constraint(direct.clone() * depth);
-        eval.add_constraint(direct.clone() * parent);
-        eval.add_constraint(direct * ordinal);
-        eval.add_constraint(action(ScopeAction::CopyStay) * last.clone());
-        eval.add_constraint(action(ScopeAction::CopyExit) * (last.clone() - one.clone()));
-
         let emit_field = action_sum::<E>(
             &trace,
             &columns,
@@ -3159,24 +3013,16 @@ impl FrameworkEval for MdocScopeEval {
                 ScopeAction::NatAlphaFirst,
                 ScopeAction::NatAlphaStay,
                 ScopeAction::NatAlphaExit,
-                ScopeAction::NatNumericFirst,
-                ScopeAction::NatNumericStay,
-                ScopeAction::NatNumericExit,
             ],
         );
         let fixed_field = action(ScopeAction::FieldByte);
         let exact_field = action(ScopeAction::FieldExact);
         let digit_field = action(ScopeAction::FieldDigit);
-        let nat_first = action(ScopeAction::NatAlphaFirst) + action(ScopeAction::NatNumericFirst);
+        let nat_first = action(ScopeAction::NatAlphaFirst);
         let nat_second = action_sum::<E>(
             &trace,
             &columns,
-            &[
-                ScopeAction::NatAlphaStay,
-                ScopeAction::NatAlphaExit,
-                ScopeAction::NatNumericStay,
-                ScopeAction::NatNumericExit,
-            ],
+            &[ScopeAction::NatAlphaStay, ScopeAction::NatAlphaExit],
         );
         let expected_field = (fixed_field.clone() + exact_field.clone() + digit_field.clone())
             * trace[columns.p0].clone()
@@ -3262,6 +3108,11 @@ impl FrameworkEval for MdocScopeEval {
             &self.digest_id_relation,
             E::EF::from(selected_id - item_id_provider),
             &[trace[columns.p0].clone(), arg_lo.clone()],
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.digest_id_uniqueness_relation,
+            E::EF::from(digest_id),
+            std::slice::from_ref(&arg_lo),
         ));
         let emit_digest_byte = action_sum::<E>(
             &trace,
@@ -3361,11 +3212,11 @@ impl FrameworkEval for MdocScopeEval {
     }
 }
 
-/// DFA edge-table component: hosts the preprocessed edge tuples and the
-/// committed per-edge multiplicity at the table's natural height, yielding
-/// `-active * multiplicity` uses of every edge into the shared
-/// [`MdocScopeDfaRelation`]. The walk component consumes from the same
-/// relation instance, so the two cancel in the global LogUp balance.
+/// DFA edge-table component.
+///
+/// It stores preprocessed edge tuples and committed edge multiplicities.
+/// Each edge yields `-active * multiplicity` into [`MdocScopeDfaRelation`].
+/// The walk component consumes the same relation entries.
 struct MdocScopeDfaTableEval {
     log_size: u32,
     dfa_relation: MdocScopeDfaRelation,
@@ -3407,6 +3258,77 @@ impl FrameworkEval for MdocScopeDfaTableEval {
     }
 }
 
+/// Fixed `u16` universe for `valueDigests` map-key uniqueness.
+///
+/// Every parsed map key consumes one relation entry. The committed
+/// multiplicity at each public universe value provides the matching entry and
+/// is constrained to a bit. Thus, no digest ID can occur more than once,
+/// independent of map order or whether the key selects a requested item.
+struct MdocScopeDigestIdUniverseEval {
+    relation: MdocScopeDigestIdUniquenessRelation,
+    claim_mask_beta: Option<QM31>,
+}
+
+impl FrameworkEval for MdocScopeDigestIdUniverseEval {
+    fn log_size(&self) -> u32 {
+        DIGEST_ID_UNIVERSE_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        DIGEST_ID_UNIVERSE_LOG_SIZE + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let value = eval.get_preprocessed_column(digest_id_universe_col_id());
+        let multiplicity = eval.next_trace_mask();
+        let one = f_const::<E>(1);
+        eval.add_constraint(multiplicity.clone() * (multiplicity.clone() - one));
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            -E::EF::from(multiplicity),
+            std::slice::from_ref(&value),
+        ));
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+fn digest_id_uniqueness_interaction_trace(
+    multiplicity: &MdocScopeColumnEval,
+    relation: &MdocScopeDigestIdUniquenessRelation,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
+) -> (Vec<MdocScopeColumnEval>, QM31) {
+    let values = digest_id_universe_column();
+    let n_vec_rows = 1usize << (DIGEST_ID_UNIVERSE_LOG_SIZE - LOG_N_LANES);
+    let mut logup = LogupTraceGenerator::new(DIGEST_ID_UNIVERSE_LOG_SIZE);
+    match claim_mask {
+        Some((mask, beta)) => {
+            assert_eq!(mask.log_size(), DIGEST_ID_UNIVERSE_LOG_SIZE);
+            logup.col_from_iter((0..n_vec_rows).map(|row| {
+                let denominator: PackedQM31 = relation.combine(&[values.data[row]]);
+                let numerator = -PackedQM31::from(multiplicity.data[row]);
+                let (mask_numerator, mask_denominator) = mask.packed_fraction_at(row, beta);
+                (
+                    numerator * mask_denominator + mask_numerator * denominator,
+                    denominator * mask_denominator,
+                )
+            }));
+        }
+        None => {
+            logup.col_from_iter((0..n_vec_rows).map(|row| {
+                (
+                    -PackedQM31::from(multiplicity.data[row]),
+                    relation.combine(&[values.data[row]]),
+                )
+            }));
+        }
+    }
+    logup.finalize_last()
+}
+
 fn packed_action_sum(
     base: &[MdocScopeColumnEval],
     columns: &ScopeTraceColumns,
@@ -3436,6 +3358,7 @@ fn scope_interaction_trace(
     dfa_relation: &MdocScopeDfaRelation,
     state_relation: &MdocScopeStateRelation,
     digest_id_relation: &MdocScopeDigestIdRelation,
+    digest_id_uniqueness_relation: &MdocScopeDigestIdUniquenessRelation,
     digest_byte_relation: &MdocScopeDigestByteRelation,
     claim_mask_trace: Option<&ClaimMaskTrace>,
     claim_mask_beta: Option<QM31>,
@@ -3495,9 +3418,6 @@ fn scope_interaction_trace(
                         ScopeAction::NatAlphaFirst,
                         ScopeAction::NatAlphaStay,
                         ScopeAction::NatAlphaExit,
-                        ScopeAction::NatNumericFirst,
-                        ScopeAction::NatNumericStay,
-                        ScopeAction::NatNumericExit,
                     ],
                 );
                 let denominator = semantic_relation.combine(&[
@@ -3553,6 +3473,31 @@ fn scope_interaction_trace(
                     base[columns.parsed_meta.start + parsed_cbor_tuple::ARG_LO16 - 3].data[row],
                 ]);
                 (PackedQM31::from(selected - provider), denominator)
+            })
+            .collect(),
+    );
+    sites.push(
+        (0..n_vec_rows)
+            .map(|row| {
+                let digest_key = packed_action_sum(
+                    base,
+                    columns,
+                    row,
+                    &[
+                        ScopeAction::SelectedDigestId0,
+                        ScopeAction::SelectedDigestId1,
+                        ScopeAction::SelectedDigestId2,
+                        ScopeAction::UnknownDigestId0,
+                        ScopeAction::UnknownDigestId1,
+                        ScopeAction::UnknownDigestId2,
+                    ],
+                );
+                let id =
+                    base[columns.parsed_meta.start + parsed_cbor_tuple::ARG_LO16 - 3].data[row];
+                (
+                    PackedQM31::from(digest_key),
+                    digest_id_uniqueness_relation.combine(&[id]),
+                )
             })
             .collect(),
     );
@@ -3761,23 +3706,19 @@ fn scope_interaction_trace(
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MdocScopeProofMetadata {
     pub(crate) log_size: u32,
-    /// `None` when no Alpha2Set item is requested; otherwise the exact signed
-    /// scalar/array entry count.  The downstream nationality component consumes
-    /// exactly `2*count` indexed field tuples, so tampering this value leaves
-    /// the shared semantic-field relation unbalanced.
-    pub(crate) nationality_count: Option<u16>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MdocScopeInteractionClaim {
     pub(crate) claimed_sum: QM31,
     pub(crate) table_claimed_sum: QM31,
+    pub(crate) digest_id_uniqueness_claimed_sum: QM31,
 }
 
 pub(crate) struct MdocScope {
     statement: MdocScopeStatement,
     metadata: MdocScopeProofMetadata,
-    /// Derived from the statement's DFA programs on both sides; never
+    /// Derived from the statement's DFA programs on both sides. Never
     /// prover-supplied.
     table_log_size: u32,
     programs: Vec<DfaProgram>,
@@ -3787,16 +3728,20 @@ pub(crate) struct MdocScope {
     witness: Option<MdocScopeWitness>,
     trace_cache: Option<Vec<MdocScopeColumnEval>>,
     table_trace_cache: Option<MdocScopeColumnEval>,
+    digest_id_uniqueness_trace_cache: Option<MdocScopeColumnEval>,
     dfa_relation: Option<MdocScopeDfaRelation>,
     state_relation: Option<MdocScopeStateRelation>,
     digest_id_relation: Option<MdocScopeDigestIdRelation>,
+    digest_id_uniqueness_relation: Option<MdocScopeDigestIdUniquenessRelation>,
     digest_byte_relation: Option<MdocScopeDigestByteRelation>,
     claim_mask_trace: Option<ClaimMaskTrace>,
     table_claim_mask_trace: Option<ClaimMaskTrace>,
+    digest_id_uniqueness_claim_mask_trace: Option<ClaimMaskTrace>,
     claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocScopeInteractionClaim>,
     component: Option<MdocScopeComponent>,
     table_component: Option<FrameworkComponent<MdocScopeDfaTableEval>>,
+    digest_id_uniqueness_component: Option<FrameworkComponent<MdocScopeDigestIdUniverseEval>>,
 }
 
 impl MdocScope {
@@ -3828,15 +3773,11 @@ impl MdocScope {
             &programs,
             &table_edges,
         )?;
-        // The walk runs at its natural (byte-count driven) height; the DFA
+        // The walk runs at its natural (byte-count driven) height. The DFA
         // edge table lives in its own component at its own height.
         let log_size = scope_log_size(witness.active_rows.len())?;
         let table_log_size = scope_log_size(table_edges.len())?;
-        let metadata = MdocScopeProofMetadata {
-            log_size,
-            nationality_count: witness.nationality_count,
-        };
-        validate_nationality_metadata(&statement, &metadata)?;
+        let metadata = MdocScopeProofMetadata { log_size };
         Ok(Self {
             statement,
             metadata,
@@ -3848,16 +3789,20 @@ impl MdocScope {
             witness: Some(witness),
             trace_cache: None,
             table_trace_cache: None,
+            digest_id_uniqueness_trace_cache: None,
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
+            digest_id_uniqueness_relation: None,
             digest_byte_relation: None,
             claim_mask_trace: None,
             table_claim_mask_trace: None,
+            digest_id_uniqueness_claim_mask_trace: None,
             claim_mask_challenge: None,
             interaction_claim: None,
             component: None,
             table_component: None,
+            digest_id_uniqueness_component: None,
         })
     }
 
@@ -3869,7 +3814,6 @@ impl MdocScope {
     ) -> Result<Self, MdocScopeError> {
         statement.validate()?;
         validate_handle_counts(&statement, &handles)?;
-        validate_nationality_metadata(&statement, &metadata)?;
         if !(MDOC_SCOPE_MIN_LOG_SIZE..=MDOC_SCOPE_MAX_LOG_SIZE).contains(&metadata.log_size) {
             return Err(MdocScopeError::TraceTooLarge(
                 1usize << metadata.log_size.min(20),
@@ -3894,21 +3838,46 @@ impl MdocScope {
             witness: None,
             trace_cache: None,
             table_trace_cache: None,
+            digest_id_uniqueness_trace_cache: None,
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
+            digest_id_uniqueness_relation: None,
             digest_byte_relation: None,
             claim_mask_trace: None,
             table_claim_mask_trace: None,
+            digest_id_uniqueness_claim_mask_trace: None,
             claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             component: None,
             table_component: None,
+            digest_id_uniqueness_component: None,
         })
     }
 
     pub(crate) fn metadata(&self) -> &MdocScopeProofMetadata {
         &self.metadata
+    }
+
+    pub(crate) fn with_fixed_log_size(mut self, log_size: u32) -> Result<Self, MdocScopeError> {
+        if !(MDOC_SCOPE_MIN_LOG_SIZE..=MDOC_SCOPE_MAX_LOG_SIZE).contains(&log_size)
+            || self.metadata.log_size > log_size
+        {
+            return Err(MdocScopeError::TraceTooLarge(
+                self.witness
+                    .as_ref()
+                    .map_or(0, |witness| witness.active_rows.len()),
+            ));
+        }
+        self.metadata.log_size = log_size;
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    fn private_nationality_count(&self) -> Option<u16> {
+        self.witness
+            .as_ref()
+            .and_then(|witness| witness.nationality_count)
     }
 
     pub(crate) fn interaction_claim(&self) -> &MdocScopeInteractionClaim {
@@ -3923,8 +3892,10 @@ impl MdocScope {
     /// issuer `Sig_structure`, issuer payload wrapper, normalized MSO, then
     /// each item's outer tag-24 wrapper and inner `IssuerSignedItem` map.
     ///
-    /// This is prover-only witness data.  Verifiers intentionally cannot
-    /// recover private credential bytes from proof metadata.
+    /// This method returns prover-only witness data.
+    /// Proof metadata does not contain these bytes as explicit fields.
+    /// Transparent proof openings remain witness-dependent.
+    /// The current proof does not guarantee confidentiality.
     pub(crate) fn parser_stream_bytes(&self) -> &[Vec<u8>] {
         &self
             .witness
@@ -3972,7 +3943,11 @@ impl MdocScope {
     }
 
     pub(crate) fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
-        vec![self.metadata.log_size, self.table_log_size]
+        vec![
+            self.metadata.log_size,
+            self.table_log_size,
+            DIGEST_ID_UNIVERSE_LOG_SIZE,
+        ]
     }
 
     pub(crate) fn with_claim_masks(
@@ -3980,13 +3955,15 @@ impl MdocScope {
         traces: Vec<ClaimMaskTrace>,
         challenge: SharedClaimMaskChallenge,
     ) -> Self {
-        let [walk, table]: [ClaimMaskTrace; 2] = traces
+        let [walk, table, digest_id_uniqueness]: [ClaimMaskTrace; 3] = traces
             .try_into()
-            .unwrap_or_else(|_| panic!("mdoc scope expects exactly two claim masks"));
+            .unwrap_or_else(|_| panic!("mdoc scope expects exactly three claim masks"));
         assert_eq!(walk.log_size(), self.metadata.log_size);
         assert_eq!(table.log_size(), self.table_log_size);
+        assert_eq!(digest_id_uniqueness.log_size(), DIGEST_ID_UNIVERSE_LOG_SIZE);
         self.claim_mask_trace = Some(walk);
         self.table_claim_mask_trace = Some(table);
+        self.digest_id_uniqueness_claim_mask_trace = Some(digest_id_uniqueness);
         self.claim_mask_challenge = Some(challenge);
         self
     }
@@ -4007,12 +3984,12 @@ impl MdocScope {
             .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
     }
 
-    /// Walk-component LogUp sites; the DFA table's yield lives in its own
+    /// Walk-component LogUp sites. The DFA table's yield lives in its own
     /// component (see [`Self::n_table_interaction_sites`]).
     fn n_interaction_sites(&self) -> usize {
         self.handles.parsed_streams.len()
             + self.handles.raw_streams.len()
-            + 3 // semantic, digest-id, digest-byte
+            + 4 // semantic, digest-id binding, digest-id uniqueness, digest-byte
             + usize::from(self.payload_hash_binding)
             + self.statement.items.len() * (SCOPE_DIGEST_BYTES + 1)
             + 3 // DFA consume and state consume/provider
@@ -4022,33 +3999,20 @@ impl MdocScope {
     fn n_table_interaction_sites(&self) -> usize {
         1 + usize::from(self.claim_mask_challenge.is_some())
     }
-}
 
-fn validate_nationality_metadata(
-    statement: &MdocScopeStatement,
-    metadata: &MdocScopeProofMetadata,
-) -> Result<(), MdocScopeError> {
-    let has_nationality = statement
-        .items
-        .iter()
-        .any(|item| matches!(item.mode, MdocScopeMode::Alpha2Set(_)));
-    match (has_nationality, metadata.nationality_count) {
-        (true, Some(count)) if count != 0 && usize::from(count) <= MAX_PRESENTED_NATIONALITIES => {
-            Ok(())
-        }
-        (false, None) => Ok(()),
-        _ => Err(MdocScopeError::WrongShape("nationality proof metadata")),
+    fn n_digest_id_uniqueness_interaction_sites(&self) -> usize {
+        1 + usize::from(self.claim_mask_challenge.is_some())
     }
 }
 
 impl Air for MdocScope {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(0x4d44_4f43_5343_4f50);
-        channel.mix_u64(self.statement.profile.transcript_tag());
+        channel.mix_u64(3);
         channel.mix_u64(u64::from(self.payload_hash_binding));
         channel.mix_u64(u64::from(self.metadata.log_size));
         channel.mix_u64(u64::from(self.table_log_size));
-        channel.mix_u64(self.metadata.nationality_count.map_or(u64::MAX, u64::from));
+        channel.mix_u64(u64::from(DIGEST_ID_UNIVERSE_LOG_SIZE));
         for chunk in self.statement.request_binding.chunks_exact(8) {
             channel.mix_u64(u64::from_be_bytes(
                 chunk.try_into().expect("request-binding chunk is 8 bytes"),
@@ -4068,28 +4032,9 @@ impl Air for MdocScope {
             for &byte in &item.element_identifier {
                 channel.mix_u64(u64::from(byte));
             }
-            match &item.mode {
-                MdocScopeMode::ValueEquality(value) => {
-                    channel.mix_u64(0);
-                    channel.mix_u64(value.len() as u64);
-                    for &byte in value {
-                        channel.mix_u64(u64::from(byte));
-                    }
-                }
-                MdocScopeMode::AgeOver(encoding) => {
-                    channel.mix_u64(1);
-                    channel.mix_u64(match encoding {
-                        MdocScopeBirthDateEncoding::Packed => 0,
-                        MdocScopeBirthDateEncoding::Text => 1,
-                    });
-                }
-                MdocScopeMode::Alpha2Set(encoding) => {
-                    channel.mix_u64(2);
-                    channel.mix_u64(match encoding {
-                        MdocScopeNationalityEncoding::Numeric => 0,
-                        MdocScopeNationalityEncoding::Alpha2 => 1,
-                    });
-                }
+            match item.mode {
+                MdocScopeMode::AgeOver => channel.mix_u64(1),
+                MdocScopeMode::Alpha2Set => channel.mix_u64(2),
             }
         }
         for spec in stream_specs(self.statement.items.len()) {
@@ -4122,6 +4067,8 @@ impl Air for MdocScope {
         self.dfa_relation = Some(MdocScopeDfaRelation::draw(channel));
         self.state_relation = Some(MdocScopeStateRelation::draw(channel));
         self.digest_id_relation = Some(MdocScopeDigestIdRelation::draw(channel));
+        self.digest_id_uniqueness_relation =
+            Some(MdocScopeDigestIdUniquenessRelation::draw(channel));
         self.digest_byte_relation = Some(MdocScopeDigestByteRelation::draw(channel));
     }
 
@@ -4131,8 +4078,10 @@ impl Air for MdocScope {
             usize::from(self.claim_mask_challenge.is_some()) * CLAIM_MASK_TRACE_COLUMNS;
         let mut preprocessed = vec![self.table_log_size; SCOPE_PREPROCESSED_FIXED_COLS];
         preprocessed.extend(vec![self.metadata.log_size; self.statement.items.len()]);
+        preprocessed.push(DIGEST_ID_UNIVERSE_LOG_SIZE);
         let mut trace = vec![self.metadata.log_size; columns.total + mask_columns];
         trace.extend(vec![self.table_log_size; 1 + mask_columns]);
+        trace.extend(vec![DIGEST_ID_UNIVERSE_LOG_SIZE; 1 + mask_columns]);
         let mut interaction = vec![
             self.metadata.log_size;
             self.n_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
@@ -4140,6 +4089,12 @@ impl Air for MdocScope {
         interaction.extend(vec![
             self.table_log_size;
             self.n_table_interaction_sites().div_ceil(2)
+                * SECURE_EXTENSION_DEGREE
+        ]);
+        interaction.extend(vec![
+            DIGEST_ID_UNIVERSE_LOG_SIZE;
+            self.n_digest_id_uniqueness_interaction_sites()
+                .div_ceil(2)
                 * SECURE_EXTENSION_DEGREE
         ]);
         TreeLayout {
@@ -4151,7 +4106,11 @@ impl Air for MdocScope {
 
     fn claimed_sums(&self) -> Vec<QM31> {
         let claim = self.interaction_claim();
-        vec![claim.claimed_sum, claim.table_claimed_sum]
+        vec![
+            claim.claimed_sum,
+            claim.table_claimed_sum,
+            claim.digest_id_uniqueness_claimed_sum,
+        ]
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
@@ -4202,6 +4161,10 @@ impl Air for MdocScope {
                     .digest_id_relation
                     .clone()
                     .expect("mdoc scope digest-id relation drawn"),
+                digest_id_uniqueness_relation: self
+                    .digest_id_uniqueness_relation
+                    .clone()
+                    .expect("mdoc scope digest-id uniqueness relation drawn"),
                 digest_byte_relation: self
                     .digest_byte_relation
                     .clone()
@@ -4222,6 +4185,17 @@ impl Air for MdocScope {
             },
             claim.table_claimed_sum,
         ));
+        self.digest_id_uniqueness_component = Some(FrameworkComponent::new(
+            allocator,
+            MdocScopeDigestIdUniverseEval {
+                relation: self
+                    .digest_id_uniqueness_relation
+                    .clone()
+                    .expect("mdoc scope digest-id uniqueness relation drawn"),
+                claim_mask_beta: self.claim_mask_beta(),
+            },
+            claim.digest_id_uniqueness_claimed_sum,
+        ));
     }
 
     fn components(&self) -> Vec<&dyn Component> {
@@ -4232,17 +4206,25 @@ impl Air for MdocScope {
             self.table_component
                 .as_ref()
                 .expect("mdoc scope DFA table component is built"),
+            self.digest_id_uniqueness_component
+                .as_ref()
+                .expect("mdoc scope digest-id uniqueness component is built"),
         ]
     }
 }
 
 impl AirProver for MdocScope {
     fn max_log_size(&self) -> u32 {
-        self.metadata.log_size.max(self.table_log_size)
+        self.metadata
+            .log_size
+            .max(self.table_log_size)
+            .max(DIGEST_ID_UNIVERSE_LOG_SIZE)
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        (self.metadata.log_size + 4).max(self.table_log_size + 1)
+        scope_constraint_log_degree_bound(self.metadata.log_size, self.statement.items.len())
+            .max(self.table_log_size + 1)
+            .max(DIGEST_ID_UNIVERSE_LOG_SIZE + 1)
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -4310,6 +4292,13 @@ impl AirProver for MdocScope {
         if let Some(mask) = &self.table_claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
+        let digest_id_uniqueness_trace =
+            digest_id_uniqueness_trace(&witness.digest_id_multiplicities);
+        self.digest_id_uniqueness_trace_cache = Some(digest_id_uniqueness_trace.clone());
+        tb.extend_evals(vec![digest_id_uniqueness_trace]);
+        if let Some(mask) = &self.digest_id_uniqueness_claim_mask_trace {
+            tb.extend_evals(mask.columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -4329,6 +4318,10 @@ impl AirProver for MdocScope {
             .digest_id_relation
             .as_ref()
             .expect("digest-id relation drawn");
+        let digest_id_uniqueness_relation = self
+            .digest_id_uniqueness_relation
+            .as_ref()
+            .expect("digest-id uniqueness relation drawn");
         let digest_byte_relation = self
             .digest_byte_relation
             .as_ref()
@@ -4354,6 +4347,7 @@ impl AirProver for MdocScope {
             dfa_relation,
             state_relation,
             digest_id_relation,
+            digest_id_uniqueness_relation,
             digest_byte_relation,
             self.claim_mask_trace.as_ref(),
             self.claim_mask_beta(),
@@ -4377,9 +4371,25 @@ impl AirProver for MdocScope {
             table_claim_mask,
         );
         tb.extend_evals(table_interaction);
+        let digest_id_uniqueness_trace = self
+            .digest_id_uniqueness_trace_cache
+            .as_ref()
+            .expect("mdoc scope digest-id uniqueness trace cached before interaction");
+        let digest_id_uniqueness_claim_mask = self
+            .digest_id_uniqueness_claim_mask_trace
+            .as_ref()
+            .zip(self.claim_mask_beta());
+        let (digest_id_uniqueness_interaction, digest_id_uniqueness_claimed_sum) =
+            digest_id_uniqueness_interaction_trace(
+                digest_id_uniqueness_trace,
+                digest_id_uniqueness_relation,
+                digest_id_uniqueness_claim_mask,
+            );
+        tb.extend_evals(digest_id_uniqueness_interaction);
         self.interaction_claim = Some(MdocScopeInteractionClaim {
             claimed_sum,
             table_claimed_sum,
+            digest_id_uniqueness_claimed_sum,
         });
     }
 
@@ -4391,6 +4401,9 @@ impl AirProver for MdocScope {
             self.table_component
                 .as_ref()
                 .expect("mdoc scope DFA table component is built"),
+            self.digest_id_uniqueness_component
+                .as_ref()
+                .expect("mdoc scope digest-id uniqueness component is built"),
         ]
     }
 }
@@ -4402,10 +4415,72 @@ mod tests {
     use stwo::core::fields::FieldExpOps;
     use stwo::core::pcs::TreeVec;
     use stwo_constraint_framework::assert_constraints_on_trace;
+    use stwo_constraint_framework::expr::ExprEvaluator;
 
     const VALID_SIGNED: &str = "2026-01-01T00:00:00Z";
     const VALID_FROM: &str = "2026-01-02T03:04:05Z";
     const VALID_UNTIL: &str = "2030-12-31T23:59:59Z";
+
+    fn symbolic_max_degree(eval: impl FrameworkEval) -> u32 {
+        eval.evaluate(ExprEvaluator::new())
+            .constraint_degree_bounds()
+            .into_iter()
+            .max()
+            .unwrap_or(0) as u32
+    }
+
+    fn symbolic_scope_eval(item_count: usize) -> MdocScopeEval {
+        MdocScopeEval {
+            log_size: 16,
+            stream_ids: vec![1],
+            program_starts: vec![0],
+            program_ends: vec![1],
+            raw_target_stream_ids: vec![1],
+            parsed_relations: vec![ParsedCborByteRelation::dummy()],
+            raw_relations: vec![FieldBytesRelation::dummy()],
+            semantic_relation: FieldBytesRelation::dummy(),
+            payload_hash_relation: Some(FieldBytesRelation::dummy()),
+            item_digest_relations: (0..item_count)
+                .map(|_| DigestBytesRelation::dummy())
+                .collect(),
+            dfa_relation: MdocScopeDfaRelation::dummy(),
+            state_relation: MdocScopeStateRelation::dummy(),
+            digest_id_relation: MdocScopeDigestIdRelation::dummy(),
+            digest_id_uniqueness_relation: MdocScopeDigestIdUniquenessRelation::dummy(),
+            digest_byte_relation: MdocScopeDigestByteRelation::dummy(),
+            claim_mask_beta: None,
+        }
+    }
+
+    #[test]
+    fn scope_expression_degrees_match_item_count_bounds() {
+        for (item_count, expected_degree) in [(1, 3), (2, 4), (3, 5), (4, 6)] {
+            let eval = symbolic_scope_eval(item_count);
+            let declared = eval.max_constraint_log_degree_bound();
+            let measured = symbolic_max_degree(eval);
+            let required = scope_constraint_log_degree_bound(16, item_count);
+
+            assert_eq!(measured, expected_degree, "item count {item_count}");
+            assert_eq!(declared, required, "item count {item_count}");
+        }
+    }
+
+    #[test]
+    fn scope_dfa_table_expression_degree_matches_bound() {
+        let eval = MdocScopeDfaTableEval {
+            log_size: 16,
+            dfa_relation: MdocScopeDfaRelation::dummy(),
+            claim_mask_beta: None,
+        };
+        let declared = eval.max_constraint_log_degree_bound();
+        let measured = symbolic_max_degree(eval);
+
+        // ExprEvaluator records the linear numerator supplied to LogUp. The
+        // framework's recurrence still receives the mandatory one-bit domain
+        // headroom represented by the declared log+1 bound.
+        assert_eq!(measured, 1);
+        assert_eq!(declared, 17);
+    }
 
     fn encoded_bstr(bytes: &[u8]) -> Vec<u8> {
         let mut encoded = cbor_head(2, bytes.len() as u64);
@@ -4438,6 +4513,19 @@ mod tests {
 
     fn encoded_tdate(value: &str) -> Vec<u8> {
         encoded_tag(0, &cbor_text(value.as_bytes()))
+    }
+
+    fn encoded_full_date(value: &[u8; 10]) -> Vec<u8> {
+        encoded_tag(1004, &cbor_text(value))
+    }
+
+    fn encoded_nationalities(values: &[&[u8; 2]]) -> Vec<u8> {
+        encoded_array(
+            &values
+                .iter()
+                .map(|value| cbor_text(value.as_slice()))
+                .collect::<Vec<_>>(),
+        )
     }
 
     fn device_key_info() -> Vec<u8> {
@@ -4497,10 +4585,7 @@ mod tests {
         valid_until: &str,
     ) -> Vec<(Vec<u8>, Vec<u8>)> {
         vec![
-            (
-                cbor_text(b"version"),
-                cbor_text(statement.profile.version_bytes()),
-            ),
+            (cbor_text(b"version"), cbor_text(b"2.0")),
             (cbor_text(b"docType"), cbor_text(&statement.doc_type)),
             (cbor_text(b"digestAlgorithm"), cbor_text(b"SHA-256")),
             (
@@ -4550,62 +4635,33 @@ mod tests {
         ])
     }
 
-    fn v2_statement(nationality: bool) -> MdocScopeStatement {
+    fn product_statement(nationality: bool) -> MdocScopeStatement {
         let mut items = vec![MdocScopeItem {
             element_identifier: b"birth_date".to_vec(),
-            mode: MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Text),
+            mode: MdocScopeMode::AgeOver,
         }];
         if nationality {
             items.push(MdocScopeItem {
                 element_identifier: b"nationality".to_vec(),
-                mode: MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Alpha2),
+                mode: MdocScopeMode::Alpha2Set,
             });
         }
         MdocScopeStatement {
             request_binding: [0x42; 32],
-            profile: MdocScopeProfile::V2,
-            doc_type: b"org.iso.18013.5.1.mDL".to_vec(),
-            namespace: b"org.iso.18013.5.1".to_vec(),
+            doc_type: b"eu.europa.ec.eudi.pid.1".to_vec(),
+            namespace: b"eu.europa.ec.eudi.pid.1".to_vec(),
             items,
         }
     }
 
-    fn v1_statement() -> MdocScopeStatement {
-        MdocScopeStatement {
-            request_binding: [0x24; 32],
-            profile: MdocScopeProfile::V1,
-            doc_type: b"org.iso.18013.5.1.mDL".to_vec(),
-            namespace: b"org.iso.18013.5.1".to_vec(),
-            items: vec![
-                MdocScopeItem {
-                    element_identifier: b"birth_date".to_vec(),
-                    mode: MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Packed),
-                },
-                MdocScopeItem {
-                    element_identifier: b"nationality".to_vec(),
-                    mode: MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Numeric),
-                },
-            ],
-        }
-    }
-
-    fn v2_item_inners(nationalities: &[&[u8; 2]]) -> Vec<Vec<u8>> {
+    fn product_item_inners(nationalities: &[&[u8; 2]]) -> Vec<Vec<u8>> {
         let birth_date = encoded_map(&item_entries(
             16,
             7,
             b"birth_date",
-            cbor_text(b"1990-01-02"),
+            encoded_full_date(b"1990-01-02"),
         ));
-        let nationality_value = if nationalities.len() == 1 {
-            cbor_text(nationalities[0])
-        } else {
-            encoded_array(
-                &nationalities
-                    .iter()
-                    .map(|code| cbor_text(code.as_slice()))
-                    .collect::<Vec<_>>(),
-            )
-        };
+        let nationality_value = encoded_nationalities(nationalities);
         let nationality = encoded_map(&item_entries(16, 9, b"nationality", nationality_value));
         vec![birth_date, nationality]
     }
@@ -4627,11 +4683,11 @@ mod tests {
         MdocScope::new(statement, issuer, items, handles)
     }
 
-    fn construct_v2(
+    fn construct_product(
         nationalities: &[&[u8; 2]],
         wrapped_mso: bool,
     ) -> Result<MdocScope, MdocScopeError> {
-        let statement = v2_statement(true);
+        let statement = product_statement(true);
         let mso = encoded_map(&mso_entries(
             &statement,
             &[7, 9],
@@ -4639,7 +4695,12 @@ mod tests {
             VALID_FROM,
             VALID_UNTIL,
         ));
-        construct(statement, mso, v2_item_inners(nationalities), wrapped_mso)
+        construct(
+            statement,
+            mso,
+            product_item_inners(nationalities),
+            wrapped_mso,
+        )
     }
 
     fn nationality_emissions(scope: &MdocScope) -> Vec<(u32, u8)> {
@@ -4654,13 +4715,10 @@ mod tests {
                     ScopeAction::FieldByte if row.applied.edge.p0 == field_id::NATIONALITY => {
                         row.applied.edge.p1
                     }
-                    ScopeAction::NatAlphaFirst | ScopeAction::NatNumericFirst => {
-                        row.applied.before.position * 2
+                    ScopeAction::NatAlphaFirst => row.applied.before.position * 2,
+                    ScopeAction::NatAlphaStay | ScopeAction::NatAlphaExit => {
+                        row.applied.before.position * 2 + 1
                     }
-                    ScopeAction::NatAlphaStay
-                    | ScopeAction::NatAlphaExit
-                    | ScopeAction::NatNumericStay
-                    | ScopeAction::NatNumericExit => row.applied.before.position * 2 + 1,
                     _ => return None,
                 };
                 Some((
@@ -4680,18 +4738,12 @@ mod tests {
     }
 
     #[test]
-    fn accepts_direct_and_tag24_wrapped_mso_and_exposes_parser_order() {
-        let direct = construct_v2(&[b"FR", b"DE"], false).unwrap();
-        let wrapped = construct_v2(&[b"FR", b"DE"], true).unwrap();
+    fn product_rejects_direct_mso_and_exposes_wrapped_parser_order() {
+        assert!(construct_product(&[b"FR", b"DE"], false).is_err());
+        let wrapped = construct_product(&[b"FR", b"DE"], true).unwrap();
 
-        assert_eq!(direct.metadata().nationality_count, Some(2));
-        assert_eq!(wrapped.metadata().nationality_count, Some(2));
-        assert_eq!(direct.parser_stream_bytes().len(), 7);
+        assert_eq!(wrapped.private_nationality_count(), Some(2));
         assert_eq!(wrapped.parser_stream_bytes().len(), 7);
-        assert_eq!(
-            direct.parser_stream_bytes()[1],
-            direct.parser_stream_bytes()[2]
-        );
         assert_ne!(
             wrapped.parser_stream_bytes()[1],
             wrapped.parser_stream_bytes()[2]
@@ -4707,44 +4759,8 @@ mod tests {
     }
 
     #[test]
-    fn accepts_v1_packed_date_numeric_nationality_and_unordered_item_map() {
-        let statement = v1_statement();
-        let mso = encoded_map(&mso_entries(
-            &statement,
-            &[7, 9],
-            VALID_SIGNED,
-            VALID_FROM,
-            VALID_UNTIL,
-        ));
-        let mut birth_entries = item_entries(
-            16,
-            7,
-            b"birth_date",
-            encoded_bstr(&[0x07, 0xe6, 0x01, 0x02]),
-        );
-        birth_entries.swap(0, 3);
-        let mut nationality_entries =
-            item_entries(16, 9, b"nationality", encoded_bstr(&[0x01, 0x14]));
-        nationality_entries.rotate_left(1);
-
-        let scope = construct(
-            statement,
-            mso,
-            vec![
-                encoded_map(&birth_entries),
-                encoded_map(&nationality_entries),
-            ],
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(scope.metadata().nationality_count, Some(1));
-        assert_eq!(nationality_emissions(&scope), vec![(0, 0x01), (1, 0x14)]);
-    }
-
-    #[test]
     fn accepts_reordered_top_validity_and_cose_maps() {
-        let statement = v2_statement(true);
+        let statement = product_statement(true);
         let mut cose_entries = vec![
             (cbor_head(0, 1), cbor_head(0, 2)),
             (cbor_head(1, 0), cbor_head(0, 1)),
@@ -4770,15 +4786,15 @@ mod tests {
         construct(
             statement,
             encoded_map(&entries),
-            v2_item_inners(&[b"FR"]),
-            false,
+            product_item_inners(&[b"FR"]),
+            true,
         )
         .unwrap();
     }
 
     #[test]
     fn rejects_wrong_cose_sig_structure_context_protected_or_external_aad() {
-        let statement = v2_statement(true);
+        let statement = product_statement(true);
         let mso = encoded_map(&mso_entries(
             &statement,
             &[7, 9],
@@ -4786,8 +4802,8 @@ mod tests {
             VALID_FROM,
             VALID_UNTIL,
         ));
-        let payload = mso;
-        let inners = v2_item_inners(&[b"FR"]);
+        let payload = encoded_tag(24, &encoded_bstr(&mso));
+        let inners = product_item_inners(&[b"FR"]);
         for issuer in [
             sig_structure(b"Signature", &[0xa1, 0x01, 0x26], &[], &payload),
             sig_structure(b"Signature1", &[0xa1, 0x01, 0x27], &[], &payload),
@@ -4808,8 +4824,8 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_wrong_or_missing_mso_fields() {
-        let statement = v2_statement(true);
-        let inners = v2_item_inners(&[b"FR"]);
+        let statement = product_statement(true);
+        let inners = product_item_inners(&[b"FR"]);
 
         let mut duplicate = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
         duplicate[1] = duplicate[0].clone();
@@ -4860,7 +4876,7 @@ mod tests {
                 statement.clone(),
                 encoded_map(&entries),
                 inners.clone(),
-                false,
+                true,
             )
             .is_err());
         }
@@ -4868,8 +4884,8 @@ mod tests {
 
     #[test]
     fn accepts_unordered_digest_ids_but_rejects_duplicates_missing_and_oversized_ids() {
-        let statement = v2_statement(true);
-        let inners = v2_item_inners(&[b"FR"]);
+        let statement = product_statement(true);
+        let inners = product_item_inners(&[b"FR"]);
         let unordered = encoded_map(&mso_entries(
             &statement,
             &[9, 7],
@@ -4877,7 +4893,7 @@ mod tests {
             VALID_FROM,
             VALID_UNTIL,
         ));
-        construct(statement.clone(), unordered, inners.clone(), false).unwrap();
+        construct(statement.clone(), unordered, inners.clone(), true).unwrap();
 
         for ids in [vec![7, 7], vec![7], vec![7, u64::from(u16::MAX) + 1]] {
             let mso = encoded_map(&mso_entries(
@@ -4887,13 +4903,27 @@ mod tests {
                 VALID_FROM,
                 VALID_UNTIL,
             ));
-            assert!(construct(statement.clone(), mso, inners.clone(), false).is_err());
+            assert!(construct(statement.clone(), mso, inners.clone(), true).is_err());
         }
+
+        // Both selected and unrequested entries use the same uniqueness
+        // relation. A repeated unrequested ID must fail too.
+        let duplicate_unrequested = encoded_map(&mso_entries(
+            &statement,
+            &[7, 5, 5, 9],
+            VALID_SIGNED,
+            VALID_FROM,
+            VALID_UNTIL,
+        ));
+        assert!(matches!(
+            construct(statement, duplicate_unrequested, inners, true),
+            Err(MdocScopeError::DuplicateDigestId(5))
+        ));
     }
 
     #[test]
     fn permits_unordered_unrequested_digest_entries_but_still_selects_every_item() {
-        let statement = v2_statement(true);
+        let statement = product_statement(true);
         let mso = encoded_map(&mso_entries(
             &statement,
             &[9, 5, 8, 7],
@@ -4901,106 +4931,13 @@ mod tests {
             VALID_FROM,
             VALID_UNTIL,
         ));
-        let scope = construct(statement, mso, v2_item_inners(&[b"FR"]), false).unwrap();
-        assert_eq!(scope.metadata().nationality_count, Some(1));
-    }
-
-    #[test]
-    fn accepts_mdl_aamva_digest_namespace_without_cross_namespace_selection() {
-        let statement = v2_statement(true);
-        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
-        entries[3].1 = encoded_map(&[
-            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
-            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[1, 2])),
-        ]);
-
-        let scope = construct(
-            statement.clone(),
-            encoded_map(&entries),
-            v2_item_inners(&[b"FR"]),
-            false,
-        )
-        .unwrap();
-        let witness = scope.witness.as_ref().unwrap();
-        assert_eq!(witness.item_digest_bytes[0], [7; 32]);
-        assert_eq!(witness.item_digest_bytes[1], [9; 32]);
-
-        let malformed_aamva = encoded_map(&[(
-            cbor_head(0, 1),
-            encoded_bstr(&[0x11; SCOPE_DIGEST_BYTES - 1]),
-        )]);
-        entries[3].1 = encoded_map(&[
-            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
-            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), malformed_aamva),
-        ]);
-        assert!(construct(
-            statement,
-            encoded_map(&entries),
-            v2_item_inners(&[b"FR"]),
-            false,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn rejects_selected_digest_found_only_in_mdl_aamva_namespace() {
-        let statement = v2_statement(true);
-        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
-        entries[3].1 = encoded_map(&[
-            (cbor_text(&statement.namespace), digest_map(&[7])),
-            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[9])),
-        ]);
-
-        assert!(construct(
-            statement,
-            encoded_map(&entries),
-            v2_item_inners(&[b"FR"]),
-            false,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn rejects_aamva_digest_namespace_for_non_mdl_statement() {
-        let mut statement = v2_statement(true);
-        statement.doc_type = b"eu.europa.ec.eudi.pid.1".to_vec();
-        statement.namespace = b"eu.europa.ec.eudi.pid.1".to_vec();
-        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
-        entries[3].1 = encoded_map(&[
-            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
-            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[1, 2])),
-        ]);
-
-        assert!(construct(
-            statement,
-            encoded_map(&entries),
-            v2_item_inners(&[b"FR"]),
-            false,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn accepts_mdl_digest_namespaces_in_reverse_order() {
-        let statement = v2_statement(true);
-        let mut entries = mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
-        entries[3].1 = encoded_map(&[
-            (cbor_text(ISO_MDL_AAMVA_NAMESPACE), digest_map(&[1, 2])),
-            (cbor_text(&statement.namespace), digest_map(&[7, 9])),
-        ]);
-
-        construct(
-            statement,
-            encoded_map(&entries),
-            v2_item_inners(&[b"FR"]),
-            false,
-        )
-        .unwrap();
+        let scope = construct(statement, mso, product_item_inners(&[b"FR"]), true).unwrap();
+        assert_eq!(scope.private_nationality_count(), Some(1));
     }
 
     #[test]
     fn private_digest_ids_select_the_right_mso_entry_independent_of_item_order() {
-        let statement = v2_statement(true);
+        let statement = product_statement(true);
         let mso = encoded_map(&mso_entries(
             &statement,
             &[7, 9],
@@ -5012,11 +4949,16 @@ mod tests {
             16,
             9,
             b"birth_date",
-            cbor_text(b"1990-01-02"),
+            encoded_full_date(b"1990-01-02"),
         ));
-        let nationality = encoded_map(&item_entries(16, 7, b"nationality", cbor_text(b"FR")));
+        let nationality = encoded_map(&item_entries(
+            16,
+            7,
+            b"nationality",
+            encoded_nationalities(&[b"FR"]),
+        ));
 
-        let scope = construct(statement, mso, vec![birth_date, nationality], false).unwrap();
+        let scope = construct(statement, mso, vec![birth_date, nationality], true).unwrap();
         let witness = scope.witness.as_ref().unwrap();
         assert_eq!(witness.item_digest_bytes[0], [9; 32]);
         assert_eq!(witness.item_digest_bytes[1], [7; 32]);
@@ -5024,7 +4966,7 @@ mod tests {
 
     #[test]
     fn rejects_short_random_duplicate_item_key_v2_reordering_and_trailing_inner_cbor() {
-        let statement = v2_statement(true);
+        let statement = product_statement(true);
         let mso = encoded_map(&mso_entries(
             &statement,
             &[7, 9],
@@ -5032,20 +4974,22 @@ mod tests {
             VALID_FROM,
             VALID_UNTIL,
         ));
-        let valid = v2_item_inners(&[b"FR"]);
+        let valid = product_item_inners(&[b"FR"]);
 
         let short_random = encoded_map(&item_entries(
             15,
             7,
             b"birth_date",
-            cbor_text(b"1990-01-02"),
+            encoded_full_date(b"1990-01-02"),
         ));
 
-        let mut duplicate_entries = item_entries(16, 7, b"birth_date", cbor_text(b"1990-01-02"));
+        let mut duplicate_entries =
+            item_entries(16, 7, b"birth_date", encoded_full_date(b"1990-01-02"));
         duplicate_entries[3].0 = duplicate_entries[0].0.clone();
         let duplicate_key = encoded_map(&duplicate_entries);
 
-        let mut reordered_entries = item_entries(16, 7, b"birth_date", cbor_text(b"1990-01-02"));
+        let mut reordered_entries =
+            item_entries(16, 7, b"birth_date", encoded_full_date(b"1990-01-02"));
         reordered_entries.swap(2, 3);
         let reordered = encoded_map(&reordered_entries);
 
@@ -5057,7 +5001,7 @@ mod tests {
                 statement.clone(),
                 mso.clone(),
                 vec![malformed, valid[1].clone()],
-                false,
+                true,
             )
             .is_err());
         }
@@ -5065,8 +5009,8 @@ mod tests {
 
     #[test]
     fn rejects_nonminimal_and_trailing_cbor() {
-        let statement = v2_statement(true);
-        let inners = v2_item_inners(&[b"FR"]);
+        let statement = product_statement(true);
+        let inners = product_item_inners(&[b"FR"]);
         let mut nonminimal = encoded_map(&mso_entries(
             &statement,
             &[7, 9],
@@ -5077,7 +5021,7 @@ mod tests {
         assert_eq!(nonminimal.remove(0), 0xa6);
         nonminimal.splice(0..0, [0xb8, 0x06]);
         assert!(matches!(
-            construct(statement.clone(), nonminimal, inners.clone(), false),
+            construct(statement.clone(), nonminimal, inners.clone(), true),
             Err(MdocScopeError::Cbor(
                 MdocCborStreamError::NonMinimalArgument { .. }
             ))
@@ -5091,13 +5035,13 @@ mod tests {
             VALID_UNTIL,
         ));
         trailing.push(0xf6);
-        assert!(construct(statement, trailing, inners, false).is_err());
+        assert!(construct(statement, trailing, inners, true).is_err());
     }
 
     #[test]
     fn rejects_malformed_or_out_of_range_tdates() {
-        let statement = v2_statement(true);
-        let inners = v2_item_inners(&[b"FR"]);
+        let statement = product_statement(true);
+        let inners = product_item_inners(&[b"FR"]);
         let malformed = [
             "2026-13-01T00:00:00Z",
             "2026-01-32T00:00:00Z",
@@ -5123,7 +5067,7 @@ mod tests {
                     dates[2],
                 ));
                 assert!(
-                    construct(statement.clone(), mso, inners.clone(), false).is_err(),
+                    construct(statement.clone(), mso, inners.clone(), true).is_err(),
                     "accepted malformed tdate {value} at validity slot {position}"
                 );
             }
@@ -5132,8 +5076,8 @@ mod tests {
 
     #[test]
     fn accepts_exact_gregorian_leap_boundaries() {
-        let statement = v2_statement(true);
-        let inners = v2_item_inners(&[b"FR"]);
+        let statement = product_statement(true);
+        let inners = product_item_inners(&[b"FR"]);
         for value in [
             "1900-02-28T00:00:00Z",
             "1996-02-29T00:00:00Z",
@@ -5147,15 +5091,15 @@ mod tests {
                 VALID_FROM,
                 VALID_UNTIL,
             ));
-            construct(statement.clone(), mso, inners.clone(), false)
+            construct(statement.clone(), mso, inners.clone(), true)
                 .unwrap_or_else(|error| panic!("rejected valid Gregorian date {value}: {error}"));
         }
     }
 
     #[test]
     fn expected_update_is_omitted_or_a_valid_tdate_never_null() {
-        let statement = v2_statement(true);
-        let inners = v2_item_inners(&[b"FR"]);
+        let statement = product_statement(true);
+        let inners = product_item_inners(&[b"FR"]);
 
         let mut with_tdate =
             mso_entries(&statement, &[7, 9], VALID_SIGNED, VALID_FROM, VALID_UNTIL);
@@ -5169,7 +5113,7 @@ mod tests {
             statement.clone(),
             encoded_map(&with_tdate),
             inners.clone(),
-            false,
+            true,
         )
         .unwrap();
 
@@ -5177,19 +5121,15 @@ mod tests {
         with_null[5].1 =
             validity_info_with_expected_update(VALID_SIGNED, VALID_FROM, VALID_UNTIL, vec![0xf6]);
         assert!(
-            construct(statement, encoded_map(&with_null), inners, false).is_err(),
+            construct(statement, encoded_map(&with_null), inners, true).is_err(),
             "present expectedUpdate must be a tdate, not null"
         );
     }
 
     #[test]
-    fn emits_every_scalar_or_array_nationality_entry_at_fixed_indices() {
-        let scalar = construct_v2(&[b"FR"], false).unwrap();
-        assert_eq!(scalar.metadata().nationality_count, Some(1));
-        assert_eq!(nationality_emissions(&scalar), vec![(0, b'F'), (1, b'R')]);
-
-        let array = construct_v2(&[b"FR", b"DE", b"US"], false).unwrap();
-        assert_eq!(array.metadata().nationality_count, Some(3));
+    fn emits_every_array_nationality_entry_at_fixed_indices() {
+        let array = construct_product(&[b"FR", b"DE", b"US"], true).unwrap();
+        assert_eq!(array.private_nationality_count(), Some(3));
         assert_eq!(
             nationality_emissions(&array),
             vec![
@@ -5204,8 +5144,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_nationality_arrays_above_the_public_bound() {
-        let statement = v2_statement(true);
+    fn rejects_bare_birth_date_and_scalar_nationality() {
+        let statement = product_statement(true);
         let mso = encoded_map(&mso_entries(
             &statement,
             &[7, 9],
@@ -5213,7 +5153,43 @@ mod tests {
             VALID_FROM,
             VALID_UNTIL,
         ));
-        let mut inners = v2_item_inners(&[b"FR"]);
+        let valid = product_item_inners(&[b"FR"]);
+        let bare_birth_date = encoded_map(&item_entries(
+            16,
+            7,
+            b"birth_date",
+            cbor_text(b"1990-01-02"),
+        ));
+        let scalar_nationality =
+            encoded_map(&item_entries(16, 9, b"nationality", cbor_text(b"FR")));
+
+        assert!(construct(
+            statement.clone(),
+            mso.clone(),
+            vec![bare_birth_date, valid[1].clone()],
+            true,
+        )
+        .is_err());
+        assert!(construct(
+            statement,
+            mso,
+            vec![valid[0].clone(), scalar_nationality],
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_nationality_arrays_above_the_public_bound() {
+        let statement = product_statement(true);
+        let mso = encoded_map(&mso_entries(
+            &statement,
+            &[7, 9],
+            VALID_SIGNED,
+            VALID_FROM,
+            VALID_UNTIL,
+        ));
+        let mut inners = product_item_inners(&[b"FR"]);
         let nationalities = (0..=MAX_PRESENTED_NATIONALITIES)
             .map(|_| cbor_text(b"FR"))
             .collect::<Vec<_>>();
@@ -5224,90 +5200,29 @@ mod tests {
             encoded_array(&nationalities),
         ));
 
-        assert!(construct(statement, mso, inners, false).is_err());
+        assert!(construct(statement, mso, inners, true).is_err());
     }
 
     #[test]
-    fn accepts_value_encodings_independently_of_map_order_profile() {
-        let mut v1 = v1_statement();
-        v1.items[0].mode = MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Text);
-        v1.items[1].mode = MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Alpha2);
-        v1.validate().unwrap();
-
-        let mut v2 = v2_statement(true);
-        v2.items[0].mode = MdocScopeMode::AgeOver(MdocScopeBirthDateEncoding::Packed);
-        v2.items[1].mode = MdocScopeMode::Alpha2Set(MdocScopeNationalityEncoding::Numeric);
-        v2.validate().unwrap();
-    }
-
-    #[test]
-    fn value_equality_requires_one_minimally_encoded_complete_cbor_value() {
-        let base = MdocScopeStatement {
-            request_binding: [0; 32],
-            profile: MdocScopeProfile::V2,
-            doc_type: b"doc".to_vec(),
-            namespace: b"ns".to_vec(),
-            items: vec![MdocScopeItem {
-                element_identifier: b"given_name".to_vec(),
-                mode: MdocScopeMode::ValueEquality(cbor_text(b"Alice")),
-            }],
-        };
-        base.validate().unwrap();
-
-        let mut trailing = base.clone();
-        trailing.items[0].mode = MdocScopeMode::ValueEquality(vec![0x01, 0x02]);
-        assert!(matches!(
-            trailing.validate(),
-            Err(MdocScopeError::Cbor(
-                MdocCborStreamError::TrailingCbor { .. }
-            ))
-        ));
-
-        let mut nonminimal = base;
-        nonminimal.items[0].mode = MdocScopeMode::ValueEquality(vec![0x18, 0x01]);
-        assert!(matches!(
-            nonminimal.validate(),
-            Err(MdocScopeError::Cbor(
-                MdocCborStreamError::NonMinimalArgument { .. }
-            ))
-        ));
-    }
-
-    #[test]
-    fn public_text_and_value_equality_text_must_be_utf8() {
-        let mut statement = v2_statement(false);
+    fn public_identifiers_must_be_utf8() {
+        let mut statement = product_statement(false);
         statement.doc_type = vec![0xff];
         assert!(matches!(
             statement.validate(),
             Err(MdocScopeError::WrongShape("public identifier UTF-8"))
         ));
 
-        let mut statement = v2_statement(false);
+        let mut statement = product_statement(false);
         statement.items[0].element_identifier = vec![0xff];
         assert!(matches!(
             statement.validate(),
             Err(MdocScopeError::WrongShape("element identifier UTF-8"))
         ));
-
-        let statement = MdocScopeStatement {
-            request_binding: [0; 32],
-            profile: MdocScopeProfile::V2,
-            doc_type: b"doc".to_vec(),
-            namespace: b"ns".to_vec(),
-            items: vec![MdocScopeItem {
-                element_identifier: b"name".to_vec(),
-                mode: MdocScopeMode::ValueEquality(vec![0x61, 0xff]),
-            }],
-        };
-        assert!(matches!(
-            statement.validate(),
-            Err(MdocScopeError::Decode("value equality"))
-        ));
     }
 
     #[test]
     fn table_multiplicity_padding_is_freshly_blinded() {
-        let scope = construct_v2(&[b"FR"], false).unwrap();
+        let scope = construct_product(&[b"FR"], true).unwrap();
         let witness = scope.witness.as_ref().unwrap();
         let first = scope_table_trace(scope.table_log_size, &witness.table_multiplicities);
         let second = scope_table_trace(scope.table_log_size, &witness.table_multiplicities);
@@ -5325,25 +5240,29 @@ mod tests {
             .flat_map(PackedM31::to_array)
             .collect::<Vec<_>>();
         // Fresh randomness in the padding region regenerates per call. (The
-        // columns are bit-reverse ordered, so compare them wholesale; the
+        // columns are bit-reverse ordered, so compare them wholesale. The
         // deterministic edge prefix is covered by the honest-table test.)
         assert_ne!(first_values, second_values);
     }
 
     #[test]
     fn payload_hash_interaction_site_is_opt_in() {
-        let mut default_scope = construct_v2(&[b"FR", b"DE"], true).unwrap();
+        let mut default_scope = construct_product(&[b"FR", b"DE"], true).unwrap();
         let default_sites = default_scope.n_interaction_sites();
         let default_interaction_columns = default_scope.layout().interaction.len();
         default_scope.draw_relations(&mut Blake2sChannel::default());
         assert!(!default_scope.handles.payload_hash_fields.is_set());
 
-        let mut bound_scope = construct_v2(&[b"FR", b"DE"], true)
+        let mut bound_scope = construct_product(&[b"FR", b"DE"], true)
             .unwrap()
             .with_payload_hash_binding();
         assert_eq!(bound_scope.n_interaction_sites(), default_sites + 1);
         let expected_columns = (default_sites + 1).div_ceil(2) * SECURE_EXTENSION_DEGREE
-            + bound_scope.n_table_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE;
+            + bound_scope.n_table_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
+            + bound_scope
+                .n_digest_id_uniqueness_interaction_sites()
+                .div_ceil(2)
+                * SECURE_EXTENSION_DEGREE;
         assert_eq!(bound_scope.layout().interaction.len(), expected_columns);
         // Pairing parity may absorb the extra site into an existing column.
         assert!(bound_scope.layout().interaction.len() >= default_interaction_columns);
@@ -5353,7 +5272,7 @@ mod tests {
 
     #[test]
     fn honest_scope_trace_and_logup_satisfy_the_complete_component() {
-        let scope = construct_v2(&[b"FR", b"DE"], true)
+        let scope = construct_product(&[b"FR", b"DE"], true)
             .unwrap()
             .with_payload_hash_binding();
         let witness = scope.witness.as_ref().unwrap();
@@ -5385,6 +5304,7 @@ mod tests {
         let dfa_relation = MdocScopeDfaRelation::dummy();
         let state_relation = MdocScopeStateRelation::dummy();
         let digest_id_relation = MdocScopeDigestIdRelation::dummy();
+        let digest_id_uniqueness_relation = MdocScopeDigestIdUniquenessRelation::dummy();
         let digest_byte_relation = MdocScopeDigestByteRelation::dummy();
         let (interaction, claimed_sum) = scope_interaction_trace(
             scope.metadata.log_size,
@@ -5401,6 +5321,7 @@ mod tests {
             &dfa_relation,
             &state_relation,
             &digest_id_relation,
+            &digest_id_uniqueness_relation,
             &digest_byte_relation,
             None,
             None,
@@ -5424,6 +5345,7 @@ mod tests {
             &dfa_relation,
             &state_relation,
             &digest_id_relation,
+            &digest_id_uniqueness_relation,
             &digest_byte_relation,
             Some(&mask),
             Some(beta),
@@ -5457,6 +5379,7 @@ mod tests {
             dfa_relation,
             state_relation,
             digest_id_relation,
+            digest_id_uniqueness_relation,
             digest_byte_relation,
             claim_mask_beta: None,
         };
@@ -5472,7 +5395,7 @@ mod tests {
 
     #[test]
     fn honest_table_trace_satisfies_the_table_component() {
-        let scope = construct_v2(&[b"FR", b"DE"], false).unwrap();
+        let scope = construct_product(&[b"FR", b"DE"], true).unwrap();
         let witness = scope.witness.as_ref().unwrap();
         let dfa_relation = MdocScopeDfaRelation::dummy();
         let multiplicity = scope_table_trace(scope.table_log_size, &witness.table_multiplicities);
@@ -5523,15 +5446,84 @@ mod tests {
         );
     }
 
-    /// Cross-component LogUp balance over the shared DFA relation: the walk's
-    /// consume fractions and the table's yield fractions must cancel exactly.
-    /// A tampered multiplicity leaves a nonzero residue, which the verifier
-    /// rejects via the global `sum(claimed_sums) == 0` check in
-    /// `air_core::verify` — the table component's own constraints stay
-    /// satisfied, so this balance is the only thing catching it.
+    #[test]
+    fn digest_id_universe_accepts_bits_and_rejects_multiplicity_two() {
+        let relation = MdocScopeDigestIdUniquenessRelation::dummy();
+        let mut multiplicities = vec![0u32; 1 << DIGEST_ID_UNIVERSE_LOG_SIZE];
+        for id in [5usize, 7, 9] {
+            multiplicities[id] = 1;
+        }
+
+        let assert_trace = |multiplicities: &[u32]| {
+            let multiplicity = digest_id_uniqueness_trace(multiplicities);
+            let (interaction, claimed_sum) =
+                digest_id_uniqueness_interaction_trace(&multiplicity, &relation, None);
+            let trees = TreeVec::new(vec![
+                vec![digest_id_universe_column().to_cpu().values],
+                vec![multiplicity.to_cpu().values],
+                interaction
+                    .into_iter()
+                    .map(|column| column.to_cpu().values)
+                    .collect(),
+            ]);
+            let trace = trees.as_cols_ref();
+            let eval = MdocScopeDigestIdUniverseEval {
+                relation: relation.clone(),
+                claim_mask_beta: None,
+            };
+            assert_constraints_on_trace(
+                &trace,
+                DIGEST_ID_UNIVERSE_LOG_SIZE,
+                |row| {
+                    let _ = eval.evaluate(row);
+                },
+                claimed_sum,
+            );
+        };
+
+        assert_trace(&multiplicities);
+        multiplicities[5] = 2;
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                assert_trace(&multiplicities);
+            }))
+            .is_err(),
+            "the Boolean universe multiplicity constraint must reject two uses of one ID",
+        );
+    }
+
+    #[test]
+    fn duplicate_selected_or_unknown_digest_id_breaks_uniqueness_balance() {
+        let relation = MdocScopeDigestIdUniquenessRelation::dummy();
+        let zero = QM31::from_u32_unchecked(0, 0, 0, 0);
+        let inverse = |id: u32| {
+            <MdocScopeDigestIdUniquenessRelation as Relation<M31, QM31>>::combine(
+                &relation,
+                &[m31(id)],
+            )
+            .inverse()
+        };
+        let consume = |ids: &[u32]| ids.iter().copied().fold(zero, |sum, id| sum + inverse(id));
+        let provide = |ids: &[u32]| ids.iter().copied().fold(zero, |sum, id| sum - inverse(id));
+
+        let honest_ids = [7, 5, 9];
+        assert_eq!(consume(&honest_ids) + provide(&honest_ids), zero);
+
+        // This models selected(7), unknown(7), selected(9). The provider can
+        // yield each universe value at most once, so the repeated 7 remains.
+        assert_ne!(consume(&[7, 7, 9]) + provide(&[7, 9]), zero);
+        // A repeated unrequested entry is rejected by the same relation.
+        assert_ne!(consume(&[7, 5, 5, 9]) + provide(&[7, 5, 9]), zero);
+    }
+
+    /// Confirms the cross-component LogUp balance for the shared DFA relation.
+    ///
+    /// Walk consumes must cancel table yields.
+    /// A changed multiplicity leaves a nonzero residue.
+    /// The global claimed-sum check rejects this residue.
     #[test]
     fn tampered_table_multiplicity_breaks_cross_component_dfa_balance() {
-        let scope = construct_v2(&[b"FR", b"DE"], false).unwrap();
+        let scope = construct_product(&[b"FR", b"DE"], true).unwrap();
         let witness = scope.witness.as_ref().unwrap();
         let dfa_relation = MdocScopeDfaRelation::dummy();
 

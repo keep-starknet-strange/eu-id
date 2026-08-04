@@ -89,8 +89,8 @@ impl FakeGlvChainClaim {
 
     /// Test-only: build a [`FakeGlvChainClaim`] where the cert at
     /// `override_cert_index` uses the injected `R'` (paired with a prepared
-    /// table built from the same `R'`); other certs use the production path.
-    /// Does NOT call [`Self::verify`], so the `final_acc == r3` gate is not
+    /// table built from the same `R'`). Other certs use the production path.
+    /// Does not call [`Self::verify`], so the `final_acc == r3` gate is not
     /// asserted here — callers observe it (or the downstream AIR) instead.
     #[cfg(test)]
     pub(crate) fn from_claims_with_r_override(

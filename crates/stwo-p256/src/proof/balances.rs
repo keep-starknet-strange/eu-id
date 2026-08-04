@@ -2,7 +2,7 @@
 //!
 //! Holds the per-relation provider/consumer claimed-sum bookkeeping
 //! ([`RelationBalanceClaim`], [`P256ProofRelations`], [`P256ProofInteractionClaim`])
-//! split out of [`super`] verbatim; the prove/verify orchestration that consumes
+//! split out of [`super`] verbatim. The prove/verify orchestration that consumes
 //! these stays in [`super`].
 
 use super::*;

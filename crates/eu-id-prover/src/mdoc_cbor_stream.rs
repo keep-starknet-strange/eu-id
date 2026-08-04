@@ -1,12 +1,11 @@
 //! Sound byte-stream parsing for mdoc CBOR.
 //!
-//! This component is deliberately semantic-agnostic. It consumes every byte of
-//! a SHA-padded (or raw nested) stream from [`FieldBytesRelation`], proves that
-//! exactly one definite-length CBOR root occupies the raw prefix, and yields one
-//! [`ParsedCborByteRelation`] tuple for every raw-CBOR byte. A later semantic
-//! component must consume every yielded tuple; it can identify genuine tokens
-//! from the constrained parent/ordinal metadata without verifier-supplied byte
-//! offsets.
+//! This component does not interpret semantic field values.
+//! It consumes each byte from a SHA-padded or raw nested stream.
+//! It proves that one definite-length CBOR root occupies the raw prefix.
+//! It yields one [`ParsedCborByteRelation`] tuple for each raw CBOR byte.
+//! A semantic component must consume each tuple.
+//! Constrained parent and ordinal data identifies tokens without public offsets.
 
 use std::fmt;
 
@@ -38,14 +37,18 @@ use stwo_constraint_framework::{
     RelationEntry, TraceLocationAllocator, ORIGINAL_TRACE_IDX,
 };
 
-/// Longfellow uses four counters. Eight keeps the same state-machine shape
-/// while covering the deeper nested maps used by current mdoc fixtures.
+/// The product accepts CBOR values nested to a fixed depth of eight levels.
 pub(crate) const MDOC_CBOR_MAX_DEPTH: usize = 8;
 const MDOC_CBOR_MIN_LOG_SIZE: u32 = 9;
 const MDOC_CBOR_MAX_LOG_SIZE: u32 = 17;
 const MDOC_CBOR_BLIND_ROWS: usize = 256;
+pub(crate) const MDOC_CBOR_MAX_ACTIVE_BYTES: usize =
+    (1usize << MDOC_CBOR_MAX_LOG_SIZE) - MDOC_CBOR_BLIND_ROWS;
 const SHA_BLOCK_BYTES: usize = 64;
 const SHA_LENGTH_BYTES: usize = 8;
+const MDOC_CBOR_MESSAGE_BOUND_BITS: usize = 15;
+
+const _: () = assert!(MDOC_CBOR_MAX_ACTIVE_BYTES == 130_816);
 
 /// Tuple layout for [`ParsedCborByteRelation`].
 pub(crate) mod parsed_cbor_tuple {
@@ -58,17 +61,14 @@ pub(crate) mod parsed_cbor_tuple {
     pub(crate) const ARG_32_47: usize = 7;
     pub(crate) const ARG_HI16: usize = 8;
     pub(crate) const CONTENT_LEN: usize = 9;
-    pub(crate) const DEPTH: usize = 10;
-    pub(crate) const PARENT_HEADER_INDEX: usize = 11;
-    pub(crate) const CHILD_ORDINAL: usize = 12;
     pub(crate) const ARITY: usize = 15;
 }
 
 relation!(ParsedCborByteRelation, 15);
 const _: () = assert!(parsed_cbor_tuple::ARITY == 15);
 
-/// One parser-instance output channel. The parser draws and sets this relation;
-/// a semantic component reads the same handle and consumes every parsed row.
+/// One parser-instance output channel. The parser draws and sets this relation.
+/// A semantic component reads the same handle and consumes every parsed row.
 /// Callers must allocate a distinct handle per parser instance.
 pub(crate) type SharedParsedCborByteRelation = SharedRelation<ParsedCborByteRelation>;
 
@@ -103,6 +103,7 @@ pub(crate) enum MdocCborPhase {
 pub(crate) enum MdocCborStreamError {
     EmptyInput,
     TraceTooLarge { bytes: usize },
+    MessageTooLong { bytes: usize, max: usize },
     InvalidShaPadding(&'static str),
     TruncatedToken { index: usize, needed: usize },
     InvalidAdditionalInfo { index: usize, additional: u8 },
@@ -123,6 +124,12 @@ impl fmt::Display for MdocCborStreamError {
                 write!(
                     f,
                     "CBOR stream of {bytes} bytes exceeds the parser trace bound"
+                )
+            }
+            Self::MessageTooLong { bytes, max } => {
+                write!(
+                    f,
+                    "CBOR message of {bytes} bytes exceeds the fixed bound {max}"
                 )
             }
             Self::InvalidShaPadding(reason) => write!(f, "invalid SHA-256 padding: {reason}"),
@@ -226,7 +233,6 @@ impl MdocCborWitnessRow {
 pub(crate) struct MdocCborWitness {
     #[cfg(test)]
     pub(crate) mode: MdocCborInputMode,
-    #[cfg(test)]
     pub(crate) message_len: usize,
     pub(crate) rows: Vec<MdocCborWitnessRow>,
     pub(crate) log_size: u32,
@@ -263,11 +269,37 @@ impl MdocCborWitness {
         Ok(Self {
             #[cfg(test)]
             mode,
-            #[cfg(test)]
             message_len,
             rows,
             log_size,
         })
+    }
+
+    fn with_shape(
+        bytes: &[u8],
+        mode: MdocCborInputMode,
+        fixed_log_size: Option<u32>,
+        max_message_len: Option<u32>,
+    ) -> Result<Self, MdocCborStreamError> {
+        let mut witness = Self::new(bytes, mode)?;
+        if let Some(max) = max_message_len {
+            let max = usize::try_from(max).expect("u32 message bound fits usize");
+            if witness.message_len > max {
+                return Err(MdocCborStreamError::MessageTooLong {
+                    bytes: witness.message_len,
+                    max,
+                });
+            }
+        }
+        if let Some(log_size) = fixed_log_size {
+            if !(MDOC_CBOR_MIN_LOG_SIZE..=MDOC_CBOR_MAX_LOG_SIZE).contains(&log_size)
+                || witness.log_size > log_size
+            {
+                return Err(MdocCborStreamError::TraceTooLarge { bytes: bytes.len() });
+            }
+            witness.log_size = log_size;
+        }
+        Ok(witness)
     }
 }
 
@@ -690,7 +722,7 @@ fn inactive_row_values() -> Vec<M31> {
         .map(|_| random_m31_cell())
         .collect::<Vec<_>>();
     // These columns encode the variable-length schedule itself. Cross-row
-    // phase constraints force the inactive suffix to zero; every private
+    // phase constraints force the inactive suffix to zero. Every private
     // byte/metadata/state column remains independently blinded.
     values[trace_col::ACTIVE] = m31(0);
     for value in &mut values[trace_col::CBOR..=22] {
@@ -718,9 +750,13 @@ fn column_eval(log_size: u32, values: Vec<M31>) -> MdocCborColumnEval {
     )
 }
 
-fn mdoc_cbor_base_columns(witness: &MdocCborWitness) -> Vec<Vec<M31>> {
+fn mdoc_cbor_base_columns_with_bound(
+    witness: &MdocCborWitness,
+    max_message_len: Option<u32>,
+) -> Vec<Vec<M31>> {
     let n_rows = 1usize << witness.log_size;
-    let mut columns = vec![vec![m31(0); n_rows]; MDOC_CBOR_TRACE_COLS];
+    let bound_columns = usize::from(max_message_len.is_some()) * MDOC_CBOR_MESSAGE_BOUND_BITS;
+    let mut columns = vec![vec![m31(0); n_rows]; MDOC_CBOR_TRACE_COLS + bound_columns];
     for row_index in 0..n_rows {
         let values = witness
             .rows
@@ -731,14 +767,41 @@ fn mdoc_cbor_base_columns(witness: &MdocCborWitness) -> Vec<Vec<M31>> {
             column[row_index] = value;
         }
     }
+    if let Some(max) = max_message_len {
+        assert!(max <= 1 << MDOC_CBOR_MESSAGE_BOUND_BITS);
+        let message_len =
+            u32::try_from(witness.message_len).expect("validated CBOR message length fits u32");
+        let slack = max
+            .checked_sub(message_len)
+            .expect("fixed CBOR message bound was validated");
+        let root_end = witness.message_len - 1;
+        for bit in 0..MDOC_CBOR_MESSAGE_BOUND_BITS {
+            let column = &mut columns[MDOC_CBOR_TRACE_COLS + bit];
+            column.fill_with(random_m31_cell);
+            column[root_end] = m31((slack >> bit) & 1);
+        }
+    }
     columns
 }
 
-fn mdoc_cbor_base_trace(witness: &MdocCborWitness) -> Vec<MdocCborColumnEval> {
-    mdoc_cbor_base_columns(witness)
+#[cfg(test)]
+fn mdoc_cbor_base_columns(witness: &MdocCborWitness) -> Vec<Vec<M31>> {
+    mdoc_cbor_base_columns_with_bound(witness, None)
+}
+
+fn mdoc_cbor_base_trace_with_bound(
+    witness: &MdocCborWitness,
+    max_message_len: Option<u32>,
+) -> Vec<MdocCborColumnEval> {
+    mdoc_cbor_base_columns_with_bound(witness, max_message_len)
         .into_iter()
         .map(|values| column_eval(witness.log_size, values))
         .collect()
+}
+
+#[cfg(test)]
+fn mdoc_cbor_base_trace(witness: &MdocCborWitness) -> Vec<MdocCborColumnEval> {
+    mdoc_cbor_base_trace_with_bound(witness, None)
 }
 
 fn preprocessed_id(log_size: u32, name: &str) -> PreProcessedColumnId {
@@ -793,7 +856,10 @@ struct MdocCborStreamEval {
     log_size: u32,
     mode: MdocCborInputMode,
     stream_id: u32,
+    input_field_id: u32,
     input_relation: FieldBytesRelation,
+    raw_input: Option<(u32, FieldBytesRelation)>,
+    max_message_len: Option<u32>,
     parsed_relation: Option<ParsedCborByteRelation>,
     claim_mask_beta: Option<QM31>,
 }
@@ -805,7 +871,7 @@ impl FrameworkEval for MdocCborStreamEval {
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
         // Five-bit additional-info equality, gated by header/CBOR, reaches
-        // degree seven; the next power-of-two degree bound is eight.
+        // degree seven. The next power-of-two degree bound is eight.
         self.log_size + 3
     }
 
@@ -862,8 +928,11 @@ impl FrameworkEval for MdocCborStreamEval {
             std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]));
         let child_ordinals: [[E::F; 2]; MDOC_CBOR_MAX_DEPTH] =
             std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]));
+        let message_bound_slack: Option<[E::F; MDOC_CBOR_MESSAGE_BOUND_BITS]> = self
+            .max_message_len
+            .map(|_| std::array::from_fn(|_| eval.next_trace_mask()));
 
-        // Active rows are exactly one phase; the all-zero suffix cannot reactivate.
+        // Active rows are exactly one phase. The all-zero suffix cannot reactivate.
         boolean_constraint(&mut eval, one.clone(), active.clone());
         boolean_constraint(&mut eval, one.clone(), cbor.clone());
         boolean_constraint(&mut eval, one.clone(), marker.clone());
@@ -967,8 +1036,22 @@ impl FrameworkEval for MdocCborStreamEval {
         eval.add_constraint(
             root_end.clone() * (message_len.clone() - row_index.clone() - one.clone()),
         );
+        if let (Some(max), Some(slack_bits)) = (self.max_message_len, message_bound_slack) {
+            let slack = slack_bits
+                .iter()
+                .enumerate()
+                .fold(zero.clone(), |sum, (bit, value)| {
+                    sum + m31_const::<E>(1u32 << bit) * value.clone()
+                });
+            for bit in slack_bits {
+                boolean_constraint(&mut eval, root_end.clone(), bit);
+            }
+            eval.add_constraint(
+                root_end.clone() * (message_len.clone() + slack - m31_const::<E>(max)),
+            );
+        }
 
-        // Header iff the token-byte countdown is zero.
+        // This row is a header if and only if the token-byte countdown is zero.
         boolean_constraint(&mut eval, cbor.clone(), header.clone());
         eval.add_constraint(header.clone() * (one.clone() - cbor.clone()));
         eval.add_constraint(cbor.clone() * remaining.clone() * header.clone());
@@ -1033,7 +1116,7 @@ impl FrameworkEval for MdocCborStreamEval {
             eval.add_constraint(cbor.clone() * (actual.clone() - expected));
         }
 
-        // ai=24 must encode >=24; wider encodings must have a nonzero high
+        // ai=24 must encode >=24. Wider encodings must have a nonzero high
         // byte region, which is equivalent to their canonical lower bound.
         let short_slack = short_slack_bits
             .iter()
@@ -1254,11 +1337,19 @@ impl FrameworkEval for MdocCborStreamEval {
             &self.input_relation,
             E::EF::from(active.clone()),
             &[
-                m31_const::<E>(self.stream_id),
+                m31_const::<E>(self.input_field_id),
                 row_index.clone(),
                 byte.clone(),
             ],
         ));
+
+        if let Some((field_id, relation)) = &self.raw_input {
+            eval.add_to_relation(RelationEntry::new(
+                relation,
+                E::EF::from(cbor.clone()),
+                &[m31_const::<E>(*field_id), row_index.clone(), byte.clone()],
+            ));
+        }
 
         if let Some(relation) = &self.parsed_relation {
             let tuple = [
@@ -1317,9 +1408,12 @@ pub(crate) struct MdocCborStreamInteractionClaim {
 pub(crate) struct MdocCborStream {
     mode: MdocCborInputMode,
     stream_id: u32,
+    input_field_id: u32,
     log_size: u32,
     witness: Option<MdocCborWitness>,
     input_handle: SharedFieldRelation,
+    raw_input: Option<(u32, SharedFieldRelation)>,
+    max_message_len: Option<u32>,
     parsed_handle: Option<SharedParsedCborByteRelation>,
     claim_mask_trace: Option<ClaimMaskTrace>,
     claim_mask_challenge: Option<SharedClaimMaskChallenge>,
@@ -1328,20 +1422,80 @@ pub(crate) struct MdocCborStream {
 }
 
 impl MdocCborStream {
-    pub(crate) fn new(
+    pub(crate) fn new_with_log_size(
         bytes: Vec<u8>,
         mode: MdocCborInputMode,
         stream_id: u32,
         input: SharedFieldRelation,
         parsed: Option<SharedParsedCborByteRelation>,
+        log_size: u32,
     ) -> Result<Self, MdocCborStreamError> {
-        let witness = MdocCborWitness::new(&bytes, mode)?;
+        Self::new_shaped(
+            bytes,
+            mode,
+            stream_id,
+            input,
+            None,
+            parsed,
+            Some(log_size),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_exact_sha(
+        bytes: Vec<u8>,
+        stream_id: u32,
+        sha_field_id: u32,
+        sha_input: SharedFieldRelation,
+        raw_field_id: u32,
+        raw_input: SharedFieldRelation,
+        parsed: Option<SharedParsedCborByteRelation>,
+        log_size: u32,
+        max_message_len: u32,
+    ) -> Result<Self, MdocCborStreamError> {
+        Self::new_shaped(
+            bytes,
+            MdocCborInputMode::ShaPadded,
+            stream_id,
+            sha_input,
+            Some((raw_field_id, raw_input)),
+            parsed,
+            Some(log_size),
+            Some(max_message_len),
+        )
+        .map(|mut stream| {
+            stream.input_field_id = sha_field_id;
+            stream
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_shaped(
+        bytes: Vec<u8>,
+        mode: MdocCborInputMode,
+        stream_id: u32,
+        input: SharedFieldRelation,
+        raw_input: Option<(u32, SharedFieldRelation)>,
+        parsed: Option<SharedParsedCborByteRelation>,
+        fixed_log_size: Option<u32>,
+        max_message_len: Option<u32>,
+    ) -> Result<Self, MdocCborStreamError> {
+        if max_message_len.is_some_and(|max| max > 1 << MDOC_CBOR_MESSAGE_BOUND_BITS) {
+            return Err(MdocCborStreamError::TraceTooLarge {
+                bytes: usize::try_from(max_message_len.unwrap()).unwrap_or(usize::MAX),
+            });
+        }
+        let witness = MdocCborWitness::with_shape(&bytes, mode, fixed_log_size, max_message_len)?;
         Ok(Self {
             mode,
             stream_id,
+            input_field_id: stream_id,
             log_size: witness.log_size,
             witness: Some(witness),
             input_handle: input,
+            raw_input,
+            max_message_len,
             parsed_handle: parsed,
             claim_mask_trace: None,
             claim_mask_challenge: None,
@@ -1367,9 +1521,48 @@ impl MdocCborStream {
         Ok(Self {
             mode,
             stream_id,
+            input_field_id: stream_id,
             log_size,
             witness: None,
             input_handle: input,
+            raw_input: None,
+            max_message_len: None,
+            parsed_handle: parsed,
+            claim_mask_trace: None,
+            claim_mask_challenge: None,
+            interaction_claim: Some(interaction_claim),
+            component: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn verifier_exact_sha(
+        stream_id: u32,
+        sha_field_id: u32,
+        sha_input: SharedFieldRelation,
+        raw_field_id: u32,
+        raw_input: SharedFieldRelation,
+        parsed: Option<SharedParsedCborByteRelation>,
+        log_size: u32,
+        max_message_len: u32,
+        interaction_claim: MdocCborStreamInteractionClaim,
+    ) -> Result<Self, MdocCborStreamError> {
+        if !(MDOC_CBOR_MIN_LOG_SIZE..=MDOC_CBOR_MAX_LOG_SIZE).contains(&log_size)
+            || max_message_len > 1 << MDOC_CBOR_MESSAGE_BOUND_BITS
+        {
+            return Err(MdocCborStreamError::TraceTooLarge {
+                bytes: 1usize << log_size.min(usize::BITS - 1),
+            });
+        }
+        Ok(Self {
+            mode: MdocCborInputMode::ShaPadded,
+            stream_id,
+            input_field_id: sha_field_id,
+            log_size,
+            witness: None,
+            input_handle: sha_input,
+            raw_input: Some((raw_field_id, raw_input)),
+            max_message_len: Some(max_message_len),
             parsed_handle: parsed,
             claim_mask_trace: None,
             claim_mask_challenge: None,
@@ -1422,6 +1615,12 @@ impl MdocCborStream {
         self.input_handle.get()
     }
 
+    fn raw_input_relation(&self) -> Option<(u32, FieldBytesRelation)> {
+        self.raw_input
+            .as_ref()
+            .map(|(field_id, handle)| (*field_id, handle.get()))
+    }
+
     fn parsed_relation(&self) -> Option<ParsedCborByteRelation> {
         self.parsed_handle.as_ref().map(SharedRelation::get)
     }
@@ -1429,19 +1628,22 @@ impl MdocCborStream {
     fn n_main_lookups(&self) -> usize {
         // Full input consume, optional parsed-byte yield, optional private
         // claimed-sum mask.
-        1 + usize::from(self.parsed_handle.is_some())
+        1 + usize::from(self.raw_input.is_some())
+            + usize::from(self.parsed_handle.is_some())
             + usize::from(self.claim_mask_challenge.is_some())
     }
 }
 
-fn mdoc_cbor_interaction_trace(
+fn mdoc_cbor_interaction_trace_with_raw(
     witness: &MdocCborWitness,
     stream_id: u32,
+    input_field_id: u32,
     input_relation: &FieldBytesRelation,
+    raw_input: Option<&(u32, FieldBytesRelation)>,
     parsed_relation: Option<&ParsedCborByteRelation>,
     claim_mask: Option<(&ClaimMaskTrace, QM31)>,
 ) -> (Vec<MdocCborColumnEval>, QM31) {
-    let base = mdoc_cbor_base_trace(witness);
+    let base = mdoc_cbor_base_trace_with_bound(witness, None);
     let preprocessed = mdoc_cbor_preprocessed_columns(witness.log_size);
     let n_vec_rows = 1usize << (witness.log_size - LOG_N_LANES);
     let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> =
@@ -1452,7 +1654,7 @@ fn mdoc_cbor_interaction_trace(
             .map(|vec_row| {
                 let numerator = PackedQM31::from(base[trace_col::ACTIVE].data[vec_row]);
                 let denominator = input_relation.combine(&[
-                    PackedM31::broadcast(m31(stream_id)),
+                    PackedM31::broadcast(m31(input_field_id)),
                     preprocessed[0].data[vec_row],
                     base[trace_col::BYTE].data[vec_row],
                 ]);
@@ -1460,6 +1662,22 @@ fn mdoc_cbor_interaction_trace(
             })
             .collect(),
     );
+
+    if let Some((field_id, relation)) = raw_input {
+        sites.push(
+            (0..n_vec_rows)
+                .map(|vec_row| {
+                    let numerator = PackedQM31::from(base[trace_col::CBOR].data[vec_row]);
+                    let denominator = relation.combine(&[
+                        PackedM31::broadcast(m31(*field_id)),
+                        preprocessed[0].data[vec_row],
+                        base[trace_col::BYTE].data[vec_row],
+                    ]);
+                    (numerator, denominator)
+                })
+                .collect(),
+        );
+    }
 
     if let Some(relation) = parsed_relation {
         sites.push(
@@ -1516,12 +1734,38 @@ fn mdoc_cbor_interaction_trace(
     logup.finalize_last()
 }
 
+#[cfg(test)]
+fn mdoc_cbor_interaction_trace(
+    witness: &MdocCborWitness,
+    stream_id: u32,
+    input_relation: &FieldBytesRelation,
+    parsed_relation: Option<&ParsedCborByteRelation>,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
+) -> (Vec<MdocCborColumnEval>, QM31) {
+    mdoc_cbor_interaction_trace_with_raw(
+        witness,
+        stream_id,
+        stream_id,
+        input_relation,
+        None,
+        parsed_relation,
+        claim_mask,
+    )
+}
+
 impl Air for MdocCborStream {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(0x4d44_4f43_4342_4f52);
         channel.mix_u64(self.mode.transcript_tag());
         channel.mix_u64(u64::from(self.stream_id));
+        channel.mix_u64(u64::from(self.input_field_id));
         channel.mix_u64(u64::from(self.log_size));
+        channel.mix_u64(
+            self.raw_input
+                .as_ref()
+                .map_or(u64::MAX, |(field_id, _)| u64::from(*field_id)),
+        );
+        channel.mix_u64(self.max_message_len.map_or(u64::MAX, u64::from));
         channel.mix_u64(u64::from(self.parsed_handle.is_some()));
     }
 
@@ -1541,6 +1785,8 @@ impl Air for MdocCborStream {
             trace: vec![
                 self.log_size;
                 MDOC_CBOR_TRACE_COLS
+                    + usize::from(self.max_message_len.is_some())
+                        * MDOC_CBOR_MESSAGE_BOUND_BITS
                     + usize::from(self.claim_mask_challenge.is_some())
                         * CLAIM_MASK_TRACE_COLUMNS
             ],
@@ -1574,7 +1820,10 @@ impl Air for MdocCborStream {
                 log_size: self.log_size,
                 mode: self.mode,
                 stream_id: self.stream_id,
+                input_field_id: self.input_field_id,
                 input_relation: self.input_relation(),
+                raw_input: self.raw_input_relation(),
+                max_message_len: self.max_message_len,
                 parsed_relation: self.parsed_relation(),
                 claim_mask_beta: self.claim_mask_beta(),
             },
@@ -1646,7 +1895,10 @@ impl AirProver for MdocCborStream {
             .witness
             .as_ref()
             .expect("mdoc CBOR prover has a witness");
-        tb.extend_evals(mdoc_cbor_base_trace(witness));
+        tb.extend_evals(mdoc_cbor_base_trace_with_bound(
+            witness,
+            self.max_message_len,
+        ));
         if let Some(mask) = &self.claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
@@ -1658,10 +1910,13 @@ impl AirProver for MdocCborStream {
             .as_ref()
             .expect("mdoc CBOR prover has a witness");
         let claim_mask = self.claim_mask_trace.as_ref().zip(self.claim_mask_beta());
-        let (trace, claimed_sum) = mdoc_cbor_interaction_trace(
+        let raw_input = self.raw_input_relation();
+        let (trace, claimed_sum) = mdoc_cbor_interaction_trace_with_raw(
             witness,
             self.stream_id,
+            self.input_field_id,
             &self.input_relation(),
+            raw_input.as_ref(),
             self.parsed_relation().as_ref(),
             claim_mask,
         );
@@ -1759,12 +2014,23 @@ mod tests {
         witness: &MdocCborWitness,
         base: &'a [Vec<M31>],
     ) -> Vec<RecordingEval<'a>> {
+        evaluate_columns_with_bound(witness, base, None)
+    }
+
+    fn evaluate_columns_with_bound<'a>(
+        witness: &MdocCborWitness,
+        base: &'a [Vec<M31>],
+        max_message_len: Option<u32>,
+    ) -> Vec<RecordingEval<'a>> {
         let preprocessed = Box::leak(Box::new(mdoc_cbor_preprocessed_values(witness.log_size)));
         let eval = MdocCborStreamEval {
             log_size: witness.log_size,
             mode: witness.mode,
             stream_id: TEST_STREAM_ID,
+            input_field_id: TEST_STREAM_ID,
             input_relation: FieldBytesRelation::dummy(),
+            raw_input: max_message_len.map(|_| (TEST_STREAM_ID + 1, FieldBytesRelation::dummy())),
+            max_message_len,
             parsed_relation: Some(ParsedCborByteRelation::dummy()),
             claim_mask_beta: None,
         };
@@ -1785,7 +2051,9 @@ mod tests {
                     "all preprocessed columns must be read"
                 );
                 assert_eq!(
-                    recorder.base_column, MDOC_CBOR_TRACE_COLS,
+                    recorder.base_column,
+                    MDOC_CBOR_TRACE_COLS
+                        + usize::from(max_message_len.is_some()) * MDOC_CBOR_MESSAGE_BOUND_BITS,
                     "all base columns must be read"
                 );
                 recorder
@@ -1794,8 +2062,19 @@ mod tests {
     }
 
     fn constraints_hold(witness: &MdocCborWitness, base: &[Vec<M31>]) -> bool {
+        constraints_hold_with_bound(witness, base, None)
+    }
+
+    fn constraints_hold_with_bound(
+        witness: &MdocCborWitness,
+        base: &[Vec<M31>],
+        max_message_len: Option<u32>,
+    ) -> bool {
         let zero = QM31::from_u32_unchecked(0, 0, 0, 0);
-        for (row_index, row) in evaluate_columns(witness, base).iter().enumerate() {
+        for (row_index, row) in evaluate_columns_with_bound(witness, base, max_message_len)
+            .iter()
+            .enumerate()
+        {
             if let Some((constraint_index, value)) = row
                 .constraints
                 .iter()
@@ -1926,6 +2205,73 @@ mod tests {
     }
 
     #[test]
+    fn exact_sha_private_lengths_share_one_fixed_shape() {
+        const FIXED_LOG_SIZE: u32 = MDOC_CBOR_MIN_LOG_SIZE;
+        const MAX_MESSAGE_LEN: u32 = 64;
+        let short = MdocCborWitness::with_shape(
+            &sha_pad(&[0]),
+            MdocCborInputMode::ShaPadded,
+            Some(FIXED_LOG_SIZE),
+            Some(MAX_MESSAGE_LEN),
+        )
+        .unwrap();
+        let long = MdocCborWitness::with_shape(
+            &sha_pad(&nested_nationality_cbor()),
+            MdocCborInputMode::ShaPadded,
+            Some(FIXED_LOG_SIZE),
+            Some(MAX_MESSAGE_LEN),
+        )
+        .unwrap();
+
+        assert_ne!(short.message_len, long.message_len);
+        assert_eq!(short.log_size, long.log_size);
+        assert_eq!(
+            mdoc_cbor_base_columns_with_bound(&short, Some(MAX_MESSAGE_LEN)).len(),
+            mdoc_cbor_base_columns_with_bound(&long, Some(MAX_MESSAGE_LEN)).len(),
+        );
+    }
+
+    #[test]
+    fn exact_sha_private_length_bound_is_constrained() {
+        const MAX_MESSAGE_LEN: u32 = 64;
+        let padded = sha_pad(&nested_nationality_cbor());
+        let witness = MdocCborWitness::with_shape(
+            &padded,
+            MdocCborInputMode::ShaPadded,
+            Some(MDOC_CBOR_MIN_LOG_SIZE),
+            Some(MAX_MESSAGE_LEN),
+        )
+        .unwrap();
+        let mut base = mdoc_cbor_base_columns_with_bound(&witness, Some(MAX_MESSAGE_LEN));
+        assert!(constraints_hold_with_bound(
+            &witness,
+            &base,
+            Some(MAX_MESSAGE_LEN)
+        ));
+
+        let root_end = witness.message_len - 1;
+        base[MDOC_CBOR_TRACE_COLS][root_end] += m31(1);
+        assert!(
+            !constraints_hold_with_bound(&witness, &base, Some(MAX_MESSAGE_LEN)),
+            "a changed private bound-slack bit must violate the root-end equality"
+        );
+    }
+
+    #[test]
+    fn exact_sha_rejects_message_past_private_bound() {
+        let padded = sha_pad(&[0x43, 1, 2, 3]);
+        assert!(matches!(
+            MdocCborWitness::with_shape(
+                &padded,
+                MdocCborInputMode::ShaPadded,
+                Some(MDOC_CBOR_MIN_LOG_SIZE),
+                Some(3),
+            ),
+            Err(MdocCborStreamError::MessageTooLong { bytes: 4, max: 3 })
+        ));
+    }
+
+    #[test]
     fn sha_padded_circle_trace_and_logup_satisfy_component() {
         let padded = sha_pad(&nested_nationality_cbor());
         let witness = MdocCborWitness::new(&padded, MdocCborInputMode::ShaPadded).unwrap();
@@ -1952,7 +2298,10 @@ mod tests {
             log_size: witness.log_size,
             mode: witness.mode,
             stream_id: TEST_STREAM_ID,
+            input_field_id: TEST_STREAM_ID,
             input_relation: input,
+            raw_input: None,
+            max_message_len: None,
             parsed_relation: Some(parsed),
             claim_mask_beta: None,
         };

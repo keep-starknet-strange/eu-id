@@ -1,16 +1,8 @@
-//! FinalEcdsaCheck AIR — increment 6.2 (in-AIR `x mod n` reduction).
+//! Proves the final ECDSA `x mod n` check.
 //!
-//! Goal of this slot in [`crate::proof::P256_PROOF_COMPONENT_SLOTS`] is to make
-//! verifier acceptance of an ECDSA signature depend on
-//! `x(u1·G + u2·Q) mod n == r`.
-//!
-//! Increment 6.1 (`r_check` as a free witness) only bound the AIR's
-//! `r_check` row to the public signature `r` through
-//! [`EcdsaResultRelation`]. That left an unconstrained witness gap because
-//! the prover could pick `r_check` freely.
-//!
-//! Increment 6.2 closes part of that gap by adding a same-row digest
-//! reduction constraint:
+//! Verification requires `x(u1·G + u2·Q) mod n == r`.
+//! [`EcdsaResultRelation`] binds `r_check` to public signature value `r`.
+//! The same row proves this reduction:
 //!
 //! ```text
 //! r_check + r_x_ge_n · n = r_x
@@ -26,21 +18,15 @@
 //! same `add_digest_reduction` helper used by `scalar_setup_air` for the
 //! digest-mod-n step is reused here verbatim.
 //!
-//! The `r_x < p` canonical bound is load-bearing for ECDSA soundness, not a
-//! hygiene check: `final_add_air` only proves `r_x` *limb-exact equal to its
-//! computed output*, whose mod-p arithmetic admits any 256-bit representative
-//! of the residue class. Without `r_x < p`, a prover whose true canonical
-//! `x(R)` satisfies `x < 2^256 − p` (≈ 2^-32 of points) could witness
-//! `r_x = x + p` end-to-end and pass `r == (x + p) mod n` for a forged `r`,
-//! since `p mod n ≠ 0`. Enforcing `r_x < p` pins `r_x` to the unique
-//! canonical affine coordinate.
+//! The bound `r_x < p` is necessary for ECDSA soundness.
+//! Modular arithmetic permits multiple 256-bit representatives of one residue.
+//! Without this bound, a prover could use `r_x = x + p`.
+//! Because `p mod n ≠ 0`, that value could permit an incorrect public `r`.
+//! The bound selects the unique canonical affine coordinate.
 //!
-//! `r_x` is bound by [`crate::final_add_air::FinalAddOutputRelation`], which
-//! is yielded by `final_add_air` after consuming the prepared-table final
-//! hint points and proving the final EC addition (including the finite
-//! doubling branch added in Task 6). The reduction in this AIR only
-//! completes `x(R) mod n = r`; it does not trust native final-check
-//! witnesses.
+//! [`crate::final_add_air::FinalAddOutputRelation`] binds `r_x` to the final EC addition.
+//! This AIR completes `x(R) mod n = r`.
+//! It does not trust native final-check witnesses.
 
 use serde::{Deserialize, Serialize};
 use stwo::core::{
@@ -230,7 +216,7 @@ impl FrameworkEval for FinalCheckAirEval {
         for limb in r_check.limbs() {
             eval.add_constraint((one.clone() - active.clone()) * limb.clone());
         }
-        // `r_x_ge_n` is gated to zero on padding rows so a stray witness can't
+        // `r_x_ge_n` is gated to zero on padding rows so a stray witness cannot
         // sneak a non-canonical reduction into a padded slot.
         eval.add_constraint((one.clone() - active.clone()) * r_x_ge_n.clone());
 
@@ -263,13 +249,13 @@ impl FrameworkEval for FinalCheckAirEval {
             active.clone(),
             &reduction_columns,
         );
-        let _ = r_check_lt_slack; // kept above for ownership; helper consumed it
+        let _ = r_check_lt_slack;
 
         // Canonical affine coordinate: `r_x < p`. `final_add_air` only pins
         // `r_x` limb-exact to its computed output, whose mod-p arithmetic
-        // admits any 256-bit representative; this canonical-LT pins the unique
+        // admits any 256-bit representative. This canonical-LT pins the unique
         // representative so `r_x mod n` cannot be shifted by `+p` (see module
-        // docs). Same gadget as the `r_check < n` bound above; the equation
+        // docs). Same gadget as the `r_check < n` bound above. The equation
         // and boolean-carry constraints are ungated (degree ≤ 2), so padding
         // rows carry a valid `0 < p` witness (handled by trace gen).
         let r_x_value = P256BigInt::from_limbs(r_x_limbs.clone());
@@ -377,8 +363,8 @@ pub fn gen_final_check_air_base_trace(
             columns[2 + limb_index][row] = *limb;
         }
 
-        // r_x = R.x (witnessed here; bound to the chain outputs in-AIR via
-        // FinalAddOutputRelation — see this module's header).
+        // r_x = R.x is witnessed here. FinalAddOutputRelation binds it to the
+        // chain outputs in the AIR. See this module's header.
         let r_x_words = final_row.r_point.x.to_u256().to_le_u64s();
         let reduction = DigestReductionTrace::new(&r_x_words, &n_words)
             .expect("R.x reduces mod n: covered by FinalEcdsaCheckClaim::verify");
@@ -485,12 +471,9 @@ pub(crate) fn gen_final_check_air_interaction_trace(
             lt_slack_offset() + limb,
         );
     }
-    // `r_x < p` canonical-LT (emitted after `add_digest_reduction` in
-    // `evaluate`, so after the `r_check < n` columns here): the gadget
-    // range-checks the value (`r_x`) and slack limbs, in that per-limb order.
-    // This re-checks all 20 `r_x` limbs as Range13 (the top limb is
-    // additionally Range9-checked above), which is redundant but keeps the
-    // shared gadget intact.
+    // Emit the `r_x < p` checks after the `r_check < n` checks.
+    // The gadget checks each value limb before its slack limb.
+    // It checks all `r_x` limbs again to preserve the shared gadget.
     for limb in 0..N_LIMBS {
         append_range_entry(
             &mut entries,
@@ -571,11 +554,10 @@ fn append_relation_entry(
     entries.push((numerators, denominators));
 }
 
-/// Per-active-row range13 uses, matching the emission order in
-/// [`FinalCheckAirEval::evaluate`]: `add_digest_reduction` range-checks the
-/// non-top `r_x` limbs as Range13, then `add_canonical_lt_fixed_bound`
-/// range-checks both the value (`r_check`) and the slack limbs, then the
-/// `r_x < p` canonical-LT re-checks all `r_x` limbs plus its slack limbs.
+/// Returns the Range13 uses for each active row.
+///
+/// The order matches [`FinalCheckAirEval::evaluate`].
+/// It contains digest reduction, `r_check < n`, and `r_x < p` values.
 pub(crate) fn final_check_range13_uses_from_base(base: &[M31ColumnEval]) -> Vec<M31> {
     let mut uses = Vec::new();
     for row in active_rows(base) {

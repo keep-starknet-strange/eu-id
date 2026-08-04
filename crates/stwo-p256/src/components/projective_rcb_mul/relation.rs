@@ -6,14 +6,13 @@ use stwo_constraint_framework::relation;
 
 use crate::range_checks::RangeCheckRelation;
 
-/// Result relation linking the hinted-mul provider to the projective-source
-/// consumers (C5 plumbing): keyed `(source_index, mul_index, role,
-/// limb_0..limb_19)` where `role ∈ {LHS, RHS, RESULT}` — one WIDE tuple per
-/// proven value instead of one per limb (both sides hold all 20 limbs in a
-/// single row, and the wide random-α combine carries identical binding power
-/// at 1/20th the interaction columns). The provider YIELDS every proven
-/// `fp_mul`'s `lhs`/`rhs`/`result`; the fake-GLV and prepared-table projective
-/// sources CONSUME the muls of the EC op on their row.
+/// Links hinted multiplication results to projective-source consumers.
+///
+/// The key is `(source_index, mul_index, role, limb_0..limb_19)`.
+/// Role identifies the left operand, right operand, or result.
+/// One wide tuple binds all 20 limbs.
+/// The provider yields each proven value.
+/// Fake-GLV and prepared-table sources consume the required values.
 pub const PROJECTIVE_RCB_MUL_RESULT_RELATION_ARITY: usize = 3 + stwo_p256_utils::constants::N_LIMBS;
 
 relation!(

@@ -1,8 +1,8 @@
-//! M31-side mdoc P4b Longfellow GF(2^128) MAC binding.
+//! M31-side mdoc P4b affine GF(2^128) MAC binding.
 //!
 //! The committed trace only carries one bit-serial row per MAC bit. The
-//! `a_v`-dependent terms live in the post-interaction tree after the shared
-//! MAC challenge is published.
+//! additive pad and value are committed before the shared `a_v` challenge.
+//! The `a_v`-dependent terms live in the post-interaction tree.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -13,7 +13,7 @@ use air_core::relations::{
     field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
 };
 use air_core::{fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint};
-use eu_id_ec_coprocessor::mac::Gf128;
+use eu_id_ec_coprocessor::mac::{bits_to_bytes, bytes_to_bits, gf128_tag, Gf128};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
@@ -115,9 +115,8 @@ pub(crate) struct MdocMacBind {
     rows: [MacHalfWitness; MACS_PER_PROOF],
     mac_state: Option<MdocP4bMacSharedState>,
     issuer_digest_handle: Option<SharedDigestRelation>,
-    revocation_digest_handle: Option<SharedDigestRelation>,
+    revocation_digest_handle: SharedDigestRelation,
     revocation_digest_relation: Option<DigestBytesRelation>,
-    has_revocation: bool,
     issuer_field_handle: Option<SharedFieldRelation>,
     av: Option<[u8; HALF_BYTES]>,
     tags: Option<[[u8; HALF_BYTES]; MACS_PER_PROOF]>,
@@ -138,7 +137,6 @@ impl Clone for MdocMacBind {
             issuer_digest_handle: self.issuer_digest_handle.clone(),
             revocation_digest_handle: self.revocation_digest_handle.clone(),
             revocation_digest_relation: None,
-            has_revocation: self.has_revocation,
             issuer_field_handle: self.issuer_field_handle.clone(),
             tags: self.tags,
             av: self.av,
@@ -182,10 +180,9 @@ impl MdocMacBind {
         mac_values: [Gf128; MACS_PER_PROOF],
         mac_state: MdocP4bMacSharedState,
         issuer_digest_handle: SharedDigestRelation,
-        revocation_digest_handle: Option<SharedDigestRelation>,
+        revocation_digest_handle: SharedDigestRelation,
         issuer_field_handle: SharedFieldRelation,
     ) -> Self {
-        let has_revocation = revocation_digest_handle.is_some();
         Self {
             rows: std::array::from_fn(|index| MacHalfWitness {
                 ap: mac_key_shares.0[index],
@@ -195,7 +192,6 @@ impl MdocMacBind {
             issuer_digest_handle: Some(issuer_digest_handle),
             revocation_digest_handle,
             revocation_digest_relation: None,
-            has_revocation,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
@@ -212,11 +208,10 @@ impl MdocMacBind {
     pub(crate) fn verifier(
         mac_state: MdocP4bMacSharedState,
         issuer_digest_handle: SharedDigestRelation,
-        revocation_digest_handle: Option<SharedDigestRelation>,
+        revocation_digest_handle: SharedDigestRelation,
         issuer_field_handle: SharedFieldRelation,
         interaction_claim: MdocMacInteractionClaim,
     ) -> Self {
-        let has_revocation = revocation_digest_handle.is_some();
         Self {
             rows: std::array::from_fn(|_| MacHalfWitness {
                 ap: [0; HALF_BYTES],
@@ -226,7 +221,6 @@ impl MdocMacBind {
             issuer_digest_handle: Some(issuer_digest_handle),
             revocation_digest_handle,
             revocation_digest_relation: None,
-            has_revocation,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
@@ -331,22 +325,16 @@ impl MdocMacBind {
 
 impl Air for MdocMacBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(0x4d44_4f43_4d41_4304);
+        channel.mix_u64(0x4d44_4f43_4d41_4305);
         channel.mix_u64(MACS_PER_PROOF as u64);
         channel.mix_u64(GF_BITS as u64);
         channel.mix_u64(ACTIVE_ROWS as u64);
         channel.mix_u64(POST_TRACE_COLS as u64);
-        channel.mix_u64(u64::from(self.has_revocation));
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.mac_half_relation = Some(MacHalfRelation::draw(channel));
-        self.revocation_digest_relation = Some(
-            self.revocation_digest_handle
-                .as_ref()
-                .map(SharedDigestRelation::get)
-                .unwrap_or_else(|| DigestBytesRelation::draw(channel)),
-        );
+        self.revocation_digest_relation = Some(self.revocation_digest_handle.get());
     }
 
     fn layout(&self) -> air_core::TreeLayout {
@@ -418,7 +406,7 @@ impl Air for MdocMacBind {
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<MacColumnEval>, stwo::core::verifier::VerificationError> {
-        Ok(preprocessed_trace(self.has_revocation))
+        Ok(preprocessed_trace())
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -490,14 +478,14 @@ impl AirProver for MdocMacBind {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(preprocessed_trace(self.has_revocation));
+        tb.extend_evals(preprocessed_trace());
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         fingerprint_preprocessed_columns(
             "eu_id_prover::mdoc_mac",
             &self.preprocessed_column_ids(),
-            &preprocessed_trace(self.has_revocation),
+            &preprocessed_trace(),
         )
     }
 
@@ -530,7 +518,6 @@ impl AirProver for MdocMacBind {
             &self.issuer_digest_relation(),
             &self.revocation_digest_relation(),
             &self.issuer_field_relation(),
-            self.has_revocation,
             binding_mask,
             claim_mask_beta,
         );
@@ -701,8 +688,16 @@ impl FrameworkEval for MacConsumerEval {
         if CHECK_POST_CONSTRAINTS {
             for bit_index in 0..GF_BITS {
                 let term = term_bits[bit_index].clone();
-                let key_bit = xor_expr::<E>(ap_bit.clone(), av_row_bit.clone());
-                eval.add_constraint(term.clone() - key_bit * s_bits[bit_index].clone());
+                let mut expected = av_row_bit.clone() * s_bits[bit_index].clone()
+                    + step_selectors[bit_index].clone() * ap_bit.clone();
+                if av_bits[bit_index] {
+                    expected = expected
+                        - m31_const::<E>(2)
+                            * step_selectors[bit_index].clone()
+                            * ap_bit.clone()
+                            * s_bits[bit_index].clone();
+                }
+                eval.add_constraint(active.clone() * term.clone() - expected);
                 eval.add_constraint(
                     first.clone() * (post_acc_bits[bit_index].clone() - term.clone())
                         + (active.clone() - first.clone())
@@ -777,20 +772,6 @@ impl FrameworkEval for MacBindingEval {
             &bytes,
         ));
 
-        // A slot with no live binding (the revocation slot when the statement
-        // carries no revocation leg) is pinned to the public nonzero
-        // placeholder; pinning it to zero would zero its MAC tags and publish
-        // a constant revocation-off marker in every proof.
-        let placeholder_bytes = absent_revocation_slot_bytes();
-        let zero_active =
-            active.clone() - issuer_digest_active - revocation_digest_active - field_active.clone();
-        for (byte_idx, byte) in bytes.iter().enumerate() {
-            eval.add_constraint(
-                zero_active.clone()
-                    * (byte.clone() - m31_const::<E>(u32::from(placeholder_bytes[byte_idx]))),
-            );
-        }
-
         for (byte_idx, byte) in bytes.iter().enumerate() {
             eval.add_to_relation(RelationEntry::new(
                 &self.issuer_field_relation,
@@ -831,7 +812,7 @@ impl FrameworkEval for MacBindingEval {
     }
 }
 
-fn preprocessed_trace(has_revocation: bool) -> Vec<MacColumnEval> {
+fn preprocessed_trace() -> Vec<MacColumnEval> {
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE]; CONSUMER_PREPROCESSED_COLS];
     for mac_index in 0..MACS_PER_PROOF {
@@ -848,17 +829,17 @@ fn preprocessed_trace(has_revocation: bool) -> Vec<MacColumnEval> {
         .into_iter()
         .map(|values| column_eval(CONSUMER_LOG_SIZE, values))
         .collect::<Vec<_>>();
-    out.extend(binding_preprocessed_trace(has_revocation));
+    out.extend(binding_preprocessed_trace());
     out
 }
 
-fn binding_preprocessed_trace(has_revocation: bool) -> Vec<MacColumnEval> {
+fn binding_preprocessed_trace() -> Vec<MacColumnEval> {
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); 1 << BINDING_LOG_SIZE]; BINDING_PREPROCESSED_COLS];
     for slot in 0..(MACS_PER_PROOF / 2) {
         columns[0][slot] = M31::from_u32_unchecked(1);
         columns[1][slot] = M31::from_u32_unchecked(u32::from(slot == 0));
-        columns[2][slot] = M31::from_u32_unchecked(u32::from(has_revocation && slot == 3));
+        columns[2][slot] = M31::from_u32_unchecked(u32::from(slot == 3));
         columns[3][slot] = M31::from_u32_unchecked(u32::from(matches!(slot, 1 | 2)));
         columns[4][slot] = M31::from_u32_unchecked(match slot {
             1 => field_id::MDOC_DEVICE_KEY_X,
@@ -871,19 +852,6 @@ fn binding_preprocessed_trace(has_revocation: bool) -> Vec<MacColumnEval> {
         .into_iter()
         .map(|values| column_eval(BINDING_LOG_SIZE, values))
         .collect()
-}
-
-/// The 32 binding-slot bytes an absent revocation slot must carry: the
-/// `MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE` placeholder in both halves, laid out
-/// exactly as `binding_value_rows` lays out live values.
-fn absent_revocation_slot_bytes() -> [u8; 32] {
-    let placeholder = eu_id_ec_coprocessor::ecdsa::MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE;
-    let mut bytes = [0u8; 32];
-    for i in 0..HALF_BYTES {
-        bytes[i] = placeholder[HALF_BYTES - 1 - i];
-        bytes[HALF_BYTES + i] = placeholder[HALF_BYTES - 1 - i];
-    }
-    bytes
 }
 
 fn binding_value_rows(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> [[u8; 32]; MACS_PER_PROOF / 2] {
@@ -925,11 +893,10 @@ fn binding_interaction_trace(
     issuer_digest_relation: &DigestBytesRelation,
     revocation_digest_relation: &DigestBytesRelation,
     issuer_field_relation: &FieldBytesRelation,
-    has_revocation: bool,
     claim_mask_trace: Option<&ClaimMaskTrace>,
     claim_mask_beta: Option<QM31>,
 ) -> (Vec<MacColumnEval>, QM31) {
-    let preprocessed = binding_preprocessed_trace(has_revocation);
+    let preprocessed = binding_preprocessed_trace();
     let active = &preprocessed[0];
     let issuer_digest_active = &preprocessed[1];
     let revocation_digest_active = &preprocessed[2];
@@ -1131,9 +1098,9 @@ fn post_interaction_trace(
         let mut acc = [false; GF_BITS];
         for step in 0..GF_BITS {
             let out_row = mac_index * GF_BITS + step;
-            let key_bit = ap_bits[step] ^ av_bits[step];
             for bit in 0..GF_BITS {
-                let term = key_bit && ladder[step][bit];
+                let term =
+                    affine_mac_term(ap_bits[step], av_bits[step], step, bit, ladder[step][bit]);
                 if term {
                     acc[bit] ^= true;
                 }
@@ -1141,10 +1108,7 @@ fn post_interaction_trace(
                 columns[GF_BITS + bit][out_row] = M31::from_u32_unchecked(u32::from(acc[bit]));
             }
         }
-        debug_assert_eq!(
-            bits_to_bytes(&acc),
-            gf128_mul(&xor_128(&row.ap, av), &row.x)
-        );
+        debug_assert_eq!(bits_to_bytes(&acc), gf128_tag(&row.ap, av, &row.x));
     }
     for row in ACTIVE_ROWS..CONSUMER_ROWS {
         let decoy = row - ACTIVE_ROWS;
@@ -1166,7 +1130,7 @@ fn mix_av_and_tags(
     av: &[u8; HALF_BYTES],
     tags: &[[u8; HALF_BYTES]; MACS_PER_PROOF],
 ) {
-    channel.mix_u64(0x5034_424d_4143_5447);
+    channel.mix_u64(0x5034_424d_4143_0002);
     for byte in av {
         channel.mix_u64(u64::from(*byte));
     }
@@ -1246,49 +1210,14 @@ fn random_gf_bits() -> [bool; GF_BITS] {
     bytes_to_bits(&bytes)
 }
 
-fn bytes_to_bits(bytes: &[u8; HALF_BYTES]) -> [bool; GF_BITS] {
-    let mut bits = [false; GF_BITS];
-    for (byte_index, byte) in bytes.iter().enumerate() {
-        for bit_index in 0..8 {
-            bits[byte_index * 8 + bit_index] = ((byte >> bit_index) & 1) == 1;
-        }
-    }
-    bits
-}
-
-fn bits_to_bytes(bits: &[bool; GF_BITS]) -> [u8; HALF_BYTES] {
-    let mut bytes = [0u8; HALF_BYTES];
-    for (bit_index, bit) in bits.iter().enumerate() {
-        if *bit {
-            bytes[bit_index / 8] |= 1 << (bit_index % 8);
-        }
-    }
-    bytes
-}
-
-fn xor_128(left: &[u8; HALF_BYTES], right: &[u8; HALF_BYTES]) -> [u8; HALF_BYTES] {
-    std::array::from_fn(|i| left[i] ^ right[i])
-}
-
-fn gf128_mul(left: &[u8; HALF_BYTES], right: &[u8; HALF_BYTES]) -> [u8; HALF_BYTES] {
-    let left = bytes_to_bits(left);
-    let right = bytes_to_bits(right);
-    let mut coeffs = [false; 255];
-    for i in 0..GF_BITS {
-        for j in 0..GF_BITS {
-            coeffs[i + j] ^= left[i] & right[j];
-        }
-    }
-    for high in (GF_BITS..255).rev() {
-        if coeffs[high] {
-            for offset in [0usize, 1, 2, 7] {
-                coeffs[high - GF_BITS + offset] ^= true;
-            }
-        }
-    }
-    let mut out = [false; GF_BITS];
-    out.copy_from_slice(&coeffs[..GF_BITS]);
-    bits_to_bytes(&out)
+fn affine_mac_term(
+    ap_bit: bool,
+    av_bit: bool,
+    step: usize,
+    output_bit: usize,
+    s_bit: bool,
+) -> bool {
+    (av_bit && s_bit) ^ (step == output_bit && ap_bit)
 }
 
 fn s_ladder(x: &[u8; HALF_BYTES]) -> [[bool; GF_BITS]; GF_BITS] {
@@ -1318,7 +1247,7 @@ mod tests {
     use stwo::prover::backend::simd::m31::N_LANES;
     use stwo_constraint_framework::{Multiplicity, PREPROCESSED_TRACE_IDX};
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct RowEval {
         preprocessed: VecDeque<Vec<M31>>,
         original: VecDeque<Vec<M31>>,
@@ -1382,6 +1311,63 @@ mod tests {
                 .filter(|(_, value)| *value != QM31::from_u32_unchecked(0, 0, 0, 0))
                 .collect()
         }
+    }
+
+    fn active_mac_rows(
+        witness: &MacHalfWitness,
+        av: &Gf128,
+        mac_index: usize,
+    ) -> (Vec<RowEval>, Gf128) {
+        let ap_bits = bytes_to_bits(&witness.ap);
+        let av_bits = bytes_to_bits(av);
+        let ladder = s_ladder(&witness.x);
+        let mut acc = [false; GF_BITS];
+        let mut rows = Vec::with_capacity(GF_BITS);
+
+        for step in 0..GF_BITS {
+            let previous_acc = acc;
+            let terms: [bool; GF_BITS] = std::array::from_fn(|bit| {
+                affine_mac_term(ap_bits[step], av_bits[step], step, bit, ladder[step][bit])
+            });
+            for bit in 0..GF_BITS {
+                acc[bit] ^= terms[bit];
+            }
+
+            let mut row = RowEval::default();
+            row.preprocessed.push_back(vec![m31_bit(true)]); // active
+            row.preprocessed.push_back(vec![m31_bit(step == 0)]); // first
+            row.preprocessed
+                .push_back(vec![m31_bit(step + 1 == GF_BITS)]); // last
+            for index in 0..MACS_PER_PROOF {
+                row.preprocessed
+                    .push_back(vec![m31_bit(index == mac_index)]);
+            }
+            for index in 0..GF_BITS {
+                row.preprocessed.push_back(vec![m31_bit(index == step)]);
+            }
+
+            row.original.push_back(vec![m31_bit(ap_bits[step])]);
+            for bit in 0..GF_BITS {
+                row.original.push_back(vec![
+                    m31_bit(ladder[step][bit]),
+                    m31_bit(step != 0 && ladder[step - 1][bit]),
+                ]);
+            }
+            for term in terms {
+                row.post.push_back(vec![m31_bit(term)]);
+            }
+            for bit in 0..GF_BITS {
+                row.post
+                    .push_back(vec![m31_bit(acc[bit]), m31_bit(previous_acc[bit])]);
+            }
+            rows.push(row);
+        }
+
+        (rows, bits_to_bytes(&acc))
+    }
+
+    fn m31_bit(bit: bool) -> M31 {
+        M31::from_u32_unchecked(u32::from(bit))
     }
 
     impl EvalAtRow for RowEval {
@@ -1452,6 +1438,97 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mdoc_mac_consumer_accepts_affine_zero_and_nonzero_values() {
+        let ap = [0x5au8; HALF_BYTES];
+        let av = [0xa5u8; HALF_BYTES];
+        for x in [[0u8; HALF_BYTES], [0x3cu8; HALF_BYTES]] {
+            let witness = MacHalfWitness { ap, x };
+            let tag = gf128_tag(&ap, &av, &x);
+            let (rows, accumulated_tag) = active_mac_rows(&witness, &av, 0);
+            assert_eq!(accumulated_tag, tag);
+            if x == [0u8; HALF_BYTES] {
+                assert_eq!(tag, ap, "x=0 must publish the fresh additive pad");
+            }
+            let mut tags = [[0u8; HALF_BYTES]; MACS_PER_PROOF];
+            tags[0] = tag;
+            let evaluator = MacConsumerEval {
+                mac_half_relation: MacHalfRelation::dummy(),
+                claim_mask_beta: None,
+                av,
+                tags,
+            };
+            for (step, row) in rows.into_iter().enumerate() {
+                let evaluated = evaluator.clone().evaluate(row);
+                assert!(
+                    evaluated.nonzero_constraints().is_empty(),
+                    "honest affine MAC row {step} failed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mdoc_mac_consumer_rejects_public_and_trace_tampering() {
+        let witness = MacHalfWitness {
+            ap: [0x5au8; HALF_BYTES],
+            x: [0x3cu8; HALF_BYTES],
+        };
+        let av = [0xa5u8; HALF_BYTES];
+        let tag = gf128_tag(&witness.ap, &av, &witness.x);
+        let (honest_rows, _) = active_mac_rows(&witness, &av, 0);
+        let evaluator = |av, tag| {
+            let mut tags = [[0u8; HALF_BYTES]; MACS_PER_PROOF];
+            tags[0] = tag;
+            MacConsumerEval {
+                mac_half_relation: MacHalfRelation::dummy(),
+                claim_mask_beta: None,
+                av,
+                tags,
+            }
+        };
+
+        let mut wrong_tag = tag;
+        wrong_tag[0] ^= 1;
+        assert!(!evaluator(av, wrong_tag)
+            .evaluate(honest_rows.last().expect("last row").clone())
+            .nonzero_constraints()
+            .is_empty());
+
+        let mut wrong_av = av;
+        wrong_av[0] ^= 1;
+        assert!(honest_rows.iter().cloned().any(|row| {
+            !evaluator(wrong_av, tag)
+                .evaluate(row)
+                .nonzero_constraints()
+                .is_empty()
+        }));
+
+        let mut bad_pad = honest_rows[0].clone();
+        let ap = bad_pad.original.front_mut().expect("a_p trace bit");
+        ap[0] = M31::from_u32_unchecked(1) - ap[0];
+        assert!(!evaluator(av, tag)
+            .evaluate(bad_pad)
+            .nonzero_constraints()
+            .is_empty());
+
+        let mut bad_ladder = honest_rows[1].clone();
+        let s = bad_ladder.original.get_mut(1).expect("first s bit");
+        s[0] = M31::from_u32_unchecked(1) - s[0];
+        assert!(!evaluator(av, tag)
+            .evaluate(bad_ladder)
+            .nonzero_constraints()
+            .is_empty());
+
+        let mut bad_term = honest_rows[0].clone();
+        let term = bad_term.post.front_mut().expect("first term bit");
+        term[0] = M31::from_u32_unchecked(1) - term[0];
+        assert!(!evaluator(av, tag)
+            .evaluate(bad_term)
+            .nonzero_constraints()
+            .is_empty());
+    }
+
     fn test_rows() -> [MacHalfWitness; MACS_PER_PROOF] {
         std::array::from_fn(|_| MacHalfWitness {
             ap: [0; HALF_BYTES],
@@ -1502,7 +1579,6 @@ mod tests {
             &issuer_digest_relation,
             &revocation_digest_relation,
             &issuer_field_relation,
-            true,
             None,
             None,
         );
@@ -1512,7 +1588,6 @@ mod tests {
             &issuer_digest_relation,
             &revocation_digest_relation,
             &issuer_field_relation,
-            true,
             Some(&mask),
             Some(beta),
         );

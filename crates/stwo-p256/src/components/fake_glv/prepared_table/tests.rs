@@ -246,14 +246,14 @@ fn prepared_table_prepared_point_trace_detects_mutated_provider() {
     assert_eq!(err, PreparedTableError::PreparedPointTraceMismatch);
 }
 
-// --- Full-table pinning adversarial audits (rejection oracle = relation
-// balance, lessons.md #18). The honest table must keep `CertBase` and
-// `PreparedTableCanonical` balanced; a wrong base or inconsistent operand
-// must imbalance the matching relation. ---
+// --- Full-table pinning adversarial audits ---------------------------------
+//
+// A valid table balances `CertBase` and `PreparedTableCanonical`.
+// An incorrect base or operand must make its relation unbalanced.
 
-/// Draw the three pinning relations from one channel and compute, for the
-/// given (possibly mutated) EC base trace + cert base trace, the
-/// `CertBase` and `PreparedTableCanonical` net sums (zero iff balanced).
+/// Computes the net pinning sums for the supplied traces.
+///
+/// A zero sum means that the relation is balanced.
 fn pinned_relation_balances(
     certs: &CertScalarInputClaim,
     ec_base: &[M31ColumnEval],
@@ -364,7 +364,7 @@ fn bump_x(point: &mut PreparedAffinePoint) {
 
 #[test]
 fn pinning_rejects_cert0_prepared_p_not_equal_generator() {
-    // cert0 base must equal G; mutating a cert0 P-cell (Base(1).lhs) away
+    // cert0 base must equal G. Mutating a cert0 P-cell (Base(1).lhs) away
     // from G leaves the CertBase consumer demanding a point the cert-base
     // provider never yields.
     let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
@@ -385,7 +385,7 @@ fn pinning_rejects_cert0_prepared_p_not_equal_generator() {
 
 #[test]
 fn pinning_rejects_cert1_prepared_p_not_equal_public_key() {
-    // cert1 base must equal the public key Q; mutating a cert1 P-cell
+    // cert1 base must equal the public key Q. Mutating a cert1 P-cell
     // (Base(2).lhs) away from Q imbalances CertBase.
     let (certs, scalar_setup, mut trace, log_size) = pinning_audit_fixture(42);
     let row = find_row_index(
@@ -424,16 +424,11 @@ fn pinning_rejects_inconsistent_r_between_base_rows() {
     );
 }
 
-/// Minimal recording `EvalAtRow` for `PreparedTableProjectiveSourceEval`: the
-/// consumer reads only same-row base-trace masks (no preprocessed columns), so
-/// this serves base columns by read order and records each polynomial
-/// constraint instead of asserting. LogUp emissions are skipped — the C5-2
-/// coordinate-formula pins are pure polynomial constraints, so a forge that
-/// keeps every relation balanced (e.g. forging provider AND consumer in
-/// lockstep) is still caught here. Mirrors
-/// `projective_rcb_mul::tests::RecordingMulEvaluator` (lessons.md #18: no
-/// `LogupAtRow`, so a violated constraint is a recorded non-zero, not an
-/// uncatchable abort).
+/// Records polynomial constraints for `PreparedTableProjectiveSourceEval`.
+///
+/// The evaluator serves same-row base columns in read order.
+/// It does not evaluate LogUp emissions.
+/// This permits direct inspection of nonzero polynomial constraints.
 struct RecordingSourceEvaluator<'a> {
     base: &'a [Vec<M31>],
     col_index: usize,
@@ -516,13 +511,10 @@ fn projective_source_constraints_hold(log_size: u32, base: &[Vec<M31>]) -> bool 
     true
 }
 
-/// C5-2 binding isolation for the prepared table: forging a committed
-/// `output_affine.x` limb on a Double / MixedAdd source row must violate the
-/// coordinate-formula POLYNOMIAL constraints themselves — independent of any
-/// LogUp relation, so a prover who forges the provider and consumer in lockstep
-/// (keeping `PreparedTableProjectiveSource` balanced) is still rejected. Before
-/// this change the source had "no coordinate constraints yet" and both forges
-/// satisfied every polynomial constraint of the consumer.
+/// Confirms that changed projective outputs fail their binding checks.
+///
+/// Polynomial constraints check the coordinate formulas.
+/// Multiplication relation balances check the deduplicated operand bindings.
 #[test]
 fn prepared_table_projective_source_rejects_forged_op_outputs() {
     use crate::scalar::scalar_mod_mul::columns::padded_log_size;
@@ -547,12 +539,9 @@ fn prepared_table_projective_source_rejects_forged_op_outputs() {
         "honest prepared-table source trace must satisfy the polynomial constraints"
     );
 
-    // Operand dedup moved the affine-normalization OPERAND binding (3a) out of
-    // the polynomial constraints and into the consume tuples: M13.lhs's value
-    // IS the committed `output.x`, pinned to the silo's proven operand by the
-    // `ProjectiveRcbMulResult` balance. A forged `output.x` therefore no
-    // longer trips a polynomial constraint — the oracle is the consumer's
-    // mul-result sum drifting from the (unchanged) provider yield.
+    // `M13.lhs` is the committed `output.x` value.
+    // The multiplication relation binds it to the silo operand.
+    // Thus, a changed value makes the consumer and provider sums differ.
     let mut channel = stwo::core::channel::Blake2sChannel::default();
     let ec_row_relation = PreparedTableEcRowRelation::draw(&mut channel);
     let mul_result_relation =

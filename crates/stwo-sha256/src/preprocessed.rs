@@ -1,35 +1,28 @@
-//! Preprocessed-trace generator for every SHA-256 lookup table.
+//! Preprocessed trace construction for the SHA-256 AIR.
 //!
-//! Builds the `CircleEvaluation`s that fill tree[0] (the preprocessed
-//! tree) and the parallel `PreProcessedColumnId` list that the
-//! [`stwo_constraint_framework::TraceLocationAllocator`] expects.
+//! This module constructs the active range tables, round selectors, and
+//! parallel `PreProcessedColumnId` list for tree 0.
 //!
-//! Emission order **must match** `crate::components::all_preprocessed_column_ids`
-//! exactly; the verifier looks up each preprocessed column by ID and the
-//! prover's commitment is a single tree over the concatenated columns —
-//! drift between the two breaks the verifier's mask reads.
+//! Emission order must match `crate::components::all_preprocessed_column_ids`.
+//! The verifier finds each preprocessed column by ID.
+//! The prover commits the concatenated columns in one tree.
+//! An order mismatch gives the verifier incorrect mask values.
 //!
-//! ## Domain & ordering convention
-//!
-//! Every table's data is written into a [`BaseColumn`] via
-//! `(0..rows).map(|i| f(i)).collect::<BaseColumn>()` — `f(i)` is the
-//! row-`i` content of the table per `crate::tables`. The resulting column
-//! is wrapped as `CircleEvaluation::new(CanonicCoset::new(log_size).circle_domain(), col)`
-//! with the `BitReversedOrder` type tag, matching the standard Stwo
-//! preprocessed-table convention (see `stwo::examples::blake::preprocessed_columns`).
+//! Each table maps its row function into a [`BaseColumn`]. A
+//! `CircleEvaluation` then uses the canonical coset and `BitReversedOrder`.
+//! This is the standard Stwo preprocessed-table convention.
 //!
 //! The matching multiplicity columns built by `crate::stark` use the same
 //! index convention, so producer and consumer balance correctly.
 //!
 //! ## Wired tables
 //!
-//! The split-pack tables were removed (Σ/σ/Maj/Ch are computed directly from
-//! committed boolean bit-planes and recomposed against them), so the
-//! standalone preprocessed trace is:
+//! The active AIR computes Sigma, Maj, and Ch from Boolean bit planes. Its
+//! standalone preprocessed trace contains:
 //!
 //! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
 //! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
-//!   — value `1` at storage index `Layout::block_slot(0, log_n_rows) = 0`,
+//!   — value `1` at storage index `Layout::row_slot(0, log_n_rows) = 0`,
 //!   zero elsewhere. The AIR pins `is_first_block ≡ is_first_row`, which
 //!   anchors the §10.3 chain at block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
 //! - 9 round-cyclic columns of the rotated one-row-per-round layout.
@@ -57,16 +50,10 @@ use crate::trace::Layout;
 /// `log2` of the row count for every 2¹⁶-row table.
 pub const LOG_SIZE_16: u32 = 16;
 
-/// `log2` of the row count of the packed Maj/Ch table at group width `W`.
-#[inline]
-pub const fn maj_ch_log_size(group_width: u32) -> u32 {
-    3 * group_width
-}
-
-/// Aggregate of one preprocessed-tree commit input: the column
-/// evaluations, their stable IDs, and their log sizes — all three of
-/// length 14 (see [`tests::total_preprocessed_columns_is_14`]) and aligned
-/// index-for-index.
+/// Preprocessed tree input with evaluations, IDs, and log sizes.
+///
+/// Each vector contains 14 aligned entries.
+/// See `tests::total_preprocessed_columns_is_14`.
 pub type PreprocessedTrace = (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     Vec<PreProcessedColumnId>,
@@ -74,11 +61,9 @@ pub type PreprocessedTrace = (
 );
 
 pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
-    // Class D: every shared producer's preprocessed columns (value/group cells
-    // + the `is_dummy` selector) live at the blinded log size `L + 1` (doubled
-    // domain, upper half = reserved dummy region). Order matches
-    // `shared_table_preprocessed_column_ids`: per producer, value cols then the
-    // dummy selector.
+    // Each Class D column uses blinded log size `L + 1`.
+    // The upper half is the reserved dummy region.
+    // Each producer emits value columns before its dummy selector.
     let mut log_sizes = Vec::new();
     for &kind in RANGE_TABLES {
         // 1 value col + 1 is_dummy.
@@ -92,14 +77,11 @@ pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
 
 /// Process-lifetime cache of the shared-table preprocessed trace.
 ///
-/// Its content is fully static — the value/group cells and the `is_dummy`
-/// selector depend only on the fixed table layouts, never on any per-proof
-/// witness or randomness (the Class-D fresh blind multiplicities live in the
-/// *committed* multiplicity trace built by `shared_table_trace`, not here). So
-/// the identical `(evals, ids, log_sizes)` triple is reusable across every
-/// prove/verify in one process, mirroring [`PREPROCESSED_TRACE_CACHE`]. Without
-/// this, `write_preprocessed` + `preprocessed_column_fingerprints` (prove) and
-/// the verifier root recompute each rebuilt all 4 doubled range tables from scratch.
+/// The cached content is static.
+/// Fixed table layouts define the value cells and `is_dummy` selector.
+/// Per-proof randomness exists only in the committed multiplicity trace.
+/// One process can reuse the same evaluations, IDs, and log sizes.
+/// This avoids repeated construction of four doubled range tables.
 static SHARED_TABLE_PREPROCESSED_CACHE: OnceLock<PreprocessedTrace> = OnceLock::new();
 
 pub fn generate_shared_table_preprocessed_trace() -> PreprocessedTrace {
@@ -115,36 +97,30 @@ pub fn generate_shared_table_preprocessed_trace() -> PreprocessedTrace {
         .clone()
 }
 
-type PreprocessedTraceCacheKey = (u32, u32, u32);
+type PreprocessedTraceCacheKey = (u32, u32);
 static PREPROCESSED_TRACE_CACHE: OnceLock<
     Mutex<HashMap<PreprocessedTraceCacheKey, PreprocessedTrace>>,
 > = OnceLock::new();
 
-/// Log sizes of every preprocessed column, in canonical order —
-/// **metadata only**, allocating no `BaseColumn`/`CircleEvaluation`.
+/// Log sizes of every preprocessed column in canonical order.
 ///
 /// This is the verifier's entry point. To re-commit `tree[0]` the verifier
-/// needs only the per-column log sizes (and the IDs, from
-/// [`all_preprocessed_column_ids`]) — never the column *data*. Calling
-/// [`generate_preprocessed_trace`] on the verify path would rebuild every
-/// lookup table (millions of rows for Maj/Ch at `2^(3W)`) only to discard
-/// the evaluations.
-///
+/// needs only the per-column log sizes and the IDs from
+/// [`all_preprocessed_column_ids`]. It does not need the column data. Calling
+/// [`generate_preprocessed_trace`] on the verify path would rebuild every column.
 /// The returned vector is identical, index-for-index, to the `log_sizes`
 /// that [`generate_preprocessed_trace`] returns and to the `log_size()` of
 /// each emitted column's domain — pinned by
-/// [`tests::metadata_log_sizes_match_built_columns`].
-pub fn preprocessed_log_sizes(group_width: u32, log_n_rows: u32) -> Vec<u32> {
-    preprocessed_log_sizes_with_range_min(group_width, log_n_rows, 0)
+/// `tests::metadata_log_sizes_match_built_columns`.
+pub fn preprocessed_log_sizes(log_n_rows: u32) -> Vec<u32> {
+    preprocessed_log_sizes_with_range_min(log_n_rows, 0)
 }
 
 pub(crate) fn preprocessed_log_sizes_with_range_min(
-    group_width: u32,
     log_n_rows: u32,
     range_min_log_size: u32,
 ) -> Vec<u32> {
     let mut log_sizes = Vec::new();
-    let _ = group_width;
     // 4 range tables × 1 column, each at its own range_log_size(kind).
     for &kind in RANGE_TABLES {
         log_sizes.push(range_log_size(kind).max(range_min_log_size));
@@ -163,20 +139,19 @@ pub(crate) fn preprocessed_log_sizes_with_range_min(
 /// The returned `Vec`s line up index-for-index:
 /// `trace[i]`'s column ID is `ids[i]` and its log size is `log_sizes[i]`.
 ///
-/// `log_n_rows` is the main `Sha256Eval` trace's `log_size`; the
-/// `is_first_row` selector column is sized to it and is `1` at storage
-/// index `Layout::block_slot(0, log_n_rows) = 0`, `0` elsewhere.
-pub fn generate_preprocessed_trace(group_width: u32, log_n_rows: u32) -> PreprocessedTrace {
-    generate_preprocessed_trace_with_range_min(group_width, log_n_rows, 0)
+/// `log_n_rows` is the main `Sha256Eval` trace's `log_size`. The
+/// The `is_first_row` selector has the same size. It is one at
+/// `Layout::row_slot(0, log_n_rows)` and zero elsewhere.
+pub fn generate_preprocessed_trace(log_n_rows: u32) -> PreprocessedTrace {
+    generate_preprocessed_trace_with_range_min(log_n_rows, 0)
 }
 
 pub(crate) fn generate_preprocessed_trace_with_range_min(
-    group_width: u32,
     log_n_rows: u32,
     range_min_log_size: u32,
 ) -> PreprocessedTrace {
     let cache = PREPROCESSED_TRACE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (group_width, log_n_rows, range_min_log_size);
+    let key = (log_n_rows, range_min_log_size);
     {
         let cache = cache.lock().expect("SHA preprocessed cache poisoned");
         if let Some(trace) = cache.get(&key) {
@@ -184,28 +159,24 @@ pub(crate) fn generate_preprocessed_trace_with_range_min(
         }
     }
 
-    let trace = generate_preprocessed_trace_uncached(group_width, log_n_rows, range_min_log_size);
+    let trace = generate_preprocessed_trace_uncached(log_n_rows, range_min_log_size);
     let mut cache = cache.lock().expect("SHA preprocessed cache poisoned");
     cache.entry(key).or_insert_with(|| trace.clone()).clone()
 }
 
 fn generate_preprocessed_trace_uncached(
-    group_width: u32,
     log_n_rows: u32,
     range_min_log_size: u32,
 ) -> PreprocessedTrace {
     let mut evals = Vec::new();
     let mut log_sizes = Vec::new();
 
-    let _ = group_width;
-
     // ---- 4 range tables (Range_2, Range_4, Range_5, Range_8) ----
     //
-    // Each `Range_k` has row content `[0, 1, …, k-1]`. Producers `< 2^4`
-    // are padded with leading value `0` up to `2^LOG_N_LANES = 16` rows;
-    // the consumer never fires lookups on those padding slots, so they
-    // do not perturb the LogUp balance (the matching multiplicity column
-    // holds zeros for the padded suffix — see `range_k_multiplicities`).
+    // Each `Range_k` has row content `[0, 1, …, k-1]`.
+    // Small producers add trailing zero rows up to the SIMD minimum.
+    // Consumers do not use the padding rows.
+    // Matching multiplicities are zero in the padding suffix.
     for &kind in RANGE_TABLES {
         let log_size = range_log_size(kind).max(range_min_log_size);
         let domain = CanonicCoset::new(log_size).circle_domain();
@@ -222,7 +193,7 @@ fn generate_preprocessed_trace_uncached(
     // ---- 1 `is_first_row` selector at the main trace's log_size ----
     //
     // Value `1` at the storage index that block 0 occupies (which is `0`
-    // by `Layout::block_slot(0, log_n_rows)`), `0` elsewhere. The AIR
+    // by `Layout::row_slot(0, log_n_rows)`), `0` elsewhere. The AIR
     // consumes this in `Sha256Eval::evaluate` to pin
     // `is_first_block ≡ is_first_row`, anchoring the §10.3 chain on
     // block 0's IV binding (closes design §11 L2).
@@ -246,12 +217,11 @@ fn generate_preprocessed_trace_uncached(
 
     // ---- 9 round-cyclic columns at the main trace's log_n_rows ----
     //
-    // Each is a function of `t = natural_row mod 64` alone. Values are laid
-    // out in storage order: storage slot `s` holds `f(natural(s) mod 64)`,
-    // where `natural ↔ storage` is the same `Layout::row_slot` bijection the
-    // trace writer uses — computed here by filling a natural-order buffer
-    // and scattering through `row_slot`. Order matches
-    // `components::round_cyclic_column_ids`:
+    // Each column depends only on `t = natural_row mod 64`.
+    // Storage slot `s` holds `f(natural(s) mod 64)`.
+    // `Layout::row_slot` defines the natural-to-storage mapping.
+    // Fill a natural-order buffer, then scatter it through that mapping.
+    // The order matches `components::round_cyclic_column_ids`:
     // `k_lo, k_hi, is_round_0, _1, _2, _3, _15, _63, is_schedule`.
     {
         use crate::constants::{K, N_ROUNDS};
@@ -363,7 +333,6 @@ fn range_rows(kind: crate::components::RangeKind) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::partitions::MAX_ROUND_GROUP_BITS;
     use stwo::prover::backend::simd::m31::LOG_N_LANES;
     use stwo::prover::backend::Column;
 
@@ -373,7 +342,7 @@ mod tests {
     #[test]
     fn total_preprocessed_columns_is_14() {
         let log_n_rows = LOG_N_LANES;
-        let (evals, ids, log_sizes) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
+        let (evals, ids, log_sizes) = generate_preprocessed_trace(log_n_rows);
         assert_eq!(evals.len(), 14);
         assert_eq!(ids.len(), 14);
         assert_eq!(log_sizes.len(), 14);
@@ -385,9 +354,8 @@ mod tests {
     /// and 9 round-cyclic columns at the main trace's `log_n_rows`.
     #[test]
     fn log_sizes_lay_out_correctly() {
-        let w = MAX_ROUND_GROUP_BITS;
         let log_n_rows = LOG_N_LANES;
-        let (_, _, log_sizes) = generate_preprocessed_trace(w, log_n_rows);
+        let (_, _, log_sizes) = generate_preprocessed_trace(log_n_rows);
         for (i, &ls) in log_sizes.iter().enumerate() {
             let expected = if i < 3 {
                 LOG_N_LANES // Range_2/4/5
@@ -403,11 +371,11 @@ mod tests {
     /// The `is_first_row` selector is `1` at storage index 0 and `0`
     /// elsewhere. This pins the `is_first_block ≡ is_first_row` constraint
     /// in `Sha256Eval` to a single anchor at block 0's slot (which
-    /// `Layout::block_slot(0, log_n_rows)` resolves to index 0).
+    /// `Layout::row_slot(0, log_n_rows)` resolves to index 0).
     #[test]
     fn is_first_row_selector_is_one_at_index_zero() {
         let log_n_rows = LOG_N_LANES;
-        let (evals, _, _) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, log_n_rows);
+        let (evals, _, _) = generate_preprocessed_trace(log_n_rows);
         // The selector is column 4 (after the 4 Range_k value columns,
         // followed by the 9 round-cyclic columns).
         let selector = &evals[4];
@@ -430,10 +398,9 @@ mod tests {
     /// the two cannot silently drift.
     #[test]
     fn metadata_log_sizes_match_built_columns() {
-        let w = MAX_ROUND_GROUP_BITS;
         let log_n_rows = LOG_N_LANES;
-        let (evals, ids, built_log_sizes) = generate_preprocessed_trace(w, log_n_rows);
-        let meta = preprocessed_log_sizes(w, log_n_rows);
+        let (evals, ids, built_log_sizes) = generate_preprocessed_trace(log_n_rows);
+        let meta = preprocessed_log_sizes(log_n_rows);
 
         assert_eq!(meta, built_log_sizes, "metadata vs builder log_sizes");
         assert_eq!(meta.len(), evals.len());
@@ -447,38 +414,32 @@ mod tests {
         }
     }
 
-    /// [`preprocessed_log_sizes`] is pure metadata (no table build), so its
-    /// shape is checked cheaply across the whole `group_width` range and for
-    /// large `log_n_rows`: 14 columns, with the trailing selector/cyclic
-    /// columns (indices 4..14) sized to `log_n_rows`.
+    /// The shape has 14 columns. The last ten selector and cyclic columns use
+    /// `log_n_rows`.
     #[test]
-    fn metadata_log_sizes_shape_for_all_widths() {
-        for w in MAX_ROUND_GROUP_BITS..=crate::tables::MAX_GROUP_WIDTH {
-            for log_n_rows in [LOG_N_LANES, 20, 30] {
-                let meta = preprocessed_log_sizes(w, log_n_rows);
-                assert_eq!(meta.len(), 14, "w={w}, l={log_n_rows}");
-                assert_eq!(
-                    meta[4..].iter().filter(|&&l| l == log_n_rows).count(),
-                    10,
-                    "selector + cyclic log_sizes"
-                );
-            }
+    fn metadata_log_sizes_shape() {
+        for log_n_rows in [LOG_N_LANES, 20, 30] {
+            let meta = preprocessed_log_sizes(log_n_rows);
+            assert_eq!(meta.len(), 14, "l={log_n_rows}");
+            assert_eq!(
+                meta[4..].iter().filter(|&&l| l == log_n_rows).count(),
+                10,
+                "selector + cyclic log_sizes"
+            );
         }
     }
 
-    /// Guard against silent field-order drift in the emitted preprocessed
-    /// columns (audit P3): emission order (here) and the column-ID order
-    /// (`components::*_column_ids`) are two hand-written lists coupled only
-    /// by position, so a swap like `o_main_lo` ↔ `o_main_hi` or `g0` ↔ `g1`
-    /// compiles and passes the count-only check while silently mislabelling
-    /// the verifier's mask data. Each family's columns are re-derived from
-    /// the table rows in the *documented* order and compared position-for-
-    /// position against what `generate_preprocessed_trace` emits.
+    /// Confirm the field order of emitted preprocessed columns.
+    ///
+    /// Emission order and column ID order are separate lists.
+    /// A one-sided swap can preserve the column count but change verifier data.
+    /// This test rebuilds each family in its documented order.
+    /// It then compares each position with `generate_preprocessed_trace`.
     #[test]
     fn emitted_columns_match_documented_field_order() {
         use crate::components::RANGE_TABLES;
 
-        let (evals, _, _) = generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, LOG_N_LANES);
+        let (evals, _, _) = generate_preprocessed_trace(LOG_N_LANES);
 
         // Split-pack tables are gone: the standalone preprocessed trace now
         // leads with the 4 `Range_k` value columns, in `RANGE_TABLES` order.
@@ -498,14 +459,14 @@ mod tests {
     /// the shared trace is range-only. Structure and content checks:
     /// - 8 columns (4 range × (value + is_dummy)).
     /// - every id is in the `sha_shared_` namespace.
-    /// - every value/selector column is at the blinded log size `L + 1`.
+    /// - each value and selector column has the masked log size `L + 1`.
     /// - each value column's REAL lower half matches the regular (standalone)
-    ///   table content; the dummy upper half holds unreachable keys `≥ 2^16`.
+    ///   table content. The dummy upper half holds unreachable keys `≥ 2^16`.
     #[test]
     fn shared_table_columns_are_class_d_blinded_with_distinct_ids() {
         use crate::components::{RANGE_TABLES, SHARED_ID_PREFIX};
         let (regular_evals, _regular_ids, _regular_log_sizes) =
-            generate_preprocessed_trace(MAX_ROUND_GROUP_BITS, LOG_N_LANES);
+            generate_preprocessed_trace(LOG_N_LANES);
         let (shared_evals, shared_ids, shared_log_sizes) =
             generate_shared_table_preprocessed_trace();
 
@@ -525,7 +486,7 @@ mod tests {
             );
         }
 
-        // The regular trace leads with the 4 range value columns; the shared
+        // The regular trace leads with the 4 range value columns. The shared
         // trace pairs each with an `is_dummy` selector at a blinded domain of
         // at least log9. Its equal-size lower/upper halves are respectively
         // honest-table padding and unreachable dummy rows.

@@ -11,43 +11,15 @@ use crate::limbs::P256M31BigInt;
 use crate::range_checks::{add_range_check, RangeCheckRelation};
 use crate::types::U256;
 
-// AIR DESIGN ARTIFACTS (air-writer)
-//
-// Property:
-//   For each active split Solinas reduction digit,
-//     folded_digit - correction_product_digit - result_limb
-//       + prev_carry - 2^13 * carry = 0.
-//
-// Algorithm choice:
-//   This helper proves one narrow digit recurrence after raw product generation
-//   and Solinas matrix folding have been split into 13-bit digits, and after
-//   correction*p has been accumulated into signed product digits. Encoding the
-//   whole folded coefficient directly is rejected because observed bounds exceed
-//   centered M31 headroom.
-//
-// Layout manifest:
-//   Pattern A, same-row helper. Columns are read by caller in this order:
-//   folded_digit, correction_product_digit, result_limb, prev_carry, carry.
-//   No preprocessed columns, no cross-row masks, no interaction finalization in
-//   this helper. Callers own product-digit/carry-link relations and
-//   padding/enabler policy.
-//
-// Relation contracts:
-//   Uses Range13 for folded/result digits and a signed carry range for
-//   prev_carry/carry. correction_product_digit is not range-checked here; it
-//   must be supplied by the correction-product accumulator relation in the full
-//   component.
-//
-// Degree worksheet:
-//   Range uses are linear in `gate`. The recurrence is linear; with a linear
-//   gate, total degree is 2.
-//
-// Adversarial plan:
-//   Mutating any digit or carry should violate the recurrence or a range lookup.
-//   Out-of-range folded/result digits should fail Range13; out-of-bound carries
-//   should fail the signed carry range. Full malicious relation-balance tests
-//   are deferred to the component that owns trace generation and interaction
-//   columns.
+// Each active row proves one split Solinas reduction digit.
+// The row uses this recurrence:
+// folded_digit - correction_product_digit - result_limb
+//     + prev_carry - 2^13 * carry = 0.
+// The caller supplies columns in the recurrence order.
+// Range13 checks the folded and result digits.
+// A signed table checks both carries.
+// The correction accumulator supplies `correction_product_digit`.
+// The complete constraint has degree 2.
 pub const FP_SOLINAS_REDUCTION_DIGIT_TRACE_COLUMNS: usize = 5;
 pub const FP_SOLINAS_REDUCTION_DIGITS: usize = N_LIMBS + FP_SOLINAS_SIGNED_CORRECTION_LIMBS - 1;
 pub const FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT: i128 =
@@ -79,7 +51,7 @@ pub struct FpSolinasReductionDigitColumns<E: EvalAtRow> {
 ///
 /// This is the row-local recurrence used after high-product terms have been
 /// folded through the P-256 Solinas matrix and split into 13-bit digits. It is
-/// intentionally narrower than a whole field multiplication row; raw product
+/// intentionally narrower than a whole field multiplication row. Raw product
 /// generation, matrix folding, and carry-link relations are separate rows.
 pub fn add_fp_solinas_reduction_digit<E: EvalAtRow>(
     eval: &mut E,
@@ -130,14 +102,10 @@ pub fn fp_solinas_reduction_digit_fits_m31() -> bool {
 /// `|correction|` plus a boolean sign bit. They are shared across all
 /// [`FP_SOLINAS_REDUCTION_DIGITS`] reduction-digit rows of one Fp multiply.
 ///
-/// Soundness (closes C1): without these, `correction_product_digit` is an
-/// unconstrained free witness bound only by the per-digit reduction recurrence,
-/// so a prover can pick wrong product digits (compensating via
-/// `result_limb`/carry) and have a FALSE product reduce correctly. Binding each
-/// product digit to the convolution of these Range13-checked digits with the
-/// constant P-256 modulus limbs makes every `correction_product_digit` bounded
-/// by `FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT` *by construction* and forces
-/// it to equal the unique honest value.
+/// These columns bind each correction product digit to a constrained convolution.
+/// Without this binding, the correction product digit would be a free witness.
+/// Range13 checks the correction digits.
+/// Constant modulus limbs determine the unique correction product.
 pub struct FpSolinasCorrectionDigitColumns<E: EvalAtRow> {
     /// Little-endian 13-bit digits of `|correction|`.
     pub digits: [E::F; FP_SOLINAS_SIGNED_CORRECTION_LIMBS],
@@ -150,14 +118,14 @@ pub struct FpSolinasCorrectionDigitColumns<E: EvalAtRow> {
 /// P-256 modulus limbs, closing C1.
 ///
 /// Enforces, gated by `gate`:
-///  * each `correction_digit[i] ∈ [0, 2¹³)` (Range13 lookup);
-///  * `sign_bit ∈ {0, 1}` (`sign_bit·(sign_bit−1) = 0`); and, with
+///  * each `correction_digit[i] ∈ [0, 2¹³)` (Range13 lookup).
+///  * `sign_bit ∈ {0, 1}` (`sign_bit·(sign_bit−1) = 0`). And, with
 ///    `sign = 1 − 2·sign_bit`,
 ///  * for every reduction digit `d`,
 ///    `correction_product_digit[d] = sign · Σ_{i+j=d} correction_digit[i]·MOD[j]`
 ///    where `MOD[j]` are the constant modulus limbs.
 ///
-/// The convolution term has degree two (`sign × digit`); gated it is degree
+/// The convolution term has degree two (`sign × digit`). Gated it is degree
 /// three, matching the sign-bit boolean constraint above and fitting
 /// the `log_size + 1` constraint-degree bound, so no auxiliary `signed_digit`
 /// columns are required.
@@ -436,10 +404,9 @@ fn correction_product_digits(
     Ok(digits)
 }
 
-/// Trace-generation counterpart of [`add_fp_solinas_correction_digit_binding`]:
-/// the boolean sign bit (`0` non-negative, `1` negative) and the nine
-/// little-endian 13-bit digits of `|correction|`, ready to commit as the
-/// per-mul correction-digit columns.
+/// Returns trace values for [`add_fp_solinas_correction_digit_binding`].
+///
+/// The values contain a sign bit and nine little-endian 13-bit digits.
 pub fn fp_solinas_correction_digit_columns(
     correction: i128,
 ) -> Result<(u32, [u32; FP_SOLINAS_SIGNED_CORRECTION_LIMBS]), FpSolinasReductionTraceError> {

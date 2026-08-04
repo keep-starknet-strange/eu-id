@@ -1,10 +1,9 @@
 //! Core types: the 32-bit-word → M31-limb representation, working state,
 //! block bytes, and the witness records the trace generator consumes.
 //!
-//! Following §3 of `docs/research/sha256-air-design.md`, a SHA-256 word `w` is
-//! stored as **two 16-bit limbs** `(lo, hi)` with `w = lo + 2¹⁶ · hi`. The
-//! 16+16 split keeps every mod-2³² addition linear over M31 while the trace's
-//! bit planes constrain the SHA boolean functions.
+//! The trace represents a SHA-256 word `w` as two 16-bit limbs `(lo, hi)`,
+//! where `w = lo + 2¹⁶ * hi`. This split keeps each modulo-2³² addition linear
+//! over M31. Bit planes constrain the SHA Boolean functions.
 
 use crate::constants::{
     BLOCK_BYTES, DIGEST_BYTES, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS, WORD_BYTES,
@@ -19,8 +18,8 @@ pub const LIMB_BASE: u32 = 1 << LIMB_BITS;
 /// Maximum legal limb value, `2¹⁶ − 1`.
 pub const LIMB_MAX: u32 = LIMB_BASE - 1;
 
-/// One word as `(lo, hi)` limbs. `lo, hi ∈ [0, 2¹⁶)` in every native witness;
-/// the AIR reconstructs the words from their constrained bit planes.
+/// One word as `(lo, hi)` limbs. `lo, hi ∈ [0, 2¹⁶)` in every native witness.
+/// The AIR reconstructs the words from their constrained bit planes.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WordLimbs {
     pub lo: u32,
@@ -131,7 +130,7 @@ impl Digest {
 /// constrained padded byte stream that the AIR consumes block-by-block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaddingWitness {
-    /// The raw message bytes (private input).
+    /// The raw message bytes in the witness.
     pub message: Vec<u8>,
     /// The padded message — a multiple of `BLOCK_BYTES` bytes (FIPS §5.1.1).
     pub padded: Vec<u8>,
@@ -141,10 +140,10 @@ pub struct PaddingWitness {
     pub bit_length: u64,
 }
 
-/// One row of the per-round witness, holding every value the AIR refers to
-/// inside that round. Limb-level fields are `u32` because the trace converts
-/// them to M31 just before commitment — and so this struct is testable
-/// without pulling in field types.
+/// The witness values for one compression round.
+///
+/// Limb fields use `u32`. The trace converts them to M31 before commitment.
+/// This representation also permits tests that do not import field types.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundWitness {
     /// Round index `t ∈ [0, 64)`.
@@ -179,10 +178,11 @@ pub struct RoundWitness {
     pub e_new_carries: AddCarries,
 }
 
-/// Carry chain of a single mod-2³² limb-add. `lo` carries from the low-limb
-/// sum into the high-limb sum; `hi` carries out of the high-limb sum (and is
-/// *discarded* — mod 2³²). Both are bounded by `k − 1` where `k` is the
-/// number of words summed; the AIR range-checks them.
+/// Carry chain for one modulo-2³² limb addition.
+///
+/// `lo` carries into the high-limb sum. `hi` carries out of that sum, and
+/// modulo 2³² discards it. For `k` addends, each carry is at most `k - 1`.
+/// The AIR checks these bounds.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AddCarries {
     pub lo: u32,
@@ -245,34 +245,20 @@ pub const WORDS_PER_BLOCK: usize = 16;
 /// length. Mirrors [`crate::constants::WORD_BYTES`] at the witness layer.
 pub const BYTES_PER_WORD: usize = 4;
 
-/// Per-block padding-role witness (§10.4 of the validated design).
+/// Padding data for one block.
 ///
-/// One [`BlockWitness`] carries one of these. It pins:
-/// 1. Which structural slot in the padded stream the block occupies —
-///    pure message, marker-only (Case B penult), length-only (Case B last),
-///    or marker-and-length (Case A trailing block).
-/// 2. Where the `0x80` marker sits within the marker block: a 16-entry
-///    one-hot vector for the word index and a 4-entry one-hot vector for
-///    the byte position within that word, plus the marker word's 4-byte
-///    big-endian decomposition.
-/// 3. The four 16-bit limbs of the FIPS bit-length field (`W[14]`/`W[15]`
-///    of the length block). Committed regardless of row so the
-///    cross-component LogUp binding (deferred to Phase 2, item 2.4) can
-///    expose them to the mdoc-parser stream uniformly.
+/// The flags identify message, marker-only, length-only, and combined
+/// marker-and-length blocks. One-hot vectors locate the `0x80` marker. Four
+/// 16-bit values contain the FIPS length field from `W[14]` and `W[15]`.
 ///
 /// Three small auxiliary booleans (`is_length_only_block`,
-/// `is_marker_only_block`, `marker_word_post_strict_15`) are committed
-/// rather than re-derived in the AIR so the [`crate::constraints`]
-/// reformulation keeps each row constraint at degree ≤ 2 (per design
-/// lesson L5). The witness generator pins them from the primary fields.
+/// `is_marker_only_block`, and `marker_word_post_strict_15`) keep each AIR
+/// constraint at degree two. The witness generator derives them from the
+/// primary fields.
 ///
-/// **Note on the asymmetric `_15`-only aux.** A symmetric `..._14`
-/// auxiliary would express "force `W[14]` to zero on marker-only blocks
-/// whose marker is strictly before `W[14]`." But the marker-only block
-/// only appears in overflow Case B (`msg.len() % 64 ∈ [56, 64)`), where
-/// the marker sits in `W[14]` or `W[15]` — never before `W[14]`. So
-/// the aux would be identically zero and its W[14]-zero constraints
-/// vacuous; we omit it.
+/// The type has only a `_15` auxiliary. In the two-block padding case, the
+/// marker is in `W[14]` or `W[15]`. It is never before `W[14]`. A symmetric
+/// `_14` value would always be zero.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaddingRowWitness {
     /// 1 iff this block contains the `0x80` padding marker.
@@ -287,12 +273,12 @@ pub struct PaddingRowWitness {
     /// marker-only block (Case B's penultimate block).
     pub is_marker_only_block: u32,
     /// One-hot indicator: `is_marker_word[j] == 1` iff word index `j` holds
-    /// the `0x80` byte. All-zero on non-marker rows; sums to
+    /// the `0x80` byte. All-zero on non-marker rows. Sums to
     /// `is_marker_block`.
     pub is_marker_word: [u32; WORDS_PER_BLOCK],
     /// One-hot indicator: `marker_byte_sel[b] == 1` iff byte position `b`
     /// within the marker word holds `0x80`. BE order — `b = 0` is the MSB
-    /// of `W[k]`. All-zero on non-marker rows; sums to `is_marker_block`.
+    /// of `W[k]`. All-zero on non-marker rows. Sums to `is_marker_block`.
     pub marker_byte_sel: [u32; BYTES_PER_WORD],
     /// Big-endian byte decomposition of the marker word, in MSB-first
     /// order. All-zero on non-marker rows. The constraint layer binds
@@ -319,19 +305,18 @@ pub struct PaddingRowWitness {
 }
 
 impl PaddingRowWitness {
-    /// Build the padding-row witness for block `block_idx` of a message
-    /// whose FIPS-padded form is `padded`, given the raw message byte
-    /// length `message_byte_length` and the total `n_blocks` in the
-    /// padded stream.
+    /// Build the padding-row witness for block `block_idx`.
     ///
-    /// The marker sits at byte offset `message_byte_length` in the padded
-    /// stream (FIPS §5.1.1). Its containing block is therefore
-    /// `message_byte_length / BLOCK_BYTES`; its byte-within-block offset is
-    /// `message_byte_length % BLOCK_BYTES`; from there the word index and
-    /// byte-in-word fall out by dividing / modding by `BYTES_PER_WORD`.
-    /// The length block is always the final block (`n_blocks − 1`); the
-    /// two coincide in Case A (when `message_byte_length % 64 ∈ [0, 56)`)
-    /// and differ in Case B (overflow into a separate length-only block).
+    /// `padded` is the FIPS-padded message. `message_byte_length` is the raw
+    /// message length. `n_blocks` is the total padded block count.
+    ///
+    /// The marker offset equals `message_byte_length` as specified in FIPS
+    /// 180-4 section 5.1.1. Division by `BLOCK_BYTES` gives its block.
+    /// Division by `BYTES_PER_WORD` gives its word and byte positions.
+    ///
+    /// The final block contains the length. The marker and length share one
+    /// block when `message_byte_length % 64` is below 56. Otherwise, the
+    /// length uses a separate block.
     pub fn for_block(
         block_idx: usize,
         padded: &[u8],
@@ -365,8 +350,8 @@ impl PaddingRowWitness {
             is_marker_word[word_idx] = 1;
             marker_byte_sel[byte_in_word] = 1;
             // Marker word bytes in BE order (byte 0 = MSB). Bytes before
-            // the marker come from the tail of the message; the marker
-            // byte is 0x80; bytes after are 0 (per FIPS §5.1.1).
+            // the marker come from the tail of the message. The marker
+            // byte is 0x80. Bytes after it are 0 (per FIPS §5.1.1).
             let word_start = block_idx * block_bytes + word_idx * BYTES_PER_WORD;
             for p in 0..BYTES_PER_WORD {
                 marker_word_byte[p] = padded[word_start + p] as u32;
@@ -411,7 +396,7 @@ impl PaddingRowWitness {
 /// Witness for one block: schedule, 64-round state evolution, IV-in/out.
 ///
 /// `schedule` is a `Vec` rather than `[WordLimbs; N_ROUNDS]`. The length is
-/// always `N_ROUNDS`; the trace generator asserts this on construction.
+/// always `N_ROUNDS`. The trace generator asserts this on construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BlockWitness {
     /// `H⁽ᵗ⁾` at block entry. Block 0 has `H⁽⁰⁾ = IV` (the AIR constrains it).

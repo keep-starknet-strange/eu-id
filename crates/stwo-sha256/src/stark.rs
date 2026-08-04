@@ -1,18 +1,16 @@
 //! Prover and verifier entry points for the standalone SHA-256 component.
 //!
-//! Full plumbing: preprocessed range tables and round selectors, the
-//! `Sha256Eval` base trace plus range multiplicities, interaction traces, and
-//! Stwo proof generation over one SHA consumer and four `Range_k` producers.
+//! This module connects the range tables, round selectors, base trace, and
+//! interaction traces. It generates a Stwo proof for one SHA consumer and four
+//! `Range_k` producers.
 //!
-//! Component composition pattern matches `../sha256-air/src/lib.rs`
-//! (structural reference) and the Blake example in
-//! `stwo/examples/blake/air.rs`. Constraint-layer soundness covers
-//! every lookup the AIR consumes: the four `Range_k` carry and terminal-byte
-//! channels. SHA boolean functions are constrained directly from bit planes.
+//! The component composition follows the Blake example in
+//! `stwo/examples/blake/air.rs`. The AIR checks all four `Range_k` carry and
+//! terminal-byte channels. It checks the SHA Boolean functions directly from
+//! bit planes.
 //!
-//! Order discipline: every `mix_into` on the channel **must** happen in
-//! the same order on the prover and verifier sides — drift silently
-//! breaks the verifier's challenge re-derivation.
+//! Call every `mix_into` in the same order in the prover and verifier. A
+//! different order gives the verifier different challenges.
 
 use num_traits::Zero;
 use stwo::core::pcs::PcsConfig;
@@ -31,7 +29,7 @@ use crate::witness::compute_sha256_witness;
 ///
 /// `Default` picks the *smallest* legal value for each knob — enough to
 /// prove a single padded block on the SIMD backend. Callers proving
-/// anything longer **must** override `log_n_rows`; see its field doc for
+/// anything longer **must** override `log_n_rows`. See its field doc for
 /// the canonical recipe. The laptop benchmark pins the production values.
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
@@ -41,16 +39,22 @@ pub struct ProverConfig {
     /// **Must satisfy `log_n_rows ≥ trace::min_log_size(witness.blocks.len())`**
     /// or [`prove_sha256`] returns [`Sha256ProveError::TraceTooSmall`]. The
     /// SIMD backend additionally requires `log_n_rows ≥ LOG_N_LANES = 4`
-    /// (one packed lane of rows); below that, [`prove_sha256`] returns
+    /// (one packed lane of rows). Below that, [`prove_sha256`] returns
     /// [`Sha256ProveError::LogSizeBelowSimdMin`].
     ///
     /// Caller recipe for any non-trivial message:
-    /// ```ignore
-    /// let witness = compute_sha256_witness(&message);
+    /// ```rust,no_run
+    /// use stwo_sha256::stark::ProverConfig;
+    /// use stwo_sha256::trace::min_log_size;
+    /// use stwo_sha256::witness::compute_sha256_witness;
+    ///
+    /// let message = b"a current SHA-256 message";
+    /// let witness = compute_sha256_witness(message);
     /// let config = ProverConfig {
-    ///     log_n_rows: trace::min_log_size(witness.blocks.len()),
+    ///     log_n_rows: min_log_size(witness.blocks.len()),
     ///     ..ProverConfig::default()
     /// };
+    /// assert_eq!(config.log_n_rows, min_log_size(witness.blocks.len()));
     /// ```
     /// `examples/prove_demo.rs` shows this pattern end-to-end. Passing a
     /// value larger than `min_log_size` absorbs additional padding rows
@@ -58,16 +62,12 @@ pub struct ProverConfig {
     /// batching variable-length messages into a single component.
     ///
     /// **`Default` sets this to `min_log_size(1) = 7`** — one padded block
-    /// (64 rows) plus padding. Larger messages must override; see the
+    /// (64 rows) plus padding. Larger messages must override. See the
     /// recipe above.
     pub log_n_rows: u32,
-    /// Legacy protocol parameter retained in proof serialization and transcript
-    /// binding. The active bit-plane AIR no longer sizes a packed Maj/Ch table
-    /// from this value.
-    pub group_width: u32,
     /// Stwo PCS configuration (FRI + PoW parameters). Use
-    /// `PcsConfig::default()` for the smallest sensible test config;
-    /// production proofs raise `pow_bits` and `n_queries`.
+    /// `PcsConfig::default()` for the smallest sensible test config.
+    /// Production proofs raise `pow_bits` and `n_queries`.
     pub pcs_config: PcsConfig,
 }
 
@@ -75,53 +75,46 @@ impl Default for ProverConfig {
     fn default() -> Self {
         Self {
             log_n_rows: crate::trace::min_log_size(1), // = 7: one block + padding
-            group_width: crate::partitions::MAX_ROUND_GROUP_BITS,
             pcs_config: PcsConfig::default(),
         }
     }
 }
 
-/// A STARK proof that a private message produces a SHA-256 trace whose
-/// last-block `h_out` columns form a valid digest.
+/// A STARK proof for a SHA-256 execution trace.
 ///
-/// **Note on `digest` and `n_blocks`.** Both are surfaced on the proof
-/// struct as witness-derived metadata so callers can read what the prover
-/// claims, but neither is cryptographically bound to the AIR by this
-/// standalone component: the verifier does not mix `digest`/`n_blocks`
-/// into its channel and does not compare them to the trace's `h_out`
-/// columns. Binding the digest to a verifier-checked public input lands
-/// with the integration-layer LogUp surface
-/// (`elementDigest ↔ valueDigests`, `Sig_structure digest ↔ ECDSA z`).
-/// Until then, treat `digest` as informational: it is only as trustworthy
-/// as the prover.
+/// The `digest` and `n_blocks` fields contain metadata from the witness. The
+/// standalone AIR does not bind either field to the proof. The verifier does
+/// not mix these fields into its channel or compare them with the trace.
+///
+/// The optional digest provider emits the digest bytes on a shared LogUp
+/// relation. A composed proof must include a matching consumer to bind those
+/// bytes. Treat the fields on this standalone type as information from the
+/// prover.
 #[derive(Clone, Debug)]
 pub struct Sha256Proof {
     /// The 32-byte digest the prover claims the (private) message hashes
-    /// to. Witness-derived metadata; not a cryptographic public input in
+    /// to. Witness-derived metadata. Not a cryptographic public input in
     /// this standalone component — see the type-level doc-comment for the
     /// binding plan.
     pub digest: [u8; DIGEST_BYTES],
-    /// Number of blocks in the padded preimage. Witness-derived metadata;
-    /// not verifier-checked in this standalone component.
+    /// Number of blocks in the padded preimage. Witness-derived metadata.
+    /// Not verifier-checked in this standalone component.
     pub n_blocks: usize,
     /// `log2` of the SHA-256 trace's row count.
     pub log_n_rows: u32,
-    /// Legacy group-width parameter mixed into the transcript for protocol
-    /// compatibility. It does not size an active table.
-    pub group_width: u32,
     /// Per-component LogUp claimed sums. The total **must** be zero for
     /// the verifier to accept — the soundness backbone of the
     /// consumer ⇄ producer LogUp balance.
     pub interaction_claim: InteractionClaim,
-    /// Stwo PCS configuration the proof was generated with. Surfaced so
-    /// the verifier can reconstruct the same `CommitmentSchemeVerifier`.
+    /// Stwo PCS configuration that the prover used. The verifier uses this
+    /// value to reconstruct the same `CommitmentSchemeVerifier`.
     pub pcs_config: PcsConfig,
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
-/// Errors that can be returned by [`prove_sha256`].
+/// Errors from [`prove_sha256`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sha256ProveError {
     /// Caller asked for a row count below what the message requires.
@@ -129,7 +122,7 @@ pub enum Sha256ProveError {
         requested_log_n_rows: u32,
         required_log_n_rows: u32,
     },
-    /// Caller's `log_n_rows` is below `LOG_N_LANES = 4`; the SIMD backend
+    /// Caller's `log_n_rows` is below `LOG_N_LANES = 4`. The SIMD backend
     /// requires at least one packed lane of rows.
     LogSizeBelowSimdMin {
         requested_log_n_rows: u32,
@@ -160,26 +153,16 @@ impl core::fmt::Display for Sha256ProveError {
 #[cfg(feature = "std")]
 impl std::error::Error for Sha256ProveError {}
 
-/// Errors that can be returned by [`verify_sha256_proof`].
+/// Errors from [`verify_sha256_proof`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Sha256VerifyError {
-    /// The Stwo verifier rejected the proof.
+    /// The Stwo verifier rejects the proof.
     StarkRejected(String),
-    /// Per-component LogUp claimed sums do not sum to zero — the
-    /// consumer ⇄ producer balance is broken.
+    /// The per-component LogUp claimed sums do not total zero.
     LogupSumNonZero,
-    /// `proof.group_width` is outside the supported `[min, max]` range.
-    /// Rejected before any allocation so a malformed proof cannot drive a
-    /// `panic!` inside the preprocessed-table builder (`build_maj_ch_table`).
-    UnsupportedGroupWidth {
-        group_width: u32,
-        min: u32,
-        max: u32,
-    },
-    /// `proof.log_n_rows` is outside the supported `[min, max]` range.
-    /// Rejected before any allocation so a malformed proof cannot drive an
-    /// out-of-memory allocation on the verify path (the trace row count is
-    /// `2^log_n_rows`).
+    /// `proof.log_n_rows` is outside the supported `[min, max]` range. The
+    /// verifier rejects it before allocation. This gate prevents an excessive
+    /// allocation of `2^log_n_rows` trace rows.
     UnsupportedLogNRows { log_n_rows: u32, min: u32, max: u32 },
 }
 
@@ -190,14 +173,6 @@ impl core::fmt::Display for Sha256VerifyError {
             Self::LogupSumNonZero => write!(
                 f,
                 "LogUp claimed-sums total is non-zero: consumer ⇄ producer balance broken"
-            ),
-            Self::UnsupportedGroupWidth {
-                group_width,
-                min,
-                max,
-            } => write!(
-                f,
-                "proof.group_width = {group_width} outside supported range [{min}, {max}]"
             ),
             Self::UnsupportedLogNRows {
                 log_n_rows,
@@ -225,11 +200,9 @@ pub fn prove_sha256(
 
 /// Generate a proof directly from a pre-built [`Sha256Witness`].
 ///
-/// Same pipeline as [`prove_sha256`] but lets callers supply the witness
-/// directly — useful for integration-stream pipelines (where the witness
-/// comes from the credential builder rather than a raw message) and for
-/// negative tests that mutate the witness before proving to exercise the
-/// soundness gates.
+/// This function runs the same pipeline as [`prove_sha256`]. It accepts a
+/// witness from a credential builder or another caller. Negative tests can
+/// also change this witness before they start the prover.
 pub fn prove_sha256_from_witness(
     witness: &Sha256Witness,
     config: &ProverConfig,
@@ -252,22 +225,19 @@ pub fn prove_sha256_from_witness(
         .map_err(|e| Sha256ProveError::StwoProveFailed(format!("{e:?}")))
 }
 
-/// Inner prover — assumes `config` has been validated. Split out so the
-/// `?`/error-mapping at the boundary stays tidy.
+/// Run the prover after the caller validates `config`.
 ///
-/// The four-phase plumbing (preprocessed tables, base trace + producer
-/// multiplicities, per-component interaction trace, component assembly) now
-/// lives in [`Sha256Prover`]; this is the thin one-module wrapper that runs it
-/// through the shared [`air_core::prove`] orchestrator.
+/// [`Sha256Prover`] controls the preprocessed tables, base trace,
+/// multiplicities, interaction trace, and components. This wrapper sends that
+/// module to [`air_core::prove`].
 fn prove_sha256_inner(
     witness: &Sha256Witness,
     config: &ProverConfig,
 ) -> Result<Sha256Proof, stwo::prover::ProvingError> {
     let log_n_rows = config.log_n_rows;
-    let group_width = config.group_width;
     let pcs_config = config.pcs_config;
 
-    let mut prover = Sha256Prover::new(witness, log_n_rows, group_width);
+    let mut prover = Sha256Prover::new(witness, log_n_rows);
     let stark_proof = air_core::prove(&mut [&mut prover], pcs_config)?;
     let interaction_claim = prover.interaction_claim().clone();
     let digest = witness.digest_from_blocks();
@@ -275,43 +245,25 @@ fn prove_sha256_inner(
         digest: digest.0,
         n_blocks: witness.blocks.len(),
         log_n_rows,
-        group_width,
         interaction_claim,
         pcs_config,
         stark_proof,
     })
 }
 
-/// Largest `log_n_rows` the verifier will accept. Each trace row is one
-/// padded 64-byte block, so `2^MAX_LOG_N_ROWS` blocks is on the order of
-/// `64 GiB` of preimage — far beyond any proof a real prover would produce.
-/// This is a denial-of-service guard, **not** a protocol limit: it bounds
-/// verifier-side allocation against a malformed/malicious `proof.log_n_rows`
-/// (e.g. `63` → instant OOM) and can be raised if a legitimate use ever
-/// approaches it. The floor is `LOG_N_LANES` (the SIMD backend's
-/// one-packed-lane minimum the prover itself enforces).
+/// Largest `log_n_rows` that the verifier accepts.
+///
+/// One block uses 64 trace rows. Thus, `2^MAX_LOG_N_ROWS` rows correspond to
+/// approximately 1 GiB of padded input. This denial-of-service guard is not a
+/// protocol limit. It limits allocations from an untrusted value such as `63`.
+/// The lower limit is `LOG_N_LANES`.
 pub const MAX_LOG_N_ROWS: u32 = 30;
 
-/// Validate the structural size parameters a proof carries **before** any
-/// allocation or table build. Split out as a pure function so the gate can
-/// be unit-tested without constructing a full [`Sha256Proof`] (which needs
-/// a real `StarkProof`).
+/// Check the proof size parameters before allocation or table construction.
 ///
-/// `group_width` must lie in `[MAX_ROUND_GROUP_BITS, MAX_GROUP_WIDTH]` — the
-/// same range [`crate::tables::build_maj_ch_table`] asserts — and
-/// `log_n_rows` in `[LOG_N_LANES, MAX_LOG_N_ROWS]`. Out-of-range values
-/// would otherwise panic the table builder (`group_width`) or drive an
-/// OOM (`log_n_rows`) on the untrusted verify path.
-fn validate_verify_params(group_width: u32, log_n_rows: u32) -> Result<(), Sha256VerifyError> {
-    let min_w = crate::partitions::MAX_ROUND_GROUP_BITS;
-    let max_w = crate::tables::MAX_GROUP_WIDTH;
-    if !(min_w..=max_w).contains(&group_width) {
-        return Err(Sha256VerifyError::UnsupportedGroupWidth {
-            group_width,
-            min: min_w,
-            max: max_w,
-        });
-    }
+/// `log_n_rows` must be in `[LOG_N_LANES, MAX_LOG_N_ROWS]`. These limits
+/// prevent an excessive allocation.
+fn validate_verify_params(log_n_rows: u32) -> Result<(), Sha256VerifyError> {
     if !(LOG_N_LANES..=MAX_LOG_N_ROWS).contains(&log_n_rows) {
         return Err(Sha256VerifyError::UnsupportedLogNRows {
             log_n_rows,
@@ -325,15 +277,15 @@ fn validate_verify_params(group_width: u32, log_n_rows: u32) -> Result<(), Sha25
 /// Verify a `Sha256Proof`.
 pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError> {
     // ---- Structural-parameter gate ----
-    // Reject malformed sizes before any allocation or table build, so a
-    // malicious proof cannot panic the preprocessed-table builder or drive
-    // an out-of-memory allocation on the untrusted verify path.
-    validate_verify_params(proof.group_width, proof.log_n_rows)?;
+    // Reject malformed sizes before allocation or table construction.
+    // This prevents an untrusted proof from panicking the table builder or
+    // requesting excessive memory.
+    validate_verify_params(proof.log_n_rows)?;
 
     // ---- Soundness gate: claimed sums must total zero ----
-    // The orchestrator also enforces this (its global LogUp balance), but we
-    // check it up front so a broken balance surfaces as the typed
-    // `LogupSumNonZero` rather than a generic structural rejection.
+    // The orchestrator also enforces this through its global LogUp balance.
+    // Check it here first. A broken balance then returns the typed
+    // `LogupSumNonZero` error instead of a generic structural error.
     if !proof.interaction_claim.total().is_zero() {
         return Err(Sha256VerifyError::LogupSumNonZero);
     }
@@ -341,11 +293,7 @@ pub fn verify_sha256_proof(proof: &Sha256Proof) -> Result<(), Sha256VerifyError>
     // The transcript re-derivation, tree commitments, and component
     // reconstruction now live in [`Sha256Verifier`] + the shared
     // [`air_core::verify`] orchestrator.
-    let mut verifier = Sha256Verifier::new(
-        proof.log_n_rows,
-        proof.group_width,
-        proof.interaction_claim.clone(),
-    );
+    let mut verifier = Sha256Verifier::new(proof.log_n_rows, proof.interaction_claim.clone());
     air_core::verify(&mut [&mut verifier], &proof.stark_proof)
         .map_err(|e: StwoVerificationError| Sha256VerifyError::StarkRejected(format!("{e:?}")))
 }
@@ -363,14 +311,13 @@ pub fn native_digest(message: &[u8]) -> Digest {
 ///   without running the prover. Used by the integration stream to
 ///   assemble its Big-AIR public input contract ahead of proving.
 /// - [`Sha256Proof::public_inputs`] — extracts the contract from a
-///   proof. Used after proving; the returned value equals
+///   proof. Used after proving. The returned value equals
 ///   `public_inputs_for(message)` for the same message.
 ///
-/// The standalone component does not cryptographically bind `digest` /
-/// `n_blocks` to the AIR — see [`Sha256Proof`]'s doc-comment for the
-/// binding approach. This type defines the *shape* the integration layer
-/// pins: the opt-in digest provider (`with_digest_provider`) yields the
-/// digest bytes on a shared LogUp channel for a consumer to bind against.
+/// The standalone component does not bind `digest` or `n_blocks` to the AIR.
+/// See [`Sha256Proof`]. The optional digest provider emits the digest bytes on
+/// a shared LogUp channel. A matching consumer can bind those bytes in a
+/// composed proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sha256PublicInputs {
     pub digest: [u8; DIGEST_BYTES],
@@ -403,7 +350,7 @@ impl Sha256Proof {
     }
 }
 
-/// Helper consumed by integration tests: pad, witness, trace — but don't
+/// Helper consumed by integration tests: pad, witness, trace — but do not
 /// run the prover.
 pub fn build_trace_for(
     message: &[u8],
@@ -460,13 +407,9 @@ mod tests {
         assert_eq!(pubs.n_blocks, 1);
     }
 
-    /// `prove_sha256_from_witness` is publicly exposed for integration
-    /// callers that already hold a [`Sha256Witness`] (e.g. from the
-    /// credential builder); its happy path requires a real proof and so
-    /// lives in `#[ignore]`d tests. This fast test pins the validation
-    /// gate without paying for proof generation, and exercises the
-    /// witness-direct entry point so it has at least one debug-mode
-    /// caller outside of `prove_sha256` itself.
+    /// Integration callers can give [`prove_sha256_from_witness`] an existing
+    /// [`Sha256Witness`]. The success case needs a real proof and has ignored
+    /// test coverage. This fast test checks the validation gate.
     #[test]
     fn prove_sha256_from_witness_rejects_too_small_log_n_rows() {
         // 5 000-byte message ⇒ well above the `1 << LOG_N_LANES` row
@@ -492,18 +435,15 @@ mod tests {
         }
     }
 
-    /// Pins the `public_inputs_for(msg) == Sha256Proof::public_inputs()`
-    /// contract for every message a downstream caller might use. We
-    /// drive it against the witness-derived shape instead of running
-    /// the prover (which is `#[ignore]`d everywhere else), since the
-    /// proof's `digest` / `n_blocks` fields are populated from the
-    /// witness verbatim in `prove_sha256_inner`.
+    /// Pin the `public_inputs_for(msg) == Sha256Proof::public_inputs()` contract.
+    /// Exercise every message shape used by downstream callers. Use the
+    /// witness-derived shape instead of the ignored prover. `prove_sha256_inner`
+    /// copies the witness digest and block count into the proof.
     #[test]
     fn public_inputs_for_matches_proof_public_inputs_shape() {
-        // A proof we can synthesise without running the prover: every
-        // field of `Sha256Proof::public_inputs()` reads from the proof's
-        // own metadata fields, so building a stand-in struct with the
-        // same `digest` / `n_blocks` exercises the contract.
+        // Synthesize the proof metadata without running the prover.
+        // `Sha256Proof::public_inputs()` reads only the proof's metadata fields.
+        // Therefore, matching digest and block-count fields exercise the contract.
         for msg in [&b""[..], b"abc", &[0u8; 56], &[0u8; 1024]] {
             let from_message = public_inputs_for(msg);
             let witness = compute_sha256_witness(msg);
@@ -516,46 +456,22 @@ mod tests {
         }
     }
 
-    /// The structural-parameter gate accepts the supported range and rejects
-    /// out-of-range `group_width` / `log_n_rows` with a typed error — never a
-    /// panic or OOM. Exercised on the pure helper so it needs no real
-    /// `StarkProof` (which the happy-path round-trip tests, all `#[ignore]`d,
-    /// would require).
+    /// Check that the structural gate accepts valid values and rejects other
+    /// values with a typed error. The pure helper does not need a real
+    /// `StarkProof`.
     #[test]
     fn verify_params_gate_accepts_range_and_rejects_outliers() {
-        use crate::partitions::MAX_ROUND_GROUP_BITS;
-        use crate::tables::MAX_GROUP_WIDTH;
-
-        // Accepts the whole supported box [MAX_ROUND_GROUP_BITS, MAX_GROUP_WIDTH]
-        // × [LOG_N_LANES, MAX_LOG_N_ROWS].
-        for w in MAX_ROUND_GROUP_BITS..=MAX_GROUP_WIDTH {
-            assert_eq!(validate_verify_params(w, LOG_N_LANES), Ok(()));
-            assert_eq!(validate_verify_params(w, MAX_LOG_N_ROWS), Ok(()));
-        }
-
-        // group_width below the floor (would under-cover the witness keys)
-        // and above the cap (would panic `build_maj_ch_table`).
-        assert_eq!(
-            validate_verify_params(MAX_ROUND_GROUP_BITS - 1, LOG_N_LANES),
-            Err(Sha256VerifyError::UnsupportedGroupWidth {
-                group_width: MAX_ROUND_GROUP_BITS - 1,
-                min: MAX_ROUND_GROUP_BITS,
-                max: MAX_GROUP_WIDTH,
-            }),
-        );
-        assert!(matches!(
-            validate_verify_params(MAX_GROUP_WIDTH + 1, LOG_N_LANES),
-            Err(Sha256VerifyError::UnsupportedGroupWidth { .. })
-        ));
+        assert_eq!(validate_verify_params(LOG_N_LANES), Ok(()));
+        assert_eq!(validate_verify_params(MAX_LOG_N_ROWS), Ok(()));
 
         // log_n_rows below the SIMD floor, and above the DoS ceiling — the
         // unbounded value (e.g. 63) the audit flagged as an instant OOM.
         assert!(matches!(
-            validate_verify_params(MAX_ROUND_GROUP_BITS, LOG_N_LANES - 1),
+            validate_verify_params(LOG_N_LANES - 1),
             Err(Sha256VerifyError::UnsupportedLogNRows { .. })
         ));
         assert_eq!(
-            validate_verify_params(MAX_ROUND_GROUP_BITS, MAX_LOG_N_ROWS + 1),
+            validate_verify_params(MAX_LOG_N_ROWS + 1),
             Err(Sha256VerifyError::UnsupportedLogNRows {
                 log_n_rows: MAX_LOG_N_ROWS + 1,
                 min: LOG_N_LANES,
@@ -563,7 +479,7 @@ mod tests {
             }),
         );
         assert!(matches!(
-            validate_verify_params(MAX_ROUND_GROUP_BITS, 63),
+            validate_verify_params(63),
             Err(Sha256VerifyError::UnsupportedLogNRows { .. })
         ));
     }

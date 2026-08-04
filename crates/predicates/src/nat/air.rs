@@ -1,4 +1,4 @@
-//! Wraps the nationality predicate as a [`combiner`] proving module.
+//! Wraps the nationality predicate as a `combiner` proving module.
 //!
 //! [`NatProver`] holds the witness and contributes all columns (prover side).
 //! [`NatVerifier`] holds only the public input and claimed sums from the proof
@@ -20,7 +20,7 @@ use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
 use stwo::core::air::Component;
-use stwo::core::channel::{Blake2sChannel, Channel};
+use stwo::core::channel::Blake2sChannel;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::prover::backend::simd::SimdBackend;
@@ -41,10 +41,11 @@ fn prover_component_refs(c: &NatComponents) -> Vec<&dyn ComponentProver<SimdBack
     vec![&c.0, &c.1]
 }
 
-/// Column layout shared by both prover and verifier: it depends on the public
-/// input, the transcript-bound signed-array length, and whether the semantic
-/// nationality binding is wired. The four base columns hold the value,
-/// membership bit, and existential prefix state; binding adds two byte columns.
+/// Returns the column layout for the prover and verifier.
+///
+/// The layout depends on public input and whether nationality binding is active.
+/// Six base columns hold private prefix selectors, value, membership, and state.
+/// Nationality binding adds two byte columns.
 fn ordered_claim_mask_log_sizes(public: &PublicInput) -> Vec<u32> {
     vec![
         WitnessData::log_size(),
@@ -52,41 +53,35 @@ fn ordered_claim_mask_log_sizes(public: &PublicInput) -> Vec<u32> {
     ]
 }
 
-fn layout(
-    public: &PublicInput,
-    nationality_count: usize,
-    bind_nat: bool,
-    claim_masks_enabled: bool,
-) -> TreeLayout {
-    debug_assert!((1..=256).contains(&nationality_count));
+fn layout(public: &PublicInput, bind_nat: bool, claim_masks_enabled: bool) -> TreeLayout {
     // Class-D: the accepted-set table commits over the blinded (`log+1`) domain.
     let table_log_size = crate::nat::table::blind_log_size(public);
     let nat_log_size = WitnessData::log_size();
-    // Membership plus the two prefix-transition sites give three logical
-    // LogUp fractions; semantic byte binding adds two more.
-    let nat_trace_cols = if bind_nat { 6 } else { 4 };
+    // Policy membership, signed-code validity, and two prefix-transition sites
+    // give four logical LogUp fractions. Semantic byte binding adds two more.
+    let nat_trace_cols = if bind_nat { 8 } else { 6 };
     let logical_nat_lookups =
-        (if bind_nat { 5usize } else { 3 }) + usize::from(claim_masks_enabled);
+        (if bind_nat { 6usize } else { 4 }) + usize::from(claim_masks_enabled);
     let nat_interaction_cols = logical_nat_lookups.div_ceil(2) * 4;
     let mut trace = Vec::new();
     trace.extend(std::iter::repeat_n(nat_log_size, nat_trace_cols));
     if claim_masks_enabled {
         trace.extend([nat_log_size; 4]);
     }
-    trace.push(table_log_size);
+    trace.extend([table_log_size; 2]);
     if claim_masks_enabled {
         trace.extend([table_log_size; 4]);
     }
     TreeLayout {
-        // Tree 0: active-prefix metadata [active, row, first, last] plus the
-        // Class-D blinded accepted-set table's [value, is_dummy] pair.
-        preprocessed: std::iter::repeat_n(nat_log_size, 4)
-            .chain([table_log_size, table_log_size])
+        // Tree 0: fixed prefix metadata [allowed, row, first], the public
+        // accepted-set table, and the fixed signed-code table.
+        preprocessed: std::iter::repeat_n(nat_log_size, 3)
+            .chain([table_log_size; 4])
             .collect(),
         // Tree 1: nationality/prefix witness columns plus table multiplicity.
         trace,
-        // Tree 2: nationality LogUp fractions plus the table's gated fraction;
-        // masking adds one unbatched secure column to the table.
+        // Tree 2: nationality LogUp fractions plus the table's gated fraction.
+        // Masking adds one unbatched secure column to the table.
         interaction: std::iter::repeat_n(nat_log_size, nat_interaction_cols)
             .chain(std::iter::repeat_n(
                 table_log_size,
@@ -97,8 +92,9 @@ fn layout(
 }
 
 fn canonical_preprocessed(preprocessed: &Preprocessed) -> Vec<air_core::PreprocessedColumnEval> {
-    let mut columns = preprocessed.active.clone();
+    let mut columns = preprocessed.prefix.clone();
     columns.extend(preprocessed.acceptable.clone());
+    columns.extend(preprocessed.signed_valid.clone());
     columns
 }
 
@@ -106,7 +102,6 @@ fn canonical_preprocessed(preprocessed: &Preprocessed) -> Vec<air_core::Preproce
 pub struct NatProver {
     public: PublicInput,
     witness: Witness,
-    nationality_count: usize,
     preprocessed: Preprocessed,
     witness_data: WitnessData,
     /// Shared `Sha256Field` channel when the nationality binding is wired.
@@ -121,12 +116,10 @@ pub struct NatProver {
 
 impl NatProver {
     pub fn new(public: &PublicInput, witness: &Witness) -> Self {
-        let nationality_count = witness.nationalities.len();
         Self {
             public: public.clone(),
             witness: witness.clone(),
-            nationality_count,
-            preprocessed: Preprocessed::new(public, nationality_count),
+            preprocessed: Preprocessed::new(public),
             witness_data: WitnessData::new(witness, public, false),
             nat_binding: None,
             lookup_elements: None,
@@ -137,11 +130,11 @@ impl NatProver {
         }
     }
 
-    /// Bind the nationality this module proves set-membership for to the
-    /// credential's signed nationality bytes: require the two nationality bytes
-    /// on the shared `Sha256Field` channel `handle`, which the SHA module yields.
-    /// Off by default; regenerates the witness with the binding columns. The
-    /// matching [`NatVerifier`] must set the same handle.
+    /// Binds the proved nationality to two signed credential bytes.
+    ///
+    /// The SHA module yields these bytes on the shared `Sha256Field` channel.
+    /// This method rebuilds the witness with binding columns.
+    /// The matching [`NatVerifier`] must use the same handle.
     pub fn with_nat_binding(mut self, handle: SharedFieldRelation) -> Self {
         self.witness_data = WitnessData::new(&self.witness, &self.public, true);
         self.nat_binding = Some(handle);
@@ -195,7 +188,6 @@ impl NatProver {
 impl Air for NatProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         self.public.mix_into(channel);
-        channel.mix_u64(self.nationality_count as u64);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
@@ -205,7 +197,6 @@ impl Air for NatProver {
     fn layout(&self) -> TreeLayout {
         layout(
             &self.public,
-            self.nationality_count,
             self.nat_binding.is_some(),
             self.claim_masks.is_some(),
         )
@@ -216,7 +207,7 @@ impl Air for NatProver {
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        preprocessed_column_ids(&self.public, self.nationality_count)
+        preprocessed_column_ids(&self.public)
     }
 
     fn canonical_preprocessed_columns(
@@ -230,7 +221,6 @@ impl Air for NatProver {
         self.components = Some(components(
             allocator,
             &self.public,
-            self.nationality_count,
             self.relations().clone(),
             self.nat_relation(),
             self.claimed_sums[0],
@@ -255,11 +245,12 @@ impl AirProver for NatProver {
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         let mut columns = Vec::new();
-        columns.extend(self.preprocessed.active.clone());
+        columns.extend(self.preprocessed.prefix.clone());
         columns.extend(self.preprocessed.acceptable.clone());
+        columns.extend(self.preprocessed.signed_valid.clone());
         fingerprint_preprocessed_columns(
             "predicates::NatProver",
-            &preprocessed_column_ids(&self.public, self.nationality_count),
+            &preprocessed_column_ids(&self.public),
             &columns,
         )
     }
@@ -298,7 +289,6 @@ impl AirProver for NatProver {
 /// sums. It has no witness and only implements [`Air`].
 pub struct NatVerifier {
     public: PublicInput,
-    nationality_count: usize,
     nat_binding: Option<SharedFieldRelation>,
     lookup_elements: Option<LookupElements>,
     claim_mask_challenge: Option<SharedClaimMaskChallenge>,
@@ -307,15 +297,9 @@ pub struct NatVerifier {
 }
 
 impl NatVerifier {
-    pub fn new(
-        public: &PublicInput,
-        nationality_count: usize,
-        nat_claimed_sum: QM31,
-        table_claimed_sum: QM31,
-    ) -> Self {
+    pub fn new(public: &PublicInput, nat_claimed_sum: QM31, table_claimed_sum: QM31) -> Self {
         Self {
             public: public.clone(),
-            nationality_count,
             nat_binding: None,
             lookup_elements: None,
             claim_mask_challenge: None,
@@ -324,9 +308,10 @@ impl NatVerifier {
         }
     }
 
-    /// Match a [`NatProver::with_nat_binding`] proof: read the two nationality
-    /// bytes from the same shared `Sha256Field` channel so the verifier rebuilds
-    /// the bound component (the extra columns + the require terms).
+    /// Matches a [`NatProver::with_nat_binding`] proof.
+    ///
+    /// Reads two nationality bytes from the shared `Sha256Field` channel.
+    /// The verifier then rebuilds the bound component.
     pub fn with_nat_binding(mut self, handle: SharedFieldRelation) -> Self {
         self.nat_binding = Some(handle);
         self
@@ -371,7 +356,6 @@ impl NatVerifier {
 impl Air for NatVerifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         self.public.mix_into(channel);
-        channel.mix_u64(self.nationality_count as u64);
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
@@ -381,7 +365,6 @@ impl Air for NatVerifier {
     fn layout(&self) -> TreeLayout {
         layout(
             &self.public,
-            self.nationality_count,
             self.nat_binding.is_some(),
             self.claim_mask_challenge.is_some(),
         )
@@ -392,24 +375,20 @@ impl Air for NatVerifier {
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        preprocessed_column_ids(&self.public, self.nationality_count)
+        preprocessed_column_ids(&self.public)
     }
 
     fn canonical_preprocessed_columns(
         &mut self,
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
     {
-        Ok(canonical_preprocessed(&Preprocessed::new(
-            &self.public,
-            self.nationality_count,
-        )))
+        Ok(canonical_preprocessed(&Preprocessed::new(&self.public)))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(components(
             allocator,
             &self.public,
-            self.nationality_count,
             self.relations().clone(),
             self.nat_relation(),
             self.claimed_sums[0],
@@ -437,11 +416,12 @@ mod claim_mask_tests {
     use stwo::core::pcs::PcsConfig;
 
     fn inputs() -> (NationalityPredicate, PublicInput, PrivateInput) {
+        let code = crate::nat::nationalities::pack_alpha2;
         (
             NationalityPredicate::new(PcsConfig::default()),
-            PublicInput::new(vec![250, 276, 300]),
+            PublicInput::new(vec![code(*b"FR"), code(*b"DE"), code(*b"GR")]),
             PrivateInput {
-                nationalities: vec![840, 276],
+                nationalities: vec![code(*b"US"), code(*b"DE")],
             },
         )
     }
@@ -477,7 +457,7 @@ mod claim_mask_tests {
 
         let verifier_shared = SharedClaimMaskChallenge::new();
         let mut verifier = predicate
-            .verifier_with_count(&public, private.nationalities.len(), &claimed_sums)
+            .verifier_for_private_prefix(&public, &claimed_sums)
             .unwrap()
             .with_claim_masks(verifier_shared.clone());
         let mut verifier_anchor =
@@ -488,7 +468,7 @@ mod claim_mask_tests {
         tampered_sums[0] += QM31::one();
         let tampered_shared = SharedClaimMaskChallenge::new();
         let mut tampered = predicate
-            .verifier_with_count(&public, private.nationalities.len(), &tampered_sums)
+            .verifier_for_private_prefix(&public, &tampered_sums)
             .unwrap()
             .with_claim_masks(tampered_shared.clone());
         let mut tampered_anchor =
@@ -496,7 +476,7 @@ mod claim_mask_tests {
         assert!(verify(&mut [&mut tampered, &mut tampered_anchor], &proof,).is_err());
 
         let unmasked = predicate
-            .verifier_with_count(&public, private.nationalities.len(), &claimed_sums)
+            .verifier_for_private_prefix(&public, &claimed_sums)
             .unwrap()
             .layout();
         let masked = verifier.layout();
@@ -540,13 +520,44 @@ mod claim_mask_tests {
 }
 
 #[cfg(test)]
+mod signed_validity_tests {
+    use super::*;
+    use crate::nat::nationalities::pack_alpha2;
+    use crate::nat::table::gen_signed_valid_multiplicity_column;
+    use crate::nat::types::Witness;
+    use crate::nat::NationalityPredicate;
+    use air_core::{prove, verify};
+    use stwo::core::pcs::PcsConfig;
+
+    #[test]
+    fn omitted_or_wrong_signed_validity_multiplicity_is_rejected() {
+        let de = pack_alpha2(*b"DE");
+        let public = PublicInput::new(vec![de]);
+        let witness = Witness {
+            public: public.clone(),
+            nationalities: vec![de],
+            accepted: vec![true],
+            accepted_rows: vec![Some(0)],
+        };
+
+        for supplied_codes in [Vec::new(), vec![de, de]] {
+            let mut prover = NatProver::new(&public, &witness);
+            prover.witness_data.table_mult_trace[1] =
+                gen_signed_valid_multiplicity_column(&public, &supplied_codes);
+            let proof = prove(&mut [&mut prover], PcsConfig::default()).unwrap();
+            let mut verifier = NationalityPredicate::new(PcsConfig::default())
+                .verifier_for_private_prefix(&public, &prover.claimed_sums())
+                .unwrap();
+            assert!(verify(&mut [&mut verifier], &proof).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 mod binding_tests {
-    //! Isolated nationality↔credential binding tests: drive the bound nat
-    //! module against a *synthetic* field producer that plays SHA's role (yields
-    //! the two nationality bytes on the shared `Sha256Field` channel). This
-    //! exercises the whole bound path — the binding layout, the
-    //! boolean/reconciliation constraints, and the cross-module balance — through
-    //! a real `air_core::prove`/`verify`, without the (slow) P256 + SHA proof.
+    //! Tests nationality binding with a synthetic SHA field provider.
+    //! The provider yields two nationality bytes on `Sha256Field`.
+    //! Real `air_core` proof operations check the layout, constraints, and balance.
 
     use super::*;
     use crate::nat::types::PrivateInput;
@@ -570,10 +581,14 @@ mod binding_tests {
         [code >> 8, code & 0xFF]
     }
 
-    /// A trace-less module that plays the SHA field provider: it draws the shared
-    /// `Sha256Field` relation, shares it, and yields `−1/combine(NATIONALITY, i,
-    /// byte)` for the two nationality bytes — exactly the term SHA contributes for
-    /// the nationality window (`−is_first_block`, one yield per byte).
+    fn alpha2(code: &[u8; 2]) -> u32 {
+        crate::nat::nationalities::pack_alpha2(*code)
+    }
+
+    /// Synthetic SHA field provider without a trace.
+    ///
+    /// It draws and shares the `Sha256Field` relation.
+    /// It yields `−1/combine(NATIONALITY, i, byte)` for each nationality byte.
     struct NatProvider {
         bytes: Vec<[u32; 2]>,
         handle: SharedFieldRelation,
@@ -657,9 +672,8 @@ mod binding_tests {
         }
     }
 
-    // DE=276, FR=250 — a two-entry accepted set (the validate minimum).
     fn eu_set() -> PublicInput {
-        PublicInput::new(vec![276, 250])
+        PublicInput::new(vec![alpha2(b"DE"), alpha2(b"FR")])
     }
 
     fn private(code: u32) -> PrivateInput {
@@ -668,17 +682,15 @@ mod binding_tests {
         }
     }
 
-    /// The bound nat module's nationality-byte requires cancel the producer's
-    /// yields when the code the module proves membership for matches the bytes the
-    /// producer yields — the proof verifies.
+    /// Confirms that matching nationality requires and yields balance.
     #[test]
     fn bound_nat_balances_against_matching_nat_yields() {
         let public = eu_set();
 
         let handle = SharedFieldRelation::new();
-        let mut provider = NatProvider::new(vec![nat_bytes(276)], handle.clone());
+        let mut provider = NatProvider::new(vec![nat_bytes(alpha2(b"DE"))], handle.clone());
         let mut nat = NationalityPredicate::new(PcsConfig::default())
-            .prover(&public, &private(276))
+            .prover(&public, &private(alpha2(b"DE")))
             .unwrap()
             .with_nat_binding(handle);
 
@@ -689,7 +701,7 @@ mod binding_tests {
         let sums = nat.claimed_sums();
 
         let handle_v = SharedFieldRelation::new();
-        let mut provider_v = NatProvider::new(vec![nat_bytes(276)], handle_v.clone());
+        let mut provider_v = NatProvider::new(vec![nat_bytes(alpha2(b"DE"))], handle_v.clone());
         let mut nat_v = NationalityPredicate::new(PcsConfig::default())
             .verifier(&public, &sums)
             .unwrap()
@@ -698,25 +710,24 @@ mod binding_tests {
         air_core::verify(&mut modules, &proof).expect("bound nat verifies against matching yields");
     }
 
-    /// When the producer yields a *different* nationality than the nat module
-    /// proves membership for (the credential↔predicate attack), the requires no
-    /// longer cancel the yields — the global balance breaks and the verifier
-    /// rejects. The prover still succeeds (each module is internally consistent;
-    /// the imbalance is a verify-time check). Both codes are in the accepted set,
-    /// so membership alone cannot catch the swap — only the binding does.
+    /// Confirms that a different producer nationality breaks the global balance.
+    ///
+    /// Each module remains internally consistent.
+    /// Both codes remain in the accepted set.
+    /// Thus, only the binding detects the swap.
     #[test]
     fn bound_nat_rejects_mismatched_nat_yields() {
         let public = eu_set();
-        // The nat module proves membership for DE (276)...
-        // ...but the producer yields the bytes of FR (250) — as if the signed
-        // credential held a different (also accepted) nationality.
-        let credential_bytes = nat_bytes(250);
-        assert_ne!(credential_bytes, nat_bytes(276));
+        // The nat module proves membership for DE.
+        // The producer instead yields FR.
+        // This simulates another accepted nationality in the signed credential.
+        let credential_bytes = nat_bytes(alpha2(b"FR"));
+        assert_ne!(credential_bytes, nat_bytes(alpha2(b"DE")));
 
         let handle = SharedFieldRelation::new();
         let mut provider = NatProvider::new(vec![credential_bytes], handle.clone());
         let mut nat = NationalityPredicate::new(PcsConfig::default())
-            .prover(&public, &private(276))
+            .prover(&public, &private(alpha2(b"DE")))
             .unwrap()
             .with_nat_binding(handle);
 
@@ -744,9 +755,9 @@ mod binding_tests {
     fn bound_nat_consumes_every_signed_array_entry() {
         let public = eu_set();
         let private = PrivateInput {
-            nationalities: vec![840, 276],
+            nationalities: vec![alpha2(b"US"), alpha2(b"DE")],
         };
-        let signed_bytes = vec![nat_bytes(840), nat_bytes(276)];
+        let signed_bytes = vec![nat_bytes(alpha2(b"US")), nat_bytes(alpha2(b"DE"))];
 
         let handle = SharedFieldRelation::new();
         let mut provider = NatProvider::new(signed_bytes.clone(), handle.clone());
@@ -763,17 +774,19 @@ mod binding_tests {
         let handle_v = SharedFieldRelation::new();
         let mut provider_v = NatProvider::new(signed_bytes, handle_v.clone());
         let mut nat_v = NationalityPredicate::new(PcsConfig::default())
-            .verifier_with_count(&public, 2, &sums)
+            .verifier_for_private_prefix(&public, &sums)
             .unwrap()
             .with_nat_binding(handle_v);
         let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut nat_v];
         air_core::verify(&mut modules, &proof).expect("complete signed array verifies");
 
         let bad_handle = SharedFieldRelation::new();
-        let mut bad_provider =
-            NatProvider::new(vec![nat_bytes(276), nat_bytes(276)], bad_handle.clone());
+        let mut bad_provider = NatProvider::new(
+            vec![nat_bytes(alpha2(b"DE")), nat_bytes(alpha2(b"DE"))],
+            bad_handle.clone(),
+        );
         let mut bad_nat = NationalityPredicate::new(PcsConfig::default())
-            .verifier_with_count(&public, 2, &sums)
+            .verifier_for_private_prefix(&public, &sums)
             .unwrap()
             .with_nat_binding(bad_handle);
         let mut bad_modules: [&mut dyn Air; 2] = [&mut bad_provider, &mut bad_nat];
@@ -781,5 +794,29 @@ mod binding_tests {
             air_core::verify(&mut bad_modules, &proof).is_err(),
             "changing a non-matching signed entry must break the indexed binding"
         );
+
+        for (produced, label) in [
+            (vec![nat_bytes(alpha2(b"US"))], "shorter producer"),
+            (
+                vec![
+                    nat_bytes(alpha2(b"US")),
+                    nat_bytes(alpha2(b"DE")),
+                    nat_bytes(alpha2(b"FR")),
+                ],
+                "longer producer",
+            ),
+        ] {
+            let length_handle = SharedFieldRelation::new();
+            let mut length_provider = NatProvider::new(produced, length_handle.clone());
+            let mut length_nat = NationalityPredicate::new(PcsConfig::default())
+                .verifier_for_private_prefix(&public, &sums)
+                .unwrap()
+                .with_nat_binding(length_handle);
+            let mut length_modules: [&mut dyn Air; 2] = [&mut length_provider, &mut length_nat];
+            assert!(
+                air_core::verify(&mut length_modules, &proof).is_err(),
+                "{label} must break the private-prefix relation balance"
+            );
+        }
     }
 }

@@ -70,14 +70,14 @@ impl InteractionTraces {
         );
         let n_packed = 1 << (WitnessData::log_size() - LOG_N_LANES);
 
-        let active = &preprocessed.active[0];
-        let row_index = &preprocessed.active[1];
-        let first = &preprocessed.active[2];
-        let last = &preprocessed.active[3];
-        let nationality = &witness_data.witness_trace[0];
-        let accepted = &witness_data.witness_trace[1];
-        let seen_before = &witness_data.witness_trace[2];
-        let seen_after = &witness_data.witness_trace[3];
+        let row_index = &preprocessed.prefix[1];
+        let first = &preprocessed.prefix[2];
+        let active = &witness_data.witness_trace[0];
+        let last = &witness_data.witness_trace[1];
+        let nationality = &witness_data.witness_trace[2];
+        let accepted = &witness_data.witness_trace[3];
+        let seen_before = &witness_data.witness_trace[4];
+        let seen_after = &witness_data.witness_trace[5];
         let one_m31 = PackedM31::broadcast(M31::from_u32_unchecked(1));
 
         let mut nat_entries = Vec::new();
@@ -86,6 +86,14 @@ impl InteractionTraces {
                 PackedQM31::from(active.values.data[packed_row] * accepted.values.data[packed_row]),
                 lookup_elements
                     .nat_table
+                    .combine(&[nationality.values.data[packed_row]]),
+            )
+        });
+        append_entry(&mut nat_entries, n_packed, |packed_row| {
+            (
+                PackedQM31::from(active.values.data[packed_row]),
+                lookup_elements
+                    .signed_valid
                     .combine(&[nationality.values.data[packed_row]]),
             )
         });
@@ -116,8 +124,8 @@ impl InteractionTraces {
             );
         }
         if let Some(field) = nat_field {
-            let code_hi = &witness_data.witness_trace[4];
-            let code_lo = &witness_data.witness_trace[5];
+            let code_hi = &witness_data.witness_trace[6];
+            let code_lo = &witness_data.witness_trace[7];
             let field_id = PackedM31::broadcast(M31::from_u32_unchecked(field_id::NATIONALITY));
             let two = PackedM31::broadcast(M31::from_u32_unchecked(2));
             for (byte_offset, value) in [(0u32, code_hi), (1, code_lo)] {
@@ -144,23 +152,37 @@ impl InteractionTraces {
         write_paired_entries(&mut logup_gen, &nat_entries);
         let (nat_interaction, nat_claimed_sum) = logup_gen.finalize_last();
 
-        // Class-D blinded accepted-set table: ONE gated fraction per row
-        // `-(1 − is_dummy)·mult` over one column, mirroring `NatTableEval`'s
-        // single `add_to_relation` + `finalize_logup`.
+        // The accepted-policy and fixed signed-validity providers share a
+        // component but use independent relations.
         let table_log_size = preprocessed.acceptable[0].domain.log_size();
         let one = PackedQM31::broadcast(QM31::from(1));
-        let mut logup_gen = LogupTraceGenerator::new(table_log_size);
-        logup_gen.col_from_fn(|vec_row| {
+        let table_n_packed = 1 << (table_log_size - LOG_N_LANES);
+        let mut table_entries = Vec::new();
+        append_entry(&mut table_entries, table_n_packed, |vec_row| {
             let nat_val: PackedM31 = preprocessed.acceptable[0].values.data[vec_row];
             let dummy_val: PackedM31 = preprocessed.acceptable[1].values.data[vec_row];
             let mult_val: PackedM31 = witness_data.table_mult_trace[0].values.data[vec_row];
-            let denom: PackedQM31 = lookup_elements.nat_table.combine(&[nat_val]);
-            let numerator = -((one - PackedQM31::from(dummy_val)) * PackedQM31::from(mult_val));
-            (numerator, denom)
+            (
+                -((one - PackedQM31::from(dummy_val)) * PackedQM31::from(mult_val)),
+                lookup_elements.nat_table.combine(&[nat_val]),
+            )
+        });
+        append_entry(&mut table_entries, table_n_packed, |vec_row| {
+            let nat_val: PackedM31 = preprocessed.signed_valid[0].values.data[vec_row];
+            let dummy_val: PackedM31 = preprocessed.signed_valid[1].values.data[vec_row];
+            let mult_val: PackedM31 = witness_data.table_mult_trace[1].values.data[vec_row];
+            (
+                -((one - PackedQM31::from(dummy_val)) * PackedQM31::from(mult_val)),
+                lookup_elements.signed_valid.combine(&[nat_val]),
+            )
         });
         if let (Some(masks), Some(beta)) = (claim_masks, claim_mask_beta) {
-            logup_gen.col_from_fn(|vec_row| masks[1].packed_fraction_at(vec_row, beta));
+            append_entry(&mut table_entries, table_n_packed, |vec_row| {
+                masks[1].packed_fraction_at(vec_row, beta)
+            });
         }
+        let mut logup_gen = LogupTraceGenerator::new(table_log_size);
+        write_paired_entries(&mut logup_gen, &table_entries);
         let (table_interaction, table_claimed_sum) = logup_gen.finalize_last();
 
         Self {

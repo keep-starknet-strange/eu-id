@@ -205,17 +205,11 @@ impl PublicEcdsaInstance<M31> {
         }
     }
 
-    /// Verifier-side canonicality gate for the public-key coordinates:
-    /// returns the first field (`"pub_x"`/`"pub_y"`) that is not a canonical
-    /// P-256 field element, i.e. whose limbs are not all 13-bit or whose
-    /// composed integer is `>= p`.
+    /// Returns the first noncanonical public-key coordinate.
     ///
-    /// The limb-range precondition is load-bearing: the `< p` comparison is
-    /// limbwise lexicographic (most-significant first), which equals integer
-    /// comparison only when every limb is below the `2^13` base. ECDSA public
-    /// keys are defined over canonical field elements; the AIR's curve check
-    /// works mod p and would otherwise accept a non-canonical representative
-    /// (`x + p`) of a valid point.
+    /// Each limb must be 13-bit, and the complete integer must be less than `p`.
+    /// The limb range is necessary for the lexicographic comparison with `p`.
+    /// Without it, the modular curve check could accept `x + p`.
     pub fn non_canonical_public_key_field(&self) -> Option<&'static str> {
         if !is_canonical_field_element(&self.pub_x) {
             Some("pub_x")

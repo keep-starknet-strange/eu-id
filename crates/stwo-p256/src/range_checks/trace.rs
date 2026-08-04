@@ -89,19 +89,14 @@ impl RangeCheckClaim {
         column_eval(self.log_size, multiplicity)
     }
 
-    // ---- Class D multiplicity blinding (Q-015 §4b / p4c Class D) ----
+    // Class-D multiplicity blinding.
     //
-    // The committed multiplicity column leaks: each row's count is a function
-    // of the private witness bytes, and every proof-side opening of the column
-    // is a linear functional over the full domain. Class D extends the table
-    // one log larger and fills the new upper half with fresh random
-    // multiplicities over RESERVED dummy keys. Per the masking note Case 1,
-    // >= 2^log_size uniform blind cells (with the full-rank circle-code opening
-    // submatrix) make every opening of the column uniform, masking the real
-    // lower-half counts. The dummy keys `[2^log_size, 2^(log_size+1))` are
-    // UNREACHABLE by honest consumers, which only ever emit values proven
-    // `< 2^log_size`, so soundness is unaffected; balance is preserved by the
-    // intra-component cancelling `+is_dummy*mult` emit in the eval.
+    // Multiplicity counts depend on private witness values.
+    // Class D extends the table by one log unit.
+    // The upper half contains random multiplicities at reserved dummy keys.
+    // At least `2^log_size` random cells mask openings of the real lower half.
+    // Consumers emit only values less than `2^log_size`.
+    // A preprocessed dummy gate removes dummy rows from the relation balance.
 
     /// `log_size + 1`: the committed row count of the Class-D blinded table.
     pub fn blind_log_size(&self) -> u32 {
@@ -109,7 +104,7 @@ impl RangeCheckClaim {
     }
 
     /// Class-D preprocessed value column `[0, 1, ..., 2^(log_size+1) - 1]`. The
-    /// lower half is the real range `[0, 2^log_size)`; the upper half is the
+    /// lower half is the real range `[0, 2^log_size)`. The upper half is the
     /// reserved dummy keys `[2^log_size, 2^(log_size+1))`.
     pub fn gen_blind_preprocessed_column(&self) -> ColumnEval {
         let size = 1u32 << self.blind_log_size();
@@ -132,7 +127,7 @@ impl RangeCheckClaim {
 
     /// Class-D multiplicity column: real counts over the lower half, fresh
     /// random blind cells over the dummy upper half. The dummy cells are the
-    /// mask; the eval's `+is_dummy*mult` term makes any value there balance.
+    /// mask. The eval's `+is_dummy*mult` term makes any value there balance.
     pub fn gen_blind_multiplicity_trace(
         &self,
         uses: impl IntoIterator<Item = M31>,

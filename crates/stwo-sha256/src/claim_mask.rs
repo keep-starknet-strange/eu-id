@@ -10,7 +10,7 @@ pub enum ShaClaimMaskConfigError {
     /// The module received a different number of masks than claim-bearing
     /// components.
     Count { expected: usize, actual: usize },
-    /// A mask trace was supplied out of component order.
+    /// A mask trace has the wrong component order.
     LogSize {
         index: usize,
         expected: u32,

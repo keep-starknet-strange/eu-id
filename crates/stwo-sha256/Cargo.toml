@@ -6,10 +6,6 @@ edition.workspace = true
 [features]
 default = ["std"]
 std = ["stwo/std", "stwo-constraint-framework/std"]
-# Multi-threaded proving via Stwo's rayon paths. Off by default (the prover
-# is single-threaded without it). Enables the M4 Max's many cores on the
-# laptop and the phone's performance cores on-device.
-parallel = ["stwo/parallel", "stwo-constraint-framework/parallel"]
 
 [dependencies]
 air-core = { path = "../air-core" }
@@ -23,7 +19,6 @@ serde = { workspace = true }
 [dev-dependencies]
 sha2 = "0.10"
 hex = "0.4"
-bincode = "1"
 
 [lints]
 workspace = true

@@ -2,7 +2,7 @@
 //!
 //! This module moves the message-agnostic split-pack/range table providers out
 //! of repeated SHA instances. Each SHA consumer still owns its main trace,
-//! digest relation, field exposure, and consumer-side lookups; this module owns
+//! digest relation, field exposure, and consumer-side lookups. This module owns
 //! only the fixed table preprocessed columns plus the union multiplicities that
 //! satisfy those lookups.
 
@@ -44,9 +44,9 @@ use crate::types::Sha256Witness;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShaTablesInteractionClaim {
-    /// One claim per producer *pair* (chunk of [`PRODUCER_PAIRS`]). A chunk of
+    /// One claim per producer *pair* (chunk of `PRODUCER_PAIRS`). A chunk of
     /// two producers carries the summed fraction of both in one interaction
-    /// column; a chunk of one carries that single producer's fraction. Order
+    /// column. A chunk of one carries that single producer's fraction. Order
     /// matches `PRODUCER_PAIRS` (== component registration == interaction
     /// column order), so `claimed_sums()` lines up with the committed columns.
     pub pairs: Vec<ComponentClaim>,
@@ -58,18 +58,17 @@ impl ShaTablesInteractionClaim {
     }
 }
 
-/// The pairing of shared-table producers into co-located components. Each inner
-/// slice is one component owning one or two producers of the *same* `log_size`;
-/// a two-producer chunk pairs its fractions into a single `SecureField`
-/// interaction column (R2 fraction batching). This one list drives four sites
-/// that must stay in lockstep: interaction-column generation
-/// (`shared_table_interaction_trace`), multiplicity-column order
-/// (`shared_table_trace`), interaction/trace log-size layout, and component
-/// registration (`ShaTablesComponents`). The 4 range tables pair into 3 chunks
-/// (range₈ single, range₂+range₄ pair, range₅ single). Under Class-D
-/// single-gated blinding each producer emits ONE fraction, so the unmasked
-/// shape has one paired interaction column per chunk: 4 producers → 3
-/// interaction columns. Claim masking appends one final fraction per chunk.
+/// The shared-table producer groups.
+///
+/// Each inner slice contains one or two producers with the same `log_size`.
+/// A two-producer group puts both fractions in one `SecureField` interaction
+/// column. This list controls the interaction columns, multiplicity columns,
+/// log-size layout, and component registration.
+///
+/// The four range tables form three groups: range₈, range₂ with range₄, and
+/// range₅. Each producer emits one Class-D fraction. Thus, the unmasked layout
+/// has one interaction column for each group. Claim masking adds one fraction
+/// to each group.
 const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
     &[SharedProducer::Range(RangeKind::Range8)],
     &[
@@ -116,15 +115,18 @@ impl ShaTableMultiplicities {
     }
 }
 
-/// Class-D multiplicity blinding (Q-015 §4b / p4c Class D): pad the honest
-/// multiplicities to the component's real lower half, then append an equally
-/// sized reserved dummy-key upper half of fresh random M31 cells. The stored
-/// (blinded) vector is committed as the
-/// multiplicity column; the interaction fraction reads the SAME committed cells.
-/// Randomness is host CSPRNG, never transcript-derived: the mask must be secret
-/// from the verifier. The dummy cells never touch the LogUp balance because
-/// `emit_blind` gates the numerator by `(1 − is_dummy)`, forcing it to `0` on
-/// every dummy row regardless of the random multiplicity committed there.
+/// Add Class-D masks to one multiplicity vector.
+///
+/// First, fill the real lower half with the honest multiplicities. Next, add a
+/// dummy-key upper half of the same size. Fill this upper half with fresh M31
+/// cells from the host cryptographic random number generator. The commitment
+/// contains this complete vector, and the interaction fraction reads the same
+/// cells.
+///
+/// The mask must stay secret from the verifier. Thus, do not derive it from the
+/// transcript. On dummy rows, `emit_blind` multiplies the numerator by
+/// `(1 - is_dummy)`. The result is zero, and the random multiplicity does not
+/// affect the LogUp balance.
 fn blind_extend(mut real: Vec<u32>, real_len: usize) -> Vec<u32> {
     use rand::RngCore;
     debug_assert!(
@@ -138,8 +140,8 @@ fn blind_extend(mut real: Vec<u32>, real_len: usize) -> Vec<u32> {
     real.resize(real_len, 0);
     let mut out = real;
     out.reserve(real_len);
-    // OsRng-seeded ChaCha12 (thread_rng): one syscall per reseed instead of
-    // one per cell — this loop runs 2^16+ times per table.
+    // `thread_rng` uses ChaCha12 with an `OsRng` seed. It does not make one
+    // system call for each cell in this large loop.
     let mut rng = rand::thread_rng();
     for _ in 0..real_len {
         // Full-field-width random mask cell (M31 reduces mod 2^31 − 1).
@@ -150,7 +152,7 @@ fn blind_extend(mut real: Vec<u32>, real_len: usize) -> Vec<u32> {
 
 /// Per-tree committed-column counts of one shared-SHA producer *component*.
 /// After R2 fraction batching a component may own two co-located producers
-/// (e.g. `sp_sigma0_lo+sp_sigma0_hi`) sharing one interaction column; the name
+/// (e.g. `sp_sigma0_lo+sp_sigma0_hi`) sharing one interaction column. The name
 /// joins the producer tags so the probe emits TRUE per-component rows instead
 /// of aggregating every producer under one `(tree, log_size)` bucket.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -239,10 +241,10 @@ impl ShaTablesProver {
     }
 
     /// TRUE per-component committed shape, one row per component (chunk of
-    /// [`PRODUCER_PAIRS`]), in registration/commit order. Reconciles exactly to
+    /// `PRODUCER_PAIRS`), in registration/commit order. Reconciles exactly to
     /// `layout()` (Σ preprocessed / trace / interaction columns per tree). A
     /// two-producer component pairs its fractions into ONE `SecureField`
-    /// interaction column (`SECURE_EXTENSION_DEGREE` base columns); its
+    /// interaction column (`SECURE_EXTENSION_DEGREE` base columns). Its
     /// preprocessed count is the sum of both producers' tables and its trace
     /// count is 2 (one multiplicity column each).
     pub fn component_shapes(&self) -> Vec<ShaTableComponentShape> {
@@ -263,11 +265,11 @@ impl ShaTablesProver {
                     trace_columns: chunk.len()
                         + usize::from(self.claim_masks.is_some())
                             * air_core::claim_mask::CLAIM_MASK_TRACE_COLUMNS,
-                    // Class D (single gated fraction): each producer emits ONE
-                    // gated fraction `-(1 − is_dummy)·mult`, so a 2-producer
-                    // chunk's two fractions pair into ONE interaction column and
-                    // a 1-producer chunk gets one column too. An enabled claim
-                    // mask is the final site and may add one paired column.
+                    // Class D uses one gated fraction per producer. Each producer
+                    // emits `-(1 − is_dummy)·mult`. Two producers share one
+                    // interaction column. One producer also uses one column.
+                    // An enabled claim mask adds a final site, which may pair with
+                    // another fraction.
                     interaction_columns: (chunk.len() + usize::from(self.claim_masks.is_some()))
                         .div_ceil(2)
                         * SECURE_EXTENSION_DEGREE,
@@ -320,7 +322,7 @@ impl ShaTablesVerifier {
             .collect()
     }
 
-    /// Match a prover whose every shared-table claim is masked.
+    /// Configure the verifier for a prover that masks all shared-table claims.
     pub fn with_claim_masks(mut self, challenge: SharedClaimMaskChallenge) -> Self {
         self.claim_mask_challenge = Some(challenge);
         self
@@ -522,13 +524,13 @@ fn shared_table_trace_log_sizes(masked: bool) -> Vec<u32> {
     out
 }
 
-/// One `SecureField` (= `SECURE_EXTENSION_DEGREE` base columns) interaction
-/// column per CHUNK, in `PRODUCER_PAIRS` order. Under Class-D single-gated
-/// blinding each producer emits ONE fraction `-(1 − is_dummy)·mult`, so a
-/// 2-producer chunk's two fractions pair into one column
-/// (`finalize_logup_in_pairs`) and a 1-producer chunk gets one column — one
-/// paired interaction column per chunk at the chunk's blinded log size. With
-/// masking enabled, one final site is appended before the same pair batching.
+/// Return the interaction log sizes in `PRODUCER_PAIRS` order.
+///
+/// Each group has one `SecureField` interaction column. A `SecureField` column
+/// contains `SECURE_EXTENSION_DEGREE` base columns. Each Class-D producer emits
+/// the fraction `-(1 - is_dummy) * mult`. `finalize_logup_in_pairs` puts two
+/// producer fractions in one column. A one-producer group also gets one column.
+/// If claim masking is active, add its fraction before the same pairing step.
 fn shared_table_interaction_log_sizes(masked: bool) -> Vec<u32> {
     let mut out = Vec::new();
     for chunk in PRODUCER_PAIRS {
@@ -603,8 +605,8 @@ fn shared_table_interaction_trace(
         // fraction `-(1 − is_dummy)·mult`, matching the single `add_to_relation`
         // call `emit_blind` fires in `SharedProducer::emit_entry`.
         // `build_interaction_columns` pairs consecutive fractions, so a
-        // 2-producer chunk `[p0, p1]` pairs into one column and a 1-producer
-        // chunk gets its own column. The optional mask is appended last.
+        // A two-producer group `[p0, p1]` uses one column. A one-producer
+        // group gets its own column. Append the optional mask last.
         let mut fracs: Vec<Vec<Frac>> = Vec::with_capacity(chunk.len());
         for &producer in chunk.iter() {
             fracs.push(producer_frac(relations, multiplicities, producer));
@@ -620,12 +622,13 @@ fn shared_table_interaction_trace(
     (combined, ShaTablesInteractionClaim { pairs: pair_claims })
 }
 
-/// The Class-D single gated LogUp fraction of one shared-table producer over
-/// the doubled domain: real rows from the table, then reserved dummy rows with
-/// unreachable keys `≥ 2^16`. The numerator is `-(1 − is_dummy)·mult/combine(row)`
-/// — `-mult` on real rows, `0` on the dummy upper half — so the fresh random
-/// blind multiplicity there never enters the LogUp sum (see
-/// [`producer_blind_frac_column`] and `emit_blind`).
+/// Return the Class-D LogUp fraction for one shared-table producer.
+///
+/// The lower half of the domain contains real rows. The upper half contains
+/// dummy rows with keys at or above `2^16`. The numerator is
+/// `-(1 - is_dummy) * mult / combine(row)`. It equals `-mult` on real rows and
+/// zero on dummy rows. Thus, the random dummy multiplicities do not enter the
+/// LogUp sum. See [`producer_blind_frac_column`] and `emit_blind`.
 fn producer_frac(
     relations: &Sha256Relations,
     multiplicities: &ShaTableMultiplicities,
@@ -656,11 +659,12 @@ fn producer_frac(
     }
 }
 
-/// Reserved dummy-key base for the blinded upper half. Every honest split-pack /
-/// range consumer emits 16-bit values `< 2^16`, so a key `≥ 2^16` is unreachable
-/// and no honest use can ever land on a dummy row. `emit_blind`'s cancelling
-/// twin additionally makes every dummy row net-zero regardless of its content,
-/// so a malicious prover cannot repurpose a dummy row to provide a real key.
+/// The dummy-key base for the masked upper half.
+///
+/// Honest range consumers emit only 16-bit values below `2^16`. Thus, they
+/// cannot use a dummy key at or above `2^16`. The second `emit_blind` term makes
+/// each dummy row net zero. A malicious prover cannot use a dummy row as a real
+/// row.
 const DUMMY_KEY_BASE: u32 = 1 << 16;
 
 /// Blinded 1-cell range rows: `[0, k)` real values then zero padding up to

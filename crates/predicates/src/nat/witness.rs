@@ -1,4 +1,4 @@
-use crate::nat::table::gen_blind_multiplicity_column;
+use crate::nat::table::{gen_blind_multiplicity_column, gen_signed_valid_multiplicity_column};
 use crate::nat::types::{PublicInput, Witness};
 use crate::types::Trace;
 use crate::utils::random_m31_cell;
@@ -45,9 +45,23 @@ impl WitnessData {
             seen_after.push(seen);
         }
 
-        // Trace-column order mirrors `NationalityEval`: value, accepted bit,
-        // prefix-OR before/after, then optional bound bytes.
+        // The prefix length stays private in committed selector columns. The
+        // fixed row-0 marker and transition relation constrain `active` to one
+        // nonempty prefix ending at the unique `last` row.
+        let count = witness.nationalities.len();
+        let rows = 1usize << LOG_SIZE;
+        assert!((1..=crate::nat::types::MAX_PRESENTED_NATIONALITIES).contains(&count));
+        let mut active = vec![0u32; rows];
+        active[..count].fill(1);
+        let mut last = vec![0u32; rows];
+        last[count - 1] = 1;
+
+        // Trace-column order mirrors `NationalityEval`: private prefix
+        // selectors, value, membership bit, prefix-OR state, then optional
+        // bound bytes.
         let mut witness_trace = vec![
+            selector_column(&active),
+            selector_column(&last),
             active_prefix_column(&witness.nationalities),
             active_prefix_column(&accepted),
             active_prefix_column(&seen_before),
@@ -69,7 +83,10 @@ impl WitnessData {
 
         // Class-D table multiplicity counts every accepted signed entry.
         let accepted_rows: Vec<usize> = witness.accepted_rows.iter().flatten().copied().collect();
-        let table_mult_trace = vec![gen_blind_multiplicity_column(public, &accepted_rows)];
+        let table_mult_trace = vec![
+            gen_blind_multiplicity_column(public, &accepted_rows),
+            gen_signed_valid_multiplicity_column(public, &witness.nationalities),
+        ];
 
         Self {
             witness_trace,
@@ -104,22 +121,31 @@ fn active_prefix_column(
     CircleEvaluation::new(domain, BaseColumn::from_iter(data))
 }
 
+fn selector_column(
+    values: &[u32],
+) -> CircleEvaluation<SimdBackend, M31, stwo::prover::poly::BitReversedOrder> {
+    CircleEvaluation::new(
+        CanonicCoset::new(LOG_SIZE).circle_domain(),
+        BaseColumn::from_iter(values.iter().copied().map(M31::from_u32_unchecked)),
+    )
+}
+
 #[cfg(test)]
 mod class_c_tests {
     use super::*;
     use stwo::prover::backend::simd::m31::N_LANES;
 
     fn test_public() -> PublicInput {
-        PublicInput::new(vec![276, 250, 300])
+        PublicInput::new(vec![0x4445, 0x4652, 0x4752])
     }
 
     fn test_witness() -> Witness {
-        // DE=276 is the second entry in the sorted set [250, 276, 300].
+        // DE is the first entry in the sorted set [DE, FR, GR].
         Witness {
             public: test_public(),
-            nationalities: vec![276],
+            nationalities: vec![0x4445],
             accepted: vec![true],
-            accepted_rows: vec![Some(1)],
+            accepted_rows: vec![Some(0)],
         }
     }
 

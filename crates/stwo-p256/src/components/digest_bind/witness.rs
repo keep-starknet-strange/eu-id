@@ -1,10 +1,9 @@
 //! Prover-side trace + interaction generation for the digest-bind bridge.
 //!
-//! The base trace holds, per signature row, `(active, sig_id, z[20], bytes[32],
-//! carries[31])` (see [`super`] `COL_*`). The interaction trace replays the
-//! bridge's LogUp consumes — range8 bytes, range13 carries, the `(sig_id, z)`
-//! binding, then the optional cross-module digest — in the **same order** the
-//! eval emits them, paired into LogUp columns.
+//! Each base-trace row contains `(active, sig_id, z[20], bytes[32], carries[31])`.
+//! The interaction trace repeats the bridge LogUp consumes.
+//! It uses the same order as the constraint evaluation.
+//! Consecutive entries form LogUp column pairs.
 
 use num_traits::{One, Zero};
 use rand::RngCore;
@@ -132,7 +131,7 @@ pub fn range_uses(rows: &[DigestBindRow]) -> (Vec<M31>, Vec<M31>) {
 }
 
 /// The relations the bridge consumes. `digest` is the shared cross-module
-/// channel; the rest are P256-internal.
+/// channel. The rest are P256-internal.
 pub struct DigestBindRelations<'a> {
     pub range8: &'a RangeCheckRelation,
     pub range13: &'a RangeCheckRelation,
@@ -140,10 +139,10 @@ pub struct DigestBindRelations<'a> {
     pub digest: &'a DigestBytesRelation,
 }
 
-/// Build the bridge's LogUp interaction trace and its claimed sum. Lookups are
-/// emitted in the canonical order (range8 bytes, range13 carries, `(sig_id, z)`,
-/// then the optional digest), paired by consecutive entries to match the
-/// eval's `finalize_logup_in_pairs`.
+/// Builds the bridge LogUp interaction trace and claimed sum.
+///
+/// The order is bytes, carries, `(sig_id, z)`, and then the optional digest.
+/// Consecutive entries form pairs for `finalize_logup_in_pairs`.
 pub fn gen_interaction_trace(
     active: &ColumnEval,
     base: &[ColumnEval],
@@ -373,12 +372,11 @@ mod tests {
         );
     }
 
-    /// The eval's constraints (boolean `active`, the 32 base-256 recomposition
-    /// equations, and the LogUp interaction column) all hold on an honest
-    /// trace, and the claimed sum matches the interaction trace. This pins the
-    /// eval ⟷ witness agreement: the eval must read the 85 columns in exactly
-    /// the order the trace generator writes them, and emit its lookups in the
-    /// order the interaction generator pairs them.
+    /// Confirms that an honest trace satisfies all bridge constraints.
+    ///
+    /// The claimed sum must match the interaction trace.
+    /// The constraint evaluation must read all 85 columns in committed order.
+    /// Its lookup order must match the interaction generator.
     #[test]
     fn honest_trace_satisfies_constraints() {
         let log_size = LOG_N_LANES;

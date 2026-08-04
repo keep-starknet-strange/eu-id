@@ -65,10 +65,6 @@ impl AgeBounds {
         self.max_supported_year - self.min_supported_year
     }
 
-    pub(crate) fn year_offset_bits(&self) -> usize {
-        utils::bits_needed(self.year_span())
-    }
-
     pub(crate) fn age_slack_bits(&self) -> usize {
         utils::bits_needed(self.max_date_key() - self.min_date_key())
     }
@@ -175,15 +171,6 @@ pub struct Witness {
     pub dob: Date,
     pub cutoff: Date,
     pub age_slack: u32,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AgeBitDecompositionProof {
-    pub public: PublicInput,
-    pub age_claimed_sum: QM31,
-    pub calendar_table_claimed_sum: QM31,
-    pub valid_day_table_claimed_sum: QM31,
-    pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

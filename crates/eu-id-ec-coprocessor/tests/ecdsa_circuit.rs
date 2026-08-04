@@ -1,3 +1,4 @@
+use ecdsa::signature::hazmat::PrehashSigner;
 use ecdsa::signature::Signer;
 use eu_id_ec_coprocessor::ecdsa::{
     build_c11_final_add_circuit, build_c12_on_curve_circuit, build_c14_c15_final_check_circuit,
@@ -12,9 +13,10 @@ use eu_id_ec_coprocessor::ecdsa::{
     verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
     verify_implemented_circuit_proofs, verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle,
     verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundleEntry, LayoutSlot,
-    MdocP4bMacKeyShares, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, MDOC_P4B_MAC_HALF_COUNT,
+    MdocP4bMacKeyShares, Witness, WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS,
+    MDOC_P4B_MAC_HALF_COUNT, N_LIMBS,
 };
-use eu_id_ec_coprocessor::ligero::{commit_witness, v2_ligero_params, v4_circle_params};
+use eu_id_ec_coprocessor::ligero::{commit_witness, product_circle_params};
 use eu_id_ec_coprocessor::sumcheck::{prove_circuit, CircuitPads};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;
@@ -91,6 +93,50 @@ fn revocation_signed_input() -> EcdsaInput {
     }
 }
 
+fn signed_input_for_digest(secret: u8, z: [u8; 32]) -> EcdsaInput {
+    let signing_key = SigningKey::from_bytes((&[secret; 32]).into()).unwrap();
+    let signature: Signature = signing_key.sign_prehash(&z).unwrap();
+    let public_key = signing_key.verifying_key().to_encoded_point(false);
+    let mut qx = [0u8; 32];
+    let mut qy = [0u8; 32];
+    qx.copy_from_slice(public_key.x().unwrap());
+    qy.copy_from_slice(public_key.y().unwrap());
+    EcdsaInput {
+        z,
+        r: signature.r().to_bytes().into(),
+        s: signature.s().to_bytes().into(),
+        qx,
+        qy,
+    }
+}
+
+fn p256_field_modulus_digest() -> [u8; 32] {
+    [
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff,
+    ]
+}
+
+fn p256_order_digest() -> [u8; 32] {
+    [
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63,
+        0x25, 0x51,
+    ]
+}
+
+fn increment_digest(mut digest: [u8; 32]) -> [u8; 32] {
+    for byte in digest.iter_mut().rev() {
+        let (value, carry) = byte.overflowing_add(1);
+        *byte = value;
+        if !carry {
+            return digest;
+        }
+    }
+    panic!("test digest overflow")
+}
+
 #[test]
 fn implemented_circuit_gate_count_stays_under_s4_budget() {
     let gates = implemented_circuit_gate_count().unwrap();
@@ -147,14 +193,14 @@ fn c1_input_limb_circuit_rejects_limb_and_value_mutations() {
     let circuit = build_c1_input_limbs_circuit().unwrap();
 
     let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::InputLimbs).start] =
-        witness.values[layout_range(LayoutSlot::InputLimbs).start] + Fp::ONE;
+    let r_limb = layout_range(LayoutSlot::InputLimbs).start + N_LIMBS;
+    witness.values[r_limb] = witness.values[r_limb] + Fp::ONE;
     let layers = circuit
         .evaluate_input(c1_input_limbs_input(&input, &witness).unwrap())
         .unwrap();
     assert!(
         !circuit.is_satisfied(&layers).unwrap(),
-        "bad z limb must reject"
+        "bad r limb must reject"
     );
 
     let witness = generate_witness(&input).unwrap();
@@ -252,37 +298,30 @@ fn c9_c10_ladder_circuit_binds_every_transition_and_endpoint() {
 fn c11_final_add_circuit_rejects_accumulator_and_final_point_mutations() {
     let input = signed_input();
     let circuit = build_c11_final_add_circuit().unwrap();
+    let rejects = |witness: &Witness| match c11_final_add_input(witness) {
+        Ok(circuit_input) => {
+            let layers = circuit.evaluate_input(circuit_input).unwrap();
+            !circuit.is_satisfied(&layers).unwrap()
+        }
+        Err(WitnessError::ExceptionalTrace) => true,
+        Err(error) => panic!("unexpected C11 input error: {error:?}"),
+    };
 
     let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::CorrectedEndpoints).start] =
         witness.values[layout_range(LayoutSlot::CorrectedEndpoints).start] + Fp::ONE;
-    let layers = circuit
-        .evaluate_input(c11_final_add_input(&witness).unwrap())
-        .unwrap();
-    assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
-        "bad corrected S1 endpoint must reject"
-    );
+    assert!(rejects(&witness), "bad corrected S1 endpoint must reject");
 
     let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::FinalPoint).start] =
         witness.values[layout_range(LayoutSlot::FinalPoint).start] + Fp::ONE;
-    let layers = circuit
-        .evaluate_input(c11_final_add_input(&witness).unwrap())
-        .unwrap();
-    assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
-        "bad final R must reject"
-    );
+    assert!(rejects(&witness), "bad final R must reject");
 
     let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] =
         witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] + Fp::ONE;
-    let layers = circuit
-        .evaluate_input(c11_final_add_input(&witness).unwrap())
-        .unwrap();
     assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
+        rejects(&witness),
         "bad witnessed final-add inverse must reject"
     );
 
@@ -290,12 +329,10 @@ fn c11_final_add_circuit_rejects_accumulator_and_final_point_mutations() {
     let corrected = layout_range(LayoutSlot::CorrectedEndpoints);
     witness.values[corrected.start + 2] = witness.values[corrected.start];
     witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] = Fp::ZERO;
-    let layers = circuit
-        .evaluate_input(c11_final_add_input(&witness).unwrap())
-        .unwrap();
-    assert!(
-        !circuit.is_satisfied(&layers).unwrap(),
-        "zero final-add denominator must reject in C11 without C13"
+    assert_eq!(
+        c11_final_add_input(&witness),
+        Err(WitnessError::ExceptionalTrace),
+        "the input builder must fail closed on a zero final-add denominator"
     );
 }
 
@@ -405,8 +442,8 @@ fn implemented_circuit_verifier_rejects_covered_mutations() {
     let input = signed_input();
 
     let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::InputLimbs).start] =
-        witness.values[layout_range(LayoutSlot::InputLimbs).start] + Fp::ONE;
+    let r_limb = layout_range(LayoutSlot::InputLimbs).start + N_LIMBS;
+    witness.values[r_limb] = witness.values[r_limb] + Fp::ONE;
     assert!(verify_implemented_circuits(&input, &witness).is_err());
 
     let mut witness = generate_witness(&input).unwrap();
@@ -496,8 +533,8 @@ fn implemented_circuit_provers_reject_mismatched_input_and_witness() {
 fn implemented_circuit_provers_reject_unsatisfied_witness_mutation() {
     let input = signed_input();
     let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::InputLimbs).start] =
-        witness.values[layout_range(LayoutSlot::InputLimbs).start] + Fp::ONE;
+    let r_limb = layout_range(LayoutSlot::InputLimbs).start + N_LIMBS;
+    witness.values[r_limb] = witness.values[r_limb] + Fp::ONE;
 
     assert!(
         prove_implemented_circuit_proofs(&input, &witness, [3u8; 32], TEST_SEED).is_err(),
@@ -648,18 +685,6 @@ fn implemented_circuit_bundle_rejects_corrupt_ligero_blind_row_opening() {
 
 #[test]
 #[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
-fn implemented_circuit_bundle_rejects_corrupt_ligero_consistency_claim_value() {
-    let input = signed_input();
-    let witness = generate_witness(&input).unwrap();
-    let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
-    assert!(bundle.consistency_claim_values.is_empty());
-    bundle.consistency_claim_values.push(Fp::ONE);
-
-    assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
-}
-
-#[test]
-#[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
 fn implemented_circuit_bundle_rejects_prover_selected_ligero_proximity_columns() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
@@ -784,12 +809,12 @@ fn implemented_circuit_bundle_rejects_spliced_c12_entry() {
 
 #[test]
 #[ignore = "full S4-lite bundle proves every implemented ECDSA circuit"]
-fn implemented_circuit_bundle_rejects_legacy_entry_without_statement_absorb() {
+fn implemented_circuit_bundle_rejects_entry_without_statement_absorb() {
     let input = signed_input();
     let witness = generate_witness(&input).unwrap();
     let mut bundle = prove_implemented_circuit_bundle(&input, &witness, TEST_SEED).unwrap();
 
-    bundle.entries[6] = c14_legacy_transcript_bundle_entry(&input, &witness);
+    bundle.entries[6] = c14_transcript_without_statement_bundle_entry(&input, &witness);
 
     assert!(verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).is_err());
 }
@@ -803,7 +828,7 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
         prove_implemented_circuit_bundle_profiled(&input, &witness, TEST_SEED).unwrap();
 
     assert_eq!(bundle.entries.len(), 7);
-    assert_eq!(bundle.params, v4_circle_params());
+    assert_eq!(bundle.params, product_circle_params());
     assert_eq!(bundle.proximity_openings.len(), bundle.params.openings);
     assert!(bundle
         .proximity_openings
@@ -840,14 +865,10 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
         bundle.claim_blind_check.combined_row.len(),
         bundle.params.claim_degree_bound()
     );
-    assert!(
-        bundle.consistency_claim_values.is_empty(),
-        "private consistency values must not be serialized"
-    );
     assert_eq!(
         bundle.quadratic_batch.quotient.len(),
         bundle.params.quadratic_degree_bound() - bundle.params.row_len,
-        "the committed claim-pad products require the exact Z_W quotient bound"
+        "the committed quadratic constraints require the exact Z_W quotient bound"
     );
     verify_implemented_circuit_bundle(&input, &bundle, TEST_SEED).unwrap();
 
@@ -865,13 +886,6 @@ fn implemented_circuit_bundle_accepts_honest_witness() {
     assert!(
         verify_implemented_circuit_bundle(&input, &corrupt_claim_blind_check, TEST_SEED).is_err(),
         "the production path must reject a forged claim-blind kernel response"
-    );
-
-    let mut noncanonical = bundle.clone();
-    noncanonical.proximity_claim_b = Some(bundle.proximity_claim.clone());
-    assert!(
-        verify_implemented_circuit_bundle(&input, &noncanonical, TEST_SEED).is_err(),
-        "unused legacy proof responses must be rejected, not ignored"
     );
 
     let mut corrupt_masked_sumcheck = bundle.clone();
@@ -923,12 +937,32 @@ fn implemented_circuit_bundle_accepts_p4b_public_projection() {
     )
     .unwrap();
 
-    assert!(
-        bundle.consistency_claim_values.is_empty(),
-        "projected private signature values must not be serialized"
-    );
     verify_implemented_circuit_bundle_batch_with_projection(&projections, &bundle, TEST_SEED)
         .unwrap();
+}
+
+#[test]
+#[ignore = "release gate: full projected proof over full-width public digests"]
+fn implemented_circuit_bundle_accepts_full_width_public_digests() {
+    let digests = [
+        ("n", p256_order_digest()),
+        ("p+1", increment_digest(p256_field_modulus_digest())),
+    ];
+    let inputs = digests.map(|(_, digest)| signed_input_for_digest(13, digest));
+    let witnesses = inputs.map(|input| {
+        generate_witness(&input).expect("full-width digest has a complete valid ECDSA witness")
+    });
+    let projections = digests.map(|(_, digest)| EcdsaPublicProjection::message_hash_only(digest));
+    let bundle = prove_implemented_circuit_bundle_batch_with_projection(
+        &inputs,
+        &projections,
+        &witnesses,
+        TEST_SEED,
+    )
+    .expect("full-width projected proof succeeds");
+
+    verify_implemented_circuit_bundle_batch_with_projection(&projections, &bundle, TEST_SEED)
+        .expect("full-width projected proof verifies");
 }
 
 #[test]
@@ -974,10 +1008,13 @@ fn implemented_circuit_bundle_rejects_wrong_p4b_public_projection() {
 fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
     let issuer = signed_input();
     let device = alternate_signed_input();
+    let revocation = revocation_signed_input();
     let issuer_witness = generate_witness(&issuer).unwrap();
     let device_witness = generate_witness(&device).unwrap();
+    let revocation_witness = generate_witness(&revocation).unwrap();
     let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
     let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+    let revocation_public = EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
     let mac_key_shares = test_mac_key_shares();
 
     let bundle = prove_mdoc_p4b_circuit_bundle(
@@ -987,7 +1024,7 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         &device,
         &device_public,
         &device_witness,
-        None,
+        (&revocation, &revocation_public, &revocation_witness),
         &mac_key_shares,
         TEST_SEED,
     )
@@ -995,12 +1032,8 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
 
     assert_eq!(bundle.mac_tags.len(), MDOC_P4B_MAC_HALF_COUNT);
     assert_eq!(
-        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 13_316,
-        "the eight MAC halves include four exact-byte canonicality witnesses"
-    );
-    assert!(
-        bundle.consistency_claim_values.is_empty(),
-        "the production mdoc bundle must serialize no private equality operands"
+        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 10_242,
+        "the eight affine MAC halves include two exact-coordinate canonicality witnesses"
     );
     let serialized = bincode::serialize(&bundle).unwrap();
     let mut hidden_values = vec![
@@ -1011,8 +1044,11 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         device.s.to_vec(),
         device.qx.to_vec(),
         device.qy.to_vec(),
+        revocation.z.to_vec(),
+        revocation.r.to_vec(),
+        revocation.s.to_vec(),
     ];
-    for witness in [&issuer_witness, &device_witness] {
+    for witness in [&issuer_witness, &device_witness, &revocation_witness] {
         hidden_values.extend(
             witness.values[layout_range(LayoutSlot::UScalars)]
                 .iter()
@@ -1027,8 +1063,14 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
             "serialized bundle contains a private ECDSA/MAC binding operand"
         );
     }
-    verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
-        .unwrap();
+    verify_mdoc_p4b_circuit_bundle(
+        &issuer_public,
+        &device_public,
+        &revocation_public,
+        &bundle,
+        TEST_SEED,
+    )
+    .unwrap();
 
     let mut corrupt_claim_blind_check = bundle.clone();
     corrupt_claim_blind_check.claim_blind_check.combined_row[0] =
@@ -1037,7 +1079,7 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
             &device_public,
-            None,
+            &revocation_public,
             &corrupt_claim_blind_check,
             TEST_SEED
         )
@@ -1051,7 +1093,7 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
             &device_public,
-            None,
+            &revocation_public,
             &malformed_params,
             TEST_SEED,
         )
@@ -1062,26 +1104,12 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
     );
     assert!(malformed_verdict.unwrap().is_err());
 
-    let mut noncanonical = bundle.clone();
-    noncanonical.claim_batch_b = Some(bundle.claim_batch.clone());
-    assert!(
-        verify_mdoc_p4b_circuit_bundle(
-            &issuer_public,
-            &device_public,
-            None,
-            &noncanonical,
-            TEST_SEED
-        )
-        .is_err(),
-        "unused legacy split responses must be rejected, not ignored"
-    );
-
     let mut tampered = bundle.clone();
     tampered.mac_tags[0][0] ^= 1;
     assert!(verify_mdoc_p4b_circuit_bundle(
         &issuer_public,
         &device_public,
-        None,
+        &revocation_public,
         &tampered,
         TEST_SEED
     )
@@ -1093,7 +1121,7 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
             &device_public,
-            None,
+            &revocation_public,
             &tampered_root_b,
             TEST_SEED
         )
@@ -1107,7 +1135,7 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
             &device_public,
-            None,
+            &revocation_public,
             &missing_root_b,
             TEST_SEED
         )
@@ -1122,7 +1150,7 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
             &device_public,
-            None,
+            &revocation_public,
             &tampered_b_opening,
             TEST_SEED
         )
@@ -1136,10 +1164,13 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
 fn mdoc_p4b_bundle_rejects_spliced_mac_batch_entry() {
     let issuer = signed_input();
     let device = alternate_signed_input();
+    let revocation = revocation_signed_input();
     let issuer_witness = generate_witness(&issuer).unwrap();
     let device_witness = generate_witness(&device).unwrap();
+    let revocation_witness = generate_witness(&revocation).unwrap();
     let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
     let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+    let revocation_public = EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
 
     let bundle = prove_mdoc_p4b_circuit_bundle(
         &issuer,
@@ -1148,7 +1179,7 @@ fn mdoc_p4b_bundle_rejects_spliced_mac_batch_entry() {
         &device,
         &device_public,
         &device_witness,
-        None,
+        (&revocation, &revocation_public, &revocation_witness),
         &test_mac_key_shares(),
         TEST_SEED,
     )
@@ -1160,29 +1191,41 @@ fn mdoc_p4b_bundle_rejects_spliced_mac_batch_entry() {
         &device,
         &device_public,
         &device_witness,
-        None,
+        (&revocation, &revocation_public, &revocation_witness),
         &alternate_mac_key_shares(),
         TEST_SEED,
     )
     .unwrap();
 
-    assert_eq!(bundle.entries.len(), 15);
-    verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
-        .unwrap();
+    assert_eq!(bundle.entries.len(), 22);
+    verify_mdoc_p4b_circuit_bundle(
+        &issuer_public,
+        &device_public,
+        &revocation_public,
+        &bundle,
+        TEST_SEED,
+    )
+    .unwrap();
 
     let mut spliced = bundle;
     let mac_batch_index = spliced.entries.len() - 1;
     spliced.entries[mac_batch_index] = alternate_bundle.entries[mac_batch_index].clone();
     assert!(
-        verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &spliced, TEST_SEED)
-            .is_err(),
+        verify_mdoc_p4b_circuit_bundle(
+            &issuer_public,
+            &device_public,
+            &revocation_public,
+            &spliced,
+            TEST_SEED,
+        )
+        .is_err(),
         "MAC batch sumcheck entry from a different root/key-share transcript unexpectedly verified"
     );
 }
 
 #[test]
 #[ignore = "release gate: full P4b mdoc MAC-bound bundle proof with revocation set"]
-fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
+fn mdoc_p4b_bundle_with_mandatory_revocation_verifies_and_fails_closed() {
     let issuer = signed_input();
     let device = alternate_signed_input();
     let revocation = revocation_signed_input();
@@ -1204,7 +1247,7 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
         &device,
         &device_public,
         &device_witness,
-        Some((&revocation, &revocation_public, &revocation_witness)),
+        (&revocation, &revocation_public, &revocation_witness),
         &mac_key_shares,
         TEST_SEED,
     )
@@ -1214,7 +1257,7 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
     verify_mdoc_p4b_circuit_bundle(
         &issuer_public,
         &device_public,
-        Some(&revocation_public),
+        &revocation_public,
         &bundle,
         TEST_SEED,
     )
@@ -1229,49 +1272,56 @@ fn mdoc_p4b_bundle_with_revocation_set_verifies_and_fails_closed() {
         );
     }
 
-    assert!(
-        verify_mdoc_p4b_circuit_bundle(&issuer_public, &device_public, None, &bundle, TEST_SEED)
-            .is_err(),
-        "three-set bundle must not verify against a two-set expectation"
-    );
-
     let wrong_revocation_key = EcdsaPublicProjection::public_key_only(issuer.qx, issuer.qy);
     assert!(
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
             &device_public,
-            Some(&wrong_revocation_key),
+            &wrong_revocation_key,
             &bundle,
             TEST_SEED,
         )
         .is_err(),
         "a different valid revocation public key must be rejected"
     );
+}
 
-    let two_set_bundle = prove_mdoc_p4b_circuit_bundle(
+#[test]
+#[ignore = "release gate: full P4b mdoc bundle covers private/public full-width digest roles"]
+fn mdoc_p4b_bundle_accepts_p_p_plus_one_and_max_digests() {
+    let p = p256_field_modulus_digest();
+    let p_plus_one = increment_digest(p);
+    let issuer = signed_input_for_digest(15, p);
+    let device = signed_input_for_digest(17, p_plus_one);
+    let revocation = signed_input_for_digest(19, [u8::MAX; 32]);
+    let issuer_witness = generate_witness(&issuer).expect("issuer z=p witness");
+    let device_witness = generate_witness(&device).expect("device z=p+1 witness");
+    let revocation_witness = generate_witness(&revocation).expect("revocation z=max witness");
+    let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
+    let device_public = EcdsaPublicProjection::message_hash_only(device.z);
+    let revocation_public = EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
+
+    let bundle = prove_mdoc_p4b_circuit_bundle(
         &issuer,
         &issuer_public,
         &issuer_witness,
         &device,
         &device_public,
         &device_witness,
-        None,
-        &mac_key_shares,
+        (&revocation, &revocation_public, &revocation_witness),
+        &test_mac_key_shares(),
         TEST_SEED,
     )
-    .unwrap();
-    assert_eq!(two_set_bundle.entries.len(), 15);
-    assert!(
-        verify_mdoc_p4b_circuit_bundle(
-            &issuer_public,
-            &device_public,
-            Some(&revocation_public),
-            &two_set_bundle,
-            TEST_SEED,
-        )
-        .is_err(),
-        "two-set bundle must not verify against a three-set expectation"
-    );
+    .expect("full-width digest mdoc proof succeeds");
+
+    verify_mdoc_p4b_circuit_bundle(
+        &issuer_public,
+        &device_public,
+        &revocation_public,
+        &bundle,
+        TEST_SEED,
+    )
+    .expect("full-width digest mdoc proof verifies");
 }
 
 fn test_mac_key_shares() -> MdocP4bMacKeyShares {
@@ -1366,7 +1416,7 @@ fn mutate_interior_u1_accumulator(witness: &mut eu_id_ec_coprocessor::ecdsa::Wit
     witness.values[u1.start + point_index * 2 + 1] = gy;
 }
 
-fn c14_legacy_transcript_bundle_entry(
+fn c14_transcript_without_statement_bundle_entry(
     input: &EcdsaInput,
     witness: &eu_id_ec_coprocessor::ecdsa::Witness,
 ) -> ImplementedCircuitBundleEntry {
@@ -1375,7 +1425,7 @@ fn c14_legacy_transcript_bundle_entry(
     let pads = CircuitPads::fresh(&circuit);
     let mut committed_input = circuit_input.clone();
     committed_input.extend_from_slice(pads.values());
-    let params = v2_ligero_params();
+    let params = product_circle_params();
     let commitment = commit_witness(&committed_input, params).unwrap();
     let root = commitment.root();
     let layers = circuit.evaluate_input(circuit_input).unwrap();

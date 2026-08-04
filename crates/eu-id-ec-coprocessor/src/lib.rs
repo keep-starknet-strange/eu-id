@@ -5,13 +5,10 @@ pub mod circle_fft;
 pub mod circuit;
 pub mod ecdsa;
 pub mod field;
-#[cfg(test)]
-mod gates;
 pub mod ligero;
 pub mod mac;
 pub mod merkle;
 pub mod mle;
-pub mod rs;
 pub mod sumcheck;
 
 pub use channel::{CoprocessorChannel, TranscriptSeed};

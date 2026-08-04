@@ -2,12 +2,12 @@ use core::ops::Range;
 use std::time::{Duration, Instant};
 
 use crate::ligero::{
-    commit_witness_with_quadratics_profiled, quadratic_committed_len, quadratic_route_claims,
-    v4_circle_params, verify_and_authenticate_split_openings,
+    commit_witness_with_quadratics_profiled, product_circle_params, quadratic_committed_len,
+    quadratic_route_claims, verify_and_authenticate_split_openings,
     verify_authenticated_split_claim_batch, verify_claim_batch, verify_claim_blind_check,
     verify_openings, verify_quadratic_batch, verify_split_claim_blind_check, LigeroClaimBatch,
-    LigeroClaimBlindCheck, LigeroCode, LigeroError, LigeroLinearClaim, LigeroLinearTerm,
-    LigeroParams, LigeroProximityClaim, LigeroQuadraticBatch, LigeroQuadraticConstraint,
+    LigeroClaimBlindCheck, LigeroError, LigeroLinearClaim, LigeroLinearTerm, LigeroParams,
+    LigeroProximityClaim, LigeroQuadraticBatch, LigeroQuadraticConstraint,
     LIGERO_AUXILIARY_ROW_COUNT,
 };
 use crate::mac::{bytes_to_bits, gf128_tag, Gf128, GF128_BITS};
@@ -44,34 +44,37 @@ pub const C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE: usize = 13;
 pub const C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE: usize = 13;
 pub const C9_C10_LADDER_INPUT_LOG_SIZE: usize = 13;
 pub const C9_C10_LADDER_OUTPUT_LOG_SIZE: usize = 14;
-pub const C11_FINAL_ADD_INPUT_LOG_SIZE: usize = 4;
-pub const C11_FINAL_ADD_OUTPUT_LOG_SIZE: usize = 2;
+pub const C11_FINAL_ADD_INPUT_LOG_SIZE: usize = 5;
+pub const C11_FINAL_ADD_OUTPUT_LOG_SIZE: usize = 5;
 pub const C12_ON_CURVE_INPUT_LOG_SIZE: usize = 11;
 pub const C12_ON_CURVE_OUTPUT_LOG_SIZE: usize = 11;
 pub const C14_C15_INPUT_LOG_SIZE: usize = 11;
 pub const C14_C15_OUTPUT_LOG_SIZE: usize = 11;
 pub const MAC_HALF_GROUP_A_INPUT_LOG_SIZE: usize = 9;
-pub const MAC_HALF_GROUP_B_INPUT_LOG_SIZE: usize = 11;
 pub const MAC_HALF_INPUT_LOG_SIZE: usize = 11;
 pub const MAC_HALF_TREE_LOG_SIZE: usize = 11;
-pub const MAC_HALF_TREE_BLOCK_SIZE: usize = 1;
-const MAC_HALF_PRODUCT_COEFFS: usize = 2 * GF128_BITS - 1;
-pub const MAC_HALF_PARITY_Q_BITS: usize = 9;
-pub const MAC_HALF_PARITY_MAX_S: usize = 632;
+pub const MAC_HALF_PARITY_Q_BITS: usize = 7;
+pub const MAC_HALF_PARITY_MAX_S: usize = GF128_BITS + 1;
 const MAC_HALF_BOOL_CONSTRAINTS: usize = 2 * GF128_BITS + GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 const MAC_HALF_TAG_CONSTRAINTS: usize = GF128_BITS;
 const MAC_HALF_LOCAL_CONSTRAINTS: usize = MAC_HALF_BOOL_CONSTRAINTS + MAC_HALF_TAG_CONSTRAINTS;
-const MAC_BATCH_GROUP_A_INPUT_LOG_SIZE: usize = 14;
-const MAC_BATCH_GROUP_B_INPUT_LOG_SIZE: usize = 14;
-const MAC_BATCH_INPUT_LOG_SIZE: usize = 15;
-const MAC_BATCH_TREE_LOG_SIZE: usize = 15;
+const MAC_BATCH_GROUP_A_INPUT_LOG_SIZE: usize = 13;
+const MAC_BATCH_GROUP_B_INPUT_LOG_SIZE: usize = 13;
+const MAC_BATCH_INPUT_LOG_SIZE: usize = 14;
+const MAC_BATCH_TREE_LOG_SIZE: usize = 14;
 const MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
 const MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE: usize = GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 const MAC_HALF_GROUP_B_INPUT_START: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
 const MAC_BATCH_GROUP_B_INPUT_START: usize = 1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE;
 const MAC_BATCH_OUTPUT_STRIDE: usize = GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS;
 const MAC_BATCH_TREE_HALF_WIDTH: usize = mac_half_tree_width();
-const MAC_BATCH_CANONICAL_VALUE_COUNT: usize = MDOC_P4B_MAC_HALF_COUNT / 2;
+/// Whole 256-bit MAC values that must be canonical P-256 base-field elements.
+///
+/// Only the device-key x/y coordinates use this range check. Issuer and
+/// revocation digests cover the full 256-bit SHA-256 output space and bind as
+/// two exact 128-bit halves instead.
+const MAC_BATCH_CANONICAL_VALUE_COUNT: usize = 2;
+const MAC_BATCH_CANONICAL_FIRST_HALF: usize = 2;
 const MAC_BATCH_CANONICAL_BITS: usize = 2 * GF128_BITS;
 const MAC_BATCH_CANONICAL_CARRIES: usize = MAC_BATCH_CANONICAL_BITS + 1;
 const MAC_BATCH_CANONICAL_SLACK_BITS_START: usize =
@@ -86,18 +89,11 @@ pub const MAC_HALF_CONST_ONE_INDEX: usize = 0;
 pub const MAC_HALF_X_BITS_START: usize = 1;
 pub const MAC_HALF_AP_BITS_START: usize = MAC_HALF_X_BITS_START + GF128_BITS;
 pub const MAC_HALF_Q_BITS_START: usize = MAC_HALF_GROUP_B_INPUT_START;
-pub const MAC_HALF_USED_INPUTS: usize = MAC_HALF_Q_BITS_START + GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 pub const MAC_HALF_GROUP_A_USED_INPUTS: usize = MAC_HALF_AP_BITS_START + GF128_BITS;
 pub const MAC_HALF_GROUP_B_USED_INPUTS: usize = GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 pub const MAC_HALF_COMMITTED_PRIVATE_INPUTS: usize =
     (MAC_HALF_GROUP_A_USED_INPUTS - 1) + MAC_HALF_GROUP_B_USED_INPUTS;
 pub const MDOC_P4B_MAC_HALF_COUNT: usize = 8;
-/// Public placeholder bound into MAC halves 6/7 when no revocation leg is
-/// present. Must be nonzero: `tag = (ap ^ av) * x`, so a zero value forces
-/// both tags to the constant zero regardless of the fresh key share,
-/// publishing a linkable revocation-off marker in every proof.
-pub const MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE: Gf128 =
-    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 pub const MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS: usize = MDOC_P4B_MAC_HALF_COUNT
     * MAC_HALF_COMMITTED_PRIVATE_INPUTS
     + MAC_BATCH_CANONICAL_VALUE_COUNT * (MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES);
@@ -105,20 +101,20 @@ pub const IMPLEMENTED_CIRCUIT_FAMILY_COUNT: usize = 7;
 
 const C1_CONST_ONE_INDEX: u32 = 0;
 const C1_VALUES_START_INDEX: u32 = 1;
-const C1_LIMBS_START_INDEX: u32 = 6;
+const C1_CANONICAL_FIELD_VALUE_COUNT: u32 = 4;
+const C1_LIMBS_START_INDEX: u32 = C1_VALUES_START_INDEX + C1_CANONICAL_FIELD_VALUE_COUNT;
 const C2_CONST_ONE_INDEX: u32 = 0;
 const C2_QX_INDEX: u32 = 1;
 const C2_QY_INDEX: u32 = 2;
 const C2_QX2_INDEX: u32 = 3;
 const C3_CONST_ONE_INDEX: usize = 0;
-const C3_Z_INDEX: usize = 1;
-const C3_R_INDEX: usize = 2;
-const C3_S_INDEX: usize = 3;
-const C3_U1_INDEX: usize = 4;
-const C3_U2_INDEX: usize = 5;
-const C3_R_NONZERO_INV_INDEX: usize = 6;
-const C3_S_NONZERO_INV_INDEX: usize = 7;
-const C3_Z_GE_N_INDEX: usize = 8;
+const C3_R_INDEX: usize = 1;
+const C3_S_INDEX: usize = 2;
+const C3_U1_INDEX: usize = 3;
+const C3_U2_INDEX: usize = 4;
+const C3_R_NONZERO_INV_INDEX: usize = 5;
+const C3_S_NONZERO_INV_INDEX: usize = 6;
+const C3_Z_GE_N_INDEX: usize = 7;
 const C3_CANONICAL_SCALAR_COUNT: usize = 5;
 const C3_SCALAR_R: usize = 0;
 const C3_SCALAR_S: usize = 1;
@@ -129,7 +125,7 @@ const C3_PRODUCT_COUNT: usize = 2;
 const PRODUCT_CARRY_BITS: usize = 19;
 const PRODUCT_CARRY_OFFSET: i64 = 1 << (PRODUCT_CARRY_BITS - 1);
 const PRODUCT_INTERNAL_CARRIES: usize = PRODUCT_EQUATION_LIMBS - 1;
-const C3_SCALAR_LIMBS_START: usize = 9;
+const C3_SCALAR_LIMBS_START: usize = 8;
 const C3_SCALAR_BITS_START: usize = C3_SCALAR_LIMBS_START + C3_CANONICAL_SCALAR_COUNT * N_LIMBS;
 const C3_SLACK_LIMBS_START: usize =
     C3_SCALAR_BITS_START + C3_CANONICAL_SCALAR_COUNT * N_LIMBS * LIMB_BITS;
@@ -144,9 +140,8 @@ const C3_PRODUCT_CARRY_BITS_START: usize =
     C3_QUOTIENT_BITS_START + C3_PRODUCT_COUNT * N_LIMBS * LIMB_BITS;
 const C3_DIGEST_BORROWS_START: usize =
     C3_PRODUCT_CARRY_BITS_START + C3_PRODUCT_COUNT * PRODUCT_INTERNAL_CARRIES * PRODUCT_CARRY_BITS;
-const C3_Z_SLACK_LIMBS_START: usize = C3_DIGEST_BORROWS_START + N_LIMBS - 1;
-const C3_Z_SLACK_BITS_START: usize = C3_Z_SLACK_LIMBS_START + N_LIMBS;
-const C3_Z_LT_CARRIES_START: usize = C3_Z_SLACK_BITS_START + N_LIMBS * LIMB_BITS;
+const C3_U1_ZERO_INDEX: usize = C3_DIGEST_BORROWS_START + N_LIMBS - 1;
+const C3_U1_NONZERO_INV_INDEX: usize = C3_U1_ZERO_INDEX + 1;
 const C9_CONST_ONE_INDEX: usize = 0;
 const C9_U1_INDEX: usize = 1;
 const C9_U2_INDEX: usize = 2;
@@ -201,8 +196,18 @@ const C11_BX_INDEX: u32 = 3;
 const C11_BY_INDEX: u32 = 4;
 const C11_RX_INDEX: u32 = 5;
 const C11_RY_INDEX: u32 = 6;
-const C11_LAMBDA_INDEX: u32 = 7;
-const C11_DENOM_INV_INDEX: u32 = 8;
+const C11_GENERIC_LAMBDA_INDEX: u32 = 7;
+const C11_GENERIC_DENOM_INV_INDEX: u32 = 8;
+const C11_U1_ZERO_INDEX: u32 = 9;
+const C11_DOUBLE_SELECTOR_INDEX: u32 = 10;
+const C11_GENERIC_SELECTOR_INDEX: u32 = 11;
+const C11_GENERIC_X_INDEX: u32 = 12;
+const C11_GENERIC_Y_INDEX: u32 = 13;
+const C11_DOUBLE_LAMBDA_INDEX: u32 = 14;
+const C11_DOUBLE_DENOM_INV_INDEX: u32 = 15;
+const C11_DOUBLE_X_INDEX: u32 = 16;
+const C11_DOUBLE_Y_INDEX: u32 = 17;
+const C11_AX_SQUARED_INDEX: u32 = 18;
 const C12_POINT_COUNT: usize = 515;
 const C12_ACCUMULATOR_POINT_COUNT: usize = 512;
 const C12_CONST_ONE_INDEX: u32 = 0;
@@ -333,14 +338,9 @@ pub struct ImplementedCircuitBundle {
     #[serde(default)]
     pub proximity_openings_b: Vec<ColumnOpening>,
     pub proximity_claim: LigeroProximityClaim,
-    #[serde(default)]
-    pub proximity_claim_b: Option<LigeroProximityClaim>,
     pub claim_batch: LigeroClaimBatch,
     pub claim_blind_check: LigeroClaimBlindCheck,
     pub quadratic_batch: LigeroQuadraticBatch,
-    #[serde(default)]
-    pub claim_batch_b: Option<LigeroClaimBatch>,
-    pub consistency_claim_values: Vec<Fp>,
     pub mac_tags: Vec<Gf128>,
     pub entries: Vec<ImplementedCircuitBundleEntry>,
 }
@@ -373,7 +373,7 @@ pub struct ImplementedCircuitProveProfile {
 pub struct ImplementedCircuitVerifyProfile {
     pub setup: Duration,
     pub ligero_proximity: Duration,
-    pub systematic_reconstruct: Duration,
+    pub claim_batch_reconstruct: Duration,
     pub sumcheck: Duration,
     pub input_claims: Duration,
     pub consistency: Duration,
@@ -473,6 +473,8 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
         .map_err(map_scalar_error)?;
     let u1_words = u1_trace.mul.result_words();
     let u2_words = u2_trace.mul.result_words();
+    let u1_zero = u1_words.iter().all(|&word| word == 0);
+    let u1_effective_words = if u1_zero { [1, 0, 0, 0] } else { u1_words };
     let mut values = vec![Fp::ZERO; LAYOUT_LEN];
     let input_range = layout_range(LayoutSlot::InputLimbs);
     let input_limbs = &mut values[input_range];
@@ -495,13 +497,18 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
         &mut values,
         LayoutSlot::U1GAccumulators,
         ProjectivePoint::GENERATOR,
-        &u1_words,
+        &u1_effective_words,
     )?;
     let u2_base = ProjectivePoint::from(public_key);
     let u2_point =
         write_ladder_accumulators(&mut values, LayoutSlot::U2QAccumulators, u2_base, &u2_words)?;
 
-    let r_point = projective_point_bytes(u1_point + u2_point)?;
+    let final_point = if u1_zero {
+        u2_point
+    } else {
+        u1_point + u2_point
+    };
+    let r_point = projective_point_bytes(final_point)?;
     let (rx_words, reduction_flag) = reduce_field_x_to_scalar(words_from_be(r_point.0));
 
     let corrected = layout_range(LayoutSlot::CorrectedEndpoints);
@@ -509,11 +516,12 @@ pub fn generate_witness(input: &EcdsaInput) -> Result<Witness, WitnessError> {
     write_projective_point(&mut values[corrected], 2, u2_point)?;
 
     let final_add_inverse = layout_range(LayoutSlot::FinalAddDenominatorInverse);
-    write_inverse(
-        &mut values[final_add_inverse],
-        0,
-        final_add_denominator(u1_point, u2_point)?,
-    )?;
+    let generic_denominator = if u1_zero {
+        Fp::ZERO
+    } else {
+        final_add_denominator(u1_point, u2_point)?
+    };
+    values[final_add_inverse.start] = generic_denominator.inverse().unwrap_or(Fp::ZERO);
 
     let final_point_range = layout_range(LayoutSlot::FinalPoint);
     values[final_point_range.start] = Fp::from_bytes_be(r_point.0).expect("R.x is a field element");
@@ -601,11 +609,10 @@ pub fn prove_implemented_circuit_proofs(
 /// Verifies only the per-family sumcheck transcript shape and returns its
 /// masked, unbound input claims.
 ///
-/// This low-level API does **not** bind a caller statement, projected inputs, or
-/// copies shared between circuit families, and cannot validate the committed
-/// pad constraints without the Ligero commitment. Production callers must use
-/// [`verify_implemented_circuit_bundle`] (or its batch/projected variants), which
-/// authenticates these claims against Ligero and adds all fixed and affine bindings.
+/// This low-level API does not bind the caller statement or projected inputs.
+/// It also does not bind copies shared between circuit families.
+/// A Ligero commitment is required to validate committed pad constraints.
+/// Production callers must use [`verify_implemented_circuit_bundle`] or its variants.
 pub fn verify_implemented_circuit_proofs(
     proofs: &ImplementedCircuitProofs,
     commitment_root: [u8; 32],
@@ -845,7 +852,7 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
         all_verifications.push(verifications);
     }
     profile.sumcheck = start.elapsed();
-    let (claim_batch, consistency_claim_values) = prover_claim_batch(
+    let claim_batch = prover_claim_batch(
         &commitment,
         projections,
         &all_instances,
@@ -898,12 +905,9 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
             proximity_openings,
             proximity_openings_b: Vec::new(),
             proximity_claim,
-            proximity_claim_b: None,
             claim_batch,
             claim_blind_check,
             quadratic_batch,
-            claim_batch_b: None,
-            consistency_claim_values,
             mac_tags: Vec::new(),
             entries,
         },
@@ -929,7 +933,7 @@ pub fn prove_implemented_circuit_bundle_profiled(
 
 /// Proves using a witness that the caller has already checked.
 ///
-/// The normal `prove_implemented_circuit_bundle` path remains checked; this is
+/// The normal `prove_implemented_circuit_bundle` path remains checked. This is
 /// used by the benchmark after `generate_witness` so witness generation and
 /// proof generation are measured as separate BL7 buckets.
 pub fn prove_implemented_circuit_bundle_unchecked_profiled(
@@ -952,7 +956,7 @@ pub fn prove_mdoc_p4b_circuit_bundle(
     device_input: &EcdsaInput,
     device_projection: &EcdsaPublicProjection,
     device_witness: &Witness,
-    revocation: Option<(&EcdsaInput, &EcdsaPublicProjection, &Witness)>,
+    revocation: (&EcdsaInput, &EcdsaPublicProjection, &Witness),
     mac_key_shares: &MdocP4bMacKeyShares,
     transcript_seed: TranscriptSeed,
 ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
@@ -977,23 +981,22 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     device_input: &EcdsaInput,
     device_projection: &EcdsaPublicProjection,
     device_witness: &Witness,
-    revocation: Option<(&EcdsaInput, &EcdsaPublicProjection, &Witness)>,
+    revocation: (&EcdsaInput, &EcdsaPublicProjection, &Witness),
     mac_key_shares: &MdocP4bMacKeyShares,
     transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, MdocP4bProveProfile), ImplementedCircuitProofError> {
     let mut profile = MdocP4bProveProfile::default();
     let start = Instant::now();
+    let (revocation_input, revocation_projection, revocation_witness) = revocation;
     validate_mdoc_p4b_projection_shapes(
         issuer_projection,
         device_projection,
-        revocation.map(|(_, projection, _)| projection),
+        revocation_projection,
     )?;
     verify_witness(issuer_input, issuer_witness).map_err(ImplementedCircuitProofError::Witness)?;
     verify_witness(device_input, device_witness).map_err(ImplementedCircuitProofError::Witness)?;
-    if let Some((revocation_input, _, revocation_witness)) = revocation {
-        verify_witness(revocation_input, revocation_witness)
-            .map_err(ImplementedCircuitProofError::Witness)?;
-    }
+    verify_witness(revocation_input, revocation_witness)
+        .map_err(ImplementedCircuitProofError::Witness)?;
     profile.witness_check = start.elapsed();
 
     let start = Instant::now();
@@ -1008,18 +1011,12 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     {
         instances.push(MdocP4bProverInstance::ecdsa(1, instance));
     }
-    if let Some((revocation_input, _, revocation_witness)) = revocation {
-        for instance in implemented_circuit_instances(revocation_input, revocation_witness)
-            .map_err(ImplementedCircuitProofError::Witness)?
-        {
-            instances.push(MdocP4bProverInstance::ecdsa(2, instance));
-        }
+    for instance in implemented_circuit_instances(revocation_input, revocation_witness)
+        .map_err(ImplementedCircuitProofError::Witness)?
+    {
+        instances.push(MdocP4bProverInstance::ecdsa(2, instance));
     }
-    let mac_values = mdoc_p4b_mac_values(
-        issuer_input,
-        device_input,
-        revocation.map(|(input, _, _)| input),
-    );
+    let mac_values = mdoc_p4b_mac_values(issuer_input, device_input, revocation_input);
     let mac_tags_placeholder = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
     let circuit = build_mac_batch_circuit(&[0u8; 16], &mac_tags_placeholder)
         .map_err(ImplementedCircuitProofError::Circuit)?;
@@ -1085,10 +1082,11 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         .split_proximity_claim(&commitment_b, &gamma)
         .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_proximity_claim = start.elapsed();
-    let mut projections = vec![*issuer_projection, *device_projection];
-    if let Some((_, revocation_projection, _)) = revocation {
-        projections.push(*revocation_projection);
-    }
+    let projections = [
+        *issuer_projection,
+        *device_projection,
+        *revocation_projection,
+    ];
     let sumcheck_start = Instant::now();
     let entry_results = instances
         .par_iter()
@@ -1163,7 +1161,7 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     profile.sumcheck = sumcheck_start.elapsed();
 
     let claim_start = Instant::now();
-    let (claim_batch, consistency_claim_values, claim_inventory) = mdoc_p4b_prover_claim_batch(
+    let (claim_batch, claim_inventory) = mdoc_p4b_prover_claim_batch(
         &commitment,
         &commitment_b,
         params,
@@ -1233,12 +1231,9 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
             proximity_openings,
             proximity_openings_b,
             proximity_claim,
-            proximity_claim_b: None,
             claim_batch,
             claim_blind_check,
             quadratic_batch,
-            claim_batch_b: None,
-            consistency_claim_values,
             mac_tags,
             entries,
         },
@@ -1280,7 +1275,7 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection(
 pub fn verify_mdoc_p4b_circuit_bundle(
     issuer_projection: &EcdsaPublicProjection,
     device_projection: &EcdsaPublicProjection,
-    revocation_projection: Option<&EcdsaPublicProjection>,
+    revocation_projection: &EcdsaPublicProjection,
     bundle: &ImplementedCircuitBundle,
     transcript_seed: TranscriptSeed,
 ) -> Result<(), ImplementedCircuitProofError> {
@@ -1297,7 +1292,7 @@ pub fn verify_mdoc_p4b_circuit_bundle(
 pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     issuer_projection: &EcdsaPublicProjection,
     device_projection: &EcdsaPublicProjection,
-    revocation_projection: Option<&EcdsaPublicProjection>,
+    revocation_projection: &EcdsaPublicProjection,
     bundle: &ImplementedCircuitBundle,
     transcript_seed: TranscriptSeed,
 ) -> Result<MdocP4bVerifyProfile, ImplementedCircuitProofError> {
@@ -1308,12 +1303,6 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         device_projection,
         revocation_projection,
     )?;
-    if bundle.proximity_claim_b.is_some() || bundle.claim_batch_b.is_some() {
-        return Err(ImplementedCircuitProofError::NonCanonicalBundle);
-    }
-    if !bundle.consistency_claim_values.is_empty() {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
-    }
     if bundle.mac_tags.len() != MDOC_P4B_MAC_HALF_COUNT {
         return Err(ImplementedCircuitProofError::WrongProofCount {
             expected: MDOC_P4B_MAC_HALF_COUNT,
@@ -1325,15 +1314,12 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         .ok_or(ImplementedCircuitProofError::ProximityOpeningRejected)?;
     let full_root = mdoc_p4b_full_root(bundle.root, root_b);
     let av = draw_mdoc_p4b_av(transcript_seed, bundle.root);
-    let mut projections = vec![*issuer_projection, *device_projection];
-    if let Some(revocation_projection) = revocation_projection {
-        projections.push(*revocation_projection);
-    }
-    // The instance set is fixed by the verifier's expectation: a bundle whose
-    // entry count does not match (revocation present vs absent) is rejected by
-    // the proof-count check below.
-    let circuits =
-        mdoc_p4b_verifier_instances(&av, &bundle.mac_tags, revocation_projection.is_some())?;
+    let projections = [
+        *issuer_projection,
+        *device_projection,
+        *revocation_projection,
+    ];
+    let circuits = mdoc_p4b_verifier_instances(&av, &bundle.mac_tags)?;
     if bundle.entries.len() != circuits.len() {
         return Err(ImplementedCircuitProofError::WrongProofCount {
             expected: circuits.len(),
@@ -1496,12 +1482,9 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
                 )?;
             }
             MdocP4bCircuitRole::RevocationEcdsa => {
-                // Only reachable when the verifier expects a revocation set:
-                // `circuits` contains revocation instances iff
-                // `revocation_projection` is `Some`.
                 add_family_fixed_claims(
                     &mut linear_claims,
-                    revocation_projection.expect("revocation instances imply a projection"),
+                    revocation_projection,
                     instance.label,
                     layout,
                 )?;
@@ -1598,14 +1581,9 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
     let setup_start = Instant::now();
     if bundle.root_b.is_some()
         || !bundle.proximity_openings_b.is_empty()
-        || bundle.proximity_claim_b.is_some()
-        || bundle.claim_batch_b.is_some()
         || !bundle.mac_tags.is_empty()
     {
         return Err(ImplementedCircuitProofError::NonCanonicalBundle);
-    }
-    if !bundle.consistency_claim_values.is_empty() {
-        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
     }
     let circuits =
         implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?;
@@ -1790,7 +1768,7 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
     {
         return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
     }
-    profile.systematic_reconstruct = start.elapsed();
+    profile.claim_batch_reconstruct = start.elapsed();
     Ok((all_claims, profile))
 }
 
@@ -1859,10 +1837,7 @@ fn ligero_claim_blind_challenge(
     ] {
         channel.mix_bytes(&(dimension as u64).to_be_bytes());
     }
-    channel.mix_bytes(&[match params.code {
-        LigeroCode::Rs => 0,
-        LigeroCode::Circle => 1,
-    }]);
+    channel.mix_bytes(&[1]);
     channel.draw_fp()
 }
 
@@ -1912,10 +1887,7 @@ fn ligero_opening_indices(
     ] {
         channel.mix_bytes(&(dimension as u64).to_be_bytes());
     }
-    channel.mix_bytes(&[match params.code {
-        LigeroCode::Rs => 0,
-        LigeroCode::Circle => 1,
-    }]);
+    channel.mix_bytes(&[1]);
     mix_fp_slice(&mut channel, &proximity_claim.combined_row);
     mix_sumcheck_entries(&mut channel, entries);
     mix_fp_slice(&mut channel, &claim_batch.coefficients);
@@ -1929,8 +1901,7 @@ fn ligero_opening_indices(
         let mut word = [0u8; 8];
         word.copy_from_slice(&bytes[24..]);
         let index = (u64::from_be_bytes(word) as usize) % params.codeword_len;
-        let is_sampleable = params.code == LigeroCode::Circle || index >= params.row_len;
-        if is_sampleable && !indices.contains(&index) {
+        if !indices.contains(&index) {
             indices.push(index);
         }
     }
@@ -1998,7 +1969,7 @@ fn verify_ligero_opening_indices(
 
 fn mdoc_p4b_full_root(root_a: [u8; 32], root_b: [u8; 32]) -> [u8; 32] {
     let mut hasher = Blake2s256::new();
-    hasher.update(b"eu-id-s4-mdoc-p4b-two-root-v2");
+    hasher.update(b"eu-id-s4-mdoc-p4b-two-root-v3");
     hasher.update(root_a);
     hasher.update(root_b);
     let digest = hasher.finalize();
@@ -2016,7 +1987,7 @@ fn draw_mdoc_p4b_av(transcript_seed: TranscriptSeed, root: [u8; 32]) -> Gf128 {
     let mut channel = CoprocessorChannel::from_seed(transcript_seed, COPROCESSOR_TRANSCRIPT_DOMAIN);
     channel.mix_bytes(MDOC_P4B_MAC_PUBLIC_LABEL);
     channel.mix_bytes(&root);
-    channel.draw_gf128(b"eu-id-p4b-mac-av")
+    channel.draw_gf128(b"eu-id-p4b-affine-mac-av-v3")
 }
 
 fn mdoc_p4b_instance_channel(
@@ -2062,7 +2033,7 @@ fn mdoc_p4b_instance_channel(
 fn validate_mdoc_p4b_projection_shapes(
     issuer: &EcdsaPublicProjection,
     device: &EcdsaPublicProjection,
-    revocation: Option<&EcdsaPublicProjection>,
+    revocation: &EcdsaPublicProjection,
 ) -> Result<(), ImplementedCircuitProofError> {
     let key_only = |projection: &EcdsaPublicProjection| {
         projection.z.is_none()
@@ -2078,10 +2049,7 @@ fn validate_mdoc_p4b_projection_shapes(
             && projection.qx.is_none()
             && projection.qy.is_none()
     };
-    if !key_only(issuer)
-        || !message_hash_only(device)
-        || revocation.is_some_and(|projection| !key_only(projection))
-    {
+    if !key_only(issuer) || !message_hash_only(device) || !key_only(revocation) {
         return Err(ImplementedCircuitProofError::NonCanonicalBundle);
     }
     Ok(())
@@ -2090,14 +2058,12 @@ fn validate_mdoc_p4b_projection_shapes(
 fn mdoc_p4b_mac_values(
     issuer_input: &EcdsaInput,
     device_input: &EcdsaInput,
-    revocation_input: Option<&EcdsaInput>,
+    revocation_input: &EcdsaInput,
 ) -> [Gf128; MDOC_P4B_MAC_HALF_COUNT] {
     let [issuer_z_lo, issuer_z_hi] = gf128_halves_from_be32(issuer_input.z);
     let [device_qx_lo, device_qx_hi] = gf128_halves_from_be32(device_input.qx);
     let [device_qy_lo, device_qy_hi] = gf128_halves_from_be32(device_input.qy);
-    let [revocation_z_lo, revocation_z_hi] = revocation_input
-        .map(|input| gf128_halves_from_be32(input.z))
-        .unwrap_or([MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE; 2]);
+    let [revocation_z_lo, revocation_z_hi] = gf128_halves_from_be32(revocation_input.z);
     [
         issuer_z_lo,
         issuer_z_hi,
@@ -2157,15 +2123,13 @@ fn circuit_gate_count(circuit: &Circuit) -> usize {
 }
 
 fn implemented_circuit_ligero_params(_input_len: usize) -> LigeroParams {
-    // v4: circle-FFT code at ℓ=256 (k = 512, claim bound 770, e = 1662,
-    // t = 176, ≈2^-132.2). Same FFT domains as v3 (ℓ=128) with twice the
-    // data slots per row: half the rows, so the per-column openings that
-    // dominate proof size AND the row-encode work both halve, at unchanged
-    // claim-batch cost per row-weight interpolation count (which doubles per
-    // row but halves in row count).
-    let params = v4_circle_params();
+    // `product_circle_params` is the single source for the live code geometry and
+    // opening count. This query/PoW target is a configuration heuristic, not
+    // a theorem-level composed soundness bound for the full proof.
+    const PCS_PARAMETER_HEURISTIC_BITS: i32 = 128;
+    let params = product_circle_params();
     debug_assert!(params.validate().is_ok());
-    debug_assert!(params.soundness_error() <= 2f64.powi(-128));
+    debug_assert!(params.soundness_error() <= 2f64.powi(-PCS_PARAMETER_HEURISTIC_BITS));
     params
 }
 
@@ -2224,8 +2188,8 @@ struct MdocP4bClaimInventory {
     linear_claim_touched_rows: usize,
 }
 
-const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-mac-batch-v2";
-const MDOC_P4B_MAC_PUBLIC_LABEL: &[u8] = b"s4-mdoc-p4b-mac-public-v2";
+const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-affine-mac-batch-v3";
+const MDOC_P4B_MAC_PUBLIC_LABEL: &[u8] = b"s4-mdoc-p4b-affine-mac-public-v3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BundleCircuitLayout {
@@ -2459,7 +2423,6 @@ fn verifier_circuit_input_len(circuit: &Circuit) -> usize {
 fn mdoc_p4b_verifier_instances(
     av: &Gf128,
     mac_tags: &[Gf128],
-    include_revocation: bool,
 ) -> Result<Vec<MdocP4bVerifierInstance>, ImplementedCircuitProofError> {
     let mut instances = Vec::new();
     for instance in
@@ -2480,16 +2443,14 @@ fn mdoc_p4b_verifier_instances(
             circuit: instance.circuit,
         });
     }
-    if include_revocation {
-        for instance in implemented_circuit_verifier_instances()
-            .map_err(ImplementedCircuitProofError::Circuit)?
-        {
-            instances.push(MdocP4bVerifierInstance {
-                label: instance.label,
-                role: MdocP4bCircuitRole::RevocationEcdsa,
-                circuit: instance.circuit,
-            });
-        }
+    for instance in
+        implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?
+    {
+        instances.push(MdocP4bVerifierInstance {
+            label: instance.label,
+            role: MdocP4bCircuitRole::RevocationEcdsa,
+            circuit: instance.circuit,
+        });
     }
     instances.push(MdocP4bVerifierInstance {
         label: MDOC_P4B_MAC_BATCH_LABEL,
@@ -2510,7 +2471,7 @@ fn prover_claim_batch(
     committed_len: usize,
     quadratic_constraints: &[LigeroQuadraticConstraint],
     transcript_seed: TranscriptSeed,
-) -> Result<(LigeroClaimBatch, Vec<Fp>), ImplementedCircuitProofError> {
+) -> Result<LigeroClaimBatch, ImplementedCircuitProofError> {
     let mut claims = Vec::new();
     for (((projection, instances), layouts), verifications) in projections
         .iter()
@@ -2538,7 +2499,7 @@ fn prover_claim_batch(
     let batch = commitment
         .claim_batch(&claims, &gamma)
         .map_err(ImplementedCircuitProofError::Ligero)?;
-    Ok((batch, Vec::new()))
+    Ok(batch)
 }
 
 fn mdoc_p4b_prover_claim_batch(
@@ -2554,7 +2515,7 @@ fn mdoc_p4b_prover_claim_batch(
     quadratic_constraints: &[LigeroQuadraticConstraint],
     transcript_root: [u8; 32],
     transcript_seed: TranscriptSeed,
-) -> Result<(LigeroClaimBatch, Vec<Fp>, MdocP4bClaimInventory), ImplementedCircuitProofError> {
+) -> Result<(LigeroClaimBatch, MdocP4bClaimInventory), ImplementedCircuitProofError> {
     let mut claims = Vec::new();
     let group_b_offset =
         quadratic_committed_len(committed_len_a, params, quadratic_constraints.len())
@@ -2609,7 +2570,7 @@ fn mdoc_p4b_prover_claim_batch(
         linear_claims: claims.len(),
         linear_claim_touched_rows: linear_claim_touched_rows(&claims, params.row_len),
     };
-    Ok((batch, Vec::new(), inventory))
+    Ok((batch, inventory))
 }
 
 fn add_circuit_verification_claims(
@@ -2756,16 +2717,21 @@ fn add_c1_public_claims(
     projection: &EcdsaPublicProjection,
     layout: &BundleCircuitLayout,
 ) -> Result<(), ImplementedCircuitProofError> {
-    for (offset, bytes) in [
-        projection.z,
-        projection.r,
-        projection.s,
-        projection.qx,
-        projection.qy,
-    ]
-    .into_iter()
-    .enumerate()
-    .filter_map(|(offset, bytes)| bytes.map(|bytes| (offset, bytes)))
+    if let Some(z) = projection.z {
+        for (limb, value) in limbs_13(z).into_iter().enumerate() {
+            add_fixed_claim(
+                claims,
+                layout.input_offset,
+                layout.input_len,
+                C1_LIMBS_START_INDEX as usize + limb,
+                Fp::from_u64(u64::from(value)),
+            );
+        }
+    }
+    for (input_value_index, bytes) in [projection.r, projection.s, projection.qx, projection.qy]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(input_value_index, bytes)| bytes.map(|bytes| (input_value_index, bytes)))
     {
         let value =
             Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
@@ -2773,7 +2739,7 @@ fn add_c1_public_claims(
             claims,
             layout.input_offset,
             layout.input_len,
-            C1_VALUES_START_INDEX as usize + offset,
+            C1_VALUES_START_INDEX as usize + input_value_index,
             value,
         );
     }
@@ -2804,13 +2770,11 @@ fn add_c3_public_claims(
     projection: &EcdsaPublicProjection,
     layout: &BundleCircuitLayout,
 ) -> Result<(), ImplementedCircuitProofError> {
-    for (index, bytes) in [
-        (C3_Z_INDEX, projection.z),
-        (C3_R_INDEX, projection.r),
-        (C3_S_INDEX, projection.s),
-    ]
-    .into_iter()
-    .filter_map(|(index, bytes)| bytes.map(|bytes| (index, bytes)))
+    // Exact public z bytes bind through C1's 20 small limbs. C1 and C3 bind
+    // those limbs pairwise below, so no whole-field digest claim is needed.
+    for (index, bytes) in [(C3_R_INDEX, projection.r), (C3_S_INDEX, projection.s)]
+        .into_iter()
+        .filter_map(|(index, bytes)| bytes.map(|bytes| (index, bytes)))
     {
         let value =
             Fp::from_bytes_be(bytes).ok_or(ImplementedCircuitProofError::InputBindingRejected)?;
@@ -2863,7 +2827,10 @@ fn add_ecdsa_consistency_claims(
     let [c1, c2, c3, c9, c11, c12, c14] = layouts else {
         unreachable!("length checked");
     };
-    let c1_value = |offset| C1_VALUES_START_INDEX as usize + offset;
+    let c1_value = |input_value_index: usize| {
+        debug_assert!((1..=4).contains(&input_value_index));
+        C1_VALUES_START_INDEX as usize + input_value_index - 1
+    };
     let c12_point =
         |point: usize, coordinate: usize| C12_POINTS_START_INDEX as usize + point * 3 + coordinate;
 
@@ -2871,7 +2838,6 @@ fn add_ecdsa_consistency_claims(
         add_fixed_claim(claims, layout.input_offset, layout.input_len, 0, Fp::ONE);
     }
     for (left_layout, left, right_layout, right) in [
-        (c1, c1_value(0), c3, C3_Z_INDEX),
         (c1, c1_value(1), c3, C3_R_INDEX),
         (c3, C3_R_INDEX, c14, C14_SIGNATURE_R_INDEX),
         (c1, c1_value(2), c3, C3_S_INDEX),
@@ -2879,8 +2845,8 @@ fn add_ecdsa_consistency_claims(
         (c2, C2_QX_INDEX as usize, c9, C9_QX_INDEX),
         (c1, c1_value(4), c2, C2_QY_INDEX as usize),
         (c2, C2_QY_INDEX as usize, c9, C9_QY_INDEX),
-        (c3, C3_U1_INDEX, c9, C9_U1_INDEX),
         (c3, C3_U2_INDEX, c9, C9_U2_INDEX),
+        (c3, C3_U1_ZERO_INDEX, c11, C11_U1_ZERO_INDEX as usize),
         (c9, c9_corrected_index(0, 0), c11, C11_AX_INDEX as usize),
         (c9, c9_corrected_index(0, 1), c11, C11_AY_INDEX as usize),
         (c9, c9_corrected_index(1, 0), c11, C11_BX_INDEX as usize),
@@ -2925,6 +2891,23 @@ fn add_ecdsa_consistency_claims(
     ] {
         add_equality_claim(claims, left_layout, left, right_layout, right);
     }
+    claims.push(LigeroLinearClaim::affine(
+        vec![
+            fixed_term(c9, C9_U1_INDEX, Fp::ONE),
+            fixed_term(c3, C3_U1_INDEX, -Fp::ONE),
+            fixed_term(c3, C3_U1_ZERO_INDEX, -Fp::ONE),
+        ],
+        Fp::ZERO,
+    ));
+    for limb in 0..N_LIMBS {
+        add_equality_claim(
+            claims,
+            c1,
+            C1_LIMBS_START_INDEX as usize + limb,
+            c3,
+            C3_Z_LIMBS_START + limb,
+        );
+    }
     Ok(())
 }
 
@@ -2963,9 +2946,7 @@ fn add_mdoc_p4b_consistency_claims(
             .zip(layouts)
             .filter_map(|((instance_role, _), layout)| (*instance_role == role).then_some(*layout))
             .collect::<Vec<_>>();
-        if !role_layouts.is_empty() {
-            add_ecdsa_consistency_claims(claims, &role_layouts)?;
-        }
+        add_ecdsa_consistency_claims(claims, &role_layouts)?;
     }
 
     let find = |role: MdocP4bCircuitRole, label: &'static [u8]| {
@@ -2983,22 +2964,54 @@ fn add_mdoc_p4b_consistency_claims(
     )?;
     let device_c2 = find(MdocP4bCircuitRole::DeviceEcdsa, b"s4-ecdsa-c2-canonicality")?;
     let mac = find(MdocP4bCircuitRole::MacBatch, MDOC_P4B_MAC_BATCH_LABEL)?;
-    add_mac_field_binding(claims, issuer_c3, C3_Z_INDEX, mac, 0, 1);
+    add_mac_digest_binding(claims, issuer_c3, mac, 0, 1);
     add_mac_field_binding(claims, device_c2, C2_QX_INDEX as usize, mac, 2, 3);
     add_mac_field_binding(claims, device_c2, C2_QY_INDEX as usize, mac, 4, 5);
-    if identities
-        .iter()
-        .any(|(role, _)| *role == MdocP4bCircuitRole::RevocationEcdsa)
-    {
-        let revocation_c3 = find(
-            MdocP4bCircuitRole::RevocationEcdsa,
-            b"s4-ecdsa-c3-c5-scalar-setup",
-        )?;
-        add_mac_field_binding(claims, revocation_c3, C3_Z_INDEX, mac, 6, 7);
-    } else {
-        add_mac_absent_revocation_binding(claims, mac, 6, 7);
-    }
+    let revocation_c3 = find(
+        MdocP4bCircuitRole::RevocationEcdsa,
+        b"s4-ecdsa-c3-c5-scalar-setup",
+    )?;
+    add_mac_digest_binding(claims, revocation_c3, mac, 6, 7);
     Ok(())
+}
+
+/// Bind an exact 256-bit C3 digest to its two MAC halves.
+///
+/// C3 and the MAC store bits least-significant first. Each separate 128-bit
+/// recomposition is strictly below Fp, so neither half can alias modulo the
+/// base-field modulus.
+fn add_mac_digest_binding(
+    claims: &mut Vec<LigeroLinearClaim>,
+    c3_layout: &BundleCircuitLayout,
+    mac_layout: &BundleCircuitLayout,
+    low_half: usize,
+    high_half: usize,
+) {
+    let (point, _) = mac_half_x_recompose_claim_point();
+    for (digest_bit_start, mac_half) in [
+        (C3_Z_BITS_START, low_half),
+        (C3_Z_BITS_START + GF128_BITS, high_half),
+    ] {
+        claims.push(LigeroLinearClaim::affine(
+            vec![
+                LigeroLinearTerm {
+                    offset: c3_layout.input_offset + digest_bit_start,
+                    len: GF128_BITS,
+                    point: point.clone(),
+                    coefficient: Fp::ONE,
+                },
+                LigeroLinearTerm {
+                    offset: mac_layout.input_offset
+                        + mac_batch_half_group_a_input_offset(mac_half)
+                        + MAC_HALF_X_BITS_START,
+                    len: GF128_BITS,
+                    point: point.clone(),
+                    coefficient: -Fp::ONE,
+                },
+            ],
+            Fp::ZERO,
+        ));
+    }
 }
 
 fn add_mac_field_binding(
@@ -3026,34 +3039,6 @@ fn add_mac_field_binding(
             half_term(high_half, -two_pow_128()),
         ],
         Fp::ZERO,
-    ));
-}
-
-fn add_mac_absent_revocation_binding(
-    claims: &mut Vec<LigeroLinearClaim>,
-    mac_layout: &BundleCircuitLayout,
-    low_half: usize,
-    high_half: usize,
-) {
-    let (point, scale) = mac_half_x_recompose_claim_point();
-    let half_term = |half, coefficient| LigeroLinearTerm {
-        offset: mac_layout.input_offset
-            + mac_batch_half_group_a_input_offset(half)
-            + MAC_HALF_X_BITS_START,
-        len: GF128_BITS,
-        point: point.clone(),
-        coefficient,
-    };
-    claims.push(LigeroLinearClaim::affine(
-        vec![
-            half_term(low_half, Fp::ONE),
-            half_term(high_half, two_pow_128()),
-        ],
-        scale
-            * recompose_gf128_halves(
-                &MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE,
-                &MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE,
-            ),
     ));
 }
 
@@ -3155,13 +3140,8 @@ fn implemented_circuit_instances(
             circuit: build_c12_on_curve_circuit().expect("static C12 circuit is valid"),
             input: c12_witness_on_curve_input(witness)?,
         },
-        // C13 slope inverses removed (WO-C3): its 1,026 interior
-        // denominator/inverse pairs were committed independently and never
-        // cross-bound to the C12 accumulator points, so they admitted the
-        // trivial extension (1, 1). Its sole bound final pair duplicated
-        // C11's existing (bx - ax) * denom_inv = 1 equation. Projecting C13
-        // from an old proof, or extending a new proof with those values,
-        // preserves the accepted statement relation exactly.
+        // C13 slope inverses do not bind to C12 accumulator points.
+        // The final pair also duplicates the C11 inverse equation.
         ProverCircuitInstance {
             label: b"s4-ecdsa-c14-c15-final-check",
             slot: LayoutSlot::FinalReduction,
@@ -3208,19 +3188,11 @@ pub fn build_mac_half_circuit(av: &Gf128, tag: &Gf128) -> Result<Circuit, Circui
     let av_bits = bytes_to_bits(av);
     let tag_bits = bytes_to_bits(tag);
     let local_constraints = mac_half_local_constraint_count();
-    let mut layers = Vec::new();
-    layers.push(mac_half_final_layer(local_constraints)?);
-    let mut block_size = 1usize;
-    while block_size < MAC_HALF_TREE_BLOCK_SIZE {
-        layers.push(mac_half_reduce_tree_layer(
-            block_size * 2,
-            local_constraints,
-        )?);
-        block_size *= 2;
-    }
-    layers.push(mac_half_product_reduce_layer(&tag_bits, local_constraints)?);
-    layers.push(mac_half_input_layer(&av_bits)?);
-    Circuit::new(layers)
+    Circuit::new(vec![
+        mac_half_final_layer(local_constraints)?,
+        mac_half_parity_layer(&tag_bits, local_constraints)?,
+        mac_half_input_layer(&av_bits)?,
+    ])
 }
 
 fn build_mac_batch_circuit(av: &Gf128, tags: &[Gf128]) -> Result<Circuit, CircuitError> {
@@ -3231,26 +3203,11 @@ fn build_mac_batch_circuit(av: &Gf128, tags: &[Gf128]) -> Result<Circuit, Circui
     let tag_bits: [[bool; GF128_BITS]; MDOC_P4B_MAC_HALF_COUNT] =
         std::array::from_fn(|index| bytes_to_bits(&tags[index]));
     let local_constraints = mac_half_local_constraint_count();
-    let mut layers = Vec::new();
-    layers.push(mac_batch_final_layer(local_constraints)?);
-    let mut block_size = 1usize;
-    while block_size < MAC_HALF_TREE_BLOCK_SIZE {
-        layers.push(mac_batch_reduce_tree_layer(
-            block_size * 2,
-            local_constraints,
-        )?);
-        block_size *= 2;
-    }
-    layers.push(mac_batch_product_reduce_layer(
-        &tag_bits,
-        local_constraints,
-    )?);
-    layers.push(mac_batch_input_layer(&av_bits)?);
-    Circuit::new(layers)
-}
-
-pub fn mac_half_input(ap: &Gf128, x: &Gf128) -> Result<Vec<Fp>, WitnessError> {
-    mac_half_input_with_av(ap, &[0u8; 16], x)
+    Circuit::new(vec![
+        mac_batch_final_layer(local_constraints)?,
+        mac_batch_parity_layer(&tag_bits, local_constraints)?,
+        mac_batch_input_layer(&av_bits)?,
+    ])
 }
 
 pub fn mac_half_input_with_av(ap: &Gf128, av: &Gf128, x: &Gf128) -> Result<Vec<Fp>, WitnessError> {
@@ -3316,7 +3273,8 @@ fn write_mac_batch_canonicality(
     mac_values: &[Gf128; MDOC_P4B_MAC_HALF_COUNT],
 ) -> Result<(), WitnessError> {
     for value in 0..MAC_BATCH_CANONICAL_VALUE_COUNT {
-        let words = gf128_pair_words(&mac_values[2 * value], &mac_values[2 * value + 1]);
+        let first_half = MAC_BATCH_CANONICAL_FIRST_HALF + 2 * value;
+        let words = gf128_pair_words(&mac_values[first_half], &mac_values[first_half + 1]);
         if cmp_words(&words, &P256_FIELD_MODULUS).is_ge() {
             return Err(WitnessError::NonCanonicalCoordinate);
         }
@@ -3412,30 +3370,25 @@ pub fn recompose_gf128_halves(lo: &Gf128, hi: &Gf128) -> Fp {
 
 fn mac_half_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitError> {
     let av_fold = av_linear_fold_slots(av_bits);
-    let mut terms = Vec::with_capacity(28_000);
+    let mut terms = Vec::new();
     add_linear(
         &mut terms,
         mac_half_tree_const_index(),
         MAC_HALF_CONST_ONE_INDEX,
         Fp::ONE,
     );
-    for ap_bit in 0..GF128_BITS {
-        for x_bit in 0..GF128_BITS {
-            add_quadratic(
-                &mut terms,
-                mac_half_product_coeff_index(ap_bit + x_bit),
-                MAC_HALF_AP_BITS_START + ap_bit,
-                MAC_HALF_X_BITS_START + x_bit,
-                Fp::ONE,
-            );
-        }
-    }
     for (out_bit, leaves) in av_fold.iter().enumerate() {
+        add_linear(
+            &mut terms,
+            mac_half_tree_count_index(out_bit),
+            MAC_HALF_AP_BITS_START + out_bit,
+            Fp::ONE,
+        );
         for (x_bit, present) in leaves.iter().copied().enumerate() {
             if present {
                 add_linear(
                     &mut terms,
-                    mac_half_tree_l_index(out_bit),
+                    mac_half_tree_count_index(out_bit),
                     MAC_HALF_X_BITS_START + x_bit,
                     Fp::ONE,
                 );
@@ -3473,7 +3426,7 @@ fn mac_half_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitEr
 
 fn mac_batch_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitError> {
     let av_fold = av_linear_fold_slots(av_bits);
-    let mut terms = Vec::with_capacity(MDOC_P4B_MAC_HALF_COUNT * 28_000);
+    let mut terms = Vec::new();
     for half in 0..MDOC_P4B_MAC_HALF_COUNT {
         let input_offset = mac_batch_half_group_a_input_offset(half);
         let b_input_offset = mac_batch_half_group_b_full_input_offset(half);
@@ -3483,23 +3436,18 @@ fn mac_batch_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitE
             input_offset + MAC_HALF_CONST_ONE_INDEX,
             Fp::ONE,
         );
-        for ap_bit in 0..GF128_BITS {
-            for x_bit in 0..GF128_BITS {
-                add_quadratic(
-                    &mut terms,
-                    mac_batch_product_coeff_index(half, ap_bit + x_bit),
-                    input_offset + MAC_HALF_AP_BITS_START + ap_bit,
-                    input_offset + MAC_HALF_X_BITS_START + x_bit,
-                    Fp::ONE,
-                );
-            }
-        }
         for (out_bit, leaves) in av_fold.iter().enumerate() {
+            add_linear(
+                &mut terms,
+                mac_batch_tree_count_index(half, out_bit),
+                input_offset + MAC_HALF_AP_BITS_START + out_bit,
+                Fp::ONE,
+            );
             for (x_bit, present) in leaves.iter().copied().enumerate() {
                 if present {
                     add_linear(
                         &mut terms,
-                        mac_batch_tree_l_index(half, out_bit),
+                        mac_batch_tree_count_index(half, out_bit),
                         input_offset + MAC_HALF_X_BITS_START + x_bit,
                         Fp::ONE,
                     );
@@ -3611,12 +3559,11 @@ fn mac_batch_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitE
     Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_INPUT_LOG_SIZE, terms)
 }
 
-fn mac_half_product_reduce_layer(
+fn mac_half_parity_layer(
     tag_bits: &[bool; GF128_BITS],
     local_constraints: usize,
 ) -> Result<Layer, CircuitError> {
-    let mut terms =
-        Vec::with_capacity(GF128_BITS * 10 + MAC_HALF_PRODUCT_COEFFS * 3 + local_constraints);
+    let mut terms = Vec::new();
     add_linear(
         &mut terms,
         mac_half_tree_const_index(),
@@ -3625,17 +3572,7 @@ fn mac_half_product_reduce_layer(
     );
     for bit in 0..GF128_BITS {
         let tag_pin = mac_half_tree_local_start() + MAC_HALF_BOOL_CONSTRAINTS + bit;
-        for power in 0..MAC_HALF_PRODUCT_COEFFS {
-            if monomial_reduction_bits(power).contains(&bit) {
-                add_linear(
-                    &mut terms,
-                    tag_pin,
-                    mac_half_product_coeff_index(power),
-                    Fp::ONE,
-                );
-            }
-        }
-        add_linear(&mut terms, tag_pin, mac_half_tree_l_index(bit), Fp::ONE);
+        add_linear(&mut terms, tag_pin, mac_half_tree_count_index(bit), Fp::ONE);
         add_linear(
             &mut terms,
             tag_pin,
@@ -3658,26 +3595,11 @@ fn mac_half_product_reduce_layer(
     Layer::new(MAC_HALF_TREE_LOG_SIZE, MAC_HALF_TREE_LOG_SIZE, terms)
 }
 
-fn mac_batch_product_reduce_layer(
+fn mac_batch_parity_layer(
     tag_bits: &[[bool; GF128_BITS]; MDOC_P4B_MAC_HALF_COUNT],
     local_constraints: usize,
 ) -> Result<Layer, CircuitError> {
-    let mut terms = Vec::with_capacity(
-        MDOC_P4B_MAC_HALF_COUNT
-            * (GF128_BITS * 10 + MAC_HALF_PRODUCT_COEFFS * 3 + local_constraints),
-    );
-    // WO-F: `monomial_reduction_bits(power)` depends only on `power`, yet the
-    // triple loop below queries it `MDOC_P4B_MAC_HALF_COUNT · GF128_BITS` times
-    // per power (~196k Vec allocations + linear scans, ~24 ms of setup).
-    // Precompute a per-power bitmask once (255 evaluations) and test membership
-    // with a shift — byte-identical `terms` in the same order.
-    let reduction_masks: Vec<u128> = (0..MAC_HALF_PRODUCT_COEFFS)
-        .map(|power| {
-            monomial_reduction_bits(power)
-                .into_iter()
-                .fold(0u128, |mask, bit| mask | (1u128 << bit))
-        })
-        .collect();
+    let mut terms = Vec::new();
     for half in 0..MDOC_P4B_MAC_HALF_COUNT {
         add_linear(
             &mut terms,
@@ -3687,20 +3609,10 @@ fn mac_batch_product_reduce_layer(
         );
         for bit in 0..GF128_BITS {
             let tag_pin = mac_batch_tree_local_start(half) + MAC_HALF_BOOL_CONSTRAINTS + bit;
-            for power in 0..MAC_HALF_PRODUCT_COEFFS {
-                if (reduction_masks[power] >> bit) & 1 == 1 {
-                    add_linear(
-                        &mut terms,
-                        tag_pin,
-                        mac_batch_product_coeff_index(half, power),
-                        Fp::ONE,
-                    );
-                }
-            }
             add_linear(
                 &mut terms,
                 tag_pin,
-                mac_batch_tree_l_index(half, bit),
+                mac_batch_tree_count_index(half, bit),
                 Fp::ONE,
             );
             add_linear(
@@ -3711,92 +3623,6 @@ fn mac_batch_product_reduce_layer(
             );
             if tag_bits[half][bit] {
                 add_constant(&mut terms, tag_pin, -Fp::ONE);
-            }
-        }
-        for index in 0..local_constraints {
-            add_linear(
-                &mut terms,
-                mac_batch_tree_local_start(half) + index,
-                mac_batch_tree_local_start(half) + index,
-                Fp::ONE,
-            );
-        }
-    }
-    for index in 0..MAC_BATCH_CANONICAL_CONSTRAINTS {
-        add_linear(
-            &mut terms,
-            mac_batch_tree_canonical_start() + index,
-            mac_batch_tree_canonical_start() + index,
-            Fp::ONE,
-        );
-    }
-
-    Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
-}
-
-fn mac_half_reduce_tree_layer(
-    previous_block_size: usize,
-    local_constraints: usize,
-) -> Result<Layer, CircuitError> {
-    debug_assert!(previous_block_size.is_power_of_two());
-    debug_assert!(previous_block_size >= 2);
-    let next_block_size = previous_block_size / 2;
-    let mut terms = Vec::with_capacity(GF128_BITS * next_block_size * 4 + local_constraints);
-    add_linear(
-        &mut terms,
-        mac_half_tree_const_index(),
-        mac_half_tree_const_index(),
-        Fp::ONE,
-    );
-    for bit in 0..GF128_BITS {
-        for slot in 0..next_block_size {
-            add_xor_value(
-                &mut terms,
-                mac_half_tree_value_index(bit, slot),
-                mac_half_tree_value_index(bit, 2 * slot),
-                mac_half_tree_value_index(bit, 2 * slot + 1),
-                mac_half_tree_const_index(),
-            );
-        }
-    }
-    for index in 0..local_constraints {
-        add_linear(
-            &mut terms,
-            mac_half_tree_local_start() + index,
-            mac_half_tree_local_start() + index,
-            Fp::ONE,
-        );
-    }
-
-    Layer::new(MAC_HALF_TREE_LOG_SIZE, MAC_HALF_TREE_LOG_SIZE, terms)
-}
-
-fn mac_batch_reduce_tree_layer(
-    previous_block_size: usize,
-    local_constraints: usize,
-) -> Result<Layer, CircuitError> {
-    debug_assert!(previous_block_size.is_power_of_two());
-    debug_assert!(previous_block_size >= 2);
-    let next_block_size = previous_block_size / 2;
-    let mut terms = Vec::with_capacity(
-        MDOC_P4B_MAC_HALF_COUNT * (GF128_BITS * next_block_size * 4 + local_constraints),
-    );
-    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
-        add_linear(
-            &mut terms,
-            mac_batch_tree_const_index(half),
-            mac_batch_tree_const_index(half),
-            Fp::ONE,
-        );
-        for bit in 0..GF128_BITS {
-            for slot in 0..next_block_size {
-                add_xor_value(
-                    &mut terms,
-                    mac_batch_tree_value_index(half, bit, slot),
-                    mac_batch_tree_value_index(half, bit, 2 * slot),
-                    mac_batch_tree_value_index(half, bit, 2 * slot + 1),
-                    mac_batch_tree_const_index(half),
-                );
             }
         }
         for index in 0..local_constraints {
@@ -3868,7 +3694,7 @@ fn mac_half_local_constraint_count() -> usize {
 }
 
 const fn mac_half_tree_width() -> usize {
-    1 + MAC_HALF_PRODUCT_COEFFS + GF128_BITS + GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS
+    1 + GF128_BITS + GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS
 }
 
 fn mac_half_q_bit_index(bit: usize, q_bit: usize) -> usize {
@@ -3887,32 +3713,13 @@ fn mac_half_tree_const_index() -> usize {
     0
 }
 
-fn mac_half_product_coeff_index(power: usize) -> usize {
-    debug_assert!(power < MAC_HALF_PRODUCT_COEFFS);
-    1 + power
-}
-
-fn mac_half_tree_values_start() -> usize {
-    1 + MAC_HALF_PRODUCT_COEFFS
-}
-
-fn mac_half_tree_l_index(bit: usize) -> usize {
+fn mac_half_tree_count_index(bit: usize) -> usize {
     debug_assert!(bit < GF128_BITS);
-    mac_half_tree_values_start() + bit
-}
-
-fn mac_half_tree_value_index(bit: usize, slot: usize) -> usize {
-    debug_assert!(bit < GF128_BITS);
-    debug_assert!(slot < MAC_HALF_TREE_BLOCK_SIZE);
-    mac_half_tree_l_index(bit)
-}
-
-fn mac_half_tree_u_start() -> usize {
-    mac_half_tree_values_start() + GF128_BITS
+    1 + bit
 }
 
 fn mac_half_tree_qsum_start() -> usize {
-    mac_half_tree_u_start()
+    1 + GF128_BITS
 }
 
 fn mac_half_tree_qsum_index(bit: usize) -> usize {
@@ -3953,7 +3760,7 @@ fn mac_batch_canonical_carry_index(value: usize, bit: usize) -> usize {
 fn mac_batch_canonical_value_bit_index(value: usize, bit: usize) -> usize {
     debug_assert!(value < MAC_BATCH_CANONICAL_VALUE_COUNT);
     debug_assert!(bit < MAC_BATCH_CANONICAL_BITS);
-    let half = 2 * value + bit / GF128_BITS;
+    let half = MAC_BATCH_CANONICAL_FIRST_HALF + 2 * value + bit / GF128_BITS;
     mac_batch_half_group_a_input_offset(half) + MAC_HALF_X_BITS_START + bit % GF128_BITS
 }
 
@@ -3974,18 +3781,8 @@ fn mac_batch_tree_const_index(half: usize) -> usize {
     mac_batch_tree_half_start(half)
 }
 
-fn mac_batch_product_coeff_index(half: usize, power: usize) -> usize {
-    mac_batch_tree_half_start(half) + mac_half_product_coeff_index(power)
-}
-
-fn mac_batch_tree_value_index(half: usize, bit: usize, slot: usize) -> usize {
-    debug_assert!(bit < GF128_BITS);
-    debug_assert!(slot < MAC_HALF_TREE_BLOCK_SIZE);
-    mac_batch_tree_half_start(half) + mac_half_tree_value_index(bit, slot)
-}
-
-fn mac_batch_tree_l_index(half: usize, bit: usize) -> usize {
-    mac_batch_tree_half_start(half) + mac_half_tree_l_index(bit)
+fn mac_batch_tree_count_index(half: usize, bit: usize) -> usize {
+    mac_batch_tree_half_start(half) + mac_half_tree_count_index(bit)
 }
 
 fn mac_batch_tree_qsum_index(half: usize, bit: usize) -> usize {
@@ -4020,18 +3817,8 @@ fn mac_half_q_witness(
     tag_bits: &[bool; GF128_BITS],
 ) -> [[bool; MAC_HALF_PARITY_Q_BITS]; GF128_BITS] {
     let mut counts = [0usize; GF128_BITS];
-    for ap_bit in 0..GF128_BITS {
-        if !ap_bits[ap_bit] {
-            continue;
-        }
-        for x_bit in 0..GF128_BITS {
-            if !x_bits[x_bit] {
-                continue;
-            }
-            for out_bit in monomial_reduction_bits(ap_bit + x_bit) {
-                counts[out_bit] += 1;
-            }
-        }
+    for bit in 0..GF128_BITS {
+        counts[bit] = usize::from(ap_bits[bit]);
     }
     let av_fold = av_linear_fold_slots(av_bits);
     for out_bit in 0..GF128_BITS {
@@ -4066,36 +3853,9 @@ fn av_linear_fold_slots(av_bits: &[bool; GF128_BITS]) -> [[bool; GF128_BITS]; GF
     slots
 }
 
-#[cfg(test)]
-fn mac_reduction_max_weight() -> usize {
-    (0..GF128_BITS)
-        .map(|bit| {
-            (0..MAC_HALF_PRODUCT_COEFFS)
-                .filter(|&power| monomial_reduction_bits(power).contains(&bit))
-                .map(|power| usize::min(power + 1, MAC_HALF_PRODUCT_COEFFS - power))
-                .sum::<usize>()
-        })
-        .max()
-        .unwrap_or(0)
-}
-
-#[cfg(test)]
-fn mac_product_coeff_max_weight() -> usize {
-    (0..MAC_HALF_PRODUCT_COEFFS)
-        .map(|power| usize::min(power + 1, MAC_HALF_PRODUCT_COEFFS - power))
-        .max()
-        .unwrap_or(0)
-}
-
 fn add_bool_constraint(terms: &mut Vec<QuadTerm>, out: usize, wire: usize) {
     add_quadratic(terms, out, wire, wire, Fp::ONE);
     add_linear(terms, out, wire, -Fp::ONE);
-}
-
-fn add_xor_value(terms: &mut Vec<QuadTerm>, out: usize, left: usize, right: usize, one: usize) {
-    add_linear_with_one(terms, out, left, Fp::ONE, one);
-    add_linear_with_one(terms, out, right, Fp::ONE, one);
-    add_quadratic(terms, out, left, right, -Fp::from_u64(2));
 }
 
 fn fp_from_bits_le(bits: &[bool; GF128_BITS]) -> Fp {
@@ -4154,10 +3914,14 @@ fn add_quadratic(terms: &mut Vec<QuadTerm>, out: usize, left: usize, right: usiz
 }
 
 pub fn build_c1_input_limbs_circuit() -> Result<Circuit, CircuitError> {
-    let mut terms = Vec::with_capacity(5 * (N_LIMBS + 1));
-    for value_index in 0..5u32 {
-        let out = value_index;
-        let value_wire = C1_VALUES_START_INDEX + value_index;
+    let mut terms = Vec::with_capacity(C1_CANONICAL_FIELD_VALUE_COUNT as usize * (N_LIMBS + 1));
+    // z is deliberately absent here: a SHA-256 digest is an arbitrary 256-bit
+    // integer, not necessarily a canonical Fp element. Its exact C1 limbs bind
+    // to the range-constrained C3 limbs through authenticated linear claims.
+    for field_value_index in 0..C1_CANONICAL_FIELD_VALUE_COUNT {
+        let input_value_index = field_value_index + 1;
+        let out = field_value_index;
+        let value_wire = C1_VALUES_START_INDEX + field_value_index;
         terms.push(QuadTerm {
             out,
             l: value_wire,
@@ -4169,7 +3933,7 @@ pub fn build_c1_input_limbs_circuit() -> Result<Circuit, CircuitError> {
         for limb in 0..N_LIMBS as u32 {
             terms.push(QuadTerm {
                 out,
-                l: C1_LIMBS_START_INDEX + value_index * N_LIMBS as u32 + limb,
+                l: C1_LIMBS_START_INDEX + input_value_index * N_LIMBS as u32 + limb,
                 r: C1_CONST_ONE_INDEX,
                 coeff: power,
             });
@@ -4195,11 +3959,11 @@ pub fn c1_input_limbs_input(
     }
     let mut circuit_input = vec![Fp::ZERO; 1usize << C1_INPUT_LIMBS_INPUT_LOG_SIZE];
     circuit_input[C1_CONST_ONE_INDEX as usize] = Fp::ONE;
-    for (offset, value) in [input.z, input.r, input.s, input.qx, input.qy]
+    for (field_value_index, value) in [input.r, input.s, input.qx, input.qy]
         .into_iter()
         .enumerate()
     {
-        circuit_input[C1_VALUES_START_INDEX as usize + offset] =
+        circuit_input[C1_VALUES_START_INDEX as usize + field_value_index] =
             Fp::from_bytes_be(value).ok_or(WitnessError::NonCanonicalCoordinate)?;
     }
     let input_limbs = layout_range(LayoutSlot::InputLimbs);
@@ -4299,9 +4063,6 @@ pub fn build_c3_c5_scalar_setup_circuit() -> Result<Circuit, CircuitError> {
         );
     }
 
-    add_limb_recomposition_constraint(&mut terms, &mut out, C3_Z_INDEX, |limb| {
-        C3_Z_LIMBS_START + limb
-    });
     for limb in 0..N_LIMBS {
         add_limb_range_constraints(
             &mut terms,
@@ -4311,19 +4072,6 @@ pub fn build_c3_c5_scalar_setup_circuit() -> Result<Circuit, CircuitError> {
             if limb + 1 == N_LIMBS { 9 } else { LIMB_BITS },
         );
     }
-    let field_limbs = words_to_limbs(&P256_FIELD_MODULUS);
-    add_canonical_lt_constraints(
-        &mut terms,
-        &mut out,
-        |limb| C3_Z_LIMBS_START + limb,
-        |limb| C3_Z_BITS_START + limb * LIMB_BITS,
-        |limb| C3_Z_SLACK_LIMBS_START + limb,
-        |limb| C3_Z_SLACK_BITS_START + limb * LIMB_BITS,
-        |limb| C3_Z_LT_CARRIES_START + limb,
-        &field_limbs,
-        9,
-    );
-
     for product in 0..C3_PRODUCT_COUNT {
         for limb in 0..N_LIMBS {
             add_limb_range_constraints(
@@ -4422,8 +4170,31 @@ pub fn build_c3_c5_scalar_setup_circuit() -> Result<Circuit, CircuitError> {
         out += 1;
     }
 
+    add_bool_constraint(&mut terms, out, C3_U1_ZERO_INDEX);
+    out += 1;
+    add_quadratic(&mut terms, out, C3_U1_INDEX, C3_U1_ZERO_INDEX, Fp::ONE);
+    out += 1;
+    add_quadratic(
+        &mut terms,
+        out,
+        C3_U1_INDEX,
+        C3_U1_NONZERO_INV_INDEX,
+        Fp::ONE,
+    );
+    add_linear(&mut terms, out, C3_U1_ZERO_INDEX, Fp::ONE);
+    add_constant(&mut terms, out, -Fp::ONE);
+    out += 1;
+    add_quadratic(
+        &mut terms,
+        out,
+        C3_U1_ZERO_INDEX,
+        C3_U1_NONZERO_INV_INDEX,
+        Fp::ONE,
+    );
+    out += 1;
+
     const {
-        assert!(C3_Z_LT_CARRIES_START + N_LIMBS <= 1usize << C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE);
+        assert!(C3_U1_NONZERO_INV_INDEX < 1usize << C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE);
     }
     debug_assert!(out <= 1usize << C3_C5_SCALAR_SETUP_OUTPUT_LOG_SIZE);
     Circuit::new(vec![Layer::new(
@@ -4440,22 +4211,8 @@ pub fn c3_c5_scalar_setup_input(
     if witness.values.len() != LAYOUT_LEN {
         return Err(WitnessError::LayoutMismatch);
     }
-    let z_words = words_from_be(input.z);
-    let z_field = Fp::from_bytes_be(input.z).ok_or(WitnessError::NonCanonicalScalar)?;
-    let z_lt_p =
-        CanonicalLtTrace::new("z", &z_words, "p", &P256_FIELD_MODULUS).map_err(map_scalar_error)?;
-    c3_c5_scalar_setup_input_with_z_trace(input, witness, z_field, &z_lt_p)
-}
-
-fn c3_c5_scalar_setup_input_with_z_trace(
-    input: &EcdsaInput,
-    witness: &Witness,
-    z_field: Fp,
-    z_lt_p: &CanonicalLtTrace,
-) -> Result<Vec<Fp>, WitnessError> {
     let mut circuit_input = vec![Fp::ZERO; 1usize << C3_C5_SCALAR_SETUP_INPUT_LOG_SIZE];
     circuit_input[C3_CONST_ONE_INDEX] = Fp::ONE;
-    circuit_input[C3_Z_INDEX] = z_field;
     circuit_input[C3_R_INDEX] =
         Fp::from_bytes_be(input.r).ok_or(WitnessError::NonCanonicalScalar)?;
     circuit_input[C3_S_INDEX] =
@@ -4505,14 +4262,6 @@ fn c3_c5_scalar_setup_input_with_z_trace(
             C3_Z_BITS_START + limb * LIMB_BITS,
             trace.z[limb],
         );
-        write_limb_and_bits(
-            &mut circuit_input,
-            C3_Z_SLACK_LIMBS_START + limb,
-            C3_Z_SLACK_BITS_START + limb * LIMB_BITS,
-            z_lt_p.slack[limb],
-        );
-        debug_assert!(matches!(z_lt_p.carries[limb], 0 | 1));
-        circuit_input[C3_Z_LT_CARRIES_START + limb] = Fp::from_u64(z_lt_p.carries[limb] as u64);
     }
     let products = [&trace.s_u1_eq, &trace.s_u2_eq];
     for (product, trace) in products.into_iter().enumerate() {
@@ -4550,6 +4299,15 @@ fn c3_c5_scalar_setup_input_with_z_trace(
             acc + circuit_input[c3_scalar_limb_index(scalar, limb)]
         });
         circuit_input[inverse] = sum.inverse().ok_or(WitnessError::ZeroScalar)?;
+    }
+    let u1 = circuit_input[C3_U1_INDEX];
+    if u1 == Fp::ZERO {
+        circuit_input[C3_U1_ZERO_INDEX] = Fp::ONE;
+        circuit_input[C3_U1_NONZERO_INV_INDEX] = Fp::ZERO;
+    } else {
+        circuit_input[C3_U1_ZERO_INDEX] = Fp::ZERO;
+        circuit_input[C3_U1_NONZERO_INV_INDEX] =
+            u1.inverse().expect("nonzero field element has an inverse");
     }
     Ok(circuit_input)
 }
@@ -4787,10 +4545,12 @@ fn c9_canonical_carry_index(ladder: usize, bit: usize) -> usize {
     C9_CANONICAL_CARRY_START_INDEX + ladder * (C9_SCALAR_BITS + 1) + bit
 }
 
-/// Constrains both ECDSA scalar-multiplication ladders. Each scalar is
-/// bit-decomposed and recomposed, every double/add transition is checked, the
-/// u2 ladder base is the same public key used by C2, and each final accumulator
-/// is the corrected endpoint consumed by C11.
+/// Constrains both ECDSA scalar-multiplication ladders.
+///
+/// The circuit decomposes and recomposes each scalar.
+/// It checks each double and add transition.
+/// The u2 ladder uses the public key from C2.
+/// C11 consumes each corrected final accumulator.
 pub fn build_c9_c10_ladder_circuit() -> Result<Circuit, CircuitError> {
     let mut terms = Vec::with_capacity(24_000);
     let mut out = 0usize;
@@ -4972,7 +4732,7 @@ pub fn build_c9_c10_ladder_circuit() -> Result<Circuit, CircuitError> {
             out += 1;
 
             // Before the first set bit the accumulator remains `base`.
-            // Afterwards it is `double`, plus the constrained add delta iff
+            // Afterward, it is `double` plus the constrained add delta if and only if
             // `active_bit` is one. Expressing this directly saves one input
             // wire per coordinate while preserving the exact transition.
             add_linear(&mut terms, out, next_x, Fp::ONE);
@@ -5029,7 +4789,8 @@ pub fn c9_c10_ladder_input(input: &EcdsaInput, witness: &Witness) -> Result<Vec<
     let mut circuit_input = vec![Fp::ZERO; 1usize << C9_C10_LADDER_INPUT_LOG_SIZE];
     circuit_input[C9_CONST_ONE_INDEX] = Fp::ONE;
     let us = layout_range(LayoutSlot::UScalars);
-    circuit_input[C9_U1_INDEX] = witness.values[us.start];
+    let u1 = witness.values[us.start];
+    circuit_input[C9_U1_INDEX] = if u1 == Fp::ZERO { Fp::ONE } else { u1 };
     circuit_input[C9_U2_INDEX] = witness.values[us.start + 1];
     circuit_input[C9_QX_INDEX] =
         Fp::from_bytes_be(input.qx).ok_or(WitnessError::NonCanonicalCoordinate)?;
@@ -5176,98 +4937,284 @@ pub fn c9_c10_ladder_input(input: &EcdsaInput, witness: &Witness) -> Result<Vec<
 }
 
 pub fn build_c11_final_add_circuit() -> Result<Circuit, CircuitError> {
-    let terms = vec![
-        QuadTerm {
-            out: 0,
-            l: C11_BX_INDEX,
-            r: C11_DENOM_INV_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 0,
-            l: C11_AX_INDEX,
-            r: C11_DENOM_INV_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 0,
-            l: C11_CONST_ONE_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C11_LAMBDA_INDEX,
-            r: C11_BX_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C11_LAMBDA_INDEX,
-            r: C11_AX_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C11_BY_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 1,
-            l: C11_AY_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C11_LAMBDA_INDEX,
-            r: C11_LAMBDA_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C11_AX_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C11_BX_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 2,
-            l: C11_RX_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 3,
-            l: C11_RY_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 3,
-            l: C11_AY_INDEX,
-            r: C11_CONST_ONE_INDEX,
-            coeff: Fp::ONE,
-        },
-        QuadTerm {
-            out: 3,
-            l: C11_LAMBDA_INDEX,
-            r: C11_AX_INDEX,
-            coeff: -Fp::ONE,
-        },
-        QuadTerm {
-            out: 3,
-            l: C11_LAMBDA_INDEX,
-            r: C11_RX_INDEX,
-            coeff: Fp::ONE,
-        },
-    ];
+    let mut terms = Vec::new();
+    let mut out = 0;
+
+    for selector in [
+        C11_U1_ZERO_INDEX,
+        C11_DOUBLE_SELECTOR_INDEX,
+        C11_GENERIC_SELECTOR_INDEX,
+    ] {
+        add_bool_constraint(&mut terms, out, selector as usize);
+        out += 1;
+    }
+
+    // Exactly one branch supplies R: u1 = 0 selects B, A = B selects 2A,
+    // and all other affine pairs use the generic addition formula.
+    for selector in [
+        C11_U1_ZERO_INDEX,
+        C11_DOUBLE_SELECTOR_INDEX,
+        C11_GENERIC_SELECTOR_INDEX,
+    ] {
+        add_linear(&mut terms, out, selector as usize, Fp::ONE);
+    }
+    add_constant(&mut terms, out, -Fp::ONE);
+    out += 1;
+
+    // The double branch is available only when A and B are the same point.
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_DOUBLE_SELECTOR_INDEX as usize,
+        C11_BX_INDEX as usize,
+        Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_DOUBLE_SELECTOR_INDEX as usize,
+        C11_AX_INDEX as usize,
+        -Fp::ONE,
+    );
+    out += 1;
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_DOUBLE_SELECTOR_INDEX as usize,
+        C11_BY_INDEX as usize,
+        Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_DOUBLE_SELECTOR_INDEX as usize,
+        C11_AY_INDEX as usize,
+        -Fp::ONE,
+    );
+    out += 1;
+
+    // Generic denominator inverse: (Bx - Ax) * inverse = generic_selector.
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_BX_INDEX as usize,
+        C11_GENERIC_DENOM_INV_INDEX as usize,
+        Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_AX_INDEX as usize,
+        C11_GENERIC_DENOM_INV_INDEX as usize,
+        -Fp::ONE,
+    );
+    add_linear(
+        &mut terms,
+        out,
+        C11_GENERIC_SELECTOR_INDEX as usize,
+        -Fp::ONE,
+    );
+    out += 1;
+
+    // Keep inactive generic auxiliaries deterministic.
+    add_linear(
+        &mut terms,
+        out,
+        C11_GENERIC_DENOM_INV_INDEX as usize,
+        Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_SELECTOR_INDEX as usize,
+        C11_GENERIC_DENOM_INV_INDEX as usize,
+        -Fp::ONE,
+    );
+    out += 1;
+    add_linear(&mut terms, out, C11_GENERIC_LAMBDA_INDEX as usize, Fp::ONE);
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_SELECTOR_INDEX as usize,
+        C11_GENERIC_LAMBDA_INDEX as usize,
+        -Fp::ONE,
+    );
+    out += 1;
+
+    // lambda_g * (Bx - Ax) = g * (By - Ay).
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_LAMBDA_INDEX as usize,
+        C11_BX_INDEX as usize,
+        Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_LAMBDA_INDEX as usize,
+        C11_AX_INDEX as usize,
+        -Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_SELECTOR_INDEX as usize,
+        C11_BY_INDEX as usize,
+        -Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_SELECTOR_INDEX as usize,
+        C11_AY_INDEX as usize,
+        Fp::ONE,
+    );
+    out += 1;
+
+    // Xg = lambda_g^2 - Ax - Bx.
+    // Yg = lambda_g * (Ax - Xg) - Ay.
+    add_linear(&mut terms, out, C11_GENERIC_X_INDEX as usize, Fp::ONE);
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_LAMBDA_INDEX as usize,
+        C11_GENERIC_LAMBDA_INDEX as usize,
+        -Fp::ONE,
+    );
+    add_linear(&mut terms, out, C11_AX_INDEX as usize, Fp::ONE);
+    add_linear(&mut terms, out, C11_BX_INDEX as usize, Fp::ONE);
+    out += 1;
+    add_linear(&mut terms, out, C11_GENERIC_Y_INDEX as usize, Fp::ONE);
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_LAMBDA_INDEX as usize,
+        C11_AX_INDEX as usize,
+        -Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_GENERIC_LAMBDA_INDEX as usize,
+        C11_GENERIC_X_INDEX as usize,
+        Fp::ONE,
+    );
+    add_linear(&mut terms, out, C11_AY_INDEX as usize, Fp::ONE);
+    out += 1;
+
+    // P-256 has a = -3. Compute 2A for every branch so the selected double
+    // candidate is fully constrained without selector-gated auxiliaries.
+    add_linear(&mut terms, out, C11_AX_SQUARED_INDEX as usize, Fp::ONE);
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_AX_INDEX as usize,
+        C11_AX_INDEX as usize,
+        -Fp::ONE,
+    );
+    out += 1;
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_AY_INDEX as usize,
+        C11_DOUBLE_DENOM_INV_INDEX as usize,
+        Fp::from_u64(2),
+    );
+    add_constant(&mut terms, out, -Fp::ONE);
+    out += 1;
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_AY_INDEX as usize,
+        C11_DOUBLE_LAMBDA_INDEX as usize,
+        Fp::from_u64(2),
+    );
+    add_linear(
+        &mut terms,
+        out,
+        C11_AX_SQUARED_INDEX as usize,
+        -Fp::from_u64(3),
+    );
+    add_constant(&mut terms, out, Fp::from_u64(3));
+    out += 1;
+    add_linear(&mut terms, out, C11_DOUBLE_X_INDEX as usize, Fp::ONE);
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_DOUBLE_LAMBDA_INDEX as usize,
+        C11_DOUBLE_LAMBDA_INDEX as usize,
+        -Fp::ONE,
+    );
+    add_linear(&mut terms, out, C11_AX_INDEX as usize, Fp::from_u64(2));
+    out += 1;
+    add_linear(&mut terms, out, C11_DOUBLE_Y_INDEX as usize, Fp::ONE);
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_DOUBLE_LAMBDA_INDEX as usize,
+        C11_AX_INDEX as usize,
+        -Fp::ONE,
+    );
+    add_quadratic(
+        &mut terms,
+        out,
+        C11_DOUBLE_LAMBDA_INDEX as usize,
+        C11_DOUBLE_X_INDEX as usize,
+        Fp::ONE,
+    );
+    add_linear(&mut terms, out, C11_AY_INDEX as usize, Fp::ONE);
+    out += 1;
+
+    // R = f*B + d*(2A) + g*(A+B), with f implicit from f+d+g=1.
+    for (result, base, generic, doubled) in [
+        (
+            C11_RX_INDEX,
+            C11_BX_INDEX,
+            C11_GENERIC_X_INDEX,
+            C11_DOUBLE_X_INDEX,
+        ),
+        (
+            C11_RY_INDEX,
+            C11_BY_INDEX,
+            C11_GENERIC_Y_INDEX,
+            C11_DOUBLE_Y_INDEX,
+        ),
+    ] {
+        add_linear(&mut terms, out, result as usize, Fp::ONE);
+        add_linear(&mut terms, out, base as usize, -Fp::ONE);
+        add_quadratic(
+            &mut terms,
+            out,
+            C11_GENERIC_SELECTOR_INDEX as usize,
+            generic as usize,
+            -Fp::ONE,
+        );
+        add_quadratic(
+            &mut terms,
+            out,
+            C11_GENERIC_SELECTOR_INDEX as usize,
+            base as usize,
+            Fp::ONE,
+        );
+        add_quadratic(
+            &mut terms,
+            out,
+            C11_DOUBLE_SELECTOR_INDEX as usize,
+            doubled as usize,
+            -Fp::ONE,
+        );
+        add_quadratic(
+            &mut terms,
+            out,
+            C11_DOUBLE_SELECTOR_INDEX as usize,
+            base as usize,
+            Fp::ONE,
+        );
+        out += 1;
+    }
+
+    debug_assert!(out <= 1usize << C11_FINAL_ADD_OUTPUT_LOG_SIZE);
     Circuit::new(vec![Layer::new(
         C11_FINAL_ADD_OUTPUT_LOG_SIZE,
         C11_FINAL_ADD_INPUT_LOG_SIZE,
@@ -5288,8 +5235,26 @@ pub fn c11_final_add_input(witness: &Witness) -> Result<Vec<Fp>, WitnessError> {
     let rx = witness.values[final_point.start];
     let ry = witness.values[final_point.start + 1];
     let final_add_inverse = layout_range(LayoutSlot::FinalAddDenominatorInverse);
-    let denom_inv = witness.values[final_add_inverse.start];
-    let lambda = (by - ay) * denom_inv;
+    let generic_denom_inv = witness.values[final_add_inverse.start];
+    let u1 = witness.values[layout_range(LayoutSlot::UScalars).start];
+    let u1_zero = u1 == Fp::ZERO;
+    let double_selector = !u1_zero && ax == bx && ay == by;
+    let generic_selector = !u1_zero && !double_selector;
+    if generic_selector && (bx - ax) * generic_denom_inv != Fp::ONE {
+        return Err(WitnessError::ExceptionalTrace);
+    }
+    let generic_lambda = if generic_selector {
+        (by - ay) * generic_denom_inv
+    } else {
+        Fp::ZERO
+    };
+    let generic_x = generic_lambda.square() - ax - bx;
+    let generic_y = generic_lambda * (ax - generic_x) - ay;
+    let ax_squared = ax.square();
+    let double_denom_inv = (ay + ay).inverse().ok_or(WitnessError::ExceptionalTrace)?;
+    let double_lambda = (Fp::from_u64(3) * ax_squared - Fp::from_u64(3)) * double_denom_inv;
+    let double_x = double_lambda.square() - ax - ax;
+    let double_y = double_lambda * (ax - double_x) - ay;
 
     let mut input = vec![Fp::ZERO; 1usize << C11_FINAL_ADD_INPUT_LOG_SIZE];
     input[C11_CONST_ONE_INDEX as usize] = Fp::ONE;
@@ -5299,8 +5264,18 @@ pub fn c11_final_add_input(witness: &Witness) -> Result<Vec<Fp>, WitnessError> {
     input[C11_BY_INDEX as usize] = by;
     input[C11_RX_INDEX as usize] = rx;
     input[C11_RY_INDEX as usize] = ry;
-    input[C11_LAMBDA_INDEX as usize] = lambda;
-    input[C11_DENOM_INV_INDEX as usize] = denom_inv;
+    input[C11_GENERIC_LAMBDA_INDEX as usize] = generic_lambda;
+    input[C11_GENERIC_DENOM_INV_INDEX as usize] = generic_denom_inv;
+    input[C11_U1_ZERO_INDEX as usize] = fp_bit(u1_zero);
+    input[C11_DOUBLE_SELECTOR_INDEX as usize] = fp_bit(double_selector);
+    input[C11_GENERIC_SELECTOR_INDEX as usize] = fp_bit(generic_selector);
+    input[C11_GENERIC_X_INDEX as usize] = generic_x;
+    input[C11_GENERIC_Y_INDEX as usize] = generic_y;
+    input[C11_DOUBLE_LAMBDA_INDEX as usize] = double_lambda;
+    input[C11_DOUBLE_DENOM_INV_INDEX as usize] = double_denom_inv;
+    input[C11_DOUBLE_X_INDEX as usize] = double_x;
+    input[C11_DOUBLE_Y_INDEX as usize] = double_y;
+    input[C11_AX_SQUARED_INDEX as usize] = ax_squared;
     Ok(input)
 }
 
@@ -5776,11 +5751,6 @@ fn final_add_denominator(u1_g: ProjectivePoint, u2_q: ProjectivePoint) -> Result
     Ok(bx - ax)
 }
 
-fn write_inverse(out: &mut [Fp], offset: usize, value: Fp) -> Result<(), WitnessError> {
-    out[offset] = value.inverse().ok_or(WitnessError::ExceptionalTrace)?;
-    Ok(())
-}
-
 fn projective_point_coords(point: ProjectivePoint) -> Result<(Fp, Fp), WitnessError> {
     if bool::from(point.is_identity()) {
         return Err(WitnessError::ExceptionalTrace);
@@ -5891,7 +5861,7 @@ mod tests {
     use crate::sumcheck::{
         prove_evaluated_circuit_sorted_sparse_profiled, verify_circuit_sorted_sparse_profiled,
     };
-    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::signature::hazmat::{PrehashSigner, PrehashVerifier};
     use p256::ecdsa::{Signature as P256Signature, SigningKey};
     use sha2::Sha256;
 
@@ -5918,20 +5888,61 @@ mod tests {
     }
 
     fn signed_p4b_input(secret: u8, message: &[u8]) -> EcdsaInput {
+        signed_p4b_input_for_digest(secret, Sha256::digest(message).into())
+    }
+
+    fn signed_p4b_input_for_digest(secret: u8, z: [u8; 32]) -> EcdsaInput {
         let signing_key = SigningKey::from_bytes((&[secret; 32]).into()).unwrap();
-        let signature: P256Signature = signing_key.sign(message);
+        let signature: P256Signature = signing_key.sign_prehash(&z).unwrap();
         let public_key = signing_key.verifying_key().to_encoded_point(false);
         let mut qx = [0u8; 32];
         let mut qy = [0u8; 32];
         qx.copy_from_slice(public_key.x().unwrap());
         qy.copy_from_slice(public_key.y().unwrap());
         EcdsaInput {
-            z: Sha256::digest(message).into(),
+            z,
             r: signature.r().to_bytes().into(),
             s: signature.s().to_bytes().into(),
             qx,
             qy,
         }
+    }
+
+    fn d1_manual_signature_input(z: U256Words, nonce_point: ProjectivePoint) -> EcdsaInput {
+        let mut secret = [0u8; 32];
+        secret[31] = 1;
+        let signing_key = SigningKey::from_bytes((&secret).into()).expect("d = 1 is valid");
+        let (qx, qy) = projective_point_bytes(ProjectivePoint::GENERATOR).unwrap();
+        let (nonce_x, _) = projective_point_bytes(nonce_point).unwrap();
+        let (r_words, _) = reduce_field_x_to_scalar(words_from_be(nonce_x));
+        let r = be_from_words(&r_words);
+        let input = EcdsaInput {
+            z: be_from_words(&z),
+            r,
+            s: r,
+            qx,
+            qy,
+        };
+        let signature = P256Signature::from_scalars(input.r, input.s).expect("r and s are valid");
+        signing_key
+            .verifying_key()
+            .verify_prehash(&input.z, &signature)
+            .expect("manual d=1 ECDSA vector verifies");
+        input
+    }
+
+    fn words_plus_one(mut words: U256Words) -> U256Words {
+        let mut carry = true;
+        for word in &mut words {
+            if !carry {
+                break;
+            }
+            let (value, overflow) = word.overflowing_add(1);
+            *word = value;
+            carry = overflow;
+        }
+        assert!(!carry, "test vector must remain below 2^256");
+        words
     }
 
     #[test]
@@ -5957,19 +5968,19 @@ mod tests {
         validate_mdoc_p4b_projection_shapes(
             &issuer_projection,
             &device_projection,
-            Some(&revocation_projection),
+            &revocation_projection,
         )
         .unwrap();
         assert!(validate_mdoc_p4b_projection_shapes(
             &issuer_projection,
             &device_projection,
-            Some(&EcdsaPublicProjection::message_hash_only(revocation.z)),
+            &EcdsaPublicProjection::message_hash_only(revocation.z),
         )
         .is_err());
         assert!(validate_mdoc_p4b_projection_shapes(
             &issuer_projection,
             &device_projection,
-            Some(&EcdsaPublicProjection::full(&revocation)),
+            &EcdsaPublicProjection::full(&revocation),
         )
         .is_err());
     }
@@ -5981,17 +5992,15 @@ mod tests {
         let revocation = p4b_microbench_input(29);
         let key_shares = p4b_microbench_key_shares();
         let av = [0x5au8; 16];
-        let absent = mdoc_p4b_mac_values(&issuer, &device, None);
-        assert_eq!(absent[6], MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE);
-        assert_eq!(absent[7], MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE);
+        let values = mdoc_p4b_mac_values(&issuer, &device, &revocation);
         assert_eq!(
-            mac_batch_group_a_input(&key_shares, &absent).unwrap().len(),
+            mac_batch_group_a_input(&key_shares, &values).unwrap().len(),
             1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE
         );
         let tags: [Gf128; MDOC_P4B_MAC_HALF_COUNT] =
-            std::array::from_fn(|half| gf128_tag(&key_shares.0[half], &av, &absent[half]));
+            std::array::from_fn(|half| gf128_tag(&key_shares.0[half], &av, &values[half]));
         assert_eq!(
-            mac_batch_group_b_input(&key_shares, &av, &absent, &tags)
+            mac_batch_group_b_input(&key_shares, &av, &values, &tags)
                 .unwrap()
                 .len(),
             1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE
@@ -6005,40 +6014,94 @@ mod tests {
             circuit.layers().last().unwrap().next_log_size(),
             MAC_BATCH_INPUT_LOG_SIZE
         );
-        let present = mdoc_p4b_mac_values(&issuer, &device, Some(&revocation));
-        assert_eq!(
-            [present[6], present[7]],
-            gf128_halves_from_be32(revocation.z)
-        );
+        assert_eq!([values[6], values[7]], gf128_halves_from_be32(revocation.z));
     }
 
     #[test]
-    fn p4b_absent_revocation_halves_are_bound_to_public_placeholder() {
+    fn digest_mac_half_claims_reject_alias_swap_and_independent_tampering() {
+        let p_plus_one = words_plus_one(P256_FIELD_MODULUS);
+        let digest = be_from_words(&p_plus_one);
+        let input = signed_p4b_input_for_digest(13, digest);
+        let witness = generate_witness(&input).expect("boundary digest witness");
+        let c3_input = c3_c5_scalar_setup_input(&input, &witness).expect("C3 input");
+
         let key_shares = p4b_microbench_key_shares();
-        let mut values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
-        values[6] = MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE;
-        values[7] = MDOC_P4B_ABSENT_REVOCATION_MAC_VALUE;
-        let mut committed = mac_batch_group_a_input(&key_shares, &values).unwrap();
-        let layout = BundleCircuitLayout {
+        let mut mac_values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
+        [mac_values[0], mac_values[1]] = gf128_halves_from_be32(digest);
+        let mac_input = mac_batch_group_a_input(&key_shares, &mac_values).expect("MAC input");
+        let c3_layout = BundleCircuitLayout {
             input_offset: 0,
-            input_len: committed.len(),
-            pad_offset: committed.len(),
+            input_len: c3_input.len(),
+            pad_offset: c3_input.len(),
             pad_len: 0,
         };
+        let mac_layout = BundleCircuitLayout {
+            input_offset: c3_input.len(),
+            input_len: mac_input.len(),
+            pad_offset: c3_input.len() + mac_input.len(),
+            pad_len: 0,
+        };
+        let mut committed = c3_input;
+        committed.extend(mac_input);
         let mut claims = Vec::new();
-        add_mac_absent_revocation_binding(&mut claims, &layout, 6, 7);
-        let claim = &claims[0];
-        let evaluate = |values: &[Fp]| {
+        add_mac_digest_binding(&mut claims, &c3_layout, &mac_layout, 0, 1);
+        assert_eq!(claims.len(), 2);
+        let evaluate = |claim: &LigeroLinearClaim, values: &[Fp]| {
             claim.terms.iter().fold(Fp::ZERO, |sum, term| {
                 let mle = Mle::new(values[term.offset..term.offset + term.len].to_vec());
                 sum + term.coefficient * mle.eval_at(&term.point).unwrap()
             })
         };
-        assert_eq!(evaluate(&committed), claim.value);
-        // Zeroing the placeholder's low bit reproduces the old all-zero
-        // encoding, which the binding must now reject.
-        committed[mac_batch_half_group_a_input_offset(6) + MAC_HALF_X_BITS_START] = Fp::ZERO;
-        assert_ne!(evaluate(&committed), claim.value);
+        assert!(claims
+            .iter()
+            .all(|claim| evaluate(claim, &committed) == claim.value));
+
+        let mac_low = mac_layout.input_offset
+            + mac_batch_half_group_a_input_offset(0)
+            + MAC_HALF_X_BITS_START;
+        let mac_high = mac_layout.input_offset
+            + mac_batch_half_group_a_input_offset(1)
+            + MAC_HALF_X_BITS_START;
+        committed[mac_low] = Fp::ONE - committed[mac_low];
+        assert_ne!(evaluate(&claims[0], &committed), claims[0].value);
+        assert_eq!(evaluate(&claims[1], &committed), claims[1].value);
+        committed[mac_low] = Fp::ONE - committed[mac_low];
+        committed[mac_high] = Fp::ONE - committed[mac_high];
+        assert_eq!(evaluate(&claims[0], &committed), claims[0].value);
+        assert_ne!(evaluate(&claims[1], &committed), claims[1].value);
+        committed[mac_high] = Fp::ONE - committed[mac_high];
+
+        for bit in 0..GF128_BITS {
+            committed.swap(mac_low + bit, mac_high + bit);
+        }
+        assert!(
+            claims
+                .iter()
+                .any(|claim| evaluate(claim, &committed) != claim.value),
+            "low/high digest halves must not be interchangeable"
+        );
+        for bit in 0..GF128_BITS {
+            committed.swap(mac_low + bit, mac_high + bit);
+        }
+
+        let one_halves = gf128_halves_from_be32(be_from_words(&[1, 0, 0, 0]));
+        assert_eq!(
+            recompose_gf128_halves(&mac_values[0], &mac_values[1]),
+            recompose_gf128_halves(&one_halves[0], &one_halves[1]),
+            "p+1 aliases one only under a whole-field recomposition"
+        );
+        for (half, replacement) in one_halves.into_iter().enumerate() {
+            let replacement_input =
+                mac_half_group_a_input(&key_shares.0[half], &replacement).unwrap();
+            let offset = mac_layout.input_offset + mac_batch_half_group_a_input_offset(half);
+            committed[offset..offset + replacement_input.len()].copy_from_slice(&replacement_input);
+        }
+        assert!(
+            claims
+                .iter()
+                .any(|claim| evaluate(claim, &committed) != claim.value),
+            "separate 128-bit claims must reject the p+1 versus one alias"
+        );
     }
 
     #[test]
@@ -6188,72 +6251,208 @@ mod tests {
     }
 
     #[test]
-    fn c3_rejects_digest_limb_alias_modulo_base_field() {
+    fn c3_accepts_full_digest_space_and_rejects_bit_tampering() {
         let circuit = build_c3_c5_scalar_setup_circuit().expect("C3 circuit builds");
+        let p_plus_one = words_plus_one(P256_FIELD_MODULUS);
+        for (label, words) in [
+            ("zero", [0; 4]),
+            ("n-1", P256_ORDER_MINUS_ONE),
+            ("n", P256_ORDER),
+            ("p", P256_FIELD_MODULUS),
+            ("p+1", p_plus_one),
+            ("2^256-1", [u64::MAX; 4]),
+        ] {
+            let input = signed_p4b_input_for_digest(9, be_from_words(&words));
+            let witness = generate_witness(&input)
+                .unwrap_or_else(|error| panic!("z={label} boundary witness failed: {error:?}"));
+            let mut c3_input = c3_c5_scalar_setup_input(&input, &witness).expect("C3 input builds");
+            let layers = circuit
+                .evaluate_input(c3_input.clone())
+                .expect("input has circuit width");
+            assert!(
+                circuit
+                    .is_satisfied(&layers)
+                    .expect("circuit shape is valid"),
+                "valid prehash signature at z={label} must satisfy C3"
+            );
 
-        let mut alias_words = P256_FIELD_MODULUS;
-        alias_words[0] = 0;
-        alias_words[1] += 1;
-        let alias_limbs = words_to_limbs(&alias_words);
-        let mut recomposed = Fp::ZERO;
-        let mut power = Fp::ONE;
-        for limb in alias_limbs {
-            recomposed = recomposed + Fp::from_u64(limb as u64) * power;
-            for _ in 0..LIMB_BITS {
-                power = power + power;
+            if label == "zero" {
+                let mut bad_flag = c3_input.clone();
+                bad_flag[C3_U1_ZERO_INDEX] = Fp::ZERO;
+                let layers = circuit
+                    .evaluate_input(bad_flag)
+                    .expect("input has circuit width");
+                assert!(
+                    !circuit.is_satisfied(&layers).expect("valid circuit shape"),
+                    "u1=0 must require the zero-scalar flag"
+                );
+
+                let mut bad_inverse = c3_input.clone();
+                bad_inverse[C3_U1_NONZERO_INV_INDEX] = Fp::ONE;
+                let layers = circuit
+                    .evaluate_input(bad_inverse)
+                    .expect("input has circuit width");
+                assert!(
+                    !circuit.is_satisfied(&layers).expect("valid circuit shape"),
+                    "the zero branch must constrain its nominal inverse to zero"
+                );
+            }
+
+            c3_input[C3_Z_BITS_START] = Fp::ONE - c3_input[C3_Z_BITS_START];
+            let tampered = circuit
+                .evaluate_input(c3_input)
+                .expect("input has circuit width");
+            assert!(
+                !circuit
+                    .is_satisfied(&tampered)
+                    .expect("circuit shape is valid"),
+                "changing one exact digest bit at z={label} must fail"
+            );
+        }
+    }
+
+    #[test]
+    fn c9_c11_accept_zero_double_and_generic_branches_and_reject_mutations() {
+        let generator = ProjectivePoint::GENERATOR;
+        let doubled_generator = generator + generator;
+        let (doubled_x, _) = projective_point_bytes(doubled_generator).unwrap();
+        let (doubled_r, _) = reduce_field_x_to_scalar(words_from_be(doubled_x));
+        let cases = [
+            ("z=0", d1_manual_signature_input([0; 4], generator), 0),
+            ("z=n", d1_manual_signature_input(P256_ORDER, generator), 0),
+            (
+                "A=B",
+                d1_manual_signature_input(doubled_r, doubled_generator),
+                1,
+            ),
+            ("generic", signed_p4b_input(11, b"generic C11 branch"), 2),
+        ];
+        let circuit = build_c11_final_add_circuit().expect("C11 circuit builds");
+        let is_satisfied = |input: Vec<Fp>| {
+            let layers = circuit.evaluate_input(input).expect("C11 input width");
+            circuit.is_satisfied(&layers).expect("C11 circuit shape")
+        };
+
+        let mut branch_inputs = Vec::new();
+        for (label, input, expected_branch) in cases {
+            let witness = generate_witness(&input)
+                .unwrap_or_else(|error| panic!("{label} witness failed: {error:?}"));
+            verify_implemented_circuits(&input, &witness)
+                .unwrap_or_else(|error| panic!("{label} circuits failed: {error:?}"));
+            let c11_input = c11_final_add_input(&witness).expect("C11 input builds");
+            assert!(is_satisfied(c11_input.clone()), "{label} must satisfy C11");
+            assert_eq!(
+                [
+                    c11_input[C11_U1_ZERO_INDEX as usize],
+                    c11_input[C11_DOUBLE_SELECTOR_INDEX as usize],
+                    c11_input[C11_GENERIC_SELECTOR_INDEX as usize],
+                ],
+                std::array::from_fn(|branch| fp_bit(branch == expected_branch)),
+                "{label} must select exactly the expected branch"
+            );
+            branch_inputs.push((label, c11_input));
+        }
+
+        for (label, input) in &branch_inputs {
+            let selected = [
+                C11_U1_ZERO_INDEX as usize,
+                C11_DOUBLE_SELECTOR_INDEX as usize,
+                C11_GENERIC_SELECTOR_INDEX as usize,
+            ]
+            .into_iter()
+            .find(|&index| input[index] == Fp::ONE)
+            .unwrap();
+            let mut mutated = input.clone();
+            mutated[selected] = Fp::ZERO;
+            assert!(
+                !is_satisfied(mutated),
+                "{label} one-hot selector mutation must fail"
+            );
+        }
+
+        for result in [C11_RX_INDEX as usize, C11_RY_INDEX as usize] {
+            let mut mutated = branch_inputs[0].1.clone();
+            mutated[result] = mutated[result] + Fp::ONE;
+            assert!(
+                !is_satisfied(mutated),
+                "the zero-scalar branch must bind selected result wire {result}"
+            );
+        }
+
+        for (label, branch, indices) in [
+            (
+                "generic",
+                3usize,
+                [
+                    C11_GENERIC_DENOM_INV_INDEX as usize,
+                    C11_GENERIC_LAMBDA_INDEX as usize,
+                    C11_GENERIC_X_INDEX as usize,
+                    C11_GENERIC_Y_INDEX as usize,
+                    C11_RX_INDEX as usize,
+                    C11_RY_INDEX as usize,
+                ],
+            ),
+            (
+                "double",
+                2usize,
+                [
+                    C11_DOUBLE_DENOM_INV_INDEX as usize,
+                    C11_DOUBLE_LAMBDA_INDEX as usize,
+                    C11_DOUBLE_X_INDEX as usize,
+                    C11_DOUBLE_Y_INDEX as usize,
+                    C11_RX_INDEX as usize,
+                    C11_RY_INDEX as usize,
+                ],
+            ),
+        ] {
+            for index in indices {
+                let mut mutated = branch_inputs[branch].1.clone();
+                mutated[index] = mutated[index] + Fp::ONE;
+                assert!(
+                    !is_satisfied(mutated),
+                    "{label} auxiliary/result wire {index} mutation must fail"
+                );
             }
         }
-        assert_eq!(recomposed, Fp::ONE, "p + 1 aliases one in Fp");
+
+        // A and -A have the same x coordinate, so affine addition returns the
+        // identity. No C11 branch represents the identity.
+        let mut opposite = branch_inputs[2].1.clone();
+        opposite[C11_BY_INDEX as usize] = -opposite[C11_AY_INDEX as usize];
+        opposite[C11_DOUBLE_SELECTOR_INDEX as usize] = Fp::ZERO;
+        opposite[C11_GENERIC_SELECTOR_INDEX as usize] = Fp::ONE;
+        opposite[C11_GENERIC_DENOM_INV_INDEX as usize] = Fp::ZERO;
+        opposite[C11_GENERIC_LAMBDA_INDEX as usize] = Fp::ZERO;
+        opposite[C11_GENERIC_X_INDEX as usize] =
+            -opposite[C11_AX_INDEX as usize] - opposite[C11_BX_INDEX as usize];
+        opposite[C11_GENERIC_Y_INDEX as usize] = -opposite[C11_AY_INDEX as usize];
+        opposite[C11_RX_INDEX as usize] = opposite[C11_GENERIC_X_INDEX as usize];
+        opposite[C11_RY_INDEX as usize] = opposite[C11_GENERIC_Y_INDEX as usize];
         assert!(
-            CanonicalLtTrace::new("z", &alias_words, "p", &P256_FIELD_MODULUS).is_err(),
-            "the canonical integer representation must exclude p + 1"
+            !is_satisfied(opposite.clone()),
+            "A + (-A) must be rejected in the generic branch"
         );
-        let mut alias_input = signed_p4b_input(9, b"c3 digest alias");
-        alias_input.z = be_from_words(&alias_words);
-        let alias_witness =
-            generate_witness(&alias_input).expect("p + 1 has a complete scalar trace");
-        let invalid_z_lt_p = CanonicalLtTrace {
-            value_name: "z",
-            bound_name: "p",
-            value: alias_limbs,
-            bound: words_to_limbs(&P256_FIELD_MODULUS),
-            slack: Default::default(),
-            carries: Default::default(),
-        };
-        let forged = c3_c5_scalar_setup_input_with_z_trace(
-            &alias_input,
-            &alias_witness,
-            Fp::ONE,
-            &invalid_z_lt_p,
-        )
-        .expect("all non-canonicality trace components are valid");
-        let layers = circuit
-            .evaluate_input(forged)
-            .expect("input has circuit width");
-        const CANONICAL_LT_CONSTRAINTS: usize = N_LIMBS * (2 * (LIMB_BITS + 1) + 1) + 1 + N_LIMBS;
-        const C3_Z_LT_OUTPUT_START: usize = 4
-            + C3_CANONICAL_SCALAR_COUNT * CANONICAL_LT_CONSTRAINTS
-            + 1
-            + N_LIMBS * (LIMB_BITS + 1);
-        const C3_Z_LT_OUTPUT_END: usize = C3_Z_LT_OUTPUT_START + CANONICAL_LT_CONSTRAINTS;
-        let violations = layers[0]
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| (*value != Fp::ZERO).then_some(index))
-            .collect::<Vec<_>>();
+        let mut wrong_double = opposite;
+        wrong_double[C11_DOUBLE_SELECTOR_INDEX as usize] = Fp::ONE;
+        wrong_double[C11_GENERIC_SELECTOR_INDEX as usize] = Fp::ZERO;
+        wrong_double[C11_RX_INDEX as usize] = wrong_double[C11_DOUBLE_X_INDEX as usize];
+        wrong_double[C11_RY_INDEX as usize] = wrong_double[C11_DOUBLE_Y_INDEX as usize];
         assert!(
-            !violations.is_empty()
-                && violations
-                    .iter()
-                    .all(|index| (C3_Z_LT_OUTPUT_START..C3_Z_LT_OUTPUT_END).contains(index)),
-            "only the z < p constraint block may reject the otherwise-valid adversarial trace: \
-             {violations:?}"
+            !is_satisfied(wrong_double),
+            "A + (-A) must not be misclassified as the double branch"
         );
-        assert!(
-            !circuit
-                .is_satisfied(&layers)
-                .expect("circuit shape is valid"),
-            "C3 must reject a digest representation that matches only modulo p"
+
+        let double_input = d1_manual_signature_input(doubled_r, doubled_generator);
+        let mut opposite_witness = generate_witness(&double_input).unwrap();
+        let corrected = layout_range(LayoutSlot::CorrectedEndpoints);
+        opposite_witness.values[corrected.start + 3] =
+            -opposite_witness.values[corrected.start + 1];
+        opposite_witness.values[layout_range(LayoutSlot::FinalAddDenominatorInverse).start] =
+            Fp::ZERO;
+        assert_eq!(
+            c11_final_add_input(&opposite_witness),
+            Err(WitnessError::ExceptionalTrace),
+            "the input builder must reject an identity-producing affine pair"
         );
     }
 
@@ -6332,7 +6531,7 @@ mod tests {
     }
 
     #[test]
-    fn ecdsa_affine_claims_bind_private_family_copies_without_claim_values() {
+    fn ecdsa_affine_claims_bind_private_family_copies() {
         let input_lens = [
             1usize << C1_INPUT_LIMBS_INPUT_LOG_SIZE,
             1usize << C2_CANONICALITY_INPUT_LOG_SIZE,
@@ -6357,7 +6556,7 @@ mod tests {
             .to_vec();
         let mut claims = Vec::new();
         add_ecdsa_consistency_claims(&mut claims, &layouts).expect("fixed family layout");
-        assert_eq!(claims.len(), 28);
+        assert_eq!(claims.len(), 48);
         assert!(
             claims[..7].iter().all(|claim| claim.value == Fp::ONE)
                 && claims[7..].iter().all(|claim| claim.value == Fp::ZERO),
@@ -6374,9 +6573,36 @@ mod tests {
         for layout in &layouts {
             values[layout.input_offset] = Fp::ONE;
         }
+        values[layouts[2].input_offset + C3_U1_ZERO_INDEX] = Fp::ZERO;
+        values[layouts[4].input_offset + C11_U1_ZERO_INDEX as usize] = Fp::ZERO;
         assert!(claims
             .iter()
             .all(|claim| evaluate(claim, &values) == claim.value));
+
+        let p_plus_one = words_plus_one(P256_FIELD_MODULUS);
+        for (limb, value) in words_to_limbs(&p_plus_one).into_iter().enumerate() {
+            values[layouts[0].input_offset + C1_LIMBS_START_INDEX as usize + limb] =
+                Fp::from_u64(u64::from(value));
+            values[layouts[2].input_offset + C3_Z_LIMBS_START + limb] =
+                Fp::from_u64(u64::from(value));
+        }
+        assert!(claims
+            .iter()
+            .all(|claim| evaluate(claim, &values) == claim.value));
+        for (limb, value) in words_to_limbs(&[1, 0, 0, 0]).into_iter().enumerate() {
+            values[layouts[0].input_offset + C1_LIMBS_START_INDEX as usize + limb] =
+                Fp::from_u64(u64::from(value));
+        }
+        assert!(
+            claims
+                .iter()
+                .any(|claim| evaluate(claim, &values) != claim.value),
+            "p+1 and 1 must not alias across the exact C1/C3 limb claims"
+        );
+        for (limb, value) in words_to_limbs(&p_plus_one).into_iter().enumerate() {
+            values[layouts[0].input_offset + C1_LIMBS_START_INDEX as usize + limb] =
+                Fp::from_u64(u64::from(value));
+        }
 
         values[layouts[2].input_offset] = Fp::ZERO;
         assert_eq!(
@@ -6397,6 +6623,62 @@ mod tests {
             1,
             "changing only C14.r must violate its equality with C3.r"
         );
+        values[layouts[6].input_offset + C14_SIGNATURE_R_INDEX] = Fp::from_u64(7);
+        values[layouts[2].input_offset + C3_U1_ZERO_INDEX] = Fp::ONE;
+        values[layouts[4].input_offset + C11_U1_ZERO_INDEX as usize] = Fp::ONE;
+        values[layouts[3].input_offset + C9_U1_INDEX] = Fp::from_u64(8);
+        assert!(
+            claims
+                .iter()
+                .all(|claim| evaluate(claim, &values) == claim.value),
+            "the effective-u1 affine claim must accept u1_eff = u1 + zero_flag"
+        );
+        values[layouts[4].input_offset + C11_U1_ZERO_INDEX as usize] = Fp::ZERO;
+        assert!(
+            claims
+                .iter()
+                .any(|claim| evaluate(claim, &values) != claim.value),
+            "C3 and C11 must authenticate the same zero-scalar branch flag"
+        );
+    }
+
+    #[test]
+    fn c1_public_digest_limb_claims_reject_p_plus_one_as_one() {
+        let p_plus_one = words_plus_one(P256_FIELD_MODULUS);
+        let projection = EcdsaPublicProjection::message_hash_only(be_from_words(&p_plus_one));
+        let layout = BundleCircuitLayout {
+            input_offset: 0,
+            input_len: 1usize << C1_INPUT_LIMBS_INPUT_LOG_SIZE,
+            pad_offset: 1usize << C1_INPUT_LIMBS_INPUT_LOG_SIZE,
+            pad_len: 0,
+        };
+        let mut claims = Vec::new();
+        add_c1_public_claims(&mut claims, &projection, &layout).expect("public z limbs bind");
+        assert_eq!(claims.len(), N_LIMBS);
+
+        let evaluate = |claim: &LigeroLinearClaim, values: &[Fp]| {
+            claim.terms.iter().fold(Fp::ZERO, |sum, term| {
+                let mle = Mle::new(values[term.offset..term.offset + term.len].to_vec());
+                sum + term.coefficient * mle.eval_at(&term.point).unwrap()
+            })
+        };
+        let mut committed = vec![Fp::ZERO; layout.input_len];
+        for (limb, value) in words_to_limbs(&p_plus_one).into_iter().enumerate() {
+            committed[C1_LIMBS_START_INDEX as usize + limb] = Fp::from_u64(u64::from(value));
+        }
+        assert!(claims
+            .iter()
+            .all(|claim| evaluate(claim, &committed) == claim.value));
+
+        for (limb, value) in words_to_limbs(&[1, 0, 0, 0]).into_iter().enumerate() {
+            committed[C1_LIMBS_START_INDEX as usize + limb] = Fp::from_u64(u64::from(value));
+        }
+        assert!(
+            claims
+                .iter()
+                .any(|claim| evaluate(claim, &committed) != claim.value),
+            "public p+1 and one digests must not alias through Fp"
+        );
     }
 
     fn median_duration(values: &mut [Duration]) -> Duration {
@@ -6406,16 +6688,15 @@ mod tests {
 
     fn compare_dense_and_structured_claim_verification(
         label: &str,
-        max_structured_calls: usize,
         issuer_projection: &EcdsaPublicProjection,
         device_projection: &EcdsaPublicProjection,
-        revocation_projection: Option<&EcdsaPublicProjection>,
+        revocation_projection: &EcdsaPublicProjection,
         bundle: &ImplementedCircuitBundle,
     ) {
         let mut dense_times = Vec::with_capacity(7);
         let mut structured_times = Vec::with_capacity(7);
-        let mut dense_calls = 0usize;
-        let mut structured_calls = 0usize;
+        let mut dense_calls = None;
+        let mut structured_calls = None;
         for iteration in 0..7 {
             for structured in [iteration % 2 == 1, iteration % 2 == 0] {
                 crate::ligero::set_structured_claims_for_test(Some(structured));
@@ -6431,14 +6712,30 @@ mod tests {
                 let calls = crate::ligero::circle_weight_encode_call_count();
                 if structured {
                     structured_times.push(profile.claim_batch);
-                    structured_calls = calls;
+                    if let Some(expected) = structured_calls {
+                        assert_eq!(
+                            calls, expected,
+                            "structured Circle row-encode count changed between runs"
+                        );
+                    } else {
+                        structured_calls = Some(calls);
+                    }
                 } else {
                     dense_times.push(profile.claim_batch);
-                    dense_calls = calls;
+                    if let Some(expected) = dense_calls {
+                        assert_eq!(
+                            calls, expected,
+                            "dense Circle row-encode count changed between runs"
+                        );
+                    } else {
+                        dense_calls = Some(calls);
+                    }
                 }
             }
         }
         crate::ligero::set_structured_claims_for_test(None);
+        let dense_calls = dense_calls.expect("dense verifier ran");
+        let structured_calls = structured_calls.expect("structured verifier ran");
         let dense = median_duration(&mut dense_times);
         let structured = median_duration(&mut structured_times);
         eprintln!(
@@ -6448,13 +6745,10 @@ mod tests {
             dense_calls,
             structured_calls,
         );
+        assert!(dense_calls > 0, "dense verifier must encode Circle rows");
         assert!(
             structured_calls * 4 <= dense_calls * 3,
             "structured evaluator must cut Circle row encodes by at least 25%"
-        );
-        assert!(
-            structured_calls <= max_structured_calls,
-            "{label} used {structured_calls} structured weight encodes; gate is {max_structured_calls}"
         );
     }
 
@@ -6465,7 +6759,7 @@ mod tests {
     }
 
     #[test]
-    fn proximity_sampler_uses_full_circle_domain_but_excludes_rs_message_prefix() {
+    fn product_proximity_sampler_uses_full_circle_domain() {
         let root = [0x51; 32];
         let seed = [0xA7; 32];
         let proximity_claim = LigeroProximityClaim {
@@ -6481,7 +6775,7 @@ mod tests {
         };
         let quadratic_batch = LigeroQuadraticBatch::default();
 
-        let circle = v4_circle_params();
+        let circle = product_circle_params();
         let circle_indices = ligero_opening_indices(
             IMPLEMENTED_BUNDLE_LIGERO_LABEL,
             root,
@@ -6510,28 +6804,11 @@ mod tests {
             circle_indices.iter().any(|&index| index < circle.row_len),
             "circle code has no systematic prefix, so its sampler must use the full domain"
         );
-
-        let rs = crate::ligero::v2_ligero_params();
-        let rs_indices = ligero_opening_indices(
-            IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-            root,
-            rs,
-            &proximity_claim,
-            &entries,
-            &claim_batch,
-            &claim_blind_check,
-            &quadratic_batch,
-            seed,
-        );
-        assert!(
-            rs_indices.iter().all(|&index| index >= rs.row_len),
-            "RS proximity queries must remain disjoint from systematic openings"
-        );
     }
 
     #[test]
     fn opening_indices_bind_every_prover_response() {
-        let params = v4_circle_params();
+        let params = product_circle_params();
         let root = [0x31; 32];
         let seed = [0x79; 32];
         let proximity_claim = LigeroProximityClaim {
@@ -6656,7 +6933,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "release gate: real default and revocation P4b old/new verifier timing"]
+    #[ignore = "release gate: real P4b structured/dense verifier timing"]
     fn mdoc_p4b_structured_claim_evaluator_matches_real_fixtures() {
         let issuer = signed_p4b_input(7, b"structured claim issuer");
         let device = signed_p4b_input(9, b"structured claim device");
@@ -6670,27 +6947,6 @@ mod tests {
         let revocation_witness = generate_witness(&revocation).unwrap();
         let key_shares = p4b_microbench_key_shares();
 
-        let default_bundle = prove_mdoc_p4b_circuit_bundle(
-            &issuer,
-            &issuer_projection,
-            &issuer_witness,
-            &device,
-            &device_projection,
-            &device_witness,
-            None,
-            &key_shares,
-            [9u8; 32],
-        )
-        .unwrap();
-        compare_dense_and_structured_claim_verification(
-            "mdoc_p4b_default",
-            40,
-            &issuer_projection,
-            &device_projection,
-            None,
-            &default_bundle,
-        );
-
         let revocation_bundle = prove_mdoc_p4b_circuit_bundle(
             &issuer,
             &issuer_projection,
@@ -6698,37 +6954,35 @@ mod tests {
             &device,
             &device_projection,
             &device_witness,
-            Some((&revocation, &revocation_projection, &revocation_witness)),
+            (&revocation, &revocation_projection, &revocation_witness),
             &key_shares,
             [9u8; 32],
         )
         .unwrap();
         compare_dense_and_structured_claim_verification(
             "mdoc_p4b_revocation",
-            50,
             &issuer_projection,
             &device_projection,
-            Some(&revocation_projection),
+            &revocation_projection,
             &revocation_bundle,
         );
     }
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn q024_mac_reduction_bounds_are_pinned() {
+    fn q024_affine_mac_parity_bound_is_pinned() {
         assert_eq!(
-            mac_product_coeff_max_weight(),
-            GF128_BITS,
-            "each unreduced C_t coefficient is a sum of at most 128 products"
+            MAC_HALF_PARITY_MAX_S,
+            GF128_BITS + 1,
+            "each output count contains one pad bit and at most 128 public-fold terms"
         );
         assert_eq!(
-            mac_reduction_max_weight(),
-            MAC_HALF_PARITY_MAX_S - GF128_BITS,
-            "Q024 q-bit layout depends on the exact pentanomial fanout bound"
+            MAC_HALF_PARITY_Q_BITS, 7,
+            "the affine parity quotient needs seven committed bits"
         );
         assert!(
             (1usize << MAC_HALF_PARITY_Q_BITS) > MAC_HALF_PARITY_MAX_S / 2,
-            "q bits must cover every possible (W_k + V_k - tag_k) / 2"
+            "q bits must cover every possible (a_p,k + V_k - tag_k) / 2"
         );
     }
 
@@ -6754,13 +7008,16 @@ mod tests {
     fn mdoc_p4b_mac_batch_sumcheck_microbench() {
         let issuer = p4b_microbench_input(11);
         let device = p4b_microbench_input(29);
+        let revocation = p4b_microbench_input(31);
         let issuer_public = EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy);
         let device_public = EcdsaPublicProjection::message_hash_only(device.z);
-        let projections = [issuer_public, device_public];
+        let revocation_public =
+            EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy);
+        let projections = [issuer_public, device_public, revocation_public];
         let transcript_seed = [7u8; 32];
         let root = [31u8; 32];
         let av = draw_mdoc_p4b_av(transcript_seed, root);
-        let mac_values = mdoc_p4b_mac_values(&issuer, &device, None);
+        let mac_values = mdoc_p4b_mac_values(&issuer, &device, &revocation);
         let key_shares = p4b_microbench_key_shares();
         let mac_tags = key_shares
             .0

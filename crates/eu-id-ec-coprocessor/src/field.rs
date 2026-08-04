@@ -55,7 +55,7 @@ impl Fp {
 
     /// Samples uniformly from F_p by rejecting the tiny `2^256 - p` tail.
     ///
-    /// Fiat–Shamir challenges deliberately retain the historical reduction in
+    /// Fiat-Shamir challenges use the existing reduction in
     /// [`Self::random`]. Secret masks use this method so their distribution is
     /// exactly uniform, as required by the committed-mask ZK argument.
     pub fn random_uniform(rng: &mut impl RngCore) -> Self {

@@ -15,10 +15,10 @@ pub struct CanonicalLtRelations<'a> {
 
 /// Enforce `value < bound` using `value + slack + 1 = bound`.
 ///
-/// This function assumes `value` is the actual value being checked. The caller
-/// should pass the same limb columns used by the consuming row, or separately
+/// This function assumes `value` is the actual value being checked.
+/// Pass the same limb columns that the consuming row uses. Alternatively,
 /// constrain equality before consuming this comparison. Range-check lookups are
-/// gated by `gate`; carry/equation constraints are ungated to keep this helper
+/// gated by `gate`. Carry/equation constraints are ungated to keep this helper
 /// degree-2, so padding rows must contain a valid comparison witness.
 pub fn add_canonical_lt_fixed_bound<E: EvalAtRow>(
     eval: &mut E,

@@ -1,36 +1,12 @@
 //! AIR evaluator for the SHA-256 component.
 //!
-//! Implements [`FrameworkEval`] for the one-row-per-block layout defined in
-//! [`crate::trace`]. The **linear** constraints — IV binding on the first
-//! block, every mod-2³² limb-add identity (schedule recurrence, round adds,
-//! finalization), the within-row state-chain that ties round outputs back
-//! to the next round's inputs, and the §10.3 **cross-row block-chain copy
-//! constraint** that pins block `b+1`'s `h_in` to block `b`'s `h_out` via a
-//! `[0, -1]` interaction mask — are emitted here. The SHA boolean functions
-//! and rotations are constrained directly from committed bit planes. The
-//! mod-2³² limb-add carries are range-checked through
-//! `Range_{2,4,5}` lookups (one family per add per
-//! [`emit_mod_2_32_add_linear`] call) and the final-block `h_out` digest
-//! bytes through `Range_8`; byte recomposition pins the terminal limbs.
+//! This module implements [`FrameworkEval`] for [`crate::trace`]. It checks the
+//! IV, schedule, compression rounds, additions, and block chain. Bit planes
+//! constrain the SHA Boolean functions.
 //!
-//! Beyond the compression-loop constraints, the §10.4 **padding-role**
-//! block — appended after `h_out` per [`crate::trace::PADDING_ROW_COLS`]
-//! — emits the constraints that pin the FIPS 180-4 §5.1.1 padding
-//! structure: the `0x80` marker sits at the right byte (one-hot word /
-//! byte selectors → byte-decomposition of the marker word), the bytes
-//! after the marker are zero (cumulative-selector gates), the words after
-//! the marker word are zero (with the length-block exception), and the
-//! length block's `W[14]`/`W[15]` carry the bit-length limbs. Block-
-//! alignment (`padded.len() % 64 == 0`) is structural — one trace row
-//! IS one 64-byte block — and so no per-row constraint expresses it. The
-//! cross-component binding of the bit-length and the marker position to
-//! the mdoc-parser stream lands with the integration layer (mdoc/COSE
-//! structure analysis).
-//!
-//! Read-order invariant: every `next_trace_mask` call here happens in the
-//! same order as the writes in [`crate::trace::write_block_row`]. Layout
-//! offsets are not used directly here — they are documented in
-//! [`crate::trace::Layout`] for cross-checking.
+//! Range lookups constrain carries and digest bytes. Padding constraints check
+//! the marker, zero region, and bit length. Trace reads must follow the write
+//! order that [`crate::trace::Layout`] documents.
 
 use num_traits::One;
 use stwo::core::fields::m31::M31;
@@ -45,8 +21,8 @@ use crate::trace::WORD_BIT_COLS;
 use crate::types::{BYTES_PER_WORD, LIMB_BITS, WORDS_PER_BLOCK};
 
 enum WordBitMasks<F> {
-    Base([[F; 3]; WORD_BIT_COLS]),
-    Field([[F; 16]; WORD_BIT_COLS]),
+    Sparse([[F; 3]; WORD_BIT_COLS]),
+    Full([[F; 16]; WORD_BIT_COLS]),
 }
 
 /// AIR evaluator over the rotated one-row-per-round layout.
@@ -58,24 +34,23 @@ pub struct Sha256Eval {
     /// The four active `Range_k` channels plus cross-component digest and
     /// selected-field channels.
     pub relations: Sha256Relations,
-    /// When set, the AIR *yields* the final-block digest bytes on the
-    /// `Sha256Digest` channel (the producer half of the `SHA_DIGEST ↔ ECDSA_Z`
-    /// binding). Off for the standalone SHA proof — the digest has no
-    /// in-module consumer, so yielding it would leave the module's claimed
-    /// sum non-zero and the standalone proof would not self-balance. The
-    /// combined prover sets it once a consumer (P256 `z`) is composed in. The
-    /// `is_last_block` flag, the digest byte columns, and their decomposition
-    /// constraints are present and enforced regardless — only the
-    /// cross-module *yield* is gated.
+    /// Yield the final digest bytes on the `Sha256Digest` channel when set.
+    ///
+    /// This yield is the producer side of the digest binding.
+    /// A standalone proof has no digest consumer.
+    /// The standalone proof leaves this option disabled.
+    /// The combined prover enables it with the P-256 `z` consumer.
+    /// The AIR always constrains the digest columns.
+    /// This option controls only the cross-module yield.
     pub expose_digest: bool,
-    /// Credential-field byte exposure. The AIR derives configured bytes from
-    /// the existing boolean W bit planes and yields them on their target block
-    /// over the `Sha256Field` channel, so predicate consumers can require the
-    /// exact bytes of the field they bind. Multi-block exposure commits only a
-    /// block counter and one selector per target block. Empty for a
-    /// standalone SHA proof and for the combined proof before the predicate
-    /// consumers are wired (yields with no consumer would leave the module's
-    /// claimed sum non-zero). The cross-module yield is what binds.
+    /// Credential field byte exposure.
+    ///
+    /// The AIR derives configured bytes from the boolean W bit planes.
+    /// It yields them on their target block through `Sha256Field`.
+    /// Predicate consumers require these exact bytes.
+    /// Multi-block exposure adds a block counter and one selector per target.
+    /// A standalone proof uses an empty exposure.
+    /// A yield without a consumer would leave a nonzero claim sum.
     pub field_exposure: FieldExposure,
     /// Post-tree-1 claimed-sum mask challenge. When present, the final logical
     /// LogUp site is `beta * mask / 1`, read from four committed trace columns.
@@ -88,16 +63,13 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Base constraints here are degree ≤ 3 (a degree-2 boundary gate times
-        // a linear identity). The LogUp closes with
-        // `finalize_logup_batched(SHA_CONSUMER_LOGUP_BATCH)`: a batch-4
-        // interaction column carries a degree-≤5 constraint
-        // (`diff · ∏ dⱼ − Σ nᵢ∏_{j≠i} dⱼ`, the denominator product being
-        // degree 4 over the 4 SecureField masks). `log_size + 2` gives the
-        // composition domain for D ≤ 5; the unlocked engine derives the
-        // matching composition split (K = 2 ≤ log_blowup = 2, so no stored
-        // coefficients are needed). The producer components stay degree-≤3 at
-        // `log_size + 1` on pair batching.
+        // Base constraints have degree three or less.
+        // A boundary gate has degree two and multiplies a linear identity.
+        // `finalize_logup_batched` uses four fractions per interaction column.
+        // The resulting LogUp constraint has degree five or less.
+        // `log_size + 2` supplies the required composition domain.
+        // The engine uses `K = 2` with `log_blowup = 2`.
+        // Pair-batched producer constraints use `log_size + 1`.
         self.log_size + 2
     }
 
@@ -123,10 +95,9 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- header ----
         //
-        // `enabler` is read with a `[0, -1, 1]` cross-row mask so the
-        // contiguity constraint can pin `enabler_prev` (first-real-row
-        // marker `enabler_step`) and the digest gate can pin `enabler_next`
-        // (last-real-row marker `is_last_block`).
+        // Read `enabler` with the `[0, -1, 1]` cross-row mask.
+        // The contiguity constraint uses `enabler_prev`.
+        // The digest gate uses `enabler_next`.
         let [enabler, enabler_prev, enabler_next] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, 1]);
         eval.add_constraint(enabler.clone() * (E::F::one() - enabler.clone()));
@@ -140,7 +111,7 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- W: the row's schedule word, read at every offset any family
         // needs. `w[k]` is `W[t−k]`: the schedule recurrence reads k ∈
-        // {2, 7, 15, 16}; the `t = 15` padding/field families read the
+        // {2, 7, 15, 16}. The `t = 15` padding and field families read the
         // block's message words `W[j] = w[15−j]`, j ∈ [0, 16).
         let w_lo = eval.next_interaction_mask(
             ORIGINAL_TRACE_IDX,
@@ -155,15 +126,15 @@ impl FrameworkEval for Sha256Eval {
             ],
         );
         let w: [(E::F, E::F); 17] = std::array::from_fn(|k| (w_lo[k].clone(), w_hi[k].clone()));
-        // Consume each physical W-bit column exactly once. Empty exposures keep
-        // the legacy three-mask shape; field exposures request all W[0..15]
-        // offsets so t=15 can form arbitrary message bytes virtually.
+        // Consume each physical W-bit column exactly once. An empty exposure
+        // needs only the three SHA and padding offsets. Field exposures request
+        // all W[0..15] offsets so t=15 can form arbitrary message bytes.
         let w_bits_m = if self.field_exposure.is_empty() {
-            WordBitMasks::Base(std::array::from_fn(|_| {
+            WordBitMasks::Sparse(std::array::from_fn(|_| {
                 eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15])
             }))
         } else {
-            WordBitMasks::Field(std::array::from_fn(|_| {
+            WordBitMasks::Full(std::array::from_fn(|_| {
                 eval.next_interaction_mask(
                     ORIGINAL_TRACE_IDX,
                     [
@@ -174,12 +145,12 @@ impl FrameworkEval for Sha256Eval {
         };
         let w_bit_at = |bit: usize, offset: usize| -> E::F {
             match &w_bits_m {
-                WordBitMasks::Field(field) => field[bit][offset].clone(),
-                WordBitMasks::Base(base) => match offset {
-                    0 => base[bit][0].clone(),
-                    2 => base[bit][1].clone(),
-                    15 => base[bit][2].clone(),
-                    _ => unreachable!("legacy constraints request W offsets 0, 2, or 15"),
+                WordBitMasks::Full(full) => full[bit][offset].clone(),
+                WordBitMasks::Sparse(sparse) => match offset {
+                    0 => sparse[bit][0].clone(),
+                    2 => sparse[bit][1].clone(),
+                    15 => sparse[bit][2].clone(),
+                    _ => unreachable!("sparse W-bit masks contain offsets 0, 2, and 15"),
                 },
             }
         };
@@ -188,7 +159,7 @@ impl FrameworkEval for Sha256Eval {
         // ---- round family: outputs, carries, Σ-decodes, packed groups ----
         //
         // Column order matches `trace::write_round_row`: σ0, σ1, ch, maj,
-        // t1, t2 read at offset 0; a_new / e_new additionally at offsets
+        // t1 and t2 read at offset 0. a_new and e_new also read at offsets
         // −1..−4 (they carry the working state across rows).
         let sigma0 = (eval.next_trace_mask(), eval.next_trace_mask());
         let sigma1 = (eval.next_trace_mask(), eval.next_trace_mask());
@@ -235,19 +206,18 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- t = 0 family ----
         //
-        // `is_first_block` is also read at offset −15: the field-exposure
-        // family on the `t = 15` row gates its range checks and yields by
-        // "is this block 0", which lives 15 rows up.
+        // Read `is_first_block` at offset −15.
+        // The field exposure on row `t = 15` uses this block-zero value.
         let [is_first_block, is_first_block_m15] =
             eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -15]);
-        // C1 anchors: pin `is_first_block ≡ is_first_row` and force the
-        // anchor row to be committed as a real row.
+        // C1 anchors: pin `is_first_block ≡ is_first_row` and require a real
+        // trace row at the anchor.
         eval.add_constraint(is_first_block.clone() - is_first_row.clone());
         eval.add_constraint(is_first_row.clone() * (E::F::one() - enabler.clone()));
 
         // `h_in`: this block's input state (t = 0 row), laid out (lo, hi)
         // per word — reads interleave accordingly. Offsets −1..−3 feed the
-        // working-state boundary selects on rows t ∈ {1, 2, 3}; offset −63
+        // Working-state boundary selects occur on rows t ∈ {1, 2, 3}. Offset −63
         // feeds the finalization adds on the t = 63 row of the same block.
         let mut h_in_lo: [[E::F; 5]; N_STATE_WORDS] =
             std::array::from_fn(|_| std::array::from_fn(|_| E::F::from(M31::from(0u32))));
@@ -278,9 +248,9 @@ impl FrameworkEval for Sha256Eval {
         // ---- schedule constraints (gate: enabler · is_schedule) ----
         //
         // W[t] = σ1(W[t−2]) + W[t−7] + σ0(W[t−15]) + W[t−16] (mod 2³²).
-        // The lower-σ bit formulas are deliberately ungated so their degree-3
-        // xor expressions are not multiplied by `gate_sched`; only the linear
-        // recomposition into the live schedule limbs is gated.
+        // Check the lower-sigma bit formulas without a gate. This choice keeps
+        // `gate_sched` out of their degree-three XOR expressions. Apply the
+        // gate only to linear recomposition into live schedule limbs.
         let w_m15_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 15));
         let w_m2_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 2));
         let lower_sigma0_bits = lower_sigma0_expr_bits::<E>(&w_m15_bits);
@@ -302,11 +272,10 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- working-state boundary selects ----
         //
-        // The state entering round `t` is, per slot, either an earlier
-        // row's `a_new`/`e_new` or (for t ∈ {0..3}) an `h_in` word of the
-        // t = 0 row, selected by the preprocessed round indicators. Each
-        // select is a degree-2 expression; it only ever appears inside
-        // `enabler`-gated linear identities (degree ≤ 3 total).
+        // The state for round `t` comes from an earlier row or `h_in`.
+        // Preprocessed round indicators select the source.
+        // Each selection has degree two.
+        // An `enabler`-gated linear identity gives a maximum degree of three.
         let not_r0 = E::F::one() - r0.clone();
         let not_r01 = E::F::one() - r0.clone() - r1.clone();
         let not_r012 = E::F::one() - r0.clone() - r1.clone() - r2.clone();
@@ -356,9 +325,9 @@ impl FrameworkEval for Sha256Eval {
                 _ => unreachable!(),
             }
         };
-        // Only `d` and `h` enter the round adds as words; `a`/`e` enter via
-        // their packed-group splits (case-split split-pack lookups below),
-        // and `b`/`c`/`f`/`g` only via the committed group duplicates.
+        // Only `d` and `h` enter the round additions as words. The `a` and `e`
+        // values enter through their bit planes. The `b`, `c`, `f`, and `g`
+        // values also enter through committed bit planes.
         let a_in = boundary_select([0, 1, 2, 3], &a_new_lo, &a_new_hi, 0);
         let e_in = boundary_select([4, 5, 6, 7], &e_new_lo, &e_new_hi, 0);
         let d_in = boundary_select([0, 1, 2, 3], &a_new_lo, &a_new_hi, 3);
@@ -409,7 +378,7 @@ impl FrameworkEval for Sha256Eval {
         constrain_word_recomposition_ungated::<E>(&mut eval, &ch, &ch_bits);
 
         // The four mod-2³² adds of the round. K[t] comes from the
-        // preprocessed cyclic columns; `h`/`d` are boundary selects.
+        // preprocessed cyclic columns. `h`/`d` are boundary selects.
         let k_t = (k_lo.clone(), k_hi.clone());
         emit_mod_2_32_add_linear(
             &mut eval,
@@ -463,7 +432,7 @@ impl FrameworkEval for Sha256Eval {
             std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
 
         // h_out, each limb read at [0, −1]: offset 0 feeds the finalization
-        // on the t = 63 row; offset −1 feeds the block-chain constraint on
+        // on the t = 63 row. Offset −1 feeds the block-chain constraint on
         // the next block's t = 0 row (its coset predecessor is this t = 63
         // row).
         let mut h_out: [(E::F, E::F); N_STATE_WORDS] =
@@ -478,10 +447,10 @@ impl FrameworkEval for Sha256Eval {
         }
 
         // Finalization: h_out[j] = h_in[j] + working[j] (mod 2³²), on the
-        // t = 63 row. `h_in[j]` is the same block's t = 0 row (offset −63);
+        // t = 63 row. `h_in[j]` is the same block's t = 0 row (offset −63).
         // `working[j]` is the state after round 63 — `a_new`/`e_new` of
-        // this row and the three before it. All addends are committed
-        // cells, so the degree-2 gate keeps every constraint ≤ 3.
+        // this row and the three before it. The trace commits all addends.
+        // The degree-two gate keeps each constraint at degree three or less.
         let working = |j: usize| -> (E::F, E::F) {
             match j {
                 0..=3 => (a_new_lo[j].clone(), a_new_hi[j].clone()),
@@ -503,12 +472,10 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
-        // §10.3 multi-block chain, on continuation blocks' t = 0 rows: this
-        // block's `h_in` equals the previous block's `h_out` (offset −1 =
-        // the predecessor's t = 63 row). The gate `enabler·is_round_0 −
-        // is_first_block` is 1 exactly on real continuation t = 0 rows, 0 on
-        // the anchor row (IV binding takes over), on rows t ≠ 0 (both sides
-        // of the difference are dead-family zeros there), and on padding.
+        // Connect each continuation block input to the prior block output.
+        // Offset −1 selects the prior `t = 63` row.
+        // `enabler·is_round_0 − is_first_block` enables only continuation rows.
+        // IV binding controls the anchor row.
         let chain_gate = gate_r0.clone() - is_first_block.clone();
         for j in 0..N_STATE_WORDS {
             eval.add_constraint(
@@ -522,15 +489,15 @@ impl FrameworkEval for Sha256Eval {
         // ---- digest provider: is_last_block gate, byte view, yield ----
         //
         // `is_last_block = enabler · is_round_63 · (1 − enabler_next)`: 1
-        // only at the last real row (the final block's t = 63 row, whose
-        // successor is padding — guaranteed by `min_log_size`).
+        // only at the last real row. `min_log_size` always adds a padding
+        // successor after the final block's t = 63 row.
         let is_last_block = eval.next_trace_mask();
         eval.add_constraint(
             is_last_block.clone() - gate_r63.clone() * (E::F::one() - enabler_next.clone()),
         );
 
         // Digest byte view (t = 63 rows): per state word `j` the cells are
-        // `[hi.b1, hi.b0, lo.b1, lo.b0]`; each limb recomposes as
+        // `[hi.b1, hi.b0, lo.b1, lo.b0]`. Each limb recomposes as
         // `limb = 256·b1 + b0`. Every byte is `Range_8`-pinned here, so the
         // recomposition also pins each limb to 16 bits without a 2¹⁶-row table.
         let digest_bytes: [E::F; DIGEST_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
@@ -568,7 +535,7 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- §10.4 padding-role constraints (t = 15 rows) ----
         //
-        // Identical algebra to the wide layout; the block's message words
+        // Identical algebra to the wide layout. The block's message words
         // `W[j]` are the `W` columns of rows `t = j`, i.e. `w[15 − j]` from
         // here. On every row outside a real t = 15 row all padding cells
         // are zero, so each identity holds vacuously.
@@ -689,7 +656,7 @@ impl FrameworkEval for Sha256Eval {
         }
 
         // (P.G) Words strictly after the marker word are zero (length-field
-        // exception; see the wide-layout derivation for the W[14]/W[15]
+        // exception. See the wide-layout derivation for the W[14]/W[15]
         // case analysis).
         for (j, cum_marker) in cum_marker_word.iter().enumerate().take(14) {
             let gate = cum_marker.clone() + is_length_only_block.clone();
@@ -722,14 +689,14 @@ impl FrameworkEval for Sha256Eval {
 
         // ---- field provider (target block t = 15 rows) ----
         //
-        // Each exposed byte is a linear expression over the existing boolean,
-        // recomposed W bit planes. Legacy block-0 exposure is gated by the
-        // existing first-block flag. Multi-block exposure appends a witness
-        // block counter plus one selector per distinct target block.
+        // Each exposed byte is a linear expression over the recomposed Boolean
+        // W bit planes. The existing first-block flag gates block-zero
+        // exposure. Multi-block exposure adds a witness block counter and one
+        // selector for each target block.
         if !self.field_exposure.is_empty() {
             // Block counter: read at [0, -1] to pin its step behaviour. It is a
             // base/witness column carrying `block_idx` on every row.
-            let block_counter = if self.field_exposure.needs_block_witness() {
+            let block_counter = if self.field_exposure.needs_dynamic_block_columns() {
                 let [b, b_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
                 // Base: 0 on block 0's anchor row.
                 eval.add_constraint(is_first_block.clone() * b.clone());
@@ -745,15 +712,15 @@ impl FrameworkEval for Sha256Eval {
                 None
             };
             // One selector per distinct target block (multi-block only).
-            let selectors: Vec<E::F> = if self.field_exposure.needs_block_witness() {
+            let selectors: Vec<E::F> = if self.field_exposure.needs_dynamic_block_columns() {
                 (0..self.field_exposure.target_blocks().len())
                     .map(|_| eval.next_trace_mask())
                     .collect()
             } else {
                 Vec::new()
             };
-            let legacy_block0_selector = is_first_block_m15;
-            if self.field_exposure.needs_block_witness() {
+            let block_zero_selector = is_first_block_m15;
+            if self.field_exposure.needs_dynamic_block_columns() {
                 let b = block_counter
                     .as_ref()
                     .expect("multi-block field exposure has a block counter");
@@ -771,7 +738,7 @@ impl FrameworkEval for Sha256Eval {
             }
 
             for y in self.field_exposure.yields() {
-                let selector = if self.field_exposure.needs_block_witness() {
+                let selector = if self.field_exposure.needs_dynamic_block_columns() {
                     selectors[self
                         .field_exposure
                         .target_blocks()
@@ -779,14 +746,14 @@ impl FrameworkEval for Sha256Eval {
                         .expect("yield target is in target_blocks")]
                     .clone()
                 } else {
-                    legacy_block0_selector.clone()
+                    block_zero_selector.clone()
                 };
                 // W bits are LSB-first. Big-endian byte positions 0..3 map
                 // to bit ranges 24..31, 16..23, 8..15, and 0..7.
                 let first_bit = (BYTES_PER_WORD - 1 - y.byte_in_word) * 8;
-                let word_offset = 15 - y.word_idx;
+                let round_offset = 15 - y.word_idx;
                 let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
-                    acc + w_bit_at(first_bit + bit, word_offset)
+                    acc + w_bit_at(first_bit + bit, round_offset)
                         * E::F::from(M31::from(1u32 << bit))
                 });
                 let tuple = [
@@ -804,8 +771,8 @@ impl FrameworkEval for Sha256Eval {
             // Full padded-message stream. One fixed lookup site per byte
             // position emits on every real block's t=15 row, so the width is
             // independent of the number of blocks. A consumer that walks
-            // byte_index 0..N therefore sees the exact compression input,
-            // including the SHA marker, zero padding, and length word.
+            // byte_index 0..N sees the exact compression input. This input
+            // includes the SHA marker, zero padding, and length word.
             if let Some(field_id) = self.field_exposure.padded_stream_field_id() {
                 let b = block_counter
                     .as_ref()
@@ -814,9 +781,9 @@ impl FrameworkEval for Sha256Eval {
                     let word_idx = byte_in_block / BYTES_PER_WORD;
                     let byte_in_word = byte_in_block % BYTES_PER_WORD;
                     let first_bit = (BYTES_PER_WORD - 1 - byte_in_word) * 8;
-                    let word_offset = 15 - word_idx;
+                    let round_offset = 15 - word_idx;
                     let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
-                        acc + w_bit_at(first_bit + bit, word_offset)
+                        acc + w_bit_at(first_bit + bit, round_offset)
                             * E::F::from(M31::from(1u32 << bit))
                     });
                     let byte_index = b.clone()
@@ -977,16 +944,16 @@ fn constrain_bits_equal<E: EvalAtRow>(
 /// `Σ aᵢ.lo = r.lo + 2¹⁶ · carry_lo`
 /// `Σ aᵢ.hi + carry_lo = r.hi + 2¹⁶ · carry_hi`
 ///
-/// `carry_hi` is the discarded mod-2³² wraparound. Both carry limbs are
-/// pinned to `[0, k)` by an `add_to_relation` lookup against the family's
-/// `Range_k` channel — `Range_2` for 2-addend adds, `Range_4` for the
-/// 4-addend schedule recurrence, `Range_5` for the 5-addend `T1`. See
-/// [`crate::headroom`] for the audited family bounds.
+/// Modulo 2³² discards `carry_hi`.
+/// A `Range_k` lookup constrains both carry limbs to `[0, k)`.
+/// `Range_2` supports two addends.
+/// `Range_4` supports the four-addend schedule recurrence.
+/// `Range_5` supports the five-addend `T1`.
+/// See [`crate::headroom`] for the audited bounds.
 ///
-/// The linear constraints are multiplied by `enabler` so padding rows
-/// (`enabler = 0`) remain unconstrained. The carry lookups are also gated
-/// by `enabler` (passed as the multiplicity) so the producer-side
-/// LogUp balance is not perturbed by zero-valued padding-row carries.
+/// Multiply the linear constraints by `enabler`. Padding rows then have no
+/// active constraint. Also use `enabler` as the carry-lookup multiplicity.
+/// Zero-valued padding-row carries do not change the LogUp balance.
 #[allow(clippy::too_many_arguments)]
 fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     eval: &mut E,
@@ -998,12 +965,9 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
     range_kind: crate::components::RangeKind,
     relations: &Sha256Relations,
 ) {
-    // Drift guard: the `RangeKind` must match the addend count published
-    // by `crate::headroom`. If a future edit grows or shrinks an add at
-    // a call site without bumping the audit (and hence `RangeKind`), the
-    // mismatch is caught here in debug builds rather than silently
-    // changing the carry range a downstream lookup pins. `Range_8` is a
-    // terminal-byte check, never an add-carry, so we reject it outright.
+    // The `RangeKind` must match the audited addend count.
+    // A debug assertion detects a count mismatch.
+    // `Range_8` constrains terminal bytes, not addition carries.
     use crate::components::RangeKind;
     let expected_addends = match range_kind {
         RangeKind::Range2 => 2,
@@ -1045,8 +1009,8 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
             * (sum_hi + carry_lo.clone() - result.1.clone() - two_pow_16 * carry_hi.clone()),
     );
 
-    // Carry range-checks via the family's `Range_k` channel. Multiplicity
-    // is `enabler` so padding rows (every cell zero) don't bump the row-0
+    // Check carry ranges through the family's `Range_k` channel. Set the
+    // multiplicity to `enabler`. Padding rows do not change the row-zero
     // producer count.
     wire_range_check::<E>(
         eval,
@@ -1062,7 +1026,7 @@ fn emit_mod_2_32_add_linear<E: EvalAtRow>(
 /// `Range_k` channel. Used for both mod-2³² add carries
 /// (`Range_2`/`4`/`5`, via [`emit_mod_2_32_add_linear`]) and terminal
 /// `h_out` digest bytes (`Range_8`, fired directly from
-/// [`Sha256Eval::evaluate`]); the AIR recomposes each checked byte pair into
+/// [`Sha256Eval::evaluate`]). The AIR recomposes each checked byte pair into
 /// its 16-bit limb. Inlined helper so call sites stay short.
 fn wire_range_check<E: EvalAtRow>(
     eval: &mut E,
@@ -1099,13 +1063,65 @@ fn wire_range_check<E: EvalAtRow>(
 
 #[cfg(test)]
 mod tests {
+    use crate::air::Sha256Prover;
     use crate::constants::{IV, K, N_ROUNDS, N_STATE_WORDS};
+    use crate::field_exposure::FieldExposure;
+    use crate::relations::Sha256Relations;
     use crate::trace::{generate_trace, min_log_size, Layout};
     use crate::types::WORDS_PER_BLOCK;
     use crate::witness::compute_sha256_witness;
+    use air_core::AirProver;
     use stwo::core::fields::m31::BaseField;
+    use stwo_constraint_framework::expr::ExprEvaluator;
+    use stwo_constraint_framework::FrameworkEval;
+
+    use super::Sha256Eval;
 
     type Trace = Vec<Vec<BaseField>>;
+
+    #[test]
+    fn sha_expression_degree_matches_declared_bound() {
+        const LOG_SIZE: u32 = 17;
+        let evaluator = Sha256Eval {
+            log_size: LOG_SIZE,
+            relations: Sha256Relations::dummy(),
+            expose_digest: false,
+            field_exposure: FieldExposure::empty(),
+            claim_mask_beta: None,
+        };
+        let declared = evaluator.max_constraint_log_degree_bound();
+        let max_degree = evaluator
+            .clone()
+            .evaluate(ExprEvaluator::new())
+            .constraint_degree_bounds()
+            .into_iter()
+            .max()
+            .unwrap_or(0) as u32;
+        let required = LOG_SIZE
+            + (max_degree.saturating_sub(1))
+                .next_power_of_two()
+                .trailing_zeros()
+                .max(1);
+
+        assert_eq!(
+            max_degree, 5,
+            "SHA AIR degree changed; review its owner bound"
+        );
+        assert_eq!(declared, required);
+    }
+
+    #[test]
+    fn sha_prover_owner_covers_main_and_fixed_table_bounds() {
+        let witness = compute_sha256_witness(b"owner-bound");
+        for (log_size, expected) in [(15, 17), (16, 18), (20, 22)] {
+            let prover = Sha256Prover::new(&witness, log_size);
+            assert_eq!(
+                prover.max_constraint_log_degree_bound(),
+                expected,
+                "log size {log_size}"
+            );
+        }
+    }
 
     fn cell(trace: &[Vec<BaseField>], col: usize, slot: usize) -> i64 {
         i64::from(trace[col][slot].0)
@@ -1116,10 +1132,10 @@ mod tests {
         (cell(trace, cols.0, slot), cell(trace, cols.1, slot))
     }
 
-    /// The working-state word entering round `t` at slot position `k`
-    /// (`k = 1` → a/e, `k = 4` → d/h), reconstructed exactly the way the
-    /// AIR's boundary select does: `h_in` of the block's `t = 0` row for
-    /// `t < k`, else `a_new`/`e_new` of row `t − k`.
+    /// Return the state word for round `t` and slot position `k`.
+    ///
+    /// Use `h_in` from row `t = 0` when `t < k`.
+    /// Otherwise, use `a_new` or `e_new` from row `t − k`.
     fn state_word(
         trace: &Trace,
         log_size: u32,
@@ -1154,9 +1170,10 @@ mod tests {
         );
     }
 
-    /// Verify every linear identity of the rotated AIR on an honest trace:
-    /// round adds (with boundary-selected `d`/`h`), schedule recurrence,
-    /// IV binding, block chain, and finalization.
+    /// Verify all linear identities on an honest trace.
+    ///
+    /// The check covers round additions, schedule recurrence, IV binding,
+    /// block chaining, and finalization.
     fn check_linear_constraints_on_message(msg: &[u8]) {
         let witness = compute_sha256_witness(msg);
         let log_size = min_log_size(witness.blocks.len());
@@ -1294,10 +1311,12 @@ mod tests {
         check_linear_constraints_on_message(&[0x42; 150]);
     }
 
-    /// §8.1 duplicate operand bits match their originating cells: on
-    /// every non-boundary row, `b_bits = a_bits@(t−1)`, `c_bits =
-    /// a_bits@(t−2)`; e-side symmetric. Boundary rows are tied to `h_in`
-    /// by word recomposition in the AIR.
+    /// Duplicate operand bits match their source cells.
+    ///
+    /// On non-boundary rows, `b_bits = a_bits@(t−1)`.
+    /// Also, `c_bits = a_bits@(t−2)`.
+    /// The e-side is symmetric.
+    /// AIR word recomposition binds boundary rows to `h_in`.
     #[test]
     fn reuse_chain_duplicates_match_their_sources() {
         let witness = compute_sha256_witness(&[0x24; 100]);

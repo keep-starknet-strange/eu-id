@@ -27,22 +27,23 @@ pub struct HintedMulScheduledRow {
     pub source_index: u32,
     pub mul_index: u32,
     pub witness: HintedMulWitness,
-    /// EC-op header metadata, copied from the source `ProjectiveRcbAirRow` onto
-    /// EVERY scheduled row of that proj group (Phase 1 threads it; only the
-    /// `mul_index == 0` header row's flags are read by the silo). `op_double`
-    /// is `true` for `ProjectiveEcOp::Double`. All false for non-proj-scope
-    /// rows (final_add / public_key_curve).
+    /// EC operation metadata copied to each scheduled projective row.
+    ///
+    /// The silo reads the flags only on the group header row.
+    /// `op_double` is true for `ProjectiveEcOp::Double`.
+    /// Nonprojective rows use false for all flags.
     pub op_double: bool,
     pub lhs_inf: bool,
     pub rhs_inf: bool,
     pub output_inf: bool,
-    /// `true` iff this row belongs to a projective-source group (fake_glv /
+    /// `true` if and only if this row belongs to a projective-source group (fake_glv /
     /// prepared_table). Gates the flag columns and the `is_proj_mul_k`
     /// one-hots on/off.
     pub proj_scope: bool,
-    /// Phase-2 per-row formula cells (out_val + the two reduction slots'
-    /// `(q, carries)`), computed once per proj group by interpreting the shared
-    /// spec table. All-zero (encoded) for non-proj rows.
+    /// Formula cells for one row.
+    ///
+    /// One table pass computes these cells for each projective group.
+    /// Nonprojective rows use encoded zero values.
     pub formula: super::formula_bind::FormulaRowCells,
 }
 
@@ -57,12 +58,10 @@ impl HintedMulTraceClaim {
         padded_log_size(self.rows.len()).max(LOG_N_LANES)
     }
 
-    /// Builds the hinted-mul rows from the silo trace claim, keyed by the
-    /// exact `(source_index, mul_index)` pairs the EC-formula consumers use.
-    /// The recomputed canonical result must match the silo's stored result
-    /// limb-exact (the native silo results are canonical, including the
-    /// identity fast-path rows whose result equals the canonical lhs), so the
-    /// consumed-limb tuples are unchanged by the swap.
+    /// Builds hinted multiplication rows from a silo trace claim.
+    ///
+    /// Each key is `(source_index, mul_index)`.
+    /// The recomputed canonical result must match the stored result for all limbs.
     pub fn from_projective_rcb(
         claim: &crate::projective_air::ProjectiveRcbAirTraceClaim,
     ) -> Result<Self, super::witness::HintedMulWitnessError> {
@@ -71,10 +70,10 @@ impl HintedMulTraceClaim {
         Ok(rows)
     }
 
-    /// Appends every mul of `claim` keyed at
-    /// `(source_offset + row.source_index, mul_index)` — used to fold other
-    /// sub-graphs' muls (final-add, public-key curve check) into the single
-    /// hinted provider with disjoint source ranges.
+    /// Appends all multiplication rows from `claim`.
+    ///
+    /// The key is `(source_offset + row.source_index, mul_index)`.
+    /// Separate source ranges permit one provider for multiple subgraphs.
     pub fn extend_from_projective_rcb(
         &mut self,
         claim: &crate::projective_air::ProjectiveRcbAirTraceClaim,
@@ -88,10 +87,9 @@ impl HintedMulTraceClaim {
             .map(|row| {
                 let op_double = matches!(row.op, crate::projective::ProjectiveEcOp::Double);
                 let (lhs_inf, rhs_inf, output_inf) = (row.lhs_inf, row.rhs_inf, row.output_inf);
-                // Phase-2: solve the whole group's per-row formula cells once,
-                // by interpreting the shared spec table. Only proj-scope groups
-                // (which carry the full 15 muls) get real cells; every other row
-                // holds encoded-zero (default) cells.
+                // Solve all formula cells from the shared specification table.
+                // Complete projective groups contain the 15 real rows.
+                // Other rows use encoded zero cells.
                 let formula_cells: Option<Vec<super::formula_bind::FormulaRowCells>> = if proj_scope
                     && row.muls.len() == super::formula_bind::FORMULA_ROWS
                 {
@@ -194,7 +192,7 @@ pub const HINTED_MUL_WITNESS_COLUMNS: usize = 2 * N_LIMBS + 3 * HINTED_MUL_GROUP
 
 /// Header-flag columns appended after the witness block: `op`, `output_inf`,
 /// `lhs_inf`, `rhs_inf` (in this order). Nonzero only on proj-scope header rows
-/// (`mul_index == 0`); zero on every other row (including padding and non-proj
+/// (`mul_index == 0`). Zero on every other row (including padding and non-proj
 /// groups).
 pub const HINTED_MUL_FLAG_COLUMNS: usize = 4;
 
@@ -371,7 +369,7 @@ fn gen_hinted_mul_base_trace_scalar(claim: &HintedMulTraceClaim) -> ColumnVec<M3
         for (column, value) in columns.iter_mut().zip(values) {
             column[row] = value;
         }
-        // Header flags: live only on proj-scope group-header rows; every other
+        // Header flags: live only on proj-scope group-header rows. Every other
         // row (non-proj groups, non-header proj rows, padding) keeps 0.
         if scheduled.proj_scope && scheduled.mul_index == 0 {
             for (i, flag) in [
@@ -386,11 +384,10 @@ fn gen_hinted_mul_base_trace_scalar(claim: &HintedMulTraceClaim) -> ColumnVec<M3
                 columns[hinted_mul_flag_column(i)][row] = bool_m31(flag);
             }
         }
-        // Phase-2 formula columns. On EVERY active row (proj AND non-proj) the
-        // reduction q/carry cells hold encoded values so the active-gated signed
-        // lookup passes; out_val holds x3/y3 on proj rows 13/14, zero elsewhere.
-        // (Non-proj rows carry default cells: q=0, carries=0, out_val=0 — all
-        // encode to valid table members.) Padding rows keep raw 0.
+        // Write encoded quotient and carry values on each active row.
+        // Projective rows 13 and 14 hold `x3` and `y3`.
+        // Other active rows use encoded zero values.
+        // Padding rows use raw zero values.
         let cells = &scheduled.formula;
         for (i, &limb) in cells.out_val.iter().enumerate() {
             columns[hinted_mul_out_val_column(i)][row] = limb;
@@ -487,7 +484,7 @@ fn packed_m31_eval_from_coset_rows(
 }
 
 /// The committed M31 values of one witness, in column order. This is the
-/// single source of truth for the base layout; `HintedMulEval::evaluate` reads
+/// single source of truth for the base layout. `HintedMulEval::evaluate` reads
 /// masks in the same order.
 fn push_row_values(witness: &HintedMulWitness, out: &mut Vec<M31>) {
     let m = M31::from_u32_unchecked;
@@ -514,7 +511,7 @@ pub struct HintedMulRelations {
     pub mul_result: ProjectiveRcbMulResultRelation,
     /// EC-op header link: the silo CONSUMES `(source_index, op, output_inf,
     /// lhs_inf, rhs_inf)` on each proj group header row (numerator
-    /// `is_proj_mul_0`); the projective-source consumers PROVIDE it.
+    /// `is_proj_mul_0`). The projective-source consumers PROVIDE it.
     pub header: super::EcOpHeaderRelation,
     /// Phase-2 signed-carry table for the formula reduction carries, at the
     /// PROJECTIVE bound (`PROJECTIVE_RCB_SIGNED_CARRY_EQUATION`). Dedups by
@@ -544,7 +541,7 @@ pub fn gen_hinted_mul_interaction_trace(
     // `is_proj_mul_0` doubles as the header consume numerator (schedule offset 3
     // is `is_proj_mul_0` — see `gen_hinted_mul_schedule_columns`).
     let is_proj_mul_0 = &schedule[3];
-    // Per-slot provide-mask numerators (Phase 3), mirroring the eval:
+    // Per-slot provider-mask numerators that mirror the evaluator:
     //   LHS:    active − Σ_{k=2..12} is_proj_k
     //   RHS:    active − Σ_{k=2..14} is_proj_k
     //   RESULT: active − Σ_{k=0..14} is_proj_k
@@ -565,9 +562,8 @@ pub fn gen_hinted_mul_interaction_trace(
         masked_numerator(0..=14),
     ];
 
-    // Entry descriptors in the exact `evaluate` emission order: every committed
-    // column in column order (Range13 for limbs, the signed table for h_hi),
-    // then the 3 mul-result provides, then the single header consume.
+    // Build descriptors in constraint-emission order.
+    // Add committed columns, three result provides, and then the header consume.
     //
     // Each entry carries its OWN numerator column (not a global `active`
     // multiply): the range/provide entries use `active`, the header consume
@@ -599,7 +595,7 @@ pub fn gen_hinted_mul_interaction_trace(
             column_cursor += 1;
         }
     }
-    // Descriptors walk the WITNESS columns only; the flag columns carry no
+    // Descriptors walk the WITNESS columns only. The flag columns carry no
     // range check (the eval reads them without one).
     assert_eq!(column_cursor, HINTED_MUL_WITNESS_COLUMNS);
     let role_columns: [(u32, usize); 3] = [
@@ -613,12 +609,11 @@ pub fn gen_hinted_mul_interaction_trace(
             column: base_column,
         });
     }
-    // Header consume: appended at the END (odd tail; handled solo by the same
+    // Header consume: appended at the END (odd tail, handled solo by the same
     // pairing math the eval's `finalize_logup_in_pairs` applies).
     descriptors.push(EntryKind::Header);
-    // Phase-2 formula range/signed uses, in EXACT eval-emission order (after the
-    // header consume): out_val (20 Range13), slot0 carries (20 SignedFormula,
-    // q skipped), slot1 carries (20 SignedFormula, q skipped).
+    // Add formula range uses after the header consume.
+    // The order is output values, slot-0 carries, and slot-1 carries.
     for i in 0..N_LIMBS {
         descriptors.push(EntryKind::Range13(hinted_mul_out_val_column(i)));
     }
@@ -745,7 +740,7 @@ pub(crate) fn hinted_mul_result_provider_sum(
         for (role, base_column) in roles {
             // Per-slot provide masks: proj rows provide only the narrowly
             // consumed slots (LHS at mul 0/1/13/14, RHS at mul 0/1, RESULT
-            // never); non-proj rows provide all three roles.
+            // never). Non-proj rows provide all three roles.
             if scheduled.proj_scope {
                 let provided = match role {
                     0 => matches!(scheduled.mul_index, 0 | 1 | 13 | 14),
@@ -768,9 +763,9 @@ pub(crate) fn hinted_mul_result_provider_sum(
     sum
 }
 
-/// Recompute the silo's `EcOpHeaderRelation` consume sum (`+is_proj_0` on each
-/// proj group header row) — excluded from the standalone slice balance since the
-/// header PROVIDER lives on the (out-of-slice) projective-source consumers.
+/// Computes the `EcOpHeaderRelation` consumer sum for projective group headers.
+///
+/// The standalone slice excludes this sum because its provider is external.
 #[cfg(test)]
 pub(crate) fn hinted_mul_header_consume_sum(
     claim: &HintedMulTraceClaim,
@@ -796,7 +791,7 @@ pub(crate) fn hinted_mul_header_consume_sum(
 
 /// Range13 use values per active row (multiplicity feed for the provider):
 /// every 13-bit witness limb, then the Phase-2 `out_val` limbs (also
-/// Range13-checked, active-gated; zero on rows ≠ 13/14).
+/// Range13-checked, active-gated. Zero on rows ≠ 13/14).
 pub fn hinted_mul_range13_uses(claim: &HintedMulTraceClaim) -> Vec<M31> {
     let mut uses = Vec::new();
     for scheduled in &claim.rows {
@@ -824,7 +819,7 @@ pub fn hinted_mul_range13_uses(claim: &HintedMulTraceClaim) -> Vec<M31> {
 }
 
 /// Signed-table use values (Phase-2 reduction carries, decoded) per active row:
-/// slot 0's 20 carries then slot 1's 20 carries. The quotient `q` is NOT
+/// slot 0's 20 carries then slot 1's 20 carries. The quotient `q` is not
 /// range-checked (transitively pinned by the carry chain, per the plan). These
 /// feed the silo's signed-carry provider at the PROJECTIVE bound.
 pub fn hinted_mul_formula_signed_uses(claim: &HintedMulTraceClaim) -> Vec<i64> {

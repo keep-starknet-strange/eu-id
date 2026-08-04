@@ -1,24 +1,21 @@
-//! WO-P4 — Merkle/channel hasher bake-off (MEASURE ONLY, no production change).
+//! Measures Merkle hash performance without production changes.
 //!
-//! Decision data for parity-plan §3.4. Reproduces the EXACT hash-node call
-//! pattern (invocation counts + input byte volumes) of the two real Merkle
-//! trees in the mdoc prove path and times three hashers over it:
+//! Replays the hash-node pattern from the two mdoc proof Merkle trees.
+//! It preserves invocation counts and input byte volumes.
+//! The benchmark measures three hashers:
 //!   - Blake2s  (current, used by both stwo `Blake2sMerkleHasher` and the
 //!     coprocessor `merkle.rs`)
 //!   - Blake3   (`blake3` crate)
-//!   - SHA-256  (`sha2` crate; on aarch64 uses the ARMv8 SHA crypto ext —
-//!     the throughput sanity check below asserts ≥ 1.5 GB/s single-thread,
-//!     which is only reachable with the hardware SHA extensions).
+//!   - SHA-256 (`sha2` crate).
+//! On AArch64, SHA-256 uses the ARMv8 SHA extensions.
+//! The throughput check requires at least 1.5 GB/s on one thread.
 //!
-//! Methodology (kernel-replay): we do NOT re-run stwo. We replay `hash_node`
-//! at the measured tree shape — for every hash invocation the tree performs we
-//! call the corresponding hasher over an input buffer of the exact byte length
-//! that node hashes (child hashes + column M31 words for stwo; domain-sep +
-//! index/len + 32-byte field limbs for the coprocessor). Node counts and byte
-//! volumes are derived from a fresh single-thread probe run (see the perf-log
-//! block for the source numbers). This isolates the hash-kernel cost, which is
-//! what a hasher swap changes; it excludes memory-layout / SIMD-packing effects
-//! of stwo's real committer (stated as a caveat in the perf-log).
+//! This kernel replay does not run Stwo.
+//! Each hash invocation receives an input buffer with the measured byte length.
+//! Stwo inputs contain child hashes and M31 column words.
+//! Coprocessor inputs contain domain data, indices, lengths, and field limbs.
+//! This method isolates hash-kernel cost.
+//! It excludes memory layout and SIMD packing effects.
 //!
 //! Run:  RAYON_NUM_THREADS=1 cargo test -p eu-id-ec-coprocessor --release \
 //!         --test hasher_bakeoff -- --ignored --nocapture
@@ -28,16 +25,14 @@ use std::time::{Duration, Instant};
 use blake2::{Blake2s256, Digest};
 use sha2::Sha256;
 
-// ---- Real tree shapes (fresh single-thread probe @ working tree, 2026-07-07) ----
-// STARK: log_blowup_factor = 2 ⇒ committed log = base_log + 2. Three trees
-// (preprocessed / trace / interaction). Per-tree base-domain column layout
-// {base_log: n_cols}:
-//   preprocessed {16: 33, 4: 3}
-//   trace        {16:  9, 4: 3}
-//   interaction  {16: 20, 4: 8}
-// stwo mixed Merkle `hash_node`: at committed depth d (2^d nodes), a node hashes
-// 2 child hashes (64 B) when d < height, plus one 4-byte M31 word per column whose
-// committed log == d.
+// STARK uses `committed_log = base_log + 2`.
+// The layouts map each base log to its column count.
+// Preprocessed: {16: 33, 4: 3}.
+// Trace: {16: 9, 4: 3}.
+// Interaction: {16: 20, 4: 8}.
+// At committed depth d, the Stwo tree has 2^d nodes.
+// A non-root node hashes two 32-byte child hashes.
+// It also hashes one M31 word for each column with committed log d.
 const LOG_BLOWUP: u32 = 2;
 const STARK_TREES: &[&[(u32, usize)]] = &[
     &[(16, 33), (4, 3)], // preprocessed
@@ -48,12 +43,10 @@ const HASH_BYTES: usize = 32; // Blake2s / SHA-256 / Blake3 all 32-byte digests 
 const CHILD_BYTES: usize = 2 * HASH_BYTES; // 64
 const M31_BYTES: usize = 4;
 
-// Coprocessor Ligero v4 tree (including the claim-blind kernel check):
-// encoded_rows = `committed_rows` codeword rows each `codeword_len` long. It
-// transposes to `codeword_len` leaves (one per codeword column), each leaf
-// hashing `committed_rows` field limbs (32 B each) + a 39-byte prefix
-// (domain-sep 23 B + index u64 + len u64). Internal nodes hash a 23-byte
-// domain-sep + 64 B of children.
+// The Ligero v4 tree includes the claim-blind kernel check.
+// It transposes `committed_rows` codewords into one leaf for each column.
+// Each leaf hashes one field limb for each committed row and a 39-byte prefix.
+// Internal nodes hash a 23-byte domain prefix and two child hashes.
 const COPROC_CODEWORD_LEN: usize = 4096;
 const COPROC_COMMITTED_ROWS: usize = 220; // prior probe + the kernel-check mask row
 const COPROC_FIELD_BYTES: usize = 32;
@@ -189,7 +182,7 @@ fn sha256_throughput_gbs() -> f64 {
 }
 
 #[test]
-#[ignore = "WO-P4 measure-only bake-off; run with --ignored --nocapture"]
+#[ignore = "measure-only bake-off; run with --ignored --nocapture"]
 fn hasher_bakeoff() {
     // Guard: this is a single-thread measurement. Warn loudly if not pinned.
     match std::env::var("RAYON_NUM_THREADS").as_deref() {
@@ -263,15 +256,14 @@ fn hasher_bakeoff() {
         eprintln!("{:<14} {:>18.2} {:>18.2}", h.name, sd, cd);
     }
 
-    // Projected probe delta if a hasher replaced Blake2s in prove.
-    // prove attribution (from the WO + fresh probe): STARK tree commits ≈ 17% of
-    // STARK prove; coprocessor merkle_commit_ms ≈ 79 ms measured. We project the
-    // per-tree hasher time linearly against the Blake2s baseline for each tree.
-    // Channel absorbs: EXCLUDED (see caveat) — the channel absorb volume is a
-    // few KB of transcript per commit, negligible vs the tree kernels, and not
-    // cheaply isolatable here.
-    const COPROC_MERKLE_MEASURED_MS: f64 = 79.0; // fresh probe merkle_commit_ms
-                                                 // STARK tree-commit share of prove: fresh probe prove_ms_median 1723; 17% ⇒
+    // Project proof time if a hasher replaces Blake2s.
+    // STARK tree commits use about 17 percent of proof time.
+    // The measured coprocessor Merkle time is about 79 ms.
+    // Scale each tree linearly from its Blake2s baseline.
+    // Exclude channel absorption because its transcript volume is small.
+    // Measured coprocessor Merkle time.
+    const COPROC_MERKLE_MEASURED_MS: f64 = 79.0;
+    // A 1723 ms proof sample spent 17 percent on STARK tree commitments.
     const STARK_PROVE_MS: f64 = 1723.0;
     const STARK_COMMIT_SHARE: f64 = 0.17;
     let stark_commit_ms = STARK_PROVE_MS * STARK_COMMIT_SHARE;

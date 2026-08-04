@@ -52,10 +52,10 @@ fn main() {
         median.prove_profile.max_row_nonzero_values,
     );
     println!(
-        "verify_setup_ms={:.3} verify_ligero_proximity_ms={:.3} verify_systematic_reconstruct_ms={:.3} verify_sumcheck_ms={:.3} verify_input_claims_ms={:.3} verify_consistency_ms={:.3}",
+        "verify_setup_ms={:.3} verify_ligero_proximity_ms={:.3} verify_claim_batch_reconstruct_ms={:.3} verify_sumcheck_ms={:.3} verify_input_claims_ms={:.3} verify_consistency_ms={:.3}",
         ms(median.verify_profile.setup),
         ms(median.verify_profile.ligero_proximity),
-        ms(median.verify_profile.systematic_reconstruct),
+        ms(median.verify_profile.claim_batch_reconstruct),
         ms(median.verify_profile.sumcheck),
         ms(median.verify_profile.input_claims),
         ms(median.verify_profile.consistency),

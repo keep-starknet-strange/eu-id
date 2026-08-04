@@ -1,0 +1,156 @@
+//! Source-bound identifiers for the classical P-256 identity profile.
+
+use predicates::{Date, NatPublicInput, PublicInput as AgePublicInput};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Returns whether `code` is an assigned ISO 3166-1 alpha-2 code.
+pub fn is_assigned_iso_alpha2(code: [u8; 2]) -> bool {
+    predicates::is_assigned_iso_alpha2(predicates::pack_alpha2(code))
+}
+
+/// The relying party's public policy — exactly the statement the combined
+/// verifier will check against. The date of birth, the nationality, and the
+/// digest are *proven*, never supplied.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Policy {
+    /// Reference "today" the age check is evaluated against.
+    pub current_date: Date,
+    /// Minimum age in years (the PRD headline is 18).
+    pub min_age_years: u32,
+    /// Canonical accepted ISO 3166-1 alpha-2 codes.
+    ///
+    /// Each entry is two uppercase ASCII bytes. The caller binds this exact
+    /// sorted set into the verifier request.
+    pub accepted_nationalities: Vec<[u8; 2]>,
+}
+
+impl Policy {
+    /// The age predicate's public input for this policy.
+    pub fn age_public_input(&self) -> AgePublicInput {
+        AgePublicInput::new(self.current_date, self.min_age_years)
+    }
+
+    /// The nationality predicate's public input over ISO 3166-1 alpha-2 codes.
+    pub fn nat_public_input(&self) -> NatPublicInput {
+        NatPublicInput::new(
+            self.accepted_nationalities
+                .iter()
+                .map(|&code| predicates::pack_alpha2(code))
+                .collect(),
+        )
+    }
+
+    /// The cutoff date a date of birth must be on-or-before to satisfy the age
+    /// check (`current` shifted back `min_age_years`).
+    pub fn age_cutoff(&self) -> Date {
+        self.age_public_input().cutoff_date()
+    }
+}
+
+pub const PRODUCT_PROFILE_ID: &str = "eudi-pid-p256-identity";
+pub const PRODUCT_MAX_ATTRIBUTES: usize = 2;
+pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 16_384;
+pub const PRODUCT_MAX_SHA_LOG_N_ROWS: u32 = 15;
+pub const PRODUCT_MAX_CBOR_LOG_SIZE: u32 = 15;
+pub const PRODUCT_MAX_SCOPE_LOG_SIZE: u32 = 16;
+
+const PROFILE_MANIFEST: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../artifacts/product-p256-identity/profile-manifest.json"
+));
+const ROOT_POLICY_MANIFEST: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../artifacts/product-p256-identity/root-policy-manifest.json"
+));
+
+pub fn product_circuit_hash() -> String {
+    hex_digest(PROFILE_MANIFEST)
+}
+
+pub fn product_root_policy_hash() -> [u8; 32] {
+    Sha256::digest(ROOT_POLICY_MANIFEST).into()
+}
+
+pub fn product_profile_pin_is_supported(
+    profile_id: &str,
+    circuit_hash: &str,
+    root_policy_hash: &[u8],
+) -> bool {
+    profile_id == PRODUCT_PROFILE_ID
+        && circuit_hash == product_circuit_hash()
+        && root_policy_hash == product_root_policy_hash()
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn product_profile_pin_is_exact() {
+        let circuit_hash = product_circuit_hash();
+        let root_policy_hash = product_root_policy_hash();
+        assert!(product_profile_pin_is_supported(
+            PRODUCT_PROFILE_ID,
+            &circuit_hash,
+            &root_policy_hash,
+        ));
+
+        let mut wrong_root = root_policy_hash;
+        wrong_root[0] ^= 1;
+        assert!(!product_profile_pin_is_supported(
+            PRODUCT_PROFILE_ID,
+            &circuit_hash,
+            &wrong_root,
+        ));
+        assert!(!product_profile_pin_is_supported(
+            PRODUCT_PROFILE_ID,
+            &"00".repeat(32),
+            &root_policy_hash,
+        ));
+    }
+
+    #[test]
+    fn manifest_parameters_match_live_product_configuration() {
+        let manifest: serde_json::Value =
+            serde_json::from_slice(PROFILE_MANIFEST).expect("profile manifest is JSON");
+        let config = crate::mdoc::mdoc_production_pcs_config();
+        assert_eq!(manifest["pcs"]["pow_bits"], config.pow_bits);
+        assert_eq!(
+            manifest["pcs"]["log_blowup_factor"],
+            config.fri_config.log_blowup_factor
+        );
+        assert_eq!(
+            manifest["pcs"]["queries"],
+            u64::try_from(config.fri_config.n_queries).unwrap()
+        );
+        assert_eq!(manifest["pcs"]["fold_step"], config.fri_config.fold_step);
+        assert_eq!(
+            manifest["product_bounds"]["max_attributes"],
+            PRODUCT_MAX_ATTRIBUTES
+        );
+        assert_eq!(
+            manifest["product_bounds"]["max_mso_payload_bytes"],
+            PRODUCT_MAX_MSO_PAYLOAD_BYTES
+        );
+        assert_eq!(
+            manifest["product_bounds"]["max_sha_log_n_rows"],
+            PRODUCT_MAX_SHA_LOG_N_ROWS
+        );
+        assert_eq!(
+            manifest["product_bounds"]["max_cbor_log_size"],
+            PRODUCT_MAX_CBOR_LOG_SIZE
+        );
+        assert_eq!(
+            manifest["product_bounds"]["max_scope_log_size"],
+            PRODUCT_MAX_SCOPE_LOG_SIZE
+        );
+    }
+}

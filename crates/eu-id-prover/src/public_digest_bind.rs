@@ -202,9 +202,8 @@ impl Air for PublicDigestBind {
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
-        // This module needs no private claim mask: its digest bytes are public
-        // (mixed into the channel and pinned by `active * (value - expected)`),
-        // so the claimed sum is a function of public data only.
+        // This module does not need a private claim mask.
+        // Public digest bytes determine the claimed sum.
         vec![self.interaction_claim().claimed_sum]
     }
 

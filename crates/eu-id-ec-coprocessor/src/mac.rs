@@ -7,8 +7,9 @@ pub fn xor_128(left: &Gf128, right: &Gf128) -> Gf128 {
     std::array::from_fn(|i| left[i] ^ right[i])
 }
 
+/// Returns the affine tag `a_p XOR (a_v * x)` in GF(2^128).
 pub fn gf128_tag(ap: &Gf128, av: &Gf128, x: &Gf128) -> Gf128 {
-    gf128_mul(&xor_128(ap, av), x)
+    xor_128(ap, &gf128_mul(av, x))
 }
 
 pub fn gf128_mul(left: &Gf128, right: &Gf128) -> Gf128 {

@@ -19,23 +19,21 @@ pub const FINAL_ADD_OUTPUT_RELATION_ARITY: usize = 1 + N_LIMBS;
 
 relation!(FinalAddOutputRelation, FINAL_ADD_OUTPUT_RELATION_ARITY);
 
-/// Sign relation: forwards each cert's PROVEN fake-GLV `s2_sign_bit` from the
-/// `fake_glv_scalar` AIR (the source of truth, where the bit is constrained by
-/// the `selected_s1` ScalarModMul identity) to the final-add sub-graph. The
-/// final add must orient `R_2` by `d = b_1 ⊕ b_2` so it binds `x(h_1 + h_2)`
-/// rather than `x(R_1 + R_2)`. Tuple `(sig_id, cert_id, sign_bit)`. Provider:
-/// `fake_glv_scalar` yields `-cert_active` per cert row. Consumer: `FinalAddCheckEval`
-/// uses `+active·(1 − r_i.inf)` for `b_1` at `(sig, 0)` and `b_2` at `(sig, 1)`.
+/// Carries each proven fake-GLV sign bit to the final-add component.
+///
+/// The tuple is `(sig_id, cert_id, sign_bit)`.
+/// `fake_glv_scalar` provides the relation for each active certificate.
+/// `FinalAddCheckEval` consumes the relation for each finite point.
+/// These bits select the correct orientation of `R_2`.
 pub const FINAL_ADD_SIGN_RELATION_ARITY: usize = 3;
 
 relation!(FinalAddSignRelation, FINAL_ADD_SIGN_RELATION_ARITY);
 
 #[derive(Clone)]
 pub struct FinalAddRelations {
-    /// SHARED with the hinted-mul provider: final-add's four muls are proven
-    /// as hinted rows (source_index = hinted_source_offset + sig_id), and the
-    /// check consumes them through the same wide
-    /// `(source_index, mul_index, role, limb_0..limb_19)` relation instance.
+    /// Shared multiplication relation for the final-add hinted rows.
+    ///
+    /// The source index is `hinted_source_offset + sig_id`.
     pub mul_result: ProjectiveRcbMulResultRelation,
     pub range13: RangeCheckRelation,
     pub signed_carry: RangeCheckRelation,

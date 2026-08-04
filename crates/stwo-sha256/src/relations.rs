@@ -1,131 +1,23 @@
 //! LogUp relation tags for the SHA-256 component.
 //!
-//! Each preprocessed lookup table is paired with one [`stwo_constraint_framework::Relation`]
-//! channel. The SHA-256 component uses these channels from the **consumer**
-//! side — `add_to_relation` with positive multiplicity, one "use" per
-//! lookup keyed on the row tuple. The actual preprocessed-column commitment
-//! and the per-row multiplicity vector live with the corresponding table
-//! component (committed separately at prover-setup time); the relations
-//! here are the contract between the two.
+//! Each active lookup table has one
+//! [`stwo_constraint_framework::Relation`] channel. The SHA component adds a
+//! positive consumer term for each lookup. A table component adds the matching
+//! negative producer term.
 //!
-//! The active constraint layer wires [`RangeRelations`] — the four width-1
-//! range-check channels
-//!     `Range_2`/`Range_4`/`Range_5`/`Range_8`. The mod-2³² limb-add carries are
-//!     range-checked through `Range_{2,4,5}` per the headroom audit
-//!     (`crate::headroom`); terminal digest bytes are checked through
-//!     `Range_8` and recomposed into the final block's 16-bit `h_out` limbs
-//!     (per design §10.2).
-//! Row content for each `Range_k` is `crate::tables_local::range_k()`.
-//! Decode, Maj/Ch, and Xor relation types remain for standalone compatibility,
-//! but the bit-plane AIR does not add entries to them.
+//! [`RangeRelations`] contains the four active width-one channels. `Range_2`,
+//! `Range_4`, and `Range_5` check modulo-2³² carries. `Range_8` checks terminal
+//! digest bytes. The AIR then reconstructs the 16-bit `h_out` limbs.
 //!
-//! Each `relation!(_, N)` declares a struct holding a `LookupElements<N>`
-//! channel — `N` is the row width of the matched table (number of base-field
-//! values per lookup tuple). The decode tables have row shape
-//! `(key, o_main_lo, o_main_hi, o2_partial_lo, o2_partial_hi)` ⇒ `N = 5`;
-//! the Maj/Ch table projects to row shape `(a, b, c, out)` ⇒ `N = 4`;
-//! `xor_8` is `(x, y, z)` ⇒ `N = 3`; the range channels are `(value)` ⇒
-//! `N = 1`. Stwo's macro implements `Relation<F, EF>::combine` so
-//! `add_to_relation` can collapse a `&[F]` slice of `N` cells into the
-//! extension-field key the LogUp interaction column reads.
+//! The digest and field relations connect SHA to other components.
 
 use air_core::relations::SharedRelation;
 use stwo::core::channel::Channel;
 use stwo_constraint_framework::relation;
 
-/// Row width of each `Σ`/`σ` decode table: `(key, o_main_lo, o_main_hi,
-/// o2_partial_lo, o2_partial_hi)`. The lookup-tuple slice passed to
-/// `add_to_relation` is sliced into the trace's per-σ-application decode
-/// block in column order (see [`crate::trace::SIGMA_DECODE_COLS`]) so the
-/// first 5 cells form the `S`-side key and the next 5 the `S′`-side key.
-pub const SIGMA_DECODE_REL_SIZE: usize = 5;
-
-relation!(Sigma0DecodeS, SIGMA_DECODE_REL_SIZE);
-relation!(Sigma0DecodeSPrime, SIGMA_DECODE_REL_SIZE);
-relation!(Sigma1DecodeS, SIGMA_DECODE_REL_SIZE);
-relation!(Sigma1DecodeSPrime, SIGMA_DECODE_REL_SIZE);
-relation!(LowerSigma0DecodeS, SIGMA_DECODE_REL_SIZE);
-relation!(LowerSigma0DecodeSPrime, SIGMA_DECODE_REL_SIZE);
-relation!(LowerSigma1DecodeS, SIGMA_DECODE_REL_SIZE);
-relation!(LowerSigma1DecodeSPrime, SIGMA_DECODE_REL_SIZE);
-
-/// All eight `Σ`/`σ` decode-table channels grouped for `Sha256Eval`. One
-/// channel per `(function, side)` pair: the per-table multiplicity columns
-/// (committed by the table component, not here) sum to the witness-side
-/// usage counts asserted by the multiplicity sanity test in
-/// [`crate::constraints`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct SigmaDecodeRelations {
-    pub sigma0_s: Sigma0DecodeS,
-    pub sigma0_s_complement: Sigma0DecodeSPrime,
-    pub sigma1_s: Sigma1DecodeS,
-    pub sigma1_s_complement: Sigma1DecodeSPrime,
-    pub lower_sigma0_s: LowerSigma0DecodeS,
-    pub lower_sigma0_s_complement: LowerSigma0DecodeSPrime,
-    pub lower_sigma1_s: LowerSigma1DecodeS,
-    pub lower_sigma1_s_complement: LowerSigma1DecodeSPrime,
-}
-
-impl SigmaDecodeRelations {
-    /// Draw fresh `LookupElements` for every channel from a transcript.
-    /// Used by the prover/verifier wiring once the foundation is in place.
-    pub fn draw(channel: &mut impl Channel) -> Self {
-        Self {
-            sigma0_s: Sigma0DecodeS::draw(channel),
-            sigma0_s_complement: Sigma0DecodeSPrime::draw(channel),
-            sigma1_s: Sigma1DecodeS::draw(channel),
-            sigma1_s_complement: Sigma1DecodeSPrime::draw(channel),
-            lower_sigma0_s: LowerSigma0DecodeS::draw(channel),
-            lower_sigma0_s_complement: LowerSigma0DecodeSPrime::draw(channel),
-            lower_sigma1_s: LowerSigma1DecodeS::draw(channel),
-            lower_sigma1_s_complement: LowerSigma1DecodeSPrime::draw(channel),
-        }
-    }
-
-    /// Constant-channel set for tests that exercise the AIR without a
-    /// real prover transcript. Matches the `XorElements*::dummy()` pattern
-    /// used by the Stwo Blake example.
-    pub fn dummy() -> Self {
-        Self {
-            sigma0_s: Sigma0DecodeS::dummy(),
-            sigma0_s_complement: Sigma0DecodeSPrime::dummy(),
-            sigma1_s: Sigma1DecodeS::dummy(),
-            sigma1_s_complement: Sigma1DecodeSPrime::dummy(),
-            lower_sigma0_s: LowerSigma0DecodeS::dummy(),
-            lower_sigma0_s_complement: LowerSigma0DecodeSPrime::dummy(),
-            lower_sigma1_s: LowerSigma1DecodeS::dummy(),
-            lower_sigma1_s_complement: LowerSigma1DecodeSPrime::dummy(),
-        }
-    }
-}
-
-impl Default for SigmaDecodeRelations {
-    fn default() -> Self {
-        Self::dummy()
-    }
-}
-
-/// Row width of the packed Maj/Ch lookup tuples: `(a, b, c, out)`. Both
-/// `MajRelation` and `ChRelation` use this width — they project the
-/// underlying 5-column `(a, b, c, maj, ch)` table content into a 4-cell
-/// row by exposing only one of the two outputs, with the table component
-/// committing two separate multiplicity columns (one per relation).
-pub const MAJ_CH_REL_SIZE: usize = 4;
-
-relation!(MajRelation, MAJ_CH_REL_SIZE);
-relation!(ChRelation, MAJ_CH_REL_SIZE);
-
-/// Row width of the generic 8-bit XOR table: `(x, y, z)` with `z = x ⊕ y`,
-/// `x, y, z ∈ [0, 256)`. Fired chunk-wise (4 lookups per σ-application) to
-/// combine the two `O2` partials of every `Σ`/`σ` evaluation.
-pub const XOR_8_REL_SIZE: usize = 3;
-
-relation!(Xor8Relation, XOR_8_REL_SIZE);
-
-/// Row width of every `Range_k` channel: a single base-field value pinned
-/// to `[0, k)`. The lookup tuple passed to `add_to_relation` is a 1-cell
-/// slice — the carry limb (for mod-2³² adds) or a terminal digest byte
-/// (for `Range_8` on `h_out`).
+/// Row width of each `Range_k` channel.
+///
+/// The one-cell tuple is an addition carry or terminal digest byte.
 pub const RANGE_REL_SIZE: usize = 1;
 
 relation!(Range2Relation, RANGE_REL_SIZE);
@@ -135,10 +27,9 @@ relation!(Range8Relation, RANGE_REL_SIZE);
 
 /// The four range-check channels grouped for `Sha256Eval`.
 ///
-/// - `range_2` / `range_4` / `range_5` pin the `(carry_lo, carry_hi)`
-///   pair of each mod-2³² limb-add (per the headroom audit's family
-///   bound: `k=4` for the schedule recurrence, `k=5` for `T1`, `k=2`
-///   everywhere else).
+/// - `range_2`, `range_4`, and `range_5` constrain addition carry pairs.
+///   The audited bounds use `k=4` for schedules and `k=5` for `T1`.
+///   All other addition families use `k=2`.
 /// - `range_8` pins every terminal digest byte. Recomposition from two
 ///   checked bytes pins each final `h_out` limb to 16 bits.
 ///
@@ -156,14 +47,11 @@ impl RangeRelations {
     /// Draw one challenge per `Range_k` channel in the canonical
     /// `crate::components::RANGE_TABLES` order.
     ///
-    /// **Mn3 — single source of truth.** Both the preprocessed-trace
-    /// generator (`crate::preprocessed`), the multiplicity assembly
-    /// (`crate::multiplicities` / `crate::interaction`), and this
-    /// challenge-draw side iterate the same `RANGE_TABLES` slice, so a
-    /// future refactor that reorders the canonical list automatically
-    /// keeps the consumer ⇄ producer LogUp balance intact. A drift
-    /// between the two used to be a hidden coupling — `draw` now
-    /// re-derives its order from `RANGE_TABLES` directly.
+    /// `RANGE_TABLES` defines the canonical channel order.
+    ///
+    /// Preprocessing, multiplicity assembly, interaction generation, and
+    /// challenge generation all use this slice.
+    /// A reordered slice changes all four paths together.
     pub fn draw(channel: &mut impl Channel) -> Self {
         use crate::components::{RangeKind, RANGE_TABLES};
         let mut out = Self::dummy();
@@ -241,18 +129,14 @@ impl SharedShaTableRelations {
 
 /// Row width of the cross-component digest relation: the 32 bytes of the
 /// final-block SHA-256 digest. The digest byte string is `H0..H7` each
-/// serialised **big-endian** (FIPS 180-4 §5); the 32 cells are laid out
+/// serialized in big-endian order (FIPS 180-4 §5). The 32 cells are laid out
 /// per state word `j` as `[hi.b1, hi.b0, lo.b1, lo.b0]` — i.e.
 /// `word_j.to_be_bytes()` — so cell `4j+k` is digest byte `4j+k`.
 pub const DIGEST_REL_SIZE: usize = crate::constants::DIGEST_BYTES;
 
-/// The cross-component digest channel is **shared** with the consumer (the P256
-/// `z` binding): a yield here only cancels against a require there if both
-/// sides combine over the *same* drawn `LookupElements`. So the relation type is
-/// defined once in the common [`air_core`] crate and aliased here, rather than
-/// declared locally. Width, and the `relation!`-generated `draw`/`dummy`/
-/// `combine`, are unchanged — 6.2's transcript order and width-32 test still
-/// hold — so this is a transparent move, not a behavioural change.
+/// The digest provider and consumer share this channel. Their terms cancel
+/// only when both use identical `LookupElements`. [`air_core`] defines the
+/// common type, and this crate uses an alias.
 pub use air_core::relations::DigestBytesRelation as Sha256Digest;
 
 // The shared arity must match this crate's digest-byte count, or the provider
@@ -260,27 +144,20 @@ pub use air_core::relations::DigestBytesRelation as Sha256Digest;
 // to balance.
 const _: () = assert!(DIGEST_REL_SIZE == air_core::relations::DIGEST_BYTES_ARITY);
 
-/// The cross-component digest channel (interface-contract item 2:
-/// `SHA_DIGEST ↔ ECDSA_Z`). **This is the one relation the SHA-256 AIR uses
-/// from the *provider* side**: on the final block of a multi-block hash it
-/// *yields* the 32 digest bytes (`add_to_relation(&digest, −is_last_block,
-/// &[b0..b31])`), so a downstream module (the P256 ECDSA `z` binding;
-/// the field predicates reuse the same byte-bridge machinery) can
-/// *require* them. Unlike every other channel here, the yield has no
-/// in-module consumer, so it leaves the SHA module's claimed-sum non-zero —
-/// it only cancels once a consumer requires the same bytes, which is what
-/// makes the combined proof bind "the signature is over the hash of this
-/// preimage". The yield is gated behind `Sha256Eval::expose_digest` so the
-/// standalone SHA proof (no consumer) still self-balances.
+/// Cross-component channel from a SHA digest to an ECDSA `z` input.
 ///
-/// **Representation bridge (interface-contract item 4).** SHA holds the
-/// digest as 16-bit `(lo, hi)` limbs; P256 holds `z` as 13-bit limbs. The
-/// two cannot be equated limb-for-limb, so the relation carries **bytes**:
-/// the SHA AIR decomposes each limb into two bytes (`limb = 256·b1 + b0`)
-/// and yields the 32 big-endian bytes. The byte values are tied to the
-/// `h_out` limbs by that decomposition constraint; SHA range-checks every
-/// byte through `Range_8`, so both the yielded byte representation and the
-/// recomposed 16-bit limbs are canonical before crossing the module boundary.
+/// On the final block, the SHA AIR yields all 32 digest bytes.
+/// A downstream P-256 module requires the same tuple.
+/// The isolated yield leaves a nonzero SHA claim sum.
+/// A matching consumer cancels it and binds the signature preimage.
+/// `Sha256Eval::expose_digest` gates the yield.
+/// The standalone SHA proof leaves this option disabled.
+///
+/// SHA uses 16-bit limbs, while P-256 uses 13-bit limbs for `z`. The relation
+/// carries bytes instead of limbs.
+/// The SHA AIR decomposes each limb with `limb = 256·b1 + b0`.
+/// It yields the 32 big-endian bytes.
+/// `Range_8` constrains each byte before it crosses the module boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DigestRelation {
     pub digest: Sha256Digest,
@@ -306,10 +183,10 @@ impl Default for DigestRelation {
     }
 }
 
-/// The cross-component credential-field channel is **shared** with the predicate
-/// consumers, so — like [`Sha256Digest`] — the relation type is
-/// defined once in [`air_core`] and aliased here. Width 3: `(field_id,
-/// byte_index, value)`.
+/// The shared credential-field channel.
+///
+/// [`air_core`] defines this three-cell relation as
+/// `(field_id, byte_index, value)`. This crate uses an alias.
 pub use air_core::relations::FieldBytesRelation as Sha256Field;
 
 // The shared arity must match this crate's expectation, or the provider and
@@ -317,22 +194,20 @@ pub use air_core::relations::FieldBytesRelation as Sha256Field;
 // balance.
 pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 
-/// The cross-component credential-field channel (interface-contract item 3:
-/// `CRED_FIELD ↔ PREDICATE_INPUT`). The second cross-module channel the SHA-256
-/// AIR uses from the **provider** side: when a non-empty
-/// [`crate::field_exposure::FieldExposure`] is configured, it *yields* one
-/// `(field_id, byte_index, value)` tuple per exposed credential byte, gated to
-/// that byte's target SHA block, so a downstream predicate can *require*
-/// exactly the byte window of the field it binds. Like the digest yield, these terms have no
-/// in-module consumer — they leave the SHA module's claimed sum non-zero until a
-/// predicate consumer cancels them — so they are gated behind the field-exposure
-/// spec (empty by default), keeping a standalone SHA proof self-balancing.
+/// Cross-component channel from credential bytes to predicate inputs.
+///
+/// A nonempty [`crate::field_exposure::FieldExposure`] enables this provider.
+/// It yields `(field_id, byte_index, value)` for each selected byte.
+/// The target block gates each tuple.
+/// A downstream predicate requires the same byte window.
+/// These yields need an external consumer to balance.
+/// The standalone SHA proof uses an empty exposure.
 ///
 /// **Representation bridge (interface-contract item 4).** Every message word
 /// already has 32 committed LSB-first bit planes. The AIR constrains each bit
 /// boolean and recomposes them to the 16-bit `(lo, hi)` schedule limbs. A field
-/// byte is the corresponding linear eight-bit big-endian projection, so it is
-/// automatically in `[0, 256)` and exactly equals the signed preimage byte.
+/// byte is the corresponding linear eight-bit big-endian projection. It is in
+/// `[0, 256)` and equals the preimage byte.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldRelation {
     pub field: Sha256Field,
@@ -358,59 +233,35 @@ impl Default for FieldRelation {
     }
 }
 
-/// Transcript-stable relation bundle. The active AIR uses the four range
-/// channels plus optional digest and field providers. Legacy decode, Maj/Ch,
-/// and Xor channels remain drawn for proof-format compatibility but receive no
-/// entries.
+/// Relations used by the active bit-plane AIR.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sha256Relations {
-    pub sigma_decode: SigmaDecodeRelations,
-    pub maj: MajRelation,
-    pub ch: ChRelation,
-    pub xor_8: Xor8Relation,
     pub range: RangeRelations,
     /// Cross-component digest channel — provider side. Always drawn so the
-    /// relation bundle is uniform; only *used* when `Sha256Eval::expose_digest`
+    /// relation bundle is uniform. Only *used* when `Sha256Eval::expose_digest`
     /// is set (the combined-proof path). See [`DigestRelation`].
     pub digest: DigestRelation,
     /// Cross-component credential-field channel — provider side. Always drawn so
-    /// the relation bundle is uniform; only *used* when a non-empty field
+    /// the relation bundle is uniform. Only *used* when a non-empty field
     /// exposure is configured (the predicate-binding path). See
     /// [`FieldRelation`].
     pub field: FieldRelation,
 }
 
 impl Sha256Relations {
-    /// Draw fresh `LookupElements` for every channel from a transcript.
-    /// The draw order is fixed — decode channels first (matching the
-    /// existing 3.9.3 pattern), then Maj, then Ch, then `xor_8`, then the
-    /// split-and-pack channels, then the range channels. Changing the
-    /// order rotates the verifier-side challenges and breaks proof
-    /// portability.
+    /// Draw fresh `LookupElements` for every channel.
+    ///
+    /// A different draw order changes verifier challenges and invalidates proofs.
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
-            sigma_decode: SigmaDecodeRelations::draw(channel),
-            maj: MajRelation::draw(channel),
-            ch: ChRelation::draw(channel),
-            xor_8: Xor8Relation::draw(channel),
             range: RangeRelations::draw(channel),
-            // Drawn after every standalone channel so adding it leaves their
-            // challenges unchanged (the draw order above is frozen — see the
-            // doc-comment). Prover and verifier both draw it whether or not
-            // the digest is exposed, keeping the transcript symmetric.
             digest: DigestRelation::draw(channel),
-            // Drawn last (after the digest), same reasoning: additive, so the
-            // field channel never perturbs an earlier channel's challenge.
             field: FieldRelation::draw(channel),
         }
     }
 
     pub fn draw_sha_tables_provider(channel: &mut impl Channel) -> Self {
         Self {
-            sigma_decode: SigmaDecodeRelations::dummy(),
-            maj: MajRelation::dummy(),
-            ch: ChRelation::dummy(),
-            xor_8: Xor8Relation::dummy(),
             range: RangeRelations::draw(channel),
             digest: DigestRelation::dummy(),
             field: FieldRelation::dummy(),
@@ -422,24 +273,15 @@ impl Sha256Relations {
         shared: &SharedShaTableRelations,
     ) -> Self {
         Self {
-            sigma_decode: SigmaDecodeRelations::dummy(),
-            maj: MajRelation::dummy(),
-            ch: ChRelation::dummy(),
-            xor_8: Xor8Relation::dummy(),
             range: shared.range.get(),
             digest: DigestRelation::draw(channel),
             field: FieldRelation::draw(channel),
         }
     }
 
-    /// Constant-channel set for tests. Mirrors [`SigmaDecodeRelations::dummy`]
-    /// so the AIR can be exercised without a real prover transcript.
+    /// Constant-channel set for tests that do not use a prover transcript.
     pub fn dummy() -> Self {
         Self {
-            sigma_decode: SigmaDecodeRelations::dummy(),
-            maj: MajRelation::dummy(),
-            ch: ChRelation::dummy(),
-            xor_8: Xor8Relation::dummy(),
             range: RangeRelations::dummy(),
             digest: DigestRelation::dummy(),
             field: FieldRelation::dummy(),
@@ -456,54 +298,6 @@ impl Default for Sha256Relations {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// All eight relations report row width 5 — i.e. matched-tuple length
-    /// equal to a decode-table row. A regression on this would silently
-    /// shift the columns the AIR slices for `add_to_relation`.
-    #[test]
-    fn every_decode_relation_has_row_width_5() {
-        use stwo::core::fields::m31::BaseField;
-        use stwo::core::fields::qm31::SecureField;
-        use stwo_constraint_framework::Relation;
-        let r = SigmaDecodeRelations::dummy();
-        // Cross-check via the Relation trait — the relation! macro derives
-        // get_size() against the size literal we declared.
-        assert_eq!(
-            <Sigma0DecodeS as Relation<BaseField, SecureField>>::get_size(&r.sigma0_s),
-            SIGMA_DECODE_REL_SIZE
-        );
-        assert_eq!(SIGMA_DECODE_REL_SIZE, 5);
-    }
-
-    #[test]
-    fn maj_and_ch_relations_have_row_width_4() {
-        use stwo::core::fields::m31::BaseField;
-        use stwo::core::fields::qm31::SecureField;
-        use stwo_constraint_framework::Relation;
-        let r = Sha256Relations::dummy();
-        assert_eq!(
-            <MajRelation as Relation<BaseField, SecureField>>::get_size(&r.maj),
-            MAJ_CH_REL_SIZE
-        );
-        assert_eq!(
-            <ChRelation as Relation<BaseField, SecureField>>::get_size(&r.ch),
-            MAJ_CH_REL_SIZE
-        );
-        assert_eq!(MAJ_CH_REL_SIZE, 4);
-    }
-
-    #[test]
-    fn xor_8_relation_has_row_width_3() {
-        use stwo::core::fields::m31::BaseField;
-        use stwo::core::fields::qm31::SecureField;
-        use stwo_constraint_framework::Relation;
-        let r = Sha256Relations::dummy();
-        assert_eq!(
-            <Xor8Relation as Relation<BaseField, SecureField>>::get_size(&r.xor_8),
-            XOR_8_REL_SIZE
-        );
-        assert_eq!(XOR_8_REL_SIZE, 3);
-    }
 
     /// Every `Range_k` channel exposes row width 1. The lookup tuple
     /// passed to `add_to_relation` is a single carry / terminal-limb cell.

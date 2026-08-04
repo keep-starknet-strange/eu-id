@@ -12,24 +12,21 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::TreeBuilder;
 
-/// Class-C rewrite (Q-015 / p4c): the age component is a single-active-row
-/// trace with a preprocessed selector. Row 0 (the active row) holds the real
-/// witness; every constraint and lookup use in [`super::eval`] is gated by the
-/// preprocessed `active` selector, so the remaining `2^LOG_SIZE − 1` rows are
-/// free blind rows filled with fresh random field cells. `LOG_SIZE = 9` gives
-/// `511 ≥ 256` blind rows (the Q-015 blind budget).
+/// The Class-C age trace has one active row.
+/// A preprocessed selector gates each constraint and lookup in [`super::eval`].
+/// Row 0 contains the real witness.
+/// All other rows contain fresh random field cells.
+/// `LOG_SIZE = 9` provides 511 blind rows.
 const LOG_SIZE: u32 = 9;
-/// The single active (witness-bearing) row; every other row is a blind row.
+/// The single active (witness-bearing) row. Every other row is a blind row.
 const ACTIVE_ROW: usize = 0;
 pub(crate) const DOB_TEXT_LEN: usize = 10;
 pub(crate) const DOB_TEXT_DIGITS: usize = 8;
 pub(crate) const DOB_TEXT_DIGIT_BITS: usize = 4;
 
-/// How the credential DOB is exposed to the age module: packed 4-byte
-/// `[year_hi, year_lo, month, day]` or a 10-byte `YYYY-MM-DD` text window.
+/// The credential DOB is exposed as a 10-byte `YYYY-MM-DD` text window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DobBindingMode {
-    Packed,
     Text,
 }
 
@@ -38,18 +35,12 @@ impl DobBindingMode {
     /// The single-row require selector is now the preprocessed `active` column,
     /// so binding no longer contributes a `bind_active` trace column.
     pub fn trace_columns(self) -> usize {
-        match self {
-            Self::Packed => 2,
-            Self::Text => DOB_TEXT_LEN + DOB_TEXT_DIGITS * DOB_TEXT_DIGIT_BITS,
-        }
+        DOB_TEXT_LEN + DOB_TEXT_DIGITS * DOB_TEXT_DIGIT_BITS
     }
 
     /// Exposed DOB byte requires the binding emits on the shared field channel.
     pub fn field_bytes(self) -> usize {
-        match self {
-            Self::Packed => 4,
-            Self::Text => DOB_TEXT_LEN,
-        }
+        DOB_TEXT_LEN
     }
 }
 
@@ -68,8 +59,7 @@ pub struct WitnessData {
     pub month_delta_val: u32,
     pub year_delta_val: u32,
     /// Credential DOB byte values when the credential binding is wired (`Some`)
-    /// — either four packed bytes `[year_hi, year_lo, month, day]` or ten text
-    /// bytes `YYYY-MM-DD`. These are the require tuples the interaction trace
+    /// — ten text bytes `YYYY-MM-DD`. These are the require tuples the interaction trace
     /// emits against the shared `Sha256Field` channel. `None` for a standalone
     /// age proof, where [`witness_trace`](Self::witness_trace) holds only the
     /// nine base columns.
@@ -118,8 +108,8 @@ impl WitnessData {
             BaseColumn::from_iter(valid_day_mult_data),
         )];
 
-        // Class-D blinded multiplicity columns for the three delta range tables:
-        // real count (1) on the value row, fresh random on the reserved dummy
+        // Build class-D blinded multiplicity columns for the three delta tables.
+        // Put the real count on the value row. Use fresh randomness on the
         // reserved dummy suffix.
         let single = |val: u32| vec![M31::from_u32_unchecked(val)];
         let day_delta_mult_trace = vec![Preprocessed::day_range()
@@ -132,10 +122,6 @@ impl WitnessData {
             .claim()
             .gen_blind_multiplicity_col(&[single(year_delta_val)])];
 
-        // Big-endian recomposition matches `Credential::encode` (`year` is the
-        // u16 birth year): byte 0 is the high byte, byte 1 the low byte, then the
-        // single month/day bytes — the same four bytes SHA yields for the DOB
-        // window (`docs/credential-format.md`).
         let dob_bytes = dob_binding_mode.map(|mode| dob_field_bytes(witness, mode));
 
         Self {
@@ -173,7 +159,7 @@ impl WitnessData {
 }
 
 /// The base witness column values for the active row, in eval-read order. Blind
-/// rows overwrite these with fresh randomness; the active row keeps them.
+/// rows overwrite these with fresh randomness. The active row keeps them.
 fn base_active_values(witness: &Witness) -> Vec<u32> {
     let day_borrow = u32::from(witness.cutoff.day < witness.dob.day);
     let day_delta = witness.cutoff.day + 32 * day_borrow - witness.dob.day;
@@ -197,35 +183,25 @@ fn base_active_values(witness: &Witness) -> Vec<u32> {
 fn gen_trace(witness: &Witness, dob_binding_mode: Option<DobBindingMode>) -> Trace {
     let mut active_values = base_active_values(witness);
 
-    // The credential-field binding columns (after the 9 base). `year_hi`/
-    // `year_lo` are the big-endian birth-year bytes the reconciliation
-    // constraint ties to the packed `birth_year`; text mode exposes the ten
+    // The credential-field binding columns (after the 9 base) expose the ten
     // ASCII bytes plus the per-digit 4-bit decomposition. The single-row require
     // selector is the preprocessed `active` column, so no `bind_active` trace
     // column is needed. On the active row the always-on-when-active
-    // reconciliation holds; the global LogUp balance forces the active row's
+    // reconciliation holds. The global LogUp balance forces the active row's
     // bytes to the credential's signed bytes.
-    if let Some(mode) = dob_binding_mode {
-        match mode {
-            DobBindingMode::Packed => {
-                active_values.push(witness.dob.year >> 8);
-                active_values.push(witness.dob.year & 0xFF);
-            }
-            DobBindingMode::Text => {
-                let text = dob_text_bytes(witness);
-                for &byte in &text {
-                    active_values.push(u32::from(byte));
-                }
-                // Per-digit 4-bit decomposition: the eval reconstructs each
-                // ASCII digit from these bits and caps it at 9, replacing a
-                // dedicated range table for the 4-bit check.
-                for (i, &byte) in text_digit_bytes(&text).iter().enumerate() {
-                    let digit = byte - b'0';
-                    debug_assert!(digit <= 9, "generated DOB digit {i} must be decimal");
-                    for bit in 0..DOB_TEXT_DIGIT_BITS {
-                        active_values.push(u32::from((digit >> bit) & 1));
-                    }
-                }
+    if dob_binding_mode.is_some() {
+        let text = dob_text_bytes(witness);
+        for &byte in &text {
+            active_values.push(u32::from(byte));
+        }
+        // Decompose each digit into four bits. The evaluator reconstructs
+        // each ASCII digit and caps it at 9. This replaces a dedicated
+        // four-bit range table.
+        for (i, &byte) in text_digit_bytes(&text).iter().enumerate() {
+            let digit = byte - b'0';
+            debug_assert!(digit <= 9, "generated DOB digit {i} must be decimal");
+            for bit in 0..DOB_TEXT_DIGIT_BITS {
+                active_values.push(u32::from((digit >> bit) & 1));
             }
         }
     }
@@ -233,11 +209,11 @@ fn gen_trace(witness: &Witness, dob_binding_mode: Option<DobBindingMode>) -> Tra
     active_values.into_iter().map(active_column).collect()
 }
 
-/// A column that holds `active_value` on [`ACTIVE_ROW`] and a fresh uniform
-/// random field cell on every other row. The random inactive cells are the
-/// Class-C blind rows: the eval gates every witness-touching constraint off the
-/// preprocessed `active` selector, so those rows are unconstrained and mask the
-/// column's proof-side openings.
+/// Builds a column with `active_value` on [`ACTIVE_ROW`].
+///
+/// Each other row contains a fresh random field cell.
+/// The preprocessed `active` selector disables witness constraints on these rows.
+/// Thus, they mask proof openings.
 fn active_column(
     active_value: u32,
 ) -> CircleEvaluation<SimdBackend, M31, stwo::prover::poly::BitReversedOrder> {
@@ -247,18 +223,9 @@ fn active_column(
     CircleEvaluation::new(domain, BaseColumn::from_iter(data))
 }
 
-/// The exposed DOB bytes for `mode`: packed big-endian `[year_hi, year_lo,
-/// month, day]` or the ten `YYYY-MM-DD` text bytes.
-pub fn dob_field_bytes(witness: &Witness, mode: DobBindingMode) -> Vec<u32> {
-    match mode {
-        DobBindingMode::Packed => vec![
-            witness.dob.year >> 8,
-            witness.dob.year & 0xFF,
-            witness.dob.month,
-            witness.dob.day,
-        ],
-        DobBindingMode::Text => dob_text_bytes(witness).into_iter().map(u32::from).collect(),
-    }
+/// The exposed `YYYY-MM-DD` DOB bytes.
+pub fn dob_field_bytes(witness: &Witness, _mode: DobBindingMode) -> Vec<u32> {
+    dob_text_bytes(witness).into_iter().map(u32::from).collect()
 }
 
 fn dob_text_bytes(witness: &Witness) -> [u8; DOB_TEXT_LEN] {
@@ -316,8 +283,7 @@ mod class_c_tests {
             .collect()
     }
 
-    /// Class-C: `LOG_SIZE = 9` leaves `511 ≥ 256` blind rows past the single
-    /// active row (the Q-015 blind budget).
+    /// Confirms that `LOG_SIZE = 9` leaves at least 256 Class-C blind rows.
     #[test]
     fn age_class_c_has_at_least_256_blind_rows() {
         let blind_rows = (1usize << WitnessData::log_size()) - 1;

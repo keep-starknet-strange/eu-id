@@ -10,10 +10,8 @@
 //! y^2 + 3x ≡ x^3 + b   (mod p)
 //! ```
 //!
-//! using four modular multiplications proven by the *exact* `projective_air`
-//! mod-`p` mul machinery (the same Solinas raw-product / matrix-fold /
-//! reduction families used by the projective EC double/add AIR), plus one
-//! mod-`p` limb-reduction identity that ties the four mul results together.
+//! Four modular multiplications use the existing `projective_air` mod-`p` constraints.
+//! One mod-`p` limb-reduction identity joins their results.
 //!
 //! # Architecture
 //!
@@ -27,15 +25,13 @@
 //! | 2           | `x2 * x`        | `x3`      |
 //! | 3           | `3 * x`         | `three_x` |
 //!
-//! The three non-mul families (`raw_product_chunk`, `folded_contribution`,
-//! `folded_digit`) and the two shared range providers (`range13`,
-//! `signed_carry`) are reused **unchanged** from `projective_air`. Only the
-//! mul family swaps in [`PublicKeyMulEval`], which proves each mul exactly as
-//! [`ProjectiveRcbMulEval`] does and then *provides* (yields, multiplicity
-//! `-active`) one [`PublicKeyMulResultRelation`] tuple per limb for the lhs,
-//! rhs and result of that mul.
+//! The three non-multiplication families reuse the `projective_air` implementation.
+//! The shared `range13` and `signed_carry` providers also reuse that implementation.
+//! The hinted multiplication provider proves the four products.
+//! The curve check consumes one
+//! [`crate::projective_air::ProjectiveRcbMulResultRelation`] tuple per limb and operand.
 //!
-//! A dedicated [`PublicKeyCurveCheckEval`] component holds the native witness
+//! A dedicated `PublicKeyCurveCheckEval` component holds the native witness
 //! `x, y, x2, x3, three_x, y2` and:
 //!
 //! * *consumes* (uses, multiplicity `+active`) the mul provider tuples using
@@ -104,20 +100,21 @@ use crate::types::U256;
 /// `x^3`, `3x`).
 pub const PUBLIC_KEY_MUL_COUNT: usize = 4;
 
-/// Arity of [`PublicKeyMulResultRelation`]: `[mul_index, role, limb_index, limb]`.
+/// Arity of each multiplication-result tuple used by this component.
 pub const PUBLIC_KEY_MUL_RESULT_ARITY: usize = 4;
 
 /// Arity of [`PublicKeyPointRelation`]: `[sig_id, x_limbs.., y_limbs..]`.
 ///
 /// This is the binding tuple. The scalar-setup component *provides* it from the
 /// public-key columns (`pub_x`, `pub_y`) that are themselves bound to the public
-/// ECDSA instance; the curve-check component *consumes* it with its witnessed
+/// ECDSA instance. The curve-check component *consumes* it with its witnessed
 /// `(sig_id, x, y)`. LogUp balance then forces the curve-checked `(x, y)` to
 /// equal the verifier's public key for the matching `sig_id`.
 pub const PUBLIC_KEY_POINT_ARITY: usize = 1 + 2 * N_LIMBS;
 
-/// Roles inside [`PublicKeyMulResultRelation`] (re-export the mul-family role
-/// constants so producers and consumers cannot drift).
+/// Roles inside the multiplication-result relation.
+///
+/// These constants match the shared multiplication roles.
 pub const ROLE_LHS: u32 = PROJECTIVE_RCB_MUL_ROLE_LHS;
 pub const ROLE_RHS: u32 = PROJECTIVE_RCB_MUL_ROLE_RHS;
 pub const ROLE_RESULT: u32 = PROJECTIVE_RCB_MUL_ROLE_RESULT;
@@ -131,7 +128,7 @@ const MUL_THREE_X: u32 = 3;
 /// Quotient witness `q` for the curve identity lives in `{-1, 0, 1}`.
 ///
 /// `y2 + three_x ∈ [0, 2p-2]` and `x3 + b ∈ [0, 2p-2]`, so their difference
-/// lies in `[-(2p-2), 2p-2]`; being an exact integer multiple of `p` it equals
+/// lies in `[-(2p-2), 2p-2]`. Being an exact integer multiple of `p` it equals
 /// `q·p` with `q ∈ {-1, 0, 1}` (verified in `curve_identity_quotient_in_range`).
 const CURVE_QUOTIENT_BOUND: i64 = 1;
 
@@ -253,8 +250,8 @@ impl PublicKeyCurveSliceClaim {
             source_index: 0,
             sig_id: M31::from_u32_unchecked(0),
             cert_id: M31::from_u32_unchecked(0),
-            // `op` / `output_projective` are unused by constraint evaluation;
-            // they only label projective EC rows. Dummies keep the slice
+            // `op` / `output_projective` are unused by constraint evaluation.
+            // They only label projective EC rows. Dummies keep the slice
             // self-contained.
             op: ProjectiveEcOp::Double,
             output_projective: ProjectivePoint::infinity(),
@@ -296,10 +293,10 @@ impl PublicKeyCurveSliceClaim {
         Ok(claim)
     }
 
-    /// Test-only adversarial rewrite: make the multiplication subgraph fully
-    /// consistent with an injected point while retaining the prior curve
-    /// identity witness if the new point is off-curve. That isolates the AIR
-    /// equation in the negative test instead of failing in native construction.
+    /// Replaces the point and multiplication subgraph for a negative test.
+    ///
+    /// An off-curve point keeps the previous curve-identity witness.
+    /// This isolates the AIR equation from native construction checks.
     #[cfg(test)]
     pub(crate) fn override_point_for_test(
         &mut self,
@@ -408,7 +405,7 @@ fn push_mul(
     lhs: &U256,
     rhs: &U256,
 ) -> Result<U256, PublicKeyCurveSliceError> {
-    // `ProjectiveRcbMulStep` is a pure label; reuse one valid variant.
+    // `ProjectiveRcbMulStep` is a pure label. Reuse one valid variant.
     let row = ProjectiveRcbMulRow::new_lite(ProjectiveRcbMulStep::DoubleX1Squared, lhs, rhs)
         .map_err(PublicKeyCurveSliceError::MulTrace)?;
     let result = row.trace.result.to_u256();
@@ -497,11 +494,10 @@ struct PublicKeyCurveCheckColumns<E: EvalAtRow> {
     y2: P256EvalBigInt<E>,
     q: E::F,
     carries: [E::F; N_LIMBS],
-    /// Witnessed boolean split of `q ∈ {-1, 0, 1}`: `q = q_pos − q_neg` with
-    /// `q_pos, q_neg ∈ {0, 1}` mutually exclusive (lessons.md #44 idiom). The
-    /// inline quartic `q·(q−1)·(q+1)` is degree 4, over the `log_size + 1`
-    /// (degree-2) composition budget — a latent completeness hazard that
-    /// activates once no larger component pads the global composition domain.
+    /// Witnessed boolean split for `q ∈ {-1, 0, 1}`.
+    ///
+    /// `q = q_pos − q_neg`, and the two bits are mutually exclusive.
+    /// This split keeps the constraint within the degree-2 budget.
     q_pos: E::F,
     q_neg: E::F,
 }
@@ -537,7 +533,7 @@ struct PublicKeyCurveCheckEval {
     final_check_hint: FinalCheckHintRelation,
     binding: CurvePointBinding,
     /// γ-digest reshape: the witnessed limbs' range13 uses and the curve
-    /// identity's signed-carry uses are bound into two per-row digests; the
+    /// identity's signed-carry uses are bound into two per-row digests. The
     /// slice's tall expanders re-expand them against the local providers.
     gamma_digest: GammaDigestRelation,
     gamma_challenge: GammaChallenge,
@@ -574,14 +570,13 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
             eval.add_constraint((one.clone() - columns.active.clone()) * limb.clone());
         }
         eval.add_constraint((one.clone() - columns.active.clone()) * columns.q.clone());
-        // `sig_id` is part of the binding tuple; gate it to zero on padding rows
+        // `sig_id` is part of the binding tuple. Gate it to zero on padding rows
         // so disabled rows cannot consume a usable `PublicKeyPointRelation` tuple.
         eval.add_constraint((one.clone() - columns.active.clone()) * columns.sig_id.clone());
         eval.add_constraint((one.clone() - columns.active.clone()) * columns.cert_id.clone());
 
-        // Bind the witnessed limbs to the proven mul operands/results by
-        // consuming (use, `+active`) the mul provider tuples using the
-        // witnessed column as the looked-up value.
+        // Bind witnessed limbs to the proven multiplication values.
+        // Consume each provider tuple with multiplicity `+active`.
         let mul_source =
             E::F::from(M31::from_u32_unchecked(self.hinted_source_offset)) + columns.sig_id.clone();
         consume_mul_limbs(
@@ -706,7 +701,7 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
         }
 
         // Collect every witnessed limb for the range13 γ-digest (self-
-        // contained domain enforcement via the tall expander; also guarantees
+        // contained domain enforcement via the tall expander. Also guarantees
         // the 13-bit headroom used by the identity below).
         let range13_values: Vec<E::F> = columns
             .x
@@ -721,7 +716,7 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
             .collect();
 
         // Curve identity: (y2 + three_x) - (x3 + b) - q·p = 0 over 13-bit
-        // limbs with a signed-carry recurrence and final carry 0; the carries
+        // limbs with a signed-carry recurrence and final carry 0. The carries
         // are collected for the signed γ-digest.
         let signed_carry_values = add_curve_identity(&mut eval, &columns);
 
@@ -754,8 +749,8 @@ impl FrameworkEval for PublicKeyCurveCheckEval {
     }
 }
 
-/// Which independently-provided point the generic curve check is proving.
-/// The arithmetic is identical; only the binding tuple differs.
+/// Selects the independently provided point for the generic curve check.
+/// The arithmetic is identical. Only the binding tuple differs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CurvePointBinding {
     /// Standalone curve-slice tests.
@@ -855,11 +850,9 @@ fn add_curve_identity<E: EvalAtRow>(
     let modulus = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_MODULUS));
     let b = P256M31BigInt::from_u256(&U256::from_le_u64s(&P256_B));
 
-    // q ∈ {-1, 0, 1} via the witnessed boolean split `q = q_pos − q_neg`
-    // (lessons.md #44): the inline quartic `active·q·(q−1)·(q+1)` is degree 4,
-    // over the log_size + 1 (degree-2) composition budget. All four
-    // constraints are ungated (padding rows hold q = q_pos = q_neg = 0) and
-    // strictly stronger than the former active-gated quartic.
+    // Use the Boolean split `q = q_pos - q_neg` for `q` in {-1, 0, 1}.
+    // The direct quartic expression exceeds the degree-two composition budget.
+    // Padding rows set `q`, `q_pos`, and `q_neg` to zero.
     let one = E::F::from(M31::from_u32_unchecked(1));
     eval.add_constraint(columns.q.clone() - columns.q_pos.clone() + columns.q_neg.clone());
     eval.add_constraint(columns.q_pos.clone() * (one.clone() - columns.q_pos.clone()));
@@ -914,7 +907,7 @@ impl PublicKeyCurveSliceLogSizes {
 #[derive(Clone)]
 pub(crate) struct PublicKeyCurveSliceRelations {
     /// SHARED with the hinted-mul provider in the monolith (the standalone
-    /// slice draws its own instance; its mul consumes are unbalanced there,
+    /// slice draws its own instance. Its mul consumes are unbalanced there,
     /// which only the monolithic balance accounting observes).
     mul_result: ProjectiveRcbMulResultRelation,
     range13: RangeCheckRelation,
@@ -924,7 +917,7 @@ pub(crate) struct PublicKeyCurveSliceRelations {
     /// row. Shared with final-add in the monolithic proof.
     final_check_hint: FinalCheckHintRelation,
     /// γ-digest relation + challenge (SHARED with every adopter in the
-    /// monolith; the standalone slice draws/builds its own).
+    /// monolith. The standalone slice draws/builds its own).
     gamma_digest: GammaDigestRelation,
     gamma_challenge: GammaChallenge,
 }
@@ -960,10 +953,10 @@ impl PublicKeyCurveSliceRelations {
         }
     }
 
-    /// Draw the public-key sub-graph's internal relations (`mul`, `result`)
-    /// fresh, but reuse a `point` relation shared with the
-    /// `scalar/setup_air.rs` provider so the binding tuple links the two
-    /// components. Used by the monolithic proof.
+    /// Draws internal relations for the public-key subgraph.
+    ///
+    /// Reuses the point relation from the scalar setup provider.
+    /// The monolithic proof uses this shared relation.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw_with_point(
         _channel: &mut impl Channel,
@@ -1282,7 +1275,7 @@ pub(crate) fn gen_slice_preprocessed_trace(
     ids: &[PreProcessedColumnId],
 ) -> Result<Vec<M31ColumnEval>, PublicKeyCurveSliceError> {
     // Local range13 / signed-carry provider columns plus the γ-digest tall
-    // schedules; the four muls are proven by the shared hinted provider.
+    // schedules. The four muls are proven by the shared hinted provider.
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
     let signed_carry = slice_signed_carry_claim();
     let mut columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = vec![
@@ -1321,7 +1314,7 @@ pub(crate) fn gen_slice_preprocessed_trace(
 
 /// γ-digest value lists for the (single-row) curve-check slice. Range13:
 /// every witnessed limb in [`PublicKeyCurveCheckEval`]'s collection order
-/// (x, y, x2, x3, three_x, y2); signed: the curve-identity carries.
+/// (x, y, x2, x3, three_x, y2). Signed: the curve-identity carries.
 fn pkc_gamma_range13_values(claim: &PublicKeyCurveSliceClaim) -> Vec<M31> {
     [
         &claim.x,
@@ -1583,10 +1576,10 @@ fn gen_slice_interaction_trace_with_range_providers(
     let mut trace = Vec::new();
 
     // Curve-check family (consumers). The four muls are proven by hinted-mul
-    // rows; the check consumes them via wide tuples against the shared
+    // rows. The check consumes them via wide tuples against the shared
     // `ProjectiveRcbMulResult` relation. In the monolith (`bind_to_public`) it
     // also emits the `PublicKeyPointRelation` consume that binds `(x, y)` to
-    // the public key; the standalone slice emits no binding tuple.
+    // the public key. The standalone slice emits no binding tuple.
     let (curve_trace, curve_claim, _mul_result_sum, _gamma_yield_sum) =
         gen_curve_check_interaction_trace(claim, relations, log_sizes.curve_check, binding);
     trace.extend(curve_trace);
@@ -1676,7 +1669,7 @@ fn gen_curve_check_interaction_trace(
         curve_check_fraction_pairs(claim, relations, binding);
     let fraction_count = fractions.len();
 
-    // Single active row at coset index 0; everything else is padding.
+    // The single active row is at coset index 0. All other rows are padding.
     let active_row = bit_reverse_index(coset_index_to_circle_domain_index(0, log_size), log_size);
     let mut storage: Vec<Vec<(SecureField, SecureField)>> = (0..padded_rows)
         .map(|_| vec![(secure_zero(), secure_one()); fraction_count])
@@ -1899,7 +1892,7 @@ pub fn public_key_curve_slice_claim_from_public_inputs(
     public_inputs: &PublicEcdsaInputClaim,
 ) -> Result<PublicKeyCurveSliceClaim, PublicKeyCurveSliceError> {
     let on_curve = PublicKeyOnCurveClaim::from_public_inputs(public_inputs)?;
-    // The standalone slice has no hinted provider; source offset 0 is a label.
+    // The standalone slice has no hinted provider. Source offset 0 is a label.
     PublicKeyCurveSliceClaim::from_public_key_claim(&on_curve, 0)
 }
 
@@ -1907,10 +1900,9 @@ pub fn public_key_curve_slice_claim_from_public_inputs(
 // Monolithic-proof integration surface
 // ---------------------------------------------------------------------------
 //
-// The monolithic current-AIR proof reuses the slice machinery above with
-// `bind_to_public = true`, drawing the `PublicKeyPointRelation` once and sharing
-// it with the `scalar/setup_air.rs` provider so the curve-checked `(x, y)` is
-// LogUp-bound to the verifier public key.
+// The monolithic proof uses the slice with `bind_to_public = true`.
+// Scalar setup and the curve check share one `PublicKeyPointRelation`.
+// This relation binds the checked point to the verifier public key.
 
 impl PublicKeyCurveSliceProofClaim {
     pub(crate) fn log_sizes(&self) -> PublicKeyCurveSliceLogSizes {
@@ -1975,7 +1967,7 @@ mod tests {
     #[test]
     fn curve_identity_quotient_in_range() {
         // y2 + three_x ∈ [0, 2p-2] and x3 + b ∈ [0, 2p-2], so the difference
-        // is in [-(2p-2), 2p-2]; being a multiple of p it equals q·p with
+        // is in [-(2p-2), 2p-2]. As a multiple of p, it equals q·p with
         // q ∈ {-1, 0, 1}. We confirm the generator's quotient lands there.
         let claim =
             public_key_curve_slice_claim_from_public_inputs(&generator_inputs()).expect("on-curve");
@@ -2004,19 +1996,13 @@ mod tests {
             ))
         ));
 
-        // 2. The provable layer also rejects a forged witness. A malicious
-        //    prover who wants to prove an off-curve `(x, y')` must keep the
-        //    real `y^2` mul (then the curve identity cannot vanish for `y'`)
-        //    or lie about the witnessed `y` binding. We model the binding lie:
-        //    corrupt the witnessed `y` consumed by the curve check while the
-        //    `y^2` mul still proves the *original* `y`.
+        // 2. The proof constraints also reject a changed witness.
+        //    Change the witnessed `y` that the curve check consumes.
+        //    Keep the multiplication for the original `y`.
         //
-        //    Per lessons.md #18 the rejection oracle is the relation-balance
-        //    audit (not `assert_constraints`, which double-panics on a failing
-        //    LogUp). The muls are proven by the shared hinted provider, which
-        //    yields wide tuples for the real `y` limbs on
-        //    `ProjectiveRcbMulResult`; the curve check consumes the corrupted
-        //    limbs, so the cross-component boundary can no longer balance.
+        //    Use the relation balance as the rejection check.
+        //    The shared provider yields tuples for the original `y` limbs.
+        //    The curve check consumes the changed limbs, so the boundary cannot balance.
         let mut forged =
             public_key_curve_slice_claim_from_public_inputs(&generator_inputs()).expect("on-curve");
         forged.y.limbs_mut()[0] = M31::from_u32_unchecked(forged.y.limbs()[0].0 ^ 1);
@@ -2027,11 +2013,8 @@ mod tests {
             Err(PublicKeyCurveSliceError::WitnessMismatch { .. })
         ));
 
-        // The mul-result boundary residue is nonzero: the corrupted `y`
-        // consume tuples (mul 0, roles lhs/rhs) no longer cancel the hinted
-        // provider's real-`y` yield tuples (modelled by
-        // `hinted_provider_sum`, the exact wide tuples the monolithic
-        // hinted-mul component yields for this claim's `mul_trace`).
+        // The changed `y` consumes do not cancel the original provider terms.
+        // Thus, the multiplication boundary residue is nonzero.
         let mut channel = stwo::core::channel::Blake2sChannel::default();
         let relations = PublicKeyCurveSliceRelations::draw(&mut channel);
         let honest =
@@ -2051,15 +2034,13 @@ mod tests {
             secure_zero()
         );
 
-        // 3. The complementary attack — bindings made self-consistent for the
-        //    wrong `y'` (the `y^2` mul squares `y'`, `y2 = y'^2`) but the
-        //    curve identity now cannot vanish for any `q in {-1,0,1}` — is
-        //    caught by the polynomial recurrence at prove time. There is no
-        //    valid carry witness, so we keep the stale on-curve carries and
-        //    assert the prover rejects the trace.
+        // 3. Make all multiplication bindings consistent with the changed `y`.
+        //    Keep the old curve-identity carries.
+        //    No quotient in `{-1, 0, 1}` can satisfy the recurrence.
+        //    Thus, the prover must reject the trace.
         let mut consistent_off = consistent_off_curve_claim();
         // Sanity: bindings are internally consistent (mul squares y'), so the
-        // mul-result relation balances; only the curve identity is violated.
+        // mul-result relation balances. Only the curve identity is violated.
         let mut audit_channel = stwo::core::channel::Blake2sChannel::default();
         let audit_relations = PublicKeyCurveSliceRelations::draw(&mut audit_channel);
         let (_, balanced) = gen_slice_interaction_trace(&consistent_off, &audit_relations, false)
@@ -2074,7 +2055,7 @@ mod tests {
         // But the prover rejects it (curve-identity recurrence does not vanish).
         let config = slice_config(&consistent_off);
         // `prove_*` first calls `claim.verify()`, which catches the off-curve
-        // identity natively; bypass that and drive the prover directly.
+        // identity natively. Bypass that and drive the prover directly.
         consistent_off_assert_prove_fails(&mut consistent_off, config, CurvePointBinding::None);
     }
 
@@ -2117,15 +2098,13 @@ mod tests {
         );
 
         // Drive the standalone AIR with the final-hint binding enabled. LogUp
-        // construction succeeds for the fully consistent mul/binding tuples;
-        // proving still fails because the curve recurrence does not vanish.
+        // construction succeeds for the fully consistent mul/binding tuples.
+        // Proving still fails because the curve recurrence does not vanish.
         let config = slice_config(&claim);
         consistent_off_assert_prove_fails(&mut claim, config, CurvePointBinding::FinalCheckHint);
     }
 
-    /// The hinted-mul provider's `ProjectiveRcbMulResult` yields (yield, −1)
-    /// for the slice's four muls — the monolithic counterpart of the slice's
-    /// consumer boundary sum recomputed by `curve_mul_result_consumer_sum`.
+    /// Returns the hinted multiplication provider sum for the four slice operations.
     fn hinted_provider_sum(
         claim: &PublicKeyCurveSliceClaim,
         relations: &PublicKeyCurveSliceRelations,
@@ -2150,9 +2129,9 @@ mod tests {
         sum
     }
 
-    /// Build an off-curve claim whose bindings are self-consistent for `y'`
-    /// (so the mul-result LogUp balances) but whose curve identity is violated
-    /// (stale on-curve carries kept).
+    /// Build an off-curve claim with self-consistent bindings for `y'`.
+    /// The multiplication-result LogUp balances, but the curve identity fails.
+    /// Keep the stale on-curve carries.
     fn consistent_off_curve_claim() -> PublicKeyCurveSliceClaim {
         let mut claim =
             public_key_curve_slice_claim_from_public_inputs(&generator_inputs()).expect("on-curve");

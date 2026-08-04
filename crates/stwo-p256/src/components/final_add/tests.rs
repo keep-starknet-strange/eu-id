@@ -80,9 +80,8 @@ fn final_add_r2_infinity_yields_x1() {
 
 #[test]
 fn final_add_supports_finite_doubling() {
-    // R_1 == R_2 = 7G => doubling. After Task 6 the AIR supports this
-    // branch (lambda = (3·x² − 3) / (2·y)) and the witness builder
-    // produces a valid `FinalAddClaim`.
+    // Equal points select the doubling branch.
+    // The witness builder must produce a valid `FinalAddClaim`.
     let r = mul(7);
     let claim = FinalAddClaim::from_hints(
         M31::from_u32_unchecked(0),
@@ -135,9 +134,9 @@ fn final_add_base_and_interaction_trace_shapes_balance() {
     let _pre = final_add_preprocessed_columns(&claim).expect("preprocessed");
 }
 
-/// Native binding oracle: a mutated `x3` (the bound `r_x`) must fail
-/// `verify()` — the chord-addition `x3 + x1 + x2 ≡ lamsq` identity no longer
-/// holds, so the witness is rejected before any proof is generated.
+/// Confirms that native verification rejects a changed `x3`.
+///
+/// The change breaks the chord-addition identity before proof generation.
 #[test]
 fn final_add_rejects_mutated_x3() {
     let r1 = mul(7);

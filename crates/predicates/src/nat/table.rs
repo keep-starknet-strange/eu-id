@@ -1,4 +1,5 @@
-use crate::nat::types::{PublicInput, PublicInputKind};
+use crate::nat::nationalities::{signed_alpha2_codes, ASSIGNED_ISO_ALPHA2};
+use crate::nat::types::PublicInput;
 use crate::types::Column;
 use crate::utils::random_m31_cell;
 use air_core::claim_mask::{add_claim_mask_fraction, CLAIM_MASK_MIN_LOG_SIZE};
@@ -15,68 +16,74 @@ use stwo_constraint_framework::{
 };
 
 relation!(NatTableElements, 1);
+relation!(SignedNatTableElements, 1);
 
-/// Base of the reserved Class-D dummy keys for the accepted-set table. Every
-/// valid nationality code — ISO-numeric (`≤ 999`) or alpha-2 packed
-/// (`256·b0 + b1 ≤ 256·90 + 90 = 23130`) — is far below this, so the dummy keys
-/// are UNREACHABLE by any honest membership use. `dummy_key(i) = base + i`.
+const SIGNED_VALID_COUNT: usize = ASSIGNED_ISO_ALPHA2.len() + 2;
+const SIGNED_VALID_LOG_SIZE: u32 = 9;
+
+/// Defines the base for reserved dummy keys in the accepted-set table.
+///
+/// All valid ISO-numeric and packed alpha-2 codes are below this base.
+/// Thus, valid membership values cannot equal dummy keys.
 const NAT_DUMMY_KEY_BASE: u32 = 1 << 24;
 
-/// Preprocessed accepted-set table id. It encodes both the code space (`kind`)
-/// and the exact accepted codes, so a preprocessed column with this id is the
-/// same fixed table for every module that shares it — the dedup/fingerprint
-/// guard rejects any two modules that reuse the id with different content.
+/// Returns the preprocessed accepted-set table ID.
+///
+/// The ID includes the code space and exact accepted codes.
+/// Thus, shared modules with this ID use the same fixed table.
+/// The fingerprint guard rejects different content under one ID.
 ///
 /// This is the Class-D **blinded** value column id (real codes in the reachable
-/// prefix, reserved dummy keys in the suffix); namespaced with `blind/` so it
+/// prefix, reserved dummy keys in the suffix). Namespaced with `blind/` so it
 /// never aliases a non-blinded table of the same accepted set.
 pub fn acceptable_col_id(public: &PublicInput) -> PreProcessedColumnId {
-    let kind = match public.kind {
-        PublicInputKind::IsoNumeric => "iso",
-        PublicInputKind::Alpha2 => "alpha2",
-    };
     let ids: Vec<String> = public.acceptable.iter().map(|c| c.to_string()).collect();
     PreProcessedColumnId {
-        id: format!("nat/acceptable/blind/{kind}/{}", ids.join(",")),
+        id: format!("nat/acceptable/blind/alpha2/{}", ids.join(",")),
     }
 }
 
 /// Preprocessed `is_dummy` selector id for the blinded accepted-set table: `1`
 /// over the reserved dummy suffix, `0` over the reachable prefix.
 pub fn acceptable_dummy_col_id(public: &PublicInput) -> PreProcessedColumnId {
-    let kind = match public.kind {
-        PublicInputKind::IsoNumeric => "iso",
-        PublicInputKind::Alpha2 => "alpha2",
-    };
     let ids: Vec<String> = public.acceptable.iter().map(|c| c.to_string()).collect();
     PreProcessedColumnId {
-        id: format!("nat/acceptable/dummy/{kind}/{}", ids.join(",")),
+        id: format!("nat/acceptable/dummy/alpha2/{}", ids.join(",")),
+    }
+}
+
+pub fn signed_valid_col_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "nat/signed-valid/blind/iso-alpha2-plus-qu-qs".into(),
+    }
+}
+
+pub fn signed_valid_dummy_col_id() -> PreProcessedColumnId {
+    PreProcessedColumnId {
+        id: "nat/signed-valid/dummy/iso-alpha2-plus-qu-qs".into(),
     }
 }
 
 /// Committed row count of the Class-D blinded table, extended to the minimum
 /// claim-mask domain when the accepted set is small.
 pub fn blind_log_size(public: &PublicInput) -> u32 {
-    (public.log_size() + 1).max(CLAIM_MASK_MIN_LOG_SIZE)
+    (public.log_size() + 1)
+        .max(CLAIM_MASK_MIN_LOG_SIZE)
+        .max(SIGNED_VALID_LOG_SIZE)
 }
 
-/// Class-D blinded value column: accepted codes (then zero padding) occupy the
-/// reachable prefix `[0, 2^log_size)`; every remaining row carries a reserved
-/// dummy key starting at `NAT_DUMMY_KEY_BASE`.
+/// Class-D blinded value column: accepted codes occupy exactly the reachable
+/// prefix. Every remaining row carries a reserved dummy key.
 pub fn acceptable_value_column(public: &PublicInput) -> Column {
-    let log_size = public.log_size();
-    let real = 1usize << log_size;
     let total = 1usize << blind_log_size(public);
     let domain = CanonicCoset::new(blind_log_size(public)).circle_domain();
     let mut col = BaseColumn::zeros(total);
     for (i, &code) in public.acceptable.iter().enumerate() {
         col.set(i, M31::from_u32_unchecked(code));
     }
-    // Reachable padding rows stay 0 (no valid code is 0). The suffix contains
-    // reserved, unreachable dummy keys.
-    for i in 0..total - real {
+    for i in 0..total - public.acceptable.len() {
         col.set(
-            real + i,
+            public.acceptable.len() + i,
             M31::from_u32_unchecked(NAT_DUMMY_KEY_BASE + i as u32),
         );
     }
@@ -86,29 +93,27 @@ pub fn acceptable_value_column(public: &PublicInput) -> Column {
 /// Class-D `is_dummy` selector: `0` over the reachable prefix and `1` over the
 /// dummy suffix.
 pub fn acceptable_dummy_column(public: &PublicInput) -> Column {
-    let log_size = public.log_size();
-    let real = 1usize << log_size;
     let total = 1usize << blind_log_size(public);
     let domain = CanonicCoset::new(blind_log_size(public)).circle_domain();
     let mut col = BaseColumn::zeros(total);
-    for i in real..total {
+    for i in public.acceptable.len()..total {
         col.set(i, M31::one());
     }
     CircleEvaluation::new(domain, col)
 }
 
-/// Class-D blinded multiplicity column: the number of marked signed entries on
-/// each accepted-code row, zero on unused real rows, and fresh random cells on
-/// the dummy suffix.
+/// Builds a Class-D blinded multiplicity column.
+///
+/// Used accepted-code rows contain their signed entry count.
+/// Unused real rows contain zero.
+/// Dummy rows contain fresh random cells.
 pub fn gen_blind_multiplicity_column(public: &PublicInput, used_rows: &[usize]) -> Column {
-    let log_size = public.log_size();
-    let real = 1usize << log_size;
     let size = 1usize << blind_log_size(public);
     let mut data = vec![M31::zero(); size];
     for &used_row in used_rows {
         data[used_row] += M31::one();
     }
-    for slot in data.iter_mut().take(size).skip(real) {
+    for slot in data.iter_mut().skip(public.acceptable.len()) {
         *slot = random_m31_cell();
     }
     CircleEvaluation::new(
@@ -117,26 +122,73 @@ pub fn gen_blind_multiplicity_column(public: &PublicInput, used_rows: &[usize]) 
     )
 }
 
-/// Class-D multiplicity-blinded accepted-set table provider (Q-015 §4b).
+pub fn signed_valid_value_column(public: &PublicInput) -> Column {
+    let log_size = blind_log_size(public);
+    let size = 1usize << log_size;
+    let mut data = vec![M31::zero(); size];
+    for (row, code) in signed_alpha2_codes().enumerate() {
+        data[row] = M31::from_u32_unchecked(code);
+    }
+    for row in SIGNED_VALID_COUNT..size {
+        data[row] = M31::from_u32_unchecked(NAT_DUMMY_KEY_BASE + row as u32);
+    }
+    CircleEvaluation::new(
+        CanonicCoset::new(log_size).circle_domain(),
+        BaseColumn::from_iter(data),
+    )
+}
+
+pub fn signed_valid_dummy_column(public: &PublicInput) -> Column {
+    let log_size = blind_log_size(public);
+    let size = 1usize << log_size;
+    let mut data = vec![M31::zero(); size];
+    data[SIGNED_VALID_COUNT..].fill(M31::one());
+    CircleEvaluation::new(
+        CanonicCoset::new(log_size).circle_domain(),
+        BaseColumn::from_iter(data),
+    )
+}
+
+pub fn gen_signed_valid_multiplicity_column(public: &PublicInput, codes: &[u32]) -> Column {
+    let log_size = blind_log_size(public);
+    let size = 1usize << log_size;
+    let valid_codes = signed_alpha2_codes().collect::<Vec<_>>();
+    let mut data = vec![M31::zero(); size];
+    for code in codes {
+        if let Some(row) = valid_codes.iter().position(|valid| valid == code) {
+            data[row] += M31::one();
+        }
+    }
+    for slot in &mut data[SIGNED_VALID_COUNT..] {
+        *slot = random_m31_cell();
+    }
+    CircleEvaluation::new(
+        CanonicCoset::new(log_size).circle_domain(),
+        BaseColumn::from_iter(data),
+    )
+}
+
+/// Provides a Class-D multiplicity-blinded accepted-set table.
 ///
-/// Reads the blinded value column (accepted codes in the reachable prefix,
-/// reserved dummy keys in the suffix) and the `is_dummy` selector, then emits ONE
-/// gated entry per row against the shared relation and the same value: numerator
-/// `-(1 − is_dummy) · multiplicity`.
+/// Reads the blinded value column and the `is_dummy` selector.
+/// The reachable prefix contains accepted codes.
+/// The suffix contains reserved dummy keys.
+/// Each row emits one gated shared-relation entry.
+/// Its numerator is `-(1 − is_dummy) · multiplicity`.
 ///
-/// On a real row (`is_dummy = 0`) the numerator is `-multiplicity` — exactly the
-/// unblinded table. On a dummy row it is identically `0` for ANY random `m`, so
-/// the blind multiplicities never touch the global balance while staying in the
-/// committed multiplicity column as the mask. The dummy keys are unreachable by
-/// honest membership uses (every valid code is `< 2^24`), so no consumer can be
-/// serviced by a dummy row; `is_dummy` is preprocessed (trusted), so a malicious
-/// prover cannot un-gate a dummy row, and both key and gate come from
-/// committed/preprocessed data, so there is no free term.
+/// A real row has numerator `-multiplicity`.
+/// This is the same value as the unblinded table.
+/// A dummy row has numerator `0` for every random multiplicity.
+/// Thus, blind multiplicities do not change the global balance.
+/// Honest consumers cannot use dummy keys because valid codes are below `2^24`.
+///
+/// The trusted `is_dummy` selector prevents a prover from activating a dummy row.
 /// `(1 − is_dummy) · multiplicity` is preprocessed × trace = degree 2, within `D ≤ 3`.
 #[derive(Clone)]
 pub struct NatTableEval {
     pub public: PublicInput,
-    pub lookup_elements: NatTableElements,
+    pub accepted_elements: NatTableElements,
+    pub signed_valid_elements: SignedNatTableElements,
     pub claim_mask_beta: Option<QM31>,
 }
 
@@ -153,20 +205,28 @@ impl FrameworkEval for NatTableEval {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let acc_nat_code = eval.get_preprocessed_column(acceptable_col_id(&self.public));
-        let is_dummy = eval.get_preprocessed_column(acceptable_dummy_col_id(&self.public));
-        let mult = eval.next_trace_mask();
+        let accepted_is_dummy = eval.get_preprocessed_column(acceptable_dummy_col_id(&self.public));
+        let signed_nat_code = eval.get_preprocessed_column(signed_valid_col_id());
+        let signed_is_dummy = eval.get_preprocessed_column(signed_valid_dummy_col_id());
+        let accepted_mult = eval.next_trace_mask();
+        let signed_mult = eval.next_trace_mask();
         // Single gated membership yield `-(1 − is_dummy)·mult`: `-m` on real rows
         // (is_dummy = 0), identically `0` on dummy rows for any committed `m`.
         let one = E::F::from(M31::from_u32_unchecked(1));
         eval.add_to_relation(RelationEntry::new(
-            &self.lookup_elements,
-            -E::EF::from((one - is_dummy) * mult),
+            &self.accepted_elements,
+            -E::EF::from((one.clone() - accepted_is_dummy) * accepted_mult),
             std::slice::from_ref(&acc_nat_code),
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.signed_valid_elements,
+            -E::EF::from((one - signed_is_dummy) * signed_mult),
+            std::slice::from_ref(&signed_nat_code),
         ));
         if let Some(beta) = self.claim_mask_beta {
             add_claim_mask_fraction(&mut eval, beta);
         }
-        eval.finalize_logup();
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
@@ -176,16 +236,14 @@ mod class_d_tests {
     use super::*;
 
     fn public() -> PublicInput {
-        PublicInput::new(vec![276, 250, 300])
+        PublicInput::new(vec![0x4445, 0x4652, 0x4752])
     }
 
-    /// Class-D: the blinded value column doubles the domain, keeps the real
-    /// accepted codes on the lower half, and reserves unreachable dummy keys on
-    /// the upper half; `is_dummy` selects exactly the upper half.
+    /// Confirms that only exact accepted-set rows are reachable.
     #[test]
     fn blinded_table_reserves_unreachable_dummy_keys() {
         let public = public();
-        let real = 1usize << public.log_size();
+        let real = public.acceptable.len();
         let value = acceptable_value_column(&public);
         let dummy = acceptable_dummy_column(&public);
 
@@ -205,14 +263,15 @@ mod class_d_tests {
         assert!(blind_log_size(&public) >= CLAIM_MASK_MIN_LOG_SIZE);
     }
 
-    /// Class-D: the random dummy multiplicities live only in the upper half; the
-    /// real code's row carries the count `1`, and each generation reseeds the
-    /// dummy cells so the committed column masks the real counts.
+    /// Random dummy multiplicities live only outside the exact accepted set.
+    /// Their gated numerators are zero, so they do not change the relation
+    /// balance. Each generation still randomizes the committed dummy suffix.
+    /// This algebraic test does not claim transcript-wide confidentiality.
     #[test]
-    fn blinded_multiplicity_masks_real_counts_with_fresh_dummies() {
+    fn dummy_multiplicity_suffix_is_fresh_and_relation_neutral() {
         let public = public();
-        let real = 1usize << public.log_size();
-        let used_row = 1usize; // 276 sits at sorted index 1
+        let real = public.acceptable.len();
+        let used_row = 1usize; // FR sits at sorted index 1.
 
         let first = gen_blind_multiplicity_column(&public, &[used_row]);
         let second = gen_blind_multiplicity_column(&public, &[used_row]);
@@ -221,7 +280,7 @@ mod class_d_tests {
             1,
             "the used code's real count is 1"
         );
-        // The upper (dummy) half is fresh randomness that differs across runs.
+        // Every dummy row is fresh randomness that differs across runs.
         let upper_first: Vec<u32> = (real..1 << blind_log_size(&public))
             .map(|i| first.values.at(i).0)
             .collect();
@@ -232,5 +291,56 @@ mod class_d_tests {
             upper_first, upper_second,
             "dummy multiplicities must be fresh per generation"
         );
+    }
+
+    #[test]
+    fn signed_valid_table_contains_exact_fixed_domain() {
+        let public = PublicInput::new(vec![0x4445]);
+        let values = signed_valid_value_column(&public);
+        let dummy = signed_valid_dummy_column(&public);
+        let expected = signed_alpha2_codes().collect::<Vec<_>>();
+
+        assert_eq!(expected.len(), 251);
+        assert!(expected.windows(2).all(|pair| pair[0] < pair[1]));
+        for (row, code) in expected.into_iter().enumerate() {
+            assert_eq!(values.values.at(row).0, code);
+            assert_eq!(dummy.values.at(row).0, 0);
+        }
+        for row in SIGNED_VALID_COUNT..1 << blind_log_size(&public) {
+            assert_eq!(dummy.values.at(row).0, 1);
+            assert!(values.values.at(row).0 >= NAT_DUMMY_KEY_BASE);
+        }
+    }
+
+    #[test]
+    fn public_and_signed_tables_share_one_domain() {
+        for public in [
+            PublicInput::new(vec![0x4445]),
+            PublicInput::new(
+                ASSIGNED_ISO_ALPHA2
+                    .iter()
+                    .copied()
+                    .map(crate::nat::nationalities::pack_alpha2)
+                    .collect(),
+            ),
+        ] {
+            let expected = blind_log_size(&public);
+            assert_eq!(acceptable_value_column(&public).domain.log_size(), expected);
+            assert_eq!(acceptable_dummy_column(&public).domain.log_size(), expected);
+            assert_eq!(
+                signed_valid_value_column(&public).domain.log_size(),
+                expected
+            );
+            assert_eq!(
+                signed_valid_dummy_column(&public).domain.log_size(),
+                expected
+            );
+            assert_eq!(
+                gen_signed_valid_multiplicity_column(&public, &[0x4445])
+                    .domain
+                    .log_size(),
+                expected
+            );
+        }
     }
 }

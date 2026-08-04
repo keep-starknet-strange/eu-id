@@ -1,13 +1,9 @@
 //! Wraps the monolithic P256 ECDSA AIR as an [`air_core`] proving module.
 //!
-//! [`P256Prover`] holds a draft and contributes every column across the four
-//! phases the standalone [`super::P256ProofDraft::prove_current_air_monolithic`]
-//! ran inline; [`P256Verifier`] holds the proof's claims and rebuilds the same
-//! components on the verify side. Both delegate to the existing
-//! `gen_current_air_*` trace generators and [`super::P256CurrentAirComponents`],
-//! so there is no duplicated proving logic — only the wiring into the shared
-//! channel and commitment scheme that [`air_core::prove`] / [`air_core::verify`]
-//! own.
+//! [`P256Prover`] holds a draft and contributes all proof columns.
+//! [`P256Verifier`] holds the claims and rebuilds the verifier components.
+//! Both use the existing trace generators and `super::P256CurrentAirComponents`.
+//! This module connects them to the shared channel and commitment scheme.
 //!
 //! This module is a child of `proof`, so it reaches that module's private
 //! claim/relations/component types and trace generators via `super::`.
@@ -15,14 +11,14 @@
 //! ## Deviations the orchestrator absorbs
 //!
 //! - **Constraint-degree FRI sizing.** P256's constraints exceed degree 2, so
-//!   it reports its real [`AirProver::max_constraint_log_degree_bound`]; the
+//!   it reports its real [`AirProver::max_constraint_log_degree_bound`]. The
 //!   orchestrator sizes twiddles from it.
 //! - **Stored polynomial coefficients.** P256 needs the lifting path, so it
 //!   returns `true` from [`AirProver::store_polynomial_coefficients`].
 //! - **Provider-inclusive balance + structured transcript mix.** P256's global
 //!   balance is `lookup_sum` (component sums *plus* public-input provider
-//!   terms), returned from [`Air::claimed_sums`]; its transcript mix is the
-//!   structured [`super::P256CurrentAirInteractionClaim::mix_into`], reproduced
+//!   terms), returned from [`Air::claimed_sums`]. Its transcript mix is the
+//!   structured `super::P256CurrentAirInteractionClaim::mix_into`, reproduced
 //!   via [`Air::mix_claimed_sums`].
 
 use air_core::{
@@ -84,17 +80,14 @@ pub fn verify_current_air(
     verify_current_air_with_preprocessed_root(proof, expected_instances, None)
 }
 
-/// Compute the expected tree-0 (preprocessed) commitment root for a draft, by
-/// running exactly the prover's tree-0 path over [`P256Prover`]. A relying
-/// party derives the draft from its OWN expected statement
-/// (`P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints` is a
-/// deterministic function of the inputs) — never from the proof — and passes
-/// the result to [`verify_current_air_with_preprocessed_root`].
+/// Computes the expected tree-0 commitment root for a draft.
 ///
-/// Uses the UNCACHED computation deliberately: the hinted-mul schedule
-/// preprocessed columns are witness-dependent but keep one column id across
-/// witnesses, so the id-keyed cache in `air_core::compute_preprocessed_root`
-/// would return the first witness's root for every later one.
+/// The function uses the prover tree-0 path.
+/// The relying party must derive the draft from its trusted statement.
+/// Pass the root to [`verify_current_air_with_preprocessed_root`].
+///
+/// This function does not use the identifier-based root cache.
+/// Hinted multiplication schedule columns depend on the witness but share identifiers.
 pub fn current_air_preprocessed_root(
     draft: &P256ProofDraft,
 ) -> Result<air_core::CommitmentRoot, P256ProofError> {
@@ -106,15 +99,12 @@ pub fn current_air_preprocessed_root(
     ))
 }
 
-/// [`verify_current_air`], with the tree-0 (preprocessed) commitment root
-/// pinned — the F-ROOT fix. On `Some(expected)`, the proof's
-/// `stark_proof.commitments[0]` must equal `expected`, checked fail-closed
-/// BEFORE the root is absorbed into the transcript, so a forged preprocessed
-/// tree (range tables, hinted-mul schedules, constants) is rejected up front
-/// with [`P256ProofError::PreprocessedRootMismatch`]. Callers obtain
-/// `expected` from [`current_air_preprocessed_root`] over their own trusted
-/// statement, never from the proof. `None` keeps the legacy unpinned behavior
-/// for self-proving tests only.
+/// Verifies with an optional expected tree-0 commitment root.
+///
+/// The verifier checks a supplied root before it enters the transcript.
+/// A mismatch returns [`P256ProofError::PreprocessedRootMismatch`].
+/// Callers compute the root from their trusted statement.
+/// Use `None` only for local prove-and-verify tests.
 pub fn verify_current_air_with_preprocessed_root(
     proof: P256CurrentAirProof<Blake2sMerkleHasher>,
     expected_instances: &[PublicEcdsaInstance<M31>],
@@ -126,9 +116,8 @@ pub fn verify_current_air_with_preprocessed_root(
         stark_proof,
     } = proof;
 
-    // Bind the proof to the caller's expected statement (see the monolithic
-    // verifier's O1 note): `Ok(())` must mean "this `(z, r, s, pub)` verifies",
-    // not "some signature the prover embedded verifies".
+    // Bind the proof to the caller expected statement.
+    // Successful verification applies to the supplied `(z, r, s, pub)` tuple.
     if claim.public_inputs.instances.as_slice() != expected_instances {
         return Err(P256ProofError::PublicInstanceMismatch);
     }
@@ -179,11 +168,13 @@ pub struct P256Prover<'a> {
     relations: Option<P256CurrentAirRelations>,
     interaction_claim: Option<P256CurrentAirInteractionClaim>,
     components: Option<P256CurrentAirComponents>,
-    /// Cross-module `z` binding: when set, the module additionally draws a
-    /// [`ScalarZRelation`], shares it through [`Self::scalar_z_handle`], and folds
-    /// an analytic `−1/combine(sig_id, z)` provider term into its claimed sum —
-    /// the counterpart the digest-bind bridge consumes. Off for a standalone
-    /// P256 proof, leaving its transcript and balance unchanged.
+    /// Enable cross-module `z` binding.
+    ///
+    /// When enabled, the module draws a [`ScalarZRelation`]. It shares the relation
+    /// through [`Self::scalar_z_handle`]. It also folds the analytic provider term
+    /// `−1/combine(sig_id, z)` into its claimed sum. The digest-bind bridge consumes
+    /// this counterpart. Standalone P-256 proofs disable it, preserving their
+    /// transcript and balance.
     bind_z: bool,
     scalar_z_handle: Option<SharedScalarZRelation>,
     scalar_z: Option<ScalarZRelation>,
@@ -255,8 +246,8 @@ impl<'a> P256Prover<'a> {
 
     /// Enable the cross-module `z` binding: the module draws and shares a
     /// [`ScalarZRelation`] through `handle` and yields the analytic
-    /// `(sig_id, z)` provider term. Set this iff the composed proof includes the
-    /// digest-bind bridge that consumes the same relation; the matching
+    /// `(sig_id, z)` provider term. Set this if and only if the composed proof includes the
+    /// digest-bind bridge that consumes the same relation. The matching
     /// [`P256Verifier`] must be built with [`P256Verifier::with_z_binding`].
     pub fn with_z_binding(mut self, handle: SharedScalarZRelation) -> Self {
         self.bind_z = true;
@@ -274,9 +265,8 @@ impl<'a> P256Prover<'a> {
         self
     }
 
-    /// The PCS config this circuit is calibrated for. A combined proof that
-    /// includes the P256 module should drive the whole proof with this config
-    /// (it is the security-calibrated one); `lifting_log_size` is `None`, so the
+    /// The PCS config this circuit uses. A combined proof with the P256 module
+    /// uses this config for the complete proof. `lifting_log_size` is `None`, so the
     /// orchestrator still sizes twiddles from the max constraint bound across
     /// all modules.
     pub fn pcs_config(&self) -> PcsConfig {
@@ -341,7 +331,7 @@ impl Air for P256Prover<'_> {
 
     fn claimed_sums(&self) -> Vec<QM31> {
         // The whole `lookup_sum` (component sums plus public-input provider
-        // terms) as one balance entry; the orchestrator rejects unless it is
+        // terms) as one balance entry. The orchestrator rejects unless it is
         // zero, matching the monolithic verifier's `lookup_sum == 0` gate. When
         // the `z` binding is on, add the analytic `(sig_id, z)` provider term the
         // bridge consumes.
@@ -385,7 +375,7 @@ impl Air for P256Prover<'_> {
 impl AirProver for P256Prover<'_> {
     fn max_log_size(&self) -> u32 {
         // Unused by the orchestrator for P256 (it sizes from
-        // `max_constraint_log_degree_bound`); reported for trait completeness.
+        // `max_constraint_log_degree_bound`). Reported for trait completeness.
         self.max_constraint_bound
     }
 
@@ -449,7 +439,7 @@ impl AirProver for P256Prover<'_> {
             .base
             .as_mut()
             .expect("base trace generated in P256Prover::new");
-        // Move out the committed columns; the rest of `base` feeds the
+        // Move out the committed columns. The rest of `base` feeds the
         // interaction phase (matching the monolithic `std::mem::take`).
         let base_columns = std::mem::take(&mut base.columns);
         tb.extend_evals(base_columns);
@@ -506,12 +496,10 @@ impl P256Verifier {
         }
     }
 
-    /// The PCS config this proof must have been produced under — the verifier-side
-    /// counterpart of [`P256Prover::pcs_config`]. A combined proof that embeds the
-    /// P256 module inherits this config for the whole STARK, so the combined
-    /// verifier pins the proof-supplied config against this value (the standalone
-    /// `verify_current_air` does the same). This stops a malicious prover from
-    /// submitting a weakened FRI/grinding setting.
+    /// Returns the required PCS configuration for this proof.
+    ///
+    /// A combined STARK inherits this configuration from the P256 module.
+    /// Verification rejects a weaker FRI or proof-of-work configuration.
     pub fn expected_pcs_config(&self) -> PcsConfig {
         p256_stark_monolithic_profile_config(
             self.proof_claim
@@ -524,7 +512,7 @@ impl P256Verifier {
 
     /// Match a [`P256Prover::with_z_binding`] proof: draw and share the same
     /// [`ScalarZRelation`] and fold the analytic provider term into the balance.
-    /// Must be set iff the prover set it.
+    /// Set this option if and only if the prover set it.
     pub fn with_z_binding(mut self, handle: SharedScalarZRelation) -> Self {
         self.bind_z = true;
         self.scalar_z_handle = Some(handle);
@@ -611,16 +599,10 @@ impl Air for P256Verifier {
         self.ids.clone()
     }
 
-    // NOTE: `P256Verifier` deliberately does NOT override
-    // `Air::canonical_preprocessed_columns`. Its preprocessed tree includes the
-    // legacy hinted-mul scalar-multiplication schedule, which is
-    // witness-dependent and cannot be reconstructed from public data alone. The
-    // trait default therefore returns `Err`, so every production verify path
-    // that runs `air_core::compute_canonical_preprocessed_root` over a module set
-    // containing this module fails closed. This is by design: the classical
-    // (non-`ec-coprocessor`) build cannot be canonically verified — the
-    // `ec-coprocessor` build proves the ECDSA statement in-circuit instead of
-    // reconstructing this schedule. See the trait-default doc in `air-core`.
+    // `P256Verifier` uses the default `canonical_preprocessed_columns` method.
+    // Its hinted multiplication schedule depends on the witness.
+    // Public data cannot rebuild this schedule.
+    // Thus, canonical reconstruction returns an error and verification fails closed.
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(
@@ -639,10 +621,10 @@ impl Air for P256Verifier {
     }
 }
 
-/// Per-tree column log-sizes. Tree 0/1 sizes are independent of the interaction
-/// claim and relations; tree 2's column count depends on the interaction claim
-/// but not relation values, so dummy relations suffice for sizing (matching the
-/// monolithic verifier's use of dummy bounds for the early trees).
+/// Returns column log sizes for each commitment tree.
+///
+/// Tree 0 and tree 1 do not depend on the interaction claim.
+/// The tree-2 count depends on the claim but not on relation values.
 fn layout(
     proof_claim: &P256CurrentAirProofClaim,
     ids: &[PreProcessedColumnId],

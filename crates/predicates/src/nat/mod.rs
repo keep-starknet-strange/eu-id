@@ -11,14 +11,12 @@ pub mod witness;
 
 use air::{NatProver, NatVerifier};
 use types::{
-    Error, InputError, PrivateInput, Proof, PublicInput, PublicInputKind, Witness,
-    MAX_PRESENTED_NATIONALITIES,
+    Error, InputError, PrivateInput, Proof, PublicInput, Witness, MAX_PRESENTED_NATIONALITIES,
 };
 
-use crate::nat::nationalities::Nationality;
+use crate::nat::nationalities::{is_assigned_iso_alpha2, is_valid_signed_alpha2};
 use crate::predicate::{PredicateProver, PredicateVerifier};
 use air_core::{prove, verify, Air};
-use strum::IntoEnumIterator;
 use stwo::core::fields::qm31::QM31;
 use stwo::core::pcs::PcsConfig;
 
@@ -38,26 +36,9 @@ impl NationalityPredicate {
         if public.acceptable.is_empty() {
             return Err(InputError::AcceptableSetTooSmall.into());
         }
-        match public.kind {
-            PublicInputKind::IsoNumeric => {
-                // Nationality enum variants are ordered by numeric code (iso-preset sorts by code).
-                let valid_codes: Vec<u32> = Nationality::iter().map(|n| n as u32).collect();
-                for &code in &public.acceptable {
-                    if valid_codes.binary_search(&code).is_err() {
-                        return Err(InputError::InvalidNationalityCode(code).into());
-                    }
-                }
-            }
-            PublicInputKind::Alpha2 => {
-                // Each code is two uppercase ASCII letters packed as `256*b0 + b1`.
-                for &code in &public.acceptable {
-                    let [first, second] = u16::try_from(code)
-                        .map(u16::to_be_bytes)
-                        .map_err(|_| InputError::InvalidNationalityCode(code))?;
-                    if !first.is_ascii_uppercase() || !second.is_ascii_uppercase() {
-                        return Err(InputError::InvalidNationalityCode(code).into());
-                    }
-                }
+        for &code in &public.acceptable {
+            if !is_assigned_iso_alpha2(code) {
+                return Err(InputError::InvalidNationalityCode(code).into());
             }
         }
         Ok(())
@@ -74,6 +55,11 @@ impl NationalityPredicate {
                 max: MAX_PRESENTED_NATIONALITIES,
             }
             .into());
+        }
+        for &code in &private.nationalities {
+            if !is_valid_signed_alpha2(code) {
+                return Err(InputError::InvalidNationalityCode(code).into());
+            }
         }
         let accepted_rows: Vec<_> = private
             .nationalities
@@ -99,8 +85,6 @@ impl NationalityPredicate {
         let claimed_sums = prover.claimed_sums();
         Ok(Proof {
             public: public.clone(),
-            nationality_count: u16::try_from(private.nationalities.len())
-                .expect("validated nationality count fits u16"),
             nat_claimed_sum: claimed_sums[0],
             table_claimed_sum: claimed_sums[1],
             stark_proof,
@@ -109,9 +93,8 @@ impl NationalityPredicate {
 
     /// Verify a standalone [`Proof`] of this predicate.
     pub fn verify(&self, proof: &Proof) -> Result<(), Error> {
-        let mut verifier = self.verifier_with_count(
+        let mut verifier = self.verifier_for_private_prefix(
             &proof.public,
-            usize::from(proof.nationality_count),
             &[proof.nat_claimed_sum, proof.table_claimed_sum],
         )?;
         verify(&mut [&mut verifier], &proof.stark_proof)?;
@@ -119,37 +102,19 @@ impl NationalityPredicate {
         Ok(())
     }
 
-    /// Construct a verifier for a complete signed nationality array.
-    ///
-    /// The count is proof metadata, mixed into the transcript and capped here;
-    /// when credential binding is enabled, relation balance forces it to equal
-    /// the number of entries emitted by the semantic mdoc scope.
-    pub fn verifier_with_count(
+    /// Construct a verifier for a private, nonempty signed nationality prefix.
+    /// Credential relation balance fixes the private prefix to the signed mdoc
+    /// entries without exposing their count as proof metadata.
+    pub fn verifier_for_private_prefix(
         &self,
         public: &PublicInput,
-        nationality_count: usize,
         claimed_sums: &[QM31],
     ) -> Result<NatVerifier, Error> {
         self.validate(public)?;
-        if nationality_count == 0 {
-            return Err(InputError::NoMatch.into());
-        }
-        if nationality_count > MAX_PRESENTED_NATIONALITIES {
-            return Err(InputError::TooManyNationalities {
-                count: nationality_count,
-                max: MAX_PRESENTED_NATIONALITIES,
-            }
-            .into());
-        }
         if claimed_sums.len() != 2 {
             return Err(InputError::InvalidProof.into());
         }
-        Ok(NatVerifier::new(
-            public,
-            nationality_count,
-            claimed_sums[0],
-            claimed_sums[1],
-        ))
+        Ok(NatVerifier::new(public, claimed_sums[0], claimed_sums[1]))
     }
 }
 
@@ -172,9 +137,7 @@ impl PredicateVerifier for NationalityPredicate {
     type Verifier = NatVerifier;
 
     fn verifier(&self, public: &PublicInput, claimed_sums: &[QM31]) -> Result<NatVerifier, Error> {
-        // The generic trait predates multi-entry presentations. Standalone and
-        // mdoc callers that carry a count use `verifier_with_count`.
-        self.verifier_with_count(public, 1, claimed_sums)
+        self.verifier_for_private_prefix(public, claimed_sums)
     }
 }
 
@@ -187,9 +150,12 @@ mod tests {
         NationalityPredicate::new(PcsConfig::default())
     }
 
-    // DE=276, FR=250, GR=300, US=840
+    fn alpha2(code: &[u8; 2]) -> u32 {
+        crate::nat::nationalities::pack_alpha2(*code)
+    }
+
     fn eu_set() -> PublicInput {
-        PublicInput::new(vec![276, 250, 300])
+        PublicInput::new(vec![alpha2(b"DE"), alpha2(b"FR"), alpha2(b"GR")])
     }
 
     fn private(codes: &[u32]) -> PrivateInput {
@@ -203,15 +169,17 @@ mod tests {
     #[test]
     fn proves_and_verifies_single_nationality_in_set() {
         let p = predicate();
-        let proof = p.prove(&eu_set(), &private(&[276])).unwrap();
+        let proof = p.prove(&eu_set(), &private(&[alpha2(b"DE")])).unwrap();
         p.verify(&proof).unwrap();
     }
 
     #[test]
     fn proves_and_verifies_first_matching_nationality_chosen() {
-        // prover holds FR and DE; both are acceptable; FR appears first
+        // prover holds FR and DE. Both are acceptable. FR appears first
         let p = predicate();
-        let proof = p.prove(&eu_set(), &private(&[250, 276])).unwrap();
+        let proof = p
+            .prove(&eu_set(), &private(&[alpha2(b"FR"), alpha2(b"DE")]))
+            .unwrap();
         p.verify(&proof).unwrap();
         assert_eq!(proof.public.acceptable, eu_set().acceptable);
     }
@@ -220,46 +188,52 @@ mod tests {
     fn proves_and_verifies_last_nationality_matches() {
         // only the last nationality is in the acceptable set
         let p = predicate();
-        let proof = p.prove(&eu_set(), &private(&[840, 276])).unwrap();
+        let proof = p
+            .prove(&eu_set(), &private(&[alpha2(b"US"), alpha2(b"DE")]))
+            .unwrap();
         p.verify(&proof).unwrap();
     }
 
     #[test]
     fn proves_and_verifies_two_entry_acceptable_set() {
         let p = predicate();
-        let public = PublicInput::new(vec![276, 300]);
-        let proof = p.prove(&public, &private(&[276])).unwrap();
+        let public = PublicInput::new(vec![alpha2(b"DE"), alpha2(b"GR")]);
+        let proof = p.prove(&public, &private(&[alpha2(b"DE")])).unwrap();
         p.verify(&proof).unwrap();
     }
 
     #[test]
     fn proves_and_verifies_large_acceptable_set() {
         // 249 ISO codes — exercises log_size=8 table
-        use crate::nat::nationalities::Nationality;
-        use strum::IntoEnumIterator;
         let p = predicate();
-        let all: Vec<u32> = Nationality::iter().map(|n| n as u32).collect();
+        let all = crate::nat::nationalities::assigned_iso_alpha2_codes()
+            .iter()
+            .copied()
+            .map(crate::nat::nationalities::pack_alpha2)
+            .collect();
         let public = PublicInput::new(all);
-        let proof = p.prove(&public, &private(&[276])).unwrap();
+        let proof = p.prove(&public, &private(&[alpha2(b"DE")])).unwrap();
         p.verify(&proof).unwrap();
     }
 
     #[test]
     fn public_input_new_sorts_and_deduplicates() {
-        let public = PublicInput::new(vec![300, 276, 250, 276]);
-        assert_eq!(public.acceptable, vec![250, 276, 300]);
-    }
-
-    // --- Alpha-2 (mdoc) path ---
-
-    fn alpha2(code: &[u8; 2]) -> u32 {
-        u32::from(u16::from_be_bytes(*code))
+        let public = PublicInput::new(vec![
+            alpha2(b"GR"),
+            alpha2(b"DE"),
+            alpha2(b"FR"),
+            alpha2(b"DE"),
+        ]);
+        assert_eq!(
+            public.acceptable,
+            vec![alpha2(b"DE"), alpha2(b"FR"), alpha2(b"GR")]
+        );
     }
 
     #[test]
     fn proves_and_verifies_alpha2_public_input() {
         let p = predicate();
-        let public = PublicInput::new_alpha2(vec![alpha2(b"FR"), alpha2(b"DE")]);
+        let public = PublicInput::new(vec![alpha2(b"FR"), alpha2(b"DE")]);
 
         let proof = p.prove(&public, &private(&[alpha2(b"DE")])).unwrap();
 
@@ -270,19 +244,19 @@ mod tests {
     #[test]
     fn alpha2_rejects_nationality_not_in_acceptable_set() {
         let p = predicate();
-        let public = PublicInput::new_alpha2(vec![alpha2(b"FR"), alpha2(b"DE")]);
+        let public = PublicInput::new(vec![alpha2(b"FR"), alpha2(b"DE")]);
         // Prover holds US, which is a valid alpha-2 code but not accepted.
         let err = p.prove(&public, &private(&[alpha2(b"US")])).unwrap_err();
         assert!(matches!(err, Error::Input(InputError::NoMatch)));
     }
 
     #[test]
-    fn validate_rejects_non_alpha2_code_in_alpha2_mode() {
+    fn validate_rejects_unassigned_public_code() {
         let p = predicate();
         let invalid = alpha2(b"D1");
         let err = p
             .prove(
-                &PublicInput::new_alpha2(vec![alpha2(b"DE"), invalid]),
+                &PublicInput::new(vec![alpha2(b"DE"), invalid]),
                 &private(&[alpha2(b"DE")]),
             )
             .unwrap_err();
@@ -298,17 +272,17 @@ mod tests {
     #[test]
     fn proves_and_verifies_singleton_acceptable_set() {
         let p = predicate();
-        let public = PublicInput::new(vec![276]);
-        let proof = p.prove(&public, &private(&[276])).unwrap();
+        let public = PublicInput::new(vec![alpha2(b"DE")]);
+        let proof = p.prove(&public, &private(&[alpha2(b"DE")])).unwrap();
         p.verify(&proof).unwrap();
-        assert_eq!(proof.public.acceptable, vec![276]);
+        assert_eq!(proof.public.acceptable, vec![alpha2(b"DE")]);
     }
 
     #[test]
     fn validate_rejects_empty_acceptable_set() {
         let p = predicate();
         let err = p
-            .prove(&PublicInput::new(vec![]), &private(&[276]))
+            .prove(&PublicInput::new(vec![]), &private(&[alpha2(b"DE")]))
             .unwrap_err();
         assert!(matches!(
             err,
@@ -317,23 +291,27 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_non_iso_code_in_acceptable_set() {
+    fn public_policy_rejects_private_only_and_unassigned_codes() {
         let p = predicate();
-        // 1 is not an assigned ISO 3166-1 numeric code
-        let err = p
-            .prove(&PublicInput::new(vec![276, 1]), &private(&[276]))
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Input(InputError::InvalidNationalityCode(1))
-        ));
+        for invalid in [alpha2(b"QU"), alpha2(b"QS"), alpha2(b"XK"), alpha2(b"ZZ")] {
+            let err = p
+                .prove(
+                    &PublicInput::new(vec![alpha2(b"DE"), invalid]),
+                    &private(&[alpha2(b"DE")]),
+                )
+                .unwrap_err();
+            assert!(matches!(
+                err,
+                Error::Input(InputError::InvalidNationalityCode(code)) if code == invalid
+            ));
+        }
     }
 
     #[test]
     fn witness_rejects_no_matching_nationality() {
         let p = predicate();
-        // US (840) is not in the EU set
-        let err = p.prove(&eu_set(), &private(&[840])).unwrap_err();
+        // US is valid but not in the EU set.
+        let err = p.prove(&eu_set(), &private(&[alpha2(b"US")])).unwrap_err();
         assert!(matches!(err, Error::Input(InputError::NoMatch)));
     }
 
@@ -344,12 +322,48 @@ mod tests {
         assert!(matches!(err, Error::Input(InputError::NoMatch)));
     }
 
+    #[test]
+    fn private_user_assigned_codes_are_valid_but_not_policy_members() {
+        let p = predicate();
+        for signed in [
+            vec![alpha2(b"DE"), alpha2(b"QU")],
+            vec![alpha2(b"QS"), alpha2(b"DE")],
+        ] {
+            let proof = p.prove(&eu_set(), &private(&signed)).unwrap();
+            p.verify(&proof).unwrap();
+        }
+    }
+
+    #[test]
+    fn fixed_signed_domain_rejects_every_invalid_active_extra() {
+        let p = predicate();
+        let public = PublicInput::new(vec![alpha2(b"DE")]);
+        for invalid in [alpha2(b"zz"), alpha2(b"De"), alpha2(b"ZZ"), alpha2(b"XK")] {
+            let forged = Witness {
+                public: public.clone(),
+                nationalities: vec![alpha2(b"DE"), invalid],
+                accepted: vec![true, false],
+                accepted_rows: vec![Some(0), None],
+            };
+            let mut prover = NatProver::new(&public, &forged);
+            let stark_proof = prove(&mut [&mut prover], p.pcs_config).unwrap();
+            let claimed_sums = prover.claimed_sums();
+            let mut verifier = p
+                .verifier_for_private_prefix(&public, &claimed_sums)
+                .unwrap();
+            assert!(
+                verify(&mut [&mut verifier], &stark_proof).is_err(),
+                "invalid active code {invalid:#06x} must leave the fixed lookup unbalanced"
+            );
+        }
+    }
+
     // --- Proof mutation ---
 
     #[test]
     fn verification_fails_on_mutated_nat_claimed_sum() {
         let p = predicate();
-        let mut proof = p.prove(&eu_set(), &private(&[276])).unwrap();
+        let mut proof = p.prove(&eu_set(), &private(&[alpha2(b"DE")])).unwrap();
         proof.nat_claimed_sum = -proof.nat_claimed_sum;
         assert!(p.verify(&proof).is_err());
     }
@@ -357,34 +371,43 @@ mod tests {
     #[test]
     fn verification_fails_on_mutated_table_claimed_sum() {
         let p = predicate();
-        let mut proof = p.prove(&eu_set(), &private(&[276])).unwrap();
+        let mut proof = p.prove(&eu_set(), &private(&[alpha2(b"DE")])).unwrap();
         proof.table_claimed_sum = -proof.table_claimed_sum;
         assert!(p.verify(&proof).is_err());
     }
 
     #[test]
-    fn verification_fails_on_mutated_nationality_count() {
+    fn non_power_of_two_padding_row_cannot_accept_zero() {
         let p = predicate();
-        let mut proof = p.prove(&eu_set(), &private(&[840, 276])).unwrap();
-        proof.nationality_count = 1;
+        let public = eu_set();
+        assert_eq!(public.acceptable.len(), 3);
+        let forged = Witness {
+            public: public.clone(),
+            nationalities: vec![alpha2(b"ZZ")],
+            accepted: vec![true],
+            accepted_rows: vec![Some(public.acceptable.len())],
+        };
+        let mut prover = NatProver::new(&public, &forged);
+        let stark_proof = prove(&mut [&mut prover], p.pcs_config).unwrap();
+        let claimed_sums = prover.claimed_sums();
+        let mut verifier = p
+            .verifier_for_private_prefix(&public, &claimed_sums)
+            .unwrap();
         assert!(
-            p.verify(&proof).is_err(),
-            "the complete signed-array length is transcript-bound"
+            verify(&mut [&mut verifier], &stark_proof).is_err(),
+            "a power-of-two padding row must never act as an accepted nationality"
         );
     }
 
-    /// Class-D balance-tamper (Q-015 §4b): the blinded accepted-set table's
-    /// contribution to the global LogUp balance is load-bearing. A round-trip
-    /// through the blinded table verifies; shifting the blinded table's claimed
-    /// sum by any nonzero amount breaks the balance and the verifier rejects.
-    /// This proves the dummy-region cancelling twin holds the balance rather than
-    /// leaving free slack a prover could exploit.
+    /// Confirms that a changed Class-D claimed sum fails verification.
+    ///
+    /// The claimed sum must match the committed real-row multiplicities.
     #[test]
     fn class_d_blinded_table_balance_tamper_is_rejected() {
         use stwo::core::fields::qm31::QM31;
         let p = predicate();
         // Round-trip through the Class-D blinded NatTable.
-        let proof = p.prove(&eu_set(), &private(&[276])).unwrap();
+        let proof = p.prove(&eu_set(), &private(&[alpha2(b"DE")])).unwrap();
         p.verify(&proof).expect("blinded-table round-trip verifies");
 
         // Shift the blinded table's claimed sum by a nonzero delta.
@@ -400,8 +423,8 @@ mod tests {
     fn verification_fails_on_mutated_acceptable_set() {
         // Replacing one code changes the preprocessed column commitment
         let p = predicate();
-        let mut proof = p.prove(&eu_set(), &private(&[276])).unwrap();
-        proof.public.acceptable[0] = 840; // swap FR(250) → US(840)
+        let mut proof = p.prove(&eu_set(), &private(&[alpha2(b"DE")])).unwrap();
+        proof.public.acceptable[0] = alpha2(b"US");
         assert!(p.verify(&proof).is_err());
     }
 }

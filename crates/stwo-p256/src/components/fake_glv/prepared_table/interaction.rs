@@ -68,7 +68,7 @@ impl PreparedTableProjectiveSourceInteractionClaim {
     }
 }
 
-/// Unpinned provider trace (test-only; the monolith uses the pinned gen).
+/// Unpinned provider trace (test-only, the monolith uses the pinned gen).
 #[cfg(test)]
 pub(crate) fn gen_prepared_table_ec_row_interaction_trace(
     base: &[M31ColumnEval],
@@ -133,12 +133,11 @@ impl PreparedTableEcRowPinnedInteractionClaim {
     }
 }
 
-/// Interaction trace for the monolithic EC-row provider: the base
-/// `PreparedTableEcRowRelation` yield plus the 30 `PIN_SCHEDULE` fractions, in
-/// the exact order emitted by `PreparedTableEcRowEval::evaluate`. When
-/// `final_check_hint` is `Some`, one more fraction is appended (the `DoubleR`
-/// `R_i` yield with multiplicity `-2`) to mirror the AIR's FinalCheckHint
-/// emission for final-add and curve membership.
+/// Builds the interaction trace for the monolithic EC-row provider.
+///
+/// The trace starts with the base relation and 30 pinning fractions.
+/// Their order matches `PreparedTableEcRowEval::evaluate`.
+/// An optional final-check hint adds one `R_i` fraction.
 pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
     base: &[M31ColumnEval],
     relation: &PreparedTableEcRowRelation,
@@ -208,7 +207,7 @@ pub(crate) fn gen_prepared_table_ec_row_pinned_interaction_trace(
 
     // Optional FinalCheckHint entry: yield `R_i` (= `lhs`) gated `active *
     // DoubleR_flag`, multiplicity `-2` (final-add + curve membership). Emitted
-    // iff a relation is supplied, in lockstep with the AIR's
+    // if and only if a relation exists, in step with the AIR
     // `if let Some(final_check_hint)` emission.
     if let Some(final_check_hint) = final_check_hint {
         append_packed_entry(&mut entries, n_vec_rows, |vec_row| {
@@ -510,8 +509,8 @@ fn prepared_table_ec_row_unpacked_relation_values(
     })
 }
 
-// Interaction trace for the prepared-table projective-source CONSUMER (Phase 3
-// narrow layout). Emits, in the exact order the eval does under one
+// Interaction trace for the narrow prepared-table projective-source consumer.
+// It emits entries in evaluator order under one
 // `finalize_logup_batched`:
 //   0. the `PreparedTableEcRowRelation` consume (+active),
 //   1..=6. the 6 narrow `ProjectiveRcbMulResultRelation` consumes (+gate),
@@ -520,8 +519,8 @@ fn prepared_table_ec_row_unpacked_relation_values(
 // `has_muls`).
 //
 // LogUp batch size: 1 fraction per interaction column. The op-mux consume
-// entries (M0.rhs at index 2, M1.rhs at index 4) have degree-2 tuple values;
-// pairing them with a neighbor pushes the logup constraint past degree 3,
+// entries (M0.rhs at index 2, M1.rhs at index 4) have degree-2 tuple values.
+// Pairing them with a neighbor pushes the logup constraint past degree 3,
 // which overflows the `log_size + 1` bound. `finalize_logup_batched` only
 // supports a uniform batch size, so everything goes solo.
 pub(crate) const PREPARED_CONSUMER_LOGUP_BATCH: usize = 1;
@@ -674,7 +673,7 @@ pub(crate) fn narrow_mul_consume_sum(
 }
 
 /// The prepared-table consumer's narrow-consume column layout (6 metadata
-/// columns — `table_index` follows `op`; points start at column 6).
+/// columns — `table_index` follows `op`. Points start at column 6).
 pub(crate) fn prepared_narrow_mul_columns() -> NarrowMulConsumeColumns {
     NarrowMulConsumeColumns {
         source: 1,
@@ -811,7 +810,7 @@ pub(crate) struct PreparedTableProjectiveSourceConsumerInteraction {
     pub columns: ColumnVec<M31ColumnEval>,
     pub ec_row_sum: SecureField,
     pub mul_result_sum: SecureField,
-    /// Σ of the EC-op header yields (−gate); balances against the silo's
+    /// Σ of the EC-op header yields (−gate). Balances against the silo's
     /// header consume.
     pub header_yield_sum: SecureField,
 }

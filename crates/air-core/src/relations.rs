@@ -1,22 +1,18 @@
 //! Cross-module LogUp relations shared by composed circuits.
 //!
-//! A relation drawn inside one module's `draw_relations` is private to that
-//! module — its `LookupElements` challenge is sampled at that module's point in
-//! the shared transcript. For two *different* modules to balance a yield against
-//! a require they must combine over the **same** drawn `LookupElements`. That is
-//! what lives here: relation types both a provider crate and a consumer crate
-//! can name, plus a [`SharedDigestRelation`] handle the orchestrator uses to
-//! hand the single drawn instance from the module that draws it to the module
-//! that reads it.
+//! A module draws its private relation at its position in the shared transcript.
+//! Two modules must use the same `LookupElements` to balance a yield and require.
+//! This module defines relation types that providers and consumers share.
+//! [`SharedDigestRelation`] gives both modules the same drawn relation.
 //!
 //! Today this hosts two byte-level bridges:
 //!
 //! - the SHA→consumer **digest byte bridge**: SHA-256 yields its 32-byte
-//!   final-block digest; the P256 ECDSA module requires the same 32 bytes as its
+//!   final-block digest. The P256 ECDSA module requires the same 32 bytes as its
 //!   message hash `z`.
 //! - the SHA→predicate **credential-field byte bridge**: SHA-256 yields the byte
-//!   windows of the signed credential's fields (date of birth, nationality);
-//!   each predicate requires exactly those bytes so the attribute it reasons
+//!   windows of the signed credential's fields (date of birth, nationality).
+//!   Each predicate requires exactly those bytes so the attribute it reasons
 //!   about is the one that was signed.
 //!
 //! Both reuse the same shape — expose some trace bytes as an 8-bit LogUp
@@ -38,15 +34,15 @@ relation!(DigestBytesRelation, DIGEST_BYTES_ARITY);
 ///
 /// The orchestrator ([`crate::prove`] / [`crate::verify`]) drives every module
 /// through `draw_relations` in module order against one channel. The **provider**
-/// module draws the relation inside its bundle and [`set`]s it here; the
+/// module draws the relation inside its bundle and [`set`]s it here. The
 /// **consumer** module reads it back with [`get`] during its interaction +
 /// component phases, which the orchestrator runs only *after* every module has
-/// drawn — so the handle is always populated by the time the consumer needs it.
-/// The same handle is reconstructed identically on prove and verify, so the
-/// challenge is deterministic.
+/// drawn. Thus, the handle is ready before the consumer uses it.
+/// Proving and verification reconstruct the same handle.
+/// Thus, both operations use the same challenge.
 ///
 /// Interior mutability behind an [`Rc`] because the producer and consumer are
-/// two distinct module objects; the orchestrator drives them single-threaded, so
+/// two distinct module objects. The orchestrator drives them single-threaded, so
 /// no `Sync` is required. `Clone` and `Default` are hand-written so they do not
 /// demand `R: Clone` / `R: Default` (the `Rc` is always cloneable).
 ///
@@ -82,9 +78,11 @@ impl<R: Clone> SharedRelation<R> {
         *self.0.borrow_mut() = Some(relation);
     }
 
-    /// Read the drawn relation. Panics if called before the provider has drawn
-    /// it — a wiring bug (the orchestrator guarantees all `draw_relations` run
-    /// before any consumer interaction/component phase).
+    /// Read the drawn relation.
+    ///
+    /// This panics when the provider has not drawn it. Such a call is a wiring
+    /// bug. The orchestrator runs every `draw_relations` call before consumer
+    /// interaction and component phases.
     pub fn get(&self) -> R {
         self.0
             .borrow()
@@ -103,26 +101,24 @@ pub type SharedDigestRelation = SharedRelation<DigestBytesRelation>;
 
 /// Number of base-field cells in the cross-module credential-field relation:
 /// `(field_id, byte_index, value)`. The SHA preimage field-exposure provider
-/// yields one such tuple per exposed credential byte; each predicate consumer
+/// yields one such tuple per exposed credential byte. Each predicate consumer
 /// requires exactly the tuples of the field it binds. Keying on
-/// `(field_id, byte_index)` lets one shared channel carry
-/// every field's bytes without an index column — the producer and consumer pin
-/// the same position by emitting the same first two cells.
+/// `(field_id, byte_index)` lets one shared channel carry every field.
+/// The producer and consumer emit the same first two cells to pin each position.
 pub const FIELD_BYTES_ARITY: usize = 3;
 
 relation!(FieldBytesRelation, FIELD_BYTES_ARITY);
 
 /// The SHA → predicate credential-field channel handle. One shared channel
-/// carries every exposed field byte; the `field_id` cell distinguishes which
+/// carries every exposed field byte. The `field_id` cell distinguishes which
 /// credential field a byte belongs to.
 pub type SharedFieldRelation = SharedRelation<FieldBytesRelation>;
 
 /// Opaque credential-field tags carried in the first cell of a
 /// [`FieldBytesRelation`] tuple. They are assigned by the credential layer and
-/// are part of the frozen cross-module contract — the SHA producer is agnostic
-/// to their meaning (it yields whatever tags its field-exposure spec lists), and
-/// each predicate consumer requires the tag of the field it binds. The MVP
-/// credential exposes exactly these two fields (`docs/credential-format.md`).
+/// are part of the frozen cross-module contract.
+/// The SHA producer yields the tags in its field exposure specification.
+/// Each predicate consumer requires the tag for its bound field.
 pub mod field_id {
     /// The date-of-birth window (`year_hi, year_lo, month, day`), bound by the
     /// age predicate.
@@ -130,31 +126,35 @@ pub mod field_id {
     /// The nationality window (`code_hi, code_lo`), bound by the nationality
     /// predicate.
     pub const NATIONALITY: u32 = 1;
-    /// The `birth_date` `elementIdentifier` window (10 ASCII bytes), pinned to
-    /// the public constant by the mdoc MSO window-bind component (Phase D1).
+    /// The `birth_date` `elementIdentifier` window in the issuer MSO.
+    ///
+    /// The mdoc scope component binds these 10 ASCII bytes to the public constant.
     pub const MDOC_BIRTH_DATE_ELEMENT_ID: u32 = 2;
-    /// The `nationality` `elementIdentifier` window (11 ASCII bytes), pinned to
-    /// the public constant (Phase D1).
+    /// The `nationality` `elementIdentifier` window in the issuer MSO.
+    ///
+    /// The mdoc scope component binds these 11 ASCII bytes to the public constant.
     pub const MDOC_NATIONALITY_ELEMENT_ID: u32 = 3;
-    /// The `valueDigests[ns][birth_digestID]` window (32 bytes) in the issuer
-    /// MSO preimage, bound to the birth_date item SHA digest (Phase D2).
+    /// The `valueDigests[ns][birth_digestID]` window in the issuer MSO.
+    ///
+    /// The mdoc scope component binds these 32 bytes to the birth-date item digest.
     pub const MDOC_BIRTH_DATE_DIGEST: u32 = 4;
-    /// The `valueDigests[ns][nat_digestID]` window (32 bytes) in the issuer MSO
-    /// preimage, bound to the nationality item SHA digest (Phase D2).
+    /// The `valueDigests[ns][nat_digestID]` window in the issuer MSO.
+    ///
+    /// The mdoc scope component binds these 32 bytes to the nationality item digest.
     pub const MDOC_NATIONALITY_DIGEST: u32 = 5;
-    /// The `deviceKey` COSE_Key `-2` (x) coordinate window (32 bytes) in the
-    /// issuer MSO preimage, bound to the device signature's public key x
-    /// coordinate (Phase D3).
+    /// The 32-byte `deviceKey` COSE_Key `-2` coordinate in the issuer MSO.
+    ///
+    /// The mdoc scope component binds it to the device public-key x-coordinate.
     pub const MDOC_DEVICE_KEY_X: u32 = 6;
-    /// The `deviceKey` COSE_Key `-3` (y) coordinate window (32 bytes) in the
-    /// issuer MSO preimage, bound to the device signature's public key y
-    /// coordinate (Phase D3).
+    /// The 32-byte `deviceKey` COSE_Key `-3` coordinate in the issuer MSO.
+    ///
+    /// The mdoc scope component binds it to the device public-key y-coordinate.
     pub const MDOC_DEVICE_KEY_Y: u32 = 7;
-    /// The `validityInfo.validFrom` full-date window (10 ASCII bytes) in the
-    /// issuer MSO preimage, bound and compared to the public policy date.
+    /// The `validityInfo.validFrom` tdate window (20 ASCII bytes) in the
+    /// issuer MSO preimage, bound to strict verifier time.
     pub const MDOC_VALID_FROM: u32 = 8;
-    /// The `validityInfo.validUntil` full-date window (10 ASCII bytes) in the
-    /// issuer MSO preimage, bound and compared to the public policy date.
+    /// The `validityInfo.validUntil` tdate window (20 ASCII bytes) in the
+    /// issuer MSO preimage, bound to strict verifier time.
     pub const MDOC_VALID_UNTIL: u32 = 9;
     /// Local CBOR anchor before the birth-date digest value.
     pub const MDOC_BIRTH_DATE_DIGEST_ANCHOR: u32 = 10;

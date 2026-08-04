@@ -15,7 +15,7 @@ fn basis(bit: usize) -> [u8; 16] {
 }
 
 #[test]
-fn gf128_mul_uses_longfellow_reduction_polynomial() {
+fn gf128_mul_uses_product_reduction_polynomial() {
     let product = gf128_mul(&basis(127), &basis(1));
 
     let mut expected = [0u8; 16];
@@ -48,7 +48,7 @@ fn gf128_mul_identity_and_xor_distribution_hold() {
 }
 
 #[test]
-fn gf128_tag_uses_ap_xor_av_key_share() {
+fn gf128_tag_uses_additive_pad_and_public_product() {
     let ap = [
         0x11, 0x52, 0x9a, 0x4b, 0x2d, 0xf0, 0x01, 0x33, 0xbe, 0x82, 0x9f, 0x74, 0x08, 0x64, 0xd2,
         0x9c,
@@ -62,29 +62,28 @@ fn gf128_tag_uses_ap_xor_av_key_share() {
         0x2f,
     ];
 
-    assert_eq!(gf128_tag(&ap, &av, &x), gf128_mul(&xor_128(&ap, &av), &x));
+    assert_eq!(gf128_tag(&ap, &av, &x), xor_128(&ap, &gf128_mul(&av, &x)));
 }
 
 #[test]
-fn gf128_tag_documents_no_b_zero_x_edge() {
+fn gf128_tag_zero_x_is_the_fresh_additive_pad() {
     let ap = sample_ap();
     let av = sample_av();
     let x = [0u8; 16];
 
-    assert_eq!(
-        gf128_tag(&ap, &av, &x),
-        [0u8; 16],
-        "the shipped no-+b Longfellow parity MAC maps x=0 to a zero tag"
-    );
+    assert_eq!(gf128_tag(&ap, &av, &x), ap);
+    let mut fresh_ap = ap;
+    fresh_ap[0] ^= 1;
+    assert_ne!(gf128_tag(&fresh_ap, &av, &x), gf128_tag(&ap, &av, &x));
 }
 
 #[test]
 fn coprocessor_channel_draws_labelled_gf128_deterministically() {
     let mut left = CoprocessorChannel::from_seed(TEST_SEED, b"mac-test");
     let mut right = CoprocessorChannel::from_seed(TEST_SEED, b"mac-test");
-    let first = left.draw_gf128(b"eu-id-p4b-mac-av");
+    let first = left.draw_gf128(b"eu-id-p4b-affine-mac-av-v3");
 
-    assert_eq!(first, right.draw_gf128(b"eu-id-p4b-mac-av"));
+    assert_eq!(first, right.draw_gf128(b"eu-id-p4b-affine-mac-av-v3"));
     assert_ne!(
         first,
         right.draw_gf128(b"eu-id-p4b-mac-other"),
@@ -92,9 +91,54 @@ fn coprocessor_channel_draws_labelled_gf128_deterministically() {
     );
     assert_ne!(
         first,
-        left.draw_gf128(b"eu-id-p4b-mac-av"),
+        left.draw_gf128(b"eu-id-p4b-affine-mac-av-v3"),
         "drawing must advance the channel counter"
     );
+}
+
+#[test]
+fn affine_mac_collision_has_one_bad_challenge_for_distinct_values() {
+    let first_ap = sample_ap();
+    let mut second_ap = sample_ap();
+    second_ap[3] ^= 0x80;
+    second_ap[11] ^= 0x25;
+    let first_x = sample_x();
+    let mut second_x = sample_x();
+    second_x[2] ^= 0x41;
+    second_x[15] ^= 0x08;
+
+    let delta_ap = xor_128(&first_ap, &second_ap);
+    let delta_x = xor_128(&first_x, &second_x);
+    let bad_av = gf128_mul(&delta_ap, &gf128_inverse(&delta_x));
+    assert_eq!(
+        gf128_tag(&first_ap, &bad_av, &first_x),
+        gf128_tag(&second_ap, &bad_av, &second_x),
+        "the unique algebraic bad challenge must produce the expected collision"
+    );
+
+    let mut other_av = bad_av;
+    other_av[0] ^= 1;
+    assert_ne!(
+        gf128_tag(&first_ap, &other_av, &first_x),
+        gf128_tag(&second_ap, &other_av, &second_x),
+        "a different challenge must not preserve the collision"
+    );
+}
+
+#[test]
+fn independent_additive_pads_keep_tags_distinct_for_zero_and_nonzero_values() {
+    let first_ap = sample_ap();
+    let mut second_ap = first_ap;
+    second_ap[7] ^= 1;
+    let av = sample_av();
+
+    for x in [[0u8; 16], sample_x()] {
+        assert_ne!(
+            gf128_tag(&first_ap, &av, &x),
+            gf128_tag(&second_ap, &av, &x),
+            "fresh independent pads must shift the entire tag set"
+        );
+    }
 }
 
 #[test]
@@ -127,14 +171,19 @@ fn mac_half_circuit_accepts_reference_tag_and_recomposition() {
     let x = sample_x();
     let tag = gf128_tag(&ap, &av, &x);
     let circuit = build_mac_half_circuit(&av, &tag).expect("MAC circuit builds");
+    assert_eq!(
+        circuit.layers().len(),
+        3,
+        "the affine MAC circuit is exactly final, parity, and input"
+    );
     let input = mac_half_input_with_av(&ap, &av, &x).expect("MAC input builds");
     assert_eq!(
-        MAC_HALF_COMMITTED_PRIVATE_INPUTS, 1408,
+        MAC_HALF_COMMITTED_PRIVATE_INPUTS, 1152,
         "each half commits x bits, a_p bits, and post-a_v Q quotient bits"
     );
     assert_eq!(
-        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 13_316,
-        "the eight MAC halves include four exact-byte canonicality witnesses"
+        MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 10_242,
+        "the eight MAC halves include two exact-coordinate canonicality witnesses"
     );
     assert_eq!(
         input.len(),
@@ -152,10 +201,10 @@ fn mac_half_circuit_accepts_reference_tag_and_recomposition() {
 }
 
 #[test]
-fn mac_half_q024_reduction_bound_fits_q_bits() {
+fn mac_half_affine_parity_bound_fits_q_bits() {
     assert_eq!(
-        MAC_HALF_PARITY_Q_BITS, 9,
-        "Q024 quotient bits cover W_k + V_k <= 632"
+        MAC_HALF_PARITY_Q_BITS, 7,
+        "seven quotient bits cover p_k plus the 128 public-fold contributions"
     );
 }
 
@@ -190,8 +239,8 @@ fn mac_half_circuit_pins_zero_x_edge_behavior() {
     let ap = sample_ap();
     let av = sample_av();
     let x = [0u8; 16];
-    let zero_tag = [0u8; 16];
-    let circuit = build_mac_half_circuit(&av, &zero_tag).expect("MAC circuit builds");
+    let tag = ap;
+    let circuit = build_mac_half_circuit(&av, &tag).expect("MAC circuit builds");
     let input = mac_half_input_with_av(&ap, &av, &x).expect("MAC input builds");
     let witness = circuit
         .evaluate_input(input.clone())
@@ -199,11 +248,12 @@ fn mac_half_circuit_pins_zero_x_edge_behavior() {
 
     assert!(
         circuit.is_satisfied(&witness).expect("MAC witness shape"),
-        "x=0 is accepted with the documented zero tag in the no-+b construction"
+        "x=0 must be accepted with tag=a_p"
     );
 
-    let nonzero_tag = basis(0);
-    let rejecting_circuit = build_mac_half_circuit(&av, &nonzero_tag).expect("MAC circuit builds");
+    let multiplicative_only_zero_tag = [0u8; 16];
+    let rejecting_circuit =
+        build_mac_half_circuit(&av, &multiplicative_only_zero_tag).expect("MAC circuit builds");
     let rejecting_witness = rejecting_circuit
         .evaluate_input(input)
         .expect("MAC witness evaluates");
@@ -211,8 +261,69 @@ fn mac_half_circuit_pins_zero_x_edge_behavior() {
         !rejecting_circuit
             .is_satisfied(&rejecting_witness)
             .expect("MAC witness shape"),
-        "x=0 must reject any non-zero public tag"
+        "x=0 must reject a multiplicative-only zero tag when a_p is nonzero"
     );
+}
+
+#[test]
+fn mac_half_circuit_rejects_multiplicative_only_tag() {
+    let ap = sample_ap();
+    let av = sample_av();
+    let x = sample_x();
+    let multiplicative_only_tag = gf128_mul(&xor_128(&ap, &av), &x);
+    assert_ne!(multiplicative_only_tag, gf128_tag(&ap, &av, &x));
+    let circuit =
+        build_mac_half_circuit(&av, &multiplicative_only_tag).expect("MAC circuit builds");
+    let input = mac_half_input_with_av(&ap, &av, &x).expect("MAC input builds");
+    let witness = circuit
+        .evaluate_input(input)
+        .expect("MAC witness evaluates");
+    assert!(
+        !circuit.is_satisfied(&witness).expect("MAC witness shape"),
+        "the multiplicative-only (a_p XOR a_v)*x formula must fail closed",
+    );
+}
+
+#[test]
+fn mac_half_circuit_rejects_ap_x_av_and_tag_tampering() {
+    let ap = sample_ap();
+    let av = sample_av();
+    let x = sample_x();
+    let tag = gf128_tag(&ap, &av, &x);
+    let circuit = build_mac_half_circuit(&av, &tag).expect("MAC circuit builds");
+    let honest = mac_half_input_with_av(&ap, &av, &x).expect("MAC input builds");
+
+    for input_index in [
+        eu_id_ec_coprocessor::ecdsa::MAC_HALF_AP_BITS_START,
+        MAC_HALF_X_BITS_START,
+    ] {
+        let mut tampered = honest.clone();
+        tampered[input_index] = Fp::ONE - tampered[input_index];
+        let witness = circuit
+            .evaluate_input(tampered)
+            .expect("tampered MAC witness evaluates");
+        assert!(!circuit.is_satisfied(&witness).expect("MAC witness shape"));
+    }
+
+    let mut tampered_av = av;
+    tampered_av[0] ^= 1;
+    let av_circuit = build_mac_half_circuit(&tampered_av, &tag).expect("MAC circuit builds");
+    let av_witness = av_circuit
+        .evaluate_input(honest.clone())
+        .expect("MAC witness evaluates");
+    assert!(!av_circuit
+        .is_satisfied(&av_witness)
+        .expect("MAC witness shape"));
+
+    let mut tampered_tag = tag;
+    tampered_tag[0] ^= 1;
+    let tag_circuit = build_mac_half_circuit(&av, &tampered_tag).expect("MAC circuit builds");
+    let tag_witness = tag_circuit
+        .evaluate_input(honest)
+        .expect("MAC witness evaluates");
+    assert!(!tag_circuit
+        .is_satisfied(&tag_witness)
+        .expect("MAC witness shape"));
 }
 
 #[test]
@@ -268,7 +379,7 @@ fn mac_half_circuit_rejects_internal_wire_tamper() {
 
     assert!(
         circuit.is_satisfied(&witness).is_err(),
-        "forged internal product/accumulator wires must be rejected by layer recurrence"
+        "forged internal count wires must be rejected by layer recurrence"
     );
 }
 
@@ -291,4 +402,17 @@ fn sample_x() -> Gf128 {
         0xd0, 0x4c, 0x21, 0x81, 0xaf, 0x7d, 0x5e, 0x99, 0x03, 0x26, 0xba, 0x40, 0x67, 0x91, 0xe8,
         0x2f,
     ]
+}
+
+fn gf128_inverse(value: &Gf128) -> Gf128 {
+    assert_ne!(*value, [0u8; 16]);
+    let mut result = basis(0);
+    for exponent_bit in (0..128).rev() {
+        result = gf128_mul(&result, &result);
+        if exponent_bit != 0 {
+            result = gf128_mul(&result, value);
+        }
+    }
+    debug_assert_eq!(gf128_mul(value, &result), basis(0));
+    result
 }

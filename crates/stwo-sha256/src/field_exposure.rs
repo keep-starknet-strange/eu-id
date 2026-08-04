@@ -1,44 +1,37 @@
 //! Optional credential-field byte exposure for the SHA-256 preimage.
 //!
-//! The producer half of the `CRED_FIELD ↔ PREDICATE_INPUT` binding: the SHA-256
-//! AIR can expose chosen byte windows of the signed preimage `C` as a LogUp
-//! provider, so a downstream predicate can *require* exactly those
-//! bytes and thereby reason about the attribute that was actually signed — not a
-//! free-floating witness.
+//! This module supplies the producer side of the field binding.
+//! The SHA-256 AIR exposes selected byte windows from signed preimage `C`.
+//! A downstream predicate requires those bytes through LogUp.
+//! The predicate then uses a signed attribute, not an independent witness.
 //!
-//! The mechanism reuses the 32 boolean bit planes already committed for every
-//! schedule word `W[t]`. A field byte at preimage offset `o` lives in message
-//! word `o / 4`, big-endian byte `o % 4` (FIPS 180-4 §5.2.1). The AIR forms that
-//! byte as a linear expression over the corresponding eight `W` bits. Those
-//! bits are independently constrained boolean and recomposed to `W`, so no
-//! duplicate byte columns or byte-range lookups are required.
+//! The mechanism reuses the 32 Boolean bit planes for each schedule word
+//! `W[t]`. A field byte at offset `o` is in word `o / 4` at big-endian byte
+//! `o % 4`. The AIR forms the byte from the corresponding eight `W` bits. It
+//! checks that these bits are Boolean and that they reconstruct `W`. This
+//! method needs no duplicate byte columns or range lookups.
 //!
-//! This module is **format-agnostic**: it knows nothing about the eu-id
-//! credential. The caller supplies the byte windows (the credential layer keys
-//! them off `docs/credential-format.md`); this type resolves them to the
-//! word/byte coordinates the trace, constraints, and interaction iterate. The
-//! `field_id` tags are opaque pass-throughs (see
+//! This module is **format-agnostic**. The caller supplies byte windows selected
+//! by the credential layer. This type resolves them to the word/byte coordinates
+//! the trace, constraints, and interaction iterate. The `field_id` tags are
+//! opaque pass-throughs (see
 //! [`air_core::relations::field_id`]).
 //!
-//! ## Scope
-//!
-//! The legacy constructor keeps the original single-block POC behavior. The
-//! multi-block constructor resolves absolute preimage offsets to a
-//! `(block_idx, word_idx, byte_in_word)` coordinate. A semantic field window may
-//! straddle a SHA-256 block boundary: each byte carries its own block coordinate
-//! and is gated independently by the AIR.
+//! A field window can cross a SHA-256 block boundary. Absolute preimage offsets
+//! resolve to `(block_idx, word_idx, byte_in_word)`, and the AIR checks every
+//! byte against that coordinate.
 
 use crate::constants::{BLOCK_BYTES, N_INPUT_WORDS, WORD_BYTES};
 
-/// One credential byte to yield across the field relation.
+/// One preimage byte to yield across the field relation.
 ///
-/// `(field_id, byte_index)` is the cross-module key the consumer pins; the value
+/// `(field_id, byte_index)` is the cross-module key the consumer pins. The value
 /// is the byte read from the resolved `(word_idx, byte_in_word)` coordinate of
 /// the SHA trace. Multiple yields with the same `field_id` and ascending
 /// `byte_index` form a field's byte window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FieldByteYield {
-    /// Opaque credential-field tag (see [`air_core::relations::field_id`]).
+    /// Opaque field tag (see [`air_core::relations::field_id`]).
     pub field_id: u32,
     /// Position of this byte within its field's window (`0`-based).
     pub byte_index: u32,
@@ -50,7 +43,7 @@ pub struct FieldByteYield {
     pub byte_in_word: usize,
 }
 
-/// The set of credential-field bytes a SHA-256 proof exposes.
+/// The set of preimage-field bytes a SHA-256 proof exposes.
 ///
 /// An **empty** exposure means the provider is off. A single-block exposure
 /// adds no trace columns: it uses the existing first-block selector. A
@@ -83,44 +76,18 @@ impl FieldExposure {
         self
     }
 
-    /// Build an exposure from preimage byte **windows**, each `(field_id,
-    /// start_offset, len)`. Resolves every byte in every window to its
-    /// `(word_idx, byte_in_word)` coordinate and assigns `byte_index` `0..len`
-    /// within the field.
-    ///
-    /// # Panics
-    ///
-    /// If any window byte falls outside the first SHA-256 block (offset
-    /// `>= BLOCK_BYTES`); see the module-level scope note.
-    pub fn from_preimage_windows(windows: &[(u32, usize, usize)]) -> Self {
-        for &(_, start, len) in windows {
-            if len == 0 {
-                continue;
-            }
-            let end = start
-                .checked_add(len - 1)
-                .expect("field-exposure window end offset overflow");
-            assert!(
-                end < BLOCK_BYTES,
-                "field-exposure offset {end} is past the first SHA-256 block; \
-                 multi-block field exposure is out of scope",
-            );
-        }
-        Self::from_preimage_windows_multi(windows)
-    }
-
     /// Build an exposure from absolute preimage byte **windows**, each
     /// `(field_id, start_offset, len)`.
     ///
-    /// Every yielded byte is resolved to `(block_idx, word_idx, byte_in_word)`.
-    /// A single field window may live in block 0, 1, 2, ... and may straddle a
-    /// 64-byte SHA block boundary; each byte's block coordinate is enforced
-    /// independently.
+    /// Resolve each byte to `(block_idx, word_idx, byte_in_word)`.
+    ///
+    /// One field window can cross a 64-byte SHA block boundary. The AIR checks
+    /// each byte against its block coordinate.
     ///
     /// # Panics
     ///
     /// If a window's end offset overflows `usize`.
-    pub fn from_preimage_windows_multi(windows: &[(u32, usize, usize)]) -> Self {
+    pub fn from_preimage_windows(windows: &[(u32, usize, usize)]) -> Self {
         let mut yields = Vec::new();
         for &(field_id, start, len) in windows {
             if len != 0 {
@@ -178,21 +145,22 @@ impl FieldExposure {
         &self.target_blocks
     }
 
-    /// Whether this exposure needs the multi-block witness tail. The legacy
-    /// block-0 path needs neither a block counter nor selectors.
-    pub fn needs_block_witness(&self) -> bool {
+    /// Whether this exposure needs dynamic block-selection columns. Fixed
+    /// windows wholly in block 0 reuse the existing first-block selector.
+    pub fn needs_dynamic_block_columns(&self) -> bool {
         self.padded_stream_field_id.is_some() || self.yields.iter().any(|y| y.block_idx != 0)
     }
 
     /// Column slot of the optional block counter within the dynamic field tail.
     pub fn block_counter_column_slot(&self) -> Option<usize> {
-        self.needs_block_witness().then_some(0)
+        self.needs_dynamic_block_columns().then_some(0)
     }
 
-    /// Column slot of the selector for `target_block` within the dynamic field
-    /// tail, if the multi-block witness tail is enabled.
+    /// Column slot of the selector for `target_block`.
+    ///
+    /// Return `None` when the exposure has no dynamic block-selection columns.
     pub fn selector_column_slot(&self, target_block: usize) -> Option<usize> {
-        self.needs_block_witness().then(|| {
+        self.needs_dynamic_block_columns().then(|| {
             1 + self
                 .target_blocks
                 .binary_search(&target_block)
@@ -201,10 +169,10 @@ impl FieldExposure {
     }
 
     /// Number of dynamic trace columns the exposure adds. Single-block
-    /// exposure adds none; multi-block exposure adds one block counter and one
+    /// exposure adds none. Multi-block exposure adds one block counter and one
     /// selector per distinct target block.
     pub fn n_columns(&self) -> usize {
-        if self.needs_block_witness() {
+        if self.needs_dynamic_block_columns() {
             1 + self.target_blocks.len()
         } else {
             0
@@ -212,11 +180,12 @@ impl FieldExposure {
     }
 }
 
-/// The big-endian bytes of a SHA-256 32-bit word held as `(lo, hi)` 16-bit
-/// limbs: `word = lo + 2¹⁶·hi`, so the bytes are `[hi.b1, hi.b0, lo.b1, lo.b0]`
-/// (`b1` the high byte of a limb). Shared by the digest byte view
-/// (`crate::trace::h_out_digest_bytes`) and the field byte view so both
-/// decompose words the same way.
+/// Return the big-endian bytes of a SHA-256 word.
+///
+/// The word uses `(lo, hi)` 16-bit limbs.
+/// Thus, `word = lo + 2¹⁶·hi`.
+/// The byte order is `[hi.b1, hi.b0, lo.b1, lo.b0]`.
+/// The digest and field byte views share this conversion.
 pub fn word_be_bytes(lo: u32, hi: u32) -> [u32; WORD_BYTES] {
     use crate::types::LimbBytes;
     let lo = LimbBytes::from_u16(lo);
@@ -226,7 +195,7 @@ pub fn word_be_bytes(lo: u32, hi: u32) -> [u32; WORD_BYTES] {
 
 // A message word index is always within the 16 input words.
 const _: () = assert!(N_INPUT_WORDS == 16);
-// The exposure resolves coordinates with `constants::WORD_BYTES`; the native
+// The exposure resolves coordinates with `constants::WORD_BYTES`. The native
 // word helper uses `types::BYTES_PER_WORD`. They must agree.
 const _: () = assert!(WORD_BYTES == crate::types::BYTES_PER_WORD);
 
@@ -235,11 +204,9 @@ mod tests {
     use super::*;
     use air_core::relations::field_id;
 
-    /// The eu-id credential windows (`docs/credential-format.md`): DOB at
-    /// offsets 5..9, nationality at 9..11. They resolve to message words
-    /// `W[1]`/`W[2]` of block 0 — exactly the words the σ-input split-and-pack
-    /// already 16-bit-pins.
-    fn credential_exposure() -> FieldExposure {
+    /// Two sample windows at offsets 5..9 and 9..11. They resolve to message
+    /// words `W[1]` and `W[2]` of block 0.
+    fn sample_exposure() -> FieldExposure {
         FieldExposure::from_preimage_windows(&[
             (field_id::DOB, 5, 4),
             (field_id::NATIONALITY, 9, 2),
@@ -256,16 +223,16 @@ mod tests {
 
     #[test]
     fn single_block_windows_need_no_auxiliary_columns() {
-        let e = credential_exposure();
+        let e = sample_exposure();
         assert_eq!(e.target_blocks(), vec![0]);
         assert_eq!(e.n_columns(), 0);
-        assert!(!e.needs_block_witness());
+        assert!(!e.needs_dynamic_block_columns());
         assert_eq!(e.n_yields(), 6); // 4 DOB + 2 nationality
     }
 
     #[test]
-    fn credential_windows_resolve_each_byte_coordinate() {
-        let e = credential_exposure();
+    fn sample_windows_resolve_each_byte_coordinate() {
+        let e = sample_exposure();
         let y = e.yields();
         // DOB: C[5]=W1.b1, C[6]=W1.b2, C[7]=W1.b3, C[8]=W2.b0.
         assert_eq!(
@@ -311,14 +278,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "past the first SHA-256 block")]
-    fn rejects_offsets_past_the_first_block() {
-        let _ = FieldExposure::from_preimage_windows(&[(field_id::DOB, 62, 4)]);
-    }
-
-    #[test]
-    fn multi_block_windows_resolve_absolute_offsets() {
-        let e = FieldExposure::from_preimage_windows_multi(&[
+    fn windows_resolve_absolute_offsets() {
+        let e = FieldExposure::from_preimage_windows(&[
             (field_id::DOB, 5, 4),
             (field_id::NATIONALITY, BLOCK_BYTES + 8, 2),
             (99, 2 * BLOCK_BYTES + 12, 3),
@@ -344,7 +305,7 @@ mod tests {
             (y[6].block_idx, y[6].word_idx, y[6].byte_in_word),
             (2, 3, 0)
         );
-        assert!(e.needs_block_witness());
+        assert!(e.needs_dynamic_block_columns());
         assert_eq!(e.target_blocks(), [0, 1, 2]);
         assert_eq!(e.n_columns(), 4);
         assert_eq!(e.block_counter_column_slot(), Some(0));
@@ -354,8 +315,8 @@ mod tests {
     }
 
     #[test]
-    fn multi_block_windows_allow_straddling_window() {
-        let e = FieldExposure::from_preimage_windows_multi(&[(field_id::DOB, BLOCK_BYTES - 2, 4)]);
+    fn windows_allow_straddling_block_boundary() {
+        let e = FieldExposure::from_preimage_windows(&[(field_id::DOB, BLOCK_BYTES - 2, 4)]);
         let y = e.yields();
         assert_eq!(
             y.iter().map(|b| b.block_idx).collect::<Vec<_>>(),
@@ -373,7 +334,7 @@ mod tests {
         assert!(!e.is_empty());
         assert_eq!(e.padded_stream_field_id(), Some(99));
         assert_eq!(e.n_yields(), BLOCK_BYTES);
-        assert!(e.needs_block_witness());
+        assert!(e.needs_dynamic_block_columns());
         assert_eq!(e.n_columns(), 1);
         assert_eq!(e.block_counter_column_slot(), Some(0));
         assert!(e.target_blocks().is_empty());
@@ -381,8 +342,8 @@ mod tests {
 
     #[test]
     fn padded_stream_composes_with_fixed_windows() {
-        let e = FieldExposure::from_preimage_windows_multi(&[(field_id::DOB, 5, 4)])
-            .with_padded_stream(99);
+        let e =
+            FieldExposure::from_preimage_windows(&[(field_id::DOB, 5, 4)]).with_padded_stream(99);
         assert_eq!(e.n_yields(), BLOCK_BYTES + 4);
         assert_eq!(e.n_columns(), 2);
         assert_eq!(e.target_blocks(), [0]);

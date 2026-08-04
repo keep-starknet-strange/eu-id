@@ -6,20 +6,40 @@ use crate::fp_solinas_air::{
     FP_SOLINAS_CORRECTION_PRODUCT_MAX_ABS_DIGIT, FP_SOLINAS_REDUCTION_DIGITS,
 };
 
-pub mod air;
 pub mod relation;
 pub mod trace;
 
-pub use air::*;
 pub use relation::*;
 pub use trace::*;
+
+pub const PROJECTIVE_RCB_SIGNED_CARRY_EQUATION: &str = "projective_rcb_reduction";
+
+pub const PROJECTIVE_RCB_SIGNED_CARRY_BOUND: i64 = projective_rcb_signed_carry_bound();
+
+pub const PROJECTIVE_RCB_MUL_ROLE_LHS: u32 = 0;
+
+pub const PROJECTIVE_RCB_MUL_ROLE_RHS: u32 = 1;
+
+pub const PROJECTIVE_RCB_MUL_ROLE_RESULT: u32 = 2;
+
+pub const fn projective_rcb_signed_carry_bound() -> i64 {
+    max_i64(
+        folded_digit_carry_bound(),
+        fp_solinas_reduction_digit_carry_bound(),
+    )
+}
+
+pub const fn projective_rcb_signed_carry_log_size() -> u32 {
+    (2 * PROJECTIVE_RCB_SIGNED_CARRY_BOUND as u64 + 1)
+        .next_power_of_two()
+        .ilog2()
+}
 
 #[cfg(test)]
 mod tests;
 
-// Geometry of the RETIRED schoolbook silo, kept ONLY because the shared
-// signed-carry table bound derives from it (the bound must stay bit-identical
-// to keep the 2^18 table and `encode_signed_carry` stable).
+// Schoolbook silo geometry used to derive the shared signed-carry bound.
+// This value preserves the `2^18` table and signed-carry encoding.
 const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_TERMS: usize = 8;
 const PROJECTIVE_RCB_RAW_PRODUCT_CHUNK_DIGITS: usize = 3;
 

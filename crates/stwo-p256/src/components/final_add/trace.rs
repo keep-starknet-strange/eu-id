@@ -1,6 +1,6 @@
-//! Native witness construction and base/preprocessed trace generation for the
-//! FinalAdd component: the fully-checked native claim/branch/error types, the
-//! per-branch reduction solvers and checkers, and the base-trace writers.
+//! Builds the native witness and traces for the FinalAdd component.
+//!
+//! This module defines claims, branches, errors, reduction solvers, and trace writers.
 //!
 //! Split out of `mod.rs` (pure relocation, no behavioral change).
 
@@ -87,8 +87,8 @@ pub struct FinalAddClaim {
     /// doubling branch, enforced by `double_add · (r2 − r1) = 0`.)
     pub x3_q: i64,
     pub x3_carries: [i64; N_LIMBS],
-    /// `x1_sq = x1·x1 mod p`. Proven by [`MUL_X1_SQUARED`] on every active
-    /// row; consumed by the doubling slope-numer reduction
+    /// `x1_sq = x1·x1 mod p`. Proven by `MUL_X1_SQUARED` on every active
+    /// row. Consumed by the doubling slope-numer reduction
     /// `dy + 3 ≡ 3·x1_sq (mod p)`.
     pub x1_sq: P256M31BigInt,
     /// Per-cert PROVEN fake-GLV sign bits (consumed from `FinalAddSignRelation`,
@@ -130,10 +130,10 @@ impl FinalAddClaim {
         let zero = U256::ZERO;
         let three = U256::from_le_u64s(&[3, 0, 0, 0]);
 
-        // Orient R_2 by d = b1 ⊕ b2 so the chord add binds x(h_1 + h_2):
-        // x(R_1 + (−1)^d R_2) = x(h_1 + h_2). x and inf are sign-invariant; only
-        // y is conditionally negated. The ORIGINAL R_2 is still stored (and
-        // consumed by the hint relation); the add runs on the oriented point.
+        // Orient `R_2` with `d = b1 ⊕ b2`.
+        // This makes the addition bind `x(h_1 + h_2)`.
+        // Only the y-coordinate changes under orientation.
+        // Store the original point for the hint relation.
         let sign_d = M31::from_u32_unchecked(sign_b1.0 ^ sign_b2.0);
         let r2p_y_u256 = if r2_inf {
             zero.clone()
@@ -205,11 +205,12 @@ impl FinalAddClaim {
 
         // ----- Mul rows (always 4) -----
         //
-        // MUL_X1_SQUARED must use the *column* x1 value (`r1_values.x`), which is
-        // 0 on an infinity row — NOT the raw hint `r1.x`. The AIR binds this mul's
-        // operands to the r1.x column, so on an inf row the operands must be 0
-        // (the mul is idle: 0·0 = 0). Using the raw `r1.x` made the witnessed mul
-        // disagree with the r1.x column and broke the AIR constraint on inf rows.
+        // MUL_X1_SQUARED must use the x1 column value (`r1_values.x`). This value
+        // is zero on an infinity row. Do not use the raw `r1.x` hint.
+        // The AIR binds both multiplication operands to the x1 column. Therefore,
+        // both operands must be zero on an infinity row. The multiplication is
+        // then idle: 0·0 = 0. A raw hint would disagree with the column and break
+        // the AIR constraint.
         let x1_col_u = if r1_inf { zero.clone() } else { r1.x.clone() };
         let x1_sq_u = fp_mul(&x1_col_u, &x1_col_u, &modulus);
         let mut muls = Vec::with_capacity(FINAL_ADD_MUL_COUNT);
@@ -516,7 +517,7 @@ impl FinalAddClaim {
                     &self.dy_carries,
                     self.sig_id.0,
                 )?;
-                // x2 = x1 here; reuse the x3 + x1 + x2 ≡ lamsq reduction.
+                // x2 = x1 here. Reuse the x3 + x1 + x2 ≡ lamsq reduction.
                 check_x3_reduction(
                     &self.x3,
                     &self.r1.x,
@@ -781,9 +782,15 @@ fn try_two_y1_carries(
     }
 }
 
-/// Doubling-branch slope numerator: `dy + 3 + q·p ≡ 3·x1_sq (mod 2^256)` with
-/// `q ∈ {0, 1, 2}` and final carry 0. (`dy = (3·x1_sq − 3) mod p`; since
-/// `3·x1_sq < 3p` and `dy < p`, the quotient `q ∈ {0, 1, 2}`.)
+/// Solves the doubling-branch slope numerator.
+///
+/// ```text
+/// dy + 3 + q · p ≡ 3 · x1_sq (mod 2^256)
+/// q ∈ {0, 1, 2}
+/// ```
+///
+/// The final carry is zero.
+/// Here, `dy = (3 · x1_sq − 3) mod p`.
 fn solve_slope_numer_reduction(
     dy: &U256,
     x1_sq: &U256,
@@ -1030,9 +1037,8 @@ fn check_slope_numer_reduction(
 pub fn final_add_preprocessed_columns(
     claim: &FinalAddClaim,
 ) -> Result<Vec<(PreProcessedColumnId, M31ColumnEval)>, FinalAddError> {
-    // Only the live providers' columns: the four muls ride the hinted
-    // provider (no schedule/carry16 candidates — they were generated and
-    // dropped by the global id selector since the fold).
+    // The hinted provider supplies all four multiplication rows.
+    // No schedule or carry16 provider columns remain.
     let _ = claim;
     let mut columns: Vec<(PreProcessedColumnId, M31ColumnEval)> = Vec::new();
     let range13 = RangeCheckClaim::new(RANGE13_BITS);
@@ -1095,7 +1101,7 @@ pub(crate) fn final_add_signed_carry_claim() -> SignedCarryRangeClaim {
 }
 
 /// The check row's range13 value list in digest order (the 12 witnessed
-/// big-ints; the four muls are hinted rows, which range-check their own
+/// big-ints. The four muls are hinted rows, which range-check their own
 /// limbs in the hinted component).
 pub(crate) fn final_add_range13_uses_list(claim: &FinalAddClaim) -> Vec<M31> {
     let mut uses = Vec::new();
@@ -1216,10 +1222,10 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     offset += 1;
     write_point(&mut cols, &mut offset, &claim.r1, row);
     write_point(&mut cols, &mut offset, &claim.r2, row);
-    // Task 6 branch selectors. Valid claims never carry `InverseAdd` (the
-    // builder rejects `R_1 = -R_2`), so `inverse_add` is always 0 in the
-    // written trace; the AIR independently enforces
-    // `active · inverse_add = 0`.
+    // Valid claims never contain `InverseAdd`.
+    // The builder rejects `R_1 = -R_2`.
+    // Thus, the trace sets `inverse_add` to zero.
+    // The AIR also enforces `active · inverse_add = 0`.
     cols[offset][row] = M31::from_u32_unchecked(if claim.branch == FinalAddBranch::DoubleAdd {
         1
     } else {
@@ -1236,10 +1242,8 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     write_limbs(&mut cols, &mut offset, &claim.dx_inv, row);
     let dx_inv_result = dx_inv_result_value(claim);
     write_limbs(&mut cols, &mut offset, &dx_inv_result, row);
-    // Task 6 doubling: `x1_sq = r1.x² mod p` is read at this position by the
-    // AIR (see `Columns::read`) and consumed via `MUL_X1_SQUARED`'s Result
-    // role. Without writing it the column stays zero, breaking the mul
-    // provider/consumer balance.
+    // Store `x1_sq = r1.x² mod p` for the doubling branch.
+    // `Columns::read` consumes it through the `MUL_X1_SQUARED` result role.
     write_limbs(&mut cols, &mut offset, &claim.x1_sq, row);
     cols[offset][row] = M31::from_u32_unchecked(claim.dx_q as u32);
     offset += 1;
@@ -1252,7 +1256,7 @@ fn gen_check_base_trace(claim: &FinalAddClaim, log_size: u32) -> Vec<M31ColumnEv
     write_signed_carries(&mut cols, &mut offset, &claim.x3_carries, row);
     // Witnessed `both_finite = (1 − r1.inf)·(1 − r2.inf)`. The defining
     // constraint is ungated and padding rows carry zeroed inf flags, so every
-    // padding row must hold 1; the active row holds the real product.
+    // A padding row must hold 1. The active row holds the real product.
     let one = M31::from_u32_unchecked(1);
     for value in cols[offset].iter_mut() {
         *value = one;

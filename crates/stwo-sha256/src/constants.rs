@@ -25,7 +25,7 @@ pub const IV: [u32; 8] = [
 /// 64 rounds per block.
 pub const N_ROUNDS: usize = 64;
 
-/// 16 message-schedule input words; the remaining `64 - 16 = 48` are derived.
+/// 16 message-schedule input words. The schedule derives 48 more words.
 pub const N_INPUT_WORDS: usize = 16;
 
 /// Total schedule length per block: `W[0..63]`.

@@ -14,12 +14,10 @@ relation!(
     PREPARED_TABLE_EC_ROW_RELATION_ARITY
 );
 
-// --- PreparedTablePoints pinning relations (full table-pinning, Phase 2) ---
+// --- Prepared-table point relations ----------------------------------------
 //
-// `CertBaseRelation` binds every prepared-table cell that must equal the cert
-// base point `P` (= G for cert0, = public key Q for cert1) to the in-AIR
-// `cert.base` proven in `cert_bind.rs`. Provider: `CertScalarInputAirEval`
-// (yield `-m(cert_id)`). Consumer: `PreparedTableEcRowEval` (use `+1` per P-cell).
+// `CertBaseRelation` binds each table base point to the proven certificate base.
+// Certificate 0 uses G, and certificate 1 uses public key Q.
 relation!(CertBaseRelation, CERT_BASE_RELATION_ARITY);
 
 // `PreparedTableCanonicalRelation` ties every other prepared-table operand
@@ -32,28 +30,21 @@ relation!(
     PREPARED_TABLE_CANONICAL_RELATION_ARITY
 );
 
-// `FinalCheckHintRelation` forwards the in-AIR-pinned signed hint point `R_i`
-// (= `±h_i`, where the sign is the per-cert `s2_sign_bit` from the Garaga
-// decomposition: `R_i = -h_i` when the bit is 1, `R_i = +h_i` when it is 0 —
-// both occur for honest signatures) from the prepared table to final-add and
-// to the generic P-256 curve-membership slice for that same hint point.
-// Provider: `PreparedTableEcRowEval` yields `R_i` (= the `DoubleR` row's `lhs`,
-// which role-`R` pinning already binds to the canonical per-cert value) twice
-// per active `DoubleR` row, gated `active * DoubleR_flag`, multiplicity `-2`.
-// Consumers: `FinalAddCheckEval` and `PublicKeyCurveCheckEval` each use the
-// identical `(sig_id, cert_id, R.x, R.y, inf=0)` tuple once.
+// `FinalCheckHintRelation` forwards the proven signed hint point `R_i`.
+// The fake-GLV sign bit selects `R_i = -h_i` or `R_i = +h_i`.
+// Prepared-table rows provide two copies of each active `R_i` tuple.
+// Final-add and curve-membership components each consume one copy.
 relation!(FinalCheckHintRelation, FINAL_CHECK_HINT_RELATION_ARITY);
 
 /// Relations the `PreparedTableEcRowEval` provider consumes/provides to pin the
-/// prepared table to the cert base point. `Some` in the monolithic STARK (where
-/// `cert_bind` provides `CertBaseRelation`); `None` for the legacy standalone
-/// slice, which emits only `PreparedTableEcRowRelation`.
+/// prepared table to the certificate base point.
 ///
-/// The in-AIR negation (`neg.y + src.y = p`) needs `neg`/`src` limbs bounded to
-/// 13 bits; that bound is inherited transitively — the canonical relation ties
-/// each `neg`/`src` to a base-row operand which feeds the projective EC-add,
-/// where every affine limb is already `Range13`-checked. So no extra range
-/// lookup is consumed here.
+/// The monolithic STARK uses `Some` because `cert_bind` provides `CertBaseRelation`.
+/// The standalone slice uses `None` and emits only `PreparedTableEcRowRelation`.
+///
+/// The AIR negation requires 13-bit `neg` and `src` limbs.
+/// The canonical relation binds these values to range-checked projective operands.
+/// Thus, this component does not need another range lookup.
 #[derive(Clone)]
 pub struct PreparedTablePinningRelations {
     pub cert_base: CertBaseRelation,

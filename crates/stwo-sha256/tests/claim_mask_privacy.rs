@@ -11,7 +11,6 @@ use stwo_sha256::claim_mask::ShaClaimMaskConfigError;
 use stwo_sha256::components::RANGE_TABLES;
 use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::interaction::{ComponentClaim, InteractionClaim};
-use stwo_sha256::partitions::MAX_ROUND_GROUP_BITS;
 use stwo_sha256::relations::SharedShaTableRelations;
 use stwo_sha256::shared_tables::{
     ShaTableMultiplicities, ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier,
@@ -51,15 +50,15 @@ fn verifier_rejects_unbound_extra_claim_entries() {
         sha256: component_claim(),
         range: vec![component_claim()],
     };
-    let shared_sha_verifier = Sha256Verifier::new(9, MAX_ROUND_GROUP_BITS, shared_sha_claim)
-        .with_shared_tables(SharedShaTableRelations::new());
+    let shared_sha_verifier =
+        Sha256Verifier::new(9, shared_sha_claim).with_shared_tables(SharedShaTableRelations::new());
     assert!(shared_sha_verifier.validate_structure().is_err());
 
     let local_sha_claim = InteractionClaim {
         sha256: component_claim(),
         range: (0..5).map(|_| component_claim()).collect(),
     };
-    let local_sha_verifier = Sha256Verifier::new(9, MAX_ROUND_GROUP_BITS, local_sha_claim);
+    let local_sha_verifier = Sha256Verifier::new(9, local_sha_claim);
     assert!(local_sha_verifier.validate_structure().is_err());
 }
 
@@ -70,8 +69,7 @@ fn sha_claim_mask_configuration_rejects_count_and_order_mismatch() {
     assert_eq!(log_n_rows, CLAIM_MASK_MIN_LOG_SIZE);
 
     let shared_tables = SharedShaTableRelations::new();
-    let sha = Sha256Prover::new(&witness, log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared_tables.clone());
+    let sha = Sha256Prover::new(&witness, log_n_rows).with_shared_tables(shared_tables.clone());
     assert_eq!(sha.ordered_claim_mask_log_sizes(), [log_n_rows]);
 
     let mut count_ring = ClaimMaskRing::new(&[log_n_rows, log_n_rows]).unwrap();
@@ -90,8 +88,7 @@ fn sha_claim_mask_configuration_rejects_count_and_order_mismatch() {
         }
     );
 
-    let sha = Sha256Prover::new(&witness, log_n_rows, MAX_ROUND_GROUP_BITS)
-        .with_shared_tables(shared_tables);
+    let sha = Sha256Prover::new(&witness, log_n_rows).with_shared_tables(shared_tables);
     let mut order_ring = ClaimMaskRing::new(&[log_n_rows + 1, log_n_rows]).unwrap();
     let wrong = order_ring.take(log_n_rows + 1).unwrap();
     let order_error = sha
@@ -172,8 +169,7 @@ fn masked_shared_sha_round_trip_and_claim_tamper_rejection() {
         ShaTableMultiplicities::from_consumers(&consumers),
         relations.clone(),
     );
-    let sha =
-        Sha256Prover::new(&witness, log_n_rows, MAX_ROUND_GROUP_BITS).with_shared_tables(relations);
+    let sha = Sha256Prover::new(&witness, log_n_rows).with_shared_tables(relations);
 
     let table_sizes = table.ordered_claim_mask_log_sizes();
     let sha_sizes = sha.ordered_claim_mask_log_sizes();
@@ -199,7 +195,7 @@ fn masked_shared_sha_round_trip_and_claim_tamper_rejection() {
     let mut table_verifier =
         ShaTablesVerifier::new(table_claim.clone(), verifier_relations.clone())
             .with_claim_masks(verifier_challenge.clone());
-    let mut sha_verifier = Sha256Verifier::new(log_n_rows, MAX_ROUND_GROUP_BITS, sha_claim.clone())
+    let mut sha_verifier = Sha256Verifier::new(log_n_rows, sha_claim.clone())
         .with_shared_tables(verifier_relations)
         .with_claim_masks(verifier_challenge.clone());
     let mut verifier_anchor =
@@ -215,7 +211,7 @@ fn masked_shared_sha_round_trip_and_claim_tamper_rejection() {
     let mut table_verifier =
         ShaTablesVerifier::new(tampered_table_claim, verifier_relations.clone())
             .with_claim_masks(verifier_challenge.clone());
-    let mut sha_verifier = Sha256Verifier::new(log_n_rows, MAX_ROUND_GROUP_BITS, sha_claim)
+    let mut sha_verifier = Sha256Verifier::new(log_n_rows, sha_claim)
         .with_shared_tables(verifier_relations)
         .with_claim_masks(verifier_challenge.clone());
     let mut verifier_anchor = ClaimMaskChallengeModule::new(verifier_challenge, all_sizes).unwrap();
@@ -234,7 +230,7 @@ fn masked_shared_sha_round_trip_and_claim_tamper_rejection() {
 fn masked_standalone_sha_covers_every_local_range_claim() {
     let witness = compute_sha256_witness(&[0x24; 200]);
     let log_n_rows = min_log_size(witness.blocks.len());
-    let sha = Sha256Prover::new(&witness, log_n_rows, MAX_ROUND_GROUP_BITS);
+    let sha = Sha256Prover::new(&witness, log_n_rows);
     let log_sizes = sha.ordered_claim_mask_log_sizes();
     assert_eq!(log_sizes.len(), 1 + RANGE_TABLES.len());
     assert!(log_sizes
@@ -252,12 +248,8 @@ fn masked_standalone_sha_covers_every_local_range_claim() {
     let proof = air_core::prove(&mut provers, pcs_config()).expect("masked standalone SHA proof");
 
     let verifier_challenge = SharedClaimMaskChallenge::new();
-    let mut verifier = Sha256Verifier::new(
-        log_n_rows,
-        MAX_ROUND_GROUP_BITS,
-        sha.interaction_claim().clone(),
-    )
-    .with_claim_masks(verifier_challenge.clone());
+    let mut verifier = Sha256Verifier::new(log_n_rows, sha.interaction_claim().clone())
+        .with_claim_masks(verifier_challenge.clone());
     let mut verifier_anchor = ClaimMaskChallengeModule::new(verifier_challenge, log_sizes).unwrap();
     let mut verifiers: [&mut dyn Air; 2] = [&mut verifier, &mut verifier_anchor];
     air_core::verify(&mut verifiers, &proof).expect("masked standalone SHA proof verifies");

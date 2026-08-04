@@ -515,20 +515,15 @@ pub(crate) fn gen_fake_glv_selector_air_interaction_trace(
     (trace, FakeGlvSelectorAirInteractionClaim { claimed_sum })
 }
 
-/// Constrain the selector reconstruction for an ARBITRARY fake-GLV
-/// decomposition (`s1`, `s2_abs` each a 128-bit half-scalar, `s2_sign_bit` free).
+/// Constrains selector reconstruction for a fake-GLV decomposition.
 ///
-/// Each `selector[i] ∈ {0..15}` packs two 2-bit chunks:
-/// `selector[i] = s1_chunk[i] + 4·s2_chunk[i]`, where `s1_chunk[i]` is bits
-/// `(1+2i, 2+2i)` of `s1` and `s2_chunk[i]` the same bits of `s2_abs`. The four
-/// chunk bits are witnessed (`selector_{low,high}_bits`,
-/// `selector_s2_{low,high}_bits`), boolean-constrained, and tied to `selector`.
-/// Two independent borrow-free 13-bit carry chains then reconstruct `s1` and
-/// `s2_abs` from their chunk bits + `{s1,s2}_{lsb,msb}` and bind them to the
-/// `FakeGlvScalarRelation` tuple (so the selector cannot reconstruct a different
-/// `(s1, s2_abs)` than the one the scalar AIR proved satisfies
-/// `scalar · s2_abs ≡ selected_s1 (mod n)`). `s2_sign_bit` flows through the
-/// relation tuple untouched (consumed by the signed-operand component).
+/// Values `s1` and `s2_abs` are 128-bit half-scalars.
+///
+/// Each selector packs one two-bit chunk from each half-scalar.
+/// Boolean constraints bind the four chunk bits to the selector.
+/// Two 13-bit carry chains reconstruct `s1` and `s2_abs`.
+/// `FakeGlvScalarRelation` binds the reconstructed values to the scalar AIR.
+/// The relation also forwards `s2_sign_bit`.
 fn constrain_selector_from_scalar<E: EvalAtRow>(
     eval: &mut E,
     active: E::F,
@@ -843,7 +838,7 @@ fn selector_limb_contribution_u32(
     limb: usize,
     source: ChunkSource,
 ) -> u32 {
-    // s1 chunk = `selector % 4` (low two bits); s2 chunk = `selector / 4` (high
+    // s1 chunk = `selector % 4` (low two bits). S2 chunk = `selector / 4` (high
     // two bits). lsb/msb are this half-scalar's boundary bits.
     let (lsb, msb, chunk_of): (u32, u32, fn(u32) -> u32) = match source {
         ChunkSource::S1 => (row.s1_lsb.0, row.s1_msb.0, |selector| selector % 4),
@@ -1100,9 +1095,9 @@ mod tests {
         selectors.mix_into(&mut channel);
     }
 
-    /// Recording `EvalAtRow` for the selector AIR: serves base-trace masks in
-    /// read order, records each polynomial constraint, skips the one LogUp
-    /// relation (the reconstruction pins are pure polynomial constraints).
+    /// Records selector AIR polynomial constraints.
+    ///
+    /// The evaluator serves base columns in read order and skips the LogUp relation.
     struct RecordingSelectorEvaluator<'a> {
         base: &'a [Vec<M31>],
         col_index: usize,
@@ -1170,22 +1165,17 @@ mod tests {
         true
     }
 
-    /// Gap A: the selector AIR's polynomial constraints must hold for an
-    /// ARBITRARY fake-GLV decomposition (`s2_abs != 1`, real 128-bit halves) —
-    /// the case the previous trivial-only constraint (`s2_lsb = 1`,
-    /// `s2_msb = 0`, `s2[0] = cert_active`) rejected. Builds the
-    /// `FakeGlvScalarHint::decompose` hint for a near-order scalar, generates the
-    /// selector trace, and asserts the AIR accepts it; then asserts a tampered
-    /// `s2_abs` reconstruction limb is rejected (the s2 carry chain fires).
+    /// Confirms selector constraints for a nontrivial fake-GLV decomposition.
+    ///
+    /// The test uses a near-order scalar with `s2_abs != 1`.
+    /// It also confirms rejection of a changed `s2_abs` limb.
     #[test]
     fn fake_glv_selector_air_accepts_arbitrary_s2() {
         use crate::limbs::P256M31BigInt;
         use crate::scalar::scalar_mod_mul::columns::padded_log_size;
 
-        // A mid-range scalar (all four 64-bit limbs distinct, top limb well
-        // below n's top limb) decomposes into genuinely non-trivial 128-bit
-        // halves with `s2_abs != 1` — the case the trivial-only constraint
-        // refused.
+        // Use a mid-range scalar with four different 64-bit limbs.
+        // Its decomposition must have `s2_abs != 1`.
         let scalar = P256M31BigInt::from_u256(&U256::from_le_u64s(&[
             0x1234_5678_9abc_def0,
             0xfedc_ba98_7654_3210,

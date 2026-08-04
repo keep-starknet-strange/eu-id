@@ -1,10 +1,9 @@
-//! Hinted mod-p multiplication with carry polynomials (P5 rewrite).
+//! Hinted mod-`p` multiplication with carry polynomials.
 //!
-//! Replaces the schoolbook Solinas silo (`projective_rcb_mul`'s raw-product /
-//! folded / reduction families, ~290 trace rows per mul) with one row per mul
-//! whose correctness is enforced by three polynomial carry identities checked
-//! at a single channel-drawn point `z ∈ QM31` (drawn AFTER the base trace is
-//! committed, exactly where the LogUp relations are drawn).
+//! The component uses one row for each multiplication.
+//! Three polynomial carry identities prove correctness.
+//! The verifier checks them at one channel challenge `z ∈ QM31`.
+//! The channel draws `z` after the base-trace commitment.
 //!
 //! # Property
 //!
@@ -16,7 +15,7 @@
 //! ```
 //!
 //! `r` keeps the existing silo invariant: it is *a* 256-bit representative of
-//! the residue class (the honest witness writes the canonical one); boundaries
+//! the residue class (the honest witness writes the canonical one). Boundaries
 //! that publish or compare values pin canonicality separately (final_check's
 //! `r_x < p`, the public-key gate).
 //!
@@ -29,13 +28,11 @@
 //! `a·b ≡ r mod p`) if no coefficient relation can wrap mod `p_M31` within the
 //! committed range bounds.
 //!
-//! The naive single identity `A·B − Q·P − R = (X−β)·H` does NOT lift: a 20×20
-//! limb convolution has up to 20 terms per coefficient, so coefficients reach
-//! `20·(β−1)² ≈ 1.342e9`, the carry values reach `≈ maxC/(β−1)`, and the
-//! per-coefficient relation `c_k − h_{k−1} + β·h_k ≡ 0 (mod p_M31)` has slack
-//! `maxC + β·H_range + H_range ≈ 2.68e9 > p_M31` — an adversary can wrap a
-//! coefficient by `±p_M31` *within range bounds* and forge `a·b ≡ r' (mod p)`
-//! with a wrong `r'`. This is a soundness requirement, not hygiene.
+//! The single identity `A·B − Q·P − R = (X−β)·H` does not lift safely.
+//! A 20-by-20 limb convolution has up to 20 terms in each coefficient.
+//! Its coefficient and carry bounds permit a wrap by `±p_M31`.
+//! Such a wrap could prove an incorrect result.
+//! Thus, the component uses three identities.
 //!
 //! Splitting `b = b_lo + β^10·b_hi` (limbs 0..10 / 10..20 — note
 //! `2^130 = β^10`, so the recombination is a pure `X^10` shift, no constant
@@ -48,7 +45,7 @@
 //! ⟹    a·b = (q1 + β^10·q2 + q3)·p + r  ⟹  a·b ≡ r (mod p)
 //! ```
 //!
-//! Worksheet (all identities share these bounds; see the constants in
+//! Worksheet (all identities share these bounds, see the constants in
 //! [`witness`]):
 //!
 //! ```text
@@ -69,23 +66,33 @@
 //!                                              < p_M31 ✓ (25% margin)
 //! ```
 //!
-//! No coefficient relation can wrap ⟹ each relation holds over ℤ ⟹ the
-//! telescoping sum at `X = β` gives the integer equation per identity ⟹ the
-//! mul is integer-exact. Schwartz–Zippel error: each identity is a degree-29
-//! polynomial; with one `z` for all rows, union bound
+//! Each coefficient relation stays below the M31 modulus.
+//! Thus, the relation holds over the integers.
+//! The telescoping sum at `X = β` gives the integer equation for each identity.
+//! Each multiplication is integer-exact.
+//!
+//! Each identity is a degree-29 polynomial.
+//! With one `z` for all rows, the union bound is
 //! `3 · rows · 29 / |QM31| ≈ 2^-105` for 4096 rows.
 //!
-//! # AIR shape (P5.2)
+//! # AIR shape
 //!
-//! One row per mul. Base columns: `a[20] b[20] q1[11] m1[20] h1_lo[29]
-//! h1_hi[29] q2[11] m2[20] h2_lo[29] h2_hi[29] q3[11] r[20] h3_lo[29]
-//! h3_hi[29]` = 307. Three UNGATED degree-2 EF constraints (per identity, the
-//! products of two degree-1 limb combinations with constant `z`-power
-//! coefficients; all-zero padding rows satisfy them trivially). Every limb
-//! Range13-checked; `h_hi` checked against the `[−12, 12]` signed table. The
-//! row provides the same `ProjectiveRcbMulResultRelation` tuples
-//! `(source_index, mul_index, role, limb_index, limb)` the silo provides
-//! today, so the EC-formula consumers are untouched.
+//! Each multiplication uses one row.
+//! The base trace has 307 columns:
+//!
+//! ```text
+//! a[20] b[20] q1[11] m1[20] h1_lo[29] h1_hi[29]
+//! q2[11] m2[20] h2_lo[29] h2_hi[29]
+//! q3[11] r[20] h3_lo[29] h3_hi[29]
+//! ```
+//!
+//! Three ungated extension-field constraints prove the identities.
+//! Each constraint has degree two.
+//! Zero padding rows satisfy them.
+//!
+//! Range13 checks every limb.
+//! A signed table checks `h_hi` in `[−12, 12]`.
+//! Each row provides the same `ProjectiveRcbMulResultRelation` tuples as the silo.
 
 pub mod air;
 pub mod formula_bind;
@@ -95,15 +102,13 @@ pub mod witness;
 
 use stwo_constraint_framework::relation;
 
-/// Header relation linking each projective-source consumer op row to its silo
-/// group header. Tuple: `(source_index, op, output_inf, lhs_inf, rhs_inf)`.
+/// Links each projective-source operation row to its silo group header.
 ///
-/// PROVIDED (`−has_muls`) by each projective-source consumer (fake_glv
-/// ec_source + prepared_table) on every op row that emits silo muls; CONSUMED
-/// (`+is_proj_mul_0`) by the silo (hinted_mul) group-header row (the
-/// `mul_index == 0` row of each proj group). Infinity-operand MixedAdd rows
-/// have `has_muls = 0` and no silo group, so they contribute nothing to either
-/// side — the relation nets to zero 1:1 across all proj groups.
+/// The tuple is `(source_index, op, output_inf, lhs_inf, rhs_inf)`.
+///
+/// Each projective-source consumer provides a tuple for an operation with silo multiplications.
+/// The silo consumes it at the first multiplication row.
+/// An infinity mixed-add row has no silo multiplication and emits no tuple.
 pub const EC_OP_HEADER_RELATION_ARITY: usize = 5;
 
 relation!(EcOpHeaderRelation, EC_OP_HEADER_RELATION_ARITY);

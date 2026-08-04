@@ -2,8 +2,8 @@
 //!
 //! Small pin-tests that fail closed if the column layout or per-block
 //! lookup-multiplicity counts drift. Kept as integration tests (rather
-//! than unit tests) so they exercise the public API surface and don't
-//! depend on internal helpers; the assertions themselves are cheap
+//! than unit tests) so they exercise the public API surface and do not
+//! depend on internal helpers. The assertions themselves are cheap
 //! enough to run on every `cargo test`.
 
 use stwo_sha256::constants::DIGEST_BYTES;
@@ -34,12 +34,11 @@ fn sha_air_uses_typed_relation_multiplicities() {
 /// Pin `Layout::TOTAL_COLS` to the claimed total so any future
 /// column-count drift fails closed against the test-plan value.
 ///
-/// Hybrid one-row-per-round layout: enabler (1) + `W` limbs (2) +
-/// W bits (32) + round family (216) + schedule family (70) +
-/// `is_first_block` (1) + `h_in` (16) + finalization carries (16) +
-/// `h_out` (16) + `is_last_block` (1) + digest bytes (32) +
-/// padding-role (33) + `enabler_step` (1) = 437. (Split-pack packed-group
-/// and σ-input-split columns removed — Σ/σ/Maj/Ch come from bit-planes.)
+/// Pin the 437-column one-row-per-round layout.
+///
+/// The total covers control, schedule, bit planes, round values, state,
+/// carries, digest bytes, and padding data. The active layout has no
+/// split-pack columns.
 #[test]
 fn total_cols_equals_437() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
