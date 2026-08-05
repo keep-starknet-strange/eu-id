@@ -134,7 +134,7 @@ pub const N_BASE_COLS: usize = COL_HINT_ACC + 9;
 /// w1Encode output; the ML-DSA-44 3-byte/6-bit packing residue was deleted --
 /// this component is single-profile in practice, statement.rs never
 /// constructs it with ML_DSA_44) and two final hint-sum checks follow.
-/// Total: 51.
+/// Total: 52.
 pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 12 + 2 + 2;
 pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
@@ -988,7 +988,7 @@ fn gen_decomp_interaction_inner(
     };
 
     // --- Build the logup fraction streams in AIR emission order ---
-    // Each row has 51 fractions. Each of four lanes has 11 range uses and one
+    // Each row has 52 fractions. Each of four lanes has 11 range uses and one
     // WCell use. Two hash-byte slots and two final hint-sum checks follow.
     // Keep this order equal to the AIR order.
     for lane in 0..LANES_PER_ROW {
