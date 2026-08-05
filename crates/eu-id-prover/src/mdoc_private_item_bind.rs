@@ -77,6 +77,10 @@ const CANONICAL_ELEMENT_IDENTIFIER: &[u8] = b"age_over_18";
 const CANONICAL_ELEMENT_VALUE: &[u8] = &[0xf5];
 const CANONICAL_SEMANTIC_TUPLES: usize =
     CANONICAL_ELEMENT_IDENTIFIER.len() + CANONICAL_ELEMENT_VALUE.len();
+/// Degree-recounted safe at +2: every `main_interaction_sites()` numerator is degree <=1
+/// (single atoms, negated atoms, or constant-scaled linear sums), so batch-4 folding over
+/// degree-1 denominators tops out at D5.
+const LOGUP_BATCH: usize = 4;
 
 // One private digest-ID tuple:
 // (encoding_len, b0, b1, b2, b3, b4, value_lo16, value_hi16).
@@ -1428,7 +1432,7 @@ impl FrameworkEval for MdocPrivateItemEval {
             self.blinder_m,
             false,
         );
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
@@ -1630,23 +1634,23 @@ fn interaction_trace(
     let blinder_denominator = blinder_denominator(blinder_relation, blinder_v);
     sites.push(vec![(blinder_numerator, blinder_denominator); packed_rows]);
 
+    // Mirrors `finalize_logup_batched(LOGUP_BATCH)`'s recursive fraction fold exactly
+    // (`num = num*d + n*den; den = den*d`, left-to-right over the chunk).
     let mut logup = LogupTraceGenerator::new(log_size);
     let mut site = 0;
-    while site + 1 < sites.len() {
-        let left = &sites[site];
-        let right = &sites[site + 1];
+    while site < sites.len() {
+        let end = (site + LOGUP_BATCH).min(sites.len());
+        let chunk = &sites[site..end];
         logup.col_from_iter((0..packed_rows).map(|row| {
-            let (left_num, left_den) = left[row];
-            let (right_num, right_den) = right[row];
-            (
-                left_num * right_den + right_num * left_den,
-                left_den * right_den,
-            )
+            let mut iter = chunk.iter().map(|s| s[row]);
+            let (mut num, mut den) = iter.next().unwrap();
+            for (n, d) in iter {
+                num = num * d + n * den;
+                den *= d;
+            }
+            (num, den)
         }));
-        site += 2;
-    }
-    if site < sites.len() {
-        logup.col_from_iter((0..packed_rows).map(|row| sites[site][row]));
+        site = end;
     }
     logup.finalize_last()
 }
@@ -1841,7 +1845,7 @@ impl Air for MdocPrivateItemBind {
             trace: vec![self.log_size; trace_col::COUNT],
             interaction: vec![
                 self.log_size;
-                self.main_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
+                self.main_interaction_sites().div_ceil(LOGUP_BATCH) * SECURE_EXTENSION_DEGREE
                     + SECURE_EXTENSION_DEGREE
             ],
         }
@@ -2510,7 +2514,7 @@ mod tests {
         assert_eq!(verifier.layout().trace.len(), trace_col::COUNT);
         assert_eq!(
             verifier.layout().interaction.len(),
-            35 * SECURE_EXTENSION_DEGREE
+            18 * SECURE_EXTENSION_DEGREE
         );
         assert_eq!(trace_col::COUNT, 80);
     }
