@@ -23,7 +23,7 @@ use stwo_constraint_framework::{
     ORIGINAL_TRACE_IDX,
 };
 
-use crate::constants::{IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS};
+use crate::constants::{IOTA_RC, IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS};
 use crate::keccak;
 use crate::keccak_round::{
     self, InteractionClaimData as RoundData, N_ANDNOT_LOOKUPS, N_XOR3_C, N_XOR3_THETA_APPLY,
@@ -34,7 +34,7 @@ use crate::utils::{circle_row_to_coset, col_eval, spread_u32, ColEval};
 /// One input boundary row followed by one row for each Keccak round.
 pub const ROWS_PER_PERMUTATION: usize = N_ROUNDS + 1;
 
-pub const N_SCHEDULE_COLUMNS: usize = 6 + N_BYTES_IN_U64;
+pub const N_SCHEDULE_COLUMNS: usize = 6 + IOTA_RC_BYTE_INDICES.len();
 pub const N_CORE_COLUMNS: usize =
     N_BYTES_IN_STATE + keccak_round::ROUND_PRE_CHI_COLUMNS + N_ANDNOT_LOOKUPS;
 pub const N_COLUMNS: usize = N_SCHEDULE_COLUMNS + N_CORE_COLUMNS;
@@ -55,12 +55,12 @@ pub const CARRIER_COLUMN_START: usize = CARRIER_START;
 
 const CHI_CLOSE_LOOKUP_START: usize = N_XOR3_C + N_XOR3_THETA_APPLY;
 
-const _: () = assert!(N_SCHEDULE_COLUMNS == 14);
+const _: () = assert!(N_SCHEDULE_COLUMNS == 10);
 const _: () = assert!(ROWS_PER_PERMUTATION == 25);
 const _: () = assert!(IOTA_RC.len() == ROWS_PER_PERMUTATION);
 const _: () = assert!(IOTA_RC[N_ROUNDS] == 0);
 const _: () = assert!(N_CORE_COLUMNS == 896);
-const _: () = assert!(N_COLUMNS == 910);
+const _: () = assert!(N_COLUMNS == 906);
 const _: () = assert!(N_TOTAL_LOOKUPS == 899);
 
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug)]
@@ -186,8 +186,10 @@ pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
         columns[PERMUTATION_COLUMN][row] = boundary.perm_id;
         columns[POSITION_COLUMN][row] = M31::from(position as u32);
         let round = position.saturating_sub(1);
-        for byte in 0..N_BYTES_IN_U64 {
-            columns[ROUND_CONSTANT_START + byte][row] =
+        // Only the 4 nonzero-capable Iota byte lanes are committed; the other
+        // 4 are literal zero in every round and are inlined at the AIR level.
+        for (column, byte) in IOTA_RC_BYTE_INDICES.into_iter().enumerate() {
+            columns[ROUND_CONSTANT_START + column][row] =
                 M31::from(spread_u32(IOTA_RC[round].to_le_bytes()[byte] as u32));
         }
         for byte in 0..N_BYTES_IN_STATE {
@@ -257,8 +259,11 @@ pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
 // =============================================================================
 
 pub const SCHEDULE_TABLE_LOG_SIZE: u32 = 5;
-pub const N_SCHEDULE_TABLE_PREPROCESSED: usize = 5 + N_BYTES_IN_U64;
-pub const N_SCHEDULE_TABLE_TRACE: usize = 1;
+pub const N_SCHEDULE_TABLE_PREPROCESSED: usize = 5 + IOTA_RC_BYTE_INDICES.len();
+/// No dedicated multiplicity trace column: the numerator `valid · n_perms` is
+/// computed directly from the `valid` preprocessed column (see
+/// [`ScheduleTableEval::evaluate`] and [`generate_schedule_interaction`]).
+pub const N_SCHEDULE_TABLE_TRACE: usize = 0;
 pub const N_SCHEDULE_TABLE_INTERACTION: usize = SECURE_EXTENSION_DEGREE;
 
 fn schedule_table_id(name: &str) -> PreProcessedColumnId {
@@ -272,7 +277,10 @@ pub fn schedule_table_ids() -> Vec<PreProcessedColumnId> {
         .into_iter()
         .map(schedule_table_id)
         .collect::<Vec<_>>();
-    for byte in 0..N_BYTES_IN_U64 {
+    // Only the 4 nonzero-capable Iota byte lanes; the other 4 are literal
+    // zero in every round and are inlined at the AIR level (see `carrier`
+    // module's Iota handling).
+    for byte in IOTA_RC_BYTE_INDICES {
         ids.push(schedule_table_id(&format!("round_constant_{byte}")));
     }
     ids
@@ -291,7 +299,7 @@ pub fn generate_schedule_table_preprocessed() -> Vec<ColEval> {
             3 => M31::from((row > 0) as u32),
             4 => M31::from((row == N_ROUNDS) as u32),
             column => {
-                let byte = column - 5;
+                let byte = IOTA_RC_BYTE_INDICES[column - 5];
                 let round = row.saturating_sub(1);
                 M31::from(spread_u32(IOTA_RC[round].to_le_bytes()[byte] as u32))
             }
@@ -305,16 +313,6 @@ pub fn generate_schedule_table_preprocessed() -> Vec<ColEval> {
             )
         })
         .collect()
-}
-
-pub fn generate_schedule_multiplicity(n_perms: usize) -> Vec<ColEval> {
-    let n_rows = 1usize << SCHEDULE_TABLE_LOG_SIZE;
-    vec![col_eval(
-        SCHEDULE_TABLE_LOG_SIZE,
-        (0..n_rows)
-            .map(|row| M31::from(if row <= N_ROUNDS { n_perms as u32 } else { 0 }))
-            .collect(),
-    )]
 }
 
 #[derive(Clone)]
@@ -338,13 +336,12 @@ impl FrameworkEval for ScheduleTableEval {
         let ids = schedule_table_ids();
         let values: [E::F; N_SCHEDULE_TABLE_PREPROCESSED] =
             std::array::from_fn(|column| eval.get_preprocessed_column(ids[column].clone()));
-        let multiplicity = eval.next_trace_mask();
-        eval.add_constraint(
-            multiplicity.clone() - values[0].clone() * BaseField::from(self.n_perms as u32),
-        );
+        // multiplicity == valid * n_perms always; use the expression directly
+        // instead of a separate witnessed-and-constrained trace column.
+        let numerator = values[0].clone() * BaseField::from(self.n_perms as u32);
         eval.add_to_relation(RelationEntry::new(
             &self.relations.round_schedule,
-            -E::EF::from(multiplicity),
+            -E::EF::from(numerator),
             &values[1..],
         ));
         eval.finalize_logup_in_pairs();
@@ -362,7 +359,6 @@ pub fn generate_schedule_interaction(
     n_perms: usize,
 ) -> (InteractionClaim, Vec<ColEval>) {
     let preprocessed = generate_schedule_table_preprocessed();
-    let multiplicity = generate_schedule_multiplicity(n_perms);
     let n_vector_rows = 1usize << (SCHEDULE_TABLE_LOG_SIZE - LOG_N_LANES);
     let mut generator = LogupTraceGenerator::new(SCHEDULE_TABLE_LOG_SIZE);
     let mut column = generator.new_col();
@@ -370,9 +366,10 @@ pub fn generate_schedule_interaction(
         let tuple = (1..N_SCHEDULE_TABLE_PREPROCESSED)
             .map(|index| preprocessed[index].values.data[vector_row])
             .collect::<Vec<_>>();
+        let numerator = preprocessed[0].values.data[vector_row] * M31::from(n_perms as u32);
         column.write_frac(
             vector_row,
-            -PackedQM31::from(multiplicity[0].values.data[vector_row]),
+            -PackedQM31::from(numerator),
             relations.round_schedule.combine(&tuple),
         );
     }
@@ -429,7 +426,9 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
     let permutation_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
     let position_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
     let end_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
-    let round_constant_masks: [[E::F; 2]; N_BYTES_IN_U64] =
+    // Only the 4 nonzero-capable Iota byte lanes are committed (see
+    // `IOTA_RC_BYTE_INDICES`); the other 4 are a literal zero in every round.
+    let round_constant_masks: [[E::F; 2]; IOTA_RC_BYTE_INDICES.len()] =
         std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]));
 
     let header = header_mask[1].clone();
@@ -473,11 +472,21 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
     eval.add_constraint(inactive.clone() * position.clone());
     eval.add_constraint(inactive.clone() * final_round.clone());
 
-    let current_rc: [E::F; N_BYTES_IN_U64] =
+    // Committed values for the 4 nonzero-capable byte lanes, in
+    // `IOTA_RC_BYTE_INDICES` order.
+    let committed_rc: [E::F; IOTA_RC_BYTE_INDICES.len()] =
         std::array::from_fn(|index| round_constant_masks[index][1].clone());
-    for value in &current_rc {
+    for value in &committed_rc {
         eval.add_constraint(inactive.clone() * value.clone());
     }
+    // Full 8-lane view for the round arithmetic (chi/iota fold-in): the other
+    // 4 lanes are a literal zero in every round, not a committed column.
+    let current_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|byte| {
+        match IOTA_RC_BYTE_INDICES.iter().position(|&b| b == byte) {
+            Some(index) => committed_rc[index].clone(),
+            None => E::F::zero(),
+        }
+    });
 
     let mut lookups = Vec::with_capacity(N_TOTAL_LOOKUPS);
     let mut schedule_tuple = vec![
@@ -486,7 +495,7 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
         round_active.clone(),
         final_round.clone(),
     ];
-    schedule_tuple.extend(current_rc.iter().cloned());
+    schedule_tuple.extend(committed_rc.iter().cloned());
     lookups.push(Lookup {
         kind: LookupKind::Schedule,
         num: E::EF::from(active),

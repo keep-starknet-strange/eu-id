@@ -520,9 +520,6 @@ impl AirProver for KeccakServiceProver {
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = sponge_v::generate_base_trace(&self.run);
         evals.extend(std::mem::take(&mut self.perm.carrier_trace));
-        evals.extend(carrier::generate_schedule_multiplicity(
-            self.jobs.n_perms_total(),
-        ));
         evals.extend(tables_air::generate_trace(&self.perm.table_mult));
         tb.extend_evals(evals);
     }

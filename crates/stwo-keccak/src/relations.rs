@@ -99,10 +99,12 @@ relation!(Split7, SPLIT_LOOKUP_ARITY);
 pub const KECCAK_ROUND_ARITY: usize = 3 + IOTA_RC_BYTE_INDICES.len() + N_BYTES_IN_STATE;
 relation!(KeccakRound, KECCAK_ROUND_ARITY);
 
-/// Arity of [`RoundScheduleRelation`]: position, row roles, and eight Iota
-/// constant bytes. The fixed schedule table provides each valid position once
-/// per permutation.
-pub const ROUND_SCHEDULE_ARITY: usize = 4 + 8;
+/// Arity of [`RoundScheduleRelation`]: position, row roles, and the four
+/// nonzero-capable Iota constant byte lanes (`IOTA_RC_BYTE_INDICES`; the
+/// other four are literal zero in every round and are inlined, not
+/// committed/looked-up). The fixed schedule table provides each valid
+/// position once per permutation.
+pub const ROUND_SCHEDULE_ARITY: usize = 4 + IOTA_RC_BYTE_INDICES.len();
 relation!(RoundScheduleRelation, ROUND_SCHEDULE_ARITY);
 
 /// Shared handle for the ONE drawn [`KeccakRelations`] of a composed proof.

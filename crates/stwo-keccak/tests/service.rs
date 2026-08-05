@@ -31,7 +31,9 @@ use stwo_constraint_framework::{
 
 use air_core::{Air, AirProver, PreprocessedColumnFingerprint, TreeLayout};
 
-use stwo_keccak::constants::{IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS};
+use stwo_keccak::constants::{
+    IOTA_RC, IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_ROUNDS,
+};
 use stwo_keccak::keccak;
 use stwo_keccak::keccak_round::{N_XOR3_C, N_XOR3_THETA_APPLY};
 use stwo_keccak::relations::{HashIoRelation, KeccakRelations, SharedKeccakRelations};
@@ -349,19 +351,23 @@ fn install_alternate_iota_witness(run: &mut SpongeVRun) -> PermWitness {
     let vector_row = position / N_LANES;
     let lane = position % N_LANES;
 
-    for byte in 0..N_BYTES_IN_U64 {
+    // The carrier only commits the 4 nonzero-capable Iota byte lanes
+    // (`IOTA_RC_BYTE_INDICES`); the other 4 are inlined as a zero literal in
+    // the AIR and have no column to tamper. Each of those is 0 in both the
+    // official and alternate constant here, so skipping them changes nothing.
+    for (column, byte) in IOTA_RC_BYTE_INDICES.into_iter().enumerate() {
         let official = M31::from(spread_u32(
             IOTA_RC[ALTERNATE_IOTA_ROUND].to_le_bytes()[byte] as u32,
         ));
         let alternate = M31::from(spread_u32(ALTERNATE_IOTA_RC.to_le_bytes()[byte] as u32));
         set_carrier_coset_cell(
-            &mut carrier_witness.trace[stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + byte],
+            &mut carrier_witness.trace[stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + column],
             position,
             alternate,
         );
         set_carrier_coset_cell(
             &mut carrier_witness.interaction.trace_mut()
-                [stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + byte],
+                [stwo_keccak::carrier::ROUND_CONSTANT_COLUMN_START + column],
             position,
             alternate,
         );
@@ -676,8 +682,8 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     const CAPACITY_PERMUTATIONS: usize = 256;
     const SHAKE256_RATE: usize = 136;
     const EXPECTED_SCHEDULE_COLUMNS: usize = 16;
-    const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 7_520_256;
-    const EXPECTED_SERVICE_CELLS: usize = 8_971_584;
+    const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 7_487_488;
+    const EXPECTED_SERVICE_CELLS: usize = 8_938_656;
 
     let capacity_bytes = (CAPACITY_PERMUTATIONS - 1) * SHAKE256_RATE;
     let mut shapes = vec![Shape::with_message_capacity(0, capacity_bytes, 1, 1, 2)
@@ -702,7 +708,7 @@ fn canonical_n261_carrier_geometry_is_pinned() {
         N_PERMUTATIONS * stwo_keccak::carrier::ROWS_PER_PERMUTATION,
         6_525
     );
-    assert_eq!(stwo_keccak::carrier::N_COLUMNS, 910);
+    assert_eq!(stwo_keccak::carrier::N_COLUMNS, 906);
     assert_eq!(stwo_keccak::carrier::N_TOTAL_LOOKUPS, 899);
     assert_eq!(stwo_keccak::round_gkr::LOG_SLOTS, 10);
     assert_eq!(stwo_keccak::round_gkr::N_TIEBACK_COLUMNS, 8);
@@ -728,7 +734,7 @@ fn canonical_n261_carrier_geometry_is_pinned() {
             + stwo_keccak::carrier::N_SCHEDULE_TABLE_TRACE
             + stwo_keccak::carrier::N_SCHEDULE_TABLE_INTERACTION)
             << stwo_keccak::carrier::SCHEDULE_TABLE_LOG_SIZE,
-        576
+        416
     );
     let service_cells = committed_cells(&layout.preprocessed)
         + committed_cells(&layout.trace)
@@ -737,7 +743,7 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     assert_eq!(service_cells, EXPECTED_SERVICE_CELLS);
     assert_eq!(
         service_cells - EXPECTED_CARRIER_AND_TIEBACK_CELLS,
-        1_451_328
+        1_451_168
     );
 }
 

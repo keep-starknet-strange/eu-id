@@ -1152,9 +1152,9 @@ mod tests {
                 mix(&mut coeff_hash, &component.0.to_le_bytes());
             }
         }
-        assert_eq!(leaf_hash, 0xdd992460e5a14cf5);
-        assert_eq!(proof_hash, 0x83141763392699d1);
-        assert_eq!(coeff_hash, 0xaab375222211cfa1);
+        assert_eq!(leaf_hash, 0x203be3391ee7337a);
+        assert_eq!(proof_hash, 0x390094219d7d8c77);
+        assert_eq!(coeff_hash, 0x15ba1af25424bdee);
         assert_eq!(blob.len(), 9_992);
     }
 }
