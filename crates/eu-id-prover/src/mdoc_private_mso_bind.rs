@@ -70,6 +70,11 @@ pub(crate) const MDOC_PRIVATE_MSO_MIN_BLIND_ROWS: usize = 256;
 pub(crate) const MDOC_PRIVATE_MSO_DEVICE_KEY_INFO_BYTES: usize = 1_987;
 pub(crate) const MDOC_PRIVATE_MSO_MAX_DOC_TYPE_BYTES: usize = 23;
 
+/// Matches the `finalize_logup_batched(LOGUP_BATCH)` call in `evaluate()`. Degree-recounted
+/// safe at the declared +2 bound: the widest numerator here is degree 2
+/// (`mirror_row * byte_active`), and a batch-4 fold multiplies each numerator by only the
+/// other three degree-1 denominators, so the constraint tops out at max(1+4, 2+3) = D5.
+const LOGUP_BATCH: usize = 4;
 const BIND_VERSION: u64 = 5;
 const BIND_DOMAIN: u64 = 0x4d44_4f43_4d53_4f42; // "MDOCMSOB"
 const CHUNK_BYTES: usize = 32;
@@ -1416,24 +1421,24 @@ fn private_mso_interaction_trace(
     let blinder_denominator = blinder_denominator(inputs.blinder_relation, inputs.blinder_v);
     sites.push(vec![(blinder_numerator, blinder_denominator); n_vec_rows]);
 
+    // Mirrors `finalize_logup_batched(LOGUP_BATCH)`'s recursive fraction fold exactly
+    // (`num = num*d + n*den; den = den*d`, left-to-right over the chunk) so the prover's
+    // trace matches what the AIR verifies.
     let mut logup = LogupTraceGenerator::new(MDOC_PRIVATE_MSO_BIND_LOG_SIZE);
     let mut site_index = 0usize;
-    while site_index + 1 < sites.len() {
-        let left = &sites[site_index];
-        let right = &sites[site_index + 1];
+    while site_index < sites.len() {
+        let end = (site_index + LOGUP_BATCH).min(sites.len());
+        let chunk = &sites[site_index..end];
         logup.col_from_iter((0..n_vec_rows).map(|vec_row| {
-            let (left_numerator, left_denominator) = left[vec_row];
-            let (right_numerator, right_denominator) = right[vec_row];
-            (
-                left_numerator * right_denominator + right_numerator * left_denominator,
-                left_denominator * right_denominator,
-            )
+            let mut iter = chunk.iter().map(|site| site[vec_row]);
+            let (mut numerator, mut denominator) = iter.next().unwrap();
+            for (n, d) in iter {
+                numerator = numerator * d + n * denominator;
+                denominator *= d;
+            }
+            (numerator, denominator)
         }));
-        site_index += 2;
-    }
-    if site_index < sites.len() {
-        let last = &sites[site_index];
-        logup.col_from_iter((0..n_vec_rows).map(|vec_row| last[vec_row]));
+        site_index = end;
     }
     logup.finalize_last()
 }
@@ -1685,7 +1690,7 @@ impl FrameworkEval for MdocPrivateMsoEval {
             self.blinder_m,
             false,
         );
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
@@ -1786,8 +1791,8 @@ impl MdocPrivateMsoBind {
     }
 
     fn interaction_columns(&self) -> usize {
-        // Main paired LogUp columns plus one blinder-counterpart column.
-        (self.n_main_sites().div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE
+        // Main batched LogUp columns plus one blinder-counterpart column.
+        (self.n_main_sites().div_ceil(LOGUP_BATCH) + 1) * SECURE_EXTENSION_DEGREE
     }
 }
 
@@ -2682,6 +2687,8 @@ mod tests {
         }
 
         fn finalize_logup_in_pairs(&mut self) {}
+
+        fn finalize_logup_batched(&mut self, _batch_size: usize) {}
     }
 
     fn test_eval(spec: &MdocPrivateMsoBindSpec, shape: &PublicShape) -> MdocPrivateMsoEval {
@@ -3093,7 +3100,7 @@ mod tests {
         assert_eq!(census.device_pk_start_uses, 1);
         assert_eq!(census.validity_uses, 2);
         assert_eq!(binder.n_main_sites(), 69);
-        assert_eq!(binder.interaction_columns(), 36 * SECURE_EXTENSION_DEGREE);
+        assert_eq!(binder.interaction_columns(), 19 * SECURE_EXTENSION_DEGREE);
 
         let expected_start = PAYLOAD_OFFSET
             + payload_anchor(binder.spec.mso_len).len()
@@ -3672,7 +3679,7 @@ mod tests {
         );
         assert_eq!(
             verifier.layout().interaction,
-            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; 36 * SECURE_EXTENSION_DEGREE]
+            vec![MDOC_PRIVATE_MSO_BIND_LOG_SIZE; 19 * SECURE_EXTENSION_DEGREE]
         );
         assert_eq!(verifier.claimed_sums(), vec![qm31(1), qm31(4)]);
 
