@@ -191,32 +191,41 @@ pub fn gen_ntt_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
     result
 }
 
+// C7a: B_DIFF_SLACK, B_QUOTIENT_SLACK, and S_QUOTIENT_SLACK were deleted.
+// `diff` and `quotient` are purely-modular intermediates: their downstream
+// consumer (the twiddle multiplication, `add_mul_constraints`) only needs the
+// z*x ≡ out (mod Q) identity, which holds for ANY alias `diff+k*Q` as long as
+// `quotient` absorbs the difference -- so their own canonicity is never
+// load-bearing (see `add_canonical_range_lookups` below and the module-level
+// C7a negative tests). B_OUT0_SLACK, B_OUT1_SLACK, and S_OUTPUT_SLACK are
+// NEVER deleted: canonicity slack is load-bearing exactly where a value is
+// consumed non-modularly. OUT0/OUT1 feed the *next* stage's `borrow = input0
+// < input1` integer comparison, and S_OUTPUT feeds the balanced-digit
+// decomposition that produces `a_eval` -- both require the value's exact
+// integer representative in [0, Q), not just its residue mod Q.
 const B_IN0: usize = 0;
 const B_IN1: usize = 3;
 const B_OUT0: usize = 6;
 const B_OUT0_SLACK: usize = 9;
 const B_DIFF: usize = 12;
-const B_DIFF_SLACK: usize = 15;
-const B_OUT1: usize = 18;
-const B_OUT1_SLACK: usize = 21;
-const B_QUOTIENT: usize = 24;
-const B_QUOTIENT_SLACK: usize = 27;
-const B_REDUCE: usize = 30;
-const B_BORROW: usize = 31;
-const B_CARRY: usize = 32;
-pub const NTT_BUTTERFLY_BASE_COLS: usize = 36;
+const B_OUT1: usize = 15;
+const B_OUT1_SLACK: usize = 18;
+const B_QUOTIENT: usize = 21;
+const B_REDUCE: usize = 24;
+const B_BORROW: usize = 25;
+const B_CARRY: usize = 26;
+pub const NTT_BUTTERFLY_BASE_COLS: usize = 30;
 
 const S_INPUT: usize = 0;
 const S_OUTPUT: usize = 3;
 const S_OUTPUT_SLACK: usize = 6;
 const S_QUOTIENT: usize = 9;
-const S_QUOTIENT_SLACK: usize = 12;
-const S_CARRY: usize = 15;
-const S_DIGIT: usize = 19;
-pub const NTT_SCALING_BASE_COLS: usize = 22;
+const S_CARRY: usize = 12;
+const S_DIGIT: usize = 16;
+pub const NTT_SCALING_BASE_COLS: usize = 19;
 
-pub const NTT_BUTTERFLY_LOGUP_ENTRIES: usize = 32;
-pub const NTT_SCALING_LOGUP_ENTRIES: usize = 21;
+pub const NTT_BUTTERFLY_LOGUP_ENTRIES: usize = 26;
+pub const NTT_SCALING_LOGUP_ENTRIES: usize = 18;
 pub const NTT_BUTTERFLY_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE * NTT_BUTTERFLY_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 pub const NTT_SCALING_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE
@@ -238,6 +247,13 @@ fn split_u23(value: u32) -> [u32; 3] {
     [value & 0xff, (value >> 8) & 0xff, value >> 16]
 }
 
+fn write_value_limbs(columns: &mut [Vec<M31>], value_base: usize, row: usize, value: u32) {
+    let value_limbs = split_u23(value);
+    for limb in 0..3 {
+        columns[value_base + limb][row] = m31(value_limbs[limb]);
+    }
+}
+
 fn write_canonical(
     columns: &mut [Vec<M31>],
     value_base: usize,
@@ -245,10 +261,9 @@ fn write_canonical(
     row: usize,
     value: u32,
 ) {
-    let value_limbs = split_u23(value);
+    write_value_limbs(columns, value_base, row, value);
     let slack_limbs = split_u23(Q - 1 - value);
     for limb in 0..3 {
-        columns[value_base + limb][row] = m31(value_limbs[limb]);
         columns[slack_base + limb][row] = m31(slack_limbs[limb]);
     }
 }
@@ -305,14 +320,26 @@ fn balanced3(value: u32) -> [i64; 3] {
     crate::witness::balanced_digits::<3>(value as i128).map(|digit| digit as i64)
 }
 
-fn record_canonical_uses(uses: &mut RcUses, value: u32) {
+/// Records the 3 value-limb range uses only (Rc8, Rc8, Rc7). Used for
+/// purely-modular intermediates (`diff`, `quotient`) that never need the
+/// slack complement -- see the C7a module comment above `B_IN0`.
+fn record_value_range_uses(uses: &mut RcUses, value: u32) {
     let limbs = split_u23(value);
-    let slack = split_u23(Q - 1 - value);
-    for limb in 0..2 {
-        uses.record(RcKind::Rc8, limbs[limb]);
-        uses.record(RcKind::Rc8, slack[limb]);
+    for &limb in &limbs[0..2] {
+        uses.record(RcKind::Rc8, limb);
     }
     uses.record(RcKind::Rc7, limbs[2]);
+}
+
+/// Records both the value-limb and slack-complement range uses (6 total).
+/// Used for values that are consumed non-modularly downstream (`output0`,
+/// `output1`, `output`), where exact canonicity in `[0, Q)` is load-bearing.
+fn record_canonical_uses(uses: &mut RcUses, value: u32) {
+    record_value_range_uses(uses, value);
+    let slack = split_u23(Q - 1 - value);
+    for &limb in &slack[0..2] {
+        uses.record(RcKind::Rc8, limb);
+    }
     uses.record(RcKind::Rc7, slack[2]);
 }
 
@@ -348,18 +375,18 @@ pub fn gen_ntt_base(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
             input0 - input1
         };
         write_canonical(&mut columns, B_OUT0, B_OUT0_SLACK, row, output0);
-        write_canonical(&mut columns, B_DIFF, B_DIFF_SLACK, row, diff);
+        write_value_limbs(&mut columns, B_DIFF, row, diff);
         record_canonical_uses(&mut range_uses, output0);
-        record_canonical_uses(&mut range_uses, diff);
+        record_value_range_uses(&mut range_uses, diff);
         columns[B_REDUCE][row] = m31(reduce as u32);
         columns[B_BORROW][row] = m31(borrow as u32);
         states[item.poly][item.index0] = output0;
 
         let (output1, quotient, carries) = mul_witness(item.twiddle, diff);
         write_canonical(&mut columns, B_OUT1, B_OUT1_SLACK, row, output1);
-        write_canonical(&mut columns, B_QUOTIENT, B_QUOTIENT_SLACK, row, quotient);
+        write_value_limbs(&mut columns, B_QUOTIENT, row, quotient);
         record_canonical_uses(&mut range_uses, output1);
-        record_canonical_uses(&mut range_uses, quotient);
+        record_value_range_uses(&mut range_uses, quotient);
         for (limb, carry) in carries.into_iter().enumerate() {
             columns[B_CARRY + limb][row] = enc_signed(carry);
             range_uses.record(RcKind::Rc13, (carry + CARRY_OFFSET) as u32);
@@ -382,9 +409,9 @@ pub fn gen_ntt_base(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
         }
         let (output, quotient, carries) = mul_witness(N_INV, input);
         write_canonical(&mut columns, S_OUTPUT, S_OUTPUT_SLACK, row, output);
-        write_canonical(&mut columns, S_QUOTIENT, S_QUOTIENT_SLACK, row, quotient);
+        write_value_limbs(&mut columns, S_QUOTIENT, row, quotient);
         record_canonical_uses(&mut range_uses, output);
-        record_canonical_uses(&mut range_uses, quotient);
+        record_value_range_uses(&mut range_uses, quotient);
         for (limb, carry) in carries.into_iter().enumerate() {
             columns[S_CARRY + limb][row] = enc_signed(carry);
             range_uses.record(RcKind::Rc13, (carry + CARRY_OFFSET) as u32);
@@ -510,6 +537,31 @@ fn add_butterfly_transition_constraints<E: EvalAtRow>(
     eval.add_constraint(active * (input0 + q * borrow - input1 - diff));
 }
 
+/// Range-checks a value's 3 limbs only (Rc8, Rc8, Rc7) -- for purely-modular
+/// intermediates (`diff`, `quotient`) that never need the slack complement.
+fn add_value_range_lookups<E: EvalAtRow>(
+    eval: &mut E,
+    relations: &PrivateKeyEvalRelations,
+    gate: E::F,
+    value: &[E::F; 3],
+) {
+    for limb in &value[0..2] {
+        eval.add_to_relation(RelationEntry::base(
+            &relations.range,
+            gate.clone(),
+            &range_tuple::<E>(limb.clone(), RcKind::Rc8),
+        ));
+    }
+    eval.add_to_relation(RelationEntry::base(
+        &relations.range,
+        gate,
+        &range_tuple::<E>(value[2].clone(), RcKind::Rc7),
+    ));
+}
+
+/// Range-checks both the value and its slack complement (6 lookups total) --
+/// for values consumed non-modularly downstream, where exact canonicity in
+/// `[0, Q)` is load-bearing (see the C7a module comment above `B_IN0`).
 fn add_canonical_range_lookups<E: EvalAtRow>(
     eval: &mut E,
     relations: &PrivateKeyEvalRelations,
@@ -517,28 +569,8 @@ fn add_canonical_range_lookups<E: EvalAtRow>(
     value: &[E::F; 3],
     slack: &[E::F; 3],
 ) {
-    for limb in 0..2 {
-        eval.add_to_relation(RelationEntry::base(
-            &relations.range,
-            gate.clone(),
-            &range_tuple::<E>(value[limb].clone(), RcKind::Rc8),
-        ));
-        eval.add_to_relation(RelationEntry::base(
-            &relations.range,
-            gate.clone(),
-            &range_tuple::<E>(slack[limb].clone(), RcKind::Rc8),
-        ));
-    }
-    eval.add_to_relation(RelationEntry::base(
-        &relations.range,
-        gate.clone(),
-        &range_tuple::<E>(value[2].clone(), RcKind::Rc7),
-    ));
-    eval.add_to_relation(RelationEntry::base(
-        &relations.range,
-        gate,
-        &range_tuple::<E>(slack[2].clone(), RcKind::Rc7),
-    ));
+    add_value_range_lookups(eval, relations, gate.clone(), value);
+    add_value_range_lookups(eval, relations, gate, slack);
 }
 
 #[derive(Clone)]
@@ -572,11 +604,9 @@ impl FrameworkEval for NttButterflyEval {
         let output0: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let output0_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let diff: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let diff_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let output1: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let output1_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let quotient: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let quotient_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let reduce = eval.next_trace_mask();
         let borrow = eval.next_trace_mask();
         let carries: [E::F; 4] = core::array::from_fn(|_| eval.next_trace_mask());
@@ -589,11 +619,9 @@ impl FrameworkEval for NttButterflyEval {
             .chain(output0.iter())
             .chain(output0_slack.iter())
             .chain(diff.iter())
-            .chain(diff_slack.iter())
             .chain(output1.iter())
             .chain(output1_slack.iter())
             .chain(quotient.iter())
-            .chain(quotient_slack.iter())
             .chain(core::iter::once(&reduce))
             .chain(core::iter::once(&borrow))
             .chain(carries.iter())
@@ -620,12 +648,7 @@ impl FrameworkEval for NttButterflyEval {
                 output_adjustment: 0,
             },
         );
-        for (value, slack) in [
-            (&output0, &output0_slack),
-            (&diff, &diff_slack),
-            (&output1, &output1_slack),
-            (&quotient, &quotient_slack),
-        ] {
+        for (value, slack) in [(&output0, &output0_slack), (&output1, &output1_slack)] {
             add_canonical_constraint(&mut eval, active.clone(), value, slack);
         }
         add_mul_constraints(
@@ -658,14 +681,25 @@ impl FrameworkEval for NttButterflyEval {
                 ],
             ));
         }
-        for (value, slack) in [
-            (&output0, &output0_slack),
-            (&diff, &diff_slack),
-            (&output1, &output1_slack),
-            (&quotient, &quotient_slack),
-        ] {
-            add_canonical_range_lookups(&mut eval, &self.relations, active.clone(), value, slack);
-        }
+        // Emission order must match `gen_ntt_interaction`'s `push_range_entries`
+        // calls exactly: output0 (canonical), diff (value-only), output1
+        // (canonical), quotient (value-only).
+        add_canonical_range_lookups(
+            &mut eval,
+            &self.relations,
+            active.clone(),
+            &output0,
+            &output0_slack,
+        );
+        add_value_range_lookups(&mut eval, &self.relations, active.clone(), &diff);
+        add_canonical_range_lookups(
+            &mut eval,
+            &self.relations,
+            active.clone(),
+            &output1,
+            &output1_slack,
+        );
+        add_value_range_lookups(&mut eval, &self.relations, active.clone(), &quotient);
         for carry in carries {
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.range,
@@ -705,7 +739,6 @@ impl FrameworkEval for NttScalingEval {
         let output: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let output_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let quotient: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let quotient_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let carries: [E::F; 4] = core::array::from_fn(|_| eval.next_trace_mask());
         let digits: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let acc_masks: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
@@ -719,7 +752,6 @@ impl FrameworkEval for NttScalingEval {
             .chain(output.iter())
             .chain(output_slack.iter())
             .chain(quotient.iter())
-            .chain(quotient_slack.iter())
             .chain(carries.iter())
             .chain(digits.iter())
         {
@@ -727,7 +759,6 @@ impl FrameworkEval for NttScalingEval {
         }
 
         add_canonical_constraint(&mut eval, active.clone(), &output, &output_slack);
-        add_canonical_constraint(&mut eval, active.clone(), &quotient, &quotient_slack);
         let constant = split_u23(N_INV).map(|value| E::F::from(m31(value)));
         add_mul_constraints(
             &mut eval,
@@ -773,13 +804,7 @@ impl FrameworkEval for NttScalingEval {
             &output,
             &output_slack,
         );
-        add_canonical_range_lookups(
-            &mut eval,
-            &self.relations,
-            active.clone(),
-            &quotient,
-            &quotient_slack,
-        );
+        add_value_range_lookups(&mut eval, &self.relations, active.clone(), &quotient);
         for carry in carries {
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.range,
@@ -814,31 +839,34 @@ pub struct NttInteraction {
     pub claims: NttClaims,
 }
 
-fn push_range_entries(
+/// Mirrors `add_value_range_lookups`: 3 value-limb entries only.
+fn push_value_range_entries(
     entries: &mut Vec<(SecureField, SecureField)>,
     relations: &PrivateKeyEvalRelations,
     value: u32,
 ) {
     let limbs = split_u23(value);
-    let slack = split_u23(Q - 1 - value);
-    for limb in 0..2 {
+    for &limb in &limbs[0..2] {
         entries.push((
             SecureField::one(),
-            range_denominator(&relations.range, limbs[limb], RcKind::Rc8),
-        ));
-        entries.push((
-            SecureField::one(),
-            range_denominator(&relations.range, slack[limb], RcKind::Rc8),
+            range_denominator(&relations.range, limb, RcKind::Rc8),
         ));
     }
     entries.push((
         SecureField::one(),
         range_denominator(&relations.range, limbs[2], RcKind::Rc7),
     ));
-    entries.push((
-        SecureField::one(),
-        range_denominator(&relations.range, slack[2], RcKind::Rc7),
-    ));
+}
+
+/// Mirrors `add_canonical_range_lookups`: value-limb entries plus their slack
+/// complement (6 total).
+fn push_range_entries(
+    entries: &mut Vec<(SecureField, SecureField)>,
+    relations: &PrivateKeyEvalRelations,
+    value: u32,
+) {
+    push_value_range_entries(entries, relations, value);
+    push_value_range_entries(entries, relations, Q - 1 - value);
 }
 
 pub fn gen_ntt_interaction(
@@ -919,9 +947,12 @@ pub fn gen_ntt_interaction(
         ));
         states[item.poly][item.index0] = output0;
         states[item.poly][item.index1] = output1;
-        for value in [output0, diff, output1, quotient] {
-            push_range_entries(&mut entries, relations, value);
-        }
+        // Order must match the AIR: output0 (canonical), diff (value-only),
+        // output1 (canonical), quotient (value-only).
+        push_range_entries(&mut entries, relations, output0);
+        push_value_range_entries(&mut entries, relations, diff);
+        push_range_entries(&mut entries, relations, output1);
+        push_value_range_entries(&mut entries, relations, quotient);
         for carry in carries {
             entries.push((
                 one,
@@ -975,9 +1006,8 @@ pub fn gen_ntt_interaction(
             ]),
         ));
         let (output, quotient, carries) = mul_witness(N_INV, input);
-        for value in [output, quotient] {
-            push_range_entries(&mut entries, relations, value);
-        }
+        push_range_entries(&mut entries, relations, output);
+        push_value_range_entries(&mut entries, relations, quotient);
         for carry in carries {
             entries.push((
                 one,
@@ -1172,6 +1202,15 @@ mod tests {
             Formula::Normalizer { constant: N_INV },
         );
 
+        // C7a(N1): this generic alias check is exactly the mechanism the
+        // RETAINED output0/output1/S_OUTPUT canonicity slack relies on (each
+        // wraps `add_canonical_constraint`, i.e. this same `bound = Q-1`
+        // formula). A forged prover claiming the wider `bound = 2*Q-1` can
+        // accept the alias (out+Q, k-1) below; the exact `bound = Q-1`
+        // verifier rejects it. `diff`/`quotient` no longer carry this
+        // constraint at all post-C7a (see the module comment above `B_IN0`),
+        // so this test's coverage is now specifically of the slack that
+        // remains load-bearing.
         let alias = Q + 5;
         let slack = Q - 1 - 5;
         let mut alias_trace = vec![m31(1)];
@@ -1183,6 +1222,72 @@ mod tests {
             Formula::Canonical { bound: 2 * Q - 1 },
             Formula::Canonical { bound: Q - 1 },
         );
+    }
+
+    /// C7a(N2): `quotient`'s high limb is still range-checked via a single
+    /// value-only Rc7 lookup after deleting its canonicity slack (only the
+    /// slack-complement lookup pair was removed; requirement #1 of the C7a
+    /// finding keeps the value-limb lookups). Rc7's domain is exactly
+    /// `[0, 128)`; the first excluded value (128, matching the shared-table
+    /// boundary this crate already exercises for the same Rc7 kind via
+    /// `coeffs::split_coeffs_rc7_boundary_rejects`) cannot even be recorded
+    /// in the witness-side multiplicity bookkeeping, since `RcUses::record`
+    /// indexes its per-value counter vector directly -- proving no honest
+    /// witness (and no witness the real AIR's identical Rc7 lookup could
+    /// balance) can carry a quotient with a high limb of 128 or more.
+    #[test]
+    #[should_panic]
+    fn quotient_limb2_at_table_boundary_cannot_be_recorded() {
+        let value_with_limb2_128 = 1u32 << 23; // split_u23(2^23) = [0, 0, 128]
+        assert_eq!(split_u23(value_with_limb2_128)[2], 128);
+        let mut uses = RcUses::new();
+        record_value_range_uses(&mut uses, value_with_limb2_128);
+    }
+
+    /// C7a(N3): with `diff`'s canonicity slack deleted, `borrow` is no longer
+    /// uniquely pinned by the constraints when `input0 - input1 <= 8190`:
+    /// both `(borrow=0, diff=input0-input1)` and
+    /// `(borrow=1, diff=input0-input1+Q)` satisfy every remaining constraint
+    /// (boolean `borrow`, the linear transition equation, and diff's
+    /// value-only range check, since both diffs land inside `[0, 2^23)`).
+    /// This is ACCEPTED non-uniqueness, not a soundness gap: `output1` (the
+    /// only downstream consumer, itself canonically range-checked) is
+    /// identical either way, since `z*diff ≡ z*(diff+Q) (mod Q)` and
+    /// `mul_witness` absorbs the difference entirely into `quotient`.
+    #[test]
+    fn borrow_alias_below_diff_boundary_yields_identical_output1() {
+        let twiddle = zeta_table()[1];
+        let input0 = 8_190;
+        let input1 = 0u32;
+        assert!(input0 - input1 <= 8_190);
+
+        let diff_no_borrow = input0 - input1;
+        let diff_with_borrow = input0 + Q - input1;
+        assert!(diff_no_borrow < (1 << 23));
+        assert!(diff_with_borrow < (1 << 23));
+
+        let (output1_no_borrow, _, _) = mul_witness(twiddle, diff_no_borrow);
+        let (output1_with_borrow, _, _) = mul_witness(twiddle, diff_with_borrow);
+        assert_eq!(
+            output1_no_borrow, output1_with_borrow,
+            "both accepted (borrow, diff) witnesses must yield the same output1"
+        );
+    }
+
+    /// C7a(N4): one step past the N3 alias boundary (`input0 - input1 =
+    /// 8191`), the borrowed diff `input0 + Q - input1` lands exactly at
+    /// `2^23`, whose limb2 is 128 -- rejected by the same value-only Rc7
+    /// lookup as N2, this time via the concrete borrow-alias construction
+    /// that produces it.
+    #[test]
+    #[should_panic]
+    fn diff_at_borrow_alias_boundary_plus_one_rejected() {
+        let input0 = 8_191;
+        let input1 = 0u32;
+        let diff_with_borrow = input0 + Q - input1;
+        assert_eq!(diff_with_borrow, 1 << 23);
+        let mut uses = RcUses::new();
+        record_value_range_uses(&mut uses, diff_with_borrow);
     }
 
     #[test]
@@ -1264,13 +1369,16 @@ mod tests {
         );
         let butterfly_rows = (MATRIX_POLYS * NTT_STAGES * N / 2) as u32;
         let scaling_rows = (MATRIX_POLYS * N) as u32;
+        // C7a deleted B_DIFF_SLACK/B_QUOTIENT_SLACK/S_QUOTIENT_SLACK: diff and
+        // quotient now contribute only 3 (value-only) Rc8/Rc8/Rc7 entries each
+        // instead of 6 (value+slack); output0/output1/output are unaffected.
         assert_eq!(
             base.range_uses.for_kind(RcKind::Rc8).iter().sum::<u32>(),
-            16 * butterfly_rows + 8 * scaling_rows
+            12 * butterfly_rows + 6 * scaling_rows
         );
         assert_eq!(
             base.range_uses.for_kind(RcKind::Rc7).iter().sum::<u32>(),
-            8 * butterfly_rows + 4 * scaling_rows
+            6 * butterfly_rows + 3 * scaling_rows
         );
         assert_eq!(
             base.range_uses.for_kind(RcKind::Rc13).iter().sum::<u32>(),
