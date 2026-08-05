@@ -42,12 +42,16 @@ pub enum RcKind {
     /// Appended AFTER `Ternary` so no existing `row_base` moves.
     Rc4,
     /// C5: folded in from `sampleinball_fsm`'s private table (offline-memory
-    /// timestamp diff `dts`). Appended AFTER `Rc4`.
+    /// timestamp diff `dts`). Appended AFTER `Rc4`. Also reused by C7b's NTT
+    /// limb re-split for the 11-bit high limb.
     Rc11,
+    /// C7b: the NTT limb re-split's 12-bit low limb (base 4096, replacing
+    /// the earlier 8/8/7-bit byte split). Appended AFTER `Rc11`.
+    Rc12,
 }
 
 impl RcKind {
-    pub const ALL: [RcKind; 7] = [
+    pub const ALL: [RcKind; 8] = [
         RcKind::Rc9,
         RcKind::Rc13,
         RcKind::Rc8,
@@ -55,6 +59,7 @@ impl RcKind {
         RcKind::Ternary,
         RcKind::Rc4,
         RcKind::Rc11,
+        RcKind::Rc12,
     ];
     pub const RANGE: [RcKind; 4] = [RcKind::Rc9, RcKind::Rc13, RcKind::Rc8, RcKind::Rc7];
 
@@ -67,6 +72,7 @@ impl RcKind {
             RcKind::Ternary => 3,
             RcKind::Rc4 => 1 << 4,
             RcKind::Rc11 => 1 << 11,
+            RcKind::Rc12 => 1 << 12,
         }
     }
 
@@ -89,6 +95,7 @@ impl RcKind {
             RcKind::Ternary => 4,
             RcKind::Rc4 => 8,
             RcKind::Rc11 => 9,
+            RcKind::Rc12 => 10,
         }
     }
 
@@ -108,6 +115,7 @@ impl RcKind {
             }
             RcKind::Rc4 => RcKind::Ternary.row_base() + RcKind::Ternary.n_values(),
             RcKind::Rc11 => RcKind::Rc4.row_base() + RcKind::Rc4.n_values(),
+            RcKind::Rc12 => RcKind::Rc11.row_base() + RcKind::Rc11.n_values(),
         }
     }
 
@@ -129,6 +137,7 @@ impl RcKind {
             RcKind::Ternary => "ternary",
             RcKind::Rc4 => "rc4",
             RcKind::Rc11 => "rc11",
+            RcKind::Rc12 => "rc12",
         }
     }
 
@@ -139,7 +148,7 @@ impl RcKind {
     }
 }
 
-pub const RANGE_TABLE_ACTIVE_ROWS: usize = RcKind::Rc11.row_base() + RcKind::Rc11.n_values();
+pub const RANGE_TABLE_ACTIVE_ROWS: usize = RcKind::Rc12.row_base() + RcKind::Rc12.n_values();
 const _: () = assert!(RANGE_TABLE_ACTIVE_ROWS <= 1 << 14);
 /// Sparse, decoupled from `RcKind::ALL.len()` (see [`RcKind::bound_id`]).
 pub const PADDING_BOUND_ID: u32 = 15;
@@ -179,7 +188,7 @@ pub fn gen_range_table_preprocessed() -> Vec<ColEval> {
     ]
 }
 
-pub fn gen_range_table_multiplicities(uses: [&[u32]; 7]) -> ColEval {
+pub fn gen_range_table_multiplicities(uses: [&[u32]; 8]) -> ColEval {
     let mut values = vec![m31(0); 1usize << range_table_log_size()];
     for (kind, counts) in RcKind::ALL.into_iter().zip(uses) {
         assert_eq!(counts.len(), kind.n_values());
@@ -253,7 +262,7 @@ impl SharedRangeTable {
             !uses.is_empty(),
             "shared range table requires at least one consumer"
         );
-        let totals: [Vec<u32>; 7] = core::array::from_fn(|index| {
+        let totals: [Vec<u32>; 8] = core::array::from_fn(|index| {
             let kind = RcKind::ALL[index];
             let mut total = vec![0u32; kind.n_values()];
             for instance in uses {
@@ -267,6 +276,7 @@ impl SharedRangeTable {
         });
         let multiplicity = gen_range_table_multiplicities([
             &totals[0], &totals[1], &totals[2], &totals[3], &totals[4], &totals[5], &totals[6],
+            &totals[7],
         ]);
         Self {
             handle,
@@ -460,7 +470,7 @@ mod tests {
                 assert_eq!(ids[row].0, kind.bound_id());
             }
         }
-        assert_eq!(RANGE_TABLE_ACTIVE_ROWS, 11_155);
+        assert_eq!(RANGE_TABLE_ACTIVE_ROWS, 15_251);
         for row in RANGE_TABLE_ACTIVE_ROWS..1usize << range_table_log_size() {
             assert_eq!(values[row].0, 0);
             assert_eq!(ids[row].0, PADDING_BOUND_ID);

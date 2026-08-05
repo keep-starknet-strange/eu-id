@@ -118,10 +118,10 @@ fn attacked_stream_boundary(stream: usize) -> Option<u32> {
                 RcKind::Rc8 => carry_high_index(stream).is_some(),
                 RcKind::Rc7 => matches!(stream, 7 | 9 | 11 | 13),
                 RcKind::Ternary => stream == 7,
-                // C5: Rc4/Rc11 were folded in from decomp/sib, which coeffs
-                // itself never consumes -- no stream in this component's own
-                // AIR can be attacked under these kinds.
-                RcKind::Rc4 | RcKind::Rc11 => false,
+                // C5/C7b: Rc4/Rc11/Rc12 were folded in from decomp/sib/ntt,
+                // which coeffs itself never consumes -- no stream in this
+                // component's own AIR can be attacked under these kinds.
+                RcKind::Rc4 | RcKind::Rc11 | RcKind::Rc12 => false,
             };
             occupied.then_some(kind.n_values() as u32)
         })
@@ -813,6 +813,7 @@ pub struct RcUses {
     pub ternary: Vec<u32>,
     pub rc4: Vec<u32>,
     pub rc11: Vec<u32>,
+    pub rc12: Vec<u32>,
 }
 
 impl RcUses {
@@ -829,6 +830,7 @@ impl RcUses {
             ternary: vec![0; 3],
             rc4: vec![0; 1 << 4],
             rc11: vec![0; 1 << 11],
+            rc12: vec![0; 1 << 12],
         }
     }
 
@@ -842,6 +844,7 @@ impl RcUses {
             RcKind::Ternary => &mut self.ternary,
             RcKind::Rc4 => &mut self.rc4,
             RcKind::Rc11 => &mut self.rc11,
+            RcKind::Rc12 => &mut self.rc12,
         };
         uses[value as usize] += 1;
     }
@@ -856,6 +859,7 @@ impl RcUses {
             RcKind::Ternary => &self.ternary,
             RcKind::Rc4 => &self.rc4,
             RcKind::Rc11 => &self.rc11,
+            RcKind::Rc12 => &self.rc12,
         }
     }
 
@@ -870,6 +874,7 @@ impl RcUses {
                 RcKind::Ternary => &mut self.ternary,
                 RcKind::Rc4 => &mut self.rc4,
                 RcKind::Rc11 => &mut self.rc11,
+                RcKind::Rc12 => &mut self.rc12,
             };
             let rhs = other.for_kind(kind);
             assert_eq!(lhs.len(), rhs.len(), "range census shape mismatch");

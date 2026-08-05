@@ -2105,6 +2105,7 @@ impl AirProver for MlDsaProver {
                 self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Ternary),
                 self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc4),
                 self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc11),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc12),
             ])];
             evals.extend(self.coeffs_rc_mult.clone());
         }

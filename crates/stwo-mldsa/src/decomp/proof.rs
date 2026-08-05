@@ -95,7 +95,7 @@ fn gen_all_preprocessed() -> Vec<ColEval> {
 /// shape [`gen_range_table_multiplicities`] expects. Only Rc4/Rc13/Rc7/Rc8
 /// are ever nonzero for decomp; the rest stay at the `RcUses::new()` zero
 /// default.
-fn range_uses_arrays(rc_uses: &crate::coeffs::RcUses) -> [&[u32]; 7] {
+fn range_uses_arrays(rc_uses: &crate::coeffs::RcUses) -> [&[u32]; 8] {
     core::array::from_fn(|index| rc_uses.for_kind(RcKind::ALL[index]))
 }
 

@@ -5,9 +5,10 @@
 //! One air-core module (`CoeffsModule`) contributes, in commit order:
 //!   1. `coeffs`          — the tall stacked bivariate-Horner component.
 //!   2. rc table providers — `rc9`, `rc13`, `rc8`, `rc7`, `ternary`, `rc4`,
-//!      `rc11` (one each; `rc4`/`rc11` are unused by coeffs itself, folded in
-//!      by C5 so the standalone harness always iterates the shared
-//!      `RcKind::ALL` -- their multiplicities are always zero here).
+//!      `rc11`, `rc12` (one each; `rc4`/`rc11`/`rc12` are unused by coeffs
+//!      itself, folded in by C5/C7b so the standalone harness always
+//!      iterates the shared `RcKind::ALL` -- their multiplicities are always
+//!      zero here).
 //!
 //! and folds two non-component terms into its `claimed_sums`:
 //!   * the coeffs component's logup residue,
@@ -67,7 +68,7 @@ pub struct CoeffsProof {
     /// The 30 claimed `P̂(r,s)` group evaluations, in poly_id order.
     pub group_evals: Vec<SecureField>,
     pub coeffs_claimed_sum: SecureField,
-    pub rc_claimed_sums: [SecureField; 7],
+    pub rc_claimed_sums: [SecureField; 8],
     pub wcell_claimed_sum: SecureField,
     pub ccell_claimed_sum: SecureField,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
@@ -201,7 +202,7 @@ pub struct CoeffsProver {
     relations: Option<CoeffsRelations>,
     group_evals: Vec<SecureField>,
     coeffs_claimed_sum: SecureField,
-    rc_claimed_sums: [SecureField; 7],
+    rc_claimed_sums: [SecureField; 8],
     wcell_claimed_sum: SecureField,
     ccell_claimed_sum: SecureField,
     native_use_sum: SecureField,
@@ -213,7 +214,7 @@ struct CoeffsVerifier {
     input: MlDsaVerifyInput,
     group_evals: Vec<SecureField>,
     coeffs_claimed_sum: SecureField,
-    rc_claimed_sums: [SecureField; 7],
+    rc_claimed_sums: [SecureField; 8],
     wcell_claimed_sum: SecureField,
     ccell_claimed_sum: SecureField,
     r: SecureField,
@@ -266,7 +267,7 @@ fn build_components(
     s: SecureField,
     relations: &CoeffsRelations,
     coeffs_claimed_sum: SecureField,
-    rc_claimed_sums: &[SecureField; 7],
+    rc_claimed_sums: &[SecureField; 8],
     wcell_claimed_sum: SecureField,
     ccell_claimed_sum: SecureField,
 ) -> Built {
@@ -578,7 +579,7 @@ pub fn prove_coeffs(
         relations: None,
         group_evals: vec![SecureField::zero(); N_GROUPS],
         coeffs_claimed_sum: SecureField::zero(),
-        rc_claimed_sums: [SecureField::zero(); 7],
+        rc_claimed_sums: [SecureField::zero(); 8],
         wcell_claimed_sum: SecureField::zero(),
         ccell_claimed_sum: SecureField::zero(),
         native_use_sum: SecureField::zero(),

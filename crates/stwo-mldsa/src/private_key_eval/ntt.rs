@@ -1,5 +1,5 @@
 use num_traits::{One, Zero};
-use stwo::core::fields::m31::M31;
+use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
@@ -103,8 +103,10 @@ fn scaling_schedule() -> Vec<ScalingRow> {
     rows
 }
 
-const BUTTERFLY_PRE_NAMES: [&str; 8] = [
-    "active", "poly", "stage", "index0", "index1", "twiddle0", "twiddle1", "twiddle2",
+// C7b: the twiddle constant is a 12/11-bit split (base 4096), not the
+// earlier 8/8/7-bit byte split -- one fewer preprocessed limb column.
+const BUTTERFLY_PRE_NAMES: [&str; 7] = [
+    "active", "poly", "stage", "index0", "index1", "twiddle0", "twiddle1",
 ];
 const SCALING_PRE_NAMES: [&str; 5] = ["active", "eval_start", "eval_end", "poly", "index"];
 
@@ -164,8 +166,8 @@ pub fn gen_ntt_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
         columns[2][row] = m31(item.stage as u32);
         columns[3][row] = m31(item.index0 as u32);
         columns[4][row] = m31(item.index1 as u32);
-        let twiddle = split_u23(item.twiddle);
-        for limb in 0..3 {
+        let twiddle = split12_11(item.twiddle);
+        for limb in 0..2 {
             columns[5 + limb][row] = m31(twiddle[limb]);
         }
     }
@@ -203,29 +205,33 @@ pub fn gen_ntt_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
 // < input1` integer comparison, and S_OUTPUT feeds the balanced-digit
 // decomposition that produces `a_eval` -- both require the value's exact
 // integer representative in [0, Q), not just its residue mod Q.
+//
+// C7b: every value/slack group re-limbs from 3 columns (8/8/7-bit, base 256)
+// to 2 (12/11-bit, base 4096); each multiplication's carry count drops from
+// 4 to 2 (`mul_carries`/`add_mul_constraints`).
 const B_IN0: usize = 0;
-const B_IN1: usize = 3;
-const B_OUT0: usize = 6;
-const B_OUT0_SLACK: usize = 9;
-const B_DIFF: usize = 12;
-const B_OUT1: usize = 15;
-const B_OUT1_SLACK: usize = 18;
-const B_QUOTIENT: usize = 21;
-const B_REDUCE: usize = 24;
-const B_BORROW: usize = 25;
-const B_CARRY: usize = 26;
-pub const NTT_BUTTERFLY_BASE_COLS: usize = 30;
+const B_IN1: usize = 2;
+const B_OUT0: usize = 4;
+const B_OUT0_SLACK: usize = 6;
+const B_DIFF: usize = 8;
+const B_OUT1: usize = 10;
+const B_OUT1_SLACK: usize = 12;
+const B_QUOTIENT: usize = 14;
+const B_REDUCE: usize = 16;
+const B_BORROW: usize = 17;
+const B_CARRY: usize = 18;
+pub const NTT_BUTTERFLY_BASE_COLS: usize = 20;
 
 const S_INPUT: usize = 0;
-const S_OUTPUT: usize = 3;
-const S_OUTPUT_SLACK: usize = 6;
-const S_QUOTIENT: usize = 9;
-const S_CARRY: usize = 12;
-const S_DIGIT: usize = 16;
-pub const NTT_SCALING_BASE_COLS: usize = 19;
+const S_OUTPUT: usize = 2;
+const S_OUTPUT_SLACK: usize = 4;
+const S_QUOTIENT: usize = 6;
+const S_CARRY: usize = 8;
+const S_DIGIT: usize = 10;
+pub const NTT_SCALING_BASE_COLS: usize = 13;
 
-pub const NTT_BUTTERFLY_LOGUP_ENTRIES: usize = 26;
-pub const NTT_SCALING_LOGUP_ENTRIES: usize = 18;
+pub const NTT_BUTTERFLY_LOGUP_ENTRIES: usize = 18;
+pub const NTT_SCALING_LOGUP_ENTRIES: usize = 13;
 pub const NTT_BUTTERFLY_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE * NTT_BUTTERFLY_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 pub const NTT_SCALING_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE
@@ -243,13 +249,24 @@ pub fn ntt_interaction_layout() -> Vec<u32> {
     layout
 }
 
-fn split_u23(value: u32) -> [u32; 3] {
-    [value & 0xff, (value >> 8) & 0xff, value >> 16]
+/// C7b: 12/11-bit limb split (base 4096), replacing the earlier 8/8/7-bit
+/// byte split. `Q = 1 + 4096·2046` -- Q's OWN 12/11 split is exactly
+/// `(q0, q1) = (1, 2046)`, which is why the schoolbook equations below use
+/// the literal constant `2046` rather than a separately-split `q`.
+const _: () = assert!(Q == 1 + 4096 * 2046);
+/// C7b(N9): every intermediate cross-term product in `mul_carries`
+/// (`z0·x1+z1·x0` and `z1·x1`, with each factor < 4096 or < 2048) stays
+/// comfortably inside the M31 field's representable range as a plain i64
+/// computation -- no field wraparound sneaks into an "exact but wrong"
+/// equation.
+const _: () = assert!(4095u32 * 4095 + 4096 * 4096 < M31_MODULUS);
+fn split12_11(value: u32) -> [u32; 2] {
+    [value & 0xfff, value >> 12]
 }
 
 fn write_value_limbs(columns: &mut [Vec<M31>], value_base: usize, row: usize, value: u32) {
-    let value_limbs = split_u23(value);
-    for limb in 0..3 {
+    let value_limbs = split12_11(value);
+    for limb in 0..2 {
         columns[value_base + limb][row] = m31(value_limbs[limb]);
     }
 }
@@ -262,50 +279,39 @@ fn write_canonical(
     value: u32,
 ) {
     write_value_limbs(columns, value_base, row, value);
-    let slack_limbs = split_u23(Q - 1 - value);
-    for limb in 0..3 {
+    let slack_limbs = split12_11(Q - 1 - value);
+    for limb in 0..2 {
         columns[slack_base + limb][row] = m31(slack_limbs[limb]);
     }
 }
 
-fn mul_carries(constant: u32, value: u32, output: u32, quotient: u32) -> [i64; 4] {
-    let z = split_u23(constant);
-    let x = split_u23(value);
-    let q = split_u23(Q);
-    let k = split_u23(quotient);
-    let out = split_u23(output);
-    let e0 = z[0] as i64 * x[0] as i64 - q[0] as i64 * k[0] as i64 - out[0] as i64;
-    let c1 = e0 / 256;
+/// Three-level schoolbook multiplication `z*x = out + Q*k`, Q-factored as
+/// `1 + 4096·2046`:
+///   e0 = z0·x0 − k0 − out0        = 4096·c1
+///   e1 = z0·x1+z1·x0 − k1 − 2046·k0 − out1 + c1 = 4096·c2
+///   e2 = z1·x1 − 2046·k1 + c2      = 0
+/// Carries: c1 ∈ [−1,4094], c2 ∈ [−2047,4093] (only 9 units of honest
+/// headroom on c1 -- see the boundary sweep in the tests below).
+fn mul_carries(constant: u32, value: u32, output: u32, quotient: u32) -> [i64; 2] {
+    let z = split12_11(constant);
+    let x = split12_11(value);
+    let k = split12_11(quotient);
+    let out = split12_11(output);
+    let e0 = z[0] as i64 * x[0] as i64 - k[0] as i64 - out[0] as i64;
+    let c1 = e0 / 4096;
     let e1 = z[0] as i64 * x[1] as i64 + z[1] as i64 * x[0] as i64
-        - q[0] as i64 * k[1] as i64
-        - q[1] as i64 * k[0] as i64
+        - k[1] as i64
+        - 2046 * k[0] as i64
         - out[1] as i64
         + c1;
-    let c2 = e1 / 256;
-    let e2 = z[0] as i64 * x[2] as i64 + z[1] as i64 * x[1] as i64 + z[2] as i64 * x[0] as i64
-        - q[0] as i64 * k[2] as i64
-        - q[1] as i64 * k[1] as i64
-        - q[2] as i64 * k[0] as i64
-        - out[2] as i64
-        + c2;
-    let c3 = e2 / 256;
-    let e3 = z[1] as i64 * x[2] as i64 + z[2] as i64 * x[1] as i64
-        - q[1] as i64 * k[2] as i64
-        - q[2] as i64 * k[1] as i64
-        + c3;
-    let c4 = e3 / 256;
-    debug_assert_eq!(e0, 256 * c1);
-    debug_assert_eq!(e1, 256 * c2);
-    debug_assert_eq!(e2, 256 * c3);
-    debug_assert_eq!(e3, 256 * c4);
-    debug_assert_eq!(
-        z[2] as i64 * x[2] as i64 - q[2] as i64 * k[2] as i64 + c4,
-        0
-    );
-    [c1, c2, c3, c4]
+    let c2 = e1 / 4096;
+    debug_assert_eq!(e0, 4096 * c1);
+    debug_assert_eq!(e1, 4096 * c2);
+    debug_assert_eq!(z[1] as i64 * x[1] as i64 - 2046 * k[1] as i64 + c2, 0);
+    [c1, c2]
 }
 
-fn mul_witness(constant: u32, value: u32) -> (u32, u32, [i64; 4]) {
+fn mul_witness(constant: u32, value: u32) -> (u32, u32, [i64; 2]) {
     let product = constant as u64 * value as u64;
     let output = (product % Q as u64) as u32;
     let quotient = (product / Q as u64) as u32;
@@ -320,27 +326,21 @@ fn balanced3(value: u32) -> [i64; 3] {
     crate::witness::balanced_digits::<3>(value as i128).map(|digit| digit as i64)
 }
 
-/// Records the 3 value-limb range uses only (Rc8, Rc8, Rc7). Used for
+/// Records the 2 value-limb range uses only (Rc12, Rc11). Used for
 /// purely-modular intermediates (`diff`, `quotient`) that never need the
 /// slack complement -- see the C7a module comment above `B_IN0`.
 fn record_value_range_uses(uses: &mut RcUses, value: u32) {
-    let limbs = split_u23(value);
-    for &limb in &limbs[0..2] {
-        uses.record(RcKind::Rc8, limb);
-    }
-    uses.record(RcKind::Rc7, limbs[2]);
+    let limbs = split12_11(value);
+    uses.record(RcKind::Rc12, limbs[0]);
+    uses.record(RcKind::Rc11, limbs[1]);
 }
 
-/// Records both the value-limb and slack-complement range uses (6 total).
+/// Records both the value-limb and slack-complement range uses (4 total).
 /// Used for values that are consumed non-modularly downstream (`output0`,
 /// `output1`, `output`), where exact canonicity in `[0, Q)` is load-bearing.
 fn record_canonical_uses(uses: &mut RcUses, value: u32) {
     record_value_range_uses(uses, value);
-    let slack = split_u23(Q - 1 - value);
-    for &limb in &slack[0..2] {
-        uses.record(RcKind::Rc8, limb);
-    }
-    uses.record(RcKind::Rc7, slack[2]);
+    record_value_range_uses(uses, Q - 1 - value);
 }
 
 pub struct NttBase {
@@ -359,10 +359,10 @@ pub fn gen_ntt_base(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
         }
         let input0 = states[item.poly][item.index0];
         let input1 = states[item.poly][item.index1];
-        for (limb, value) in split_u23(input0).into_iter().enumerate() {
+        for (limb, value) in split12_11(input0).into_iter().enumerate() {
             columns[B_IN0 + limb][row] = m31(value);
         }
-        for (limb, value) in split_u23(input1).into_iter().enumerate() {
+        for (limb, value) in split12_11(input1).into_iter().enumerate() {
             columns[B_IN1 + limb][row] = m31(value);
         }
         let sum = input0 + input1;
@@ -404,7 +404,7 @@ pub fn gen_ntt_base(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
             continue;
         }
         let input = states[item.poly][item.index];
-        for (limb, value) in split_u23(input).into_iter().enumerate() {
+        for (limb, value) in split12_11(input).into_iter().enumerate() {
             columns[S_INPUT + limb][row] = m31(value);
         }
         let (output, quotient, carries) = mul_witness(N_INV, input);
@@ -429,58 +429,46 @@ pub fn gen_ntt_base(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
     NttBase { trace, range_uses }
 }
 
-fn recompose3<F>(limbs: &[F; 3], c256: F, c65536: F) -> F
+fn recompose2<F>(limbs: &[F; 2], c4096: F) -> F
 where
     F: Clone + core::ops::Add<Output = F> + core::ops::Mul<Output = F>,
 {
-    limbs[0].clone() + c256 * limbs[1].clone() + c65536 * limbs[2].clone()
+    limbs[0].clone() + c4096 * limbs[1].clone()
 }
 
+/// C7b: the three-level schoolbook multiplication (see the module comment
+/// above `B_IN0`), Q-factored as `1 + 4096·2046` (so `q0=1` drops out,
+/// `q1=2046` is used directly rather than via a separately-split `q`).
 fn add_mul_constraints<E: EvalAtRow>(
     eval: &mut E,
     gate: E::F,
-    constant: &[E::F; 3],
-    input: &[E::F; 3],
-    quotient: &[E::F; 3],
-    output: &[E::F; 3],
-    carries: &[E::F; 4],
+    constant: &[E::F; 2],
+    input: &[E::F; 2],
+    quotient: &[E::F; 2],
+    output: &[E::F; 2],
+    carries: &[E::F; 2],
 ) {
-    let q = [m31(Q & 0xff), m31((Q >> 8) & 0xff), m31(Q >> 16)];
-    let c256 = E::F::from(m31(256));
-    let e0 = constant[0].clone() * input[0].clone()
-        - E::F::from(q[0]) * quotient[0].clone()
-        - output[0].clone();
-    eval.add_constraint(gate.clone() * (e0 - c256.clone() * carries[0].clone()));
+    let c2046 = E::F::from(m31(2046));
+    let c4096 = E::F::from(m31(4096));
+    let e0 =
+        constant[0].clone() * input[0].clone() - quotient[0].clone() - output[0].clone();
+    eval.add_constraint(gate.clone() * (e0 - c4096.clone() * carries[0].clone()));
     let e1 = constant[0].clone() * input[1].clone() + constant[1].clone() * input[0].clone()
-        - E::F::from(q[0]) * quotient[1].clone()
-        - E::F::from(q[1]) * quotient[0].clone()
+        - quotient[1].clone()
+        - c2046.clone() * quotient[0].clone()
         - output[1].clone()
         + carries[0].clone();
-    eval.add_constraint(gate.clone() * (e1 - c256.clone() * carries[1].clone()));
-    let e2 = constant[0].clone() * input[2].clone()
-        + constant[1].clone() * input[1].clone()
-        + constant[2].clone() * input[0].clone()
-        - E::F::from(q[0]) * quotient[2].clone()
-        - E::F::from(q[1]) * quotient[1].clone()
-        - E::F::from(q[2]) * quotient[0].clone()
-        - output[2].clone()
-        + carries[1].clone();
-    eval.add_constraint(gate.clone() * (e2 - c256.clone() * carries[2].clone()));
-    let e3 = constant[1].clone() * input[2].clone() + constant[2].clone() * input[1].clone()
-        - E::F::from(q[1]) * quotient[2].clone()
-        - E::F::from(q[2]) * quotient[1].clone()
-        + carries[2].clone();
-    eval.add_constraint(gate.clone() * (e3 - c256 * carries[3].clone()));
-    let e4 = constant[2].clone() * input[2].clone() - E::F::from(q[2]) * quotient[2].clone()
-        + carries[3].clone();
-    eval.add_constraint(gate * e4);
+    eval.add_constraint(gate.clone() * (e1 - c4096 * carries[1].clone()));
+    let e2 =
+        constant[1].clone() * input[1].clone() - c2046 * quotient[1].clone() + carries[1].clone();
+    eval.add_constraint(gate * e2);
 }
 
 fn add_canonical_constraint<E: EvalAtRow>(
     eval: &mut E,
     gate: E::F,
-    value: &[E::F; 3],
-    slack: &[E::F; 3],
+    value: &[E::F; 2],
+    slack: &[E::F; 2],
 ) {
     add_canonical_constraint_with_bound(eval, gate, value, slack, Q - 1);
 }
@@ -488,14 +476,13 @@ fn add_canonical_constraint<E: EvalAtRow>(
 fn add_canonical_constraint_with_bound<E: EvalAtRow>(
     eval: &mut E,
     gate: E::F,
-    value: &[E::F; 3],
-    slack: &[E::F; 3],
+    value: &[E::F; 2],
+    slack: &[E::F; 2],
     bound: u32,
 ) {
-    let c256 = E::F::from(m31(256));
-    let c65536 = E::F::from(m31(1 << 16));
+    let c4096 = E::F::from(m31(4096));
     eval.add_constraint(
-        gate * (recompose3(value, c256.clone(), c65536.clone()) + recompose3(slack, c256, c65536)
+        gate * (recompose2(value, c4096.clone()) + recompose2(slack, c4096)
             - E::F::from(m31(bound))),
     );
 }
@@ -537,37 +524,35 @@ fn add_butterfly_transition_constraints<E: EvalAtRow>(
     eval.add_constraint(active * (input0 + q * borrow - input1 - diff));
 }
 
-/// Range-checks a value's 3 limbs only (Rc8, Rc8, Rc7) -- for purely-modular
+/// Range-checks a value's 2 limbs only (Rc12, Rc11) -- for purely-modular
 /// intermediates (`diff`, `quotient`) that never need the slack complement.
 fn add_value_range_lookups<E: EvalAtRow>(
     eval: &mut E,
     relations: &PrivateKeyEvalRelations,
     gate: E::F,
-    value: &[E::F; 3],
+    value: &[E::F; 2],
 ) {
-    for limb in &value[0..2] {
-        eval.add_to_relation(RelationEntry::base(
-            &relations.range,
-            gate.clone(),
-            &range_tuple::<E>(limb.clone(), RcKind::Rc8),
-        ));
-    }
+    eval.add_to_relation(RelationEntry::base(
+        &relations.range,
+        gate.clone(),
+        &range_tuple::<E>(value[0].clone(), RcKind::Rc12),
+    ));
     eval.add_to_relation(RelationEntry::base(
         &relations.range,
         gate,
-        &range_tuple::<E>(value[2].clone(), RcKind::Rc7),
+        &range_tuple::<E>(value[1].clone(), RcKind::Rc11),
     ));
 }
 
-/// Range-checks both the value and its slack complement (6 lookups total) --
+/// Range-checks both the value and its slack complement (4 lookups total) --
 /// for values consumed non-modularly downstream, where exact canonicity in
 /// `[0, Q)` is load-bearing (see the C7a module comment above `B_IN0`).
 fn add_canonical_range_lookups<E: EvalAtRow>(
     eval: &mut E,
     relations: &PrivateKeyEvalRelations,
     gate: E::F,
-    value: &[E::F; 3],
-    slack: &[E::F; 3],
+    value: &[E::F; 2],
+    slack: &[E::F; 2],
 ) {
     add_value_range_lookups(eval, relations, gate.clone(), value);
     add_value_range_lookups(eval, relations, gate, slack);
@@ -597,19 +582,18 @@ impl FrameworkEval for NttButterflyEval {
         let twiddle = [
             eval.get_preprocessed_column(butterfly_pre_id("twiddle0")),
             eval.get_preprocessed_column(butterfly_pre_id("twiddle1")),
-            eval.get_preprocessed_column(butterfly_pre_id("twiddle2")),
         ];
-        let input0: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let input1: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let output0: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let output0_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let diff: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let output1: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let output1_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let quotient: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
+        let input0: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let input1: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let output0: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let output0_slack: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let diff: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let output1: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let output1_slack: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let quotient: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
         let reduce = eval.next_trace_mask();
         let borrow = eval.next_trace_mask();
-        let carries: [E::F; 4] = core::array::from_fn(|_| eval.next_trace_mask());
+        let carries: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
 
         let one = E::F::one();
         let inactive = one.clone() - active.clone();
@@ -628,12 +612,11 @@ impl FrameworkEval for NttButterflyEval {
         {
             eval.add_constraint(inactive.clone() * value.clone());
         }
-        let c256 = E::F::from(m31(256));
-        let c65536 = E::F::from(m31(1 << 16));
-        let input0_value = recompose3(&input0, c256.clone(), c65536.clone());
-        let input1_value = recompose3(&input1, c256.clone(), c65536.clone());
-        let output0_value = recompose3(&output0, c256.clone(), c65536.clone());
-        let diff_value = recompose3(&diff, c256, c65536);
+        let c4096 = E::F::from(m31(4096));
+        let input0_value = recompose2(&input0, c4096.clone());
+        let input1_value = recompose2(&input1, c4096.clone());
+        let output0_value = recompose2(&output0, c4096.clone());
+        let diff_value = recompose2(&diff, c4096);
 
         add_butterfly_transition_constraints(
             &mut eval,
@@ -677,7 +660,6 @@ impl FrameworkEval for NttButterflyEval {
                     index,
                     value[0].clone(),
                     value[1].clone(),
-                    value[2].clone(),
                 ],
             ));
         }
@@ -735,11 +717,11 @@ impl FrameworkEval for NttScalingEval {
         let eval_end = eval.get_preprocessed_column(scaling_pre_id("eval_end"));
         let poly = eval.get_preprocessed_column(scaling_pre_id("poly"));
         let index = eval.get_preprocessed_column(scaling_pre_id("index"));
-        let input: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let output: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let output_slack: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let quotient: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
-        let carries: [E::F; 4] = core::array::from_fn(|_| eval.next_trace_mask());
+        let input: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let output: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let output_slack: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let quotient: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
+        let carries: [E::F; 2] = core::array::from_fn(|_| eval.next_trace_mask());
         let digits: [E::F; 3] = core::array::from_fn(|_| eval.next_trace_mask());
         let acc_masks: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
             core::array::from_fn(|_| eval.next_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]));
@@ -759,7 +741,7 @@ impl FrameworkEval for NttScalingEval {
         }
 
         add_canonical_constraint(&mut eval, active.clone(), &output, &output_slack);
-        let constant = split_u23(N_INV).map(|value| E::F::from(m31(value)));
+        let constant = split12_11(N_INV).map(|value| E::F::from(m31(value)));
         add_mul_constraints(
             &mut eval,
             active.clone(),
@@ -769,7 +751,7 @@ impl FrameworkEval for NttScalingEval {
             &output,
             &carries,
         );
-        let output_value = recompose3(&output, E::F::from(m31(256)), E::F::from(m31(1 << 16)));
+        let output_value = recompose2(&output, E::F::from(m31(4096)));
         let digit_value = digits[0].clone()
             + E::F::from(m31(B as u32)) * digits[1].clone()
             + E::F::from(m31((B * B) as u32)) * digits[2].clone();
@@ -794,7 +776,6 @@ impl FrameworkEval for NttScalingEval {
                 index,
                 input[0].clone(),
                 input[1].clone(),
-                input[2].clone(),
             ],
         ));
         add_canonical_range_lookups(
@@ -839,27 +820,25 @@ pub struct NttInteraction {
     pub claims: NttClaims,
 }
 
-/// Mirrors `add_value_range_lookups`: 3 value-limb entries only.
+/// Mirrors `add_value_range_lookups`: 2 value-limb entries only (Rc12, Rc11).
 fn push_value_range_entries(
     entries: &mut Vec<(SecureField, SecureField)>,
     relations: &PrivateKeyEvalRelations,
     value: u32,
 ) {
-    let limbs = split_u23(value);
-    for &limb in &limbs[0..2] {
-        entries.push((
-            SecureField::one(),
-            range_denominator(&relations.range, limb, RcKind::Rc8),
-        ));
-    }
+    let limbs = split12_11(value);
     entries.push((
         SecureField::one(),
-        range_denominator(&relations.range, limbs[2], RcKind::Rc7),
+        range_denominator(&relations.range, limbs[0], RcKind::Rc12),
+    ));
+    entries.push((
+        SecureField::one(),
+        range_denominator(&relations.range, limbs[1], RcKind::Rc11),
     ));
 }
 
 /// Mirrors `add_canonical_range_lookups`: value-limb entries plus their slack
-/// complement (6 total).
+/// complement (4 total).
 fn push_range_entries(
     entries: &mut Vec<(SecureField, SecureField)>,
     relations: &PrivateKeyEvalRelations,
@@ -888,8 +867,8 @@ pub fn gen_ntt_interaction(
         }
         let input0 = states[item.poly][item.index0];
         let input1 = states[item.poly][item.index1];
-        let input0_limbs = split_u23(input0);
-        let input1_limbs = split_u23(input1);
+        let input0_limbs = split12_11(input0);
+        let input1_limbs = split12_11(input1);
         let mut entries = Vec::with_capacity(NTT_BUTTERFLY_LOGUP_ENTRIES);
         entries.push((
             -one,
@@ -899,7 +878,6 @@ pub fn gen_ntt_interaction(
                 m31(item.index0 as u32),
                 m31(input0_limbs[0]),
                 m31(input0_limbs[1]),
-                m31(input0_limbs[2]),
             ]),
         ));
         entries.push((
@@ -910,7 +888,6 @@ pub fn gen_ntt_interaction(
                 m31(item.index1 as u32),
                 m31(input1_limbs[0]),
                 m31(input1_limbs[1]),
-                m31(input1_limbs[2]),
             ]),
         ));
         let sum = input0 + input1;
@@ -921,8 +898,8 @@ pub fn gen_ntt_interaction(
             input0 - input1
         };
         let (output1, quotient, carries) = mul_witness(item.twiddle, diff);
-        let output0_limbs = split_u23(output0);
-        let output1_limbs = split_u23(output1);
+        let output0_limbs = split12_11(output0);
+        let output1_limbs = split12_11(output1);
         entries.push((
             one,
             relations.ntt.combine(&[
@@ -931,7 +908,6 @@ pub fn gen_ntt_interaction(
                 m31(item.index0 as u32),
                 m31(output0_limbs[0]),
                 m31(output0_limbs[1]),
-                m31(output0_limbs[2]),
             ]),
         ));
         entries.push((
@@ -942,7 +918,6 @@ pub fn gen_ntt_interaction(
                 m31(item.index1 as u32),
                 m31(output1_limbs[0]),
                 m31(output1_limbs[1]),
-                m31(output1_limbs[2]),
             ]),
         ));
         states[item.poly][item.index0] = output0;
@@ -992,7 +967,7 @@ pub fn gen_ntt_interaction(
             continue;
         }
         let input = states[item.poly][item.index];
-        let input_limbs = split_u23(input);
+        let input_limbs = split12_11(input);
         let mut entries = Vec::with_capacity(NTT_SCALING_LOGUP_ENTRIES);
         entries.push((
             -one,
@@ -1002,7 +977,6 @@ pub fn gen_ntt_interaction(
                 m31(item.index as u32),
                 m31(input_limbs[0]),
                 m31(input_limbs[1]),
-                m31(input_limbs[2]),
             ]),
         ));
         let (output, quotient, carries) = mul_witness(N_INV, input);
@@ -1140,7 +1114,7 @@ mod tests {
                     add_mul_constraints(
                         &mut eval,
                         active,
-                        &split_u23(constant).map(|value| E::F::from(m31(value))),
+                        &split12_11(constant).map(|value| E::F::from(m31(value))),
                         &input,
                         &quotient,
                         &output,
@@ -1189,9 +1163,9 @@ mod tests {
         let input = 123_456;
         let (output, quotient, carries) = mul_witness(N_INV - 1, input);
         let mut normalization_trace = vec![m31(1)];
-        normalization_trace.extend(split_u23(input).map(m31));
-        normalization_trace.extend(split_u23(quotient).map(m31));
-        normalization_trace.extend(split_u23(output).map(m31));
+        normalization_trace.extend(split12_11(input).map(m31));
+        normalization_trace.extend(split12_11(quotient).map(m31));
+        normalization_trace.extend(split12_11(output).map(m31));
         normalization_trace.extend(carries.map(enc_signed));
         assert_forged_formula_rejected(
             "inverse normalization",
@@ -1214,8 +1188,8 @@ mod tests {
         let alias = Q + 5;
         let slack = Q - 1 - 5;
         let mut alias_trace = vec![m31(1)];
-        alias_trace.extend(split_u23(alias).map(m31));
-        alias_trace.extend(split_u23(slack).map(m31));
+        alias_trace.extend(split12_11(alias).map(m31));
+        alias_trace.extend(split12_11(slack).map(m31));
         assert_forged_formula_rejected(
             "inverse-NTT modular alias",
             &alias_trace,
@@ -1224,24 +1198,23 @@ mod tests {
         );
     }
 
-    /// C7a(N2): `quotient`'s high limb is still range-checked via a single
-    /// value-only Rc7 lookup after deleting its canonicity slack (only the
-    /// slack-complement lookup pair was removed; requirement #1 of the C7a
-    /// finding keeps the value-limb lookups). Rc7's domain is exactly
-    /// `[0, 128)`; the first excluded value (128, matching the shared-table
-    /// boundary this crate already exercises for the same Rc7 kind via
-    /// `coeffs::split_coeffs_rc7_boundary_rejects`) cannot even be recorded
-    /// in the witness-side multiplicity bookkeeping, since `RcUses::record`
-    /// indexes its per-value counter vector directly -- proving no honest
-    /// witness (and no witness the real AIR's identical Rc7 lookup could
-    /// balance) can carry a quotient with a high limb of 128 or more.
+    /// C7a(N2), re-limbed for C7b: `quotient`'s high limb is still
+    /// range-checked via a single value-only Rc11 lookup after deleting its
+    /// canonicity slack (only the slack-complement lookup pair was removed;
+    /// requirement #1 of the C7a finding keeps the value-limb lookups).
+    /// Rc11's domain is exactly `[0, 2048)`; the first excluded value (2048)
+    /// cannot even be recorded in the witness-side multiplicity bookkeeping,
+    /// since `RcUses::record` indexes its per-value counter vector
+    /// directly -- proving no honest witness (and no witness the real AIR's
+    /// identical Rc11 lookup could balance) can carry a quotient with a high
+    /// limb of 2048 or more.
     #[test]
     #[should_panic]
-    fn quotient_limb2_at_table_boundary_cannot_be_recorded() {
-        let value_with_limb2_128 = 1u32 << 23; // split_u23(2^23) = [0, 0, 128]
-        assert_eq!(split_u23(value_with_limb2_128)[2], 128);
+    fn quotient_high_limb_at_table_boundary_cannot_be_recorded() {
+        let value_with_limb1_2048 = 1u32 << 23; // split12_11(2^23) = [0, 2048]
+        assert_eq!(split12_11(value_with_limb1_2048)[1], 2048);
         let mut uses = RcUses::new();
-        record_value_range_uses(&mut uses, value_with_limb2_128);
+        record_value_range_uses(&mut uses, value_with_limb1_2048);
     }
 
     /// C7a(N3): with `diff`'s canonicity slack deleted, `borrow` is no longer
@@ -1274,11 +1247,11 @@ mod tests {
         );
     }
 
-    /// C7a(N4): one step past the N3 alias boundary (`input0 - input1 =
-    /// 8191`), the borrowed diff `input0 + Q - input1` lands exactly at
-    /// `2^23`, whose limb2 is 128 -- rejected by the same value-only Rc7
-    /// lookup as N2, this time via the concrete borrow-alias construction
-    /// that produces it.
+    /// C7a(N4), re-limbed for C7b: one step past the N3 alias boundary
+    /// (`input0 - input1 = 8191`), the borrowed diff `input0 + Q - input1`
+    /// lands exactly at `2^23`, whose high limb is 2048 -- rejected by the
+    /// same value-only Rc11 lookup as N2, this time via the concrete
+    /// borrow-alias construction that produces it.
     #[test]
     #[should_panic]
     fn diff_at_borrow_alias_boundary_plus_one_rejected() {
@@ -1332,22 +1305,88 @@ mod tests {
         }
     }
 
+    /// C7b(N6): boundary sweep over all 257 multiplication constants the
+    /// real circuit ever uses (256 butterfly twiddles `Q - zeta[m]` + the
+    /// scaling constant `N_INV`), crossed with the values named in the C7b
+    /// finding plus a handful of pseudo-random samples. `c1` has only 9
+    /// units of honest headroom (`c1 ∈ [-1, 4094]` against the `[-4096,4096)`
+    /// Rc13 window), so this exhaustive-constants sweep is mandatory, not a
+    /// spot check.
     #[test]
     fn multiplication_witness_is_exact_at_boundaries() {
         let zetas = zeta_table();
-        for constant in [1, N_INV, Q - 1, zetas[1], Q - zetas[255]] {
-            for value in [0, 1, 255, 256, Q / 2, Q - 2, Q - 1] {
+        let mut constants: Vec<u32> = zetas.iter().map(|&zeta| Q - zeta).collect();
+        constants.push(N_INV);
+        assert_eq!(constants.len(), 257);
+
+        let mut values = vec![
+            0,
+            1,
+            4095,
+            4096,
+            8190,
+            8191,
+            Q / 2,
+            Q - 2,
+            Q - 1,
+            (1 << 23) - 1,
+        ];
+        let mut rng_state = 0x2026_0805_c7b0_0001u64;
+        for _ in 0..8 {
+            // A tiny xorshift PRNG: deterministic, dependency-free "random"
+            // coverage alongside the named boundary values.
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            values.push((rng_state % Q as u64) as u32);
+        }
+
+        for &constant in &constants {
+            for &value in &values {
                 let (output, quotient, carries) = mul_witness(constant, value);
                 assert_eq!(
                     constant as u64 * value as u64,
                     output as u64 + Q as u64 * quotient as u64
                 );
-                assert!(output < Q && quotient < Q);
+                assert!(output < (1 << 23) && quotient < (1 << 23));
                 assert!(carries
                     .iter()
                     .all(|carry| (-CARRY_OFFSET..CARRY_OFFSET).contains(carry)));
             }
         }
+    }
+
+    /// C7b(N8): a mutant that naively reuses the OLD 8/8/7-bit byte split's
+    /// first two limbs (`b0`, `b1`) as if they were the NEW 12/11-bit split's
+    /// `(a0, a1)` -- rather than actually re-limbing (`a0 = b0 + 256·lo4`,
+    /// `a1 = hi4 + 16·low7`) -- yields a tuple that does not `combine` to the
+    /// same value as the real (correctly re-limbed) yield, for any value
+    /// that doesn't fit in a single byte. This is exactly the class of bug a
+    /// missed re-limb site produces: an "exact but wrong" equation that
+    /// still type-checks and still range-checks each limb individually, but
+    /// never balances against the real provider/consumer.
+    #[test]
+    fn mutant_old_three_limb_yield_fails_relation_balance() {
+        let relations = PrivateKeyEvalRelations::dummy();
+        let value = 123_456u32;
+        let correct = split12_11(value);
+        let correct_denominator: SecureField =
+            relations
+                .ntt
+                .combine(&[m31(0), m31(0), m31(0), m31(correct[0]), m31(correct[1])]);
+
+        // The old byte split's first two limbs, misused as if they were the
+        // new nibble-based limbs.
+        let mutant_b0 = value & 0xff;
+        let mutant_b1 = (value >> 8) & 0xff;
+        let mutant_denominator: SecureField = relations
+            .ntt
+            .combine(&[m31(0), m31(0), m31(0), m31(mutant_b0), m31(mutant_b1)]);
+        assert_ne!(
+            correct_denominator, mutant_denominator,
+            "reusing the old byte-split limbs as the new 12/11-bit limbs must not \
+             alias the correctly re-limbed yield"
+        );
     }
 
     #[test]
@@ -1370,19 +1409,26 @@ mod tests {
         let butterfly_rows = (MATRIX_POLYS * NTT_STAGES * N / 2) as u32;
         let scaling_rows = (MATRIX_POLYS * N) as u32;
         // C7a deleted B_DIFF_SLACK/B_QUOTIENT_SLACK/S_QUOTIENT_SLACK: diff and
-        // quotient now contribute only 3 (value-only) Rc8/Rc8/Rc7 entries each
-        // instead of 6 (value+slack); output0/output1/output are unaffected.
+        // quotient contribute only 1 (value-only) Rc12/Rc11 instance each
+        // instead of 2 (value+slack); output0/output1/output are unaffected.
+        // C7b re-limbed every group from 3 columns (Rc8/Rc8/Rc7) to 2
+        // (Rc12/Rc11), so each "instance" (value or slack) now contributes
+        // exactly one Rc12 use and one Rc11 use -- butterfly has 6 instances
+        // per row (output0 value+slack, diff, output1 value+slack, quotient),
+        // scaling has 3 (output value+slack, quotient).
         assert_eq!(
-            base.range_uses.for_kind(RcKind::Rc8).iter().sum::<u32>(),
-            12 * butterfly_rows + 6 * scaling_rows
-        );
-        assert_eq!(
-            base.range_uses.for_kind(RcKind::Rc7).iter().sum::<u32>(),
+            base.range_uses.for_kind(RcKind::Rc12).iter().sum::<u32>(),
             6 * butterfly_rows + 3 * scaling_rows
         );
         assert_eq!(
+            base.range_uses.for_kind(RcKind::Rc11).iter().sum::<u32>(),
+            6 * butterfly_rows + 3 * scaling_rows
+        );
+        // Carries: 2 per multiplication (was 4 pre-C7b), one multiplication
+        // per row in both butterfly and scaling.
+        assert_eq!(
             base.range_uses.for_kind(RcKind::Rc13).iter().sum::<u32>(),
-            4 * butterfly_rows + 4 * scaling_rows
+            2 * butterfly_rows + 2 * scaling_rows
         );
         assert_eq!(
             base.range_uses.for_kind(RcKind::Rc9).iter().sum::<u32>(),

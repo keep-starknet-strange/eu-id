@@ -332,13 +332,14 @@ fn ntt_tuples(rho: &[u8; 32]) -> Vec<Vec<u32>> {
     let mut tuples = Vec::with_capacity(MATRIX_POLYS * N);
     for poly in 0..MATRIX_POLYS {
         for (index, &value) in expanded.matrix[poly / L][poly % L].iter().enumerate() {
+            // C7b: the NTT cell's value is a 12/11-bit split (base 4096),
+            // not the earlier 8/8/7-bit byte split.
             tuples.push(vec![
                 poly as u32,
                 0,
                 index as u32,
-                value & 0xff,
-                (value >> 8) & 0xff,
-                value >> 16,
+                value & 0xfff,
+                value >> 12,
             ]);
         }
     }
@@ -1012,7 +1013,7 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
 
 #[test]
 fn proof_shape_constants_are_fixed() {
-    assert_eq!(REJECTION_BASE_COLS, 11);
+    assert_eq!(REJECTION_BASE_COLS, 13);
     let shapes = shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid ExpandA service shapes");
     assert_eq!(shapes.len(), 30);
     assert!(shapes

@@ -90,7 +90,7 @@ fn gen_all_preprocessed(log_size: u32) -> Vec<ColEval> {
 /// This standalone harness's own range-use census, converted to the 7-slot
 /// shape [`gen_range_table_multiplicities`] expects. Only Rc8/Rc11 are ever
 /// nonzero for SIB; the rest stay at the `RcUses::new()` zero default.
-fn range_uses_arrays(rc_uses: &crate::coeffs::RcUses) -> [&[u32]; 7] {
+fn range_uses_arrays(rc_uses: &crate::coeffs::RcUses) -> [&[u32]; 8] {
     core::array::from_fn(|index| rc_uses.for_kind(RcKind::ALL[index]))
 }
 
