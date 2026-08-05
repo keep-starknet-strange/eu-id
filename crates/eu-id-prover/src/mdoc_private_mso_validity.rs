@@ -68,6 +68,9 @@ const _: () = assert!(MDOC_TDATE_BYTES == TS13_DEMO_VERIFICATION_TIMESTAMP_RFC33
 // This identifier binds the preprocessed layout and the public transcript.
 const VALIDITY_LAYOUT_VERSION: u64 = 2;
 const VALIDITY_TRANSCRIPT_DOMAIN: u64 = 0x4d44_4f43_5641_4c32; // "MDOCVAL2"
+/// Degree-recounted safe at +2: all 50 site numerators here are degree <=1,
+/// so batch-4 folding over degree-1 denominators tops out at D5.
+const LOGUP_BATCH: usize = 4;
 const PREPROCESSED_COLS: usize = 2;
 const DIGIT_COUNT: usize = 14;
 const MONTHS: usize = 12;
@@ -642,21 +645,23 @@ fn interaction_trace(
     sites.push(vec![(blinder_num, blinder_den); n_vec_rows]);
     debug_assert_eq!(sites.len(), 50);
 
+    // Mirrors `finalize_logup_batched(LOGUP_BATCH)`'s recursive fraction fold exactly
+    // (`num = num*d + n*den; den = den*d`, left-to-right over the chunk).
     let mut logup = LogupTraceGenerator::new(MDOC_PRIVATE_MSO_VALIDITY_LOG_SIZE);
     let mut site_index = 0usize;
-    while site_index + 1 < sites.len() {
-        let left = &sites[site_index];
-        let right = &sites[site_index + 1];
+    while site_index < sites.len() {
+        let end = (site_index + LOGUP_BATCH).min(sites.len());
+        let chunk = &sites[site_index..end];
         logup.col_from_iter((0..n_vec_rows).map(|vec_row| {
-            let (n0, d0) = left[vec_row];
-            let (n1, d1) = right[vec_row];
-            (n0 * d1 + n1 * d0, d0 * d1)
+            let mut iter = chunk.iter().map(|site| site[vec_row]);
+            let (mut num, mut den) = iter.next().unwrap();
+            for (n, d) in iter {
+                num = num * d + n * den;
+                den *= d;
+            }
+            (num, den)
         }));
-        site_index += 2;
-    }
-    if site_index < sites.len() {
-        let last = &sites[site_index];
-        logup.col_from_iter((0..n_vec_rows).map(|vec_row| last[vec_row]));
+        site_index = end;
     }
     logup.finalize_last()
 }
@@ -891,7 +896,7 @@ impl FrameworkEval for MdocPrivateMsoValidityEval {
             self.blinder_m,
             false,
         );
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
@@ -957,9 +962,9 @@ impl MdocPrivateMsoValidity {
     }
 
     fn interaction_columns(&self) -> usize {
-        // The 50 main sites use 25 QM31 columns.
+        // The 50 main sites (batched 4) use 13 QM31 columns.
         // The blinder component uses one QM31 column.
-        (50usize.div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE
+        (50usize.div_ceil(LOGUP_BATCH) + 1) * SECURE_EXTENSION_DEGREE
     }
 }
 
@@ -1405,6 +1410,8 @@ mod tests {
         }
 
         fn finalize_logup_in_pairs(&mut self) {}
+
+        fn finalize_logup_batched(&mut self, _batch_size: usize) {}
     }
 
     fn test_eval(timestamp: u32) -> MdocPrivateMsoValidityEval {

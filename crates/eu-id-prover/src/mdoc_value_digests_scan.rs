@@ -89,8 +89,11 @@ pub(crate) const MDOC_VALUE_DIGESTS_SCAN_RELATION_SITES: usize = BYTE_SITES
     + 1 // private item digest ID
     + 1 // SHA digest
     + 1; // claimed-sum blinder
+/// Degree-recounted safe at +2: every numerator among the RELATION_SITES fractions is
+/// degree <=1, so batch-4 folding over degree-1 denominators tops out at D5.
+const LOGUP_BATCH: usize = 4;
 pub(crate) const MDOC_VALUE_DIGESTS_SCAN_INTERACTION_COLS: usize =
-    (MDOC_VALUE_DIGESTS_SCAN_RELATION_SITES.div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE;
+    (MDOC_VALUE_DIGESTS_SCAN_RELATION_SITES.div_ceil(LOGUP_BATCH) + 1) * SECURE_EXTENSION_DEGREE;
 const PREPROCESSED_COLS: usize = MDOC_VALUE_DIGESTS_SCAN_PREPROCESSED_COLS;
 const TRACE_COLS: usize = MDOC_VALUE_DIGESTS_SCAN_TRACE_COLS;
 const MAIN_RELATION_SITES: usize = MDOC_VALUE_DIGESTS_SCAN_RELATION_SITES;
@@ -769,7 +772,7 @@ mod trace_col {
 
 const _: [(); TRACE_COLS] = [(); trace_col::COUNT];
 const _: [(); 43] = [(); MAIN_RELATION_SITES];
-const _: [(); 92] = [(); INTERACTION_COLS];
+const _: [(); 48] = [(); INTERACTION_COLS];
 
 fn m31(value: usize) -> M31 {
     M31::from_u32_unchecked(value as u32)
@@ -2123,7 +2126,7 @@ impl FrameworkEval for MdocValueDigestsScanEval {
             self.blinder_m,
             false,
         );
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
@@ -2241,23 +2244,23 @@ fn interaction_trace(
     sites.push(vec![(blinder_numerator, blinder_denominator); packed_rows]);
     debug_assert_eq!(sites.len(), MAIN_RELATION_SITES);
 
+    // Mirrors `finalize_logup_batched(LOGUP_BATCH)`'s recursive fraction fold exactly
+    // (`num = num*d + n*den; den = den*d`, left-to-right over the chunk).
     let mut logup = LogupTraceGenerator::new(MDOC_VALUE_DIGESTS_SCAN_LOG_SIZE);
     let mut site = 0usize;
-    while site + 1 < sites.len() {
-        let left = &sites[site];
-        let right = &sites[site + 1];
+    while site < sites.len() {
+        let end = (site + LOGUP_BATCH).min(sites.len());
+        let chunk = &sites[site..end];
         logup.col_from_iter((0..packed_rows).map(|row| {
-            let (left_num, left_den) = left[row];
-            let (right_num, right_den) = right[row];
-            (
-                left_num * right_den + right_num * left_den,
-                left_den * right_den,
-            )
+            let mut iter = chunk.iter().map(|s| s[row]);
+            let (mut num, mut den) = iter.next().unwrap();
+            for (n, d) in iter {
+                num = num * d + n * den;
+                den *= d;
+            }
+            (num, den)
         }));
-        site += 2;
-    }
-    if site < sites.len() {
-        logup.col_from_iter((0..packed_rows).map(|row| sites[site][row]));
+        site = end;
     }
     logup.finalize_last()
 }
@@ -3337,6 +3340,8 @@ mod tests {
         }
 
         fn finalize_logup_in_pairs(&mut self) {}
+
+        fn finalize_logup_batched(&mut self, _batch_size: usize) {}
     }
 
     fn test_eval(scan: &MdocValueDigestsScan) -> MdocValueDigestsScanEval {
@@ -4218,7 +4223,7 @@ mod tests {
         assert_eq!(scan.layout().preprocessed, vec![9; PREPROCESSED_COLS]);
         assert_eq!(scan.layout().trace, vec![9; 305]);
         assert_eq!(MAIN_RELATION_SITES, 43);
-        assert_eq!(scan.layout().interaction, vec![9; 92]);
+        assert_eq!(scan.layout().interaction, vec![9; 48]);
         assert_eq!(
             <MdocValueDigestsScanEval as FrameworkEval>::max_constraint_log_degree_bound(
                 &test_eval(&scan),
