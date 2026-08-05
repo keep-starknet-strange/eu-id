@@ -1,7 +1,8 @@
 //! Range-check table providers for `sampleinball_fsm`: `Rc8` (2^8, index/byte
-//! margins + sorted `daddr`), `Rc9` (2^9, coefficient `c+1` bound), and `Rc11`
-//! (2^11, offline-memory timestamp diff `dts` < N+3τ+N = 659). Same provider
-//! shape as `decomp::tables`.
+//! margins + sorted `daddr`) and `Rc11` (2^11, offline-memory timestamp diff
+//! `dts` < N+3τ+N = 659). Same provider shape as `decomp::tables`. There is no
+//! `Rc9` table: the coefficient ternary bound was redundant with `c³=c` (see
+//! `relations.rs`).
 
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -16,17 +17,15 @@ use crate::air_util::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcKind {
     Rc8,
-    Rc9,
     Rc11,
 }
 
 impl RcKind {
-    pub const ALL: [RcKind; 3] = [RcKind::Rc8, RcKind::Rc9, RcKind::Rc11];
+    pub const ALL: [RcKind; 2] = [RcKind::Rc8, RcKind::Rc11];
 
     pub const fn n_values(self) -> usize {
         match self {
             RcKind::Rc8 => 1 << 8,
-            RcKind::Rc9 => 1 << 9,
             RcKind::Rc11 => 1 << 11,
         }
     }
@@ -38,7 +37,6 @@ impl RcKind {
     pub fn name(self) -> &'static str {
         match self {
             RcKind::Rc8 => "rc8",
-            RcKind::Rc9 => "rc9",
             RcKind::Rc11 => "rc11",
         }
     }
@@ -100,7 +98,6 @@ pub const RC_TABLE_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 #[derive(Clone)]
 pub struct RcUses {
     pub rc8: Vec<u32>,
-    pub rc9: Vec<u32>,
     pub rc11: Vec<u32>,
 }
 
@@ -108,7 +105,6 @@ impl RcUses {
     pub fn new() -> Self {
         Self {
             rc8: vec![0; 1 << 8],
-            rc9: vec![0; 1 << 9],
             rc11: vec![0; 1 << 11],
         }
     }
@@ -116,7 +112,6 @@ impl RcUses {
     pub fn for_kind(&self, kind: RcKind) -> &[u32] {
         match kind {
             RcKind::Rc8 => &self.rc8,
-            RcKind::Rc9 => &self.rc9,
             RcKind::Rc11 => &self.rc11,
         }
     }
@@ -138,6 +133,6 @@ mod tests {
             RcKind::Rc8.value_column_id(),
             crate::decomp::tables::RcKind::Rc8.value_column_id()
         );
-        assert_ne!(RcKind::Rc8.value_column_id(), RcKind::Rc9.value_column_id());
+        assert_ne!(RcKind::Rc8.value_column_id(), RcKind::Rc11.value_column_id());
     }
 }

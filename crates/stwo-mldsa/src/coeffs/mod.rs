@@ -7,8 +7,9 @@
 //! coefficient per row. Per row the component:
 //!   * range-checks every digit cell (dedicated 2^9 table, offset `+2^8`);
 //!   * for carry rows, range-checks `|C| ≤ 2^20` via a `C+2^20` 13+8 split;
-//!   * recomposes both packed z/w coefficients (the first through
-//!     `recomp_cell`, the second directly from its digit triplet);
+//!   * recomposes both packed z/w coefficients directly from their digit
+//!     triplets (`Σ_t d_t·B^t`, an affine expression of already-committed
+//!     digit cells — no dedicated recomposition column);
 //!   * enforces the exact z-norm `|z| ≤ γ1−β−1 = 524_091` with a two-sided
 //!     offset;
 //!   * enforces the ternary `c ∈ {−1,0,1}` via a `{0,1,2}` membership lookup;
@@ -25,18 +26,22 @@
 //! | idx | column        | meaning |
 //! |-----|---------------|---------|
 //! | 0-5 | `digit[0..6]` | two z/w triplets, one wider coefficient, or carry cells |
-//! | 6   | `recomp_cell` | first z/w coefficient `Σ_t d_t·B^t`; else 0 |
-//! | 7   | `norm_a_hi`   | first z coefficient: 7-bit hi of `cell + 524_091` |
-//! | 8   | `norm_b_hi`   | first z coefficient: 7-bit hi of `524_091 − cell` |
-//! | 9-13| `carry_hi[0..5]` | 8-bit hi of `C_{m,t}+2^20` (carry rows) |
-//! |14   | `norm2_a_hi` | second z coefficient: 7-bit hi of `cell + 524_091` |
-//! |15   | `norm2_b_hi` | second z coefficient: 7-bit hi of `524_091 − cell` |
+//! | 6   | `norm_a_hi`   | first z coefficient: 7-bit hi of `cell + 524_091` |
+//! | 7   | `norm_b_hi`   | first z coefficient: 7-bit hi of `524_091 − cell` |
+//! | 8-12| `carry_hi[0..5]` | 8-bit hi of `C_{m,t}+2^20` (carry rows) |
+//! |13   | `norm2_a_hi` | second z coefficient: 7-bit hi of `cell + 524_091` |
+//! |14   | `norm2_b_hi` | second z coefficient: 7-bit hi of `524_091 − cell` |
+//!
+//! The first z/w coefficient's recomposition (`Σ_t d_t·B^t`, "cell" above) no
+//! longer has a dedicated column — every consumer builds it inline from
+//! `digit[0..split)` (`first_recomp_expr`), an affine (degree-1) expression.
 //!
 //! ## Preprocessed columns
 //! `start, end, poly_id, live_mask_4, is_carry, is_norm, is_c, is_w,
-//!  paired_continue, w_bind_id, c_bind_id, profile_active` — all
-//! row-index-deterministic. The AIR derives the other live masks and selectors
-//! from these columns.
+//!  w_bind_id, c_bind_id, profile_active` — all row-index-deterministic. The
+//! AIR derives the other live masks and selectors from these columns
+//! (`paired_continue = is_recomp·(1−start)` inline; both factors are already
+//! preprocessed/derived columns, so it costs nothing to recompute).
 //!
 //! ## Constraint degrees
 //!
@@ -49,8 +54,7 @@
 //! | site | degree |
 //! |------|--------|
 //! | tail-digit zero `(1−mask)·digit` | 2 |
-//! | recomp `is_recomp·(cell − Σ d·B^t)` | 2 |
-//! | z-norm rc uses (a/b lo+hi, degree-1 values) | 1 |
+//! | z-norm rc uses (a/b lo+hi, affine `first_recomp_expr`) | 1 |
 //! | carry rc uses (lo degree-1 expr, hi cell) | 1 |
 //! | ternary use `c+1 ∈ {0,1,2}` (lookup) | 1 |
 //! | ordinary Horner `acc − ((1−start)·acc_prev·r + Σ d·s^t)` | 2 |
@@ -136,23 +140,27 @@ pub const DIGIT_OFFSET: u32 = 1 << 8;
 
 // --- Base column indices ------------------------------------------------------
 const COL_DIGIT0: usize = 0;
-const COL_RECOMP: usize = COL_DIGIT0 + MAX_DIGITS; // 6
-const COL_NORM_A_HI: usize = COL_RECOMP + 1; // 7
-const COL_NORM_B_HI: usize = COL_NORM_A_HI + 1; // 8
-const COL_CARRY_HI0: usize = COL_NORM_B_HI + 1; // 9
-const COL_NORM2_A_HI: usize = COL_CARRY_HI0 + CARRY_DIGITS; // 14
-const COL_NORM2_B_HI: usize = COL_NORM2_A_HI + 1; // 15
+const COL_NORM_A_HI: usize = COL_DIGIT0 + MAX_DIGITS; // 6
+const COL_NORM_B_HI: usize = COL_NORM_A_HI + 1; // 7
+const COL_CARRY_HI0: usize = COL_NORM_B_HI + 1; // 8
+const COL_NORM2_A_HI: usize = COL_CARRY_HI0 + CARRY_DIGITS; // 13
+const COL_NORM2_B_HI: usize = COL_NORM2_A_HI + 1; // 14
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_NORM2_B_HI + 1; // 16
+pub const N_BASE_COLS: usize = COL_NORM2_B_HI + 1; // 15
 
 /// Carry-high streams are interleaved with z norm streams. The permutation
 /// lets each carry-high lookup share a stream with a disjoint z norm lookup
-/// while keeping every relation key affine and batch-4 legal.
+/// while keeping every relation key affine and batch-4 legal. carry_hi[2] and
+/// carry_hi[4] moved to streams 5/9 (from 6/8): those two streams also carry
+/// `first_recomp_expr` (now inlined in place of the deleted `recomp_cell`
+/// column), which is nonzero on carry rows (raw digit cells hold live carry
+/// data there) unless the interleave is dropped — moving the carry-hi check
+/// to a stream that never touches `first_recomp_expr` avoids that collision.
 const fn carry_high_index(stream: usize) -> Option<usize> {
     match stream {
-        6 => Some(2),
+        5 => Some(2),
         7 => Some(3),
-        8 => Some(4),
+        9 => Some(4),
         11 => Some(0),
         13 => Some(1),
         _ => None,
@@ -191,7 +199,6 @@ pub fn coeffs_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnI
         profile_pre_id(profile, "is_norm"),
         profile_pre_id(profile, "is_c"),
         profile_pre_id(profile, "is_w"),
-        profile_pre_id(profile, "paired_continue"),
         pre_id("w_bind_id"),
         pre_id("c_bind_id"),
         profile_active_id(profile),
@@ -265,7 +272,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
     let mut is_norm = vec![m31(0); rows];
     let mut is_c = vec![m31(0); rows];
     let mut is_w = vec![m31(0); rows];
-    let mut paired_continue = vec![m31(0); rows];
     let mut w_bind_id = vec![m31(0); rows];
     let mut c_bind_id = vec![m31(0); rows];
     let mut profile_active = vec![m31(0); rows];
@@ -283,7 +289,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
             is_norm[row] = m31(u32::from(g.kind == Kind::Z));
             is_c[row] = m31(u32::from(g.kind == Kind::C));
             is_w[row] = m31(u32::from(g.kind == Kind::W));
-            paired_continue[row] = m31(u32::from(g.kind.has_recomp() && info.in_group != 0));
         }
         if g.kind == Kind::C {
             let m = g
@@ -313,7 +318,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
         is_norm,
         is_c,
         is_w,
-        paired_continue,
         w_bind_id,
         c_bind_id,
     ]
@@ -343,21 +347,20 @@ pub fn gen_coeffs_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
             cols[COL_DIGIT0 + t][row] = enc_signed(d);
         }
         match info.group.kind {
-            Kind::Z | Kind::W => {
+            Kind::Z => {
+                // The first z coefficient's recomposition has no dedicated
+                // column (deleted `recomp_cell`); it is rebuilt inline in the
+                // AIR from `digit[0..split)`. Only the norm hi splits still
+                // need computing here.
                 let [first, second] = paired_recompositions(&digits);
-                cols[COL_RECOMP][row] = enc_signed(first);
-                if info.group.kind == Kind::Z {
-                    // Both packed z coefficients receive the exact two-sided
-                    // norm decomposition.
-                    let first_a = first + norm_bound as i128;
-                    let first_b = norm_bound as i128 - first;
-                    let second_a = second + norm_bound as i128;
-                    let second_b = norm_bound as i128 - second;
-                    cols[COL_NORM_A_HI][row] = m31((first_a >> 13) as u32);
-                    cols[COL_NORM_B_HI][row] = m31((first_b >> 13) as u32);
-                    cols[COL_NORM2_A_HI][row] = m31((second_a >> 13) as u32);
-                    cols[COL_NORM2_B_HI][row] = m31((second_b >> 13) as u32);
-                }
+                let first_a = first + norm_bound as i128;
+                let first_b = norm_bound as i128 - first;
+                let second_a = second + norm_bound as i128;
+                let second_b = norm_bound as i128 - second;
+                cols[COL_NORM_A_HI][row] = m31((first_a >> 13) as u32);
+                cols[COL_NORM_B_HI][row] = m31((first_b >> 13) as u32);
+                cols[COL_NORM2_A_HI][row] = m31((second_a >> 13) as u32);
+                cols[COL_NORM2_B_HI][row] = m31((second_b >> 13) as u32);
             }
             Kind::Carry => {
                 for t in 0..CARRY_DIGITS {
@@ -499,8 +502,6 @@ impl FrameworkEval for CoeffsEval {
         let is_norm = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_norm"));
         let is_c = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_c"));
         let is_w = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_w"));
-        let paired_continue =
-            eval.get_preprocessed_column(profile_pre_id(self.profile, "paired_continue"));
         let w_bind_id = eval.get_preprocessed_column(pre_id("w_bind_id"));
         let c_bind_id = eval.get_preprocessed_column(pre_id("c_bind_id"));
         let profile_active = eval.get_preprocessed_column(profile_active_id(self.profile));
@@ -520,7 +521,6 @@ impl FrameworkEval for CoeffsEval {
 
         // --- Base columns ---
         let digit: Vec<E::F> = (0..MAX_DIGITS).map(|_| eval.next_trace_mask()).collect();
-        let recomp_cell = eval.next_trace_mask();
         let norm_a_hi = eval.next_trace_mask();
         let norm_b_hi = eval.next_trace_mask();
         let carry_hi: Vec<E::F> = (0..CARRY_DIGITS).map(|_| eval.next_trace_mask()).collect();
@@ -542,7 +542,6 @@ impl FrameworkEval for CoeffsEval {
         let inactive = one.clone() - profile_active;
         for value in digit
             .iter()
-            .chain(core::iter::once(&recomp_cell))
             .chain(core::iter::once(&norm_a_hi))
             .chain(core::iter::once(&norm_b_hi))
             .chain(carry_hi.iter())
@@ -560,7 +559,6 @@ impl FrameworkEval for CoeffsEval {
         // Auxiliary columns are zero outside the row kinds that use them.
         // This lets the range denominators select values by addition instead
         // of multiplying witness values by selectors (which would raise degree).
-        eval.add_constraint((one.clone() - is_recomp.clone()) * recomp_cell.clone());
         eval.add_constraint((one.clone() - is_norm.clone() - is_c.clone()) * norm_a_hi.clone());
         eval.add_constraint((one.clone() - is_norm.clone()) * norm_b_hi.clone());
         for hi in &carry_hi {
@@ -570,9 +568,10 @@ impl FrameworkEval for CoeffsEval {
         eval.add_constraint((one.clone() - is_norm.clone()) * norm2_b_hi.clone());
         eval.add_constraint(is_c.clone() * (norm_a_hi.clone() - digit[0].clone() - one.clone()));
 
-        // The first packed coefficient uses a recomposition cell. The second
-        // coefficient is recomposed directly from its triplet wherever it is
-        // consumed (norm and WCell), leaving no auxiliary value to bind.
+        // Both packed coefficients are recomposed directly from their digit
+        // triplets wherever consumed (norm, WCell, and the two carry-hi
+        // interleaved streams below) — affine (degree-1) expressions of
+        // already-committed digit cells, no dedicated recomposition column.
         let split = Kind::Z.live_digits();
         let mut first_recomp_expr = E::F::from(M31::one()) * digit[0].clone();
         let mut second_recomp_expr = E::F::from(M31::one()) * digit[split].clone();
@@ -582,7 +581,6 @@ impl FrameworkEval for CoeffsEval {
             second_recomp_expr += E::F::from(weight) * digit[split + t].clone();
             weight *= b_ef;
         }
-        eval.add_constraint(is_recomp.clone() * (recomp_cell.clone() - first_recomp_expr.clone()));
 
         // Fourteen shared range streams. Every bound id is a constant-weighted
         // preprocessed selector; no witness column can choose a wider bound.
@@ -611,30 +609,40 @@ impl FrameworkEval for CoeffsEval {
                 &[value, bound_id],
             ));
         }
-        // Slot 5: sixth digit rc9. Carry highs are interleaved below.
-        let gate = is_digit.clone() * live_mask[5].clone();
-        let value = digit[5].clone() + is_digit.clone() * digit_offset;
+        // Slot 5: sixth digit rc9, interleaved with carry_hi[2]'s hi range
+        // check (rc8). Moved here from slot 6 (see `carry_high_index`):
+        // substituting `first_recomp_expr` for the deleted `recomp_cell` at
+        // slot 6 would otherwise pollute the carry-row value there (raw digit
+        // cells hold live carry data on carry rows), so carry_hi[2]'s own
+        // range check needed a slot that never touches `first_recomp_expr`.
+        // digit[5] is already forced 0 on carry rows (live_mask[5] = 0 there)
+        // and carry_hi[2] is already forced 0 outside is_carry, so the two
+        // terms never collide.
+        let gate = is_digit.clone() * live_mask[5].clone() + is_carry.clone();
+        let value =
+            digit[5].clone() + is_digit.clone() * digit_offset + carry_hi[2].clone();
         #[cfg(test)]
         let value = attacked_stream_value::<E>(5, value);
-        let bound_id = is_digit.clone() * rc9_id;
+        let bound_id = is_digit.clone() * rc9_id + is_carry.clone() * rc8_id.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
             gate,
             &[value, bound_id],
         ));
 
-        // Slots 6..9: first z coefficient's exact norm, interleaved with carry
-        // highs 2..4. Slot 7 also carries c+1 on c rows.
+        // Slots 6..9: first z coefficient's exact norm (`first_recomp_expr`,
+        // inlined in place of the deleted `recomp_cell`). Slot 7 also carries
+        // carry_hi[3] (rc8) and c+1 on c rows — unaffected by the recomp_cell
+        // deletion since it never referenced that column.
         let bound = E::F::from(M31::from_u32_unchecked(z_norm_bound(self.profile) as u32));
-        let value = carry_hi[2].clone() + recomp_cell.clone() + is_norm.clone() * bound.clone()
+        let value = first_recomp_expr.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_a_hi.clone();
         #[cfg(test)]
         let value = attacked_stream_value::<E>(6, value);
-        let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
-            is_carry.clone() + is_norm.clone(),
-            &[value, bound_id],
+            is_norm.clone(),
+            &[value, is_norm.clone() * rc13_id.clone()],
         ));
 
         let value = carry_hi[3].clone() + norm_a_hi.clone();
@@ -649,24 +657,25 @@ impl FrameworkEval for CoeffsEval {
             &[value, bound_id],
         ));
 
-        let value = carry_hi[4].clone() - recomp_cell.clone() + is_norm.clone() * bound.clone()
+        let value = -first_recomp_expr.clone() + is_norm.clone() * bound.clone()
             - two_pow_13.clone() * norm_b_hi.clone();
         #[cfg(test)]
         let value = attacked_stream_value::<E>(8, value);
-        let bound_id = is_carry.clone() * rc8_id.clone() + is_norm.clone() * rc13_id.clone();
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.range,
-            is_carry.clone() + is_norm.clone(),
-            &[value, bound_id],
-        ));
-
-        let value = norm_b_hi.clone();
-        #[cfg(test)]
-        let value = attacked_stream_value::<E>(9, value);
-        let bound_id = is_norm.clone() * rc7_id.clone();
         eval.add_to_relation(RelationEntry::base(
             &self.relations.range,
             is_norm.clone(),
+            &[value, is_norm.clone() * rc13_id.clone()],
+        ));
+
+        // Slot 9: norm_b_hi (rc7), interleaved with carry_hi[4] (rc8) — moved
+        // here from slot 8 for the same reason carry_hi[2] moved to slot 5.
+        let value = norm_b_hi.clone() + carry_hi[4].clone();
+        #[cfg(test)]
+        let value = attacked_stream_value::<E>(9, value);
+        let bound_id = is_norm.clone() * rc7_id.clone() + is_carry.clone() * rc8_id.clone();
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            is_norm.clone() + is_carry.clone(),
             &[value, bound_id],
         ));
 
@@ -731,6 +740,7 @@ impl FrameworkEval for CoeffsEval {
         let paired_digit_row = first_digit_row * r_ef.clone() + second_digit_row;
         let digit_row = ordinary_digit_row.clone()
             + E::EF::from(is_recomp.clone()) * (paired_digit_row - ordinary_digit_row);
+        let paired_continue = is_recomp.clone() * (one.clone() - start.clone());
         let expected = E::EF::from(active.clone() - start) * acc_prev.clone() * r_ef
             + E::EF::from(paired_continue) * acc_prev * E::EF::from(self.r * self.r - self.r)
             + digit_row;
@@ -745,7 +755,7 @@ impl FrameworkEval for CoeffsEval {
         // Two WCell yields (−is_w), one for each packed w coefficient.
         // `c_bind_id` is otherwise idle on w rows and carries the second exact
         // key. Both recompositions are affine in the digit cells.
-        let wtuple = [w_bind_id.clone(), recomp_cell.clone()];
+        let wtuple = [w_bind_id.clone(), first_recomp_expr];
         eval.add_to_relation(RelationEntry::base(
             &self.relations.wcell,
             -is_w.clone(),
@@ -1383,7 +1393,7 @@ mod packed_tests {
                 continue;
             }
 
-            for selector in [0, 3, 4, 5, 6, 7, 8, 11] {
+            for selector in [0, 3, 4, 5, 6, 7, 10] {
                 assert_eq!(
                     preprocessed[selector][circle_row],
                     m31(0),

@@ -100,17 +100,16 @@ const COL_B0: usize = 0;
 const COL_B1: usize = 1;
 const COL_B2: usize = 2;
 const COL_LOW7: usize = 3;
-const COL_TOP: usize = 4;
-const COL_SAMPLE: usize = 5;
-const COL_ACCEPT: usize = 6;
-const COL_INDEX: usize = 7;
-const COL_ACCEPT_SLACK0: usize = 8;
-const COL_ACCEPT_SLACK1: usize = 9;
-const COL_ACCEPT_SLACK2: usize = 10;
-const COL_REJECT_DELTA: usize = 11;
+const COL_SAMPLE: usize = 4;
+const COL_ACCEPT: usize = 5;
+const COL_INDEX: usize = 6;
+const COL_ACCEPT_SLACK0: usize = 7;
+const COL_ACCEPT_SLACK1: usize = 8;
+const COL_ACCEPT_SLACK2: usize = 9;
+const COL_REJECT_DELTA: usize = 10;
 
 pub const ABSORB_BASE_COLS: usize = 1;
-pub const REJECTION_BASE_COLS: usize = 12;
+pub const REJECTION_BASE_COLS: usize = 11;
 pub const ABSORB_LOGUP_ENTRIES: usize = 2;
 pub const REJECTION_LOGUP_ENTRIES: usize = 10;
 pub const ABSORB_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
@@ -125,8 +124,6 @@ pub const TRACE_COL_B1: usize = COL_B1;
 pub const TRACE_COL_B2: usize = COL_B2;
 #[doc(hidden)]
 pub const TRACE_COL_LOW7: usize = COL_LOW7;
-#[doc(hidden)]
-pub const TRACE_COL_TOP: usize = COL_TOP;
 #[doc(hidden)]
 pub const TRACE_COL_SAMPLE: usize = COL_SAMPLE;
 #[doc(hidden)]
@@ -629,7 +626,6 @@ fn gen_expand_a_preprocessed_with_attack(
 struct RejectionRow {
     bytes: [u32; 3],
     low7: u32,
-    top: u32,
     sample: bool,
     accept: bool,
     index: u32,
@@ -666,7 +662,6 @@ fn build_rejection_rows(witness: &ExpandAWitness) -> Vec<RejectionRow> {
             rows.push(RejectionRow {
                 bytes,
                 low7,
-                top: bytes[2] >> 7,
                 sample,
                 accept,
                 index,
@@ -730,7 +725,6 @@ fn gen_rejection_base_trace(
         columns[COL_B1][row] = m31(value.bytes[1]);
         columns[COL_B2][row] = m31(value.bytes[2]);
         columns[COL_LOW7][row] = m31(value.low7);
-        columns[COL_TOP][row] = m31(value.top);
         columns[COL_SAMPLE][row] = m31(value.sample as u32);
         columns[COL_ACCEPT][row] = m31(value.accept as u32);
         columns[COL_INDEX][row] = m31(value.index);
@@ -839,7 +833,6 @@ impl FrameworkEval for RejectionEval {
         let b1 = eval.next_trace_mask();
         let b2 = eval.next_trace_mask();
         let low7 = eval.next_trace_mask();
-        let top = eval.next_trace_mask();
         let sample = eval.next_trace_mask();
         let accept_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
         let accept_prev = accept_mask[0].clone();
@@ -865,11 +858,14 @@ impl FrameworkEval for RejectionEval {
             slack[0].clone() + c256.clone() * slack[1].clone() + c65536 * slack[2].clone();
         let skip = sample.clone() - accept.clone();
 
-        eval.add_constraint(top.clone() * (one.clone() - top.clone()));
         eval.add_constraint(sample.clone() * (one.clone() - sample.clone()));
         eval.add_constraint(accept.clone() * (one.clone() - accept.clone()));
         eval.add_constraint(accept.clone() * (one.clone() - sample.clone()));
-        eval.add_constraint(active.clone() * (b2.clone() - low7.clone() - c128 * top.clone()));
+        // b2 = low7 + 128·top with top ∈ {0,1} ⟺ (b2−low7) ∈ {0,128}: the same
+        // fact without witnessing `top` as its own column (deleted; was only
+        // ever used here).
+        let top_gap = b2.clone() - low7.clone();
+        eval.add_constraint(top_gap.clone() * (top_gap - c128));
         eval.add_constraint(
             accept.clone() * (value.clone() + slack_value - (q.clone() - one.clone())),
         );
@@ -891,7 +887,6 @@ impl FrameworkEval for RejectionEval {
             b1.clone(),
             b2.clone(),
             low7.clone(),
-            top,
             sample.clone(),
             accept.clone(),
             index.clone(),
@@ -1542,7 +1537,7 @@ mod tests {
             .iter()
             .all(|id| !id.id.ends_with("_rejection_poly")));
         assert_eq!(ABSORB_BASE_COLS, 1);
-        assert_eq!(REJECTION_BASE_COLS, 12);
+        assert_eq!(REJECTION_BASE_COLS, 11);
         assert_eq!(ABSORB_INTERACTION_COLS, 4);
         assert_eq!(REJECTION_INTERACTION_COLS, 12);
         let rho = [17u8; 32];
@@ -1746,7 +1741,6 @@ mod tests {
     fn set_boundary_candidate(row: &mut RejectionRow, value: u32, accept: bool) {
         row.bytes = split_u23(value);
         row.low7 = row.bytes[2] & 0x7f;
-        row.top = row.bytes[2] >> 7;
         row.accept = accept;
         row.accept_slack = if accept {
             split_u23(Q - 1 - value)
@@ -1783,7 +1777,6 @@ mod tests {
         set_boundary_candidate(&mut rows[reject_rows[1]], (1 << 23) - 1, false);
         rows[done_row].bytes = [0, 0, 128];
         rows[done_row].low7 = 0;
-        rows[done_row].top = 1;
 
         assert_eq!(rows[accept_rows[0]].accept_slack, [0, 0, 0]);
         assert_eq!(rows[accept_rows[1]].accept_slack[0], 255);
@@ -1800,7 +1793,6 @@ mod tests {
         let row = rows.iter().position(|row| row.accept).unwrap();
         rows[row].bytes = split_u23(Q);
         rows[row].low7 = rows[row].bytes[2] & 0x7f;
-        rows[row].top = rows[row].bytes[2] >> 7;
         rows[row].accept = true;
         rows[row].accept_slack = [0; 3];
 
@@ -1821,7 +1813,6 @@ mod tests {
             .unwrap();
         rows[row].bytes = split_u23(Q - 1);
         rows[row].low7 = rows[row].bytes[2] & 0x7f;
-        rows[row].top = rows[row].bytes[2] >> 7;
         rows[row].accept = false;
         rows[row].reject_delta = 0;
 
@@ -1890,11 +1881,6 @@ mod tests {
                 row: accept_row,
                 column: COL_LOW7,
                 value: rows[accept_row].low7 ^ 1,
-            },
-            ExpandATraceAttack::Rejection {
-                row: accept_row,
-                column: COL_TOP,
-                value: 2,
             },
             ExpandATraceAttack::Rejection {
                 row: 0,

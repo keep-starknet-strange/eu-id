@@ -1643,7 +1643,6 @@ fn sib_rc_relation(
 ) -> &crate::sampleinball::relations::RcRelation {
     match kind {
         sib_tables::RcKind::Rc8 => &r.rc8,
-        sib_tables::RcKind::Rc9 => &r.rc9,
         sib_tables::RcKind::Rc11 => &r.rc11,
     }
 }

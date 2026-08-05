@@ -13,8 +13,11 @@
 //! | `StepVal`| 2 | `(step, value)` | read rows (+) | write-i rows (−) | FSM↔mem value tie |
 //! | `SignBit`| 2 | `(bit_idx, ±1)` | sign rows per bit (+) | write-j rows (−) | FSM↔mem sign tie |
 //! | `Rc8`   | 1 | `v ∈ [0,2^8)` | rc8 table | index/byte bounds, sorted daddr |
-//! | `Rc9`   | 1 | `v ∈ [0,2^9)` | rc9 table | coefficient `c+1` bound |
 //! | `Rc11`  | 1 | `v ∈ [0,2^11)` | rc11 table | offline-memory timestamp diff `dts` |
+//!
+//! There is no `Rc9` relation: the coefficient ternary bound `c+1 ∈ [0,2^9)`
+//! was redundant with `c·csq = c` (`csq = c²`), the degree-2 identity `c³ = c`
+//! which alone forces `c ∈ {−1,0,1}` over a field.
 //!
 //! ## Offline memory checking (the swap soundness core)
 //!
@@ -76,7 +79,6 @@ pub struct SibRelations {
     pub stepval: StepValRelation,
     pub signbit: SignBitRelation,
     pub rc8: RcRelation,
-    pub rc9: RcRelation,
     pub rc11: RcRelation,
 }
 
@@ -90,7 +92,6 @@ impl SibRelations {
             stepval: StepValRelation::draw(channel),
             signbit: SignBitRelation::draw(channel),
             rc8: RcRelation::draw(channel),
-            rc9: RcRelation::draw(channel),
             rc11: RcRelation::draw(channel),
         }
     }
@@ -112,7 +113,6 @@ impl SibRelations {
             stepval: StepValRelation::draw(channel),
             signbit: SignBitRelation::draw(channel),
             rc8: RcRelation::draw(channel),
-            rc9: RcRelation::draw(channel),
             rc11: RcRelation::draw(channel),
         }
     }
@@ -126,7 +126,6 @@ impl SibRelations {
             stepval: StepValRelation::dummy(),
             signbit: SignBitRelation::dummy(),
             rc8: RcRelation::dummy(),
-            rc9: RcRelation::dummy(),
             rc11: RcRelation::dummy(),
         }
     }

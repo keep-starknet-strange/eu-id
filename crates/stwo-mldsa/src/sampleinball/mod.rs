@@ -73,6 +73,7 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry, INTERACTION_TRACE_IDX,
+    ORIGINAL_TRACE_IDX,
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
@@ -127,16 +128,16 @@ const COL_S_SAME: usize = 17; // 1 iff sorted addr == previous sorted addr (same
 const COL_S_DADDR: usize = 18; // sorted addr − previous sorted addr ∈ [0,256) (rc8)
 const COL_S_DADDR_INV: usize = 19; // inverse gadget: daddr·inv == 1−same
 const COL_S_DTS: usize = 20; // (ts − prev_ts − 1) within a cell ∈ [0,2048) (rc11)
-const COL_S_SR_SAME: usize = 21; // same·s_read (witnessed to keep continuity deg 2)
-const COL_S_FOC: usize = 22; // first-of-cell = is_access·(1−same) (witnessed, deg 2 pin)
+                             // sr_same = same·s_read and foc = is_sorted·(1−same) are inlined
+                             // (degree 2 each) at their use sites instead of witnessed columns.
                              // Sign-bit columns — the 8 bits of each sign row's byte (only on the 8 sign rows;
                              // 0 elsewhere). These feed the SignBit channel that ties write-j values to the
                              // FIPS sign bits (`c[j] = (−1)^bit`).
-const COL_SIGN_BIT0: usize = 23;
+const COL_SIGN_BIT0: usize = 21;
 /// Number of sign-bit columns (one per bit of a sign byte).
 pub const SIGN_BIT_COLS: usize = 8;
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_SIGN_BIT0 + SIGN_BIT_COLS; // 31
+pub const N_BASE_COLS: usize = COL_SIGN_BIT0 + SIGN_BIT_COLS; // 29
 
 /// Core (unsorted) offline-memory accesses laid out on their own rows: N init
 /// writes + 3 per step (read + 2 writes). The N FINAL reads are NOT counted here
@@ -160,11 +161,19 @@ fn n_accesses(profile: MlDsaProfile) -> usize {
     n_core(profile) + N
 }
 
-/// Namespaced preprocessed id for one hosted ML-DSA instance. The schedule
-/// content is static; namespacing preserves the composition's per-role order.
-pub(crate) fn pre_id_ns(ns: &str, name: &str) -> PreProcessedColumnId {
+/// Preprocessed id for one hosted ML-DSA instance. The schedule content is
+/// static across instances (function of `(profile, log_size)` only), and
+/// cross-instance separation lives in each instance's own relation draws
+/// (distinct `SibRelations` per namespace, from a channel already mixed with
+/// the instance namespace — see `statement::mix_public`/`draw_relations`), not
+/// in the preprocessed id. Deliberately UNNAMESPACED so air-core's
+/// content-fingerprint dedup collapses the 28 identical columns committed
+/// once instead of once per hosted instance. `ns` is accepted for call-site
+/// symmetry with other components' `pre_id_ns` helpers; air-core's id-content
+/// fingerprint guard fails loudly if this ever stops being content-only.
+pub(crate) fn pre_id_ns(_ns: &str, name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("{}mldsa_sib_{name}", crate::sponge_link::ns_prefix(ns)),
+        id: format!("mldsa_sib_{name}"),
     }
 }
 
@@ -860,11 +869,8 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
         // Strict ts within a cell: dts = ts − prev_ts − 1 ≥ 0 (only when same).
         let dts = if same { a.ts - prev.unwrap().ts - 1 } else { 0 };
         cols[COL_S_DTS][row] = m31(dts);
-        let s_read = !a.is_write;
-        let sr_same = same && s_read;
-        cols[COL_S_SR_SAME][row] = m31(u32::from(sr_same));
-        // first-of-cell = is_sorted·(1−same) (is_sorted==1 on every sorted row).
-        cols[COL_S_FOC][row] = m31(u32::from(!same));
+        // sr_same (same·s_read) and foc (is_sorted·(1−same)) are inlined in
+        // the AIR from `same`/`s_write`/`is_sorted`; no base column to fill.
         prev = Some(*a);
     }
 
@@ -890,20 +896,24 @@ pub struct SibEval {
 
 /// Logup entries (fixed per row, gates zero inactive stages), in AIR emission
 /// order: accept_lo (rc8), accept_hi (rc8), reject_lo (rc8), reject_hi (rc8),
-/// hashio consume, c+1 bound (rc9), ccell use, daddr (rc8), dts (rc11),
-/// mem_unsorted_core (+), mem_unsorted_final (+), mem_sorted (−) = 12; then the
-/// FSM↔memory tie channels: swap accept-yield ×2, swap read-consume, swap
-/// write-j-consume = 4; stepval read-yield, stepval write-i-consume = 2; signbit
-/// sign-yield ×8, signbit write-j-consume = 9. Total 12 + 4 + 2 + 9 = 27.
-pub const N_LOGUP_ENTRIES: usize = 12 + 4 + 2 + 9;
+/// hashio consume, ccell use, daddr (rc8), dts (rc11), mem_unsorted_core (+),
+/// mem_unsorted_final (+), mem_sorted (−) = 11 (the ternary c+1 rc9 bound was
+/// dropped: `c·csq = c` with `csq = c²` already forces `c ∈ {−1,0,1}`, a
+/// degree-2 identity equivalent to `c³ = c`, which has exactly those 3 roots
+/// over a field — the range lookup was redundant); then the FSM↔memory tie
+/// channels: swap accept-yield ×2, swap read-consume, swap write-j-consume =
+/// 4; stepval read-yield, stepval write-i-consume = 2; signbit sign-yield ×8,
+/// signbit write-j-consume = 9. Total 11 + 4 + 2 + 9 = 26.
+pub const N_LOGUP_ENTRIES: usize = 11 + 4 + 2 + 9;
 pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // Σc² accumulator.
-                                                         // One QM31 passthrough column packing sorted (addr, ts, val) into coords
-                                                         // 0/1/2 and the SampleInBall state-after value into coord 3.
-const N_SORTED_PASS_COLS: usize = SECURE_EXTENSION_DEGREE;
-pub const N_INTERACTION_COLS: usize =
-    N_ACC_COORD_COLS + N_SORTED_PASS_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
+/// No dedicated sorted-view passthrough interaction column: the previous
+/// sorted row's (addr, ts, val) and the previous FSM state-after value are
+/// read directly via shifted `[-1,0]` BASE-trace masks on `s_addr`/`s_val`/
+/// `s_ts`/`idx`/`accept` (see their declarations in `evaluate`), since those
+/// are already committed base columns with no challenge dependency.
+pub const N_INTERACTION_COLS: usize = N_ACC_COORD_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
 
 impl FrameworkEval for SibEval {
     fn log_size(&self) -> u32 {
@@ -945,8 +955,17 @@ impl FrameworkEval for SibEval {
 
         let active = eval.next_trace_mask();
         let byte = eval.next_trace_mask();
-        let idx = eval.next_trace_mask();
-        let accept = eval.next_trace_mask();
+        // idx/accept are read via a shifted [-1,0] base-trace mask so the
+        // previous row's FSM state-after value (idx+accept) is available
+        // directly, replacing what used to be a dedicated QM31 interaction
+        // passthrough coordinate pinned equal to `idx + accept` (see
+        // `prev_fsm_after` below).
+        let idx_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
+        let idx_prev = idx_mask[0].clone();
+        let idx = idx_mask[1].clone();
+        let accept_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
+        let accept_prev = accept_mask[0].clone();
+        let accept = accept_mask[1].clone();
         let reject = eval.next_trace_mask();
         let accept_hi = eval.next_trace_mask();
         let reject_hi = eval.next_trace_mask();
@@ -957,16 +976,24 @@ impl FrameworkEval for SibEval {
         let u_val = eval.next_trace_mask();
         let u_ts = eval.next_trace_mask();
         let u_write = eval.next_trace_mask();
-        let s_addr = eval.next_trace_mask();
-        let s_val = eval.next_trace_mask();
-        let s_ts = eval.next_trace_mask();
+        // s_addr/s_val/s_ts are read via a shifted [-1,0] base-trace mask so
+        // the previous sorted row's (addr, ts, val) is available directly,
+        // replacing what used to be a dedicated QM31 interaction passthrough
+        // pinned equal to these same base cells.
+        let s_addr_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
+        let prev_s_addr = s_addr_mask[0].clone();
+        let s_addr = s_addr_mask[1].clone();
+        let s_val_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
+        let prev_s_val = s_val_mask[0].clone();
+        let s_val = s_val_mask[1].clone();
+        let s_ts_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
+        let prev_s_ts = s_ts_mask[0].clone();
+        let s_ts = s_ts_mask[1].clone();
         let s_write = eval.next_trace_mask();
         let s_same = eval.next_trace_mask();
         let s_daddr = eval.next_trace_mask();
         let s_daddr_inv = eval.next_trace_mask();
         let s_dts = eval.next_trace_mask();
-        let s_sr_same = eval.next_trace_mask();
-        let s_foc = eval.next_trace_mask();
         // Sign-bit base masks (COL_SIGN_BIT0..): bits of each sign-row byte.
         let sign_bit: Vec<E::F> = (0..SIGN_BIT_COLS).map(|_| eval.next_trace_mask()).collect();
 
@@ -976,20 +1003,10 @@ impl FrameworkEval for SibEval {
         let csq_prev = E::combine_ef(acc_coords.each_ref().map(|p| p[0].clone()));
         let csq_cur = E::combine_ef(acc_coords.each_ref().map(|p| p[1].clone()));
 
-        // Packed passthrough, read at `[-1,0]`: coords 0/1/2 carry sorted
-        // `(addr, ts, val)` and coord 3 carries the FSM state after this byte.
-        let pass_coords: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
-            core::array::from_fn(|_| eval.next_interaction_mask(INTERACTION_TRACE_IDX, [-1, 0]));
-        let prev_s_addr = pass_coords[0][0].clone();
-        let prev_s_ts = pass_coords[1][0].clone();
-        let prev_s_val = pass_coords[2][0].clone();
-        let prev_fsm_after = pass_coords[3][0].clone();
-        // Pin the passthrough's CURRENT coords to the sorted base columns so the
-        // interaction column faithfully carries (addr, ts, val).
-        eval.add_constraint(pass_coords[0][1].clone() - s_addr.clone());
-        eval.add_constraint(pass_coords[1][1].clone() - s_ts.clone());
-        eval.add_constraint(pass_coords[2][1].clone() - s_val.clone());
-        eval.add_constraint(pass_coords[3][1].clone() - idx.clone() - accept.clone());
+        // FSM state-after value for the previous row (idx + accept), built
+        // directly from the shifted idx/accept masks above instead of a
+        // dedicated interaction passthrough column.
+        let prev_fsm_after = idx_prev + accept_prev;
 
         let one = E::F::from(M31::one());
         let two_pow_8 = E::F::from(m31(1 << 8));
@@ -1062,15 +1079,11 @@ impl FrameworkEval for SibEval {
             &io_tuple,
         ));
 
-        // C4: bound c+1 to [0,512), then enforce ternary directly. The rc9
-        // lookup alone is only a range check; together with csq=c² below,
-        // c·csq=c is the degree-2 polynomial identity c³=c.
-        let c_plus1 = c.clone() + one.clone();
-        eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc9,
-            is_c.clone(),
-            core::slice::from_ref(&c_plus1),
-        ));
+        // C4: enforce ternary directly via c·csq=c (with csq=c² below), the
+        // degree-2 polynomial identity c³=c. Over a field this cubic has
+        // exactly the 3 roots {−1,0,1}, so it fully binds c ∈ {−1,0,1} on its
+        // own; a separate c+1 ∈ [0,512) rc9 range-check lookup was redundant
+        // and has been dropped.
         eval.add_constraint(c.clone() * csq.clone() - c.clone());
 
         // C5a: witness csq = c² (degree-2 constraint, NOT involving the shifted
@@ -1101,21 +1114,22 @@ impl FrameworkEval for SibEval {
         ));
 
         // =====================================================================
-        // C8: offline-memory swap replay. Each row has degree 2 or less.
-        // | site                                   | expr                       | deg |
-        // | u_write / s_write / s_same booleans    | x(1−x)                     |  2  |
-        // | daddr is-zero: daddr·inv == 1−same     | daddr·inv , 1−same         |  2  |
-        // | same ⇒ daddr==0                        | same·daddr                 |  2  |
-        // | sr_same == same·s_read                 | same·(is_sorted−s_write)   |  2  |
-        // | foc == is_sorted·(1−same)              | is_sorted·(1−same)         |  2  |
-        // | daddr = s_addr − prev (gate transition)| s_addr−prev_addr−daddr     |  1  |
-        // | strict ts: same·(Δts−1−dts)==0         | same·(…)                   |  2  |
-        // | value continuity: sr_same·(s_val−prev) | sr_same·(…)                |  2  |
-        // | init: foc·(1−s_write), foc·s_val       | foc·(…)                    |  2  |
-        // | rc uses (daddr rc8, dts rc11)          | gate·value                 |  1  |
-        // | Mem yields (±combine)                  | gate·combine               |  1  |
-        // The passthrough pins above have degree 1. No constraint exceeds degree
-        // 2, so the `[-1,0]` masks keep the bound at log_size+1.
+        // C8: offline-memory swap replay.
+        // | site                                          | expr                     | deg |
+        // | u_write / s_write / s_same booleans           | x(1−x)                   |  2  |
+        // | daddr is-zero: daddr·inv == 1−same            | daddr·inv , 1−same       |  2  |
+        // | same ⇒ daddr==0                               | same·daddr               |  2  |
+        // | daddr = s_addr − prev (gate transition)       | s_addr−prev_addr−daddr   |  1  |
+        // | strict ts: same·(Δts−1−dts)==0                | same·(…)                 |  2  |
+        // | value continuity: (same·s_read)·(s_val−prev)  | inlined sr_same·(…)      |  3  |
+        // | init: foc·(1−s_write), foc·s_val (foc inlined)| inlined foc·(…)          |  3  |
+        // | rc uses (daddr rc8, dts rc11)                 | gate·value               |  1  |
+        // | Mem yields (±combine)                         | gate·combine             |  1  |
+        // No constraint exceeds degree 3, well within the component's declared
+        // `log_size + 2` (D ≤ 5) bound. The shifted `[-1,0]` base-trace masks
+        // (idx/accept/s_addr/s_val/s_ts) read the previous row of an
+        // already-committed column directly — no separate interaction
+        // passthrough column or pin constraints needed.
         // =====================================================================
 
         // C8a: access-flag booleans.
@@ -1161,16 +1175,19 @@ impl FrameworkEval for SibEval {
         ));
 
         // C8e: value continuity for READs within a cell. s_read = is_sorted −
-        // s_write (0/1 on sorted rows). sr_same = same·s_read (witnessed), then
-        // sr_same·(s_val − prev_s_val) == 0 keeps degree ≤ 2.
+        // s_write (0/1 on sorted rows). sr_same = same·s_read, inlined (degree
+        // 2; was witnessed): sr_same·(s_val − prev_s_val) is then degree 3,
+        // still within the component's +2 budget.
         let s_read = is_sorted.clone() - s_write.clone();
-        eval.add_constraint(s_sr_same.clone() - s_same.clone() * s_read.clone());
-        eval.add_constraint(s_sr_same.clone() * (s_val.clone() - prev_s_val.clone()));
+        let s_sr_same = s_same.clone() * s_read;
+        eval.add_constraint(s_sr_same * (s_val.clone() - prev_s_val.clone()));
 
-        // C8f: first-of-cell must be an INIT write of 0. foc = is_sorted·(1−same).
-        eval.add_constraint(s_foc.clone() - is_sorted.clone() * (one.clone() - s_same.clone()));
+        // C8f: first-of-cell must be an INIT write of 0. foc =
+        // is_sorted·(1−same), inlined (degree 2; was witnessed): each use
+        // below is degree 3.
+        let s_foc = is_sorted.clone() * (one.clone() - s_same.clone());
         eval.add_constraint(s_foc.clone() * (one.clone() - s_write.clone())); // is a write
-        eval.add_constraint(s_foc.clone() * s_val.clone()); // writes value 0
+        eval.add_constraint(s_foc * s_val.clone()); // writes value 0
 
         // C8g: Mem multiset permutation. Unsorted CORE accesses yield (+); the N
         // FINAL reads yield (+) co-located on the c-stage rows with value = COL_C
@@ -1359,7 +1376,7 @@ pub fn gen_sib_metadata(witness: &MlDsaWitness) -> SibMetadata {
 }
 
 fn gen_sib_metadata_from_parts(
-    witness: &MlDsaWitness,
+    _witness: &MlDsaWitness,
     srows: &[StreamRow],
     mem: &MemTrace,
 ) -> SibMetadata {
@@ -1377,10 +1394,6 @@ fn gen_sib_metadata_from_parts(
             rc_uses.rc8[margin & 0xff] += 1;
             rc_uses.rc8[margin >> 8] += 1;
         }
-    }
-
-    for &c in &witness.digits.c {
-        rc_uses.rc9[(c + 1) as usize] += 1;
     }
 
     // Offline-memory range uses over the sorted view: daddr (rc8) on every
@@ -1440,27 +1453,11 @@ pub fn gen_sib_interaction(
         .collect();
 
     // Offline-memory: sorted view per coset row (row r ↦ sorted[r] for r<N_ACCESSES).
+    // No passthrough interaction column needed: s_addr/s_val/s_ts and
+    // idx/accept are already committed BASE columns, read via shifted
+    // `[-1,0]` masks directly in the AIR (see `evaluate`).
     let mem = mem_trace(witness);
     let metadata = gen_sib_metadata_from_parts(witness, &srows, &mem);
-    // Packed passthrough QM31 column: sorted (addr, ts, val) in coords 0/1/2,
-    // and the ordered SampleInBall state-after value in coord 3.
-    let pass: Vec<SecureField> = (0..rows)
-        .map(|row| {
-            let (addr, ts, value) = mem.sorted.get(row).map_or((m31(0), m31(0), m31(0)), |a| {
-                (m31(a.addr), m31(a.ts), enc_signed(a.value))
-            });
-            let fsm_after = srows
-                .get(row)
-                .map_or(m31(0), |r| m31(r.i + u32::from(r.accept)));
-            SecureField::from_m31_array([addr, ts, value, fsm_after])
-        })
-        .collect();
-    for coord in 0..N_SORTED_PASS_COLS {
-        trace.push(col_eval(
-            log_size,
-            pass.iter().map(|v| v.to_m31_array()[coord]).collect(),
-        ));
-    }
 
     let row_lookup = circle_row_to_coset(log_size);
     let vec_rows = 1usize << (log_size - stwo::prover::backend::simd::m31::LOG_N_LANES);
@@ -1526,7 +1523,7 @@ pub fn gen_sib_interaction(
     };
 
     // AIR emission order (7): accept_lo(rc8), accept_hi(rc8), reject_lo(rc8),
-    // reject_hi(rc8), hashio(−), c+1 bound(rc9), ccell(+).
+    // reject_hi(rc8), hashio(−), ccell(+).
     push(
         &|coset| match coset_row[coset] {
             Some(Row::Stream {
@@ -1585,18 +1582,6 @@ pub fn gen_sib_interaction(
             Some(Row::Stream { byte, .. }) => {
                 let tuple = [m31(sib_stream), m31(coset as u32), m31(byte)];
                 (-one, relations.hash_io.combine(&tuple))
-            }
-            _ => (zero, one),
-        },
-        &mut entries,
-        &mut claimed,
-    );
-    // c+1 range bound (ternary itself is enforced by c³=c in the AIR).
-    push(
-        &|coset| match coset_row[coset] {
-            Some(Row::C { c, .. }) => {
-                let v = (c + 1) as u32;
-                (one, relations.rc9.combine(&[m31(v)]))
             }
             _ => (zero, one),
         },

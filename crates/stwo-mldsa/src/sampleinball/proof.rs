@@ -1,6 +1,6 @@
 //! Test harness for `sampleinball_fsm` via `air-core`. Contributes, in commit order:
 //!   1. `sib`             — the [CHAL] FSM + ternary/τ + c-binding component.
-//!   2. rc providers       — rc8, rc9, rc11 (one each).
+//!   2. rc providers       — rc8, rc11 (one each).
 //!   3. `ccell_provider`   — TEST-SIDE balancer yielding the coeffs C-cell
 //!      `(c_bind_id, c)` tuples that the FSM consumes.
 //!   4. `hashio_producer`  — TEST-SIDE balancer yielding the squeeze bytes the FSM
@@ -137,7 +137,6 @@ impl Built {
 fn rc_relation(r: &SibRelations, kind: RcKind) -> &RcRelation {
     match kind {
         RcKind::Rc8 => &r.rc8,
-        RcKind::Rc9 => &r.rc9,
         RcKind::Rc11 => &r.rc11,
     }
 }
@@ -303,7 +302,7 @@ impl Air for SibProver {
 impl AirProver for SibProver {
     fn max_log_size(&self) -> u32 {
         sib_log_size()
-            .max(RcKind::Rc9.log_size())
+            .max(RcKind::Rc11.log_size())
             .max(ccell_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
