@@ -34,9 +34,10 @@
 //!
 //! ## Preprocessed columns
 //! `start, end, poly_id, live_mask_4, is_carry, is_norm, is_c, is_w,
-//!  paired_continue, w_bind_id, c_bind_id, profile_active` — all
-//! row-index-deterministic. The AIR derives the other live masks and selectors
-//! from these columns.
+//!  w_bind_id, c_bind_id, profile_active` — all row-index-deterministic. The
+//! AIR derives the other live masks and selectors from these columns
+//! (`paired_continue = is_recomp·(1−start)` inline; both factors are already
+//! preprocessed/derived columns, so it costs nothing to recompute).
 //!
 //! ## Constraint degrees
 //!
@@ -191,7 +192,6 @@ pub fn coeffs_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnI
         profile_pre_id(profile, "is_norm"),
         profile_pre_id(profile, "is_c"),
         profile_pre_id(profile, "is_w"),
-        profile_pre_id(profile, "paired_continue"),
         pre_id("w_bind_id"),
         pre_id("c_bind_id"),
         profile_active_id(profile),
@@ -265,7 +265,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
     let mut is_norm = vec![m31(0); rows];
     let mut is_c = vec![m31(0); rows];
     let mut is_w = vec![m31(0); rows];
-    let mut paired_continue = vec![m31(0); rows];
     let mut w_bind_id = vec![m31(0); rows];
     let mut c_bind_id = vec![m31(0); rows];
     let mut profile_active = vec![m31(0); rows];
@@ -283,7 +282,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
             is_norm[row] = m31(u32::from(g.kind == Kind::Z));
             is_c[row] = m31(u32::from(g.kind == Kind::C));
             is_w[row] = m31(u32::from(g.kind == Kind::W));
-            paired_continue[row] = m31(u32::from(g.kind.has_recomp() && info.in_group != 0));
         }
         if g.kind == Kind::C {
             let m = g
@@ -313,7 +311,6 @@ pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
         is_norm,
         is_c,
         is_w,
-        paired_continue,
         w_bind_id,
         c_bind_id,
     ]
@@ -499,8 +496,6 @@ impl FrameworkEval for CoeffsEval {
         let is_norm = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_norm"));
         let is_c = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_c"));
         let is_w = eval.get_preprocessed_column(profile_pre_id(self.profile, "is_w"));
-        let paired_continue =
-            eval.get_preprocessed_column(profile_pre_id(self.profile, "paired_continue"));
         let w_bind_id = eval.get_preprocessed_column(pre_id("w_bind_id"));
         let c_bind_id = eval.get_preprocessed_column(pre_id("c_bind_id"));
         let profile_active = eval.get_preprocessed_column(profile_active_id(self.profile));
@@ -731,6 +726,7 @@ impl FrameworkEval for CoeffsEval {
         let paired_digit_row = first_digit_row * r_ef.clone() + second_digit_row;
         let digit_row = ordinary_digit_row.clone()
             + E::EF::from(is_recomp.clone()) * (paired_digit_row - ordinary_digit_row);
+        let paired_continue = is_recomp.clone() * (one.clone() - start.clone());
         let expected = E::EF::from(active.clone() - start) * acc_prev.clone() * r_ef
             + E::EF::from(paired_continue) * acc_prev * E::EF::from(self.r * self.r - self.r)
             + digit_row;
@@ -1383,7 +1379,7 @@ mod packed_tests {
                 continue;
             }
 
-            for selector in [0, 3, 4, 5, 6, 7, 8, 11] {
+            for selector in [0, 3, 4, 5, 6, 7, 10] {
                 assert_eq!(
                     preprocessed[selector][circle_row],
                     m31(0),

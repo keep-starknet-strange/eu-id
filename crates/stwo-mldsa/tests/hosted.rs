@@ -1124,10 +1124,10 @@ fn hosted_public_native_mu_proves_and_verifies() {
 
 #[test]
 fn hosted_private_key_shapes_kat_and_layout_are_exact() {
-    const EXPECTED_PREPROCESSED_COLUMNS: usize = 85;
+    const EXPECTED_PREPROCESSED_COLUMNS: usize = 84;
     const EXPECTED_TRACE_COLUMNS: usize = 189;
     const EXPECTED_INTERACTION_COLUMNS: usize = 344;
-    const EXPECTED_PREPROCESSED_CELLS: usize = 461_472;
+    const EXPECTED_PREPROCESSED_CELLS: usize = 453_280;
     const EXPECTED_TRACE_CELLS: usize = 1_580_256;
     const EXPECTED_INTERACTION_M31_CELLS: usize = 1_641_152;
 
