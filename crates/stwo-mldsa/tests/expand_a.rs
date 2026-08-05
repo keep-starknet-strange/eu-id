@@ -36,7 +36,7 @@ use stwo_mldsa::expand_a::{
     ExpandATraceAttack, ExpandAVerifier, ABSORB_ACTIVE_ROWS, MATRIX_POLYS, MAX_CANDIDATES,
     MAX_EXPAND_A_SQUEEZE_BYTES, REJECTION_BASE_COLS, TRACE_COL_ACCEPT, TRACE_COL_ACCEPT_SLACK0,
     TRACE_COL_ACCEPT_SLACK1, TRACE_COL_ACCEPT_SLACK2, TRACE_COL_B0, TRACE_COL_B1, TRACE_COL_B2,
-    TRACE_COL_INDEX, TRACE_COL_LOW7, TRACE_COL_REJECT_DELTA, TRACE_COL_SAMPLE, TRACE_COL_TOP,
+    TRACE_COL_INDEX, TRACE_COL_LOW7, TRACE_COL_REJECT_DELTA, TRACE_COL_SAMPLE,
 };
 use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::sponge::shake128;
@@ -626,11 +626,6 @@ fn adversarial_traces_and_disconnected_matrix_fail() {
             value: 128,
         },
         ExpandATraceAttack::Rejection {
-            row: accept_row,
-            column: TRACE_COL_TOP,
-            value: 2,
-        },
-        ExpandATraceAttack::Rejection {
             row: 0,
             column: TRACE_COL_SAMPLE,
             value: 2,
@@ -981,7 +976,7 @@ fn six_block_expand_a_composes_with_real_keccak_service() {
 
 #[test]
 fn proof_shape_constants_are_fixed() {
-    assert_eq!(REJECTION_BASE_COLS, 12);
+    assert_eq!(REJECTION_BASE_COLS, 11);
     let shapes = shake128_job_shapes(ML_DSA_65, STREAM_BASE).expect("valid ExpandA service shapes");
     assert_eq!(shapes.len(), 30);
     assert!(shapes
