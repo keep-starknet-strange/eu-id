@@ -34,10 +34,14 @@
 //!    decomposition so a lying `s0` desyncs the range (see C-DECOMP-S0).
 //! 3. **[HINT] UseHint** — `w1' = (w1 + h·(2·s0−1)) mod m`, where
 //!    `m = (q−1)/(2γ2)` and `h ∈ {0,1}`. `w1'` is range-checked directly via a
-//!    single Rc4 lookup; `wrap_m` itself carries no lookup — once `w1` and
-//!    `w1'` are Rc4-pinned to `[0,16)`, this equation is linear in `wrap_m`
-//!    with a unique field solution, so any independent range check on it is
-//!    redundant (the assessed and closed C8c(c) finding).
+//!    single Rc4 lookup, and `wrap_m + 1` carries its own Rc4 lookup. That
+//!    second lookup is load-bearing, not redundant: `m = 16` is invertible in
+//!    M31, so an unconstrained `wrap_m` lets the prover solve
+//!    `wrap_m = (w1' − w1 − h·(2s0−1))·16⁻¹` for *any* target `w1'`, leaving
+//!    UseHint unenforced while `w1'` still passes its own range check — and
+//!    `w1'` is packed straight into the c̃ sponge (step 6), so that is a
+//!    universal forgery. With `wrap_m ∈ {−1,0,1}` the equation is exact over
+//!    ℤ (both sides bounded by 16 ≪ p), which pins `w1' = (w1 + hδ) mod 16`.
 //! 4. **[HINT] Σh ≤ ω** — a running accumulator adds the four lane hints. The
 //!    final active row is range-checked against the selected `ω`.
 //! 5. **w-binding** — each sub-lane `w` is a USE of the coeffs W-group cell
@@ -144,14 +148,14 @@ const COL_V_ZERO: [usize; LANES_PER_ROW] = [
 /// Total base columns.
 pub const N_BASE_COLS: usize = COL_HINT_ACC + 5;
 
-/// Logup entries per row, batched by [`LOGUP_BATCH`]: four lanes each emit 8
-/// range uses (Rc4 `w1`, Rc4 `w1'`, Rc13/Rc7 `a_lo`/`a_hi`, Rc13/Rc7
-/// `b_lo`/`b_hi`, Rc13/Rc7 `sign_lo`/`sign_hi`) and one WCell use. Two
-/// hash-byte slots (ML-DSA-65's fixed w1Encode output; the ML-DSA-44 3-byte/
-/// 6-bit packing residue was deleted -- this component is single-profile in
-/// practice, statement.rs never constructs it with ML_DSA_44) and two final
-/// hint-sum checks follow. Total: 40.
-pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 9 + 2 + 2;
+/// Logup entries per row, batched by [`LOGUP_BATCH`]: four lanes each emit 9
+/// range uses (Rc4 `w1`, Rc4 `w1'`, Rc4 `wrap_m + 1`, Rc13/Rc7 `a_lo`/`a_hi`,
+/// Rc13/Rc7 `b_lo`/`b_hi`, Rc13/Rc7 `sign_lo`/`sign_hi`) and one WCell use.
+/// Two hash-byte slots (ML-DSA-65's fixed w1Encode output; the ML-DSA-44
+/// 3-byte/6-bit packing residue was deleted -- this component is
+/// single-profile in practice, statement.rs never constructs it with
+/// ML_DSA_44) and two final hint-sum checks follow. Total: 44.
+pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 10 + 2 + 2;
 pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // hint_acc is a QM31 running sum
@@ -391,6 +395,17 @@ pub(super) enum DecompTracePoke {
     /// Rc4's bound id must still be rejected (no provider row for that exact
     /// `(value, bound_id)` tuple).
     Rc11MagnitudeClaimedUnderRc4BoundId,
+    /// UseHint forgery with an **in-range** `w1'`: the exact attack the
+    /// deleted-then-restored `wrap_m` lookup exists to stop. `w1'` is poked to
+    /// 7 (a perfectly legal Rc4 value, so its own lookup still matches) while
+    /// `wrap_m` is solved by modular inverse -- `16⁻¹ = 2^27` in M31, so
+    /// `wrap_m = 7·2^27 mod p = 939_524_096` makes the linear UseHint
+    /// constraint hold exactly. Without a lookup on `wrap_m` this witness is
+    /// fully self-consistent and `w1'` (which is packed into the c-tilde
+    /// sponge) is free -- a universal forgery. The `wrap_m + 1` Rc4 lookup is
+    /// what rejects it: 939_524_097 has no provider row in Rc4's 16-value
+    /// domain.
+    InRangeW1pViaUnconstrainedWrapM,
 }
 
 #[cfg(test)]
@@ -498,6 +513,25 @@ impl DecompTracePoke {
                 sign_hi: (gamma2 - 1) >> 13,
                 v_is_zero: 0,
             },
+            Self::InRangeW1pViaUnconstrainedWrapM => PokedLane {
+                // Same honest standard case as above; w1'=7 is IN Rc4 range,
+                // so only the wrap_m lookup can catch it.
+                w: gamma2,
+                w1: 0,
+                w0: gamma2,
+                hint: 0,
+                wrap_k: 0,
+                s0: 1,
+                w1p: 7,
+                // 7·16⁻¹ mod (2^31−1) = 7·2^27 mod p: satisfies
+                // w1' − (w1 + h·(2s0−1) + 16·wrap_m) = 0 in the field.
+                wrap_m: 939_524_096,
+                a_hi: (2 * gamma2 - 1) >> 13,
+                b_hi: 0,
+                sign_val: gamma2 - 1,
+                sign_hi: (gamma2 - 1) >> 13,
+                v_is_zero: 0,
+            },
         }
     }
 }
@@ -511,6 +545,8 @@ impl PokedLane {
         match field {
             RcField::W1 => self.w1,
             RcField::W1P => self.w1p,
+            // shifted into Rc4's [0,16) domain; the AIR looks up `wrap_m + 1`
+            RcField::WrapM => self.wrap_m + 1,
             RcField::ALo => a - (1 << 13) * self.a_hi,
             RcField::AHi => self.a_hi,
             RcField::BLo => b - (1 << 13) * self.b_hi,
@@ -772,10 +808,15 @@ impl FrameworkEval for DecompEval {
 
             // [HINT] UseHint in the selected high-bits modulus. C8c(c):
             // wrap_m carries no lookup of its own -- with w1 and w1' both
-            // Rc4-pinned to [0,16), this equation is linear in wrap_m with a
-            // unique field solution, so it is already fully determined by
-            // this one constraint; any additional range check on it is
-            // redundant.
+            // Rc4-pinned to [0,16), this equation is linear in wrap_m — which
+            // is exactly why wrap_m MUST carry its own range check. 16 is
+            // invertible in M31, so without one the prover solves
+            // `wrap_m = (w1' − w1 − h·(2s0−1))·16⁻¹` for ANY target w1' and
+            // UseHint is not enforced at all; w1' feeds the c-tilde sponge
+            // (see the w1Encode packing below), so that is a universal
+            // forgery. The lookup below is what makes the equation exact over
+            // ℤ (|w1' − w1 − hδ| ≤ 16 and wrap_m ∈ {−1,0,1}), which then pins
+            // w1' = (w1 + hδ) mod 16.
             let delta_sign = s0.clone() + s0.clone() - one.clone(); // 2s0 − 1
             eval.add_constraint(
                 w1p.clone()
@@ -783,6 +824,11 @@ impl FrameworkEval for DecompEval {
                         + hint.clone() * delta_sign
                         + w1_modulus.clone() * wrap_m.clone()),
             );
+            eval.add_to_relation(RelationEntry::base(
+                &self.relations.range,
+                enabler_pre.clone(),
+                &range_tuple::<E>(wrap_m.clone() + one.clone(), RcKind::Rc4),
+            ));
 
             // Range-check w1' directly: a single Rc4 lookup (C8c(a), see w1
             // above).
@@ -923,6 +969,8 @@ fn gen_decomp_metadata_inner(
             let v = lane_vals(witness, i, m);
             rc_uses.rc4[v.w1 as usize] += 1;
             rc_uses.rc4[v.w1p as usize] += 1;
+            // `wrap_m ∈ {−1,0,1}` is looked up shifted into Rc4's domain.
+            rc_uses.rc4[(v.wrap_m + 1) as usize] += 1;
             let a = shifted_lower_range_value(profile, v.w0);
             let b = gamma2 - v.w0;
             let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
@@ -971,6 +1019,7 @@ fn honest_lane_rc_integer(profile: MlDsaProfile, v: &LaneVals, field: RcField) -
     match field {
         RcField::W1 => v.w1,
         RcField::W1P => v.w1p,
+        RcField::WrapM => v.wrap_m + 1,
         RcField::ALo => a & ((1 << 13) - 1),
         RcField::AHi => a >> 13,
         RcField::BLo => b & ((1 << 13) - 1),
@@ -983,7 +1032,7 @@ fn honest_lane_rc_integer(profile: MlDsaProfile, v: &LaneVals, field: RcField) -
 #[cfg(test)]
 fn rc_uses_for_field_mut(uses: &mut RcUses, field: RcField) -> &mut [u32] {
     match field {
-        RcField::W1 | RcField::W1P => &mut uses.rc4,
+        RcField::W1 | RcField::W1P | RcField::WrapM => &mut uses.rc4,
         RcField::ALo | RcField::BLo | RcField::SignLo => &mut uses.rc13,
         RcField::AHi | RcField::BHi | RcField::SignHi => &mut uses.rc7,
     }
@@ -995,7 +1044,7 @@ fn apply_trace_poke_to_metadata(
     witness: &MlDsaWitness,
     poke: DecompTracePoke,
 ) -> DecompMetadata {
-    const RC_FIELDS: [RcField; 8] = [
+    const RC_FIELDS: [RcField; 9] = [
         RcField::W1,
         RcField::ALo,
         RcField::BLo,
@@ -1003,6 +1052,7 @@ fn apply_trace_poke_to_metadata(
         RcField::BHi,
         RcField::SignLo,
         RcField::SignHi,
+        RcField::WrapM,
         RcField::W1P,
     ];
 
@@ -1049,6 +1099,7 @@ fn apply_trace_poke_to_metadata(
         DecompTracePoke::BoundaryZeroFlagUnset => 1,
         DecompTracePoke::NonBooleanZeroFlagWithNonzeroW1 => 0,
         DecompTracePoke::Rc11MagnitudeClaimedUnderRc4BoundId => 1,
+        DecompTracePoke::InRangeW1pViaUnconstrainedWrapM => 1,
     };
     debug_assert_eq!(unmatched, expected_unmatched);
     metadata.w1_encode_bytes[0] = (metadata.w1_encode_bytes[0] & 0xf0) | attacked.w1p as u8;
@@ -1180,6 +1231,7 @@ fn gen_decomp_interaction_inner(
             RcField::BHi,
             RcField::SignLo,
             RcField::SignHi,
+            RcField::WrapM,
             RcField::W1P,
         ] {
             push(
@@ -1308,6 +1360,7 @@ fn gen_decomp_interaction_inner(
 enum RcField {
     W1,
     W1P,
+    WrapM,
     ALo,
     AHi,
     BLo,
@@ -1319,7 +1372,7 @@ enum RcField {
 impl RcField {
     fn rc_kind(self) -> RcKind {
         match self {
-            RcField::W1 | RcField::W1P => RcKind::Rc4,
+            RcField::W1 | RcField::W1P | RcField::WrapM => RcKind::Rc4,
             RcField::ALo | RcField::BLo | RcField::SignLo => RcKind::Rc13,
             RcField::AHi | RcField::BHi | RcField::SignHi => RcKind::Rc7,
         }
@@ -1375,6 +1428,7 @@ fn lane_rc(
             let val: u32 = match field {
                 RcField::W1 => v.w1 as u32,
                 RcField::W1P => v.w1p as u32,
+                RcField::WrapM => (v.wrap_m + 1) as u32,
                 RcField::ALo => (a & ((1 << 13) - 1)) as u32,
                 RcField::AHi => (a >> 13) as u32,
                 RcField::BLo => (b & ((1 << 13) - 1)) as u32,

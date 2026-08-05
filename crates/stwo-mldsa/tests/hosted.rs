@@ -1126,10 +1126,10 @@ fn hosted_public_native_mu_proves_and_verifies() {
 fn hosted_private_key_shapes_kat_and_layout_are_exact() {
     const EXPECTED_PREPROCESSED_COLUMNS: usize = 75;
     const EXPECTED_TRACE_COLUMNS: usize = 144;
-    const EXPECTED_INTERACTION_COLUMNS: usize = 276;
+    const EXPECTED_INTERACTION_COLUMNS: usize = 280;
     const EXPECTED_PREPROCESSED_CELLS: usize = 408_592;
     const EXPECTED_TRACE_CELLS: usize = 955_472;
-    const EXPECTED_INTERACTION_M31_CELLS: usize = 1_124_480;
+    const EXPECTED_INTERACTION_M31_CELLS: usize = 1_126_528;
 
     let msg = b"private device key tr reference vector".to_vec();
     let input = oracle_input(4_260, &msg);

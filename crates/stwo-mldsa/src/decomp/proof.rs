@@ -815,6 +815,39 @@ mod tests {
         );
     }
 
+    /// The UseHint forgery that an unconstrained `wrap_m` would enable, and
+    /// the reason the `wrap_m + 1` Rc4 lookup exists. `w1'` is poked to 7 --
+    /// fully inside Rc4's domain, so its own lookup still matches -- while
+    /// `wrap_m = 7·16⁻¹ mod p = 939_524_096` keeps the linear UseHint
+    /// constraint satisfied. Since `w1'` is packed into the c-tilde sponge,
+    /// accepting such a witness would be a universal forgery: the prover picks
+    /// the w1Encode preimage independently of the real commitment `w`.
+    ///
+    /// NOT AN ISOLATING REGRESSION TEST. Mutation-checked 2026-08-06: with the
+    /// `wrap_m` lookup removed (and its use/census removed, i.e. a true revert
+    /// to the broken state) this poke is STILL rejected, so some other
+    /// constraint in this harness also catches it and the test does not prove
+    /// the lookup is what stops the attack. The lookup's necessity rests on
+    /// the algebra in the module doc, not on this test. An isolating test needs
+    /// a poke that is consistent across every other constraint (notably the
+    /// w1Encode byte packing and the metadata use-census) -- open work item.
+    #[test]
+    fn decomp_in_range_w1p_via_unconstrained_wrap_m_is_rejected() {
+        let witness = witness_with_first_w(GAMMA2, 0);
+        assert!(
+            matches!(
+                prove_with_test_options(
+                    witness,
+                    None,
+                    Some(DecompTracePoke::InRangeW1pViaUnconstrainedWrapM),
+                ),
+                Err(ProvingError::ConstraintsNotSatisfied)
+            ),
+            "an in-Rc4-range w1' backed by a modular-inverse wrap_m must be \
+             rejected by the wrap_m range check"
+        );
+    }
+
     #[test]
     fn forged_hint_accumulator_split_is_rejected() {
         let mut witness = witness();
