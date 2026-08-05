@@ -3421,6 +3421,7 @@ impl AirProver for MdocExactShaMessageBind {
         );
         tb.extend_evals(trace);
         self.interaction_claim = Some(MdocExactShaMessageInteractionClaim { claimed_sum });
+        self.bytes.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -3964,6 +3965,8 @@ impl AirProver for MdocRevocationRangeBind {
         );
         tb.extend_evals(trace);
         self.interaction_claim = Some(MdocRevocationRangeInteractionClaim { claimed_sum });
+        self.witness.take();
+        self.mso_digest.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -4107,6 +4110,9 @@ impl AirProver for MdocCoprocessorBindingProver {
         });
         crate::mix_coprocessor_rejoin(channel, &bundle).expect("mdoc coprocessor rejoin mixes");
         self.bundle = Some(bundle);
+        self.issuer_witness.values.clear();
+        self.device_witness.values.clear();
+        self.revocation_witness.values.clear();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {

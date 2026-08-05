@@ -614,7 +614,11 @@ fn padding_row(
 }
 
 const MDOC_CBOR_PREPROCESSED_COLS: usize = 3;
-const MDOC_CBOR_TRACE_COLS: usize = 117;
+// Four prefix columns per extended additional-info flag factor the five-bit
+// header equality into degree-three/four constraints.  The final flag column
+// remains the witness-provided conjunction result.
+const MDOC_CBOR_EXT_MATCH_PREFIX_COLS: usize = 4 * 4;
+const MDOC_CBOR_TRACE_COLS: usize = 117 + MDOC_CBOR_EXT_MATCH_PREFIX_COLS;
 
 type MdocCborColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type MdocCborComponent = FrameworkComponent<MdocCborStreamEval>;
@@ -700,6 +704,13 @@ fn row_values(row: &MdocCborWitnessRow) -> Vec<M31> {
     };
     values.extend(bits(short_slack, 8));
     values.extend(row.ext_flags.map(|flag| m31(u32::from(flag))));
+    for expected in 24..28 {
+        let mut prefix = true;
+        for bit in 0..4 {
+            prefix &= ((row.byte >> bit) & 1) == ((expected >> bit) & 1);
+            values.push(m31(u32::from(prefix)));
+        }
+    }
 
     let pad_slack = if row.phase == MdocCborPhase::LengthByte(0) {
         row.byte_index - row.message_len - 1
@@ -870,9 +881,10 @@ impl FrameworkEval for MdocCborStreamEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Five-bit additional-info equality, gated by header/CBOR, reaches
-        // degree seven. The next power-of-two degree bound is eight.
-        self.log_size + 3
+        // The extended additional-info equality is factored through four
+        // committed bit-prefix columns per flag.  All resulting constraints
+        // have degree at most five, so the fixed two-bit PCS blowup suffices.
+        self.log_size + 2
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
@@ -916,6 +928,8 @@ impl FrameworkEval for MdocCborStreamEval {
         let minimal_inv = eval.next_trace_mask();
         let short_slack_bits: [E::F; 8] = std::array::from_fn(|_| eval.next_trace_mask());
         let ext_flags: [E::F; 4] = std::array::from_fn(|_| eval.next_trace_mask());
+        let ext_match: [[E::F; 4]; 4] =
+            std::array::from_fn(|_| std::array::from_fn(|_| eval.next_trace_mask()));
         let pad_slack_bits: [E::F; 6] = std::array::from_fn(|_| eval.next_trace_mask());
         let counters: [[E::F; 2]; MDOC_CBOR_MAX_DEPTH] =
             std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, 1]));
@@ -1083,13 +1097,31 @@ impl FrameworkEval for MdocCborStreamEval {
             .fold(zero.clone(), |sum, (bit, value)| {
                 sum + m31_const::<E>(1u32 << bit) * value.clone()
             });
-        for (offset, flag) in ext_flags.iter().enumerate() {
+        for (offset, (flag, prefixes)) in ext_flags.iter().zip(ext_match).enumerate() {
             boolean_constraint(&mut eval, cbor.clone(), flag.clone());
             let value = 24 + offset;
-            let eq = (0..5).fold(one.clone(), |product, bit| {
-                product * eq_bit::<E>(byte_bits[bit].clone(), value & (1 << bit) != 0)
-            });
-            eval.add_constraint(cbor.clone() * (flag.clone() - header.clone() * eq));
+            for prefix in &prefixes {
+                boolean_constraint(&mut eval, cbor.clone(), prefix.clone());
+            }
+            eval.add_constraint(
+                cbor.clone()
+                    * (prefixes[0].clone() - eq_bit::<E>(byte_bits[0].clone(), value & 1 != 0)),
+            );
+            for bit in 1..4 {
+                eval.add_constraint(
+                    cbor.clone()
+                        * (prefixes[bit].clone()
+                            - prefixes[bit - 1].clone()
+                                * eq_bit::<E>(byte_bits[bit].clone(), value & (1 << bit) != 0)),
+                );
+            }
+            eval.add_constraint(
+                cbor.clone()
+                    * (flag.clone()
+                        - header.clone()
+                            * prefixes[3].clone()
+                            * eq_bit::<E>(byte_bits[4].clone(), value & (1 << 4) != 0)),
+            );
         }
         let ext_sum = ext_flags
             .iter()
@@ -1395,9 +1427,11 @@ mod trace_col {
     #[cfg(test)]
     pub(super) const SHORT_SLACK: usize = 51;
     #[cfg(test)]
-    pub(super) const PAD_SLACK: usize = 63;
+    pub(super) const EXT_MATCH: usize = 63;
     #[cfg(test)]
-    pub(super) const COUNTERS: usize = 69;
+    pub(super) const PAD_SLACK: usize = 79;
+    #[cfg(test)]
+    pub(super) const COUNTERS: usize = 85;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1411,6 +1445,7 @@ pub(crate) struct MdocCborStream {
     input_field_id: u32,
     log_size: u32,
     witness: Option<MdocCborWitness>,
+    prover_bytes: Option<Vec<u8>>,
     input_handle: SharedFieldRelation,
     raw_input: Option<(u32, SharedFieldRelation)>,
     max_message_len: Option<u32>,
@@ -1495,6 +1530,7 @@ impl MdocCborStream {
             input_field_id,
             log_size: witness.log_size,
             witness: Some(witness),
+            prover_bytes: Some(bytes),
             input_handle: input,
             raw_input,
             max_message_len,
@@ -1530,6 +1566,7 @@ impl MdocCborStream {
             input_field_id,
             log_size,
             witness: None,
+            prover_bytes: None,
             input_handle: input,
             raw_input: None,
             max_message_len,
@@ -1566,6 +1603,7 @@ impl MdocCborStream {
             input_field_id: sha_field_id,
             log_size,
             witness: None,
+            prover_bytes: None,
             input_handle: sha_input,
             raw_input: Some((raw_field_id, raw_input)),
             max_message_len: Some(max_message_len),
@@ -1897,12 +1935,9 @@ impl AirProver for MdocCborStream {
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let witness = self
-            .witness
-            .as_ref()
-            .expect("mdoc CBOR prover has a witness");
+        let witness = self.witness.take().expect("mdoc CBOR prover has a witness");
         tb.extend_evals(mdoc_cbor_base_trace_with_bound(
-            witness,
+            &witness,
             self.max_message_len,
         ));
         if let Some(mask) = &self.claim_mask_trace {
@@ -1911,14 +1946,19 @@ impl AirProver for MdocCborStream {
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let witness = self
-            .witness
-            .as_ref()
-            .expect("mdoc CBOR prover has a witness");
+        let witness = MdocCborWitness::with_shape(
+            self.prover_bytes
+                .as_deref()
+                .expect("mdoc CBOR prover retains its source bytes"),
+            self.mode,
+            Some(self.log_size),
+            self.max_message_len,
+        )
+        .expect("mdoc CBOR witness rebuild succeeds");
         let claim_mask = self.claim_mask_trace.as_ref().zip(self.claim_mask_beta());
         let raw_input = self.raw_input_relation();
         let (trace, claimed_sum) = mdoc_cbor_interaction_trace_with_raw(
-            witness,
+            &witness,
             self.stream_id,
             self.input_field_id,
             &self.input_relation(),
@@ -2100,6 +2140,14 @@ mod tests {
         base[trace_col::BYTE][row] = m31(u32::from(byte));
         for bit in 0..8 {
             base[2 + bit][row] = m31(u32::from((byte >> bit) & 1));
+        }
+        for expected in 24..28 {
+            let mut prefix = true;
+            for bit in 0..4 {
+                prefix &= ((byte >> bit) & 1) == ((expected >> bit) & 1);
+                base[trace_col::EXT_MATCH + usize::from(expected - 24) * 4 + bit][row] =
+                    m31(u32::from(prefix));
+            }
         }
     }
 

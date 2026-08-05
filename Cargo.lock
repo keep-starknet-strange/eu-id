@@ -1420,6 +1420,7 @@ dependencies = [
 name = "sdk"
 version = "0.1.0"
 dependencies = [
+ "air-core",
  "bincode",
  "ciborium",
  "eu-id-prover",

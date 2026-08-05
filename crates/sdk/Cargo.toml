@@ -31,6 +31,9 @@ bench-jni = ["dep:jni", "dep:libc", "dep:memory-stats", "dep:rayon"]
 [dependencies]
 # Use the production allocator that the benchmarks measure.
 mimalloc = { workspace = true }
+# Expose the transitive proving-profile feature to the prescribed SDK probe
+# command without changing the production dependency graph.
+air-core = { path = "../air-core", optional = true }
 # Prover types and entry points for the product mdoc path.
 # The SDK converts UniFFI values into the prover types.
 # The SDK uses `prove_mdoc` and `verify_product_mdoc`.

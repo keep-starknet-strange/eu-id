@@ -103,8 +103,6 @@ pub struct Sha256Prover<'a> {
     expose_field: bool,
     field_handle: Option<air_core::relations::SharedFieldRelation>,
     shared_tables: Option<SharedShaTableRelations>,
-    preprocessed: Option<Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
-    base: Option<Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
     relations: Option<Sha256Relations>,
     interaction_claim: Option<InteractionClaim>,
     components: Option<Sha256Components>,
@@ -143,8 +141,6 @@ impl<'a> Sha256Prover<'a> {
             expose_field: false,
             field_handle: None,
             shared_tables: None,
-            preprocessed: None,
-            base: None,
             relations: None,
             interaction_claim: None,
             components: None,
@@ -376,73 +372,16 @@ impl AirProver for Sha256Prover<'_> {
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
         let ids = self.preprocessed_column_ids();
         let range_min_log_size = self.local_range_min_log_size();
-        let preprocessed = match self.preprocessed.take() {
-            Some(_) if range_min_log_size != 0 => {
-                generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size)
-            }
-            Some(evals) if !self.uses_shared_tables() => evals,
-            Some(evals) => {
-                let full_ids = all_preprocessed_column_ids();
-                ids.iter()
-                    .map(|selected_id| {
-                        full_ids
-                            .iter()
-                            .zip(&evals)
-                            .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "selected preprocessed column {} is not owned by this SHA-256 module",
-                                    selected_id.id
-                                )
-                            })
-                    })
-                    .collect()
-            }
-            None => generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size),
-        };
+        let preprocessed =
+            generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size);
         tb.extend_evals(preprocessed);
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        // Fingerprint exactly what `write_preprocessed` will commit: the caller-provided
-        // evals when set, otherwise the (cached) generated trace. Do not `take` — the
-        // evals must still be available for the later `write_preprocessed` call.
         let ids = self.preprocessed_column_ids();
         let range_min_log_size = self.local_range_min_log_size();
-        match &self.preprocessed {
-            Some(_) if range_min_log_size != 0 => {
-                let evals =
-                    generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size);
-                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
-            }
-            Some(evals) if !self.uses_shared_tables() => {
-                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, evals)
-            }
-            Some(evals) => {
-                let full_ids = all_preprocessed_column_ids();
-                let selected: Vec<_> = ids
-                    .iter()
-                    .map(|selected_id| {
-                        full_ids
-                            .iter()
-                            .zip(evals)
-                            .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "selected preprocessed column {} is not owned by this SHA-256 module",
-                                    selected_id.id
-                                )
-                            })
-                    })
-                    .collect();
-                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &selected)
-            }
-            None => {
-                let evals =
-                    generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size);
-                fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
-            }
-        }
+        let evals = generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size);
+        fingerprint_preprocessed_columns("stwo_sha256::Sha256Prover", &ids, &evals)
     }
 
     fn write_selected_preprocessed(
@@ -454,30 +393,8 @@ impl AirProver for Sha256Prover<'_> {
         // this module for only the selected, non-duplicate subset.
         let ids = self.preprocessed_column_ids();
         let range_min_log_size = self.local_range_min_log_size();
-        let preprocessed = match self.preprocessed.take() {
-            Some(_) if range_min_log_size != 0 => {
-                generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size)
-            }
-            Some(evals) if !self.uses_shared_tables() => evals,
-            Some(evals) => {
-                let full_ids = all_preprocessed_column_ids();
-                ids.iter()
-                    .map(|selected_id| {
-                        full_ids
-                            .iter()
-                            .zip(&evals)
-                            .find_map(|(id, column)| (id == selected_id).then(|| column.clone()))
-                            .unwrap_or_else(|| {
-                                panic!(
-                                    "selected preprocessed column {} is not owned by this SHA-256 module",
-                                    selected_id.id
-                                )
-                            })
-                    })
-                    .collect()
-            }
-            None => generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size),
-        };
+        let preprocessed =
+            generated_preprocessed_for_ids(self.log_n_rows, &ids, range_min_log_size);
         if selected_ids == ids.as_slice() {
             tb.extend_evals(preprocessed);
             return;
@@ -503,37 +420,12 @@ impl AirProver for Sha256Prover<'_> {
         let include_table_providers = !self.uses_shared_tables();
         let range_min_log_size = self.local_range_min_log_size();
         let main_columns = Layout::TOTAL_COLS;
-        let mut base = match self.base.take() {
-            Some(prepared)
-                if range_min_log_size == 0
-                    && include_table_providers
-                    && prepared.len() == main_columns + RANGE_TABLES.len() =>
-            {
-                prepared
-            }
-            Some(mut prepared) => {
-                assert!(
-                    prepared.len() >= main_columns,
-                    "prepared SHA trace is missing main component columns"
-                );
-                prepared.truncate(main_columns);
-                if include_table_providers {
-                    for &kind in RANGE_TABLES {
-                        let log_size = range_log_size(kind).max(range_min_log_size);
-                        let mut mults = range_k_multiplicities(self.witness, kind);
-                        mults.resize(1usize << log_size, 0);
-                        prepared.push(mult_col_to_eval(&mults, log_size));
-                    }
-                }
-                prepared
-            }
-            None => build_base_trace(
-                self.witness,
-                self.log_n_rows,
-                include_table_providers,
-                range_min_log_size,
-            ),
-        };
+        let mut base = build_base_trace(
+            self.witness,
+            self.log_n_rows,
+            include_table_providers,
+            range_min_log_size,
+        );
 
         if let Some(masks) = &self.claim_masks {
             let mut masked =

@@ -41,6 +41,12 @@ use ciborium::value::Value;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// The profiled identity probe enables the transitive AIR profile feature via
+// `air-core/prove-profile`; keep the optional feature edge explicit without
+// adding it to the production dependency set.
+#[cfg(feature = "air-core")]
+use air_core as _;
+
 uniffi::setup_scaffolding!();
 
 #[cfg(feature = "bench-jni")]

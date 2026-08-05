@@ -26,16 +26,19 @@ use air_core::{
 };
 use ciborium::value::Value;
 use predicates::nat::types::MAX_PRESENTED_NATIONALITIES;
-use rand::RngCore;
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::poly::circle::CanonicCoset;
-use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
+use stwo::core::utils::{
+    bit_reverse_index, circle_domain_index_to_coset_index, coset_index_to_circle_domain_index,
+};
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES};
+use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
@@ -2108,8 +2111,7 @@ fn m31(value: u32) -> M31 {
     M31::from_u32_unchecked(value)
 }
 
-fn random_m31() -> M31 {
-    let mut rng = rand::thread_rng();
+fn random_m31(rng: &mut impl RngCore) -> M31 {
     loop {
         let value = rng.next_u32() & 0x7fff_ffff;
         if value < 2_147_483_647 {
@@ -2227,7 +2229,8 @@ fn scope_preprocessed_columns(
 /// of the LogUp yield.
 fn scope_table_trace(table_log_size: u32, multiplicities: &[u32]) -> MdocScopeColumnEval {
     let domain = 1usize << table_log_size;
-    let mut values: Vec<M31> = (0..domain).map(|_| random_m31()).collect();
+    let mut rng = rand::thread_rng();
+    let mut values: Vec<M31> = (0..domain).map(|_| random_m31(&mut rng)).collect();
     for (row, &multiplicity) in multiplicities.iter().enumerate() {
         values[row] = m31(multiplicity);
     }
@@ -2305,100 +2308,34 @@ fn scope_base_trace(
     witness: &MdocScopeWitness,
     stream_count: usize,
     raw_count: usize,
+    seed: [u8; 32],
 ) -> Vec<MdocScopeColumnEval> {
     let domain = 1usize << log_size;
+    let mut rng = StdRng::from_seed(seed);
     let mut values = (0..columns.total)
-        .map(|_| (0..domain).map(|_| random_m31()).collect::<Vec<_>>())
+        .map(|_| {
+            (0..domain)
+                .map(|_| random_m31(&mut rng))
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
 
-    let mut zero_columns = vec![columns.active, columns.first, columns.last];
-    zero_columns.extend(columns.stream_selectors.clone());
-    zero_columns.extend(columns.action_flags.clone());
-    zero_columns.extend(columns.raw_selectors.clone());
-    for column in zero_columns {
+    for column in scope_zero_columns(columns) {
         values[column].fill(m31(0));
     }
 
     for (row_index, row) in witness.active_rows.iter().enumerate() {
-        let applied = row.applied;
-        values[columns.active][row_index] = m31(1);
-        values[columns.first][row_index] = m31(u32::from(row.first));
-        values[columns.last][row_index] = m31(u32::from(row.last));
-        values[columns.stream_selectors.start + row.stream_slot][row_index] = m31(1);
-        values[columns.byte_index][row_index] = m31(row.parsed[parsed_cbor_tuple::BYTE_INDEX]);
-        values[columns.byte][row_index] = m31(row.parsed[parsed_cbor_tuple::BYTE]);
-        for (offset, tuple_index) in (3..parsed_cbor_tuple::ARITY).enumerate() {
-            values[columns.parsed_meta.start + offset][row_index] = m31(row.parsed[tuple_index]);
-        }
-        values[columns.state_before][row_index] = m31(applied.edge.from);
-        values[columns.state_after][row_index] = m31(applied.edge.to);
-        values[columns.remaining_before][row_index] = m31(applied.before.remaining);
-        values[columns.remaining_after][row_index] = m31(applied.after.remaining);
-        values[columns.position_before][row_index] = m31(applied.before.position);
-        values[columns.position_after][row_index] = m31(applied.after.position);
-        values[columns.previous_id_before][row_index] = m31(applied.before.previous_id);
-        values[columns.previous_id_after][row_index] = m31(applied.after.previous_id);
-        values[columns.have_previous_before][row_index] =
-            m31(u32::from(applied.before.have_previous));
-        values[columns.have_previous_after][row_index] =
-            m31(u32::from(applied.after.have_previous));
-        for item in 0..MDOC_SCOPE_MAX_ITEMS {
-            values[columns.seen_before.start + item][row_index] =
-                m31(u32::from(applied.before.seen[item]));
-            values[columns.seen_after.start + item][row_index] =
-                m31(u32::from(applied.after.seen[item]));
-        }
-        for level in 0..MDOC_SCOPE_UNORDERED_MAP_DEPTH {
-            values[columns.map_remaining_before.start + level][row_index] =
-                m31(applied.before.map_remaining[level]);
-            values[columns.map_remaining_after.start + level][row_index] =
-                m31(applied.after.map_remaining[level]);
-            values[columns.map_accumulator_before.start + level][row_index] =
-                m31(applied.before.map_accumulator[level]);
-            values[columns.map_accumulator_after.start + level][row_index] =
-                m31(applied.after.map_accumulator[level]);
-            values[columns.map_full_before.start + level][row_index] =
-                m31(applied.before.map_full[level]);
-            values[columns.map_full_after.start + level][row_index] =
-                m31(applied.after.map_full[level]);
-        }
-        values[columns.action_flags.start + applied.edge.action.index()][row_index] = m31(1);
-        values[columns.p0][row_index] = m31(applied.edge.p0);
-        values[columns.p1][row_index] = m31(applied.edge.p1);
+        populate_scope_active_row(&mut values, columns, row_index, row);
         set_bits(
             &mut values,
             columns.slack_bits.clone(),
             row_index,
-            applied.slack,
+            row.applied.slack,
         );
-        values[columns.inverse][row_index] = applied.inverse;
-
-        if applied.edge.action.emits_raw() {
-            values[columns.raw_selectors.start + applied.edge.p0 as usize][row_index] = m31(1);
-        }
-        let (field, index) = match applied.edge.action {
-            ScopeAction::FieldByte => (applied.edge.p0, applied.edge.p1),
-            ScopeAction::FieldExact => (applied.edge.p0, applied.edge.p1 / 256),
-            ScopeAction::FieldDigit => (applied.edge.p0, applied.edge.p1),
-            ScopeAction::NatAlphaFirst => (
-                field_id::NATIONALITY,
-                applied.before.position.saturating_mul(2),
-            ),
-            ScopeAction::NatAlphaStay | ScopeAction::NatAlphaExit => (
-                field_id::NATIONALITY,
-                applied.before.position.saturating_mul(2) + 1,
-            ),
-            _ => (0, 0),
-        };
-        values[columns.field_id][row_index] = m31(field);
-        values[columns.field_index][row_index] = m31(index);
+        values[columns.inverse][row_index] = row.applied.inverse;
     }
 
-    for (item, digest) in witness.item_digest_bytes.iter().enumerate() {
-        for (byte, value) in digest.iter().copied().enumerate() {
-            values[columns.digest_values.start + byte][item] = m31(u32::from(value));
-        }
-    }
+    populate_scope_item_digest_values(&mut values, columns, &witness.item_digest_bytes);
 
     debug_assert_eq!(columns.stream_selectors.len(), stream_count);
     debug_assert_eq!(columns.raw_selectors.len(), raw_count);
@@ -2406,6 +2343,157 @@ fn scope_base_trace(
         .into_iter()
         .map(|column| scope_column(log_size, column))
         .collect()
+}
+
+fn scope_zero_columns(columns: &ScopeTraceColumns) -> Vec<usize> {
+    let mut zero_columns = vec![columns.active, columns.first, columns.last];
+    zero_columns.extend(columns.stream_selectors.clone());
+    zero_columns.extend(columns.action_flags.clone());
+    zero_columns.extend(columns.raw_selectors.clone());
+    zero_columns
+}
+
+fn populate_scope_active_row(
+    values: &mut [Vec<M31>],
+    columns: &ScopeTraceColumns,
+    row_index: usize,
+    row: &ScopeActiveRow,
+) {
+    let applied = row.applied;
+    values[columns.active][row_index] = m31(1);
+    values[columns.first][row_index] = m31(u32::from(row.first));
+    values[columns.last][row_index] = m31(u32::from(row.last));
+    values[columns.stream_selectors.start + row.stream_slot][row_index] = m31(1);
+    values[columns.byte_index][row_index] = m31(row.parsed[parsed_cbor_tuple::BYTE_INDEX]);
+    values[columns.byte][row_index] = m31(row.parsed[parsed_cbor_tuple::BYTE]);
+    for (offset, tuple_index) in (3..parsed_cbor_tuple::ARITY).enumerate() {
+        values[columns.parsed_meta.start + offset][row_index] = m31(row.parsed[tuple_index]);
+    }
+    values[columns.state_before][row_index] = m31(applied.edge.from);
+    values[columns.state_after][row_index] = m31(applied.edge.to);
+    values[columns.remaining_before][row_index] = m31(applied.before.remaining);
+    values[columns.remaining_after][row_index] = m31(applied.after.remaining);
+    values[columns.position_before][row_index] = m31(applied.before.position);
+    values[columns.position_after][row_index] = m31(applied.after.position);
+    values[columns.previous_id_before][row_index] = m31(applied.before.previous_id);
+    values[columns.previous_id_after][row_index] = m31(applied.after.previous_id);
+    values[columns.have_previous_before][row_index] = m31(u32::from(applied.before.have_previous));
+    values[columns.have_previous_after][row_index] = m31(u32::from(applied.after.have_previous));
+    for item in 0..MDOC_SCOPE_MAX_ITEMS {
+        values[columns.seen_before.start + item][row_index] =
+            m31(u32::from(applied.before.seen[item]));
+        values[columns.seen_after.start + item][row_index] =
+            m31(u32::from(applied.after.seen[item]));
+    }
+    for level in 0..MDOC_SCOPE_UNORDERED_MAP_DEPTH {
+        values[columns.map_remaining_before.start + level][row_index] =
+            m31(applied.before.map_remaining[level]);
+        values[columns.map_remaining_after.start + level][row_index] =
+            m31(applied.after.map_remaining[level]);
+        values[columns.map_accumulator_before.start + level][row_index] =
+            m31(applied.before.map_accumulator[level]);
+        values[columns.map_accumulator_after.start + level][row_index] =
+            m31(applied.after.map_accumulator[level]);
+        values[columns.map_full_before.start + level][row_index] =
+            m31(applied.before.map_full[level]);
+        values[columns.map_full_after.start + level][row_index] =
+            m31(applied.after.map_full[level]);
+    }
+    values[columns.action_flags.start + applied.edge.action.index()][row_index] = m31(1);
+    values[columns.p0][row_index] = m31(applied.edge.p0);
+    values[columns.p1][row_index] = m31(applied.edge.p1);
+    if applied.edge.action.emits_raw() {
+        values[columns.raw_selectors.start + applied.edge.p0 as usize][row_index] = m31(1);
+    }
+    let (field, index) = match applied.edge.action {
+        ScopeAction::FieldByte => (applied.edge.p0, applied.edge.p1),
+        ScopeAction::FieldExact => (applied.edge.p0, applied.edge.p1 / 256),
+        ScopeAction::FieldDigit => (applied.edge.p0, applied.edge.p1),
+        ScopeAction::NatAlphaFirst => (
+            field_id::NATIONALITY,
+            applied.before.position.saturating_mul(2),
+        ),
+        ScopeAction::NatAlphaStay | ScopeAction::NatAlphaExit => (
+            field_id::NATIONALITY,
+            applied.before.position.saturating_mul(2) + 1,
+        ),
+        _ => (0, 0),
+    };
+    values[columns.field_id][row_index] = m31(field);
+    values[columns.field_index][row_index] = m31(index);
+}
+
+fn populate_scope_item_digest_values(
+    values: &mut [Vec<M31>],
+    columns: &ScopeTraceColumns,
+    item_digest_bytes: &[[u8; 32]],
+) {
+    for (item, digest) in item_digest_bytes.iter().enumerate() {
+        for (byte, value) in digest.iter().copied().enumerate() {
+            values[columns.digest_values.start + byte][item] = m31(u32::from(value));
+        }
+    }
+}
+
+trait ScopeInteractionBase {
+    fn at(&self, column: usize, row: usize) -> PackedM31;
+}
+
+impl ScopeInteractionBase for [MdocScopeColumnEval] {
+    fn at(&self, column: usize, row: usize) -> PackedM31 {
+        self[column].data[row]
+    }
+}
+
+impl ScopeInteractionBase for Vec<MdocScopeColumnEval> {
+    fn at(&self, column: usize, row: usize) -> PackedM31 {
+        self.as_slice().at(column, row)
+    }
+}
+
+struct ScopeActiveInteractionBase {
+    log_size: u32,
+    values: Vec<Vec<M31>>,
+    zero_columns: Vec<bool>,
+}
+
+impl ScopeActiveInteractionBase {
+    fn new(log_size: u32, columns: &ScopeTraceColumns, witness: &MdocScopeWitness) -> Self {
+        let active_rows = witness.active_rows.len();
+        let mut values = (0..columns.total)
+            .map(|_| vec![m31(0); active_rows])
+            .collect::<Vec<_>>();
+        for (row_index, row) in witness.active_rows.iter().enumerate() {
+            populate_scope_active_row(&mut values, columns, row_index, row);
+        }
+        populate_scope_item_digest_values(&mut values, columns, &witness.item_digest_bytes);
+        let mut zero_columns = vec![false; columns.total];
+        for column in scope_zero_columns(columns) {
+            zero_columns[column] = true;
+        }
+        Self {
+            log_size,
+            values,
+            zero_columns,
+        }
+    }
+}
+
+impl ScopeInteractionBase for ScopeActiveInteractionBase {
+    fn at(&self, column: usize, row: usize) -> PackedM31 {
+        PackedM31::from_array(std::array::from_fn(|lane| {
+            let circle_row = bit_reverse_index(row * N_LANES + lane, self.log_size);
+            let source_row = circle_domain_index_to_coset_index(circle_row, self.log_size);
+            self.values
+                .get(column)
+                .and_then(|values| values.get(source_row))
+                .copied()
+                .unwrap_or_else(|| {
+                    let value = if self.zero_columns[column] { 0 } else { 1 };
+                    m31(value)
+                })
+        }))
+    }
 }
 
 #[derive(Clone)]
@@ -3330,8 +3418,8 @@ fn digest_id_uniqueness_interaction_trace(
     logup.finalize_last()
 }
 
-fn packed_action_sum(
-    base: &[MdocScopeColumnEval],
+fn packed_action_sum<B: ScopeInteractionBase + ?Sized>(
+    base: &B,
     columns: &ScopeTraceColumns,
     row: usize,
     actions: &[ScopeAction],
@@ -3339,15 +3427,15 @@ fn packed_action_sum(
     actions
         .iter()
         .fold(PackedM31::broadcast(m31(0)), |sum, action| {
-            sum + base[columns.action_flags.start + action.index()].data[row]
+            sum + base.at(columns.action_flags.start + action.index(), row)
         })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scope_interaction_trace(
+fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
     log_size: u32,
     columns: &ScopeTraceColumns,
-    base: &[MdocScopeColumnEval],
+    base: &B,
     walk_preprocessed: &[MdocScopeColumnEval],
     stream_ids: &[u32],
     raw_target_stream_ids: &[u32],
@@ -3368,21 +3456,23 @@ fn scope_interaction_trace(
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::new();
     let broadcast = |value: u32| PackedM31::broadcast(m31(value));
+    let base_at = |column: usize, row: usize| base.at(column, row);
 
     for (slot, relation) in parsed_relations.iter().enumerate() {
         sites.push(
             (0..n_vec_rows)
                 .map(|row| {
                     let numerator =
-                        PackedQM31::from(base[columns.stream_selectors.start + slot].data[row]);
+                        PackedQM31::from(base_at(columns.stream_selectors.start + slot, row));
                     let mut tuple = Vec::with_capacity(parsed_cbor_tuple::ARITY);
                     tuple.push(broadcast(stream_ids[slot]));
-                    tuple.push(base[columns.byte_index].data[row]);
-                    tuple.push(base[columns.byte].data[row]);
+                    tuple.push(base_at(columns.byte_index, row));
+                    tuple.push(base_at(columns.byte, row));
                     tuple.extend(
-                        base[columns.parsed_meta.clone()]
-                            .iter()
-                            .map(|column| column.data[row]),
+                        columns
+                            .parsed_meta
+                            .clone()
+                            .map(|column| base_at(column, row)),
                     );
                     (numerator, relation.combine(&tuple))
                 })
@@ -3394,11 +3484,11 @@ fn scope_interaction_trace(
             (0..n_vec_rows)
                 .map(|row| {
                     let numerator =
-                        -PackedQM31::from(base[columns.raw_selectors.start + slot].data[row]);
+                        -PackedQM31::from(base_at(columns.raw_selectors.start + slot, row));
                     let denominator = relation.combine(&[
                         broadcast(raw_target_stream_ids[slot]),
-                        base[columns.position_before].data[row],
-                        base[columns.byte].data[row],
+                        base_at(columns.position_before, row),
+                        base_at(columns.byte, row),
                     ]);
                     (numerator, denominator)
                 })
@@ -3423,9 +3513,9 @@ fn scope_interaction_trace(
                     ],
                 );
                 let denominator = semantic_relation.combine(&[
-                    base[columns.field_id].data[row],
-                    base[columns.field_index].data[row],
-                    base[columns.byte].data[row],
+                    base_at(columns.field_id, row),
+                    base_at(columns.field_index, row),
+                    base_at(columns.byte, row),
                 ]);
                 (-PackedQM31::from(emit), denominator)
             })
@@ -3435,11 +3525,11 @@ fn scope_interaction_trace(
         sites.push(
             (0..n_vec_rows)
                 .map(|row| {
-                    let numerator = -PackedQM31::from(base[columns.raw_selectors.start].data[row]);
+                    let numerator = -PackedQM31::from(base_at(columns.raw_selectors.start, row));
                     let denominator = payload_hash_relation.combine(&[
                         broadcast(MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID),
-                        base[columns.position_before].data[row],
-                        base[columns.byte].data[row],
+                        base_at(columns.position_before, row),
+                        base_at(columns.byte, row),
                     ]);
                     (numerator, denominator)
                 })
@@ -3471,8 +3561,11 @@ fn scope_interaction_trace(
                     ],
                 );
                 let denominator = digest_id_relation.combine(&[
-                    base[columns.p0].data[row],
-                    base[columns.parsed_meta.start + parsed_cbor_tuple::ARG_LO16 - 3].data[row],
+                    base_at(columns.p0, row),
+                    base_at(
+                        columns.parsed_meta.start + parsed_cbor_tuple::ARG_LO16 - 3,
+                        row,
+                    ),
                 ]);
                 (PackedQM31::from(selected - provider), denominator)
             })
@@ -3494,8 +3587,10 @@ fn scope_interaction_trace(
                         ScopeAction::UnknownDigestId2,
                     ],
                 );
-                let id =
-                    base[columns.parsed_meta.start + parsed_cbor_tuple::ARG_LO16 - 3].data[row];
+                let id = base_at(
+                    columns.parsed_meta.start + parsed_cbor_tuple::ARG_LO16 - 3,
+                    row,
+                );
                 (
                     PackedQM31::from(digest_key),
                     digest_id_uniqueness_relation.combine(&[id]),
@@ -3517,9 +3612,9 @@ fn scope_interaction_trace(
                     ],
                 );
                 let denominator = digest_byte_relation.combine(&[
-                    base[columns.p0].data[row],
-                    base[columns.p1].data[row],
-                    base[columns.byte].data[row],
+                    base_at(columns.p0, row),
+                    base_at(columns.p1, row),
+                    base_at(columns.byte, row),
                 ]);
                 (-PackedQM31::from(emit), denominator)
             })
@@ -3536,7 +3631,7 @@ fn scope_interaction_trace(
                         let denominator = digest_byte_relation.combine(&[
                             broadcast(item as u32),
                             broadcast(byte as u32),
-                            base[columns.digest_values.start + byte].data[row],
+                            base_at(columns.digest_values.start + byte, row),
                         ]);
                         (numerator, denominator)
                     })
@@ -3547,9 +3642,10 @@ fn scope_interaction_trace(
             (0..n_vec_rows)
                 .map(|row| {
                     let numerator = PackedQM31::from(aggregate.data[row]);
-                    let values: Vec<_> = base[columns.digest_values.clone()]
-                        .iter()
-                        .map(|column| column.data[row])
+                    let values: Vec<_> = columns
+                        .digest_values
+                        .clone()
+                        .map(|column| base_at(column, row))
                         .collect();
                     let mut digest_tuple = Vec::with_capacity(1 + values.len());
                     digest_tuple.push(broadcast(
@@ -3568,26 +3664,23 @@ fn scope_interaction_trace(
             .map(|row| {
                 let stream_slot =
                     (0..stream_ids.len()).fold(PackedM31::broadcast(m31(0)), |sum, slot| {
-                        sum + base[columns.stream_selectors.start + slot].data[row]
+                        sum + base_at(columns.stream_selectors.start + slot, row)
                             * broadcast(slot as u32)
                     });
                 let action_code =
                     (0..SCOPE_ACTION_COUNT).fold(PackedM31::broadcast(m31(0)), |sum, action| {
-                        sum + base[columns.action_flags.start + action].data[row]
+                        sum + base_at(columns.action_flags.start + action, row)
                             * broadcast(action as u32)
                     });
                 let denominator = dfa_relation.combine(&[
                     stream_slot,
-                    base[columns.state_before].data[row],
-                    base[columns.state_after].data[row],
+                    base_at(columns.state_before, row),
+                    base_at(columns.state_after, row),
                     action_code,
-                    base[columns.p0].data[row],
-                    base[columns.p1].data[row],
+                    base_at(columns.p0, row),
+                    base_at(columns.p1, row),
                 ]);
-                (
-                    PackedQM31::from(base[columns.active].data[row]),
-                    denominator,
-                )
+                (PackedQM31::from(base_at(columns.active, row)), denominator)
             })
             .collect(),
     );
@@ -3596,41 +3689,43 @@ fn scope_interaction_trace(
             .map(|row| {
                 let stream_slot =
                     (0..stream_ids.len()).fold(PackedM31::broadcast(m31(0)), |sum, slot| {
-                        sum + base[columns.stream_selectors.start + slot].data[row]
+                        sum + base_at(columns.stream_selectors.start + slot, row)
                             * broadcast(slot as u32)
                     });
                 let mut tuple = vec![
                     stream_slot,
-                    base[columns.byte_index].data[row],
-                    base[columns.state_before].data[row],
-                    base[columns.remaining_before].data[row],
-                    base[columns.position_before].data[row],
-                    base[columns.previous_id_before].data[row],
-                    base[columns.have_previous_before].data[row],
-                    base[columns.seen_before.start].data[row],
-                    base[columns.seen_before.start + 1].data[row],
-                    base[columns.seen_before.start + 2].data[row],
-                    base[columns.seen_before.start + 3].data[row],
+                    base_at(columns.byte_index, row),
+                    base_at(columns.state_before, row),
+                    base_at(columns.remaining_before, row),
+                    base_at(columns.position_before, row),
+                    base_at(columns.previous_id_before, row),
+                    base_at(columns.have_previous_before, row),
+                    base_at(columns.seen_before.start, row),
+                    base_at(columns.seen_before.start + 1, row),
+                    base_at(columns.seen_before.start + 2, row),
+                    base_at(columns.seen_before.start + 3, row),
                 ];
                 tuple.extend(
-                    base[columns.map_remaining_before.clone()]
-                        .iter()
-                        .map(|column| column.data[row]),
+                    columns
+                        .map_remaining_before
+                        .clone()
+                        .map(|column| base_at(column, row)),
                 );
                 tuple.extend(
-                    base[columns.map_accumulator_before.clone()]
-                        .iter()
-                        .map(|column| column.data[row]),
+                    columns
+                        .map_accumulator_before
+                        .clone()
+                        .map(|column| base_at(column, row)),
                 );
                 tuple.extend(
-                    base[columns.map_full_before.clone()]
-                        .iter()
-                        .map(|column| column.data[row]),
+                    columns
+                        .map_full_before
+                        .clone()
+                        .map(|column| base_at(column, row)),
                 );
                 let denominator = state_relation.combine(&tuple);
-                let numerator = PackedQM31::from(
-                    base[columns.active].data[row] - base[columns.first].data[row],
-                );
+                let numerator =
+                    PackedQM31::from(base_at(columns.active, row) - base_at(columns.first, row));
                 (numerator, denominator)
             })
             .collect(),
@@ -3640,41 +3735,43 @@ fn scope_interaction_trace(
             .map(|row| {
                 let stream_slot =
                     (0..stream_ids.len()).fold(PackedM31::broadcast(m31(0)), |sum, slot| {
-                        sum + base[columns.stream_selectors.start + slot].data[row]
+                        sum + base_at(columns.stream_selectors.start + slot, row)
                             * broadcast(slot as u32)
                     });
                 let mut tuple = vec![
                     stream_slot,
-                    base[columns.byte_index].data[row] + PackedM31::broadcast(m31(1)),
-                    base[columns.state_after].data[row],
-                    base[columns.remaining_after].data[row],
-                    base[columns.position_after].data[row],
-                    base[columns.previous_id_after].data[row],
-                    base[columns.have_previous_after].data[row],
-                    base[columns.seen_after.start].data[row],
-                    base[columns.seen_after.start + 1].data[row],
-                    base[columns.seen_after.start + 2].data[row],
-                    base[columns.seen_after.start + 3].data[row],
+                    base_at(columns.byte_index, row) + PackedM31::broadcast(m31(1)),
+                    base_at(columns.state_after, row),
+                    base_at(columns.remaining_after, row),
+                    base_at(columns.position_after, row),
+                    base_at(columns.previous_id_after, row),
+                    base_at(columns.have_previous_after, row),
+                    base_at(columns.seen_after.start, row),
+                    base_at(columns.seen_after.start + 1, row),
+                    base_at(columns.seen_after.start + 2, row),
+                    base_at(columns.seen_after.start + 3, row),
                 ];
                 tuple.extend(
-                    base[columns.map_remaining_after.clone()]
-                        .iter()
-                        .map(|column| column.data[row]),
+                    columns
+                        .map_remaining_after
+                        .clone()
+                        .map(|column| base_at(column, row)),
                 );
                 tuple.extend(
-                    base[columns.map_accumulator_after.clone()]
-                        .iter()
-                        .map(|column| column.data[row]),
+                    columns
+                        .map_accumulator_after
+                        .clone()
+                        .map(|column| base_at(column, row)),
                 );
                 tuple.extend(
-                    base[columns.map_full_after.clone()]
-                        .iter()
-                        .map(|column| column.data[row]),
+                    columns
+                        .map_full_after
+                        .clone()
+                        .map(|column| base_at(column, row)),
                 );
                 let denominator = state_relation.combine(&tuple);
-                let numerator = -PackedQM31::from(
-                    base[columns.active].data[row] - base[columns.last].data[row],
-                );
+                let numerator =
+                    -PackedQM31::from(base_at(columns.active, row) - base_at(columns.last, row));
                 (numerator, denominator)
             })
             .collect(),
@@ -3734,9 +3831,7 @@ pub(crate) struct MdocScope {
     handles: MdocScopeHandles,
     payload_hash_binding: bool,
     witness: Option<MdocScopeWitness>,
-    trace_cache: Option<Vec<MdocScopeColumnEval>>,
-    table_trace_cache: Option<MdocScopeColumnEval>,
-    digest_id_uniqueness_trace_cache: Option<MdocScopeColumnEval>,
+    trace_seed: Option<[u8; 32]>,
     dfa_relation: Option<MdocScopeDfaRelation>,
     state_relation: Option<MdocScopeStateRelation>,
     digest_id_relation: Option<MdocScopeDigestIdRelation>,
@@ -3795,9 +3890,11 @@ impl MdocScope {
             handles,
             payload_hash_binding: false,
             witness: Some(witness),
-            trace_cache: None,
-            table_trace_cache: None,
-            digest_id_uniqueness_trace_cache: None,
+            trace_seed: Some({
+                let mut seed = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut seed);
+                seed
+            }),
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
@@ -3844,9 +3941,7 @@ impl MdocScope {
             handles,
             payload_hash_binding: false,
             witness: None,
-            trace_cache: None,
-            table_trace_cache: None,
-            digest_id_uniqueness_trace_cache: None,
+            trace_seed: None,
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
@@ -4285,22 +4380,20 @@ impl AirProver for MdocScope {
             witness,
             self.handles.parsed_streams.len(),
             self.handles.raw_streams.len(),
+            self.trace_seed.expect("mdoc scope trace seed is set"),
         );
         let table_trace = scope_table_trace(self.table_log_size, &witness.table_multiplicities);
-        self.trace_cache = Some(trace.clone());
         tb.extend_evals(trace);
         if let Some(mask) = &self.claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
-        self.table_trace_cache = Some(table_trace.clone());
         tb.extend_evals(vec![table_trace]);
         if let Some(mask) = &self.table_claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
-        let digest_id_uniqueness_trace =
-            digest_id_uniqueness_trace(&witness.digest_id_multiplicities);
-        self.digest_id_uniqueness_trace_cache = Some(digest_id_uniqueness_trace.clone());
-        tb.extend_evals(vec![digest_id_uniqueness_trace]);
+        tb.extend_evals(vec![digest_id_uniqueness_trace(
+            &witness.digest_id_multiplicities,
+        )]);
         if let Some(mask) = &self.digest_id_uniqueness_claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
@@ -4308,10 +4401,11 @@ impl AirProver for MdocScope {
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let columns = self.columns();
-        let base = self
-            .trace_cache
+        let witness = self
+            .witness
             .as_ref()
-            .expect("mdoc scope trace cached before interaction");
+            .expect("mdoc scope prover has a witness");
+        let base = ScopeActiveInteractionBase::new(self.metadata.log_size, &columns, witness);
         let walk_preprocessed =
             scope_walk_preprocessed_columns(self.metadata.log_size, self.statement.items.len());
         let parsed_relations = self.parsed_relations();
@@ -4337,7 +4431,7 @@ impl AirProver for MdocScope {
         let (interaction, claimed_sum) = scope_interaction_trace(
             self.metadata.log_size,
             &columns,
-            base,
+            &base,
             &walk_preprocessed,
             &stream_specs(self.statement.items.len())
                 .into_iter()
@@ -4359,10 +4453,8 @@ impl AirProver for MdocScope {
             self.claim_mask_beta(),
         );
         tb.extend_evals(interaction);
-        let table_multiplicity = self
-            .table_trace_cache
-            .as_ref()
-            .expect("mdoc scope table trace cached before interaction");
+        let table_multiplicity =
+            scope_table_trace(self.table_log_size, &witness.table_multiplicities);
         let table_preprocessed =
             scope_table_preprocessed_columns(self.table_log_size, &self.table_edges);
         let table_claim_mask = self
@@ -4371,23 +4463,21 @@ impl AirProver for MdocScope {
             .zip(self.claim_mask_beta());
         let (table_interaction, table_claimed_sum) = scope_table_interaction_trace(
             self.table_log_size,
-            table_multiplicity,
+            &table_multiplicity,
             &table_preprocessed,
             dfa_relation,
             table_claim_mask,
         );
         tb.extend_evals(table_interaction);
-        let digest_id_uniqueness_trace = self
-            .digest_id_uniqueness_trace_cache
-            .as_ref()
-            .expect("mdoc scope digest-id uniqueness trace cached before interaction");
+        let digest_id_uniqueness_trace =
+            digest_id_uniqueness_trace(&witness.digest_id_multiplicities);
         let digest_id_uniqueness_claim_mask = self
             .digest_id_uniqueness_claim_mask_trace
             .as_ref()
             .zip(self.claim_mask_beta());
         let (digest_id_uniqueness_interaction, digest_id_uniqueness_claimed_sum) =
             digest_id_uniqueness_interaction_trace(
-                digest_id_uniqueness_trace,
+                &digest_id_uniqueness_trace,
                 digest_id_uniqueness_relation,
                 digest_id_uniqueness_claim_mask,
             );
@@ -4397,6 +4487,10 @@ impl AirProver for MdocScope {
             table_claimed_sum,
             digest_id_uniqueness_claimed_sum,
         });
+        // The witness has now supplied both committed trees.  Components only
+        // retain the public statement, relations, and claimed sums.
+        self.witness.take();
+        self.trace_seed.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -5289,6 +5383,7 @@ mod tests {
             witness,
             scope.handles.parsed_streams.len(),
             scope.handles.raw_streams.len(),
+            [0x42; 32],
         );
         let preprocessed =
             scope_walk_preprocessed_columns(scope.metadata.log_size, scope.statement.items.len());
@@ -5331,6 +5426,44 @@ mod tests {
             None,
             None,
         );
+        let compact_base =
+            ScopeActiveInteractionBase::new(scope.metadata.log_size, &columns, witness);
+        let (compact_interaction, compact_claimed_sum) = scope_interaction_trace(
+            scope.metadata.log_size,
+            &columns,
+            &compact_base,
+            &preprocessed,
+            &stream_ids,
+            &scope.raw_target_stream_ids(),
+            &parsed_relations,
+            &raw_relations,
+            &semantic_relation,
+            Some(&payload_hash_relation),
+            &item_digest_relation,
+            scope.statement.items.len(),
+            &dfa_relation,
+            &state_relation,
+            &digest_id_relation,
+            &digest_id_uniqueness_relation,
+            &digest_byte_relation,
+            None,
+            None,
+        );
+        assert_eq!(compact_claimed_sum, claimed_sum);
+        assert_eq!(compact_interaction.len(), interaction.len());
+        for (compact, full) in compact_interaction.iter().zip(interaction.iter()) {
+            assert_eq!(
+                compact
+                    .data
+                    .iter()
+                    .flat_map(|value| value.to_array())
+                    .collect::<Vec<_>>(),
+                full.data
+                    .iter()
+                    .flat_map(|value| value.to_array())
+                    .collect::<Vec<_>>(),
+            );
+        }
         let mut ring =
             ClaimMaskRing::new(&[scope.metadata.log_size, scope.metadata.log_size]).unwrap();
         let mask = ring.take(scope.metadata.log_size).unwrap();
