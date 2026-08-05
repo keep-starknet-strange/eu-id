@@ -1124,12 +1124,12 @@ fn hosted_public_native_mu_proves_and_verifies() {
 
 #[test]
 fn hosted_private_key_shapes_kat_and_layout_are_exact() {
-    const EXPECTED_PREPROCESSED_COLUMNS: usize = 84;
-    const EXPECTED_TRACE_COLUMNS: usize = 188;
-    const EXPECTED_INTERACTION_COLUMNS: usize = 344;
-    const EXPECTED_PREPROCESSED_CELLS: usize = 453_280;
-    const EXPECTED_TRACE_CELLS: usize = 1_572_064;
-    const EXPECTED_INTERACTION_M31_CELLS: usize = 1_641_152;
+    const EXPECTED_PREPROCESSED_COLUMNS: usize = 83;
+    const EXPECTED_TRACE_COLUMNS: usize = 185;
+    const EXPECTED_INTERACTION_COLUMNS: usize = 336;
+    const EXPECTED_PREPROCESSED_CELLS: usize = 452_768;
+    const EXPECTED_TRACE_CELLS: usize = 1_569_504;
+    const EXPECTED_INTERACTION_M31_CELLS: usize = 1_635_008;
 
     let msg = b"private device key tr reference vector".to_vec();
     let input = oracle_input(4_260, &msg);
@@ -1235,7 +1235,7 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
         cells(&private_layout.interaction),
         EXPECTED_INTERACTION_M31_CELLS
     );
-    assert_eq!(hosted_private_key_claimed_sums_len(), 23);
+    assert_eq!(hosted_private_key_claimed_sums_len(), 22);
 
     // Exercise canonical tree-0 generation too: ids and columns must agree
     // before relations are drawn.
@@ -1434,7 +1434,7 @@ fn hosted_private_key_proves_and_adversarial_bindings_reject() {
     let proof = prove_hosted_private_key(4_263, &msg);
     assert_eq!(proof.public_input.message, msg);
     assert_eq!(proof.group_evals.len(), 66);
-    assert_eq!(proof.claimed_sums.len(), 23);
+    assert_eq!(proof.claimed_sums.len(), 22);
     verify_hosted_private_key(&proof).expect("hosted-private-key verify");
 
     let mut message_tamper = proof.clone();
@@ -1532,22 +1532,22 @@ fn hosted_private_key_malformed_claim_shapes_return_error_not_panic() {
     assert_rejected(
         "short group vector",
         vec![SecureField::zero(); 65],
-        vec![SecureField::zero(); 23],
+        vec![SecureField::zero(); 22],
     );
     assert_rejected(
         "long group vector",
         vec![SecureField::zero(); 67],
-        vec![SecureField::zero(); 23],
+        vec![SecureField::zero(); 22],
     );
     assert_rejected(
         "short claimed-sum vector",
         vec![SecureField::zero(); 66],
-        vec![SecureField::zero(); 22],
+        vec![SecureField::zero(); 21],
     );
     assert_rejected(
         "long claimed-sum vector",
         vec![SecureField::zero(); 66],
-        vec![SecureField::zero(); 24],
+        vec![SecureField::zero(); 23],
     );
 }
 
