@@ -38,15 +38,23 @@ pub enum RcKind {
     Rc8,
     Rc7,
     Ternary,
+    /// C5: folded in from `mldsa_decomp`'s private table (w1/w1' after C8c).
+    /// Appended AFTER `Ternary` so no existing `row_base` moves.
+    Rc4,
+    /// C5: folded in from `sampleinball_fsm`'s private table (offline-memory
+    /// timestamp diff `dts`). Appended AFTER `Rc4`.
+    Rc11,
 }
 
 impl RcKind {
-    pub const ALL: [RcKind; 5] = [
+    pub const ALL: [RcKind; 7] = [
         RcKind::Rc9,
         RcKind::Rc13,
         RcKind::Rc8,
         RcKind::Rc7,
         RcKind::Ternary,
+        RcKind::Rc4,
+        RcKind::Rc11,
     ];
     pub const RANGE: [RcKind; 4] = [RcKind::Rc9, RcKind::Rc13, RcKind::Rc8, RcKind::Rc7];
 
@@ -57,9 +65,21 @@ impl RcKind {
             RcKind::Rc8 => 1 << 8,
             RcKind::Rc7 => 1 << 7,
             RcKind::Ternary => 3,
+            RcKind::Rc4 => 1 << 4,
+            RcKind::Rc11 => 1 << 11,
         }
     }
 
+    /// Sparse (non-dense) bound ids. The original five kinds (0..4) keep
+    /// their ids unchanged so no existing lookup site is retargeted. C5
+    /// deliberately assigns Rc4/Rc11 far from the dense 0..4 range (and
+    /// PADDING far from all of them): several components build a bound id as
+    /// a selector-weighted SUM of two kind ids (e.g.
+    /// `coeffs::mod.rs`'s `is_carry*rc8_id + is_norm*rc7_id`); with a dense
+    /// namespace, a pairwise sum like `rc8_id(2) + rc7_id(3) = 5` could alias
+    /// a densely-assigned new kind's id. The max pairwise sum over `{0,1,2,3,4}`
+    /// is `3+4=7`, so ids `8`, `9`, and padding `15` are unreachable by any
+    /// such combination.
     pub const fn bound_id(self) -> u32 {
         match self {
             RcKind::Rc9 => 0,
@@ -67,6 +87,8 @@ impl RcKind {
             RcKind::Rc8 => 2,
             RcKind::Rc7 => 3,
             RcKind::Ternary => 4,
+            RcKind::Rc4 => 8,
+            RcKind::Rc11 => 9,
         }
     }
 
@@ -84,6 +106,8 @@ impl RcKind {
                     + RcKind::Rc8.n_values()
                     + RcKind::Rc7.n_values()
             }
+            RcKind::Rc4 => RcKind::Ternary.row_base() + RcKind::Ternary.n_values(),
+            RcKind::Rc11 => RcKind::Rc4.row_base() + RcKind::Rc4.n_values(),
         }
     }
 
@@ -103,6 +127,8 @@ impl RcKind {
             RcKind::Rc8 => "rc8",
             RcKind::Rc7 => "rc7",
             RcKind::Ternary => "ternary",
+            RcKind::Rc4 => "rc4",
+            RcKind::Rc11 => "rc11",
         }
     }
 
@@ -113,8 +139,10 @@ impl RcKind {
     }
 }
 
-pub const RANGE_TABLE_ACTIVE_ROWS: usize = RcKind::Ternary.row_base() + RcKind::Ternary.n_values();
-pub const PADDING_BOUND_ID: u32 = RcKind::ALL.len() as u32;
+pub const RANGE_TABLE_ACTIVE_ROWS: usize = RcKind::Rc11.row_base() + RcKind::Rc11.n_values();
+const _: () = assert!(RANGE_TABLE_ACTIVE_ROWS <= 1 << 14);
+/// Sparse, decoupled from `RcKind::ALL.len()` (see [`RcKind::bound_id`]).
+pub const PADDING_BOUND_ID: u32 = 15;
 
 pub const fn range_table_log_size() -> u32 {
     14
@@ -151,7 +179,7 @@ pub fn gen_range_table_preprocessed() -> Vec<ColEval> {
     ]
 }
 
-pub fn gen_range_table_multiplicities(uses: [&[u32]; 5]) -> ColEval {
+pub fn gen_range_table_multiplicities(uses: [&[u32]; 7]) -> ColEval {
     let mut values = vec![m31(0); 1usize << range_table_log_size()];
     for (kind, counts) in RcKind::ALL.into_iter().zip(uses) {
         assert_eq!(counts.len(), kind.n_values());
@@ -225,7 +253,7 @@ impl SharedRangeTable {
             !uses.is_empty(),
             "shared range table requires at least one consumer"
         );
-        let totals: [Vec<u32>; 5] = core::array::from_fn(|index| {
+        let totals: [Vec<u32>; 7] = core::array::from_fn(|index| {
             let kind = RcKind::ALL[index];
             let mut total = vec![0u32; kind.n_values()];
             for instance in uses {
@@ -238,7 +266,7 @@ impl SharedRangeTable {
             total
         });
         let multiplicity = gen_range_table_multiplicities([
-            &totals[0], &totals[1], &totals[2], &totals[3], &totals[4],
+            &totals[0], &totals[1], &totals[2], &totals[3], &totals[4], &totals[5], &totals[6],
         ]);
         Self {
             handle,
@@ -432,7 +460,7 @@ mod tests {
                 assert_eq!(ids[row].0, kind.bound_id());
             }
         }
-        assert_eq!(RANGE_TABLE_ACTIVE_ROWS, 9_091);
+        assert_eq!(RANGE_TABLE_ACTIVE_ROWS, 11_155);
         for row in RANGE_TABLE_ACTIVE_ROWS..1usize << range_table_log_size() {
             assert_eq!(values[row].0, 0);
             assert_eq!(ids[row].0, PADDING_BOUND_ID);

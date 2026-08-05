@@ -1,7 +1,9 @@
 //! Test harness for `mldsa_decomp` through the `air-core` orchestrator. The
 //! module contributes, in commit order:
 //!   1. `decomp`             — the [DECOMP]+[HINT] byte-pair component.
-//!   2. rc providers          — rc4, rc13, rc7, rc8 (one each).
+//!   2. `range_table`         — the shared `(value, bound_id)` range table
+//!      (C5), self-drawn here (standalone mode) rather than shared through a
+//!      hosted handle.
 //!   3. `wcell_provider`      — TEST-SIDE balancer: yields the `(w_bind_id, w)`
 //!      tuples that decomp consumes. It stands in for the coefficient W-cell
 //!      yields in the composed statement.
@@ -32,16 +34,17 @@ use air_core::{
 
 use crate::air_util::{padded_log_size, ColEval};
 use crate::binding::STREAM_ID_CTILDE_ABSORB;
+use crate::coeffs::tables::{
+    gen_range_table_interaction, gen_range_table_multiplicities, gen_range_table_preprocessed,
+    range_table_log_size, range_table_preprocessed_ids, RangeTableEval, RANGE_TABLE_INTERACTION_COLS,
+};
+use crate::coeffs::tables::RcKind;
 use crate::profile::ML_DSA_65;
 use crate::witness::MlDsaWitness;
 
 #[cfg(not(test))]
 use super::gen_decomp_metadata;
 use super::relations::DecompRelations;
-use super::tables::{
-    gen_table_interaction, gen_table_multiplicities, gen_table_preprocessed, RcKind, RcTableEval,
-    RC_TABLE_INTERACTION_COLS,
-};
 use super::{
     decomp_preprocessed_ids, gen_decomp_base_trace, gen_decomp_interaction,
     gen_decomp_preprocessed, DecompEval, DecompMetadata, N_BASE_COLS, N_INTERACTION_COLS, N_ROWS,
@@ -57,12 +60,10 @@ use crate::balancer::{
     BALANCER_INTERACTION_COLS,
 };
 
-const N_RC: usize = 4;
-
 /// The public statement + prover claims of a decomp proof.
 pub struct DecompProof {
     pub decomp_claimed_sum: SecureField,
-    pub rc_claimed_sums: [SecureField; N_RC],
+    pub range_claimed_sum: SecureField,
     pub wcell_claimed_sum: SecureField,
     pub hashio_claimed_sum: SecureField,
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
@@ -74,26 +75,28 @@ fn decomp_log_size() -> u32 {
 
 fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     let mut ids = decomp_preprocessed_ids(ML_DSA_65);
-    for kind in RcKind::ALL {
-        ids.push(kind.value_column_id());
-    }
+    ids.extend(range_table_preprocessed_ids());
     ids
 }
 
 fn all_preprocessed_log_sizes() -> Vec<u32> {
     let mut sizes = vec![decomp_log_size(); decomp_preprocessed_ids(ML_DSA_65).len()];
-    for kind in RcKind::ALL {
-        sizes.push(kind.log_size());
-    }
+    sizes.extend(vec![range_table_log_size(); range_table_preprocessed_ids().len()]);
     sizes
 }
 
 fn gen_all_preprocessed() -> Vec<ColEval> {
     let mut cols = gen_decomp_preprocessed(ML_DSA_65, decomp_log_size());
-    for kind in RcKind::ALL {
-        cols.push(gen_table_preprocessed(kind));
-    }
+    cols.extend(gen_range_table_preprocessed());
     cols
+}
+
+/// This standalone harness's own range-use census, converted to the 7-slot
+/// shape [`gen_range_table_multiplicities`] expects. Only Rc4/Rc13/Rc7/Rc8
+/// are ever nonzero for decomp; the rest stay at the `RcUses::new()` zero
+/// default.
+fn range_uses_arrays(rc_uses: &crate::coeffs::RcUses) -> [&[u32]; 7] {
+    core::array::from_fn(|index| rc_uses.for_kind(RcKind::ALL[index]))
 }
 
 // The two balancer components' log sizes (padded to their tuple counts).
@@ -106,29 +109,27 @@ fn hashio_log_size() -> u32 {
 
 struct Built {
     decomp: FrameworkComponent<DecompEval>,
-    rc: Vec<FrameworkComponent<RcTableEval>>,
+    range: FrameworkComponent<RangeTableEval>,
     wcell: FrameworkComponent<BalancerEval>,
     hashio: FrameworkComponent<BalancerEval>,
 }
 
 impl Built {
     fn as_components(&self) -> Vec<&dyn Component> {
-        let mut out: Vec<&dyn Component> = vec![&self.decomp];
-        out.extend(self.rc.iter().map(|c| c as &dyn Component));
-        out.push(&self.wcell);
-        out.push(&self.hashio);
-        out
+        vec![
+            &self.decomp as &dyn Component,
+            &self.range as &dyn Component,
+            &self.wcell as &dyn Component,
+            &self.hashio as &dyn Component,
+        ]
     }
     fn as_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.decomp];
-        out.extend(
-            self.rc
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
-        out.push(&self.wcell);
-        out.push(&self.hashio);
-        out
+        vec![
+            &self.decomp as &dyn ComponentProver<SimdBackend>,
+            &self.range as &dyn ComponentProver<SimdBackend>,
+            &self.wcell as &dyn ComponentProver<SimdBackend>,
+            &self.hashio as &dyn ComponentProver<SimdBackend>,
+        ]
     }
 }
 
@@ -163,10 +164,10 @@ pub struct DecompProver {
     trace_poke: Option<DecompTracePoke>,
     relations: Option<DecompRelations>,
     decomp_claimed_sum: SecureField,
-    rc_claimed_sums: [SecureField; N_RC],
+    range_claimed_sum: SecureField,
     wcell_claimed_sum: SecureField,
     hashio_claimed_sum: SecureField,
-    rc_mult: Vec<ColEval>,
+    range_mult: Option<ColEval>,
     w1_encode_bytes: Vec<u8>,
     built: Option<Built>,
 }
@@ -240,7 +241,7 @@ fn apply_trace_poke(evals: &mut [ColEval], poke: DecompTracePoke) {
 
 struct DecompVerifier {
     decomp_claimed_sum: SecureField,
-    rc_claimed_sums: [SecureField; N_RC],
+    range_claimed_sum: SecureField,
     wcell_claimed_sum: SecureField,
     hashio_claimed_sum: SecureField,
     relations: Option<DecompRelations>,
@@ -251,7 +252,7 @@ fn build_components(
     allocator: &mut TraceLocationAllocator,
     relations: &DecompRelations,
     decomp_claimed_sum: SecureField,
-    rc_claimed_sums: &[SecureField; N_RC],
+    range_claimed_sum: SecureField,
     wcell_claimed_sum: SecureField,
     hashio_claimed_sum: SecureField,
 ) -> Built {
@@ -265,17 +266,16 @@ fn build_components(
         ),
         decomp_claimed_sum,
     );
-    let mut rc = Vec::with_capacity(N_RC);
-    for (idx, kind) in RcKind::ALL.iter().enumerate() {
-        rc.push(FrameworkComponent::new(
-            allocator,
-            RcTableEval {
-                kind: *kind,
-                relation: rc_relation(relations, *kind).clone(),
-            },
-            rc_claimed_sums[idx],
-        ));
-    }
+    // Standalone-only shared range table (C5): decomp draws its OWN `range`
+    // relation independently (`DecompRelations::draw`), so it needs its own
+    // matching provider here, not the hosted `SharedRangeTable` handle.
+    let range = FrameworkComponent::new(
+        allocator,
+        RangeTableEval {
+            relation: relations.range.clone(),
+        },
+        range_claimed_sum,
+    );
     // wcell provider: YIELDS (−) the (w_bind_id, w) tuples decomp consumes.
     let wcell = FrameworkComponent::new(
         allocator,
@@ -300,26 +300,15 @@ fn build_components(
     );
     Built {
         decomp,
-        rc,
+        range,
         wcell,
         hashio,
     }
 }
 
-fn rc_relation(r: &DecompRelations, kind: RcKind) -> &super::relations::RcRelation {
-    match kind {
-        RcKind::Rc4 => &r.rc4,
-        RcKind::Rc13 => &r.rc13,
-        RcKind::Rc7 => &r.rc7,
-        RcKind::Rc8 => &r.rc8,
-    }
-}
-
 fn module_trace_layout() -> Vec<u32> {
     let mut trace = vec![decomp_log_size(); N_BASE_COLS];
-    for kind in RcKind::ALL {
-        trace.push(kind.log_size()); // one multiplicity column each
-    }
+    trace.push(range_table_log_size()); // one multiplicity column
     // Each balancer writes `1 + arity` base columns (enabler + tuple cells).
     for _ in 0..crate::balancer::balancer_base_cols(crate::binding::WCELL_ARITY) {
         trace.push(wcell_log_size());
@@ -332,10 +321,8 @@ fn module_trace_layout() -> Vec<u32> {
 
 fn module_interaction_layout() -> Vec<u32> {
     let mut inter = vec![decomp_log_size(); N_INTERACTION_COLS];
-    for kind in RcKind::ALL {
-        for _ in 0..RC_TABLE_INTERACTION_COLS {
-            inter.push(kind.log_size());
-        }
+    for _ in 0..RANGE_TABLE_INTERACTION_COLS {
+        inter.push(range_table_log_size());
     }
     for _ in 0..BALANCER_INTERACTION_COLS {
         inter.push(wcell_log_size());
@@ -359,11 +346,12 @@ impl Air for DecompProver {
         }
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
-        let mut s = vec![self.decomp_claimed_sum];
-        s.extend(self.rc_claimed_sums);
-        s.push(self.wcell_claimed_sum);
-        s.push(self.hashio_claimed_sum);
-        s
+        vec![
+            self.decomp_claimed_sum,
+            self.range_claimed_sum,
+            self.wcell_claimed_sum,
+            self.hashio_claimed_sum,
+        ]
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids()
@@ -373,7 +361,7 @@ impl Air for DecompProver {
             allocator,
             self.relations.as_ref().expect("relations"),
             self.decomp_claimed_sum,
-            &self.rc_claimed_sums,
+            self.range_claimed_sum,
             self.wcell_claimed_sum,
             self.hashio_claimed_sum,
         ));
@@ -386,14 +374,14 @@ impl Air for DecompProver {
 impl AirProver for DecompProver {
     fn max_log_size(&self) -> u32 {
         decomp_log_size()
-            .max(RcKind::Rc13.log_size())
+            .max(range_table_log_size())
             .max(wcell_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
         // Every constraint is degree ≤ 2 (each component needs its_log_size + 1);
         // the orchestrator sizes twiddles from the max over modules, so return the
-        // largest (rc13 at log 13 ⇒ 14). Each component still declares its own
-        // exact +1 bound through `FrameworkEval`.
+        // largest (the range table at log 14 ⇒ 15). Each component still
+        // declares its own exact +1 bound through `FrameworkEval`.
         self.max_log_size() + 1
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -424,11 +412,9 @@ impl AirProver for DecompProver {
         }
         let metadata = self.gen_metadata();
         self.w1_encode_bytes = metadata.w1_encode_bytes;
-        self.rc_mult = RcKind::ALL
-            .iter()
-            .map(|kind| gen_table_multiplicities(*kind, metadata.rc_uses.for_kind(*kind)))
-            .collect();
-        evals.extend(self.rc_mult.clone());
+        let range_mult = gen_range_table_multiplicities(range_uses_arrays(&metadata.rc_uses));
+        self.range_mult = Some(range_mult.clone());
+        evals.push(range_mult);
         // balancer base cols.
         evals.extend(gen_balancer_trace(
             wcell_log_size(),
@@ -446,12 +432,12 @@ impl AirProver for DecompProver {
         let mut evals = interaction.trace;
         self.decomp_claimed_sum = interaction.claimed_sum;
 
-        for (idx, kind) in RcKind::ALL.iter().enumerate() {
-            let (tr, sum) =
-                gen_table_interaction(*kind, &self.rc_mult[idx], rc_relation(&relations, *kind));
-            evals.extend(tr);
-            self.rc_claimed_sums[idx] = sum;
-        }
+        let (range_tr, range_sum) = gen_range_table_interaction(
+            self.range_mult.as_ref().expect("range mult written"),
+            &relations.range,
+        );
+        evals.extend(range_tr);
+        self.range_claimed_sum = range_sum;
         // wcell provider yields (−); hashio consumer consumes (+).
         let (wtr, wsum) = gen_balancer_interaction(
             wcell_log_size(),
@@ -490,11 +476,12 @@ impl Air for DecompVerifier {
         }
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
-        let mut s = vec![self.decomp_claimed_sum];
-        s.extend(self.rc_claimed_sums);
-        s.push(self.wcell_claimed_sum);
-        s.push(self.hashio_claimed_sum);
-        s
+        vec![
+            self.decomp_claimed_sum,
+            self.range_claimed_sum,
+            self.wcell_claimed_sum,
+            self.hashio_claimed_sum,
+        ]
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids()
@@ -504,7 +491,7 @@ impl Air for DecompVerifier {
             allocator,
             self.relations.as_ref().expect("relations"),
             self.decomp_claimed_sum,
-            &self.rc_claimed_sums,
+            self.range_claimed_sum,
             self.wcell_claimed_sum,
             self.hashio_claimed_sum,
         ));
@@ -531,17 +518,17 @@ pub fn prove_decomp(witness: MlDsaWitness, config: PcsConfig) -> Result<DecompPr
         trace_poke: None,
         relations: None,
         decomp_claimed_sum: SecureField::zero(),
-        rc_claimed_sums: [SecureField::zero(); N_RC],
+        range_claimed_sum: SecureField::zero(),
         wcell_claimed_sum: SecureField::zero(),
         hashio_claimed_sum: SecureField::zero(),
-        rc_mult: Vec::new(),
+        range_mult: None,
         w1_encode_bytes: Vec::new(),
         built: None,
     };
     let stark_proof = air_core::prove(&mut [&mut prover], config)?;
     Ok(DecompProof {
         decomp_claimed_sum: prover.decomp_claimed_sum,
-        rc_claimed_sums: prover.rc_claimed_sums,
+        range_claimed_sum: prover.range_claimed_sum,
         wcell_claimed_sum: prover.wcell_claimed_sum,
         hashio_claimed_sum: prover.hashio_claimed_sum,
         stark_proof,
@@ -560,7 +547,7 @@ pub fn verify_decomp(
     }
     let mut verifier = DecompVerifier {
         decomp_claimed_sum: proof.decomp_claimed_sum,
-        rc_claimed_sums: proof.rc_claimed_sums,
+        range_claimed_sum: proof.range_claimed_sum,
         wcell_claimed_sum: proof.wcell_claimed_sum,
         hashio_claimed_sum: proof.hashio_claimed_sum,
         relations: None,
@@ -702,17 +689,17 @@ mod tests {
             trace_poke,
             relations: None,
             decomp_claimed_sum: SecureField::zero(),
-            rc_claimed_sums: [SecureField::zero(); N_RC],
+            range_claimed_sum: SecureField::zero(),
             wcell_claimed_sum: SecureField::zero(),
             hashio_claimed_sum: SecureField::zero(),
-            rc_mult: Vec::new(),
+            range_mult: None,
             w1_encode_bytes: Vec::new(),
             built: None,
         };
         let stark_proof = air_core::prove(&mut [&mut prover], pcs_config())?;
         Ok(DecompProof {
             decomp_claimed_sum: prover.decomp_claimed_sum,
-            rc_claimed_sums: prover.rc_claimed_sums,
+            range_claimed_sum: prover.range_claimed_sum,
             wcell_claimed_sum: prover.wcell_claimed_sum,
             hashio_claimed_sum: prover.hashio_claimed_sum,
             stark_proof,
@@ -801,6 +788,30 @@ mod tests {
             ),
             "a non-boolean zero flag (b=2) with nonzero w1 must be rejected \
              by b·w1=0"
+        );
+    }
+
+    /// C5(4) -- the arity trap: `w1'` poked to 2000 (an Rc11-magnitude value)
+    /// with `wrap_m` recomputed so the UseHint equation still holds exactly.
+    /// Decomp always tags its w1' lookup with `RcKind::Rc4`'s bound id;
+    /// 2000 is a legitimate value elsewhere in the shared table (under
+    /// `RcKind::Rc11`'s bound id), but claiming it under Rc4's bound id must
+    /// still be rejected -- there is no provider row for that exact
+    /// `(value, bound_id)` tuple.
+    #[test]
+    fn decomp_rc11_magnitude_rejected_under_rc4_bound_id() {
+        let witness = witness_with_first_w(GAMMA2, 0);
+        assert!(
+            matches!(
+                prove_with_test_options(
+                    witness,
+                    None,
+                    Some(DecompTracePoke::Rc11MagnitudeClaimedUnderRc4BoundId),
+                ),
+                Err(ProvingError::ConstraintsNotSatisfied)
+            ),
+            "w1'=2000 claimed under Rc4's bound id must be rejected even \
+             though 2000 is valid under Rc11's bound id"
         );
     }
 

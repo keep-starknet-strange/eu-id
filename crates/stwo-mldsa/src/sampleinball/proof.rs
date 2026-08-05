@@ -1,6 +1,8 @@
 //! Test harness for `sampleinball_fsm` via `air-core`. Contributes, in commit order:
 //!   1. `sib`             — the [CHAL] FSM + ternary/τ + c-binding component.
-//!   2. rc providers       — rc8, rc11 (one each).
+//!   2. `range_table`      — the shared `(value, bound_id)` range table (C5),
+//!      self-drawn here (standalone mode) rather than shared through a hosted
+//!      handle.
 //!   3. `ccell_provider`   — TEST-SIDE balancer yielding the coeffs C-cell
 //!      `(c_bind_id, c)` tuples that the FSM consumes.
 //!   4. `hashio_producer`  — TEST-SIDE balancer yielding the squeeze bytes the FSM
@@ -29,26 +31,25 @@ use crate::balancer::{
     BALANCER_INTERACTION_COLS,
 };
 use crate::binding::{CCELL_ARITY, HASH_IO_ARITY, STREAM_ID_SIB_SQUEEZE};
+use crate::coeffs::tables::{
+    gen_range_table_interaction, gen_range_table_multiplicities, gen_range_table_preprocessed,
+    range_table_log_size, range_table_preprocessed_ids, RangeTableEval, RANGE_TABLE_INTERACTION_COLS,
+};
+use crate::coeffs::tables::RcKind;
 use crate::constants::N;
 use crate::profile::ML_DSA_65;
 use crate::witness::MlDsaWitness;
 
-use super::relations::{RcRelation, SibRelations};
-use super::tables::{
-    gen_table_interaction, gen_table_multiplicities, gen_table_preprocessed, RcKind, RcTableEval,
-    RC_TABLE_INTERACTION_COLS,
-};
+use super::relations::SibRelations;
 use super::{
     gen_sib_base_trace, gen_sib_interaction, gen_sib_metadata, gen_sib_preprocessed,
     sib_preprocessed_ids, SibEval, MAX_SIB_SQUEEZE_BYTES, N_ACCESSES, N_BASE_COLS,
     N_INTERACTION_COLS,
 };
 
-const N_RC: usize = 3;
-
 pub struct SibProof {
     pub sib_claimed_sum: SecureField,
-    pub rc_claimed_sums: [SecureField; N_RC],
+    pub range_claimed_sum: SecureField,
     pub ccell_claimed_sum: SecureField,
     pub hashio_claimed_sum: SecureField,
     pub log_size: u32,
@@ -70,26 +71,27 @@ fn hashio_log_size() -> u32 {
 
 fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     let mut ids = sib_preprocessed_ids();
-    for kind in RcKind::ALL {
-        ids.push(kind.value_column_id());
-    }
+    ids.extend(range_table_preprocessed_ids());
     ids
 }
 
 fn all_preprocessed_log_sizes(log_size: u32) -> Vec<u32> {
     let mut sizes = vec![log_size; sib_preprocessed_ids().len()];
-    for kind in RcKind::ALL {
-        sizes.push(kind.log_size());
-    }
+    sizes.extend(vec![range_table_log_size(); range_table_preprocessed_ids().len()]);
     sizes
 }
 
 fn gen_all_preprocessed(log_size: u32) -> Vec<ColEval> {
     let mut cols = gen_sib_preprocessed(ML_DSA_65, log_size);
-    for kind in RcKind::ALL {
-        cols.push(gen_table_preprocessed(kind));
-    }
+    cols.extend(gen_range_table_preprocessed());
     cols
+}
+
+/// This standalone harness's own range-use census, converted to the 7-slot
+/// shape [`gen_range_table_multiplicities`] expects. Only Rc8/Rc11 are ever
+/// nonzero for SIB; the rest stay at the `RcUses::new()` zero default.
+fn range_uses_arrays(rc_uses: &crate::coeffs::RcUses) -> [&[u32]; 7] {
+    core::array::from_fn(|index| rc_uses.for_kind(RcKind::ALL[index]))
 }
 
 fn ccell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
@@ -108,36 +110,27 @@ fn hashio_tuples(bytes: &[u8]) -> Vec<Vec<u32>> {
 
 struct Built {
     sib: FrameworkComponent<SibEval>,
-    rc: Vec<FrameworkComponent<RcTableEval>>,
+    range: FrameworkComponent<RangeTableEval>,
     ccell: FrameworkComponent<BalancerEval>,
     hashio: FrameworkComponent<BalancerEval>,
 }
 
 impl Built {
     fn as_components(&self) -> Vec<&dyn Component> {
-        let mut out: Vec<&dyn Component> = vec![&self.sib];
-        out.extend(self.rc.iter().map(|c| c as &dyn Component));
-        out.push(&self.ccell);
-        out.push(&self.hashio);
-        out
+        vec![
+            &self.sib as &dyn Component,
+            &self.range as &dyn Component,
+            &self.ccell as &dyn Component,
+            &self.hashio as &dyn Component,
+        ]
     }
     fn as_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.sib];
-        out.extend(
-            self.rc
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
-        out.push(&self.ccell);
-        out.push(&self.hashio);
-        out
-    }
-}
-
-fn rc_relation(r: &SibRelations, kind: RcKind) -> &RcRelation {
-    match kind {
-        RcKind::Rc8 => &r.rc8,
-        RcKind::Rc11 => &r.rc11,
+        vec![
+            &self.sib as &dyn ComponentProver<SimdBackend>,
+            &self.range as &dyn ComponentProver<SimdBackend>,
+            &self.ccell as &dyn ComponentProver<SimdBackend>,
+            &self.hashio as &dyn ComponentProver<SimdBackend>,
+        ]
     }
 }
 
@@ -145,10 +138,10 @@ pub struct SibProver {
     witness: MlDsaWitness,
     relations: Option<SibRelations>,
     sib_claimed_sum: SecureField,
-    rc_claimed_sums: [SecureField; N_RC],
+    range_claimed_sum: SecureField,
     ccell_claimed_sum: SecureField,
     hashio_claimed_sum: SecureField,
-    rc_mult: Vec<ColEval>,
+    range_mult: Option<ColEval>,
     stream_bytes: Vec<u8>,
     built: Option<Built>,
 }
@@ -157,7 +150,7 @@ struct SibVerifier {
     witness_log_size: u32,
     hashio_log_size: u32,
     sib_claimed_sum: SecureField,
-    rc_claimed_sums: [SecureField; N_RC],
+    range_claimed_sum: SecureField,
     ccell_claimed_sum: SecureField,
     hashio_claimed_sum: SecureField,
     relations: Option<SibRelations>,
@@ -172,7 +165,7 @@ fn build_components(
     hashio_ls: u32,
     relations: &SibRelations,
     sib_claimed_sum: SecureField,
-    rc_claimed_sums: &[SecureField; N_RC],
+    range_claimed_sum: SecureField,
     ccell_claimed_sum: SecureField,
     hashio_claimed_sum: SecureField,
 ) -> Built {
@@ -187,17 +180,16 @@ fn build_components(
         },
         sib_claimed_sum,
     );
-    let mut rc = Vec::with_capacity(N_RC);
-    for (idx, kind) in RcKind::ALL.iter().enumerate() {
-        rc.push(FrameworkComponent::new(
-            allocator,
-            RcTableEval {
-                kind: *kind,
-                relation: rc_relation(relations, *kind).clone(),
-            },
-            rc_claimed_sums[idx],
-        ));
-    }
+    // Standalone-only shared range table (C5): SIB draws its OWN `range`
+    // relation independently (`SibRelations::draw`), so it needs its own
+    // matching provider here, not the hosted `SharedRangeTable` handle.
+    let range = FrameworkComponent::new(
+        allocator,
+        RangeTableEval {
+            relation: relations.range.clone(),
+        },
+        range_claimed_sum,
+    );
     // ccell provider: FSM consumes (+); provider yields (−).
     let ccell = FrameworkComponent::new(
         allocator,
@@ -222,7 +214,7 @@ fn build_components(
     );
     Built {
         sib,
-        rc,
+        range,
         ccell,
         hashio,
     }
@@ -230,9 +222,7 @@ fn build_components(
 
 fn module_trace_layout(log_size: u32, ccell_ls: u32, hashio_ls: u32) -> Vec<u32> {
     let mut trace = vec![log_size; N_BASE_COLS];
-    for kind in RcKind::ALL {
-        trace.push(kind.log_size());
-    }
+    trace.push(range_table_log_size());
     for _ in 0..crate::balancer::balancer_base_cols(CCELL_ARITY) {
         trace.push(ccell_ls);
     }
@@ -244,10 +234,8 @@ fn module_trace_layout(log_size: u32, ccell_ls: u32, hashio_ls: u32) -> Vec<u32>
 
 fn module_interaction_layout(log_size: u32, ccell_ls: u32, hashio_ls: u32) -> Vec<u32> {
     let mut inter = vec![log_size; N_INTERACTION_COLS];
-    for kind in RcKind::ALL {
-        for _ in 0..RC_TABLE_INTERACTION_COLS {
-            inter.push(kind.log_size());
-        }
+    for _ in 0..RANGE_TABLE_INTERACTION_COLS {
+        inter.push(range_table_log_size());
     }
     for _ in 0..BALANCER_INTERACTION_COLS {
         inter.push(ccell_ls);
@@ -272,11 +260,12 @@ impl Air for SibProver {
         }
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
-        let mut s = vec![self.sib_claimed_sum];
-        s.extend(self.rc_claimed_sums);
-        s.push(self.ccell_claimed_sum);
-        s.push(self.hashio_claimed_sum);
-        s
+        vec![
+            self.sib_claimed_sum,
+            self.range_claimed_sum,
+            self.ccell_claimed_sum,
+            self.hashio_claimed_sum,
+        ]
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids()
@@ -289,7 +278,7 @@ impl Air for SibProver {
             hashio_log_size(),
             self.relations.as_ref().expect("relations"),
             self.sib_claimed_sum,
-            &self.rc_claimed_sums,
+            self.range_claimed_sum,
             self.ccell_claimed_sum,
             self.hashio_claimed_sum,
         ));
@@ -302,7 +291,7 @@ impl Air for SibProver {
 impl AirProver for SibProver {
     fn max_log_size(&self) -> u32 {
         sib_log_size()
-            .max(RcKind::Rc11.log_size())
+            .max(range_table_log_size())
             .max(ccell_log_size())
     }
     fn max_constraint_log_degree_bound(&self) -> u32 {
@@ -324,11 +313,9 @@ impl AirProver for SibProver {
         let mut evals = gen_sib_base_trace(&self.witness, ls);
         let metadata = gen_sib_metadata(&self.witness);
         self.stream_bytes = metadata.stream_bytes;
-        self.rc_mult = RcKind::ALL
-            .iter()
-            .map(|kind| gen_table_multiplicities(*kind, metadata.rc_uses.for_kind(*kind)))
-            .collect();
-        evals.extend(self.rc_mult.clone());
+        let range_mult = gen_range_table_multiplicities(range_uses_arrays(&metadata.rc_uses));
+        self.range_mult = Some(range_mult.clone());
+        evals.push(range_mult);
         evals.extend(gen_balancer_trace(
             ccell_log_size(),
             &ccell_tuples(&self.witness),
@@ -346,12 +333,12 @@ impl AirProver for SibProver {
         let mut evals = interaction.trace;
         self.sib_claimed_sum = interaction.claimed_sum;
 
-        for (idx, kind) in RcKind::ALL.iter().enumerate() {
-            let (tr, sum) =
-                gen_table_interaction(*kind, &self.rc_mult[idx], rc_relation(&relations, *kind));
-            evals.extend(tr);
-            self.rc_claimed_sums[idx] = sum;
-        }
+        let (range_tr, range_sum) = gen_range_table_interaction(
+            self.range_mult.as_ref().expect("range mult written"),
+            &relations.range,
+        );
+        evals.extend(range_tr);
+        self.range_claimed_sum = range_sum;
         let (ctr, csum) = gen_balancer_interaction(
             ccell_log_size(),
             &ccell_tuples(&self.witness),
@@ -396,11 +383,12 @@ impl Air for SibVerifier {
         }
     }
     fn claimed_sums(&self) -> Vec<SecureField> {
-        let mut s = vec![self.sib_claimed_sum];
-        s.extend(self.rc_claimed_sums);
-        s.push(self.ccell_claimed_sum);
-        s.push(self.hashio_claimed_sum);
-        s
+        vec![
+            self.sib_claimed_sum,
+            self.range_claimed_sum,
+            self.ccell_claimed_sum,
+            self.hashio_claimed_sum,
+        ]
     }
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         all_preprocessed_ids()
@@ -413,7 +401,7 @@ impl Air for SibVerifier {
             self.hashio_log_size,
             self.relations.as_ref().expect("relations"),
             self.sib_claimed_sum,
-            &self.rc_claimed_sums,
+            self.range_claimed_sum,
             self.ccell_claimed_sum,
             self.hashio_claimed_sum,
         ));
@@ -440,17 +428,17 @@ pub fn prove_sib(witness: MlDsaWitness, config: PcsConfig) -> Result<SibProof, P
         witness,
         relations: None,
         sib_claimed_sum: SecureField::zero(),
-        rc_claimed_sums: [SecureField::zero(); N_RC],
+        range_claimed_sum: SecureField::zero(),
         ccell_claimed_sum: SecureField::zero(),
         hashio_claimed_sum: SecureField::zero(),
-        rc_mult: Vec::new(),
+        range_mult: None,
         stream_bytes: Vec::new(),
         built: None,
     };
     let stark_proof = air_core::prove(&mut [&mut prover], config)?;
     Ok(SibProof {
         sib_claimed_sum: prover.sib_claimed_sum,
-        rc_claimed_sums: prover.rc_claimed_sums,
+        range_claimed_sum: prover.range_claimed_sum,
         ccell_claimed_sum: prover.ccell_claimed_sum,
         hashio_claimed_sum: prover.hashio_claimed_sum,
         log_size,
@@ -483,7 +471,7 @@ pub fn verify_sib(
         witness_log_size: proof.log_size,
         hashio_log_size: proof.hashio_log_size,
         sib_claimed_sum: proof.sib_claimed_sum,
-        rc_claimed_sums: proof.rc_claimed_sums,
+        range_claimed_sum: proof.range_claimed_sum,
         ccell_claimed_sum: proof.ccell_claimed_sum,
         hashio_claimed_sum: proof.hashio_claimed_sum,
         relations: None,

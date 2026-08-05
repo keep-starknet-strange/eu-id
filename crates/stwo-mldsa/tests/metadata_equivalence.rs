@@ -17,13 +17,11 @@ use stwo_mldsa::coeffs::tables::RcKind as CoeffsRcKind;
 use stwo_mldsa::coeffs::{gen_coeffs_interaction, gen_coeffs_rc_uses, layout as coeffs_layout};
 use stwo_mldsa::constants::{K, N};
 use stwo_mldsa::decomp::relations::DecompRelations;
-use stwo_mldsa::decomp::tables::RcKind as DecompRcKind;
 use stwo_mldsa::decomp::{gen_decomp_interaction, gen_decomp_metadata, N_ROWS};
 use stwo_mldsa::profile::ML_DSA_65;
 use stwo_mldsa::reference::encoding::{pk_decode, sig_decode};
 use stwo_mldsa::reference::sponge::shake256;
 use stwo_mldsa::sampleinball::relations::SibRelations;
-use stwo_mldsa::sampleinball::tables::RcKind as SibRcKind;
 use stwo_mldsa::sampleinball::{
     gen_sib_interaction, gen_sib_metadata, MAX_SIB_SQUEEZE_BYTES, N_ACCESSES,
 };
@@ -121,7 +119,7 @@ fn direct_metadata_matches_full_dry_interactions() {
             STREAM_ID_CTILDE_ABSORB,
             &DecompRelations::dummy(),
         );
-        for kind in DecompRcKind::ALL {
+        for kind in CoeffsRcKind::ALL {
             assert_eq!(
                 direct.rc_uses.for_kind(kind),
                 interaction.rc_uses.for_kind(kind),
@@ -149,7 +147,7 @@ fn direct_metadata_matches_full_dry_interactions() {
             STREAM_ID_SIB_SQUEEZE,
             &SibRelations::dummy(),
         );
-        for kind in SibRcKind::ALL {
+        for kind in CoeffsRcKind::ALL {
             assert_eq!(
                 direct.rc_uses.for_kind(kind),
                 interaction.rc_uses.for_kind(kind),
