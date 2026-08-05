@@ -1114,21 +1114,22 @@ impl FrameworkEval for SibEval {
         ));
 
         // =====================================================================
-        // C8: offline-memory swap replay. Each row has degree 2 or less.
-        // | site                                   | expr                       | deg |
-        // | u_write / s_write / s_same booleans    | x(1−x)                     |  2  |
-        // | daddr is-zero: daddr·inv == 1−same     | daddr·inv , 1−same         |  2  |
-        // | same ⇒ daddr==0                        | same·daddr                 |  2  |
-        // | sr_same == same·s_read                 | same·(is_sorted−s_write)   |  2  |
-        // | foc == is_sorted·(1−same)              | is_sorted·(1−same)         |  2  |
-        // | daddr = s_addr − prev (gate transition)| s_addr−prev_addr−daddr     |  1  |
-        // | strict ts: same·(Δts−1−dts)==0         | same·(…)                   |  2  |
-        // | value continuity: sr_same·(s_val−prev) | sr_same·(…)                |  2  |
-        // | init: foc·(1−s_write), foc·s_val       | foc·(…)                    |  2  |
-        // | rc uses (daddr rc8, dts rc11)          | gate·value                 |  1  |
-        // | Mem yields (±combine)                  | gate·combine               |  1  |
-        // The passthrough pins above have degree 1. No constraint exceeds degree
-        // 2, so the `[-1,0]` masks keep the bound at log_size+1.
+        // C8: offline-memory swap replay.
+        // | site                                          | expr                     | deg |
+        // | u_write / s_write / s_same booleans           | x(1−x)                   |  2  |
+        // | daddr is-zero: daddr·inv == 1−same            | daddr·inv , 1−same       |  2  |
+        // | same ⇒ daddr==0                               | same·daddr               |  2  |
+        // | daddr = s_addr − prev (gate transition)       | s_addr−prev_addr−daddr   |  1  |
+        // | strict ts: same·(Δts−1−dts)==0                | same·(…)                 |  2  |
+        // | value continuity: (same·s_read)·(s_val−prev)  | inlined sr_same·(…)      |  3  |
+        // | init: foc·(1−s_write), foc·s_val (foc inlined)| inlined foc·(…)          |  3  |
+        // | rc uses (daddr rc8, dts rc11)                 | gate·value               |  1  |
+        // | Mem yields (±combine)                         | gate·combine             |  1  |
+        // No constraint exceeds degree 3, well within the component's declared
+        // `log_size + 2` (D ≤ 5) bound. The shifted `[-1,0]` base-trace masks
+        // (idx/accept/s_addr/s_val/s_ts) read the previous row of an
+        // already-committed column directly — no separate interaction
+        // passthrough column or pin constraints needed.
         // =====================================================================
 
         // C8a: access-flag booleans.
