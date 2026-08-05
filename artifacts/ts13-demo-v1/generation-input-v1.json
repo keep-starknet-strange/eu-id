@@ -163,20 +163,8 @@
               5,
               5,
               5,
-              5,
-              5,
-              5,
-              5,
               16,
               16,
-              16,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
               8,
               8,
               8,
@@ -2143,12 +2131,6 @@
               13,
               13,
               13,
-              13,
-              13,
-              13,
-              13,
-              5,
-              16,
               16,
               8,
               8,
@@ -3078,21 +3060,21 @@
             {
               "name": "shared_keccak_service_air_0_component_1",
               "traceRows": 8192,
-              "constraintCount": 21,
+              "constraintCount": 17,
               "maxConstraintLogDegreeBound": 14,
               "traceMaskColumnCounts": [
                 0,
-                910
+                906
               ]
             },
             {
               "name": "shared_keccak_service_air_0_component_2",
               "traceRows": 32,
-              "constraintCount": 2,
+              "constraintCount": 1,
               "maxConstraintLogDegreeBound": 6,
               "traceMaskColumnCounts": [
-                13,
-                1,
+                9,
+                0,
                 4
               ]
             },
@@ -3102,8 +3084,8 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 17,
               "traceMaskColumnCounts": [
-                3,
                 2,
+                1,
                 4
               ]
             },
@@ -3124,7 +3106,7 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                3,
+                2,
                 1,
                 4
               ]
@@ -3135,7 +3117,7 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                3,
+                2,
                 1,
                 4
               ]
@@ -3146,7 +3128,7 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                3,
+                2,
                 1,
                 4
               ]
@@ -3157,7 +3139,7 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                3,
+                2,
                 1,
                 4
               ]
@@ -3168,7 +3150,7 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                3,
+                2,
                 1,
                 4
               ]
@@ -3179,7 +3161,7 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                3,
+                2,
                 1,
                 4
               ]
@@ -3190,7 +3172,7 @@
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 9,
               "traceMaskColumnCounts": [
-                3,
+                2,
                 1,
                 4
               ]
@@ -3300,8 +3282,6 @@
               13,
               13,
               13,
-              13,
-              9,
               9,
               9,
               9,
@@ -3339,7 +3319,6 @@
               10,
               10,
               8,
-              9,
               11,
               12,
               12,
@@ -3370,13 +3349,6 @@
               13,
               13,
               13,
-              13,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9,
               9,
               9,
@@ -3467,10 +3439,7 @@
               10,
               10,
               10,
-              10,
-              10,
               8,
-              9,
               11,
               4,
               12,
@@ -3561,10 +3530,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
               4,
               4,
               4,
@@ -3613,18 +3578,10 @@
               10,
               10,
               10,
-              10,
-              10,
-              10,
-              10,
               8,
               8,
               8,
               8,
-              9,
-              9,
-              9,
-              9,
               11,
               11,
               11,
@@ -3676,7 +3633,7 @@
             ],
             "postInteractionM31LogSizes": []
           },
-          "claimedSumCount": 18,
+          "claimedSumCount": 17,
           "maxLogSize": 14,
           "maxConstraintLogDegreeBound": 16,
           "components": [
@@ -3693,23 +3650,23 @@
             {
               "name": "issuer_private_message_mldsa_air_0_component_1",
               "traceRows": 8192,
-              "constraintCount": 40,
+              "constraintCount": 37,
               "maxConstraintLogDegreeBound": 15,
               "traceMaskColumnCounts": [
-                12,
-                16,
+                11,
+                15,
                 24
               ]
             },
             {
               "name": "issuer_private_message_mldsa_air_0_component_2",
               "traceRows": 512,
-              "constraintCount": 70,
+              "constraintCount": 51,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
-                5,
-                63,
-                60
+                4,
+                57,
+                56
               ]
             },
             {
@@ -3759,12 +3716,12 @@
             {
               "name": "issuer_private_message_mldsa_air_0_component_7",
               "traceRows": 1024,
-              "constraintCount": 53,
+              "constraintCount": 47,
               "maxConstraintLogDegreeBound": 12,
               "traceMaskColumnCounts": [
                 28,
-                31,
-                36
+                29,
+                32
               ]
             },
             {
@@ -3780,17 +3737,6 @@
             },
             {
               "name": "issuer_private_message_mldsa_air_0_component_9",
-              "traceRows": 512,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 10,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "issuer_private_message_mldsa_air_0_component_10",
               "traceRows": 2048,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 12,
@@ -3801,7 +3747,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_11",
+              "name": "issuer_private_message_mldsa_air_0_component_10",
               "traceRows": 16,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 5,
@@ -3812,7 +3758,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_12",
+              "name": "issuer_private_message_mldsa_air_0_component_11",
               "traceRows": 4096,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 13,
@@ -3823,7 +3769,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_13",
+              "name": "issuer_private_message_mldsa_air_0_component_12",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -3834,7 +3780,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_14",
+              "name": "issuer_private_message_mldsa_air_0_component_13",
               "traceRows": 1024,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 11,
@@ -3845,7 +3791,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_15",
+              "name": "issuer_private_message_mldsa_air_0_component_14",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -3856,7 +3802,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_16",
+              "name": "issuer_private_message_mldsa_air_0_component_15",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -3867,7 +3813,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_17",
+              "name": "issuer_private_message_mldsa_air_0_component_16",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -3900,73 +3846,6 @@
               4
             ],
             "traceM31LogSizes": [
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
               8,
               8,
               8,
@@ -4272,11 +4151,11 @@
             {
               "name": "requested_item_sha256_air_0_component_0",
               "traceRows": 256,
-              "constraintCount": 461,
+              "constraintCount": 322,
               "maxConstraintLogDegreeBound": 10,
               "traceMaskColumnCounts": [
                 10,
-                260,
+                193,
                 32
               ]
             },
@@ -4314,73 +4193,6 @@
               4
             ],
             "traceM31LogSizes": [
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
               12,
               12,
               12,
@@ -4686,11 +4498,11 @@
             {
               "name": "private_mso_sha256_air_0_component_0",
               "traceRows": 4096,
-              "constraintCount": 461,
+              "constraintCount": 322,
               "maxConstraintLogDegreeBound": 14,
               "traceMaskColumnCounts": [
                 10,
-                260,
+                193,
                 32
               ]
             },
@@ -5182,74 +4994,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9
             ],
             "postInteractionM31LogSizes": []
@@ -5261,12 +5005,12 @@
             {
               "name": "private_item_binder_air_0_component_0",
               "traceRows": 512,
-              "constraintCount": 293,
+              "constraintCount": 276,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 5,
                 80,
-                136
+                68
               ]
             },
             {
@@ -5524,74 +5268,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9
             ],
             "postInteractionM31LogSizes": []
@@ -5603,12 +5279,12 @@
             {
               "name": "private_mso_binder_air_0_component_0",
               "traceRows": 512,
-              "constraintCount": 338,
+              "constraintCount": 321,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 67,
                 88,
-                140
+                72
               ]
             },
             {
@@ -5781,54 +5457,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9
             ],
             "postInteractionM31LogSizes": []
@@ -5840,12 +5468,12 @@
             {
               "name": "mdoc_private_mso_validity_air_0_component_0",
               "traceRows": 512,
-              "constraintCount": 98,
+              "constraintCount": 86,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 2,
                 88,
-                100
+                52
               ]
             },
             {
@@ -6229,50 +5857,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9
             ],
             "postInteractionM31LogSizes": []
@@ -6284,12 +5868,12 @@
             {
               "name": "private_value_digests_scanner_air_0_component_0",
               "traceRows": 512,
-              "constraintCount": 567,
+              "constraintCount": 556,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 4,
                 305,
-                88
+                44
               ]
             },
             {
@@ -6327,7 +5911,6 @@
             ],
             "traceM31LogSizes": [
               10,
-              14,
               14,
               14,
               14,
@@ -6378,11 +5961,11 @@
             {
               "name": "private_expand_a_air_0_component_1",
               "traceRows": 16384,
-              "constraintCount": 30,
+              "constraintCount": 28,
               "maxConstraintLogDegreeBound": 16,
               "traceMaskColumnCounts": [
                 5,
-                12,
+                11,
                 12
               ]
             }
@@ -6466,30 +6049,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9
             ],
             "postInteractionM31LogSizes": []
@@ -6501,12 +6060,12 @@
             {
               "name": "private_device_key_binder_air_0_component_0",
               "traceRows": 512,
-              "constraintCount": 47,
+              "constraintCount": 41,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 5,
                 34,
-                48
+                24
               ]
             },
             {
@@ -6541,7 +6100,6 @@
               13,
               13,
               13,
-              13,
               15,
               15,
               15,
@@ -6561,7 +6119,6 @@
               11,
               11,
               4,
-              9,
               9,
               9,
               9,
@@ -6599,7 +6156,6 @@
               10,
               10,
               8,
-              9,
               11,
               11,
               11,
@@ -6632,7 +6188,6 @@
               13,
               13,
               13,
-              13,
               15,
               15,
               15,
@@ -6696,12 +6251,6 @@
               11,
               11,
               11,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9,
               9,
               9,
@@ -6792,10 +6341,7 @@
               10,
               10,
               10,
-              10,
-              10,
               8,
-              9,
               11,
               4,
               11,
@@ -6960,10 +6506,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
               4,
               4,
               4,
@@ -7012,18 +6554,10 @@
               10,
               10,
               10,
-              10,
-              10,
-              10,
-              10,
               8,
               8,
               8,
               8,
-              9,
-              9,
-              9,
-              9,
               11,
               11,
               11,
@@ -7155,18 +6689,18 @@
             ],
             "postInteractionM31LogSizes": []
           },
-          "claimedSumCount": 23,
+          "claimedSumCount": 22,
           "maxLogSize": 15,
           "maxConstraintLogDegreeBound": 17,
           "components": [
             {
               "name": "private_device_mldsa_air_0_component_0",
               "traceRows": 8192,
-              "constraintCount": 40,
+              "constraintCount": 37,
               "maxConstraintLogDegreeBound": 15,
               "traceMaskColumnCounts": [
-                12,
-                16,
+                11,
+                15,
                 24
               ]
             },
@@ -7206,12 +6740,12 @@
             {
               "name": "private_device_mldsa_air_0_component_4",
               "traceRows": 512,
-              "constraintCount": 70,
+              "constraintCount": 51,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
-                5,
-                63,
-                60
+                4,
+                57,
+                56
               ]
             },
             {
@@ -7261,12 +6795,12 @@
             {
               "name": "private_device_mldsa_air_0_component_9",
               "traceRows": 1024,
-              "constraintCount": 53,
+              "constraintCount": 47,
               "maxConstraintLogDegreeBound": 12,
               "traceMaskColumnCounts": [
                 28,
-                31,
-                36
+                29,
+                32
               ]
             },
             {
@@ -7282,17 +6816,6 @@
             },
             {
               "name": "private_device_mldsa_air_0_component_11",
-              "traceRows": 512,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 10,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_12",
               "traceRows": 2048,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 12,
@@ -7303,7 +6826,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_13",
+              "name": "private_device_mldsa_air_0_component_12",
               "traceRows": 16,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 5,
@@ -7314,12 +6837,23 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_14",
+              "name": "private_device_mldsa_air_0_component_13",
               "traceRows": 2048,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 12,
               "traceMaskColumnCounts": [
                 2,
+                1,
+                8
+              ]
+            },
+            {
+              "name": "private_device_mldsa_air_0_component_14",
+              "traceRows": 64,
+              "constraintCount": 2,
+              "maxConstraintLogDegreeBound": 7,
+              "traceMaskColumnCounts": [
+                1,
                 1,
                 8
               ]
@@ -7337,17 +6871,6 @@
             },
             {
               "name": "private_device_mldsa_air_0_component_16",
-              "traceRows": 64,
-              "constraintCount": 2,
-              "maxConstraintLogDegreeBound": 7,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                8
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_17",
               "traceRows": 1024,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 11,
@@ -7358,7 +6881,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_18",
+              "name": "private_device_mldsa_air_0_component_17",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -7366,6 +6889,17 @@
                 2,
                 1,
                 8
+              ]
+            },
+            {
+              "name": "private_device_mldsa_air_0_component_18",
+              "traceRows": 128,
+              "constraintCount": 1,
+              "maxConstraintLogDegreeBound": 8,
+              "traceMaskColumnCounts": [
+                2,
+                1,
+                4
               ]
             },
             {
@@ -7392,17 +6926,6 @@
             },
             {
               "name": "private_device_mldsa_air_0_component_21",
-              "traceRows": 128,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 8,
-              "traceMaskColumnCounts": [
-                2,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_22",
               "traceRows": 16,
               "constraintCount": 18,
               "maxConstraintLogDegreeBound": 6,
@@ -7861,8 +7384,6 @@
               13,
               13,
               13,
-              13,
-              9,
               9,
               9,
               9,
@@ -7900,7 +7421,6 @@
               10,
               10,
               8,
-              9,
               11,
               5,
               5,
@@ -7931,13 +7451,6 @@
               13,
               13,
               13,
-              13,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
               9,
               9,
               9,
@@ -8028,10 +7541,7 @@
               10,
               10,
               10,
-              10,
-              10,
               8,
-              9,
               11,
               4,
               5,
@@ -8122,10 +7632,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
               4,
               4,
               4,
@@ -8174,18 +7680,10 @@
               10,
               10,
               10,
-              10,
-              10,
-              10,
-              10,
               8,
               8,
               8,
               8,
-              9,
-              9,
-              9,
-              9,
               11,
               11,
               11,
@@ -8237,7 +7735,7 @@
             ],
             "postInteractionM31LogSizes": []
           },
-          "claimedSumCount": 18,
+          "claimedSumCount": 17,
           "maxLogSize": 14,
           "maxConstraintLogDegreeBound": 16,
           "components": [
@@ -8254,23 +7752,23 @@
             {
               "name": "private_revocation_mldsa_air_0_component_1",
               "traceRows": 8192,
-              "constraintCount": 40,
+              "constraintCount": 37,
               "maxConstraintLogDegreeBound": 15,
               "traceMaskColumnCounts": [
-                12,
-                16,
+                11,
+                15,
                 24
               ]
             },
             {
               "name": "private_revocation_mldsa_air_0_component_2",
               "traceRows": 512,
-              "constraintCount": 70,
+              "constraintCount": 51,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
-                5,
-                63,
-                60
+                4,
+                57,
+                56
               ]
             },
             {
@@ -8320,12 +7818,12 @@
             {
               "name": "private_revocation_mldsa_air_0_component_7",
               "traceRows": 1024,
-              "constraintCount": 53,
+              "constraintCount": 47,
               "maxConstraintLogDegreeBound": 12,
               "traceMaskColumnCounts": [
                 28,
-                31,
-                36
+                29,
+                32
               ]
             },
             {
@@ -8341,17 +7839,6 @@
             },
             {
               "name": "private_revocation_mldsa_air_0_component_9",
-              "traceRows": 512,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 10,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_revocation_mldsa_air_0_component_10",
               "traceRows": 2048,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 12,
@@ -8362,7 +7849,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_11",
+              "name": "private_revocation_mldsa_air_0_component_10",
               "traceRows": 16,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 5,
@@ -8373,7 +7860,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_12",
+              "name": "private_revocation_mldsa_air_0_component_11",
               "traceRows": 32,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 6,
@@ -8384,7 +7871,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_13",
+              "name": "private_revocation_mldsa_air_0_component_12",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -8395,7 +7882,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_14",
+              "name": "private_revocation_mldsa_air_0_component_13",
               "traceRows": 1024,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 11,
@@ -8406,7 +7893,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_15",
+              "name": "private_revocation_mldsa_air_0_component_14",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -8417,7 +7904,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_16",
+              "name": "private_revocation_mldsa_air_0_component_15",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -8428,7 +7915,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_17",
+              "name": "private_revocation_mldsa_air_0_component_16",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -9594,12 +9081,6 @@
           "multiplicity": "-remaining_mu_squeeze_sink"
         },
         {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_17",
-          "sign": "negative",
-          "multiplicity": "-remaining_ct_squeeze_sink"
-        },
-        {
           "module": "private_expand_a",
           "component": "private_expand_a_air_0_component_0",
           "sign": "positive",
@@ -9766,12 +9247,6 @@
           "component": "private_revocation_mldsa_air_0_component_16",
           "sign": "negative",
           "multiplicity": "-remaining_mu_squeeze_sink"
-        },
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_17",
-          "sign": "negative",
-          "multiplicity": "-remaining_ct_squeeze_sink"
         }
       ]
     },
@@ -12841,12 +12316,6 @@
           "component": "private_device_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-eval_end for 6 private t1 polynomials"
-        },
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_22",
-          "sign": "positive",
-          "multiplicity": "+active for all 66 folded evaluations"
         }
       ]
     },
@@ -14344,11 +13813,11 @@
     {
       "name": "mldsa",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 784,
+      "fixedLength": 768,
       "fixedVectorLengths": [
         {
           "name": "claimed_sums",
-          "value": 18
+          "value": 17
         },
         {
           "name": "group_evals",
@@ -14359,11 +13828,11 @@
     {
       "name": "device_mldsa",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 1440,
+      "fixedLength": 1424,
       "fixedVectorLengths": [
         {
           "name": "claimed_sums",
-          "value": 23
+          "value": 22
         },
         {
           "name": "group_evals",
@@ -14374,11 +13843,11 @@
     {
       "name": "revocation_mldsa",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 784,
+      "fixedLength": 768,
       "fixedVectorLengths": [
         {
           "name": "claimed_sums",
-          "value": 18
+          "value": 17
         },
         {
           "name": "group_evals",
@@ -15782,7 +15251,7 @@
       "name": "impl.component_count",
       "value": {
         "kind": "unsigned",
-        "value": 98
+        "value": 95
       }
     },
     {
@@ -15863,7 +15332,7 @@
       "name": "impl.mldsa.device_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 23
+        "value": 22
       }
     },
     {
@@ -15877,7 +15346,7 @@
       "name": "impl.mldsa.issuer_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 18
+        "value": 17
       }
     },
     {
@@ -15891,7 +15360,7 @@
       "name": "impl.mldsa.revocation_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 18
+        "value": 17
       }
     },
     {
@@ -15912,7 +15381,7 @@
       "name": "impl.outer_claim_bytes_excluding_stark_and_post_payloads",
       "value": {
         "kind": "unsigned",
-        "value": 3872
+        "value": 3824
       }
     },
     {
@@ -15947,7 +15416,7 @@
       "name": "impl.serialized_claim_bytes_excluding_stark",
       "value": {
         "kind": "unsigned",
-        "value": 24168
+        "value": 24120
       }
     },
     {
@@ -15989,7 +15458,7 @@
       "name": "impl.transcript.global_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 97
+        "value": 94
       }
     },
     {
@@ -16042,31 +15511,19 @@
       "PreProcessedColumnId { id: \"keccak_carrier_schedule/final\" }",
       "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_0\" }",
       "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_1\" }",
-      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_2\" }",
       "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_3\" }",
-      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_4\" }",
-      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_5\" }",
-      "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_6\" }",
       "PreProcessedColumnId { id: \"keccak_carrier_schedule/round_constant_7\" }",
       "PreProcessedColumnId { id: \"keccak_dense_0\" }",
       "PreProcessedColumnId { id: \"keccak_dense_1\" }",
-      "PreProcessedColumnId { id: \"keccak_dense_2\" }",
       "PreProcessedColumnId { id: \"keccak_conv_0\" }",
       "PreProcessedColumnId { id: \"keccak_spread_byte_8\" }",
       "PreProcessedColumnId { id: \"keccak_split_1_1\" }",
-      "PreProcessedColumnId { id: \"keccak_split_1_2\" }",
       "PreProcessedColumnId { id: \"keccak_split_2_1\" }",
-      "PreProcessedColumnId { id: \"keccak_split_2_2\" }",
       "PreProcessedColumnId { id: \"keccak_split_3_1\" }",
-      "PreProcessedColumnId { id: \"keccak_split_3_2\" }",
       "PreProcessedColumnId { id: \"keccak_split_4_1\" }",
-      "PreProcessedColumnId { id: \"keccak_split_4_2\" }",
       "PreProcessedColumnId { id: \"keccak_split_5_1\" }",
-      "PreProcessedColumnId { id: \"keccak_split_5_2\" }",
       "PreProcessedColumnId { id: \"keccak_split_6_1\" }",
-      "PreProcessedColumnId { id: \"keccak_split_6_2\" }",
       "PreProcessedColumnId { id: \"keccak_split_7_1\" }",
-      "PreProcessedColumnId { id: \"keccak_split_7_2\" }",
       "PreProcessedColumnId { id: \"mdoc/private_message/v1/len_2534/log_12/active\" }",
       "PreProcessedColumnId { id: \"mdoc/private_message/v1/len_2534/log_12/index\" }",
       "PreProcessedColumnId { id: \"mldsa_coeffs_MlDsa65_start\" }",
@@ -16077,7 +15534,6 @@
       "PreProcessedColumnId { id: \"mldsa_coeffs_MlDsa65_is_norm\" }",
       "PreProcessedColumnId { id: \"mldsa_coeffs_MlDsa65_is_c\" }",
       "PreProcessedColumnId { id: \"mldsa_coeffs_MlDsa65_is_w\" }",
-      "PreProcessedColumnId { id: \"mldsa_coeffs_MlDsa65_paired_continue\" }",
       "PreProcessedColumnId { id: \"mldsa_coeffs_w_bind_id\" }",
       "PreProcessedColumnId { id: \"mldsa_coeffs_c_bind_id\" }",
       "PreProcessedColumnId { id: \"mldsa_coeffs_MlDsa65_profile_active\" }",
@@ -16085,40 +15541,38 @@
       "PreProcessedColumnId { id: \"mldsa_decomp_start\" }",
       "PreProcessedColumnId { id: \"mldsa_decomp_byte_pos\" }",
       "PreProcessedColumnId { id: \"mldsa_decomp_is_last\" }",
-      "PreProcessedColumnId { id: \"mldsa_decomp_MlDsa65_hash_active\" }",
       "PreProcessedColumnId { id: \"mldsa_value_table/log4/n16\" }",
       "PreProcessedColumnId { id: \"mldsa_value_table/log13/n8192\" }",
       "PreProcessedColumnId { id: \"mldsa_value_table/log7/n128\" }",
       "PreProcessedColumnId { id: \"mldsa_value_table/log8/n256\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_stream\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_placement\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_c\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_acc_start\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_c_last\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_c_bind_id\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_byte_pos\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_core\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_sorted\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sorted_start\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_ts_final\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_step_no\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_init\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_read_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_wr_i_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_wr_j_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_core_ts\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_init_addr\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_is_sign\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_stream_last\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_0\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_1\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_2\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_3\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_4\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_5\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_6\" }",
-      "PreProcessedColumnId { id: \"mdoc/issuer/mldsa_sib_sign_mask_7\" }",
-      "PreProcessedColumnId { id: \"mldsa_value_table/log9/n512\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_stream\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_placement\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_c\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_acc_start\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_c_last\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_c_bind_id\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_byte_pos\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_core\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_sorted\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sorted_start\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_ts_final\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_step_no\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_init\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_read_row\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_wr_i_row\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_wr_j_row\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_core_ts\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_init_addr\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_is_sign\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_stream_last\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_0\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_1\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_2\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_3\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_4\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_5\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_6\" }",
+      "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_7\" }",
       "PreProcessedColumnId { id: \"mldsa_value_table/log11/n2048\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log12/len2534/active\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log12/len2534/offset0/index\" }",
@@ -16269,65 +15723,9 @@
       "PreProcessedColumnId { id: \"mldsa_private_key_t1_poly\" }",
       "PreProcessedColumnId { id: \"mldsa_private_key_t1_index\" }",
       "PreProcessedColumnId { id: \"mldsa_private_key_fold_active\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_stream\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_placement\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_c\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_acc_start\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_c_last\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_c_bind_id\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_byte_pos\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_core\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_sorted\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sorted_start\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_ts_final\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_step_no\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_init\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_read_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_wr_i_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_wr_j_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_core_ts\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_init_addr\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_is_sign\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_stream_last\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_0\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_1\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_2\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_3\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_4\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_5\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_6\" }",
-      "PreProcessedColumnId { id: \"mdoc/device/mldsa_sib_sign_mask_7\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log11/len1952/active\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log11/len1952/offset0/index\" }",
       "PreProcessedColumnId { id: \"mdoc/ts13/revocation_range_active\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_stream\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_placement\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_c\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_acc_start\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_c_last\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_c_bind_id\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_byte_pos\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_core\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_sorted\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sorted_start\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_ts_final\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_step_no\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_init\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_read_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_wr_i_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_wr_j_row\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_core_ts\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_init_addr\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_is_sign\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_stream_last\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_0\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_1\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_2\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_3\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_4\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_5\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_6\" }",
-      "PreProcessedColumnId { id: \"mdoc/ts13/revocation/mldsa_sib_sign_mask_7\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log5/len20/active\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log5/len20/offset0/index\" }"
     ],
@@ -16365,20 +15763,8 @@
       5,
       5,
       5,
-      5,
-      5,
-      5,
-      5,
       16,
       16,
-      16,
-      8,
-      8,
-      8,
-      8,
-      8,
-      8,
-      8,
       8,
       8,
       8,
@@ -16401,8 +15787,6 @@
       13,
       13,
       13,
-      13,
-      9,
       9,
       9,
       9,
@@ -16439,7 +15823,6 @@
       10,
       10,
       10,
-      9,
       11,
       12,
       12,
@@ -16590,69 +15973,13 @@
       11,
       11,
       4,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
       11,
       11,
       4,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
-      10,
       5,
       5
     ],
-    "root": "e1a23c9ed3ed047896c600943ad60ed739c180f202aa74998538a24c016ef0ed"
+    "root": "8efe4b48bc7fef1906c2fc139559b00d381b3c64338b3e03f5df712615c61d2a"
   },
   "proofSystem": {
     "field": "M31",
@@ -16673,11 +16000,11 @@
         "name": "tree_0_preprocessed",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 319,
+        "maximumOpenedColumns": 248,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 319
+            "count": 248
           }
         ]
       },
@@ -16685,15 +16012,15 @@
         "name": "tree_1_trace",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 4171,
+        "maximumOpenedColumns": 4000,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 3357
+            "count": 3175
           },
           {
             "value": 2,
-            "count": 603
+            "count": 614
           },
           {
             "value": 3,
@@ -16725,15 +16052,15 @@
         "name": "tree_2_interaction",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 2380,
+        "maximumOpenedColumns": 2092,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 1948
+            "count": 1684
           },
           {
             "value": 2,
-            "count": 432
+            "count": 408
           }
         ]
       },
