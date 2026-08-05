@@ -38,10 +38,9 @@ use stwo_air_utils_derive::{IterMut, ParIterMut, Uninitialized};
 use stwo_constraint_framework::EvalAtRow;
 
 use crate::constants::{
-    IOTA_RC, IOTA_RC_BYTE_INDICES, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, RHO_OFFSETS,
-    SQRT_N_LANES,
+    IOTA_RC, N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, RHO_OFFSETS, SQRT_N_LANES,
 };
-use crate::utils::{spread_u32, unspread_u32, Enabler};
+use crate::utils::{spread_u32, unspread_u32};
 
 // Lookup budgets for one arithmetic row.
 
@@ -64,31 +63,25 @@ pub const N_SPLIT_LOOKUPS: usize = N_SPLIT_C_ROT + N_SPLIT_RHO; // 216
 /// hi-limb witness columns: one per split lookup.
 const N_HI_WITNESS: usize = N_SPLIT_LOOKUPS;
 
-/// First committed trace column for the nonzero-capable Iota byte lanes.
-pub const ROUND_CONSTANT_TRACE_START: usize = 1;
-
-/// First committed trace column for the interleaved chi and round-output cells.
-pub const ROUND_CHI_TRACE_START: usize = ROUND_CONSTANT_TRACE_START
-    + IOTA_RC_BYTE_INDICES.len() // nonzero-capable current_rc byte lanes
-    + 2                              // perm_id + round_idx
-    + N_BYTES_IN_STATE             // initial spread state
-    + N_XOR3_C                     // theta C-parity intermediates (t + C)
-    + N_HI_WITNESS                 // spread-hi witnesses for all rotations
-    + N_XOR3_THETA_APPLY; // theta-apply outputs (res_S)
-
-/// First committed trace column for the round input state.
-pub const ROUND_INPUT_TRACE_START: usize =
-    ROUND_CONSTANT_TRACE_START + IOTA_RC_BYTE_INDICES.len() + 2;
-
-/// Number of committed arithmetic columns between the input state and Chi.
+/// Number of committed helper-trace columns before the interleaved chi/andnot
+/// cells: theta C-parity intermediates (t + C), all rotation spread-hi
+/// witnesses, and theta-apply outputs (res_S). This is also the first
+/// committed column (column 0) of the helper trace: the enabler, current_rc,
+/// perm_id, round_idx, and initial spread-state groups are computed in
+/// `fill_row` for the round arithmetic but are never committed as helper
+/// columns — the carrier commits its own schedule/state columns for those
+/// directly from the boundary witness (see `carrier::generate`), so
+/// materializing them here would only be discarded at the copy site.
 pub const ROUND_PRE_CHI_COLUMNS: usize = N_XOR3_C + N_HI_WITNESS + N_XOR3_THETA_APPLY;
 
-/// Return the trace column for one spread byte of the round output.
-pub const fn round_output_trace_index(byte_index: usize) -> usize {
-    ROUND_CHI_TRACE_START + 2 * byte_index + 1
-}
-
-pub const N_ARITHMETIC_COLUMNS: usize = ROUND_CHI_TRACE_START + N_ANDNOT_LOOKUPS + N_XOR3_CHI_CLOSE;
+/// Only the andnot output is committed for each Chi cell (contiguous right
+/// after the pre-chi block); the closing xor3 (Chi's `a ^ andnot [^ rc]`
+/// round-output cell) is a lookup payload only, written by
+/// `write_xor3_payload_only`. The carrier reads the round output back from
+/// its own next-row carrier-state mask (`collect_arithmetic_lookups`'s
+/// `output_state` argument), never from this helper trace, so committing it
+/// here would be a discarded column.
+pub const N_ARITHMETIC_COLUMNS: usize = ROUND_PRE_CHI_COLUMNS + N_ANDNOT_LOOKUPS;
 
 /// Number of arithmetic lookups that the carrier uses for one round row.
 pub const N_ARITHMETIC_LOOKUPS: usize = N_XOR3_LOOKUPS + N_ANDNOT_LOOKUPS + N_SPLIT_LOOKUPS;
@@ -134,7 +127,6 @@ where
         1 << (log_size - LOG_N_LANES),
         [PackedM31::zero(); N_BYTES_IN_STATE + 2],
     );
-    let enabler_col = Enabler::new(invocations);
 
     let (mut trace, mut lookup_data) = unsafe {
         (
@@ -149,15 +141,8 @@ where
         lookup_data.par_iter_mut(),
     )
         .into_par_iter()
-        .enumerate()
-        .for_each(|(row_index, (mut row, input, mut lookup_data))| {
-            fill_row(
-                row_index,
-                &enabler_col,
-                &input,
-                &mut row[..],
-                &mut lookup_data,
-            );
+        .for_each(|(mut row, input, mut lookup_data)| {
+            fill_row(&input, &mut row[..], &mut lookup_data);
         });
 
     (
@@ -195,18 +180,17 @@ fn andnot_bytes(b1: &[u32; N_LANES], b2: &[u32; N_LANES]) -> [u32; N_LANES] {
 
 #[allow(clippy::type_complexity)]
 fn fill_row(
-    row_index: usize,
-    enabler_col: &Enabler,
     input: &[PackedM31; N_BYTES_IN_STATE + 2],
     row: &mut [&mut PackedM31],
     lookup_data: &mut LookupDataMutChunk<'_>,
 ) {
     let mut idx = Idx::default();
-    *row[idx.col] = enabler_col.packed_at(row_index);
-    idx.col += 1;
 
     // Carry the current constant in spread form. This lets Iota use the
-    // closing lane-zero xor3 without an extra conversion column.
+    // closing lane-zero xor3 without an extra conversion column. Used only
+    // by the Chi/Iota fold below: the carrier commits its own round-constant
+    // schedule columns directly (see `carrier::generate`), so this value is
+    // never a helper-trace column (see `N_ARITHMETIC_COLUMNS`'s doc).
     let round_of = |lane_val: u32| lane_val as usize;
     let current_rc: [PackedM31; N_BYTES_IN_U64] = std::array::from_fn(|i| {
         PackedM31::from_array(std::array::from_fn(|lane| {
@@ -214,27 +198,12 @@ fn fill_row(
             M31::from(spread_u32(IOTA_RC[r].to_le_bytes()[i] as u32))
         }))
     });
-    for byte_index in IOTA_RC_BYTE_INDICES {
-        *row[idx.col] = current_rc[byte_index];
-        idx.col += 1;
-    }
-    // Identity carried by both round links. `round_idx + 1` is derived in the
-    // outgoing tuple, so a row cannot redirect its result to another round;
-    // `perm_id` is reused unchanged, so results cannot cross permutations.
-    let perm_id = input[N_BYTES_IN_STATE + 1];
-    *row[idx.col] = perm_id;
-    idx.col += 1;
-    let round_idx = input[N_BYTES_IN_STATE];
-    *row[idx.col] = round_idx;
-    idx.col += 1;
 
-    // Initial spread state columns.
-    for x in &input[..N_BYTES_IN_STATE] {
-        *row[idx.col] = *x;
-        idx.col += 1;
-    }
-
-    // Per-lane byte view of the incoming state.
+    // Per-lane byte view of the incoming state. Neither the initial spread
+    // state (`input[..N_BYTES_IN_STATE]`) nor `perm_id`/`round_idx`
+    // (`input[N_BYTES_IN_STATE..]`) are committed as helper columns: the
+    // carrier commits its own carrier-state and schedule columns directly
+    // from the boundary witness.
     let mut S: [ByteLane; N_LANES_KECCAK] = std::array::from_fn(|lane| {
         std::array::from_fn(|i| unspread_lane(input[lane * N_BYTES_IN_U64 + i]))
     });
@@ -371,17 +340,18 @@ fn fill_row(
                 } else {
                     PackedM31::zero()
                 };
-                let out_spread = write_xor3(
+                // Payload only: the carrier reads this round-output cell
+                // back from its own next-row carrier-state mask, never from
+                // this helper trace (see `N_ARITHMETIC_COLUMNS`'s doc), so it
+                // is never committed as a helper column.
+                write_xor3_payload_only(
                     &mut idx,
-                    row,
                     lookup_data,
                     &B_spread[a_idx][i],
                     &an_spread,
                     &rc_spread,
                     &out,
                 );
-                S[out_idx][i] = out;
-                S_spread[out_idx][i] = out_spread;
             }
         }
     }
@@ -405,6 +375,23 @@ fn write_xor3(
     *lookup_data.xor3[idx.xor3] = [key, out];
     idx.xor3 += 1;
     out
+}
+
+/// Record one xor3 lookup payload without committing a helper-trace column
+/// (used for the Chi-close round-output cell only; see
+/// `N_ARITHMETIC_COLUMNS`'s doc).
+fn write_xor3_payload_only(
+    idx: &mut Idx,
+    lookup_data: &mut LookupDataMutChunk<'_>,
+    s1: &PackedM31,
+    s2: &PackedM31,
+    s3: &PackedM31,
+    out_bytes: &[u32; N_LANES],
+) {
+    let out = spread_lane(out_bytes);
+    let key = *s1 + *s2 + *s3;
+    *lookup_data.xor3[idx.xor3] = [key, out];
+    idx.xor3 += 1;
 }
 
 /// Write one andnot: commit the spread output limb, record the xor3-retarget
