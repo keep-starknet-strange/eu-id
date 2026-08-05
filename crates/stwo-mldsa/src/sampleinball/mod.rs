@@ -92,13 +92,19 @@ pub const SHAKE256_RATE: usize = 136;
 /// Resource cap for the SampleInBall rejection stream.
 ///
 /// This is the maximum cap for the fixed internal storage. ML-DSA-44 uses one
-/// block and has exhaustion probability about 2^-202.929. ML-DSA-65 uses five
-/// blocks. This is a resource cap, not a semantic worst-case bound. FIPS 204
-/// sampling is unbounded.
-pub const MAX_SIB_SQUEEZE_BLOCKS: usize = 5;
+/// block and has exhaustion probability about 2^-202.929. ML-DSA-65 uses two
+/// blocks and has exhaustion probability about 2^-463.58 (exact DP over the
+/// FIPS 204 Alg.29 acceptance chain, 264 placement bytes, τ=49), comfortably
+/// under the 2^-128 policy floor. This is a resource cap, not a semantic
+/// worst-case bound. FIPS 204 sampling is unbounded.
+pub const MAX_SIB_SQUEEZE_BLOCKS: usize = 2;
 
 /// Byte length of the maximum SampleInBall squeeze stream.
 pub const MAX_SIB_SQUEEZE_BYTES: usize = SHAKE256_RATE * MAX_SIB_SQUEEZE_BLOCKS;
+
+// Compile-time coupling: the per-profile squeeze budget consumed at
+// statement.rs must never exceed this component's fixed storage cap.
+const _: () = assert!(crate::profile::ML_DSA_65.sample_in_ball_squeeze_blocks() <= MAX_SIB_SQUEEZE_BLOCKS);
 
 // The stream stage binds the verifier-selected resource cap. `active` selects
 // only the FIPS-consumed prefix. The c stage follows the selected stream rows.

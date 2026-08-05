@@ -129,7 +129,7 @@ impl MlDsaProfile {
     pub const fn sample_in_ball_squeeze_blocks(self) -> usize {
         match self {
             Self::MlDsa44 => 1,
-            Self::MlDsa65 => 5,
+            Self::MlDsa65 => 2,
         }
     }
 }

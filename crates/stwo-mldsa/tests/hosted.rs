@@ -1187,7 +1187,7 @@ fn hosted_private_key_shapes_kat_and_layout_are_exact() {
 
     let sib = job_shapes[3];
     assert_eq!(sib.message_len, ML_DSA_65.c_tilde_bytes());
-    assert_eq!(sib.n_squeeze, 5);
+    assert_eq!(sib.n_squeeze, 2);
     assert_eq!(sib.absorb_stream_id, SIB_ABSORB);
     assert_eq!(sib.squeeze_stream_id, STREAM_ID_SIB_SQUEEZE);
 

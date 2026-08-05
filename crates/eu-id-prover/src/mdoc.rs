@@ -3453,7 +3453,7 @@ mod tests {
     }
 
     #[test]
-    fn all_mldsa65_keccak_plan_has_exact_role_order_and_261_permutations() {
+    fn all_mldsa65_keccak_plan_has_exact_role_order_and_252_permutations() {
         const ISSUER_JOBS: std::ops::Range<usize> = 0..3;
         const EXPAND_A_JOBS: std::ops::Range<usize> = 3..33;
         const DEVICE_JOBS: std::ops::Range<usize> = 33..37;
@@ -3480,8 +3480,8 @@ mod tests {
                 .map(|shape| shape.n_perms())
                 .sum(),
         ];
-        assert_eq!(role_permutations, [32, 180, 36, 13]);
-        assert_eq!(jobs.n_perms_total(), 261);
+        assert_eq!(role_permutations, [29, 180, 33, 10]);
+        assert_eq!(jobs.n_perms_total(), 252);
 
         assert_eq!(
             jobs.jobs[0].absorb_stream_id,
@@ -3513,7 +3513,7 @@ mod tests {
             jobs.jobs[36].message_len,
             stwo_mldsa::profile::ML_DSA_65.c_tilde_bytes()
         );
-        assert_eq!(jobs.jobs[36].n_squeeze, 5);
+        assert_eq!(jobs.jobs[36].n_squeeze, 2);
     }
 
     #[test]
