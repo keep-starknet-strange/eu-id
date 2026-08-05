@@ -206,17 +206,21 @@ pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
     let (full_trace, mut round_data) =
         keccak_round::generate_arithmetic_trace(round_inputs, n_rows);
 
-    let pre_chi_start = keccak_round::ROUND_INPUT_TRACE_START + N_BYTES_IN_STATE;
+    // The helper trace commits only the kept 696 columns (see
+    // `keccak_round::N_ARITHMETIC_COLUMNS`'s doc): the pre-chi block starts
+    // at column 0, followed directly by the (now contiguous) andnot block —
+    // the Chi-close round-output cell is a lookup payload only and was never
+    // committed as a helper column.
     let pre_chi_target = CARRIER_START + N_BYTES_IN_STATE;
     let andnot_target = pre_chi_target + keccak_round::ROUND_PRE_CHI_COLUMNS;
     for row in 0..n_rows {
         let full_row = full_trace.row_at(row);
         for column in 0..keccak_round::ROUND_PRE_CHI_COLUMNS {
-            columns[pre_chi_target + column][row] = full_row[pre_chi_start + column];
+            columns[pre_chi_target + column][row] = full_row[column];
         }
         for byte in 0..N_ANDNOT_LOOKUPS {
             columns[andnot_target + byte][row] =
-                full_row[keccak_round::ROUND_CHI_TRACE_START + 2 * byte];
+                full_row[keccak_round::ROUND_PRE_CHI_COLUMNS + byte];
         }
     }
 
