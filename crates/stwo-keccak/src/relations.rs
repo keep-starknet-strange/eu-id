@@ -4,10 +4,12 @@
 //!
 //! 1. **Interface relations:** [`KeccakStateRelation`] and [`HashIoRelation`].
 //!    Downstream ML-DSA components use only these relations.
-//! 2. **Internal relations:** [`Xor3`], [`AndNot`], [`Conv`], and the seven
-//!    `Split*` byte-split channels connect the carrier to its spread-form
-//!    lookup tables. [`KeccakRound`] keeps its fixed v1 transcript draw. No AIR
-//!    emits a `KeccakRound` tuple in this profile.
+//! 2. **Internal relations:** [`Xor3`], [`Conv`], and the seven `Split*`
+//!    byte-split channels connect the carrier to its spread-form lookup
+//!    tables. The dense andnot lookup is retargeted at [`Xor3`] (see
+//!    [`crate::tables`]); no separate `AndNot` relation is drawn.
+//!    [`KeccakRound`] keeps its fixed v1 transcript draw. No AIR emits a
+//!    `KeccakRound` tuple in this profile.
 //!
 //! Each `relation!(_, N)` declares a struct wrapping `LookupElements<N>`; `N`
 //! is the base-field arity of one lookup tuple. Stwo's macro implements
@@ -75,9 +77,6 @@ relation!(HashIoRelation, HASH_IO_ARITY);
 pub const DENSE_LOOKUP_ARITY: usize = 2;
 relation!(Xor3, DENSE_LOOKUP_ARITY);
 
-// `andnot` channel: `(u, spread(¬b'∧b''))` with `u = spread(b')+2·spread(b'')`.
-relation!(AndNot, DENSE_LOOKUP_ARITY);
-
 // `conv` byte↔spread channel: `(byte, spread(byte))`. Its arity is 2.
 relation!(Conv, DENSE_LOOKUP_ARITY);
 
@@ -124,7 +123,6 @@ pub struct KeccakRelations {
     pub hash_io: HashIoRelation,
     pub keccak_round: KeccakRound,
     pub xor3: Xor3,
-    pub andnot: AndNot,
     pub conv: Conv,
     pub split: [SplitRelation; 7],
     pub round_schedule: RoundScheduleRelation,
@@ -189,7 +187,6 @@ impl KeccakRelations {
             hash_io: HashIoRelation::draw(channel),
             keccak_round: KeccakRound::draw(channel),
             xor3: Xor3::draw(channel),
-            andnot: AndNot::draw(channel),
             conv: Conv::draw(channel),
             split: [
                 SplitRelation::S1(Split1::draw(channel)),
@@ -212,7 +209,6 @@ impl KeccakRelations {
             hash_io: HashIoRelation::dummy(),
             keccak_round: KeccakRound::dummy(),
             xor3: Xor3::dummy(),
-            andnot: AndNot::dummy(),
             conv: Conv::dummy(),
             split: [
                 SplitRelation::S1(Split1::dummy()),

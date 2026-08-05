@@ -390,7 +390,6 @@ pub enum LookupKind {
     Schedule,
     State,
     Xor3,
-    Andnot,
     Split(usize),
 }
 
@@ -521,8 +520,10 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
     );
     lookups.extend(arithmetic.into_iter().map(|lookup| Lookup {
         kind: match lookup.kind {
-            keccak_round::ArithmeticLookupKind::Xor3 => LookupKind::Xor3,
-            keccak_round::ArithmeticLookupKind::Andnot => LookupKind::Andnot,
+            // The andnot lookup retargets onto the xor3 relation/table (see
+            // `keccak_round::write_andnot`); no separate `LookupKind` needed.
+            keccak_round::ArithmeticLookupKind::Xor3
+            | keccak_round::ArithmeticLookupKind::Andnot => LookupKind::Xor3,
             keccak_round::ArithmeticLookupKind::Split(shift) => LookupKind::Split(shift),
         },
         num: lookup.numerator,
@@ -713,7 +714,6 @@ fn lookup_denominator(
         LookupKind::Schedule => relations.round_schedule.combine(&lookup.tuple),
         LookupKind::State => relations.keccak_state.combine(&lookup.tuple),
         LookupKind::Xor3 => relations.xor3.combine(&lookup.tuple),
-        LookupKind::Andnot => relations.andnot.combine(&lookup.tuple),
         LookupKind::Split(shift) => relations.split[shift - 1].combine(&lookup.tuple),
     };
     normalize_denominator(denominator)

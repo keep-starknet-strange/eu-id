@@ -677,7 +677,7 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     const SHAKE256_RATE: usize = 136;
     const EXPECTED_SCHEDULE_COLUMNS: usize = 16;
     const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 7_520_256;
-    const EXPECTED_SERVICE_CELLS: usize = 9_102_656;
+    const EXPECTED_SERVICE_CELLS: usize = 8_971_584;
 
     let capacity_bytes = (CAPACITY_PERMUTATIONS - 1) * SHAKE256_RATE;
     let mut shapes = vec![Shape::with_message_capacity(0, capacity_bytes, 1, 1, 2)
@@ -737,7 +737,7 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     assert_eq!(service_cells, EXPECTED_SERVICE_CELLS);
     assert_eq!(
         service_cells - EXPECTED_CARRIER_AND_TIEBACK_CELLS,
-        1_582_400
+        1_451_328
     );
 }
 
@@ -1109,7 +1109,7 @@ fn non_spread_value_in_spread_column_has_no_dense_row() {
     let rel = KeccakRelations::dummy();
     let table = build_dense_table();
     let key = spread_u32(0xAB) + spread_u32(0xCD) + spread_u32(0x37);
-    let [tk, honest_out, _] = table[key as usize];
+    let [tk, honest_out] = table[key as usize];
     assert_eq!(tk, key);
     let bad_out = honest_out | 0b11;
     assert!(
