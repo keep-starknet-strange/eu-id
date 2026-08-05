@@ -107,11 +107,18 @@ const COL_ACCEPT_SLACK0: usize = 7;
 const COL_ACCEPT_SLACK1: usize = 8;
 const COL_ACCEPT_SLACK2: usize = 9;
 const COL_REJECT_DELTA: usize = 10;
+/// C7b: `b1`'s 4+4-bit split (`b1 = lo4 + 16·hi4`), gated by `accept`.
+/// Re-limbs the NTT cell yield from the 8/8/7-bit byte split (`b0,b1,low7`)
+/// to the 12/11-bit split (`a0 = b0+256·lo4`, `a1 = hi4+16·low7`) ntt.rs now
+/// uses, via OPTION (ii): no new canonicity slack, since `value < Q` is
+/// already enforced in byte form.
+const COL_LO4: usize = 11;
+const COL_HI4: usize = 12;
 
 pub const ABSORB_BASE_COLS: usize = 1;
-pub const REJECTION_BASE_COLS: usize = 11;
+pub const REJECTION_BASE_COLS: usize = 13;
 pub const ABSORB_LOGUP_ENTRIES: usize = 2;
-pub const REJECTION_LOGUP_ENTRIES: usize = 10;
+pub const REJECTION_LOGUP_ENTRIES: usize = 12;
 pub const ABSORB_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 pub const REJECTION_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE * REJECTION_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
@@ -626,6 +633,9 @@ fn gen_expand_a_preprocessed_with_attack(
 struct RejectionRow {
     bytes: [u32; 3],
     low7: u32,
+    /// C7b: `b1`'s low/high nibble (`b1 = lo4 + 16·hi4`).
+    lo4: u32,
+    hi4: u32,
     sample: bool,
     accept: bool,
     index: u32,
@@ -651,6 +661,8 @@ fn build_rejection_rows(witness: &ExpandAWitness) -> Vec<RejectionRow> {
             ];
             let low7 = bytes[2] & 0x7f;
             let value = bytes[0] | bytes[1] << 8 | low7 << 16;
+            let lo4 = bytes[1] & 0xf;
+            let hi4 = bytes[1] >> 4;
             let sample = index < N as u32;
             let accept = sample && value < Q;
             let accept_slack = if accept {
@@ -662,6 +674,8 @@ fn build_rejection_rows(witness: &ExpandAWitness) -> Vec<RejectionRow> {
             rows.push(RejectionRow {
                 bytes,
                 low7,
+                lo4,
+                hi4,
                 sample,
                 accept,
                 index,
@@ -686,6 +700,11 @@ fn rejection_range_uses(rows: &[RejectionRow]) -> RcUses {
             uses.record(RcKind::Rc8, row.accept_slack[0]);
             uses.record(RcKind::Rc8, row.accept_slack[1]);
             uses.record(RcKind::Rc7, row.accept_slack[2]);
+            // C7b: lo4/hi4 only need to be range-valid for accepted rows
+            // (they feed the accept-gated NTT yield's 12/11-bit limbs);
+            // mirrors accept_slack's accept-gated lookup pattern.
+            uses.record(RcKind::Rc4, row.lo4);
+            uses.record(RcKind::Rc4, row.hi4);
         } else if row.sample {
             uses.record(RcKind::Rc13, row.reject_delta);
         }
@@ -732,6 +751,8 @@ fn gen_rejection_base_trace(
         columns[COL_ACCEPT_SLACK1][row] = m31(value.accept_slack[1]);
         columns[COL_ACCEPT_SLACK2][row] = m31(value.accept_slack[2]);
         columns[COL_REJECT_DELTA][row] = m31(value.reject_delta);
+        columns[COL_LO4][row] = m31(value.lo4);
+        columns[COL_HI4][row] = m31(value.hi4);
     }
     if let Some(ExpandATraceAttack::Rejection { row, column, value }) = attack {
         columns[column][row] = m31(value);
@@ -846,8 +867,12 @@ impl FrameworkEval for RejectionEval {
             eval.next_trace_mask(),
         ];
         let reject_delta = eval.next_trace_mask();
+        // C7b: b1's 4+4-bit split, re-limbing the NTT yield to 12/11 bits.
+        let lo4 = eval.next_trace_mask();
+        let hi4 = eval.next_trace_mask();
 
         let one = E::F::one();
+        let c16 = E::F::from(m31(16));
         let c128 = E::F::from(m31(128));
         let c255 = E::F::from(m31(255));
         let c256 = E::F::from(m31(256));
@@ -881,6 +906,12 @@ impl FrameworkEval for RejectionEval {
             eval.add_constraint((one.clone() - accept.clone()) * limb.clone());
         }
         eval.add_constraint((one.clone() - skip.clone()) * reject_delta.clone());
+        // C7b: b1 = lo4 + 16·hi4, gated by accept (lo4/hi4 only feed the
+        // accept-gated NTT yield below; no other consumer, so -- like
+        // accept_slack -- the split need not hold on reject rows).
+        eval.add_constraint(
+            accept.clone() * (b1.clone() - lo4.clone() - c16.clone() * hi4.clone()),
+        );
         let padding = one.clone() - active.clone();
         for cell in [
             b0.clone(),
@@ -894,6 +925,8 @@ impl FrameworkEval for RejectionEval {
             slack[1].clone(),
             slack[2].clone(),
             reject_delta.clone(),
+            lo4.clone(),
+            hi4.clone(),
         ] {
             eval.add_constraint(padding.clone() * cell);
         }
@@ -941,9 +974,25 @@ impl FrameworkEval for RejectionEval {
             &range_tuple::<E>(reject_delta, RcKind::Rc13),
         ));
         eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            accept.clone(),
+            &range_tuple::<E>(lo4.clone(), RcKind::Rc4),
+        ));
+        eval.add_to_relation(RelationEntry::base(
+            &self.relations.range,
+            accept.clone(),
+            &range_tuple::<E>(hi4.clone(), RcKind::Rc4),
+        ));
+        // C7b: yield the NTT cell in the 12/11-bit split instead of the
+        // 8/8/7-bit byte split -- a0 = b0 + 256·lo4 (12 bits), a1 = hi4 +
+        // 16·low7 (11 bits); a0 + 4096·a1 == b0 + 256·b1 + 65536·low7
+        // (`value`, unchanged) since b1 = lo4 + 16·hi4.
+        let a0 = b0 + c256 * lo4;
+        let a1 = hi4 + c16 * low7;
+        eval.add_to_relation(RelationEntry::base(
             &self.relations.ntt,
             accept,
-            &[poly, E::F::zero(), index, b0, b1, low7],
+            &[poly, E::F::zero(), index, a0, a1],
         ));
         eval.finalize_logup_batched(LOGUP_BATCH);
         eval
@@ -1084,16 +1133,30 @@ fn gen_rejection_interaction(
         } else {
             (zero, one)
         });
+        // C7b: lo4/hi4 Rc4 lookups (gated by accept, mirroring accept_slack).
         entries.push(if data.accept {
+            (one, range_denominator(&relations.range, data.lo4, RcKind::Rc4))
+        } else {
+            (zero, one)
+        });
+        entries.push(if data.accept {
+            (one, range_denominator(&relations.range, data.hi4, RcKind::Rc4))
+        } else {
+            (zero, one)
+        });
+        entries.push(if data.accept {
+            // C7b: yield the NTT cell in the 12/11-bit split instead of the
+            // 8/8/7-bit byte split (see `RejectionEval::evaluate`).
+            let a0 = data.bytes[0] + 256 * data.lo4;
+            let a1 = data.hi4 + 16 * data.low7;
             (
                 one,
                 relations.ntt.combine(&[
                     m31(poly as u32),
                     m31(0),
                     m31(data.index),
-                    m31(data.bytes[0]),
-                    m31(data.bytes[1]),
-                    m31(data.low7),
+                    m31(a0),
+                    m31(a1),
                 ]),
             )
         } else {
@@ -1537,7 +1600,7 @@ mod tests {
             .iter()
             .all(|id| !id.id.ends_with("_rejection_poly")));
         assert_eq!(ABSORB_BASE_COLS, 1);
-        assert_eq!(REJECTION_BASE_COLS, 11);
+        assert_eq!(REJECTION_BASE_COLS, 13);
         assert_eq!(ABSORB_INTERACTION_COLS, 4);
         assert_eq!(REJECTION_INTERACTION_COLS, 12);
         let rho = [17u8; 32];
@@ -1741,6 +1804,8 @@ mod tests {
     fn set_boundary_candidate(row: &mut RejectionRow, value: u32, accept: bool) {
         row.bytes = split_u23(value);
         row.low7 = row.bytes[2] & 0x7f;
+        row.lo4 = row.bytes[1] & 0xf;
+        row.hi4 = row.bytes[1] >> 4;
         row.accept = accept;
         row.accept_slack = if accept {
             split_u23(Q - 1 - value)
@@ -1793,6 +1858,8 @@ mod tests {
         let row = rows.iter().position(|row| row.accept).unwrap();
         rows[row].bytes = split_u23(Q);
         rows[row].low7 = rows[row].bytes[2] & 0x7f;
+        rows[row].lo4 = rows[row].bytes[1] & 0xf;
+        rows[row].hi4 = rows[row].bytes[1] >> 4;
         rows[row].accept = true;
         rows[row].accept_slack = [0; 3];
 
@@ -1821,6 +1888,34 @@ mod tests {
             1,
             "q - 1 must not satisfy the rejected-candidate comparison"
         );
+    }
+
+    /// C7b(N7a): `lo4`/`hi4` must satisfy `b1 = lo4 + 16·hi4` exactly on an
+    /// accepted row -- bumping `hi4` by one (leaving `lo4` and `b1`
+    /// untouched) breaks the split constraint and must be rejected.
+    #[test]
+    fn rejection_air_rejects_mismatched_lo4_hi4_split() {
+        let witness = derive_expand_a_witness(ML_DSA_65, [42u8; 32]).unwrap();
+        let mut rows = build_rejection_rows(&witness);
+        let row = rows.iter().position(|row| row.accept).unwrap();
+        rows[row].hi4 += 1;
+
+        assert!(
+            rejection_constraint_failures(&rows, None) > 0,
+            "a mismatched (lo4, hi4) split must be rejected"
+        );
+    }
+
+    /// C7b(N7b): `hi4` is still range-checked via Rc4 after the re-limb.
+    /// Rc4's domain is exactly `[0, 16)`; the first excluded value (16)
+    /// cannot even be recorded in the witness-side multiplicity
+    /// bookkeeping, mirroring the same structural argument as the ntt.rs
+    /// C7a/C7b boundary tests.
+    #[test]
+    #[should_panic]
+    fn hi4_at_table_boundary_cannot_be_recorded() {
+        let mut uses = RcUses::new();
+        uses.record(RcKind::Rc4, 16);
     }
 
     #[test]

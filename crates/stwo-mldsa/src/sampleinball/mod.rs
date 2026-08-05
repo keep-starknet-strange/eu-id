@@ -63,7 +63,6 @@
 
 pub mod proof;
 pub mod relations;
-pub mod tables;
 
 use num_traits::One;
 use stwo::core::fields::m31::M31;
@@ -78,10 +77,27 @@ use stwo_constraint_framework::{
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 use crate::constants::{N, TAU};
+use crate::coeffs::tables::RcKind;
+use crate::coeffs::RcUses;
 use crate::profile::MlDsaProfile;
 use crate::witness::MlDsaWitness;
 use relations::SibRelations;
-use tables::RcUses;
+
+/// `[value, bound_id]` tuple for the shared range table (C5). Mirrors
+/// `crate::decomp::range_tuple`.
+fn range_tuple<E: EvalAtRow>(value: E::F, kind: RcKind) -> [E::F; 2] {
+    [value, E::F::from(m31(kind.bound_id()))]
+}
+
+/// Witness-side denominator for a shared range-table lookup. Mirrors
+/// `crate::decomp::range_denominator`.
+fn range_denominator(
+    relation: &crate::coeffs::relations::RangeRelation,
+    value: u32,
+    kind: RcKind,
+) -> SecureField {
+    relation.combine(&[m31(value), m31(kind.bound_id())])
+}
 
 /// Sign bytes at the head of the squeeze stream.
 pub const SIGN_BYTES: usize = 8;
@@ -1054,26 +1070,26 @@ impl FrameworkEval for SibEval {
         // so the LogUp constraint stays at degree 2 or less.
         let accept_lo = (idx.clone() - byte.clone()) - two_pow_8.clone() * accept_hi.clone();
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             accept.clone(),
-            core::slice::from_ref(&accept_lo),
+            &range_tuple::<E>(accept_lo, RcKind::Rc8),
         ));
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             accept.clone(),
-            core::slice::from_ref(&accept_hi),
+            &range_tuple::<E>(accept_hi.clone(), RcKind::Rc8),
         ));
         let reject_lo =
             (byte.clone() - idx.clone() - one.clone()) - two_pow_8.clone() * reject_hi.clone();
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             reject.clone(),
-            core::slice::from_ref(&reject_lo),
+            &range_tuple::<E>(reject_lo, RcKind::Rc8),
         ));
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             reject.clone(),
-            core::slice::from_ref(&reject_hi),
+            &range_tuple::<E>(reject_hi.clone(), RcKind::Rc8),
         ));
 
         // C3: HashIo consume — (STREAM_ID_SIB_SQUEEZE, byte_pos, byte), require (−).
@@ -1164,9 +1180,9 @@ impl FrameworkEval for SibEval {
 
         // C8c: daddr ∈ [0,256) (rc8) — non-decreasing addr. Gated to non-first.
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             not_first.clone(),
-            core::slice::from_ref(&s_daddr),
+            &range_tuple::<E>(s_daddr.clone(), RcKind::Rc8),
         ));
 
         // C8d: strict ts within a cell: dts = ts − prev_ts − 1 ≥ 0 (rc11), and
@@ -1175,9 +1191,9 @@ impl FrameworkEval for SibEval {
             s_same.clone() * (s_ts.clone() - prev_s_ts.clone() - one.clone() - s_dts.clone()),
         );
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc11,
+            &self.relations.range,
             s_same.clone(),
-            core::slice::from_ref(&s_dts),
+            &range_tuple::<E>(s_dts.clone(), RcKind::Rc11),
         ));
 
         // C8e: value continuity for READs within a cell. s_read = is_sorted −
@@ -1536,7 +1552,7 @@ pub fn gen_sib_interaction(
                 byte, i, accept, ..
             }) if accept => {
                 let lo = (i - byte) & 0xff;
-                (one, relations.rc8.combine(&[m31(lo)]))
+                (one, range_denominator(&relations.range, lo, RcKind::Rc8))
             }
             _ => (zero, one),
         },
@@ -1549,7 +1565,7 @@ pub fn gen_sib_interaction(
                 byte, i, accept, ..
             }) if accept => {
                 let hi = (i - byte) >> 8;
-                (one, relations.rc8.combine(&[m31(hi)]))
+                (one, range_denominator(&relations.range, hi, RcKind::Rc8))
             }
             _ => (zero, one),
         },
@@ -1562,7 +1578,7 @@ pub fn gen_sib_interaction(
                 byte, i, reject, ..
             }) if reject => {
                 let lo = (byte - i - 1) & 0xff;
-                (one, relations.rc8.combine(&[m31(lo)]))
+                (one, range_denominator(&relations.range, lo, RcKind::Rc8))
             }
             _ => (zero, one),
         },
@@ -1575,7 +1591,7 @@ pub fn gen_sib_interaction(
                 byte, i, reject, ..
             }) if reject => {
                 let hi = (byte - i - 1) >> 8;
-                (one, relations.rc8.combine(&[m31(hi)]))
+                (one, range_denominator(&relations.range, hi, RcKind::Rc8))
             }
             _ => (zero, one),
         },
@@ -1612,7 +1628,7 @@ pub fn gen_sib_interaction(
         &|coset| {
             if coset >= 1 && coset < mem.sorted.len() {
                 let daddr = mem.sorted[coset].addr - mem.sorted[coset - 1].addr;
-                (one, relations.rc8.combine(&[m31(daddr)]))
+                (one, range_denominator(&relations.range, daddr, RcKind::Rc8))
             } else {
                 (zero, one)
             }
@@ -1628,7 +1644,7 @@ pub fn gen_sib_interaction(
                 && mem.sorted[coset].addr == mem.sorted[coset - 1].addr
             {
                 let dts = mem.sorted[coset].ts - mem.sorted[coset - 1].ts - 1;
-                (one, relations.rc11.combine(&[m31(dts)]))
+                (one, range_denominator(&relations.range, dts, RcKind::Rc11))
             } else {
                 (zero, one)
             }
@@ -1864,5 +1880,75 @@ pub fn gen_sib_interaction(
         rc_uses,
         stream_bytes,
         ccell_uses,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// C5(3): sib's daddr/index-margin values are still Rc8-range-checked
+    /// (now via the shared table) after folding decomp's and sib's private
+    /// tables in. Rc8's domain is exactly `[0, 256)`; the first excluded
+    /// value (256) cannot even be recorded in the witness-side multiplicity
+    /// bookkeeping, since `RcUses::record` indexes its per-value counter
+    /// vector directly -- proving no honest witness (and no witness the real
+    /// AIR's identical Rc8 lookup could balance) can carry a daddr/margin of
+    /// 256 or more.
+    #[test]
+    #[should_panic]
+    fn sib_rc8_boundary_value_cannot_be_recorded() {
+        let mut uses = RcUses::new();
+        uses.record(RcKind::Rc8, 256);
+    }
+
+    /// C5: same structural check for `dts` (Rc11, `[0, 2048)`) -- the one
+    /// newly-migrated kind unique to SIB (Rc8 is shared with decomp/coeffs
+    /// already; Rc11 is SIB's own).
+    #[test]
+    #[should_panic]
+    fn sib_rc11_boundary_value_cannot_be_recorded() {
+        let mut uses = RcUses::new();
+        uses.record(RcKind::Rc11, 2048);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum GateKind {
+        /// A witnessed (base/interaction) column with an explicit
+        /// `x·(1−x)=0` booleanity constraint in the SAME component (or, for
+        /// `not_first`, a fixed linear combination of two such preprocessed
+        /// flags -- itself boolean by construction, no separate constraint
+        /// needed).
+        WitnessWithBooleanity,
+    }
+
+    /// C5(5) numerator-provenance regression: every shared-range consumer's
+    /// LogUp numerator (the `gate` argument to `add_to_relation`) must be
+    /// either a preprocessed column or carry its own booleanity constraint in
+    /// the same component. Enumerates every SIB site (`evaluate`, one entry
+    /// per `add_to_relation(&self.relations.range, ...)` call):
+    /// - `accept`/`reject` (mod.rs ~:1073-1090): witness columns, booleanity
+    ///   constrained at ~:1050-1051 (C1).
+    /// - `not_first` (mod.rs ~:1183): `is_sorted − sorted_start`, both
+    ///   preprocessed (~:961-962) -- `sorted_start` implies `is_sorted`, so
+    ///   the difference is itself boolean with no extra constraint needed.
+    /// - `s_same` (mod.rs ~:1194): a witness column, booleanity constrained
+    ///   at ~:1160 (C8a).
+    #[test]
+    fn sib_range_lookup_gates_carry_booleanity_or_are_preprocessed() {
+        const SITES: &[(&str, GateKind)] = &[
+            ("accept_lo (Rc8)", GateKind::WitnessWithBooleanity),
+            ("accept_hi (Rc8)", GateKind::WitnessWithBooleanity),
+            ("reject_lo (Rc8)", GateKind::WitnessWithBooleanity),
+            ("reject_hi (Rc8)", GateKind::WitnessWithBooleanity),
+            ("s_daddr (Rc8, gate=not_first)", GateKind::WitnessWithBooleanity),
+            ("s_dts (Rc11, gate=s_same)", GateKind::WitnessWithBooleanity),
+        ];
+        assert_eq!(
+            SITES.len(),
+            6,
+            "update this enumeration (and re-audit gate provenance) if a \
+             shared-range lookup site is added or removed"
+        );
     }
 }

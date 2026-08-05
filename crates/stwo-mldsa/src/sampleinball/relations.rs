@@ -12,8 +12,13 @@
 //! | `Swap`  | 2 | `(step, addr)` | accept rows ×2 (+) | read + write-j rows (−) | FSM↔mem addr tie |
 //! | `StepVal`| 2 | `(step, value)` | read rows (+) | write-i rows (−) | FSM↔mem value tie |
 //! | `SignBit`| 2 | `(bit_idx, ±1)` | sign rows per bit (+) | write-j rows (−) | FSM↔mem sign tie |
-//! | `Rc8`   | 1 | `v ∈ [0,2^8)` | rc8 table | index/byte bounds, sorted daddr |
-//! | `Rc11`  | 1 | `v ∈ [0,2^11)` | rc11 table | offline-memory timestamp diff `dts` |
+//! | `Range` | 2 | `(value, bound_id)` | shared range table (yield `−mult`) | index/byte bounds, sorted daddr (Rc8), offline-memory timestamp diff `dts` (Rc11) |
+//!
+//! C5 folded SIB's two private tables (`Rc8`, `Rc11`) into
+//! [`crate::coeffs::relations::RangeRelation`], the same proof-wide
+//! `(value, bound_id)` table `coeffs` / `ExpandA` / `private_key_eval` /
+//! decomp already share. Every SIB lookup now carries its
+//! [`crate::coeffs::tables::RcKind`] bound id as the tuple's second slot.
 //!
 //! There is no `Rc9` relation: the coefficient ternary bound `c+1 ∈ [0,2^9)`
 //! was redundant with `c·csq = c` (`csq = c²`), the degree-2 identity `c³ = c`
@@ -41,15 +46,13 @@
 use stwo_constraint_framework::relation;
 
 use crate::binding::{CCellRelation, HashIoRelation};
+use crate::coeffs::relations::RangeRelation;
 
 /// `(addr, value, timestamp, is_write)` offline-memory channel. The access
 /// classification is load-bearing: omitting it lets a malicious sorted view
 /// relabel every read as a write and bypass read-value continuity.
 pub const MEM_ARITY: usize = 4;
 relation!(MemRelation, MEM_ARITY);
-
-// Arity-1 range table relation (independent instances).
-relation!(RcRelation, 1);
 
 /// Arity-2 FSM↔memory tie channels. These close the free-witness hole in the
 /// core access list: without them the unsorted `(u_addr, u_val, u_ts, u_write)`
@@ -78,8 +81,7 @@ pub struct SibRelations {
     pub swap: SwapRelation,
     pub stepval: StepValRelation,
     pub signbit: SignBitRelation,
-    pub rc8: RcRelation,
-    pub rc11: RcRelation,
+    pub range: RangeRelation,
 }
 
 impl SibRelations {
@@ -91,19 +93,21 @@ impl SibRelations {
             swap: SwapRelation::draw(channel),
             stepval: StepValRelation::draw(channel),
             signbit: SignBitRelation::draw(channel),
-            rc8: RcRelation::draw(channel),
-            rc11: RcRelation::draw(channel),
+            range: RangeRelation::draw(channel),
         }
     }
 
     /// Composed-statement constructor. Draw only the private SIB relations
-    /// (mem + range tables) and reuse SHARED `ccell` (from coeffs) and `hash_io`
-    /// (from the SIB-chain sponge) instances so the c-binding and squeeze-stream
-    /// bytes cancel across components. Private draw order matches [`Self::draw`].
+    /// (mem + swap/stepval/signbit) and reuse SHARED `ccell` (from coeffs),
+    /// `hash_io` (from the SIB-chain sponge), and `range` (the proof-wide
+    /// range table, C5) instances so the c-binding, squeeze-stream bytes, and
+    /// range-table uses cancel across components. Private draw order matches
+    /// [`Self::draw`].
     pub fn draw_with(
         channel: &mut impl stwo::core::channel::Channel,
         ccell: CCellRelation,
         hash_io: HashIoRelation,
+        range: RangeRelation,
     ) -> Self {
         Self {
             ccell,
@@ -112,8 +116,7 @@ impl SibRelations {
             swap: SwapRelation::draw(channel),
             stepval: StepValRelation::draw(channel),
             signbit: SignBitRelation::draw(channel),
-            rc8: RcRelation::draw(channel),
-            rc11: RcRelation::draw(channel),
+            range,
         }
     }
 
@@ -125,8 +128,7 @@ impl SibRelations {
             swap: SwapRelation::dummy(),
             stepval: StepValRelation::dummy(),
             signbit: SignBitRelation::dummy(),
-            rc8: RcRelation::dummy(),
-            rc11: RcRelation::dummy(),
+            range: RangeRelation::dummy(),
         }
     }
 }

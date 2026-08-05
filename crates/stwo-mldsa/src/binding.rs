@@ -65,11 +65,13 @@ relation!(RhoCellRelation, RHO_CELL_ARITY);
 pub const T1_CELL_ARITY: usize = 4;
 relation!(T1CellRelation, T1_CELL_ARITY);
 
-/// `(matrix_poly, ntt_stage, coefficient_index, limb0, limb1, limb2)`.
+/// `(matrix_poly, ntt_stage, coefficient_index, limb0, limb1)`.
 ///
 /// ExpandA yields accepted coefficients at stage zero. The inverse-NTT
 /// component consumes those cells. Each NTT stage uses the same tuple shape.
-pub const NTT_CELL_ARITY: usize = 6;
+/// C7b: the value limbs are a 12/11-bit split (`limb0 < 4096`,
+/// `limb1 < 2048`), base 4096 -- not the earlier 8/8/7-bit byte split.
+pub const NTT_CELL_ARITY: usize = 5;
 relation!(NttCellRelation, NTT_CELL_ARITY);
 
 /// Shared handles for the public-key and inverse-NTT components.

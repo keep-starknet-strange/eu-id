@@ -84,11 +84,9 @@ use crate::coeffs::tables as coeffs_tables;
 use crate::coeffs::{self, CoeffsEval, RcUses};
 
 use crate::decomp::relations::DecompRelations;
-use crate::decomp::tables as decomp_tables;
 use crate::decomp::{self, DecompEval};
 
 use crate::sampleinball::relations::SibRelations;
-use crate::sampleinball::tables as sib_tables;
 use crate::sampleinball::{self, SibEval};
 
 // =============================================================================
@@ -382,8 +380,13 @@ fn draw_relations_common(
     let private_key = private_key_bindings.map(|bindings| {
         PrivateKeyEvalRelations::from_bindings(bindings, coeffs.eval.clone(), coeffs.range.clone())
     });
-    let decomp = DecompRelations::draw_with(channel, wcell, keccak.hash_io.clone());
-    let sib = SibRelations::draw_with(channel, ccell, keccak.hash_io.clone());
+    let decomp = DecompRelations::draw_with(wcell, keccak.hash_io.clone(), coeffs.range.clone());
+    let sib = SibRelations::draw_with(
+        channel,
+        ccell,
+        keccak.hash_io.clone(),
+        coeffs.range.clone(),
+    );
 
     Relations {
         rho_rlc,
@@ -738,16 +741,13 @@ fn all_preprocessed_ids(
     if private_key {
         ids.extend(private_key_eval::preprocessed_ids(profile));
     }
-    // decomp (+ its rc kinds).
+    // decomp. C5 folded its private rc tables into the shared range table
+    // (already included above when `!hosted`; hosted mode's copy lives in
+    // the external `SharedRangeTable`), so decomp contributes no rc columns
+    // of its own anymore.
     ids.extend(decomp::decomp_preprocessed_ids(profile));
-    for kind in decomp_tables::RcKind::ALL {
-        ids.push(kind.value_column_id());
-    }
-    // sib (+ its rc kinds).
+    // sib. Same C5 fold as decomp.
     ids.extend(sampleinball::sib_preprocessed_ids_ns(ns));
-    for kind in sib_tables::RcKind::ALL {
-        ids.push(kind.value_column_id());
-    }
     // Private message bridge, remaining fixed bridges, and sinks.
     if !public_message {
         ids.extend(
@@ -801,14 +801,8 @@ fn all_preprocessed_log_sizes(
     }
     let dls = decomp_log_size();
     sizes.extend(vec![dls; decomp::decomp_preprocessed_ids(profile).len()]);
-    for kind in decomp_tables::RcKind::ALL {
-        sizes.push(kind.log_size());
-    }
     let sls = sib_log_size(profile);
     sizes.extend(vec![sls; sampleinball::sib_preprocessed_ids().len()]);
-    for kind in sib_tables::RcKind::ALL {
-        sizes.push(kind.log_size());
-    }
     if !public_message {
         let log_size = bridge_log_size(message_len);
         sizes.extend(vec![
@@ -887,14 +881,8 @@ fn gen_all_preprocessed(
     }
     let dls = decomp_log_size();
     cols.extend(decomp::gen_decomp_preprocessed(profile, dls));
-    for kind in decomp_tables::RcKind::ALL {
-        cols.push(decomp_tables::gen_table_preprocessed(kind));
-    }
     let sls = sib_log_size(profile);
     cols.extend(sampleinball::gen_sib_preprocessed(profile, sls));
-    for kind in sib_tables::RcKind::ALL {
-        cols.push(sib_tables::gen_table_preprocessed(kind));
-    }
     if !public_message {
         cols.extend(
             msg_bridge_eval("", message_len, 0, &msglink, None, &hash_io).gen_preprocessed(),
@@ -964,9 +952,7 @@ struct Built {
     /// shared table instead.
     coeffs_rc: Option<FrameworkComponent<coeffs_tables::RangeTableEval>>,
     decomp: FrameworkComponent<DecompEval>,
-    decomp_rc: Vec<FrameworkComponent<decomp_tables::RcTableEval>>,
     sib: FrameworkComponent<SibEval>,
-    sib_rc: Vec<FrameworkComponent<sib_tables::RcTableEval>>,
     /// Standalone msglink producer; `None` in hosted mode (dropped from the
     /// commit order — the msg bridge sources from the host's shared relation).
     msglink: Option<FrameworkComponent<MsgLinkEval>>,
@@ -992,9 +978,7 @@ impl Built {
             out.push(component);
         }
         out.push(&self.decomp);
-        out.extend(self.decomp_rc.iter().map(|c| c as &dyn Component));
         out.push(&self.sib);
-        out.extend(self.sib_rc.iter().map(|c| c as &dyn Component));
         if let Some(m) = &self.msglink {
             out.push(m);
         }
@@ -1022,17 +1006,7 @@ impl Built {
             out.push(component);
         }
         out.push(&self.decomp);
-        out.extend(
-            self.decomp_rc
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
         out.push(&self.sib);
-        out.extend(
-            self.sib_rc
-                .iter()
-                .map(|c| c as &dyn ComponentProver<SimdBackend>),
-        );
         if let Some(m) = &self.msglink {
             out.push(m);
         }
@@ -1067,9 +1041,7 @@ struct Claims {
     private_key: Option<PrivateKeyEvalClaims>,
     coeffs_rc: Vec<SecureField>,
     decomp: SecureField,
-    decomp_rc: Vec<SecureField>,
     sib: SecureField,
-    sib_rc: Vec<SecureField>,
     msglink: SecureField,
     prefix: SecureField,
     bridges: Vec<SecureField>,
@@ -1089,9 +1061,7 @@ impl Claims {
         }
         v.extend(self.coeffs_rc.iter().copied());
         v.push(self.decomp);
-        v.extend(self.decomp_rc.iter().copied());
         v.push(self.sib);
-        v.extend(self.sib_rc.iter().copied());
         if !self.hosted {
             v.push(self.msglink);
         }
@@ -1122,11 +1092,7 @@ impl Claims {
         });
         let coeffs_rc = if ctx.hosted { Vec::new() } else { vec![next()] };
         let decomp = next();
-        let decomp_rc = (0..decomp_tables::RcKind::ALL.len())
-            .map(|_| next())
-            .collect();
         let sib = next();
-        let sib_rc = (0..sib_tables::RcKind::ALL.len()).map(|_| next()).collect();
         let msglink = if ctx.hosted {
             SecureField::zero()
         } else {
@@ -1149,9 +1115,7 @@ impl Claims {
             private_key,
             coeffs_rc,
             decomp,
-            decomp_rc,
             sib,
-            sib_rc,
             msglink,
             prefix,
             bridges,
@@ -1231,17 +1195,11 @@ fn module_trace_layout(ctx: &LayoutCtx) -> Vec<u32> {
     if !ctx.hosted {
         t.push(coeffs_tables::range_table_log_size());
     }
-    // 3. decomp + 4. rc ×4.
+    // 3. decomp (C5 folded its rc columns into the shared range table above).
     t.extend(vec![decomp_log_size(); decomp::N_BASE_COLS]);
-    for kind in decomp_tables::RcKind::ALL {
-        t.push(kind.log_size());
-    }
-    // 5. sib + 6. rc ×3.
+    // 5. sib (C5 folded its rc columns into the shared range table above).
     let sls = sib_log_size(ctx.profile);
     t.extend(vec![sls; sampleinball::N_BASE_COLS]);
-    for kind in sib_tables::RcKind::ALL {
-        t.push(kind.log_size());
-    }
     // 7. msglink (standalone only).
     if !ctx.hosted {
         t.extend(vec![msglink::MSGLINK_LOG_SIZE; msglink::N_BASE_COLS]);
@@ -1281,21 +1239,13 @@ fn module_interaction_layout(ctx: &LayoutCtx) -> Vec<u32> {
             coeffs_tables::RANGE_TABLE_INTERACTION_COLS
         ]);
     }
-    // 3. decomp + 4. rc ×4.
+    // 3. decomp (C5 folded its rc interaction columns into the shared range
+    // table above).
     i.extend(vec![decomp_log_size(); decomp::N_INTERACTION_COLS]);
-    for kind in decomp_tables::RcKind::ALL {
-        for _ in 0..decomp_tables::RC_TABLE_INTERACTION_COLS {
-            i.push(kind.log_size());
-        }
-    }
-    // 5. sib + 6. rc ×3.
+    // 5. sib (C5 folded its rc interaction columns into the shared range
+    // table above).
     let sls = sib_log_size(ctx.profile);
     i.extend(vec![sls; sampleinball::N_INTERACTION_COLS]);
-    for kind in sib_tables::RcKind::ALL {
-        for _ in 0..sib_tables::RC_TABLE_INTERACTION_COLS {
-            i.push(kind.log_size());
-        }
-    }
     // 7. msglink (standalone only).
     if !ctx.hosted {
         i.extend(vec![
@@ -1473,21 +1423,6 @@ fn build_components(
         ),
         claims.decomp,
     );
-    // 4. decomp rc ×4.
-    let decomp_rc = decomp_tables::RcKind::ALL
-        .iter()
-        .enumerate()
-        .map(|(idx, kind)| {
-            FrameworkComponent::new(
-                allocator,
-                decomp_tables::RcTableEval {
-                    kind: *kind,
-                    relation: decomp_rc_relation(&rel.decomp, *kind).clone(),
-                },
-                claims.decomp_rc[idx],
-            )
-        })
-        .collect();
     // 5. sib.
     let sib = FrameworkComponent::new(
         allocator,
@@ -1500,21 +1435,6 @@ fn build_components(
         },
         claims.sib,
     );
-    // 6. sib rc ×3.
-    let sib_rc = sib_tables::RcKind::ALL
-        .iter()
-        .enumerate()
-        .map(|(idx, kind)| {
-            FrameworkComponent::new(
-                allocator,
-                sib_tables::RcTableEval {
-                    kind: *kind,
-                    relation: sib_rc_relation(&rel.sib, *kind).clone(),
-                },
-                claims.sib_rc[idx],
-            )
-        })
-        .collect();
     // 7. msglink (standalone only; hosted mode drops it).
     let msglink = (!claims.hosted).then(|| {
         let input = input.expect("standalone message link requires the public input");
@@ -1614,36 +1534,13 @@ fn build_components(
         private_key,
         coeffs_rc,
         decomp,
-        decomp_rc,
         sib,
-        sib_rc,
         msglink,
         prefix,
         msg,
         bridges,
         sinks,
         private_fold,
-    }
-}
-
-fn decomp_rc_relation(
-    r: &DecompRelations,
-    kind: decomp_tables::RcKind,
-) -> &crate::decomp::relations::RcRelation {
-    match kind {
-        decomp_tables::RcKind::Rc4 => &r.rc4,
-        decomp_tables::RcKind::Rc13 => &r.rc13,
-        decomp_tables::RcKind::Rc7 => &r.rc7,
-        decomp_tables::RcKind::Rc8 => &r.rc8,
-    }
-}
-fn sib_rc_relation(
-    r: &SibRelations,
-    kind: sib_tables::RcKind,
-) -> &crate::sampleinball::relations::RcRelation {
-    match kind {
-        sib_tables::RcKind::Rc8 => &r.rc8,
-        sib_tables::RcKind::Rc11 => &r.rc11,
     }
 }
 
@@ -1682,11 +1579,16 @@ pub struct MlDsaProver {
     private_key_base: Option<PrivateKeyBase>,
     private_device_evals: Option<PrivateDeviceEvals>,
     relations: Option<Relations>,
-    // Range-check multiplicity columns stored between trace phases.
+    // Range-check multiplicity columns stored between trace phases. C5 folds
+    // decomp's and sib's own range uses into `coeffs_rc_uses` too, done at
+    // `build()` time (not `write_trace`) so `range_uses()` is already
+    // complete the moment the caller queries it -- hosted callers build the
+    // external `SharedRangeTable` from `range_uses()` before `write_trace`
+    // ever runs. The metadata is stashed here so `write_trace` doesn't
+    // recompute it.
     coeffs_rc_mult: Vec<ColEval>,
     coeffs_rc_uses: RcUses,
-    decomp_rc_mult: Vec<ColEval>,
-    sib_rc_mult: Vec<ColEval>,
+    decomp_metadata: Option<decomp::DecompMetadata>,
     // Bridge byte payloads stored for the interaction phase.
     decomp_w1_bytes: Vec<u8>,
     sponge_outputs: SpongeOutputs,
@@ -1749,7 +1651,18 @@ impl MlDsaProver {
             public_message,
             private_key,
         );
-        let coeffs_rc_uses = coeffs::gen_coeffs_rc_uses(&witness);
+        // C5: decomp's and sib's own range uses are computed and folded in
+        // HERE (build time), not in `write_trace`, so `range_uses()` is
+        // already complete the moment a hosted caller queries it to build
+        // the external `SharedRangeTable` -- that happens before
+        // `write_trace` ever runs.
+        let mut coeffs_rc_uses = coeffs::gen_coeffs_rc_uses(&witness);
+        let decomp_metadata = decomp::gen_decomp_metadata(&witness);
+        coeffs_rc_uses.add_assign(&decomp_metadata.rc_uses);
+        // sib's own metadata is only ever needed for its range-use census;
+        // fold it in immediately and discard the rest (unlike decomp's
+        // metadata, nothing downstream needs sib's stream bytes from here).
+        coeffs_rc_uses.add_assign(&sampleinball::gen_sib_metadata(&witness).rc_uses);
         let sponge_outputs =
             sponge_outputs(profile, &witness, &input, ctx.native_mu(), private_key);
         let claims = Claims {
@@ -1774,8 +1687,7 @@ impl MlDsaProver {
             relations: None,
             coeffs_rc_mult: Vec::new(),
             coeffs_rc_uses,
-            decomp_rc_mult: Vec::new(),
-            sib_rc_mult: Vec::new(),
+            decomp_metadata: Some(decomp_metadata),
             decomp_w1_bytes: Vec::new(),
             sponge_outputs,
             group_evals: Vec::new(),
@@ -2172,6 +2084,17 @@ impl AirProver for MlDsaProver {
                     .trace,
             );
         }
+        // C5: decomp's and sib's own range uses were already folded into
+        // `coeffs_rc_uses` at `build()` time (so `range_uses()` is complete
+        // before a hosted caller ever queries it); reuse the metadata
+        // stashed there instead of recomputing it. decomp/sib no longer
+        // commit any range columns of their own.
+        let decomp_metadata = self
+            .decomp_metadata
+            .take()
+            .expect("decomp metadata was prepared at build time");
+        self.decomp_w1_bytes = decomp_metadata.w1_encode_bytes;
+
         self.coeffs_rc_mult.clear();
         if !self.ctx.hosted {
             self.coeffs_rc_mult = vec![coeffs_tables::gen_range_table_multiplicities([
@@ -2180,37 +2103,20 @@ impl AirProver for MlDsaProver {
                 self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc8),
                 self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc7),
                 self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Ternary),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc4),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc11),
+                self.coeffs_rc_uses.for_kind(coeffs_tables::RcKind::Rc12),
             ])];
             evals.extend(self.coeffs_rc_mult.clone());
         }
 
-        // 3. Decomposition base + 4. range counts. Store w1Encode bytes for its bridge.
+        // 3. Decomposition base. Store w1Encode bytes for its bridge.
         let dls = decomp_log_size();
         evals.extend(decomp::gen_decomp_base_trace(&self.witness, dls));
-        let decomp_metadata = decomp::gen_decomp_metadata(&self.witness);
-        self.decomp_w1_bytes = decomp_metadata.w1_encode_bytes;
-        self.decomp_rc_mult = decomp_tables::RcKind::ALL
-            .iter()
-            .map(|kind| {
-                decomp_tables::gen_table_multiplicities(
-                    *kind,
-                    decomp_metadata.rc_uses.for_kind(*kind),
-                )
-            })
-            .collect();
-        evals.extend(self.decomp_rc_mult.clone());
 
-        // 5. sib base + 6. rc mult.
+        // 5. sib base.
         let sls = sib_log_size(self.ctx.profile);
         evals.extend(sampleinball::gen_sib_base_trace(&self.witness, sls));
-        let sib_metadata = sampleinball::gen_sib_metadata(&self.witness);
-        self.sib_rc_mult = sib_tables::RcKind::ALL
-            .iter()
-            .map(|kind| {
-                sib_tables::gen_table_multiplicities(*kind, sib_metadata.rc_uses.for_kind(*kind))
-            })
-            .collect();
-        evals.extend(self.sib_rc_mult.clone());
 
         // 7. msglink (standalone only).
         if !self.ctx.hosted {
@@ -2365,17 +2271,6 @@ impl AirProver for MlDsaProver {
         );
         self.claims.decomp = decomp_int.claimed_sum;
         evals.extend(decomp_int.trace);
-        // 4. decomp rc ×4.
-        self.claims.decomp_rc.clear();
-        for (idx, kind) in decomp_tables::RcKind::ALL.iter().enumerate() {
-            let (tr, sum) = decomp_tables::gen_table_interaction(
-                *kind,
-                &self.decomp_rc_mult[idx],
-                decomp_rc_relation(&rel.decomp, *kind),
-            );
-            evals.extend(tr);
-            self.claims.decomp_rc.push(sum);
-        }
 
         // 5. sib interaction.
         let sls = sib_log_size(self.ctx.profile);
@@ -2387,17 +2282,6 @@ impl AirProver for MlDsaProver {
         );
         self.claims.sib = sib_int.claimed_sum;
         evals.extend(sib_int.trace);
-        // 6. sib rc ×3.
-        self.claims.sib_rc.clear();
-        for (idx, kind) in sib_tables::RcKind::ALL.iter().enumerate() {
-            let (tr, sum) = sib_tables::gen_table_interaction(
-                *kind,
-                &self.sib_rc_mult[idx],
-                sib_rc_relation(&rel.sib, *kind),
-            );
-            evals.extend(tr);
-            self.claims.sib_rc.push(sum);
-        }
 
         // 7. msglink (standalone only; hosted mode sources the msg bridge from
         // the host's shared relation and commits no msglink component).
@@ -2884,11 +2768,11 @@ fn claimed_sums_len(
     private_key: bool,
 ) -> usize {
     let native_mu = public_message && !private_key;
+    // C5: decomp and sib no longer contribute their own rc claimed sums --
+    // their range uses are folded into the one proof-wide range table.
     1 + usize::from(!hosted) * coeffs_tables::RANGE_TABLE_COMPONENTS
-        + 1
-        + decomp_tables::RcKind::ALL.len()
-        + 1
-        + sib_tables::RcKind::ALL.len()
+        + 1 // decomp
+        + 1 // sib
         + usize::from(!hosted)
         + 1 // public prefix for the selected message/key mode
         + usize::from(!public_message)

@@ -10,7 +10,6 @@ use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
-use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::LogupTraceGenerator;
 
 /// A base-field column evaluation over the circle domain (bit-reversed order).
@@ -25,26 +24,6 @@ pub fn m31(value: u32) -> M31 {
 pub(crate) fn enc_signed(value: impl Into<i128>) -> M31 {
     const P: i128 = (1 << 31) - 1;
     m31(value.into().rem_euclid(P) as u32)
-}
-
-/// Smallest range-table log size covering `n_values`, floored at the SIMD lane width.
-pub(crate) const fn table_log_size(n_values: usize) -> u32 {
-    let bits = usize::BITS - (n_values - 1).leading_zeros();
-    if bits < LOG_N_LANES {
-        LOG_N_LANES
-    } else {
-        bits
-    }
-}
-
-/// Stable ID for a canonical `[0, n_values)` value table.
-///
-/// Components with the same row count and values share one physical
-/// preprocessing commitment.
-pub(crate) fn value_table_preprocessed_id(log_size: u32, n_values: usize) -> PreProcessedColumnId {
-    PreProcessedColumnId {
-        id: format!("mldsa_value_table/log{log_size}/n{n_values}"),
-    }
 }
 
 /// Preprocessed value column `[0, 1, …, n−1, 0, 0, …]`.

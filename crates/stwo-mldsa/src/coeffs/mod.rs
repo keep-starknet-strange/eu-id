@@ -118,6 +118,10 @@ fn attacked_stream_boundary(stream: usize) -> Option<u32> {
                 RcKind::Rc8 => carry_high_index(stream).is_some(),
                 RcKind::Rc7 => matches!(stream, 7 | 9 | 11 | 13),
                 RcKind::Ternary => stream == 7,
+                // C5/C7b: Rc4/Rc11/Rc12 were folded in from decomp/sib/ntt,
+                // which coeffs itself never consumes -- no stream in this
+                // component's own AIR can be attacked under these kinds.
+                RcKind::Rc4 | RcKind::Rc11 | RcKind::Rc12 => false,
             };
             occupied.then_some(kind.n_values() as u32)
         })
@@ -798,7 +802,8 @@ pub struct CoeffsInteraction {
     pub rc_uses: RcUses,
 }
 
-/// Multiplicity seeds for the five tables (indexed by table value).
+/// Multiplicity seeds for the seven tables (indexed by table value). C5
+/// folded decomp's and sampleinball's private tables (Rc4, Rc11) in here too.
 #[derive(Clone)]
 pub struct RcUses {
     pub rc9: Vec<u32>,
@@ -806,6 +811,9 @@ pub struct RcUses {
     pub rc8: Vec<u32>,
     pub rc7: Vec<u32>,
     pub ternary: Vec<u32>,
+    pub rc4: Vec<u32>,
+    pub rc11: Vec<u32>,
+    pub rc12: Vec<u32>,
 }
 
 impl RcUses {
@@ -820,6 +828,9 @@ impl RcUses {
             rc8: vec![0; 1 << 8],
             rc7: vec![0; 1 << 7],
             ternary: vec![0; 3],
+            rc4: vec![0; 1 << 4],
+            rc11: vec![0; 1 << 11],
+            rc12: vec![0; 1 << 12],
         }
     }
 
@@ -831,6 +842,9 @@ impl RcUses {
             RcKind::Rc8 => &mut self.rc8,
             RcKind::Rc7 => &mut self.rc7,
             RcKind::Ternary => &mut self.ternary,
+            RcKind::Rc4 => &mut self.rc4,
+            RcKind::Rc11 => &mut self.rc11,
+            RcKind::Rc12 => &mut self.rc12,
         };
         uses[value as usize] += 1;
     }
@@ -843,6 +857,9 @@ impl RcUses {
             RcKind::Rc8 => &self.rc8,
             RcKind::Rc7 => &self.rc7,
             RcKind::Ternary => &self.ternary,
+            RcKind::Rc4 => &self.rc4,
+            RcKind::Rc11 => &self.rc11,
+            RcKind::Rc12 => &self.rc12,
         }
     }
 
@@ -855,6 +872,9 @@ impl RcUses {
                 RcKind::Rc8 => &mut self.rc8,
                 RcKind::Rc7 => &mut self.rc7,
                 RcKind::Ternary => &mut self.ternary,
+                RcKind::Rc4 => &mut self.rc4,
+                RcKind::Rc11 => &mut self.rc11,
+                RcKind::Rc12 => &mut self.rc12,
             };
             let rhs = other.for_kind(kind);
             assert_eq!(lhs.len(), rhs.len(), "range census shape mismatch");

@@ -16,19 +16,28 @@
 //!
 //! 1. **[DECOMP] reconstruction** — `w1·α + w0 = w − wrap_k·q`, `α = 2γ2`,
 //!    `wrap_k ∈ {0,1}` (the FIPS borderline `r−r0 = q−1` wrap; verified over ℤ
-//!    that `w1·α+w0 − w ∈ {0, −q}`). `w1` is in the selected profile range, and
+//!    that `w1·α+w0 − w ∈ {0, −q}`). `w1` is range-checked directly via a
+//!    single Rc4 lookup (the selected profile's exact `w1_values()`, pinned
+//!    to be 16 — see [`DecompEval::new`]), and
 //!    `w0 ∈ (−γ2, γ2] ∪ {−γ2 when w1=0}`. For `v = w0+γ2`, the zero flag
-//!    `b` and inverse witness obey `b+v·v_inv=1`, `b·v=0`, and `b·w1=0`.
-//!    Thus `b=1` exactly when `v=0` without a redundant boolean constraint:
-//!    `v=0` forces `b=1` in the first equation, while `v≠0` forces `b=0`
-//!    in the second. The lower range value is shifted to `v−1+b`; the
+//!    `b` obeys `b·v=0` and `b·w1=0`; no separate booleanity or `v=0 ⇒ b=1`
+//!    constraint is needed. `b·v=0` forces `b=0` whenever `v≠0` (the standard
+//!    case), leaving the honest `a = v−1+b` range-check value unaffected.
+//!    When `v=0` (the FIPS wraparound boundary), both equations are trivially
+//!    satisfiable for *any* `b` as long as `w1=0`; a dishonest `w1≠0` instead
+//!    forces `b=0` via `b·w1=0`, which drives `a=v−1+b=−1`, an out-of-range
+//!    value the Rc13/Rc7 lookup rejects (see the `BoundaryZeroFlagUnset`
+//!    negative test). The lower range value is shifted to `v−1+b`; the
 //!    complementary upper value remains `γ2−w0`. Both use the existing
 //!    13+7-bit splits.
 //! 2. **[HINT] sign** — `s0 = [w0 > 0] ∈ {0,1}`, bound to `w0`'s two-sided
 //!    decomposition so a lying `s0` desyncs the range (see C-DECOMP-S0).
 //! 3. **[HINT] UseHint** — `w1' = (w1 + h·(2·s0−1)) mod m`, where
-//!    `m = (q−1)/(2γ2)` and `h ∈ {0,1}`. A ternary wrap cell selects the exact
-//!    representative in the profile range.
+//!    `m = (q−1)/(2γ2)` and `h ∈ {0,1}`. `w1'` is range-checked directly via a
+//!    single Rc4 lookup; `wrap_m` itself carries no lookup — once `w1` and
+//!    `w1'` are Rc4-pinned to `[0,16)`, this equation is linear in `wrap_m`
+//!    with a unique field solution, so any independent range check on it is
+//!    redundant (the assessed and closed C8c(c) finding).
 //! 4. **[HINT] Σh ≤ ω** — a running accumulator adds the four lane hints. The
 //!    final active row is range-checked against the selected `ω`.
 //! 5. **w-binding** — each sub-lane `w` is a USE of the coeffs W-group cell
@@ -42,10 +51,8 @@
 //! | site | expr | degree |
 //! |------|------|--------|
 //! | boolean `x(1−x)` (hint, wrap_k, s0) | | 2 |
-//! | boundary zero test `b + v·v_inv − 1` | `v·v_inv` | 2 |
 //! | boundary selector `b·v` | product of cells | 2 |
 //! | FIPS boundary gate `b·w1` | product of cells | 2 |
-//! | modular-wrap ternary `u(u−1)(u+1)` | — LOOKUP (`u+1 ∈ {0,1,2}`) | 1 |
 //! | decomp recon `w1·α + w0 − w + wrap_k·q` | linear in cells | 1 |
 //! | s0 · w0 sign link (see C-DECOMP-S0) | `s0·(…)` | 2 |
 //! | UseHint `w1' − (w1 + h·(2s0−1) + m·u)` | `h·s0` deg 2 | 2 |
@@ -61,7 +68,6 @@
 
 pub mod proof;
 pub mod relations;
-pub mod tables;
 
 use num_traits::One;
 use stwo::core::fields::m31::M31;
@@ -77,10 +83,27 @@ use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 #[cfg(test)]
 use crate::constants::GAMMA2;
 use crate::constants::{K, N, Q};
+use crate::coeffs::tables::RcKind;
+use crate::coeffs::RcUses;
 use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
-use tables::RcUses;
+
+/// `[value, bound_id]` tuple for the shared range table (C5). Mirrors
+/// `private_key_eval::range_tuple` / `expand_a::range_tuple`.
+fn range_tuple<E: EvalAtRow>(value: E::F, kind: RcKind) -> [E::F; 2] {
+    [value, E::F::from(m31(kind.bound_id()))]
+}
+
+/// Witness-side denominator for a shared range-table lookup. Mirrors
+/// `private_key_eval::range_denominator`.
+fn range_denominator(
+    relation: &crate::coeffs::relations::RangeRelation,
+    value: u32,
+    kind: RcKind,
+) -> SecureField {
+    relation.combine(&[m31(value), m31(kind.bound_id())])
+}
 
 const LANES_PER_ROW: usize = 4;
 /// Active rows: four coefficients per row.
@@ -88,7 +111,7 @@ pub const N_ROWS: usize = K * N / LANES_PER_ROW;
 
 // --- Base column indices (four lanes) ----------------------------------------
 // Per lane: w, w1, w0, hint, wrap_k, s0, w1p, wrap_m, a_hi, b_hi, sign_val,
-// sign_hi. The boundary zero flags/inverses are appended after hint_acc so all
+// sign_hi. The boundary zero flags are appended after hint_acc so all
 // existing lane indices remain stable.
 const PER_LANE: usize = 12;
 #[cfg(test)]
@@ -114,26 +137,21 @@ const L_SIGN_HI: usize = 11;
 const COL_HINT_ACC: usize = LANES_PER_ROW * PER_LANE;
 const COL_V_ZERO: [usize; LANES_PER_ROW] = [
     COL_HINT_ACC + 1,
-    COL_HINT_ACC + 3,
-    COL_HINT_ACC + 5,
-    COL_HINT_ACC + 7,
-];
-const COL_V_INV: [usize; LANES_PER_ROW] = [
     COL_HINT_ACC + 2,
+    COL_HINT_ACC + 3,
     COL_HINT_ACC + 4,
-    COL_HINT_ACC + 6,
-    COL_HINT_ACC + 8,
 ];
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_HINT_ACC + 9;
+pub const N_BASE_COLS: usize = COL_HINT_ACC + 5;
 
-/// Logup entries per row, batched by [`LOGUP_BATCH`]: four lanes each emit 11
-/// range uses and one WCell use. Two hash-byte slots (ML-DSA-65's fixed
-/// w1Encode output; the ML-DSA-44 3-byte/6-bit packing residue was deleted --
-/// this component is single-profile in practice, statement.rs never
-/// constructs it with ML_DSA_44) and two final hint-sum checks follow.
-/// Total: 52.
-pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 12 + 2 + 2;
+/// Logup entries per row, batched by [`LOGUP_BATCH`]: four lanes each emit 8
+/// range uses (Rc4 `w1`, Rc4 `w1'`, Rc13/Rc7 `a_lo`/`a_hi`, Rc13/Rc7
+/// `b_lo`/`b_hi`, Rc13/Rc7 `sign_lo`/`sign_hi`) and one WCell use. Two
+/// hash-byte slots (ML-DSA-65's fixed w1Encode output; the ML-DSA-44 3-byte/
+/// 6-bit packing residue was deleted -- this component is single-profile in
+/// practice, statement.rs never constructs it with ML_DSA_44) and two final
+/// hint-sum checks follow. Total: 40.
+pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 9 + 2 + 2;
 pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // hint_acc is a QM31 running sum
@@ -229,6 +247,67 @@ mod schedule_tests {
     }
 }
 
+#[cfg(test)]
+mod range_provenance_tests {
+    use super::*;
+    use crate::air_util::padded_log_size;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum GateKind {
+        /// Read via `eval.get_preprocessed_column`: fixed by the public
+        /// schedule (verified boolean below against the generated column).
+        Preprocessed,
+    }
+
+    /// C5(5) numerator-provenance regression: every shared-range consumer's
+    /// LogUp numerator (the `gate` argument to `add_to_relation`) must be
+    /// either a preprocessed column or carry its own booleanity constraint in
+    /// the same component -- otherwise a witness-controlled numerator could
+    /// dodge the lookup obligation by forcing it to zero (or forge a "used"
+    /// claim by forcing a nonzero non-Boolean gate). Enumerates every decomp
+    /// site (`evaluate`, one entry per `add_to_relation(&self.relations.range, ...)`
+    /// call): all eight use `enabler_pre` or `is_last`, both preprocessed.
+    #[test]
+    fn decomp_range_lookup_gates_are_preprocessed_and_boolean() {
+        const SITES: &[(&str, GateKind)] = &[
+            ("w1 (Rc4)", GateKind::Preprocessed),          // mod.rs ~:644, gate=enabler_pre
+            ("a_lo/b_lo (Rc13)", GateKind::Preprocessed),   // mod.rs ~:671, gate=enabler_pre
+            ("a_hi/b_hi (Rc7)", GateKind::Preprocessed),    // mod.rs ~:678, gate=enabler_pre
+            ("sign_lo (Rc13)", GateKind::Preprocessed),     // mod.rs ~:702, gate=enabler_pre
+            ("sign_hi (Rc7)", GateKind::Preprocessed),      // mod.rs ~:707, gate=enabler_pre
+            ("w1' (Rc4)", GateKind::Preprocessed),          // mod.rs ~:729, gate=enabler_pre
+            ("hint_acc (Rc8)", GateKind::Preprocessed),     // mod.rs ~:789, gate=is_last
+            ("acc_room (Rc8)", GateKind::Preprocessed),     // mod.rs ~:794, gate=is_last
+        ];
+        assert_eq!(
+            SITES.len(),
+            8,
+            "update this enumeration (and re-audit gate provenance) if a \
+             shared-range lookup site is added or removed"
+        );
+
+        // Mechanically verify both candidate gates are boolean-valued in the
+        // actual generated preprocessed columns (not just boolean "in
+        // theory") -- `enabler_pre` is index 0, `is_last` is index 3 in
+        // `decomp_preprocessed_ids` order.
+        let log_size = padded_log_size(N_ROWS);
+        let names = ["enabler_pre", "start", "byte_pos", "is_last"];
+        for (name, column) in names
+            .into_iter()
+            .zip(gen_decomp_preprocessed(ML_DSA_65, log_size))
+        {
+            if name != "enabler_pre" && name != "is_last" {
+                continue;
+            }
+            let values = column.to_cpu().values;
+            assert!(
+                values.iter().all(|&v| v == m31(0) || v == m31(1)),
+                "{name} must be boolean-valued"
+            );
+        }
+    }
+}
+
 // =============================================================================
 // Per-lane witness readout.
 // =============================================================================
@@ -289,6 +368,29 @@ fn shifted_lower_range_value(profile: MlDsaProfile, w0: i64) -> i64 {
 pub(super) enum DecompTracePoke {
     BoundaryWithNonzeroW1,
     BelowNegativeGamma2,
+    /// C8c(b) negative: the FIPS boundary (v=w0+γ2=0) with a noncanonical
+    /// nonzero `w1`, but this time the zero flag `b` is left UNSET (0)
+    /// instead of forced to 1. With the `v·v_inv` boundary equation deleted,
+    /// `b·v=0` and `b·w1=0` are both trivially satisfied (v=0, b=0), so this
+    /// witness must instead be caught by the shifted lower range value
+    /// `a=v−1+b=−1` failing its Rc13/Rc7 lookup (imbalance, no provider row).
+    BoundaryZeroFlagUnset,
+    /// C8c(b) negative: a non-boolean zero flag `b=2` at the same boundary
+    /// (v=0) with a nonzero `w1`. `b·v=0` is trivially satisfied (v=0), but
+    /// `b·w1=2·w1≠0` fails directly -- proving the deleted booleanity
+    /// constraint on `b` is not needed for this gate to hold.
+    NonBooleanZeroFlagWithNonzeroW1,
+    /// C5 negative (arity trap): `w1'` is poked to 2000, an Rc11-magnitude
+    /// value, while `wrap_m` is recomputed (125 = 2000/16 exactly) so the
+    /// UseHint linear equation `w1' = w1 + h·(2s0−1) + m·wrap_m` still holds
+    /// exactly -- wrap_m carries no lookup of its own (C8c(c)), so this is a
+    /// fully self-consistent witness in every OTHER respect. Only the w1'
+    /// Rc4 lookup is attacked: decomp always tags it with `RcKind::Rc4`'s
+    /// bound id, so even though 2000 is a legitimate value somewhere in the
+    /// shared table (under `RcKind::Rc11`'s bound id), claiming it under
+    /// Rc4's bound id must still be rejected (no provider row for that exact
+    /// `(value, bound_id)` tuple).
+    Rc11MagnitudeClaimedUnderRc4BoundId,
 }
 
 #[cfg(test)]
@@ -307,7 +409,6 @@ pub(super) struct PokedLane {
     pub sign_val: i64,
     pub sign_hi: i64,
     pub v_is_zero: i64,
-    pub v_inv: M31,
 }
 
 #[cfg(test)]
@@ -331,7 +432,6 @@ impl DecompTracePoke {
                 sign_val: gamma2,
                 sign_hi: gamma2 >> 13,
                 v_is_zero: 1,
-                v_inv: m31(0),
             },
             Self::BelowNegativeGamma2 => PokedLane {
                 // This alternative reconstructs w=q−γ2−1. All cells remain
@@ -349,7 +449,54 @@ impl DecompTracePoke {
                 sign_val: gamma2 + 1,
                 sign_hi: (gamma2 + 1) >> 13,
                 v_is_zero: 0,
-                v_inv: enc_signed(-1),
+            },
+            Self::BoundaryZeroFlagUnset => PokedLane {
+                w: gamma2,
+                w1: 1,
+                w0: -gamma2,
+                hint: 0,
+                wrap_k: 0,
+                s0: 0,
+                w1p: 1,
+                wrap_m: 0,
+                a_hi: 0,
+                b_hi: (2 * gamma2) >> 13,
+                sign_val: gamma2,
+                sign_hi: gamma2 >> 13,
+                v_is_zero: 0,
+            },
+            Self::NonBooleanZeroFlagWithNonzeroW1 => PokedLane {
+                w: gamma2,
+                w1: 1,
+                w0: -gamma2,
+                hint: 0,
+                wrap_k: 0,
+                s0: 0,
+                w1p: 1,
+                wrap_m: 0,
+                a_hi: 0,
+                b_hi: (2 * gamma2) >> 13,
+                sign_val: gamma2,
+                sign_hi: gamma2 >> 13,
+                v_is_zero: 2,
+            },
+            Self::Rc11MagnitudeClaimedUnderRc4BoundId => PokedLane {
+                // The standard (non-boundary) case w=w0=γ2, w1=0, s0=1: every
+                // cell is honest except w1'/wrap_m, so only the w1' Rc4
+                // lookup is under attack.
+                w: gamma2,
+                w1: 0,
+                w0: gamma2,
+                hint: 0,
+                wrap_k: 0,
+                s0: 1,
+                w1p: 2000,
+                wrap_m: 125, // (2000 − (w1 + hint·(2s0−1))) / 16, exact
+                a_hi: (2 * gamma2 - 1) >> 13,
+                b_hi: 0,
+                sign_val: gamma2 - 1,
+                sign_hi: (gamma2 - 1) >> 13,
+                v_is_zero: 0,
             },
         }
     }
@@ -363,10 +510,7 @@ impl PokedLane {
         let b = gamma2 - self.w0;
         match field {
             RcField::W1 => self.w1,
-            RcField::W1Room => ML_DSA_65.w1_values() as i64 - 1 - self.w1,
             RcField::W1P => self.w1p,
-            RcField::W1PRoom => ML_DSA_65.w1_values() as i64 - 1 - self.w1p,
-            RcField::WrapM => self.wrap_m + 1,
             RcField::ALo => a - (1 << 13) * self.a_hi,
             RcField::AHi => self.a_hi,
             RcField::BLo => b - (1 << 13) * self.b_hi,
@@ -387,12 +531,6 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
     let mut cols: Vec<Vec<M31>> = (0..N_BASE_COLS).map(|_| vec![m31(0); rows]).collect();
 
     let gamma2 = witness.profile.gamma2() as i64;
-    let gamma2_inv = m31(witness.profile.gamma2()).inverse();
-    for lane in 0..LANES_PER_ROW {
-        // The zero-test constraints are ungated. Padding has w0=0, hence
-        // v=γ2 and must carry γ2⁻¹ rather than the default zero.
-        cols[COL_V_INV[lane]].fill(gamma2_inv);
-    }
     let mut hint_acc = 0i64;
     for (row, &(i, p)) in sched.iter().enumerate() {
         for lane in 0..LANES_PER_ROW {
@@ -410,11 +548,6 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
             let shifted_v = v.w0 + gamma2;
             let v_is_zero = i64::from(shifted_v == 0);
             cols[COL_V_ZERO[lane]][row] = m31(v_is_zero as u32);
-            cols[COL_V_INV[lane]][row] = if shifted_v == 0 {
-                m31(0)
-            } else {
-                m31(shifted_v as u32).inverse()
-            };
             // Exact lower endpoint: shift only v−1 by the zero flag so the
             // FIPS (w1,w0)=(0,−γ2) case maps to zero.
             let a = shifted_lower_range_value(witness.profile, v.w0);
@@ -468,6 +601,22 @@ impl DecompEval {
             "DecompEval is single-profile since the wave-A ML-DSA-44 deletion; \
              only ML_DSA_65 is supported"
         );
+        // C8c: the eval below is written generically against `self.profile`,
+        // but `w1`/`w1'` are range-checked with a single Rc4 lookup against a
+        // FIXED 16-row table (not parametrized by profile). A profile whose
+        // `w1_values()` != 16 (e.g. ML-DSA-44's 44) would silently accept any
+        // out-of-profile-range w1/w1' value once it wrapped past 16, since
+        // the table itself has no notion of the profile's real upper bound.
+        // This must be a hard assert, not a debug_assert: it is a soundness
+        // precondition of the AIR, not merely a witness sanity check.
+        assert_eq!(
+            profile.w1_values(),
+            16,
+            "mldsa_decomp pins w1/w1' range checks to a fixed 16-row Rc4 \
+             table; a profile whose w1_values() != 16 would silently under- \
+             or over-range-check w1/w1' since the table is not parametrized \
+             by profile"
+        );
         Self {
             log_size,
             profile,
@@ -501,9 +650,7 @@ impl FrameworkEval for DecompEval {
             .map(|_| (0..PER_LANE).map(|_| eval.next_trace_mask()).collect())
             .collect();
         let hint_acc = eval.next_trace_mask();
-        let boundary: Vec<(E::F, E::F)> = (0..LANES_PER_ROW)
-            .map(|_| (eval.next_trace_mask(), eval.next_trace_mask()))
-            .collect();
+        let boundary: Vec<E::F> = (0..LANES_PER_ROW).map(|_| eval.next_trace_mask()).collect();
 
         // hint_acc previous-row value via interaction mask (running sum).
         let acc_coords: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
@@ -537,7 +684,7 @@ impl FrameworkEval for DecompEval {
             let b_hi = c[L_B_HI].clone();
             let sign_val = c[L_SIGN_VAL].clone();
             let sign_hi = c[L_SIGN_HI].clone();
-            let (v_is_zero, v_inv) = &boundary[lane];
+            let v_is_zero = &boundary[lane];
 
             // The hint, wrap_k, and s0 values are Boolean. Padding uses zero.
             eval.add_constraint(hint.clone() * (one.clone() - hint.clone()));
@@ -549,26 +696,27 @@ impl FrameworkEval for DecompEval {
                 w1.clone() * alpha.clone() + w0.clone() - w.clone() + wrap_k.clone() * q.clone(),
             );
 
-            // Range-check w1 in the selected profile's exact interval.
-            let w1_room = E::F::from(m31(self.profile.w1_values() - 1)) - w1.clone();
+            // Range-check w1 directly: a single Rc4 lookup on the exact
+            // 16-value profile interval (see the `w1_values()==16` assert in
+            // `DecompEval::new`). C8c(a): the previous two-sided
+            // `w1`/`w1_room` Rc8 pair is redundant once the table matches the
+            // value's exact domain.
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc8,
+                &self.relations.range,
                 enabler_pre.clone(),
-                core::slice::from_ref(&w1),
-            ));
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc8,
-                enabler_pre.clone(),
-                core::slice::from_ref(&w1_room),
+                &range_tuple::<E>(w1.clone(), RcKind::Rc4),
             ));
 
-            // Enforce the exact FIPS lower endpoint. For v=w0+γ2, the first two
-            // equations force v_is_zero=[v=0] and its inverse witness; the
-            // third permits v=0 only with w1=0. Booleanity is implied:
-            // v=0 forces b=1 in (a), while v≠0 forces b=0 in (b).
+            // Enforce the exact FIPS lower endpoint. For v=w0+γ2: `b·v=0`
+            // forces b=0 whenever v≠0 (standard case, a=v−1 unaffected);
+            // `b·w1=0` forces b=0 whenever w1≠0. When v=0 and w1=0 (the FIPS
+            // wraparound), both are trivially satisfiable for any b, and the
+            // honest prover sets b=1 so a=0. A dishonest w1≠0 at v=0 instead
+            // forces b=0 (via the second equation), driving a=v−1+b=−1,
+            // which the Rc13/Rc7 lookup below rejects (see
+            // `BoundaryZeroFlagUnset`). No separate booleanity or `v=0⇒b=1`
+            // constraint on b is needed (C8c(b): the deleted `v_inv` column).
             let v = w0.clone() + gamma2.clone();
-            // (a) b + v·v_inv = 1 (degree 2).
-            eval.add_constraint(v_is_zero.clone() + v.clone() * v_inv.clone() - one.clone());
             // (b) b·v = 0 (degree 2).
             eval.add_constraint(v_is_zero.clone() * v.clone());
             // (c) b·w1 = 0 (degree 2).
@@ -581,16 +729,16 @@ impl FrameworkEval for DecompEval {
             let b_lo = b - two_pow_13.clone() * b_hi.clone();
             for expr in [&a_lo, &b_lo] {
                 eval.add_to_relation(RelationEntry::base(
-                    &self.relations.rc13,
+                    &self.relations.range,
                     enabler_pre.clone(),
-                    core::slice::from_ref(expr),
+                    &range_tuple::<E>(expr.clone(), RcKind::Rc13),
                 ));
             }
             for hi in [&a_hi, &b_hi] {
                 eval.add_to_relation(RelationEntry::base(
-                    &self.relations.rc7,
+                    &self.relations.range,
                     enabler_pre.clone(),
-                    core::slice::from_ref(hi),
+                    &range_tuple::<E>(hi.clone(), RcKind::Rc7),
                 ));
             }
 
@@ -612,17 +760,22 @@ impl FrameworkEval for DecompEval {
             );
             let sign_lo = sign_val - two_pow_13.clone() * sign_hi.clone();
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc13,
+                &self.relations.range,
                 enabler_pre.clone(),
-                core::slice::from_ref(&sign_lo),
+                &range_tuple::<E>(sign_lo, RcKind::Rc13),
             ));
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc7,
+                &self.relations.range,
                 enabler_pre.clone(),
-                core::slice::from_ref(&sign_hi),
+                &range_tuple::<E>(sign_hi.clone(), RcKind::Rc7),
             ));
 
-            // [HINT] UseHint in the selected high-bits modulus.
+            // [HINT] UseHint in the selected high-bits modulus. C8c(c):
+            // wrap_m carries no lookup of its own -- with w1 and w1' both
+            // Rc4-pinned to [0,16), this equation is linear in wrap_m with a
+            // unique field solution, so it is already fully determined by
+            // this one constraint; any additional range check on it is
+            // redundant.
             let delta_sign = s0.clone() + s0.clone() - one.clone(); // 2s0 − 1
             eval.add_constraint(
                 w1p.clone()
@@ -631,25 +784,12 @@ impl FrameworkEval for DecompEval {
                         + w1_modulus.clone() * wrap_m.clone()),
             );
 
-            // Check wrap_m ∈ {−1,0,1} with a `{0,1,2}` lookup on wrap_m+1.
-            let wrap_plus_one = wrap_m.clone() + one.clone();
+            // Range-check w1' directly: a single Rc4 lookup (C8c(a), see w1
+            // above).
             eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc4, // rc4 ⊇ {0,1,2}; the value is always < 16
+                &self.relations.range,
                 enabler_pre.clone(),
-                core::slice::from_ref(&wrap_plus_one),
-            ));
-
-            // Range-check w1' in the selected profile's exact interval.
-            let w1p_room = E::F::from(m31(self.profile.w1_values() - 1)) - w1p.clone();
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc8,
-                enabler_pre.clone(),
-                core::slice::from_ref(&w1p),
-            ));
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc8,
-                enabler_pre.clone(),
-                core::slice::from_ref(&w1p_room),
+                &range_tuple::<E>(w1p, RcKind::Rc4),
             ));
 
             // Use the coeffs W cell `(poly_id·N + m, w)`.
@@ -707,14 +847,14 @@ impl FrameworkEval for DecompEval {
         let omega = E::F::from(m31(self.profile.omega() as u32));
         let acc_room = omega - hint_acc.clone(); // = ω − Σh; ∈ [0,256) ⟺ Σh ≤ ω
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             is_last.clone(),
-            core::slice::from_ref(&hint_acc),
+            &range_tuple::<E>(hint_acc.clone(), RcKind::Rc8),
         ));
         eval.add_to_relation(RelationEntry::base(
-            &self.relations.rc8,
+            &self.relations.range,
             is_last.clone(),
-            core::slice::from_ref(&acc_room),
+            &range_tuple::<E>(acc_room, RcKind::Rc8),
         ));
 
         eval.finalize_logup_batched(LOGUP_BATCH);
@@ -781,11 +921,8 @@ fn gen_decomp_metadata_inner(
             let m = LANES_PER_ROW * p + lane;
             total_h += witness.decomp.hint[i][m] as u32;
             let v = lane_vals(witness, i, m);
-            rc_uses.rc8[v.w1 as usize] += 1;
-            rc_uses.rc8[profile.w1_values() as usize - 1 - v.w1 as usize] += 1;
-            rc_uses.rc8[v.w1p as usize] += 1;
-            rc_uses.rc8[profile.w1_values() as usize - 1 - v.w1p as usize] += 1;
-            rc_uses.rc4[(v.wrap_m + 1) as usize] += 1;
+            rc_uses.rc4[v.w1 as usize] += 1;
+            rc_uses.rc4[v.w1p as usize] += 1;
             let a = shifted_lower_range_value(profile, v.w0);
             let b = gamma2 - v.w0;
             let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
@@ -833,10 +970,7 @@ fn honest_lane_rc_integer(profile: MlDsaProfile, v: &LaneVals, field: RcField) -
     let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
     match field {
         RcField::W1 => v.w1,
-        RcField::W1Room => profile.w1_values() as i64 - 1 - v.w1,
         RcField::W1P => v.w1p,
-        RcField::W1PRoom => profile.w1_values() as i64 - 1 - v.w1p,
-        RcField::WrapM => v.wrap_m + 1,
         RcField::ALo => a & ((1 << 13) - 1),
         RcField::AHi => a >> 13,
         RcField::BLo => b & ((1 << 13) - 1),
@@ -849,8 +983,7 @@ fn honest_lane_rc_integer(profile: MlDsaProfile, v: &LaneVals, field: RcField) -
 #[cfg(test)]
 fn rc_uses_for_field_mut(uses: &mut RcUses, field: RcField) -> &mut [u32] {
     match field {
-        RcField::W1 | RcField::W1Room | RcField::W1P | RcField::W1PRoom => &mut uses.rc8,
-        RcField::WrapM => &mut uses.rc4,
+        RcField::W1 | RcField::W1P => &mut uses.rc4,
         RcField::ALo | RcField::BLo | RcField::SignLo => &mut uses.rc13,
         RcField::AHi | RcField::BHi | RcField::SignHi => &mut uses.rc7,
     }
@@ -862,18 +995,15 @@ fn apply_trace_poke_to_metadata(
     witness: &MlDsaWitness,
     poke: DecompTracePoke,
 ) -> DecompMetadata {
-    const RC_FIELDS: [RcField; 11] = [
+    const RC_FIELDS: [RcField; 8] = [
         RcField::W1,
-        RcField::W1Room,
         RcField::ALo,
         RcField::BLo,
         RcField::AHi,
         RcField::BHi,
         RcField::SignLo,
         RcField::SignHi,
-        RcField::WrapM,
         RcField::W1P,
-        RcField::W1PRoom,
     ];
 
     let honest = lane_vals(witness, 0, 0);
@@ -896,14 +1026,29 @@ fn apply_trace_poke_to_metadata(
             uses[new as usize] += 1;
         } else {
             unmatched += 1;
-            debug_assert!(matches!(field, RcField::ALo));
-            debug_assert_eq!(new, -2);
+            match field {
+                // Out-of-range a_lo values differ by poke (−2 for the
+                // wrap-past-negative-γ2 case, −1 for the zero-flag-unset
+                // boundary case); both are negative, i.e. genuinely
+                // unrepresentable in [0,2^13).
+                RcField::ALo => debug_assert!(new < 0, "unmatched ALo must be negative, got {new}"),
+                // C5(4): w1' poked to an Rc11-magnitude value (2000), out of
+                // Rc4's 16-row domain -- genuinely unrepresentable there.
+                RcField::W1P => debug_assert!(
+                    new >= 16,
+                    "unmatched W1P must exceed Rc4's domain, got {new}"
+                ),
+                _ => debug_assert!(false, "unexpected unmatched field {field:?}"),
+            }
         }
     }
 
     let expected_unmatched = match poke {
         DecompTracePoke::BoundaryWithNonzeroW1 => 0,
         DecompTracePoke::BelowNegativeGamma2 => 1,
+        DecompTracePoke::BoundaryZeroFlagUnset => 1,
+        DecompTracePoke::NonBooleanZeroFlagWithNonzeroW1 => 0,
+        DecompTracePoke::Rc11MagnitudeClaimedUnderRc4BoundId => 1,
     };
     debug_assert_eq!(unmatched, expected_unmatched);
     metadata.w1_encode_bytes[0] = (metadata.w1_encode_bytes[0] & 0xf0) | attacked.w1p as u8;
@@ -1023,22 +1168,19 @@ fn gen_decomp_interaction_inner(
     };
 
     // --- Build the logup fraction streams in AIR emission order ---
-    // Each row has 52 fractions. Each of four lanes has 11 range uses and one
+    // Each row has 40 fractions. Each of four lanes has 8 range uses and one
     // WCell use. Two hash-byte slots and two final hint-sum checks follow.
     // Keep this order equal to the AIR order.
     for lane in 0..LANES_PER_ROW {
         for field in [
             RcField::W1,
-            RcField::W1Room,
             RcField::ALo,
             RcField::BLo,
             RcField::AHi,
             RcField::BHi,
             RcField::SignLo,
             RcField::SignHi,
-            RcField::WrapM,
             RcField::W1P,
-            RcField::W1PRoom,
         ] {
             push(
                 &|coset| {
@@ -1095,7 +1237,7 @@ fn gen_decomp_interaction_inner(
     push(
         &|coset| {
             if coset == active - 1 {
-                let d: SecureField = relations.rc8.combine(&[m31(checked_total_h)]);
+                let d = range_denominator(&relations.range, checked_total_h, RcKind::Rc8);
                 (one, d)
             } else {
                 (zero, one)
@@ -1107,9 +1249,11 @@ fn gen_decomp_interaction_inner(
     push(
         &|coset| {
             if coset == active - 1 {
-                let d: SecureField = relations
-                    .rc8
-                    .combine(&[m31(witness.profile.omega() as u32 - checked_total_h)]);
+                let d = range_denominator(
+                    &relations.range,
+                    witness.profile.omega() as u32 - checked_total_h,
+                    RcKind::Rc8,
+                );
                 (one, d)
             } else {
                 (zero, one)
@@ -1160,19 +1304,26 @@ fn gen_decomp_interaction_inner(
 }
 
 /// Which range value a lane rc fraction targets.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum RcField {
     W1,
-    W1Room,
     W1P,
-    W1PRoom,
-    WrapM,
     ALo,
     AHi,
     BLo,
     BHi,
     SignLo,
     SignHi,
+}
+
+impl RcField {
+    fn rc_kind(self) -> RcKind {
+        match self {
+            RcField::W1 | RcField::W1P => RcKind::Rc4,
+            RcField::ALo | RcField::BLo | RcField::SignLo => RcKind::Rc13,
+            RcField::AHi | RcField::BHi | RcField::SignHi => RcKind::Rc7,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1193,25 +1344,26 @@ fn lane_rc(
             #[cfg(test)]
             if coset == 0 && lane == 0 {
                 if let Some(poke) = trace_poke {
-                    if matches!(poke, DecompTracePoke::BelowNegativeGamma2)
-                        && matches!(field, RcField::ALo)
-                    {
-                        // There is no Rc13 provider row for a_lo=−2. Omit
-                        // exactly this fraction so the AIR lookup fails during
-                        // proving; every other attacked relation stays coherent.
+                    let alo_out_of_range = matches!(field, RcField::ALo)
+                        && matches!(
+                            poke,
+                            DecompTracePoke::BelowNegativeGamma2
+                                | DecompTracePoke::BoundaryZeroFlagUnset
+                        );
+                    if alo_out_of_range {
+                        // There is no Rc13 provider row for a negative a_lo
+                        // (−2 for BelowNegativeGamma2, −1 for
+                        // BoundaryZeroFlagUnset). Omit exactly this fraction
+                        // so the AIR lookup fails during proving; every other
+                        // attacked relation stays coherent.
                         return (zero, one);
                     }
-                    let rel = match field {
-                        RcField::W1 | RcField::W1Room | RcField::W1P | RcField::W1PRoom => {
-                            &relations.rc8
-                        }
-                        RcField::WrapM => &relations.rc4,
-                        RcField::ALo | RcField::BLo | RcField::SignLo => &relations.rc13,
-                        RcField::AHi | RcField::BHi | RcField::SignHi => &relations.rc7,
-                    };
+                    let value = poke.lane().rc_integer(field);
                     return (
                         one,
-                        rel.combine(&[enc_signed(poke.lane().rc_integer(field))]),
+                        relations
+                            .range
+                            .combine(&[enc_signed(value), m31(field.rc_kind().bound_id())]),
                     );
                 }
             }
@@ -1220,26 +1372,17 @@ fn lane_rc(
             let a = shifted_lower_range_value(witness.profile, v.w0);
             let b = gamma2 - v.w0;
             let sign_val = if v.s0 == 1 { v.w0 - 1 } else { -v.w0 };
-            let (val, rel): (u32, &relations::RcRelation) = match field {
-                RcField::W1 => (v.w1 as u32, &relations.rc8),
-                RcField::W1Room => (
-                    witness.profile.w1_values() - 1 - v.w1 as u32,
-                    &relations.rc8,
-                ),
-                RcField::W1P => (v.w1p as u32, &relations.rc8),
-                RcField::W1PRoom => (
-                    witness.profile.w1_values() - 1 - v.w1p as u32,
-                    &relations.rc8,
-                ),
-                RcField::WrapM => ((v.wrap_m + 1) as u32, &relations.rc4),
-                RcField::ALo => ((a & ((1 << 13) - 1)) as u32, &relations.rc13),
-                RcField::AHi => ((a >> 13) as u32, &relations.rc7),
-                RcField::BLo => ((b & ((1 << 13) - 1)) as u32, &relations.rc13),
-                RcField::BHi => ((b >> 13) as u32, &relations.rc7),
-                RcField::SignLo => ((sign_val & ((1 << 13) - 1)) as u32, &relations.rc13),
-                RcField::SignHi => ((sign_val >> 13) as u32, &relations.rc7),
+            let val: u32 = match field {
+                RcField::W1 => v.w1 as u32,
+                RcField::W1P => v.w1p as u32,
+                RcField::ALo => (a & ((1 << 13) - 1)) as u32,
+                RcField::AHi => (a >> 13) as u32,
+                RcField::BLo => (b & ((1 << 13) - 1)) as u32,
+                RcField::BHi => (b >> 13) as u32,
+                RcField::SignLo => (sign_val & ((1 << 13) - 1)) as u32,
+                RcField::SignHi => (sign_val >> 13) as u32,
             };
-            (one, rel.combine(&[m31(val)]))
+            (one, range_denominator(&relations.range, val, field.rc_kind()))
         }
         None => (zero, one),
     }
