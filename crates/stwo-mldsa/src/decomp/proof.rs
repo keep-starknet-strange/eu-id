@@ -49,7 +49,7 @@ use super::{
 #[cfg(test)]
 use super::{
     gen_decomp_interaction_with_test_options, gen_decomp_metadata_with_test_options,
-    DecompTracePoke, COL_HINT_ACC, COL_LANE0, COL_V_INV, COL_V_ZERO, L_A_HI, L_B_HI, L_HINT, L_S0,
+    DecompTracePoke, COL_HINT_ACC, COL_LANE0, COL_V_ZERO, L_A_HI, L_B_HI, L_HINT, L_S0,
     L_SIGN_HI, L_SIGN_VAL, L_W, L_W0, L_W1, L_W1P, L_WRAPK, L_WRAP_M,
 };
 use crate::balancer::{
@@ -236,7 +236,6 @@ fn apply_trace_poke(evals: &mut [ColEval], poke: DecompTracePoke) {
     evals[COL_V_ZERO[0]]
         .values
         .set(row, crate::air_util::m31(lane.v_is_zero as u32));
-    evals[COL_V_INV[0]].values.set(row, lane.v_inv);
 }
 
 struct DecompVerifier {
@@ -756,6 +755,52 @@ mod tests {
                 Err(ProvingError::ConstraintsNotSatisfied)
             ),
             "w0=−γ2−1 must be rejected by the shifted lower range"
+        );
+    }
+
+    /// C8c(b) negative: with the `v·v_inv` boundary equation deleted, `b·v=0`
+    /// and `b·w1=0` alone must still reject the FIPS-boundary noncanonical
+    /// twin (w1,w0)=(1,−γ2) when the zero flag is left UNSET (b=0) rather
+    /// than forced to 1. Both remaining equations are trivially satisfied
+    /// (v=0, b=0), so only the shifted lower range value a=v−1+b=−1 catches
+    /// it, via an Rc13/Rc7 lookup imbalance (no provider row for a negative
+    /// value).
+    #[test]
+    fn decomp_boundary_zero_flag_unset_rejects() {
+        let witness = witness_with_first_w(GAMMA2, 0);
+        assert!(
+            matches!(
+                prove_with_test_options(
+                    witness,
+                    None,
+                    Some(DecompTracePoke::BoundaryZeroFlagUnset),
+                ),
+                Err(ProvingError::ConstraintsNotSatisfied)
+            ),
+            "(w1,w0)=(1,−γ2) with the zero flag left unset must still be \
+             rejected, via the a-range check rather than a direct b·w1 \
+             failure"
+        );
+    }
+
+    /// C8c(b) negative: a non-boolean zero flag (b=2) at the same FIPS
+    /// boundary with a nonzero w1 must be rejected directly by `b·w1=0`
+    /// (2·w1≠0) -- demonstrating the deleted booleanity constraint on b was
+    /// never load-bearing for this gate.
+    #[test]
+    fn decomp_non_boolean_zero_flag_rejects() {
+        let witness = witness_with_first_w(GAMMA2, 0);
+        assert!(
+            matches!(
+                prove_with_test_options(
+                    witness,
+                    None,
+                    Some(DecompTracePoke::NonBooleanZeroFlagWithNonzeroW1),
+                ),
+                Err(ProvingError::ConstraintsNotSatisfied)
+            ),
+            "a non-boolean zero flag (b=2) with nonzero w1 must be rejected \
+             by b·w1=0"
         );
     }
 
