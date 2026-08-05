@@ -7827,6 +7827,70 @@ mod coprocessor_tests {
         tags[eu_id_ec_coprocessor::ecdsa::MDOC_P4B_MAC_HALF_COUNT - 1][0] ^= 1;
         assert_verify_rejects("tampered revocation MAC tag", &tampered_tag, &statement);
     }
+
+    /// A proof whose packed SHA trace carries the wrong message count for the
+    /// statement's predicate mode must never verify: an `And` proof packs five
+    /// messages, a one-predicate proof packs four, and the statement-driven
+    /// consumer set is the only thing that enforces the count (§6.3 LogUp
+    /// balance — there is no message-count field anywhere in the proof).
+    #[test]
+    #[ignore = "slow: proves both predicate modes and cross-checks the packed SHA message count"]
+    fn product_rejects_wrong_packed_sha_message_count_for_statement() {
+        let age_attributes = vec![MdocRequestedAttribute {
+            element_identifier: "birth_date".to_string(),
+            mode: MdocDisclosureMode::AgeOver,
+        }];
+        let and_attributes = vec![
+            MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            },
+            MdocRequestedAttribute {
+                element_identifier: "nationality".to_string(),
+                mode: MdocDisclosureMode::Alpha2Set,
+            },
+        ];
+        let age_fixture = demo_mdoc_circuit_fixture_with_attributes(age_attributes);
+        let and_fixture = demo_mdoc_circuit_fixture_with_attributes(and_attributes);
+
+        let age_proof = prove_mdoc_circuit(&age_fixture.extracted, &age_fixture.statement)
+            .expect("honest four-message Age proof proves");
+        verify_mdoc_circuit(&age_proof, &age_fixture.statement)
+            .expect("honest four-message Age proof verifies");
+        let and_proof = prove_mdoc_circuit(&and_fixture.extracted, &and_fixture.statement)
+            .expect("honest five-message And proof proves");
+        verify_mdoc_circuit(&and_proof, &and_fixture.statement)
+            .expect("honest five-message And proof verifies");
+
+        assert!(
+            verify_mdoc_circuit(&and_proof, &age_fixture.statement).is_err(),
+            "five-message And proof verified against a four-consumer Age statement"
+        );
+        assert!(
+            verify_mdoc_circuit(&age_proof, &and_fixture.statement).is_err(),
+            "four-message Age proof verified against a five-consumer And statement"
+        );
+
+        for (label, extracted, statement) in [
+            (
+                "five-message extraction against a four-consumer statement",
+                &and_fixture.extracted,
+                &age_fixture.statement,
+            ),
+            (
+                "four-message extraction against a five-consumer statement",
+                &age_fixture.extracted,
+                &and_fixture.statement,
+            ),
+        ] {
+            if let Ok(proof) = prove_mdoc_circuit(extracted, statement) {
+                assert!(
+                    verify_mdoc_circuit(&proof, statement).is_err(),
+                    "{label} produced a verifying proof"
+                );
+            }
+        }
+    }
 }
 
 fn is_supported_mdoc_profile_version(version: &str) -> bool {
