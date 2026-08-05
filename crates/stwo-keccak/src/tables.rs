@@ -17,9 +17,10 @@
 //!   pins `spread(¬b'∧b'')` (the committed andnot column) without a dedicated
 //!   `andnot` relation or table column.
 //! - `split_r` for `r ∈ {1..=7}`: spread byte-split range tables with `2^8` rows
-//!   `(spread_byte, spread_hi, spread_lo)` with `spread_lo = spread(byte mod
-//!   2^r)`, `spread_hi = spread(byte >> r)`. Because spread is additive across
-//!   disjoint bit ranges, `spread_byte = spread_hi + spread_lo·4^r`.
+//!   `(spread_byte, spread_hi)` with `spread_hi = spread(byte >> r)`. Because
+//!   spread is additive across disjoint bit ranges, `spread_byte = spread_hi·4^r
+//!   + spread_lo`, so `spread_lo = spread_byte − spread_hi·4^r` is a derived
+//!   linear expression, not a committed column.
 //! - `conv`: `2^8 × 2`, `(byte, spread(byte))`. Used only at the HashIo
 //!   boundary to convert absorbed message bytes into spread form and squeezed
 //!   spread limbs back into bytes. Both directions are certified by the one
@@ -60,19 +61,13 @@ pub fn build_dense_table() -> Vec<[u32; 2]> {
 }
 
 /// The spread split table for shift `r ∈ {1..=7}`: 256 rows
-/// `(spread_byte, spread_hi, spread_lo)` indexed by `byte`, with
-/// `spread_hi = spread(byte >> r)` and `spread_lo = spread(byte & (2^r-1))`.
-pub fn build_split_table(r: u32) -> Vec<[u32; 3]> {
+/// `(spread_byte, spread_hi)` indexed by `byte`, with
+/// `spread_hi = spread(byte >> r)`. `spread_lo = spread_byte − spread_hi·4^r`
+/// is derived at each lookup site, not stored.
+pub fn build_split_table(r: u32) -> Vec<[u32; 2]> {
     assert!((1..=7).contains(&r), "split shift out of range: {r}");
-    let lo_mask = (1u32 << r) - 1;
     (0u32..256)
-        .map(|byte| {
-            [
-                spread_u32(byte),
-                spread_u32(byte >> r),
-                spread_u32(byte & lo_mask),
-            ]
-        })
+        .map(|byte| [spread_u32(byte), spread_u32(byte >> r)])
         .collect()
 }
 
@@ -135,16 +130,15 @@ mod tests {
         for r in SPLIT_SHIFTS {
             let t = build_split_table(r);
             assert_eq!(t.len(), 1 << LOG_SIZE_SPLIT);
-            for (byte, &[sb, shi, slo]) in t.iter().enumerate() {
+            for (byte, &[sb, shi]) in t.iter().enumerate() {
                 assert_eq!(
                     sb,
                     spread_u32(byte as u32),
                     "spread_byte column = spread(row index)"
                 );
-                // Spread is additive across the disjoint hi/lo bit ranges:
-                // spread_byte = spread_hi·4^r + spread_lo (hi occupies the high
-                // 8-r bits, lo the low r bits).
-                assert_eq!(shi * (1 << (2 * r)) + slo, sb, "spread recombination");
+                // spread_lo is derived, not stored: spread_byte = spread_hi·4^r
+                // + spread_lo (hi occupies the high 8-r bits, lo the low r bits).
+                let slo = sb - shi * (1 << (2 * r));
                 assert!(unspread_u32(slo) < (1 << r), "lo fits in r bits");
                 assert!(unspread_u32(shi) < (1 << (8 - r)), "hi fits in 8-r bits");
             }

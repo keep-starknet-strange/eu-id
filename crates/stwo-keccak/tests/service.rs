@@ -683,7 +683,7 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     const SHAKE256_RATE: usize = 136;
     const EXPECTED_SCHEDULE_COLUMNS: usize = 16;
     const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 7_487_488;
-    const EXPECTED_SERVICE_CELLS: usize = 8_938_656;
+    const EXPECTED_SERVICE_CELLS: usize = 8_936_864;
 
     let capacity_bytes = (CAPACITY_PERMUTATIONS - 1) * SHAKE256_RATE;
     let mut shapes = vec![Shape::with_message_capacity(0, capacity_bytes, 1, 1, 2)
@@ -743,7 +743,7 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     assert_eq!(service_cells, EXPECTED_SERVICE_CELLS);
     assert_eq!(
         service_cells - EXPECTED_CARRIER_AND_TIEBACK_CELLS,
-        1_451_168
+        1_449_376
     );
 }
 

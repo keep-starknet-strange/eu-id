@@ -9,7 +9,8 @@
 //!   relation. The chi step's `andnot` lookup retargets onto this same table
 //!   (see [`crate::tables`]); no dedicated `andnot` relation or column.
 //! - **Conv:** `2^8`-row `(byte, spread(byte))` byte↔spread table.
-//! - **Split(r):** `2^8`-row `(spread_byte, spread_hi, spread_lo)` spread split.
+//! - **Split(r):** `2^8`-row `(spread_byte, spread_hi)` spread split;
+//!   `spread_lo = spread_byte − spread_hi·4^r` is derived at the lookup site.
 
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
@@ -72,12 +73,11 @@ impl TableKind {
         }
     }
 
-    /// Number of preprocessed columns (Dense=2, Conv=2, Split=3).
+    /// Number of preprocessed columns: 2 for every table kind (Dense:
+    /// key+xor_out; Conv: byte+spread; Split: spread_byte+spread_hi — the
+    /// andnot output and split's spread_lo are both derived, not committed).
     pub fn n_cols(&self) -> usize {
-        match self {
-            TableKind::Dense | TableKind::Conv => 2,
-            TableKind::Split(_) => 3,
-        }
+        2
     }
 
     /// Number of relations yielded (and multiplicity columns): 1 for every
@@ -298,7 +298,6 @@ fn packed_row_denom(
     vr: usize,
 ) -> PackedQM31 {
     let base = vr * N_LANES;
-    let n = kind.n_cols();
     let pack =
         |c: usize| PackedM31::from_array(std::array::from_fn(|l| M31::from(rows[base + l][c])));
     match kind {
@@ -306,8 +305,11 @@ fn packed_row_denom(
         TableKind::Conv => rel.conv.combine(&[pack(0), pack(1)]),
         TableKind::Split(r) => {
             let sr: &SplitRelation = &rel.split[(*r - 1) as usize];
-            let cols: Vec<PackedM31> = (0..n).map(pack).collect();
-            sr.combine(&cols)
+            let spread_byte = pack(0);
+            let spread_hi = pack(1);
+            // spread_lo = spread_byte - spread_hi * 4^r (derived, not committed).
+            let spread_lo = spread_byte - spread_hi * M31::from(1u32 << (2 * r));
+            sr.combine(&[spread_byte, spread_hi, spread_lo])
         }
     }
 }
@@ -358,10 +360,13 @@ impl FrameworkEval for Eval {
                 ));
             }
             TableKind::Split(r) => {
+                // spread_lo = spread_byte - spread_hi * 4^r (derived, not
+                // committed): cols is [spread_byte, spread_hi].
+                let spread_lo = cols[0].clone() - cols[1].clone() * M31::from(1u32 << (2 * r));
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.split[(r - 1) as usize],
                     -E::EF::from(mult),
-                    &cols,
+                    &[cols[0].clone(), cols[1].clone(), spread_lo],
                 ));
             }
         }
@@ -382,14 +387,14 @@ mod tests {
         for shift in 1..=7 {
             assert_eq!(TableKind::Split(shift).column_ids()[0], shared);
         }
-        // Dense(2) + Conv(1 new + 1 shared) + Split(7×2 new, sharing 1 column) = 18.
+        // Dense(2) + Conv(1 new + 1 shared) + Split(7 new, sharing 1 column) = 11.
         assert_eq!(
             all_preprocessed_column_ids()
                 .into_iter()
                 .map(|id| id.id)
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            18
+            11
         );
     }
 }
