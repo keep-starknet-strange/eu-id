@@ -4128,10 +4128,17 @@ mod tests {
         const MSO_BLOCKS: usize = 40;
         const ITEM_BLOCKS: usize = 2;
         const ITEM_PADDED_BYTES: usize = TS13_DEMO_ITEM_PADDED_BYTES as usize;
-        const EXPECTED_MSO_CELLS: usize = 963_664;
-        const EXPECTED_ITEM_CELLS: usize = 61_264;
+        // Wave C / C10 (2026-08-05): SHA's padding-role region is now
+        // ALIASED onto 30 of the 32 finalization-carry/`h_out` cells
+        // instead of adding 30 columns (`stwo_sha256::trace::Layout`
+        // 192 → 162 total). MSO loses 30 cols × 4096 rows = 122,880
+        // cells; the item/attribute instance loses 30 cols × 256 rows =
+        // 7,680 cells. Shared-table cells are untouched (range tables,
+        // not the SHA main trace).
+        const EXPECTED_MSO_CELLS: usize = 840_784;
+        const EXPECTED_ITEM_CELLS: usize = 53_584;
         const EXPECTED_SHARED_TABLE_CELLS: usize = 4_128;
-        const EXPECTED_TOTAL_CELLS: usize = 1_029_056;
+        const EXPECTED_TOTAL_CELLS: usize = 898_496;
         const _: () = assert!(EXPECTED_TOTAL_CELLS <= 1_500_000);
 
         let mso_bytes = vec![0u8; TS13_DEMO_MSO_PAYLOAD_BYTES];
@@ -4172,7 +4179,7 @@ mod tests {
 
         let mso_layout = mso_sha.layout();
         assert_eq!(mso_layout.preprocessed, [vec![12; 10], vec![4]].concat());
-        assert_eq!(mso_layout.trace, [vec![12; 193], vec![4; 32]].concat());
+        assert_eq!(mso_layout.trace, [vec![12; 163], vec![4; 32]].concat());
         assert_eq!(mso_layout.interaction, [vec![12; 32], vec![4; 36]].concat());
         assert_eq!(committed_cells(&mso_layout), EXPECTED_MSO_CELLS);
 

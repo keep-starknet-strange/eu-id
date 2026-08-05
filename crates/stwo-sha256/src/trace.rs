@@ -89,7 +89,15 @@ impl Layout {
     /// Schedule family — live on rows with `t ≥ 16`.
     pub const COL_SCHED_ENTRY_START: usize = Self::COL_ROUND_END;
     pub const COL_SCHED_ENTRY_END: usize = Self::COL_SCHED_ENTRY_START + SCHEDULE_ENTRY_COLS;
-    /// `t = 63` family.
+    /// `t = 63` family. **ALIASED** with the per-block padding-role region
+    /// (below): the first `PADDING_ROW_COLS` (30) of these 32
+    /// finalization-carry/`h_out` cells double as the padding-role witness
+    /// on each block's `t = 15` row. Only `h_out` word `N_STATE_WORDS − 1`
+    /// (the last 2 cells) is never aliased — see [`Self::COL_PADDING_START`].
+    /// Sound because `r15`/`r63` (the preprocessed round selectors) are
+    /// structurally disjoint: `ROWS_PER_BLOCK = 67` is prime, and a natural
+    /// row's position mod 67 is either `18` (round 15) or `66` (round 63),
+    /// never both — so no row ever needs both meanings from one cell.
     pub const COL_FINAL_CARRIES_START: usize = Self::COL_SCHED_ENTRY_END;
     pub const COL_FINAL_CARRIES_END: usize = Self::COL_FINAL_CARRIES_START + 2 * N_STATE_WORDS;
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
@@ -102,10 +110,23 @@ impl Layout {
     /// this flags exactly the last real row. It gates the cross-component
     /// digest yield to the final block, since the intermediate blocks'
     /// `h_out` are multi-block chaining state, not the credential digest.
+    ///
+    /// **Never aliased.** Unlike the padding-role region, `is_last_block`
+    /// keeps its own column and its ungated defining equality — a
+    /// malicious prover cannot forge it at a `t = 15` row, which is what
+    /// keeps the digest-substitution attack (planting `is_last_block = 1`
+    /// on a padding-controlled row so the digest relation yields
+    /// attacker-chosen bytes) closed by construction.
     pub const COL_IS_LAST_BLOCK: usize = Self::COL_H_OUT_END;
 
-    /// Per-block padding-role region, live on the `t = 15` row.
-    pub const COL_PADDING_START: usize = Self::COL_IS_LAST_BLOCK + 1;
+    /// Per-block padding-role region, **ALIASED** onto the first
+    /// `PADDING_ROW_COLS` (30) of the 32 `COL_FINAL_CARRIES_START..
+    /// COL_H_OUT_END` cells (see the field-level docs there). Live on the
+    /// `t = 15` row; the aliased final family is live on the `t = 63` row.
+    /// The remaining 2 cells (`h_out` word `N_STATE_WORDS − 1`) are never
+    /// reused for padding — see [`crate::constraints::Sha256Eval`]'s merged
+    /// zero-pin vs. the plain finalization-only pin.
+    pub const COL_PADDING_START: usize = Self::COL_FINAL_CARRIES_START;
     pub const COL_IS_MARKER_BLOCK: usize = Self::COL_PADDING_START;
     pub const COL_IS_LENGTH_BLOCK: usize = Self::COL_PADDING_START + 1;
     pub const COL_IS_MARKER_WORD_START: usize = Self::COL_PADDING_START + 2;
@@ -120,8 +141,10 @@ impl Layout {
     pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 3;
     pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
 
-    /// Number of base trace columns.
-    pub const TOTAL_COLS: usize = Self::COL_PADDING_END;
+    /// Number of base trace columns. The padding-role region is aliased
+    /// (not additive), so this ends at `is_last_block`, not at
+    /// `COL_PADDING_END`.
+    pub const TOTAL_COLS: usize = Self::COL_IS_LAST_BLOCK + 1;
 
     /// First column of the optional padded-stream block counter.
     pub const COL_FIELD_BYTES_START: usize = Self::TOTAL_COLS;
@@ -345,6 +368,11 @@ fn generate_trace_base_columns_with_decoys(
         witness.blocks.len(),
         n_rows
     );
+    // Decoy indexing below (`(row_idx - n_real_rows) % ROWS_PER_BLOCK`)
+    // assumes the real-row prefix ends on a block boundary — the aliased
+    // padding/finalization region relies on this to line up `block_row`
+    // with the right selector (`r15`/`r63`) on every padding row.
+    assert!(n_real_rows.is_multiple_of(ROWS_PER_BLOCK));
 
     let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
     let last_block_idx = witness.blocks.len().saturating_sub(1);
@@ -416,6 +444,8 @@ fn generate_trace_with_fields_scalar_fallback_with_decoys(
         witness.blocks.len(),
         n_rows
     );
+    // See the matching assert in `generate_trace_base_columns_with_decoys`.
+    assert!(n_real_rows.is_multiple_of(ROWS_PER_BLOCK));
 
     let total_cols = Layout::total_cols_with_fields(field_exposure.n_columns());
     let mut cols = vec![vec![BaseField::from(0u32); n_rows]; total_cols];
@@ -506,7 +536,21 @@ fn disabled_decoy_row_values(
     }
     values[Layout::COL_ENABLER] = BaseField::from(0u32);
     values[Layout::COL_IS_LAST_BLOCK] = BaseField::from(0u32);
-    values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
+    // The padding-role region is ALIASED onto the finalization
+    // carries/`h_out` cells (see `Layout::COL_PADDING_START`). At the
+    // decoy's `t = 15` row those cells hold whatever `write_round_row_values`
+    // left there for the padding family — zero them so the disabled-row
+    // invariant (padding flags are public-zero off an active block) holds.
+    // At the decoy's `t = 63` row (`block_row == STATE_SEED_ROWS + N_ROUNDS
+    // − 1`), the SAME physical cells instead hold the decoy's own
+    // finalization carries/`h_out` — real, honestly-computed values that
+    // must NOT be zeroed, since they are the Class-D digest-relation blind
+    // (a decoy's `h_out` masks the honest proof's final digest in the
+    // logup sum). Every other `block_row` never writes these cells at all
+    // (they stay zero-initialized), so the conditional is a no-op there.
+    if block_row != STATE_SEED_ROWS + N_ROUNDS - 1 {
+        values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
+    }
     if field_exposure.n_columns() != 0 {
         values[Layout::COL_FIELD_BYTES_START..].fill(BaseField::from(0u32));
     }
@@ -1060,6 +1104,13 @@ mod tests {
     }
 
     /// The column-count breakdown documented on [`Layout`] adds up.
+    ///
+    /// Wave C (2026-08-05, C10): the 30-cell padding-role region is now
+    /// ALIASED onto 30 of the 32 finalization-carry/`h_out` cells, not
+    /// additive — `TOTAL_COLS` ends at `is_last_block` (192 → 162).
+    /// `PADDING_ROW_COLS` still pins the alias width (it must stay ≤ 32,
+    /// the aliasable region's size, and equal to 30 exactly since 2 cells —
+    /// `h_out` word `N_STATE_WORDS − 1` — are deliberately left unaliased).
     #[test]
     fn layout_total_cols_matches_expected_breakdown() {
         let expected = 1 // enabler
@@ -1069,12 +1120,17 @@ mod tests {
             + SCHEDULE_ENTRY_COLS
             + 2 * N_STATE_WORDS // final carries
             + 2 * N_STATE_WORDS // h_out
-            + 1 // is_last_block
-            + PADDING_ROW_COLS;
+            + 1; // is_last_block
         assert_eq!(Layout::TOTAL_COLS, expected);
         assert_eq!(ROUND_COLS, 88);
         assert_eq!(SCHEDULE_ENTRY_COLS, 6);
-        assert_eq!(Layout::TOTAL_COLS, 192);
+        assert_eq!(Layout::TOTAL_COLS, 162);
+        assert_eq!(PADDING_ROW_COLS, 30);
+        let aliasable_region_cols = 2 * (2 * N_STATE_WORDS); // final carries + h_out
+        assert!(
+            PADDING_ROW_COLS <= aliasable_region_cols,
+            "alias-width must fit the 32-cell final_carries/h_out region"
+        );
     }
 
     /// Round family, schedule family, and boundary families round-trip a

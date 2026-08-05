@@ -35,7 +35,9 @@ fn sha_air_uses_typed_relation_multiplicities() {
 ///
 /// Three-seed-row layout: enabler (1) + `W` limbs (2) + W bits (32) +
 /// round family (88) + schedule family (6) + finalization carries (16) +
-/// `h_out` (16) + `is_last_block` (1) + padding-role (30) = 192.
+/// `h_out` (16) + `is_last_block` (1) = 162. The 30-cell padding-role
+/// region is ALIASED onto 30 of the 32 finalization-carry/`h_out` cells
+/// (`PADDING_ROW_COLS` pins only the alias width), not additive.
 ///
 /// Wave A (2026-08-05): deleted the 64 committed schedule-σ output bit
 /// columns (schedule family 70→6, ungated recomposition straight from
@@ -43,10 +45,15 @@ fn sha_air_uses_typed_relation_multiplicities() {
 /// `is_marker_only_block`, `marker_word_post_strict_15`; padding-role
 /// 33→30) — the first two are now inlined AIR expressions, the third is
 /// dead code, deleted outright.
+///
+/// Wave C / C10 (2026-08-05): aliased the 30-cell padding-role region onto
+/// the finalization-carry/`h_out` region (192 → 162 total columns). See
+/// `crate::trace::Layout`'s field docs and `crate::constraints::Sha256Eval`
+/// for the merged zero-pin and the `r15`-gated padding constraint family.
 #[test]
-fn total_cols_equals_192() {
+fn total_cols_equals_162() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 192);
+    assert_eq!(Layout::TOTAL_COLS, 162);
     assert_eq!(PADDING_ROW_COLS, 30);
     assert_eq!(DIGEST_BYTES, 32);
 }

@@ -398,6 +398,34 @@ mod tests {
         }
     }
 
+    /// Wave C / C10 (2026-08-05): the padding-role region now aliases 30 of
+    /// the 32 finalization-carry/`h_out` trace cells, sound only because
+    /// `r15` (cyclic[3], round 15) and `r63` (cyclic[4], round 63) never
+    /// both fire on one row. Check this pointwise, structurally, for two
+    /// `log_n_rows` values (below and above one packed SIMD lane) —
+    /// `ROWS_PER_BLOCK = 67` is prime, so `position mod 67` is `18` xor `66`
+    /// for every row, never both.
+    #[test]
+    fn r15_and_r63_are_pointwise_disjoint() {
+        for log_n_rows in [8u32, 12u32] {
+            let (evals, _, _) = generate_preprocessed_trace(log_n_rows);
+            // Emission order: 4 range tables (0..4) + 2 boundary selectors
+            // (4, 5: is_first_row, is_first_round) + 8 cyclic columns
+            // (6..14) + 1 digest-bridge selector (14). `r15` is cyclic[3]
+            // (evals[6 + 3]), `r63` is cyclic[4] (evals[6 + 4]).
+            let r15 = &evals[9];
+            let r63 = &evals[10];
+            let n_rows = 1usize << log_n_rows;
+            for slot in 0..n_rows {
+                let product = r15.values.at(slot).0 * r63.values.at(slot).0;
+                assert_eq!(
+                    product, 0,
+                    "r15·r63 nonzero at slot {slot} (log_n_rows={log_n_rows})"
+                );
+            }
+        }
+    }
+
     /// The metadata-only [`preprocessed_log_sizes`] must agree, index-for-
     /// index, with both the `log_sizes` vector and the actual committed
     /// column domains that [`generate_preprocessed_trace`] produces. This
