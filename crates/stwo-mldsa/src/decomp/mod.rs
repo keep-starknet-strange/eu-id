@@ -1,10 +1,13 @@
 //! `mldsa_decomp` — FIPS 204 [DECOMP] + [HINT] over each `w_i` coefficient.
 //!
-//! One AIR row holds four consecutive coefficients of one `w_i` polynomial.
-//! ML-DSA-44 encodes them as three 6-bit-packed bytes. ML-DSA-65 encodes them
-//! as two 4-bit-packed bytes. Both profiles emit exactly 768 bytes. The fixed
-//! trace stores six polynomial slots. The verifier-selected `k` activates four
-//! or six slots.
+//! One AIR row holds four consecutive coefficients of one `w_i` polynomial,
+//! encoded as two 4-bit-packed bytes (768 bytes total, ML-DSA-65's `w1Encode`).
+//! The fixed trace stores six polynomial slots, matching ML-DSA-65's `k`. This
+//! component is single-profile in practice: `statement.rs` never constructs
+//! it with `ML_DSA_44` (the "No ML-DSA-44" policy), so the ML-DSA-44
+//! 6-bit/3-byte packing variant it once also supported (pack-bit columns, two
+//! rc4 splits, a third output byte, and the `hash_active` gate needed to
+//! selectively disable them for the narrower `k`) has been deleted.
 //!
 //! ## Per-lane FIPS obligations
 //!
@@ -30,8 +33,8 @@
 //!    final active row is range-checked against the selected `ω`.
 //! 5. **w-binding** — each sub-lane `w` is a USE of the coeffs W-group cell
 //!    (`WCellRelation(w_bind_id, w)`), `w_bind_id = i·N + m`. Yielded by coeffs.
-//! 6. **w1Encode emission** — each row yields two ML-DSA-65 bytes or three
-//!    ML-DSA-44 bytes into the commitment-hash absorb stream.
+//! 6. **w1Encode emission** — each row yields two bytes into the
+//!    commitment-hash absorb stream.
 //!
 //! ## Constraint degrees
 //!
@@ -74,7 +77,9 @@ use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 #[cfg(test)]
 use crate::constants::GAMMA2;
 use crate::constants::{K, N, Q};
-use crate::profile::{MlDsaProfile, ML_DSA_44, ML_DSA_65};
+use crate::profile::MlDsaProfile;
+#[cfg(test)]
+use crate::profile::ML_DSA_65;
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
 use tables::RcUses;
@@ -101,8 +106,9 @@ const L_WRAP_M: usize = 7;
 const L_A_HI: usize = 8;
 const L_B_HI: usize = 9;
 /// `sign_val = s0·(w0−1) + (1−s0)·(−w0) ∈ [0, γ2]`, witnessed so the rc value
-/// stays at degree 1. A degree-2 lookup value would make the LogUp constraint
-/// degree 3 and break the +1 bound. C-DECOMP-S0 pins this value.
+/// stays at degree 1. A degree-2 lookup value would make the batched LogUp
+/// constraint degree 6 and break the component's +2 (D ≤ 5) bound.
+/// C-DECOMP-S0 pins this value.
 const L_SIGN_VAL: usize = 10;
 /// 7-bit hi of `sign_val` (13+7 split).
 const L_SIGN_HI: usize = 11;
@@ -120,15 +126,16 @@ const COL_V_INV: [usize; LANES_PER_ROW] = [
     COL_HINT_ACC + 6,
     COL_HINT_ACC + 8,
 ];
-const COL_PACK_BIT0: usize = COL_HINT_ACC + 9;
-const PACK_BIT_COLS: usize = 6;
 /// Total base columns.
-pub const N_BASE_COLS: usize = COL_PACK_BIT0 + PACK_BIT_COLS;
+pub const N_BASE_COLS: usize = COL_HINT_ACC + 9;
 
 /// Logup entries per row, batched by [`LOGUP_BATCH`]: four lanes each emit 11
-/// range uses and one WCell use. Three hash-byte slots, two ML-DSA-44 split
-/// checks, and two final hint-sum checks follow. Total: 55.
-pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 12 + 3 + 2 + 2;
+/// range uses and one WCell use. Two hash-byte slots (ML-DSA-65's fixed
+/// w1Encode output; the ML-DSA-44 3-byte/6-bit packing residue was deleted --
+/// this component is single-profile in practice, statement.rs never
+/// constructs it with ML_DSA_44) and two final hint-sum checks follow.
+/// Total: 51.
+pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 12 + 2 + 2;
 pub const LOGUP_BATCH: usize = 4;
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // hint_acc is a QM31 running sum
@@ -140,20 +147,20 @@ fn pre_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
-fn hash_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
-    PreProcessedColumnId {
-        id: format!("mldsa_decomp_{:?}_hash_active", profile),
-    }
-}
-
 /// Preprocessed column IDs for the selected profile, in commit order.
-pub fn decomp_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
+///
+/// `profile` is accepted for call-site symmetry with the other components'
+/// per-profile preprocessed-id builders wired uniformly in `statement.rs`;
+/// this component's own content no longer depends on it (the ML-DSA-44
+/// `hash_active` gate was deleted -- production only ever constructs this
+/// component with `ML_DSA_65`, K == ML_DSA_65.k(), so every row was always
+/// active).
+pub fn decomp_preprocessed_ids(_profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     vec![
         pre_id("enabler_pre"),
         pre_id("start"),
         pre_id("byte_pos"),
         pre_id("is_last"),
-        hash_active_id(profile),
     ]
 }
 
@@ -172,7 +179,7 @@ fn row_schedule() -> Vec<(usize, usize)> {
 // Preprocessed trace.
 // =============================================================================
 
-pub fn gen_decomp_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
+pub fn gen_decomp_preprocessed(_profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
 
@@ -180,19 +187,17 @@ pub fn gen_decomp_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColE
     let mut start = vec![m31(0); rows];
     let mut byte_pos = vec![m31(0); rows];
     let mut is_last = vec![m31(0); rows];
-    let mut hash_active = vec![m31(0); rows];
 
-    for (row, &(i, _)) in sched.iter().enumerate() {
+    for (row, _) in sched.iter().enumerate() {
         enabler[row] = m31(1);
         byte_pos[row] = m31(row as u32);
-        hash_active[row] = m31(u32::from(i < profile.k()));
     }
     start[0] = m31(1); // coset row 0 zeroes the accumulator's wraparound acc_prev.
     if !sched.is_empty() {
         is_last[sched.len() - 1] = m31(1);
     }
 
-    vec![enabler, start, byte_pos, is_last, hash_active]
+    vec![enabler, start, byte_pos, is_last]
         .into_iter()
         .map(|v| col_eval(log_size, v))
         .collect()
@@ -204,7 +209,7 @@ mod schedule_tests {
 
     #[test]
     fn byte_position_derives_all_wcell_keys() {
-        assert_eq!(decomp_preprocessed_ids(ML_DSA_65).len(), 5);
+        assert_eq!(decomp_preprocessed_ids(ML_DSA_65).len(), 4);
         for (row, (i, p)) in row_schedule().into_iter().enumerate() {
             let byte_pos = row as u32;
             for lane in 0..LANES_PER_ROW {
@@ -416,16 +421,6 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
             cols[base + L_SIGN_HI][row] = m31((sign_val >> 13) as u32);
             hint_acc += v.hint;
         }
-        if witness.profile == ML_DSA_44 && i < witness.profile.k() {
-            let lane1 = witness.decomp.w1[i][LANES_PER_ROW * p + 1];
-            let lane2 = witness.decomp.w1[i][LANES_PER_ROW * p + 2];
-            for bit in 0..2 {
-                cols[COL_PACK_BIT0 + bit][row] = m31((lane1 >> bit) & 1);
-            }
-            for bit in 0..4 {
-                cols[COL_PACK_BIT0 + 2 + bit][row] = m31((lane2 >> bit) & 1);
-            }
-        }
         cols[COL_HINT_ACC][row] = m31(hint_acc as u32);
     }
 
@@ -463,7 +458,6 @@ impl FrameworkEval for DecompEval {
         let start = eval.get_preprocessed_column(pre_id("start"));
         let byte_pos = eval.get_preprocessed_column(pre_id("byte_pos"));
         let is_last = eval.get_preprocessed_column(pre_id("is_last"));
-        let hash_active = eval.get_preprocessed_column(hash_active_id(self.profile));
         let four = E::F::from(m31(LANES_PER_ROW as u32));
         let wbid_base = byte_pos.clone() * four;
 
@@ -475,7 +469,6 @@ impl FrameworkEval for DecompEval {
         let boundary: Vec<(E::F, E::F)> = (0..LANES_PER_ROW)
             .map(|_| (eval.next_trace_mask(), eval.next_trace_mask()))
             .collect();
-        let pack_bits: Vec<E::F> = (0..PACK_BIT_COLS).map(|_| eval.next_trace_mask()).collect();
 
         // hint_acc previous-row value via interaction mask (running sum).
         let acc_coords: [[E::F; 2]; SECURE_EXTENSION_DEGREE] =
@@ -513,9 +506,6 @@ impl FrameworkEval for DecompEval {
 
             // The hint, wrap_k, and s0 values are Boolean. Padding uses zero.
             eval.add_constraint(hint.clone() * (one.clone() - hint.clone()));
-            if self.profile == ML_DSA_44 {
-                eval.add_constraint((one.clone() - hash_active.clone()) * hint.clone());
-            }
             eval.add_constraint(wrap_k.clone() * (one.clone() - wrap_k.clone()));
             eval.add_constraint(s0.clone() * (one.clone() - s0.clone()));
 
@@ -631,7 +621,7 @@ impl FrameworkEval for DecompEval {
             let wtuple = [wbids[lane].clone(), w.clone()];
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.wcell,
-                hash_active.clone(),
+                enabler_pre.clone(),
                 &wtuple,
             ));
 
@@ -651,63 +641,18 @@ impl FrameworkEval for DecompEval {
             E::EF::from(is_last.clone()) * (E::EF::from(hint_acc.clone()) - acc_cur.clone()),
         );
 
-        // Bind the ML-DSA-44 6-bit carrier split. Four coefficients map to
-        // three bytes. The two derived high parts must be in rc4, so the six
-        // Boolean low bits cannot choose a non-integer field alias.
-        for bit in &pack_bits {
-            eval.add_constraint(bit.clone() * (one.clone() - bit.clone()));
-            eval.add_constraint((one.clone() - hash_active.clone()) * bit.clone());
-            if self.profile == ML_DSA_65 {
-                eval.add_constraint(bit.clone());
-            }
-        }
-        let low2 = pack_bits[0].clone() + E::F::from(m31(2)) * pack_bits[1].clone();
-        let low4 = pack_bits[2].clone()
-            + E::F::from(m31(2)) * pack_bits[3].clone()
-            + E::F::from(m31(4)) * pack_bits[4].clone()
-            + E::F::from(m31(8)) * pack_bits[5].clone();
-        let inv4 = E::F::from(m31(4).inverse());
-        let inv16 = E::F::from(m31(16).inverse());
-        let high4 = (lanes[1][L_W1P].clone() - low2.clone()) * inv4;
-        let high2 = (lanes[2][L_W1P].clone() - low4.clone()) * inv16;
-
-        let split_gate = if self.profile == ML_DSA_44 {
-            hash_active.clone()
-        } else {
-            E::F::from(m31(0))
-        };
-        for high in [&high4, &high2] {
-            eval.add_to_relation(RelationEntry::base(
-                &self.relations.rc4,
-                split_gate.clone(),
-                core::slice::from_ref(high),
-            ));
-        }
-
-        let output_bytes = if self.profile == ML_DSA_44 {
-            vec![
-                lanes[0][L_W1P].clone() + E::F::from(m31(64)) * low2,
-                high4 + E::F::from(m31(16)) * low4,
-                high2 + E::F::from(m31(4)) * lanes[3][L_W1P].clone(),
-            ]
-        } else {
-            vec![
-                lanes[0][L_W1P].clone() + E::F::from(m31(16)) * lanes[1][L_W1P].clone(),
-                lanes[2][L_W1P].clone() + E::F::from(m31(16)) * lanes[3][L_W1P].clone(),
-            ]
-        };
+        // w1Encode: the fixed ML-DSA-65 packing, two bytes per row
+        // (lane0 | lane1<<4, lane2 | lane3<<4). The ML-DSA-44 3-byte/6-bit
+        // packing residue (6 pack-bit columns, 2 rc4 splits, a third output
+        // byte) was deleted -- this component is single-profile in
+        // production (statement.rs never constructs it with ML_DSA_44).
+        let output_bytes = [
+            lanes[0][L_W1P].clone() + E::F::from(m31(16)) * lanes[1][L_W1P].clone(),
+            lanes[2][L_W1P].clone() + E::F::from(m31(16)) * lanes[3][L_W1P].clone(),
+        ];
         let stream = E::F::from(m31(self.ct_stream));
         let stride = E::F::from(m31(output_bytes.len() as u32));
-        for output in 0..3 {
-            let gate = if output < output_bytes.len() {
-                hash_active.clone()
-            } else {
-                E::F::from(m31(0))
-            };
-            let byte = output_bytes
-                .get(output)
-                .cloned()
-                .unwrap_or_else(|| E::F::from(m31(0)));
+        for (output, byte) in output_bytes.into_iter().enumerate() {
             let io_tuple = [
                 stream.clone(),
                 byte_pos.clone() * stride.clone() + E::F::from(m31(output as u32)),
@@ -715,7 +660,7 @@ impl FrameworkEval for DecompEval {
             ];
             eval.add_to_relation(RelationEntry::base(
                 &self.relations.hash_io,
-                gate,
+                enabler_pre.clone(),
                 &io_tuple,
             ));
         }
@@ -817,14 +762,7 @@ fn gen_decomp_metadata_inner(
             rc_uses.rc7[(sign_val >> 13) as usize] += 1;
         }
         if i < profile.k() {
-            let bytes = packed_row_bytes(profile, witness, i, p);
-            if profile == ML_DSA_44 {
-                let lane1 = witness.decomp.w1[i][LANES_PER_ROW * p + 1];
-                let lane2 = witness.decomp.w1[i][LANES_PER_ROW * p + 2];
-                rc_uses.rc4[(lane1 >> 2) as usize] += 1;
-                rc_uses.rc4[(lane2 >> 4) as usize] += 1;
-            }
-            w1_encode_bytes.extend(bytes);
+            w1_encode_bytes.extend(packed_row_bytes(witness, i, p));
         }
     }
 
@@ -841,21 +779,15 @@ fn gen_decomp_metadata_inner(
     }
 }
 
-fn packed_row_bytes(profile: MlDsaProfile, witness: &MlDsaWitness, i: usize, p: usize) -> Vec<u8> {
+/// The fixed ML-DSA-65 w1Encode packing: two bytes per row (lane0|lane1<<4,
+/// lane2|lane3<<4). The ML-DSA-44 3-byte/6-bit variant was deleted.
+fn packed_row_bytes(witness: &MlDsaWitness, i: usize, p: usize) -> Vec<u8> {
     let values: [u32; LANES_PER_ROW] =
         core::array::from_fn(|lane| witness.decomp.w1[i][LANES_PER_ROW * p + lane]);
-    if profile == ML_DSA_44 {
-        vec![
-            (values[0] | (values[1] << 6)) as u8,
-            ((values[1] >> 2) | (values[2] << 4)) as u8,
-            ((values[2] >> 4) | (values[3] << 2)) as u8,
-        ]
-    } else {
-        vec![
-            (values[0] | (values[1] << 4)) as u8,
-            (values[2] | (values[3] << 4)) as u8,
-        ]
-    }
+    vec![
+        (values[0] | (values[1] << 4)) as u8,
+        (values[2] | (values[3] << 4)) as u8,
+    ]
 }
 
 #[cfg(test)]
@@ -1056,9 +988,9 @@ fn gen_decomp_interaction_inner(
     };
 
     // --- Build the logup fraction streams in AIR emission order ---
-    // Each row has 55 fractions. Each of four lanes has 11 range uses and one
-    // WCell use. Two ML-DSA-44 split checks, three hash-byte slots, and two
-    // final hint-sum checks follow. Keep this order equal to the AIR order.
+    // Each row has 51 fractions. Each of four lanes has 11 range uses and one
+    // WCell use. Two hash-byte slots and two final hint-sum checks follow.
+    // Keep this order equal to the AIR order.
     for lane in 0..LANES_PER_ROW {
         for field in [
             RcField::W1,
@@ -1106,38 +1038,16 @@ fn gen_decomp_interaction_inner(
             &mut claimed,
         );
     }
-    // Two split-high rc4 uses for ML-DSA-44. They are zero-numerator streams
-    // for ML-DSA-65 so the interaction layout stays canonical.
-    for split in 0..2 {
-        push(
-            &|coset| match &coset_rows[coset] {
-                Some((i, p)) if witness.profile == ML_DSA_44 && *i < witness.profile.k() => {
-                    let m = LANES_PER_ROW * p + 1 + split;
-                    let shift = if split == 0 { 2 } else { 4 };
-                    let high = witness.decomp.w1[*i][m] >> shift;
-                    (one, relations.rc4.combine(&[m31(high)]))
-                }
-                _ => (zero, one),
-            },
-            &mut entries,
-            &mut claimed,
-        );
-    }
-    // Up to three byte yields into HashIo. ML-DSA-65 uses two, while the third
-    // fraction has numerator zero.
-    for output in 0..3 {
+    // Two byte yields into HashIo (the fixed ML-DSA-65 packing).
+    for output in 0..2 {
         push(
             &|coset| match &coset_rows[coset] {
                 Some((i, p)) if *i < witness.profile.k() => {
-                    let bytes = packed_row_bytes(witness.profile, witness, *i, *p);
-                    match bytes.get(output) {
-                        Some(&byte) => {
-                            let position = coset * bytes.len() + output;
-                            let tuple = [m31(ct_stream), m31(position as u32), m31(byte as u32)];
-                            (one, relations.hash_io.combine(&tuple))
-                        }
-                        None => (zero, one),
-                    }
+                    let bytes = packed_row_bytes(witness, *i, *p);
+                    let byte = bytes[output];
+                    let position = coset * bytes.len() + output;
+                    let tuple = [m31(ct_stream), m31(position as u32), m31(byte as u32)];
+                    (one, relations.hash_io.combine(&tuple))
                 }
                 _ => (zero, one),
             },
