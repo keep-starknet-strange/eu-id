@@ -5,13 +5,12 @@
 //! multiplicities. Thus, the LogUp balance holds only for valid table rows.
 //!
 //! Three table families:
-//! - **Dense:** one `2^16`-row table `(key, spread(xor), andnot)` that serves both
-//!   the `xor3` and `andnot` relations. Both key a 16-bit base-4 digit value, so
-//!   they share the dense key space. Merging halves the fixed `2^16`
-//!   commitment. It carries two multiplicity columns and yields
-//!   both relations.
+//! - **Dense:** one `2^16`-row `(key, spread(xor))` table serving the `xor3`
+//!   relation. The chi step's `andnot` lookup retargets onto this same table
+//!   (see [`crate::tables`]); no dedicated `andnot` relation or column.
 //! - **Conv:** `2^8`-row `(byte, spread(byte))` byte↔spread table.
-//! - **Split(r):** `2^8`-row `(spread_byte, spread_hi, spread_lo)` spread split.
+//! - **Split(r):** `2^8`-row `(spread_byte, spread_hi)` spread split;
+//!   `spread_lo = spread_byte − spread_hi·4^r` is derived at the lookup site.
 
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
@@ -74,20 +73,18 @@ impl TableKind {
         }
     }
 
-    /// Number of preprocessed columns (Dense=3, Conv=2, Split=3).
+    /// Number of preprocessed columns: 2 for every table kind (Dense:
+    /// key+xor_out; Conv: byte+spread; Split: spread_byte+spread_hi — the
+    /// andnot output and split's spread_lo are both derived, not committed).
     pub fn n_cols(&self) -> usize {
-        match self {
-            TableKind::Conv => 2,
-            TableKind::Dense | TableKind::Split(_) => 3,
-        }
+        2
     }
 
-    /// Number of relations yielded (and multiplicity columns): Dense=2, else 1.
+    /// Number of relations yielded (and multiplicity columns): 1 for every
+    /// table kind (the dense table's andnot lookup retargets onto its own
+    /// xor3 relation, so it no longer needs a second relation/column).
     pub fn n_relations(&self) -> usize {
-        match self {
-            TableKind::Dense => 2,
-            _ => 1,
-        }
+        1
     }
 
     /// Rows as `Vec<Vec<u32>>` (each inner vec of length `n_cols`).
@@ -180,11 +177,13 @@ impl TableMultiplicities {
                 }
             }
         }
+        // Retargeted onto the xor3 relation (see `write_andnot`): tuple[0] is
+        // now a genuine xor3 key, so it folds into the same bucket as above.
         for lookup in &data.lookup_data.andnot {
             for (vector_row, tuple) in lookup.iter().enumerate() {
-                for (lane, value) in tuple[0].to_array().iter().enumerate() {
+                for (lane, key) in tuple[0].to_array().iter().enumerate() {
                     if active(vector_row * N_LANES + lane) {
-                        per_table[DENSE_I][1][value.0 as usize] += 1;
+                        per_table[DENSE_I][0][key.0 as usize] += 1;
                     }
                 }
             }
@@ -270,36 +269,13 @@ pub fn generate_interaction_trace(
         let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
         let mut gen = LogupTraceGenerator::new(log_size);
 
-        match kind {
-            TableKind::Dense => {
-                // Two yields (xor3, andnot) over the shared rows, pair-batched.
-                let mut col = gen.new_col();
-                for vr in 0..n_vec_rows {
-                    let base = vr * N_LANES;
-                    let pack = |c: usize| {
-                        PackedM31::from_array(std::array::from_fn(|l| M31::from(rows[base + l][c])))
-                    };
-                    let key = pack(0);
-                    let xor_out = pack(1);
-                    let andnot_out = pack(2);
-                    let d0: PackedQM31 = rel.xor3.combine(&[key, xor_out]);
-                    let d1: PackedQM31 = rel.andnot.combine(&[key, andnot_out]);
-                    let n0 = packed_neg_mult(&mults[0], vr);
-                    let n1 = packed_neg_mult(&mults[1], vr);
-                    col.write_frac(vr, n0 * d1 + n1 * d0, d0 * d1);
-                }
-                col.finalize_col();
-            }
-            _ => {
-                let mut col = gen.new_col();
-                for vr in 0..n_vec_rows {
-                    let num = packed_neg_mult(&mults[0], vr);
-                    let den = packed_row_denom(kind, rel, &rows, vr);
-                    col.write_frac(vr, num, den);
-                }
-                col.finalize_col();
-            }
+        let mut col = gen.new_col();
+        for vr in 0..n_vec_rows {
+            let num = packed_neg_mult(&mults[0], vr);
+            let den = packed_row_denom(kind, rel, &rows, vr);
+            col.write_frac(vr, num, den);
         }
+        col.finalize_col();
 
         let (trace, sum) = gen.finalize_last();
         all_cols.extend(trace);
@@ -322,17 +298,19 @@ fn packed_row_denom(
     vr: usize,
 ) -> PackedQM31 {
     let base = vr * N_LANES;
-    let n = kind.n_cols();
     let pack =
         |c: usize| PackedM31::from_array(std::array::from_fn(|l| M31::from(rows[base + l][c])));
     match kind {
+        TableKind::Dense => rel.xor3.combine(&[pack(0), pack(1)]),
         TableKind::Conv => rel.conv.combine(&[pack(0), pack(1)]),
         TableKind::Split(r) => {
             let sr: &SplitRelation = &rel.split[(*r - 1) as usize];
-            let cols: Vec<PackedM31> = (0..n).map(pack).collect();
-            sr.combine(&cols)
+            let spread_byte = pack(0);
+            let spread_hi = pack(1);
+            // spread_lo = spread_byte - spread_hi * 4^r (derived, not committed).
+            let spread_lo = spread_byte - spread_hi * M31::from(1u32 << (2 * r));
+            sr.combine(&[spread_byte, spread_hi, spread_lo])
         }
-        TableKind::Dense => unreachable!("dense handled inline"),
     }
 }
 
@@ -363,24 +341,18 @@ impl FrameworkEval for Eval {
             .iter()
             .map(|id| eval.get_preprocessed_column(id.clone()))
             .collect();
+        let mult = eval.next_trace_mask();
         match self.kind {
             TableKind::Dense => {
-                // (key, xor_out, andnot_out) yields xor3 and andnot.
-                let m_xor = eval.next_trace_mask();
-                let m_and = eval.next_trace_mask();
+                // (key, xor_out) yields xor3; the chi step's andnot lookup
+                // retargets onto this same relation (see `crate::tables`).
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.xor3,
-                    -E::EF::from(m_xor),
-                    &[cols[0].clone(), cols[1].clone()],
-                ));
-                eval.add_to_relation(RelationEntry::new(
-                    &self.relations.andnot,
-                    -E::EF::from(m_and),
-                    &[cols[0].clone(), cols[2].clone()],
+                    -E::EF::from(mult),
+                    &cols,
                 ));
             }
             TableKind::Conv => {
-                let mult = eval.next_trace_mask();
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.conv,
                     -E::EF::from(mult),
@@ -388,11 +360,13 @@ impl FrameworkEval for Eval {
                 ));
             }
             TableKind::Split(r) => {
-                let mult = eval.next_trace_mask();
+                // spread_lo = spread_byte - spread_hi * 4^r (derived, not
+                // committed): cols is [spread_byte, spread_hi].
+                let spread_lo = cols[0].clone() - cols[1].clone() * M31::from(1u32 << (2 * r));
                 eval.add_to_relation(RelationEntry::new(
                     &self.relations.split[(r - 1) as usize],
                     -E::EF::from(mult),
-                    &cols,
+                    &[cols[0].clone(), cols[1].clone(), spread_lo],
                 ));
             }
         }
@@ -413,13 +387,14 @@ mod tests {
         for shift in 1..=7 {
             assert_eq!(TableKind::Split(shift).column_ids()[0], shared);
         }
+        // Dense(2) + Conv(1 new + 1 shared) + Split(7 new, sharing 1 column) = 11.
         assert_eq!(
             all_preprocessed_column_ids()
                 .into_iter()
                 .map(|id| id.id)
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            19
+            11
         );
     }
 }

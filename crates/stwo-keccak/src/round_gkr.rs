@@ -365,7 +365,6 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
                 LookupKind::Schedule => self.relations.round_schedule.combine(&lk.tuple),
                 LookupKind::State => self.relations.keccak_state.combine(&lk.tuple),
                 LookupKind::Xor3 => self.relations.xor3.combine(&lk.tuple),
-                LookupKind::Andnot => self.relations.andnot.combine(&lk.tuple),
                 LookupKind::Split(r) => self.relations.split[r - 1].combine(&lk.tuple),
             };
             out += self.eq_ws[s] * (self.delta * lk.num + den);
@@ -951,7 +950,6 @@ mod tests {
                 LookupKind::Schedule => relations.round_schedule.combine(&lookup.tuple),
                 LookupKind::State => relations.keccak_state.combine(&lookup.tuple),
                 LookupKind::Xor3 => relations.xor3.combine(&lookup.tuple),
-                LookupKind::Andnot => relations.andnot.combine(&lookup.tuple),
                 LookupKind::Split(shift) => relations.split[shift - 1].combine(&lookup.tuple),
             };
             reconstructed_numerator += weights[slot] * lookup.num;
@@ -1154,9 +1152,9 @@ mod tests {
                 mix(&mut coeff_hash, &component.0.to_le_bytes());
             }
         }
-        assert_eq!(leaf_hash, 0xbdfcf01aac9fcae8);
-        assert_eq!(proof_hash, 0x465a62423b4bed77);
-        assert_eq!(coeff_hash, 0x9a58852dcb08ee98);
+        assert_eq!(leaf_hash, 0x940dfa7ccb6aa2ad);
+        assert_eq!(proof_hash, 0xbfec621f6408e493);
+        assert_eq!(coeff_hash, 0x8617d8dcf13f10e0);
         assert_eq!(blob.len(), 9_992);
     }
 }

@@ -4,10 +4,10 @@
 //!
 //! 1. **Interface relations:** [`KeccakStateRelation`] and [`HashIoRelation`].
 //!    Downstream ML-DSA components use only these relations.
-//! 2. **Internal relations:** [`Xor3`], [`AndNot`], [`Conv`], and the seven
-//!    `Split*` byte-split channels connect the carrier to its spread-form
-//!    lookup tables. [`KeccakRound`] keeps its fixed v1 transcript draw. No AIR
-//!    emits a `KeccakRound` tuple in this profile.
+//! 2. **Internal relations:** [`Xor3`], [`Conv`], and the seven `Split*`
+//!    byte-split channels connect the carrier to its spread-form lookup
+//!    tables. The dense andnot lookup is retargeted at [`Xor3`] (see
+//!    [`crate::tables`]); no separate `AndNot` relation is drawn.
 //!
 //! Each `relation!(_, N)` declares a struct wrapping `LookupElements<N>`; `N`
 //! is the base-field arity of one lookup tuple. Stwo's macro implements
@@ -75,9 +75,6 @@ relation!(HashIoRelation, HASH_IO_ARITY);
 pub const DENSE_LOOKUP_ARITY: usize = 2;
 relation!(Xor3, DENSE_LOOKUP_ARITY);
 
-// `andnot` channel: `(u, spread(¬b'∧b''))` with `u = spread(b')+2·spread(b'')`.
-relation!(AndNot, DENSE_LOOKUP_ARITY);
-
 // `conv` byte↔spread channel: `(byte, spread(byte))`. Its arity is 2.
 relation!(Conv, DENSE_LOOKUP_ARITY);
 
@@ -92,18 +89,12 @@ relation!(Split5, SPLIT_LOOKUP_ARITY);
 relation!(Split6, SPLIT_LOOKUP_ARITY);
 relation!(Split7, SPLIT_LOOKUP_ARITY);
 
-/// Arity of the reserved v1 [`KeccakRound`] transcript relation.
-///
-/// The removed standalone round wrapper used a permutation identifier, a
-/// direction, a round index, four Iota byte lanes, and 200 state bytes. The v1
-/// profile keeps this unused draw so later transcript challenges do not move.
-pub const KECCAK_ROUND_ARITY: usize = 3 + IOTA_RC_BYTE_INDICES.len() + N_BYTES_IN_STATE;
-relation!(KeccakRound, KECCAK_ROUND_ARITY);
-
-/// Arity of [`RoundScheduleRelation`]: position, row roles, and eight Iota
-/// constant bytes. The fixed schedule table provides each valid position once
-/// per permutation.
-pub const ROUND_SCHEDULE_ARITY: usize = 4 + 8;
+/// Arity of [`RoundScheduleRelation`]: position, row roles, and the four
+/// nonzero-capable Iota constant byte lanes (`IOTA_RC_BYTE_INDICES`; the
+/// other four are literal zero in every round and are inlined, not
+/// committed/looked-up). The fixed schedule table provides each valid
+/// position once per permutation.
+pub const ROUND_SCHEDULE_ARITY: usize = 4 + IOTA_RC_BYTE_INDICES.len();
 relation!(RoundScheduleRelation, ROUND_SCHEDULE_ARITY);
 
 /// Shared handle for the ONE drawn [`KeccakRelations`] of a composed proof.
@@ -122,9 +113,7 @@ pub type SharedKeccakRelations = air_core::relations::SharedRelation<KeccakRelat
 pub struct KeccakRelations {
     pub keccak_state: KeccakStateRelation,
     pub hash_io: HashIoRelation,
-    pub keccak_round: KeccakRound,
     pub xor3: Xor3,
-    pub andnot: AndNot,
     pub conv: Conv,
     pub split: [SplitRelation; 7],
     pub round_schedule: RoundScheduleRelation,
@@ -187,9 +176,7 @@ impl KeccakRelations {
         Self {
             keccak_state: KeccakStateRelation::draw(channel),
             hash_io: HashIoRelation::draw(channel),
-            keccak_round: KeccakRound::draw(channel),
             xor3: Xor3::draw(channel),
-            andnot: AndNot::draw(channel),
             conv: Conv::draw(channel),
             split: [
                 SplitRelation::S1(Split1::draw(channel)),
@@ -210,9 +197,7 @@ impl KeccakRelations {
         Self {
             keccak_state: KeccakStateRelation::dummy(),
             hash_io: HashIoRelation::dummy(),
-            keccak_round: KeccakRound::dummy(),
             xor3: Xor3::dummy(),
-            andnot: AndNot::dummy(),
             conv: Conv::dummy(),
             split: [
                 SplitRelation::S1(Split1::dummy()),

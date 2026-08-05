@@ -11,8 +11,10 @@
 //!   `res = S ⊕ C[x−1] ⊕ rotl(C[x+1],1)` uses one xor3 lookup. The chi step
 //!   `a ⊕ (¬b'∧b'')` uses one xor3 lookup whose third input is 0. On lane 0,
 //!   the third input is `spread(rc)`, which also applies iota.
-//! - **andnot:** `(¬b'∧b'')` uses one lookup with key
-//!   `spread(b')+2·spread(b'')` into a dense `2^16` table.
+//! - **andnot:** `(¬b'∧b'')` retargets onto the xor3 table via the identity
+//!   `spread(b'⊕b'') = 2·spread(¬b'∧b'') + spread(b') − spread(b'')`: the
+//!   committed andnot output is checked by an xor3 lookup keyed
+//!   `spread(b')+spread(b'')` whose expected xor output is that expression.
 //! - **split_r:** the rho/theta sub-byte rotation splits a spread byte at bit
 //!   boundary `2r` via the spread split tables; `spread` is additive across the
 //!   disjoint hi/lo ranges, so `spread_lo = spread_byte − spread_hi·4^r` is a
@@ -108,7 +110,9 @@ pub struct InteractionClaimData {
 pub struct LookupData {
     /// `[key, out]`: key is the degree-1 sum and out is the spread(xor) result.
     pub xor3: [Vec<[PackedM31; 2]>; N_XOR3_LOOKUPS],
-    /// `[u, out]`: `u = spread(b')+2·spread(b'')` and out = spread(¬b'∧b'').
+    /// `[key, xor_out]` retargeted onto the xor3 table: `key =
+    /// spread(b')+spread(b'')`, `xor_out = 2·andnot + spread(b') −
+    /// spread(b'')` derived from the committed andnot output.
     pub andnot: [Vec<[PackedM31; 2]>; N_ANDNOT_LOOKUPS],
     /// `[shift_r, spread_byte, spread_hi, spread_lo]`; `shift_r` selects the
     /// `Split*` relation and is constant across SIMD lanes.
@@ -403,7 +407,8 @@ fn write_xor3(
     out
 }
 
-/// Write one andnot: commit the spread output limb, record `[u, out]`.
+/// Write one andnot: commit the spread output limb, record the xor3-retarget
+/// tuple `[key, xor_out]` (see the module doc's andnot identity).
 fn write_andnot(
     idx: &mut Idx,
     row: &mut [&mut PackedM31],
@@ -415,8 +420,9 @@ fn write_andnot(
     let out = spread_lane(out_bytes);
     *row[idx.col] = out;
     idx.col += 1;
-    let u = *b1_spread + *b2_spread + *b2_spread; // spread(b1) + 2·spread(b2)
-    *lookup_data.andnot[idx.andnot] = [u, out];
+    let key = *b1_spread + *b2_spread;
+    let xor_out = out + out + *b1_spread - *b2_spread;
+    *lookup_data.andnot[idx.andnot] = [key, xor_out];
     idx.andnot += 1;
     out
 }
@@ -649,10 +655,15 @@ fn push_arithmetic_andnot<E: EvalAtRow>(
     output: &E::F,
     numerator: E::EF,
 ) {
+    // Retarget onto the xor3 table: spread(b1^b2) = 2*output + b1 - b2 (see
+    // module doc). `output` is still the committed andnot spread limb.
     lookups.push(ArithmeticLookup {
         kind: ArithmeticLookupKind::Andnot,
         numerator,
-        tuple: vec![b1.clone() + b2.clone() + b2.clone(), output.clone()],
+        tuple: vec![
+            b1.clone() + b2.clone(),
+            output.clone() + output.clone() + b1.clone() - b2.clone(),
+        ],
     });
 }
 

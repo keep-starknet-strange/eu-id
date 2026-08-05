@@ -17,11 +17,13 @@ use crate::constants::{N_BYTES_IN_STATE, N_BYTES_IN_U64, N_LANES_KECCAK, N_ROUND
 // Stride-2 "spread" form: a byte `b = Σ bᵢ·2ⁱ` maps to `spread(b) = Σ bᵢ·4ⁱ`
 // (a 16-bit value whose 8 base-4 digits are exactly `b`'s bits). Sums of ≤3
 // spread values stay carry-free in M31 (each base-4 slot sums to ≤3), so XOR of
-// up to three bytes is a single dense `sum → spread(xor)` table lookup, and
-// AndNot is a single `spread(b')+2·spread(b'') → spread(¬b'∧b'')` lookup. The
-// Keccak state is carried in spread form across all rounds and through the
-// `KeccakStateRelation`. Byte form appears only at the HashIo boundary, where
-// the `conv` table converts it.
+// up to three bytes is a single dense `sum → spread(xor)` table lookup. AndNot
+// retargets onto the same table: `spread(b'⊕b'') = 2·spread(¬b'∧b'') +
+// spread(b') − spread(b'')` lets a `spread(b')+spread(b'')` xor3 lookup certify
+// the committed `spread(¬b'∧b'')` output. The Keccak state is carried in
+// spread form across all rounds and through the `KeccakStateRelation`. Byte
+// form appears only at the HashIo boundary, where the `conv` table converts
+// it.
 
 /// Largest spread value: `spread(0xFF) = Σ 4ⁱ = (4⁸−1)/3 = 21845`.
 pub const SPREAD_MAX: u32 = spread_u32(0xFF);
