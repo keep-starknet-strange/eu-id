@@ -160,11 +160,19 @@ fn n_accesses(profile: MlDsaProfile) -> usize {
     n_core(profile) + N
 }
 
-/// Namespaced preprocessed id for one hosted ML-DSA instance. The schedule
-/// content is static; namespacing preserves the composition's per-role order.
-pub(crate) fn pre_id_ns(ns: &str, name: &str) -> PreProcessedColumnId {
+/// Preprocessed id for one hosted ML-DSA instance. The schedule content is
+/// static across instances (function of `(profile, log_size)` only), and
+/// cross-instance separation lives in each instance's own relation draws
+/// (distinct `SibRelations` per namespace, from a channel already mixed with
+/// the instance namespace — see `statement::mix_public`/`draw_relations`), not
+/// in the preprocessed id. Deliberately UNNAMESPACED so air-core's
+/// content-fingerprint dedup collapses the 28 identical columns committed
+/// once instead of once per hosted instance. `ns` is accepted for call-site
+/// symmetry with other components' `pre_id_ns` helpers; air-core's id-content
+/// fingerprint guard fails loudly if this ever stops being content-only.
+pub(crate) fn pre_id_ns(_ns: &str, name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("{}mldsa_sib_{name}", crate::sponge_link::ns_prefix(ns)),
+        id: format!("mldsa_sib_{name}"),
     }
 }
 
