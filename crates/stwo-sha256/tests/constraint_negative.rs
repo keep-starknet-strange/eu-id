@@ -562,21 +562,136 @@ fn rejects_noncanonical_intermediate_output_limb() {
     );
 }
 
+/// Wave C / C10 (2026-08-05): extended from the pre-alias version, which
+/// checked only 2 columns (`h_out_word(0).0`, `final_carry(0).0`). Now that
+/// `Layout::COL_PADDING_START..COL_PADDING_END` (30 cells) ALIASES onto the
+/// finalization-carry/`h_out` region, every one of those 30 cells must
+/// reject a planted nonzero value at a row that is neither `r15` (t = 15)
+/// nor `r63` (t = 63) — the merged `(1 - r63 - r15) · cell` zero-pin from
+/// `Sha256Eval::evaluate`.
 #[test]
 fn rejects_finalization_cells_outside_round_63() {
     let witness = compute_sha256_witness(b"abc");
     let log_size = min_log_size(witness.blocks.len());
     let slot = Layout::round_row_slot(0, stwo_sha256::constants::N_ROUNDS - 2, log_size);
 
-    for column in [Layout::h_out_word(0).0, Layout::final_carry(0).0] {
+    for column in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
         let mut trace = generate_trace(&witness, log_size);
         assert_eq!(trace[column][slot].0, 0);
         trace[column][slot] = BaseField::from(1u32);
         assert!(
             !collect_constraint_residuals(&trace, log_size).is_empty(),
-            "AIR must reject nonzero finalization column {column} outside round 63",
+            "AIR must reject nonzero aliased column {column} at t = 62 (outside both r15 and r63)",
         );
     }
+}
+
+/// t4 (C10 adversarial plan): a padding-shaped value planted in an aliased
+/// slot at a REAL block's `t = 63` row must reject via the `gate_r63`
+/// finalization mod-add — the merged zero-pin is vacuous there (r63 = 1),
+/// so the linear add identity is the only thing standing guard.
+#[test]
+fn rejects_padding_value_in_aliased_slot_at_real_round_63() {
+    let witness = compute_sha256_witness(b"abc");
+    let log_size = min_log_size(witness.blocks.len());
+    let slot = Layout::round_row_slot(0, stwo_sha256::constants::N_ROUNDS - 1, log_size);
+    let mut trace = generate_trace(&witness, log_size);
+
+    assert!(
+        collect_constraint_residuals(&trace, log_size).is_empty(),
+        "baseline should be clean before mutation",
+    );
+
+    // Perturb one of the 30 aliased cells (here, the first finalization
+    // carry, which coincides with `Layout::COL_IS_MARKER_BLOCK`) as if a
+    // padding value had been substituted for the honest finalization carry.
+    let column = Layout::COL_PADDING_START;
+    trace[column][slot] = BaseField::from(trace[column][slot].0 + 1);
+
+    let residuals = collect_constraint_residuals(&trace, log_size);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject a padding-shaped value substituted for a real t = 63 finalization cell",
+    );
+}
+
+/// t3 (C10 adversarial plan): every aliased slot must reject a lone
+/// nonzero plant at a DISABLED block's `t = 15` row too — the merged
+/// zero-pin is vacuous there (r15 = 1), so this exercises the r15-gated
+/// padding family (P.A/P.A'/P.B/P.D) instead. `bit_length_w14/w15` (4 of
+/// the 30 slots) are the one documented exception: they are read only by
+/// (P.H), itself gated by `is_length_block` — which (P.A') already pins to
+/// 0 here — so a lone plant in just those 4 cells is inert (no other
+/// constraint reads them) both before and after this change. See the
+/// final report for the file:line trace of this pre-existing property.
+#[test]
+fn rejects_nonzero_in_aliased_slot_on_disabled_block_round_15() {
+    let witness = compute_sha256_witness(b"abc");
+    let log_size = min_log_size(witness.blocks.len()).max(4);
+    let n_rows = 1usize << log_size;
+
+    // Second "block" position (k = 1) is disabled padding for a
+    // single-block message; its t = 15 row is natural row 67 + 3 + 15.
+    let disabled_t15_natural =
+        stwo_sha256::trace::ROWS_PER_BLOCK + stwo_sha256::trace::STATE_SEED_ROWS + 15;
+    let slot = bit_reverse_index(
+        coset_index_to_circle_domain_index(disabled_t15_natural, log_size),
+        log_size,
+    );
+    assert!(slot < n_rows);
+
+    let bit_length_cols = [
+        Layout::COL_BIT_LENGTH_W14_LO,
+        Layout::COL_BIT_LENGTH_W14_HI,
+        Layout::COL_BIT_LENGTH_W15_LO,
+        Layout::COL_BIT_LENGTH_W15_HI,
+    ];
+    for column in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
+        if bit_length_cols.contains(&column) {
+            continue;
+        }
+        let mut trace = generate_trace(&witness, log_size);
+        assert_eq!(trace[Layout::COL_ENABLER][slot].0, 0);
+        assert_eq!(trace[column][slot].0, 0);
+        trace[column][slot] = BaseField::from(1u32);
+        assert!(
+            !collect_constraint_residuals(&trace, log_size).is_empty(),
+            "AIR must reject nonzero aliased column {column} on a disabled block's t = 15 row",
+        );
+    }
+}
+
+/// t5 (C10 adversarial plan): `is_marker_block = 1` planted at a DISABLED
+/// r15 row (natural `67k + 18`, `k ≥ 1`) must reject via (P.A') — gated by
+/// bare `r15`, not `gate_r15 = enabler · r15` (which would vanish on this
+/// exact disabled row and silently miss the mutation). No prior test in
+/// this suite planted the flag specifically on an `r15 = 1`, `enabler = 0`
+/// row (`rejects_padding_role_flag_on_disabled_row` uses a seed row,
+/// `r15 = 0`, caught instead by the merged "outside both families" pin).
+#[test]
+fn rejects_marker_flag_on_disabled_r15_row() {
+    let witness = compute_sha256_witness(b"abc");
+    let log_size = min_log_size(witness.blocks.len()).max(4);
+    let n_rows = 1usize << log_size;
+
+    let disabled_t15_natural =
+        stwo_sha256::trace::ROWS_PER_BLOCK + stwo_sha256::trace::STATE_SEED_ROWS + 15;
+    let slot = bit_reverse_index(
+        coset_index_to_circle_domain_index(disabled_t15_natural, log_size),
+        log_size,
+    );
+    assert!(slot < n_rows);
+
+    let mut trace = generate_trace(&witness, log_size);
+    assert_eq!(trace[Layout::COL_ENABLER][slot].0, 0);
+    assert_eq!(trace[Layout::COL_IS_MARKER_BLOCK][slot].0, 0);
+    trace[Layout::COL_IS_MARKER_BLOCK][slot] = BaseField::from(1u32);
+
+    let residuals = collect_constraint_residuals(&trace, log_size);
+    assert!(
+        !residuals.is_empty(),
+        "AIR must reject is_marker_block = 1 planted on a disabled r15 row",
+    );
 }
 
 /// Mutation class: shift the padding's `0x80` marker.

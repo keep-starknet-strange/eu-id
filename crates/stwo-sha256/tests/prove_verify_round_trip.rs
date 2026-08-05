@@ -25,6 +25,51 @@ use stwo_sha256::stark::{
 use stwo_sha256::trace::min_log_size;
 use stwo_sha256::witness::compute_sha256_witness;
 
+type BaseTrace = Vec<
+    stwo::prover::poly::circle::CircleEvaluation<
+        stwo::prover::backend::simd::SimdBackend,
+        stwo::core::fields::m31::BaseField,
+        stwo::prover::poly::BitReversedOrder,
+    >,
+>;
+
+/// Prove and verify with a base trace built from `witness` at `log_n_rows`,
+/// mutated by `mutate` before it is committed. Returns `Ok(())` only if
+/// BOTH prove and verify succeed; any failure in either phase is folded
+/// into a single `Err` so callers can assert "the pipeline rejects this"
+/// without caring which phase caught it.
+///
+/// Used by the C10 alias adversarial tests below, which plant a cell no
+/// witness-level mutation can reach (`is_last_block` outside its true row,
+/// an enabler prefix that isn't block-aligned) — `Sha256Prover::with_base`
+/// (test-only, `#[doc(hidden)]`) is the only entry point that accepts a
+/// pre-built, hand-mutated trace instead of regenerating one from the
+/// witness.
+fn prove_and_verify_mutated_base(
+    witness: &stwo_sha256::types::Sha256Witness,
+    log_n_rows: u32,
+    mutate: impl FnOnce(&mut BaseTrace),
+) -> Result<(), String> {
+    use stwo_sha256::air::{build_base_trace, Sha256Prover, Sha256Verifier};
+    use stwo_sha256::field_exposure::FieldExposure;
+
+    let mut base = build_base_trace(witness, log_n_rows, &FieldExposure::empty(), true);
+    mutate(&mut base);
+
+    let mut prover = Sha256Prover::new(witness, log_n_rows).with_base(base);
+    let pcs_config = ProverConfig::default().pcs_config;
+    let stark_proof = match air_core::prove(&mut [&mut prover], pcs_config) {
+        Err(e) => return Err(format!("prove rejected: {e:?}")),
+        Ok(proof) => proof,
+    };
+    let interaction_claim = prover.interaction_claim().clone();
+    let mut verifier = Sha256Verifier::new(log_n_rows, interaction_claim);
+    match air_core::verify(&mut [&mut verifier], &stark_proof) {
+        Err(e) => Err(format!("verify rejected: {e:?}")),
+        Ok(()) => Ok(()),
+    }
+}
+
 /// Build a `ProverConfig` whose `log_n_rows` is the smallest value that
 /// fits `n_blocks` padded blocks (and at least the SIMD floor).
 fn config_for(n_blocks: usize) -> ProverConfig {
@@ -273,6 +318,88 @@ fn digest_provider_proof_is_unbalanced_without_consumer() {
     assert!(
         air_core::verify(&mut [&mut verifier], &stark_proof).is_err(),
         "an unbalanced digest yield (no consumer) must fail verification",
+    );
+}
+
+/// Sanity baseline for [`prove_and_verify_mutated_base`]: rebuilding the
+/// base trace via `build_base_trace` and feeding it back unmutated through
+/// `with_base` must reproduce an ordinary honest proof. If this fails, the
+/// t1/t6 rejections below would be meaningless (they could be rejecting
+/// the plumbing, not the mutation).
+#[ignore = "slow: builds a real release STARK proof; run in release with --ignored"]
+#[test]
+fn with_base_roundtrip_matches_honest_proof_when_unmutated() {
+    let witness = compute_sha256_witness(b"abc");
+    let log_n_rows = config_for(witness.blocks.len()).log_n_rows;
+    prove_and_verify_mutated_base(&witness, log_n_rows, |_base| {})
+        .expect("unmutated with_base round trip must succeed");
+}
+
+/// t1 (C10 alias adversarial plan): planting `is_last_block = 1` at a
+/// `t = 15` row must reject through the real prove/verify pipeline, not
+/// just the hand-rolled `constraint_negative` evaluator — `is_last_block`
+/// is never aliased (`crate::trace::Layout::COL_IS_LAST_BLOCK` keeps its
+/// own column precisely to close the digest-substitution attack this
+/// tests), and its cross-relation consequence (the digest LogUp yield at
+/// the wrong row, against an interaction trace built from the honest
+/// witness) can only be exercised by a real STARK proof —
+/// `tests/constraint_negative.rs`'s collector no-ops `add_to_relation`
+/// (file-level docs, `:214-227`) and cannot see it.
+#[ignore = "slow: builds a real release STARK proof; run in release with --ignored"]
+#[test]
+fn verify_rejects_is_last_block_planted_at_round_15() {
+    use stwo::core::fields::m31::BaseField;
+    use stwo::prover::backend::Column;
+    use stwo_sha256::trace::Layout;
+
+    let witness = compute_sha256_witness(b"abc");
+    let log_n_rows = config_for(witness.blocks.len()).log_n_rows;
+    let slot = Layout::round_row_slot(0, 15, log_n_rows);
+
+    let result = prove_and_verify_mutated_base(&witness, log_n_rows, |base| {
+        base[Layout::COL_IS_LAST_BLOCK]
+            .values
+            .set(slot, BaseField::from(1u32));
+    });
+    assert!(
+        result.is_err(),
+        "planting is_last_block = 1 at a t = 15 row must reject (prove or verify), got Ok",
+    );
+}
+
+/// t6 (C10 alias adversarial plan): an enabler prefix whose length is not
+/// a multiple of `ROWS_PER_BLOCK = 67` (here, one extra enabled row past
+/// the true final block) must fail verification — `is_last_block`'s
+/// defining equality `enabler · is_round_63 · (1 − enabler_next)` no
+/// longer identifies the true completion row once `enabler_next` at the
+/// real `t = 63` row flips to 1, so no row yields a digest and the digest
+/// bridge (which always expects exactly one) cannot balance. Requires the
+/// real pipeline for the same reason as t1: the failure surfaces through
+/// relation/interaction-trace consistency, not a local polynomial identity
+/// `constraint_negative`'s collector can see.
+#[ignore = "slow: builds a real release STARK proof; run in release with --ignored"]
+#[test]
+fn verify_rejects_enabler_prefix_not_block_aligned() {
+    use stwo::core::fields::m31::BaseField;
+    use stwo::prover::backend::Column;
+    use stwo_sha256::trace::Layout;
+
+    let witness = compute_sha256_witness(b"abc"); // 1 block, 67 real rows.
+    assert_eq!(witness.blocks.len(), 1);
+    let log_n_rows = config_for(witness.blocks.len()).log_n_rows;
+    // First padding row (natural row 67, block 1's seed row 0) — enabling
+    // it makes the enabled-row count 68 ≢ 0 (mod 67).
+    let extra_row_natural = stwo_sha256::trace::ROWS_PER_BLOCK;
+    let slot = Layout::row_slot(extra_row_natural, log_n_rows);
+
+    let result = prove_and_verify_mutated_base(&witness, log_n_rows, |base| {
+        base[Layout::COL_ENABLER]
+            .values
+            .set(slot, BaseField::from(1u32));
+    });
+    assert!(
+        result.is_err(),
+        "an enabler prefix not aligned to ROWS_PER_BLOCK must reject (prove or verify), got Ok",
     );
 }
 
