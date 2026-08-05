@@ -34,12 +34,19 @@ fn sha_air_uses_typed_relation_multiplicities() {
 /// Pin `Layout::TOTAL_COLS` to the documented total.
 ///
 /// Three-seed-row layout: enabler (1) + `W` limbs (2) + W bits (32) +
-/// round family (88) + schedule family (70) + finalization carries (16) +
-/// `h_out` (16) + `is_last_block` (1) + padding-role (33) = 259.
+/// round family (88) + schedule family (6) + finalization carries (16) +
+/// `h_out` (16) + `is_last_block` (1) + padding-role (30) = 192.
+///
+/// Wave A (2026-08-05): deleted the 64 committed schedule-σ output bit
+/// columns (schedule family 70→6, ungated recomposition straight from
+/// `w_bits`) and 3 padding aux columns (`is_length_only_block`,
+/// `is_marker_only_block`, `marker_word_post_strict_15`; padding-role
+/// 33→30) — the first two are now inlined AIR expressions, the third is
+/// dead code, deleted outright.
 #[test]
-fn total_cols_equals_259() {
+fn total_cols_equals_192() {
     println!("Layout::TOTAL_COLS = {}", Layout::TOTAL_COLS);
-    assert_eq!(Layout::TOTAL_COLS, 259);
-    assert_eq!(PADDING_ROW_COLS, 33);
+    assert_eq!(Layout::TOTAL_COLS, 192);
+    assert_eq!(PADDING_ROW_COLS, 30);
     assert_eq!(DIGEST_BYTES, 32);
 }
