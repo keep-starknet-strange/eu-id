@@ -1465,12 +1465,12 @@ fn build_components(
     // 3. decomp.
     let decomp = FrameworkComponent::new(
         allocator,
-        DecompEval {
-            log_size: decomp_log_size(),
-            profile: ctx.profile,
-            ct_stream: stream_base + STREAM_ID_CTILDE_ABSORB,
-            relations: rel.decomp.clone(),
-        },
+        DecompEval::new(
+            decomp_log_size(),
+            ctx.profile,
+            stream_base + STREAM_ID_CTILDE_ABSORB,
+            rel.decomp.clone(),
+        ),
         claims.decomp,
     );
     // 4. decomp rc ×4.

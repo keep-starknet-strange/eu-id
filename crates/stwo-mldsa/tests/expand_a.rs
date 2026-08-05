@@ -512,6 +512,16 @@ fn candidate_rows(rho: &[u8; 32]) -> (usize, usize, usize) {
     )
 }
 
+/// The raw `(b0, b1, b2)` squeeze bytes backing rejection row `row`.
+fn candidate_bytes(rho: &[u8; 32], row: usize) -> [u8; 3] {
+    let messages = shake128_absorb_streams(ML_DSA_65, rho);
+    let poly = row / MAX_CANDIDATES;
+    let candidate = row % MAX_CANDIDATES;
+    let output = shake128(&[&messages[poly]], MAX_EXPAND_A_SQUEEZE_BYTES).0;
+    let offset = 3 * candidate;
+    [output[offset], output[offset + 1], output[offset + 2]]
+}
+
 #[test]
 fn fixed_expand_a_proves_and_verifies() {
     let _guard = PROOF_LOCK.lock().unwrap();
@@ -752,6 +762,32 @@ fn adversarial_traces_and_disconnected_matrix_fail() {
             "attack unexpectedly proved: {attack:?}"
         );
     }
+}
+
+/// Wave A deleted the witnessed `top` column and replaced it with the
+/// `(b2-low7) ∈ {0,128}` gate (`top_gap * (top_gap - 128) == 0`, see
+/// `expand_a::mod::RejectionEval::evaluate`). Bumping `b2` by one on an
+/// active row (leaving `low7` untouched) keeps every other constraint
+/// satisfied but moves `top_gap` off both {0,128}, so this must be caught
+/// by that gate specifically -- not by an out-of-range byte value.
+#[test]
+fn rejection_air_rejects_stray_top_bit_gap() {
+    let _guard = PROOF_LOCK.lock().unwrap();
+    let rho = [42u8; 32];
+    let (accept_row, _, _) = candidate_rows(&rho);
+    let bytes = candidate_bytes(&rho, accept_row);
+    let attack = ExpandATraceAttack::Rejection {
+        row: accept_row,
+        column: TRACE_COL_B2,
+        value: u32::from(bytes[2]) + 1,
+    };
+    assert!(
+        matches!(
+            prove_core(rho, rho, Some(attack)),
+            Err(ProvingError::ConstraintsNotSatisfied)
+        ),
+        "b2 off by one from low7 by neither 0 nor 128 must not prove"
+    );
 }
 
 #[derive(Clone)]

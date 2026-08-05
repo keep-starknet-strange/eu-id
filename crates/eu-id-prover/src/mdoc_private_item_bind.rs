@@ -82,6 +82,15 @@ const CANONICAL_SEMANTIC_TUPLES: usize =
 /// degree-1 denominators tops out at D5.
 const LOGUP_BATCH: usize = 4;
 
+/// Fixed logup fraction count in `interaction_trace`, in AIR emission order:
+/// outer + inner + inner_raw + key_active (4), one push per `KEY_LABELS`
+/// encoded byte (`KEY_ENCODED_BYTES`), digest_id (1), identifier/value active
+/// (2), one push per canonical semantic tuple (`CANONICAL_SEMANTIC_TUPLES`),
+/// and the claimed-sum blinder (1). Parity-checked against `sites.len()`
+/// the way `combine_batched_sites` in `mdoc_private_device_key_bind.rs` checks
+/// `MAIN_LOGUP_SITES`.
+const ITEM_BIND_LOGUP_SITES: usize = 8 + KEY_ENCODED_BYTES + CANONICAL_SEMANTIC_TUPLES;
+
 // One private digest-ID tuple:
 // (encoding_len, b0, b1, b2, b3, b4, value_lo16, value_hi16).
 // The fixed profile sets b3, b4, and value_hi16 to zero.
@@ -1634,6 +1643,7 @@ fn interaction_trace(
     let blinder_denominator = blinder_denominator(blinder_relation, blinder_v);
     sites.push(vec![(blinder_numerator, blinder_denominator); packed_rows]);
 
+    debug_assert_eq!(sites.len(), ITEM_BIND_LOGUP_SITES);
     // Mirrors `finalize_logup_batched(LOGUP_BATCH)`'s recursive fraction fold exactly
     // (`num = num*d + n*den; den = den*d`, left-to-right over the chunk).
     let mut logup = LogupTraceGenerator::new(log_size);

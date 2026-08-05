@@ -125,6 +125,33 @@ mod tests {
         }
     }
 
+    /// Exhaustive check of the *composed* claim: looking up the real dense
+    /// table (not a re-derivation) at `key = spread(b1)+spread(b2)` and
+    /// solving the AIR's tuple equation `table_xor_out == 2*out +
+    /// spread(b1) - spread(b2)` for `out` yields exactly `spread(¬b1∧b2)`.
+    /// This is what the chi step's retarget actually does at proof time:
+    /// the previous exhaustive test only checked the identity natively,
+    /// without going through `build_dense_table`.
+    #[test]
+    fn andnot_composed_lookup_matches_dense_table_exhaustive() {
+        let t = build_dense_table();
+        for b1 in 0u32..256 {
+            for b2 in 0u32..256 {
+                let andnot = (!b1) & b2 & 0xFF;
+                let key = (spread_u32(b1) + spread_u32(b2)) as usize;
+                let [k, table_xor_out] = t[key];
+                assert_eq!(k as usize, key);
+                let out = (table_xor_out as i64 - spread_u32(b1) as i64 + spread_u32(b2) as i64)
+                    / 2;
+                assert_eq!(
+                    unspread_u32(out as u32),
+                    andnot,
+                    "b1={b1:#x} b2={b2:#x}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn split_tables_are_canonical_spread() {
         for r in SPLIT_SHIFTS {

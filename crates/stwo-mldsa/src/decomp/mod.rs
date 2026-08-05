@@ -77,9 +77,7 @@ use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
 #[cfg(test)]
 use crate::constants::GAMMA2;
 use crate::constants::{K, N, Q};
-use crate::profile::MlDsaProfile;
-#[cfg(test)]
-use crate::profile::ML_DSA_65;
+use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
 use tables::RcUses;
@@ -206,6 +204,15 @@ pub fn gen_decomp_preprocessed(_profile: MlDsaProfile, log_size: u32) -> Vec<Col
 #[cfg(test)]
 mod schedule_tests {
     use super::*;
+
+    /// Wave A deleted every ML-DSA-44 branch from this component; constructing
+    /// it with the wrong profile must fail loudly instead of silently emitting
+    /// the fixed ML-DSA-65 `w1Encode` packing under ML-DSA-44 parameters.
+    #[test]
+    #[should_panic(expected = "single-profile")]
+    fn new_rejects_ml_dsa_44() {
+        let _ = DecompEval::new(0, crate::profile::ML_DSA_44, 0, DecompRelations::dummy());
+    }
 
     #[test]
     fn byte_position_derives_all_wcell_keys() {
@@ -440,6 +447,34 @@ pub struct DecompEval {
     /// [`STREAM_ID_CTILDE_ABSORB`] (the standalone default is the constant).
     pub ct_stream: u32,
     pub relations: DecompRelations,
+}
+
+impl DecompEval {
+    /// Wave A deleted the ML-DSA-44 packing branches (pack-bit columns, two
+    /// rc4 splits, a third output byte, `hash_active`) from this component's
+    /// trace generation and AIR; `profile` is kept only for call-site
+    /// symmetry with the other components' per-profile builders. Constructing
+    /// with anything but `ML_DSA_65` would silently emit the fixed
+    /// ML-DSA-65 `w1Encode` packing under the wrong profile's parameters, so
+    /// reject it here rather than let it through to the deleted-branch gap.
+    pub fn new(
+        log_size: u32,
+        profile: MlDsaProfile,
+        ct_stream: u32,
+        relations: DecompRelations,
+    ) -> Self {
+        assert_eq!(
+            profile, ML_DSA_65,
+            "DecompEval is single-profile since the wave-A ML-DSA-44 deletion; \
+             only ML_DSA_65 is supported"
+        );
+        Self {
+            log_size,
+            profile,
+            ct_stream,
+            relations,
+        }
+    }
 }
 
 impl FrameworkEval for DecompEval {

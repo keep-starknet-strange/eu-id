@@ -258,12 +258,12 @@ fn build_components(
 ) -> Built {
     let decomp = FrameworkComponent::new(
         allocator,
-        DecompEval {
-            profile: crate::profile::ML_DSA_65,
-            log_size: decomp_log_size(),
-            ct_stream: STREAM_ID_CTILDE_ABSORB,
-            relations: relations.clone(),
-        },
+        DecompEval::new(
+            decomp_log_size(),
+            crate::profile::ML_DSA_65,
+            STREAM_ID_CTILDE_ABSORB,
+            relations.clone(),
+        ),
         decomp_claimed_sum,
     );
     let mut rc = Vec::with_capacity(N_RC);
@@ -676,12 +676,12 @@ mod tests {
         ]);
         let trace = trace.as_ref().map_cols(|column| column.to_cpu().values);
         let trace = trace.as_cols_ref();
-        let component = DecompEval {
-            log_size: decomp_log_size(),
-            profile: ML_DSA_65,
-            ct_stream: STREAM_ID_CTILDE_ABSORB,
+        let component = DecompEval::new(
+            decomp_log_size(),
+            ML_DSA_65,
+            STREAM_ID_CTILDE_ABSORB,
             relations,
-        };
+        );
         assert_constraints_on_trace(
             &trace,
             decomp_log_size(),
