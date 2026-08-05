@@ -8,8 +8,6 @@
 //!    byte-split channels connect the carrier to its spread-form lookup
 //!    tables. The dense andnot lookup is retargeted at [`Xor3`] (see
 //!    [`crate::tables`]); no separate `AndNot` relation is drawn.
-//!    [`KeccakRound`] keeps its fixed v1 transcript draw. No AIR emits a
-//!    `KeccakRound` tuple in this profile.
 //!
 //! Each `relation!(_, N)` declares a struct wrapping `LookupElements<N>`; `N`
 //! is the base-field arity of one lookup tuple. Stwo's macro implements
@@ -91,14 +89,6 @@ relation!(Split5, SPLIT_LOOKUP_ARITY);
 relation!(Split6, SPLIT_LOOKUP_ARITY);
 relation!(Split7, SPLIT_LOOKUP_ARITY);
 
-/// Arity of the reserved v1 [`KeccakRound`] transcript relation.
-///
-/// The removed standalone round wrapper used a permutation identifier, a
-/// direction, a round index, four Iota byte lanes, and 200 state bytes. The v1
-/// profile keeps this unused draw so later transcript challenges do not move.
-pub const KECCAK_ROUND_ARITY: usize = 3 + IOTA_RC_BYTE_INDICES.len() + N_BYTES_IN_STATE;
-relation!(KeccakRound, KECCAK_ROUND_ARITY);
-
 /// Arity of [`RoundScheduleRelation`]: position, row roles, and the four
 /// nonzero-capable Iota constant byte lanes (`IOTA_RC_BYTE_INDICES`; the
 /// other four are literal zero in every round and are inlined, not
@@ -123,7 +113,6 @@ pub type SharedKeccakRelations = air_core::relations::SharedRelation<KeccakRelat
 pub struct KeccakRelations {
     pub keccak_state: KeccakStateRelation,
     pub hash_io: HashIoRelation,
-    pub keccak_round: KeccakRound,
     pub xor3: Xor3,
     pub conv: Conv,
     pub split: [SplitRelation; 7],
@@ -187,7 +176,6 @@ impl KeccakRelations {
         Self {
             keccak_state: KeccakStateRelation::draw(channel),
             hash_io: HashIoRelation::draw(channel),
-            keccak_round: KeccakRound::draw(channel),
             xor3: Xor3::draw(channel),
             conv: Conv::draw(channel),
             split: [
@@ -209,7 +197,6 @@ impl KeccakRelations {
         Self {
             keccak_state: KeccakStateRelation::dummy(),
             hash_io: HashIoRelation::dummy(),
-            keccak_round: KeccakRound::dummy(),
             xor3: Xor3::dummy(),
             conv: Conv::dummy(),
             split: [
