@@ -63,7 +63,10 @@ const COEFFICIENT_BASE_SCALE: u32 = 1_288_490_189;
 const PREPROCESSED_COLS: usize = 5;
 const TRACE_COLS: usize = 34;
 const MAIN_LOGUP_SITES: usize = 23;
-const MAIN_INTERACTION_COLS: usize = MAIN_LOGUP_SITES.div_ceil(2) * SECURE_EXTENSION_DEGREE;
+/// Matches the `finalize_logup_batched(LOGUP_BATCH)` call in `evaluate()`; degree-recounted
+/// safe at +2 (all numerators here are degree <=1, so batch-4 folding tops out at D5).
+const LOGUP_BATCH: usize = 4;
+const MAIN_INTERACTION_COLS: usize = MAIN_LOGUP_SITES.div_ceil(LOGUP_BATCH) * SECURE_EXTENSION_DEGREE;
 const BLINDER_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 
 const PP_ACTIVE: usize = 0;
@@ -563,7 +566,7 @@ impl FrameworkEval for MdocPrivateDeviceKeyEval {
             self.blinder_m,
             false,
         );
-        eval.finalize_logup_in_pairs();
+        eval.finalize_logup_batched(LOGUP_BATCH);
         eval
     }
 }
@@ -574,24 +577,28 @@ fn packed_bit_sum(trace: &[ColEval], start: usize, vec_row: usize, width: usize)
     })
 }
 
-fn combine_pairwise_sites(sites: &[Vec<(PackedQM31, PackedQM31)>]) -> (Vec<ColEval>, SecureField) {
+/// Combines `sites` into interaction columns in groups of `LOGUP_BATCH`,
+/// mirroring `finalize_logup_batched(LOGUP_BATCH)`'s recursive fraction fold
+/// exactly (`num = num*d + n*den; den = den*d`, left-to-right over the
+/// chunk) so the prover's trace matches what the AIR verifies.
+fn combine_batched_sites(sites: &[Vec<(PackedQM31, PackedQM31)>]) -> (Vec<ColEval>, SecureField) {
     debug_assert_eq!(sites.len(), MAIN_LOGUP_SITES);
     let vec_rows = 1usize << (MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE - LOG_N_LANES);
     let mut logup = LogupTraceGenerator::new(MDOC_PRIVATE_DEVICE_KEY_LOG_SIZE);
     let mut site = 0;
-    while site + 1 < sites.len() {
+    while site < sites.len() {
+        let end = (site + LOGUP_BATCH).min(sites.len());
+        let chunk = &sites[site..end];
         logup.col_from_iter((0..vec_rows).map(|row| {
-            let (left_num, left_den) = sites[site][row];
-            let (right_num, right_den) = sites[site + 1][row];
-            (
-                left_num * right_den + right_num * left_den,
-                left_den * right_den,
-            )
+            let mut iter = chunk.iter().map(|s| s[row]);
+            let (mut num, mut den) = iter.next().unwrap();
+            for (n, d) in iter {
+                num = num * d + n * den;
+                den *= d;
+            }
+            (num, den)
         }));
-        site += 2;
-    }
-    if site < sites.len() {
-        logup.col_from_iter((0..vec_rows).map(|row| sites[site][row]));
+        site = end;
     }
     logup.finalize_last()
 }
@@ -771,7 +778,7 @@ fn interaction_trace(
         );
         vec_rows
     ]);
-    combine_pairwise_sites(&sites)
+    combine_batched_sites(&sites)
 }
 
 type MdocPrivateDeviceKeyComponent = FrameworkComponent<MdocPrivateDeviceKeyEval>;
@@ -1141,6 +1148,8 @@ mod tests {
         }
 
         fn finalize_logup_in_pairs(&mut self) {}
+
+        fn finalize_logup_batched(&mut self, _batch_size: usize) {}
     }
 
     fn dummy_eval() -> MdocPrivateDeviceKeyEval {
@@ -1212,7 +1221,7 @@ mod tests {
         let (_, census) = build_trace(&pk, start, 4_096).unwrap();
         assert_eq!(PREPROCESSED_COLS, 5);
         assert_eq!(TRACE_COLS, 34);
-        assert_eq!(MAIN_INTERACTION_COLS + BLINDER_INTERACTION_COLS, 52);
+        assert_eq!(MAIN_INTERACTION_COLS + BLINDER_INTERACTION_COLS, 28);
         assert_eq!(census.active_rows, 416);
         assert_eq!(census.blind_rows, 96);
         assert_eq!(census.normalized_uses, 1_952);
