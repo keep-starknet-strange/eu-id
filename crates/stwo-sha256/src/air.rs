@@ -183,6 +183,29 @@ impl<'a> Sha256Prover<'a> {
         self
     }
 
+    /// Test-only hook: commit `base` verbatim instead of the
+    /// witness-derived generator's output. Adversarial tests use this to
+    /// plant an illegal cell (e.g. `is_last_block` outside its true row, or
+    /// an enabler prefix that isn't block-aligned) and drive the *real*
+    /// STARK prove/verify pipeline against it — `tests/constraint_negative.rs`'s
+    /// hand-rolled evaluator no-ops `add_to_relation`, so it can't exercise
+    /// a mutation whose only consequence surfaces through a relation (the
+    /// digest LogUp) or through trace/interaction-trace inconsistency. The
+    /// interaction trace is still generated from `witness` (this hook does
+    /// not intercept it), so a mutated `base` that changes what a relation
+    /// should have yielded is exactly the class of bug this exists to catch.
+    /// `base` must match [`build_base_trace`]'s shape (same `witness`,
+    /// `log_n_rows`, `field_exposure`, and shared-tables mode this builder
+    /// will otherwise use) — this does not re-validate that.
+    #[doc(hidden)]
+    pub fn with_base(
+        mut self,
+        base: Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    ) -> Self {
+        self.base = Some(base);
+        self
+    }
+
     fn uses_shared_tables(&self) -> bool {
         self.shared_tables.is_some()
     }
@@ -729,7 +752,11 @@ fn mult_col_to_eval(
 
 /// Build the base trace in component order: the `Sha256Eval` columns, the
 /// fixed digest bridge, and one producer multiplicity column per range table.
-fn build_base_trace(
+///
+/// `pub` (rather than crate-private) so adversarial tests can build a base
+/// trace, mutate a specific cell, and feed it back through
+/// [`Sha256Prover::with_base`].
+pub fn build_base_trace(
     witness: &Sha256Witness,
     log_n_rows: u32,
     field_exposure: &FieldExposure,

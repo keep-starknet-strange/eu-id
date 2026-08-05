@@ -72,13 +72,19 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Base constraints are degree ≤ 3. Full padded-stream mode
-        // adds one degree-4 final-counter identity
-        // (`gate_r15 · (1-enabler_after_block) · (counter-expected)`).
-        // The binding term is the batch-4 LogUp finalizer
-        // (`finalize_logup_batched(LOGUP_BATCH)`): four degree-1 denominators
-        // and degree-≤ 2 numerators fold to a degree-5 constraint (see
-        // [`LOGUP_BATCH`]), so the budget is `log_size + 2` (D ≤ 5).
+        // Wave C (2026-08-05, C10): base constraints are now degree ≤ 4 —
+        // the padding-role family (P.A–P.H) is gated by the preprocessed
+        // `r15` selector now that its 30 cells alias the finalization
+        // carries/`h_out` region, and (P.G)'s gate `r15 · (cum_marker +
+        // is_length_only_block)` (degree 3) times a schedule-word limb
+        // (degree 1) is the new base-constraint ceiling at degree 4. Full
+        // padded-stream mode's final-counter identity
+        // (`gate_r15 · (1-enabler_after_block) · (counter-expected)`) is
+        // also degree 4. The binding term is still the batch-4 LogUp
+        // finalizer (`finalize_logup_batched(LOGUP_BATCH)`): four degree-1
+        // denominators and degree-≤ 2 numerators fold to a degree-5
+        // constraint (see [`LOGUP_BATCH`]), so the budget stays
+        // `log_size + 2` (D ≤ 5).
         self.log_size + 2
     }
 
@@ -307,6 +313,12 @@ impl FrameworkEval for Sha256Eval {
         );
 
         // ---- t = 63 family: finalization, digest, chain ----
+        //
+        // ALIASED with the padding-role family (below, at `t = 15`): the
+        // first `PADDING_ROW_COLS` (30) of these 32 cells double as the
+        // padding-role witness. Sound because `r15`/`r63` are structurally
+        // disjoint preprocessed selectors (`ROWS_PER_BLOCK = 67` is prime;
+        // a natural row's position mod 67 is either 18 or 66, never both).
         let final_carries: [(E::F, E::F); N_STATE_WORDS] =
             std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
 
@@ -322,11 +334,49 @@ impl FrameworkEval for Sha256Eval {
             h_out[j] = (lo_cur, hi_cur);
             h_out_prev[j] = (lo_prev, hi_prev);
         }
-        let not_r63 = E::F::one() - r63.clone();
-        for (carry, output) in final_carries.iter().zip(&h_out) {
-            for cell in [&carry.0, &carry.1, &output.0, &output.1] {
-                eval.add_constraint(not_r63.clone() * cell.clone());
+
+        // Flat view of the 30 aliased cells, in the SAME physical order
+        // `crate::trace::Layout::COL_PADDING_START..COL_PADDING_END` uses
+        // (which is defined to equal `COL_FINAL_CARRIES_START..` — see
+        // `Layout`'s docs): `final_carries[0..8]` flattened (16 cells) then
+        // `h_out[0..7)` flattened (14 cells). `h_out[N_STATE_WORDS - 1]`
+        // (the last 2 cells of the 32-cell region) is never aliased.
+        let aliased: [E::F; crate::trace::PADDING_ROW_COLS] = std::array::from_fn(|i| {
+            if i < 2 * N_STATE_WORDS {
+                let (word, hi) = (i / 2, i % 2 == 1);
+                if hi {
+                    final_carries[word].1.clone()
+                } else {
+                    final_carries[word].0.clone()
+                }
+            } else {
+                let k = i - 2 * N_STATE_WORDS;
+                let (word, hi) = (k / 2, k % 2 == 1);
+                if hi {
+                    h_out[word].1.clone()
+                } else {
+                    h_out[word].0.clone()
+                }
             }
+        });
+
+        // Merged zero-pin (LINEAR): an aliased cell is nonzero only on an
+        // `r15` or `r63` row. `(1 - r63 - r15)` is 0 on both families (they
+        // never coincide) and 1 elsewhere, so this single constraint
+        // replaces the old separate `not_r63 · cell` (finalization-only)
+        // and `not_r15 · cell` (padding-only) pins for these 30 cells.
+        let not_r63_not_r15 = E::F::one() - r63.clone() - r15.clone();
+        for cell in aliased.iter() {
+            eval.add_constraint(not_r63_not_r15.clone() * cell.clone());
+        }
+        // The 2 unaliased final slots (`h_out` word `N_STATE_WORDS - 1`)
+        // keep the plain finalization-only pin — never live at `t = 15`.
+        let not_r63 = E::F::one() - r63.clone();
+        for cell in [
+            &h_out[N_STATE_WORDS - 1].0,
+            &h_out[N_STATE_WORDS - 1].1,
+        ] {
+            eval.add_constraint(not_r63.clone() * cell.clone());
         }
 
         // Finalization reads the input state from the rolling bit lanes at
@@ -398,58 +448,57 @@ impl FrameworkEval for Sha256Eval {
         // ---- padding-role constraints (t = 15 rows) ----
         //
         // The block's message words `W[j]` are the `W` columns of rows
-        // `t = j`, or `w[15 - j]` from this row. All padding cells are zero
-        // outside an active round-15 row.
-        let is_marker_block = eval.next_trace_mask();
-        let is_length_block = eval.next_trace_mask();
+        // `t = j`, or `w[15 - j]` from this row. These fields are VIEWS
+        // over `aliased` (built above) — not new trace columns — at the
+        // same relative offsets `crate::trace::Layout` uses
+        // (`is_marker_block`/`is_length_block` at 0/1, `is_marker_word` at
+        // 2..18, `marker_byte_sel` at 18..22, `marker_word_byte` at
+        // 22..26, the four bit-length limbs at 26..30).
+        let is_marker_block = aliased[0].clone();
+        let is_length_block = aliased[1].clone();
         let is_marker_word: [E::F; WORDS_PER_BLOCK] =
-            std::array::from_fn(|_| eval.next_trace_mask());
+            std::array::from_fn(|j| aliased[2 + j].clone());
         let marker_byte_sel: [E::F; BYTES_PER_WORD] =
-            std::array::from_fn(|_| eval.next_trace_mask());
+            std::array::from_fn(|b| aliased[2 + WORDS_PER_BLOCK + b].clone());
         let marker_word_byte: [E::F; BYTES_PER_WORD] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let bit_length_w14_lo = eval.next_trace_mask();
-        let bit_length_w14_hi = eval.next_trace_mask();
-        let bit_length_w15_lo = eval.next_trace_mask();
-        let bit_length_w15_hi = eval.next_trace_mask();
-
-        let not_r15 = E::F::one() - r15.clone();
-        for cell in [
-            &is_marker_block,
-            &is_length_block,
-            &bit_length_w14_lo,
-            &bit_length_w14_hi,
-            &bit_length_w15_lo,
-            &bit_length_w15_hi,
-        ] {
-            eval.add_constraint(not_r15.clone() * cell.clone());
-        }
-        for cell in is_marker_word
-            .iter()
-            .chain(&marker_byte_sel)
-            .chain(&marker_word_byte)
-        {
-            eval.add_constraint(not_r15.clone() * cell.clone());
-        }
+            std::array::from_fn(|b| aliased[2 + WORDS_PER_BLOCK + BYTES_PER_WORD + b].clone());
+        let bit_length_base = 2 + WORDS_PER_BLOCK + 2 * BYTES_PER_WORD;
+        let bit_length_w14_lo = aliased[bit_length_base].clone();
+        let bit_length_w14_hi = aliased[bit_length_base + 1].clone();
+        let bit_length_w15_lo = aliased[bit_length_base + 2].clone();
+        let bit_length_w15_hi = aliased[bit_length_base + 3].clone();
 
         // The block's message word `W[j]`, from the t = 15 row's viewpoint.
         let w_msg = |j: usize| -> &(E::F, E::F) { &w[15 - j] };
 
-        // (P.A) Binary checks (ungated — all cells are 0 off-family).
+        // Every padding constraint group below is gated ×`r15` (bare, not
+        // `gate_r15 = enabler · r15`): the aliased cells now hold live
+        // finalization data on non-`r15` rows, so — unlike the pre-alias
+        // design, where these cells were unconditionally zero off the
+        // padding family — every P.* identity must be actively restricted
+        // to `t = 15` rows. Bare `r15` (not `gate_r15`) is required so the
+        // family still binds on a DISABLED `t = 15` row (`enabler = 0`,
+        // `r15 = 1`): `gate_r15` vanishes there (`enabler = 0`), which
+        // would make (P.A)/(P.A′)/(P.B) silently vacuous exactly on the
+        // rows the disabled-flag guard (P.A′) must cover, reopening the
+        // hole a malicious `is_marker_block = 1` on a disabled block would
+        // otherwise slip through.
+
+        // (P.A) Binary checks.
         for flag in [&is_marker_block, &is_length_block] {
-            eval.add_constraint(flag.clone() * (E::F::one() - flag.clone()));
+            eval.add_constraint(r15.clone() * flag.clone() * (E::F::one() - flag.clone()));
         }
         for bit in is_marker_word.iter() {
-            eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
+            eval.add_constraint(r15.clone() * bit.clone() * (E::F::one() - bit.clone()));
         }
         for bit in marker_byte_sel.iter() {
-            eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
+            eval.add_constraint(r15.clone() * bit.clone() * (E::F::one() - bit.clone()));
         }
 
         // (P.A') Pin the padding-role flags to 0 on disabled rows.
         let one_minus_enabler = E::F::one() - enabler.clone();
         for flag in [&is_marker_block, &is_length_block] {
-            eval.add_constraint(one_minus_enabler.clone() * flag.clone());
+            eval.add_constraint(r15.clone() * one_minus_enabler.clone() * flag.clone());
         }
 
         // (P.B) One-hot sums match the block role.
@@ -457,12 +506,12 @@ impl FrameworkEval for Sha256Eval {
             .iter()
             .cloned()
             .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
-        eval.add_constraint(sum_is_marker_word - is_marker_block.clone());
+        eval.add_constraint(r15.clone() * (sum_is_marker_word - is_marker_block.clone()));
         let sum_marker_byte_sel: E::F = marker_byte_sel
             .iter()
             .cloned()
             .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
-        eval.add_constraint(sum_marker_byte_sel - is_marker_block.clone());
+        eval.add_constraint(r15.clone() * (sum_marker_byte_sel - is_marker_block.clone()));
 
         // (P.C) Aux flags, inlined (no longer committed columns — each is a
         // direct product of the already-boolean, already-pinned
@@ -494,54 +543,52 @@ impl FrameworkEval for Sha256Eval {
             sum_w_lo += is_marker.clone() * w_msg(j).0.clone();
         }
         eval.add_constraint(
-            sum_w_hi
-                - byte_base.clone() * marker_word_byte[0].clone()
-                - marker_word_byte[1].clone(),
+            r15.clone()
+                * (sum_w_hi
+                    - byte_base.clone() * marker_word_byte[0].clone()
+                    - marker_word_byte[1].clone()),
         );
         eval.add_constraint(
-            sum_w_lo
-                - byte_base.clone() * marker_word_byte[2].clone()
-                - marker_word_byte[3].clone(),
+            r15.clone()
+                * (sum_w_lo
+                    - byte_base.clone() * marker_word_byte[2].clone()
+                    - marker_word_byte[3].clone()),
         );
 
         // (P.E) The marker byte is `0x80`.
         let marker_value = E::F::from(M31::from(0x80u32));
         for b in 0..BYTES_PER_WORD {
             eval.add_constraint(
-                marker_byte_sel[b].clone() * (marker_word_byte[b].clone() - marker_value.clone()),
+                r15.clone()
+                    * marker_byte_sel[b].clone()
+                    * (marker_word_byte[b].clone() - marker_value.clone()),
             );
         }
 
         // (P.F) Bytes strictly after the marker byte are zero.
         let mut cum_byte_sel = E::F::from(M31::from(0u32));
         for b in 0..BYTES_PER_WORD {
-            eval.add_constraint(cum_byte_sel.clone() * marker_word_byte[b].clone());
+            eval.add_constraint(r15.clone() * cum_byte_sel.clone() * marker_word_byte[b].clone());
             cum_byte_sel += marker_byte_sel[b].clone();
         }
 
         // (P.G) Words after the marker word are zero. W[14] and W[15] can
         // contain the length field.
         for (j, cum_marker) in cum_marker_word.iter().enumerate().take(14) {
-            let gate = cum_marker.clone() + is_length_only_block.clone();
+            let gate = r15.clone() * (cum_marker.clone() + is_length_only_block.clone());
             eval.add_constraint(gate.clone() * w_msg(j).0.clone());
             eval.add_constraint(gate * w_msg(j).1.clone());
         }
-        eval.add_constraint(marker_word_post_strict_15.clone() * w_msg(15).0.clone());
-        eval.add_constraint(marker_word_post_strict_15.clone() * w_msg(15).1.clone());
+        let gate_post_strict_15 = r15.clone() * marker_word_post_strict_15.clone();
+        eval.add_constraint(gate_post_strict_15.clone() * w_msg(15).0.clone());
+        eval.add_constraint(gate_post_strict_15 * w_msg(15).1.clone());
 
         // (P.H) Length-field encoding.
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(14).0.clone() - bit_length_w14_lo.clone()),
-        );
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(14).1.clone() - bit_length_w14_hi.clone()),
-        );
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(15).0.clone() - bit_length_w15_lo.clone()),
-        );
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(15).1.clone() - bit_length_w15_hi.clone()),
-        );
+        let gate_length = r15.clone() * is_length_block.clone();
+        eval.add_constraint(gate_length.clone() * (w_msg(14).0.clone() - bit_length_w14_lo.clone()));
+        eval.add_constraint(gate_length.clone() * (w_msg(14).1.clone() - bit_length_w14_hi.clone()));
+        eval.add_constraint(gate_length.clone() * (w_msg(15).0.clone() - bit_length_w15_lo.clone()));
+        eval.add_constraint(gate_length * (w_msg(15).1.clone() - bit_length_w15_hi.clone()));
 
         // ---- field provider (four bytes on each input-word row) ----
         if let Some((field_id, padded_len)) = self.field_exposure.full_padded_stream() {
