@@ -837,6 +837,44 @@ mod tests {
         }
     }
 
+    /// The product pin gate must fire through the public `verify_identity`
+    /// entry point, and it must fire BEFORE any proof parsing: honest pins
+    /// with a garbage proof reach the decoder (clean `ok: false`), while a
+    /// corrupted pin surfaces the pin error without a verdict.
+    #[test]
+    fn verify_identity_rejects_wrong_circuit_and_root_pins_before_proof_parsing() {
+        let (statement, _, _) = honest_mdoc_statement();
+        let garbage_proof = vec![0u8; 64];
+
+        let control = verify_identity(statement.clone(), garbage_proof.clone())
+            .expect("honest pins with a garbage proof must reach the proof decoder");
+        assert!(!control.ok, "garbage proof unexpectedly verified");
+
+        let mut wrong_circuit = statement.clone();
+        wrong_circuit.circuit_hash = format!("{:0>64}", "deadbeef");
+        let mut wrong_root = statement.clone();
+        wrong_root.root_policy_hash[0] ^= 1;
+        let mut wrong_both = wrong_circuit.clone();
+        wrong_both.root_policy_hash[0] ^= 1;
+
+        for (label, tampered) in [
+            ("wrong circuit_hash", wrong_circuit),
+            ("wrong root_policy_hash", wrong_root),
+            ("both pins wrong", wrong_both),
+        ] {
+            match verify_identity(tampered, garbage_proof.clone()) {
+                Err(err) => assert!(
+                    format!("{err:?}").contains("circuit_hash, or root_policy_hash"),
+                    "{label}: expected the product pin gate, got {err:?}"
+                ),
+                Ok(result) => panic!(
+                    "{label}: wrong pin produced a verdict (ok = {}) instead of the pin error",
+                    result.ok
+                ),
+            }
+        }
+    }
+
     fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::MdocStatement, [u8; 32]) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let extraction_device_hash = fixture.extracted.device_ecdsa_input.message_hash.0;
