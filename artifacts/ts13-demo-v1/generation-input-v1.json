@@ -3286,10 +3286,6 @@
               9,
               9,
               9,
-              4,
-              13,
-              7,
-              8,
               10,
               10,
               10,
@@ -3318,8 +3314,6 @@
               10,
               10,
               10,
-              8,
-              11,
               12,
               12,
               6,
@@ -3402,14 +3396,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              4,
-              13,
-              7,
-              8,
               10,
               10,
               10,
@@ -3439,8 +3425,6 @@
               10,
               10,
               10,
-              8,
-              11,
               4,
               12,
               6,
@@ -3522,30 +3506,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              4,
-              4,
-              4,
-              4,
-              13,
-              13,
-              13,
-              13,
-              7,
-              7,
-              7,
-              7,
-              8,
-              8,
-              8,
-              8,
               10,
               10,
               10,
@@ -3578,14 +3538,6 @@
               10,
               10,
               10,
-              8,
-              8,
-              8,
-              8,
-              11,
-              11,
-              11,
-              11,
               4,
               4,
               4,
@@ -3633,7 +3585,7 @@
             ],
             "postInteractionM31LogSizes": []
           },
-          "claimedSumCount": 17,
+          "claimedSumCount": 11,
           "maxLogSize": 14,
           "maxConstraintLogDegreeBound": 16,
           "components": [
@@ -3661,60 +3613,16 @@
             {
               "name": "issuer_private_message_mldsa_air_0_component_2",
               "traceRows": 512,
-              "constraintCount": 51,
+              "constraintCount": 45,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 4,
-                57,
-                56
+                53,
+                48
               ]
             },
             {
               "name": "issuer_private_message_mldsa_air_0_component_3",
-              "traceRows": 16,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 5,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "issuer_private_message_mldsa_air_0_component_4",
-              "traceRows": 8192,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 14,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "issuer_private_message_mldsa_air_0_component_5",
-              "traceRows": 128,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 8,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "issuer_private_message_mldsa_air_0_component_6",
-              "traceRows": 256,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 9,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "issuer_private_message_mldsa_air_0_component_7",
               "traceRows": 1024,
               "constraintCount": 47,
               "maxConstraintLogDegreeBound": 12,
@@ -3725,29 +3633,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_8",
-              "traceRows": 256,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 9,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "issuer_private_message_mldsa_air_0_component_9",
-              "traceRows": 2048,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 12,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "issuer_private_message_mldsa_air_0_component_10",
+              "name": "issuer_private_message_mldsa_air_0_component_4",
               "traceRows": 16,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 5,
@@ -3758,7 +3644,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_11",
+              "name": "issuer_private_message_mldsa_air_0_component_5",
               "traceRows": 4096,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 13,
@@ -3769,7 +3655,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_12",
+              "name": "issuer_private_message_mldsa_air_0_component_6",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -3780,7 +3666,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_13",
+              "name": "issuer_private_message_mldsa_air_0_component_7",
               "traceRows": 1024,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 11,
@@ -3791,7 +3677,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_14",
+              "name": "issuer_private_message_mldsa_air_0_component_8",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -3802,7 +3688,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_15",
+              "name": "issuer_private_message_mldsa_air_0_component_9",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -3813,7 +3699,7 @@
               ]
             },
             {
-              "name": "issuer_private_message_mldsa_air_0_component_16",
+              "name": "issuer_private_message_mldsa_air_0_component_10",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -3846,36 +3732,6 @@
               4
             ],
             "traceM31LogSizes": [
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
-              8,
               8,
               8,
               8,
@@ -4151,11 +4007,11 @@
             {
               "name": "requested_item_sha256_air_0_component_0",
               "traceRows": 256,
-              "constraintCount": 322,
+              "constraintCount": 292,
               "maxConstraintLogDegreeBound": 10,
               "traceMaskColumnCounts": [
                 10,
-                193,
+                163,
                 32
               ]
             },
@@ -4193,36 +4049,6 @@
               4
             ],
             "traceM31LogSizes": [
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
-              12,
               12,
               12,
               12,
@@ -4498,11 +4324,11 @@
             {
               "name": "private_mso_sha256_air_0_component_0",
               "traceRows": 4096,
-              "constraintCount": 322,
+              "constraintCount": 292,
               "maxConstraintLogDegreeBound": 14,
               "traceMaskColumnCounts": [
                 10,
-                193,
+                163,
                 32
               ]
             },
@@ -5921,6 +5747,8 @@
               14,
               14,
               14,
+              14,
+              14,
               14
             ],
             "interactionM31LogSizes": [
@@ -5961,11 +5789,11 @@
             {
               "name": "private_expand_a_air_0_component_1",
               "traceRows": 16384,
-              "constraintCount": 28,
+              "constraintCount": 31,
               "maxConstraintLogDegreeBound": 16,
               "traceMaskColumnCounts": [
                 5,
-                11,
+                13,
                 12
               ]
             }
@@ -6107,7 +5935,6 @@
               15,
               15,
               15,
-              15,
               13,
               13,
               13,
@@ -6123,10 +5950,6 @@
               9,
               9,
               9,
-              4,
-              13,
-              7,
-              8,
               10,
               10,
               10,
@@ -6155,8 +5978,6 @@
               10,
               10,
               10,
-              8,
-              11,
               11,
               11,
               6,
@@ -6208,31 +6029,6 @@
               15,
               15,
               15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              13,
-              13,
-              13,
-              13,
-              13,
-              13,
-              13,
-              13,
-              13,
               13,
               13,
               13,
@@ -6304,14 +6100,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              4,
-              13,
-              7,
-              8,
               10,
               10,
               10,
@@ -6341,8 +6129,6 @@
               10,
               10,
               10,
-              8,
-              11,
               4,
               11,
               6,
@@ -6398,26 +6184,6 @@
               15,
               15,
               15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              15,
-              13,
-              13,
-              13,
-              13,
-              13,
-              13,
-              13,
-              13,
               13,
               13,
               13,
@@ -6498,30 +6264,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              4,
-              4,
-              4,
-              4,
-              13,
-              13,
-              13,
-              13,
-              7,
-              7,
-              7,
-              7,
-              8,
-              8,
-              8,
-              8,
               10,
               10,
               10,
@@ -6554,14 +6296,6 @@
               10,
               10,
               10,
-              8,
-              8,
-              8,
-              8,
-              11,
-              11,
-              11,
-              11,
               4,
               4,
               4,
@@ -6689,7 +6423,7 @@
             ],
             "postInteractionM31LogSizes": []
           },
-          "claimedSumCount": 22,
+          "claimedSumCount": 16,
           "maxLogSize": 15,
           "maxConstraintLogDegreeBound": 17,
           "components": [
@@ -6707,23 +6441,23 @@
             {
               "name": "private_device_mldsa_air_0_component_1",
               "traceRows": 32768,
-              "constraintCount": 57,
+              "constraintCount": 34,
               "maxConstraintLogDegreeBound": 17,
               "traceMaskColumnCounts": [
-                8,
-                36,
-                32
+                7,
+                20,
+                20
               ]
             },
             {
               "name": "private_device_mldsa_air_0_component_2",
               "traceRows": 8192,
-              "constraintCount": 37,
+              "constraintCount": 23,
               "maxConstraintLogDegreeBound": 15,
               "traceMaskColumnCounts": [
                 5,
-                22,
-                28
+                13,
+                20
               ]
             },
             {
@@ -6740,60 +6474,16 @@
             {
               "name": "private_device_mldsa_air_0_component_4",
               "traceRows": 512,
-              "constraintCount": 51,
+              "constraintCount": 45,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 4,
-                57,
-                56
+                53,
+                48
               ]
             },
             {
               "name": "private_device_mldsa_air_0_component_5",
-              "traceRows": 16,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 5,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_6",
-              "traceRows": 8192,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 14,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_7",
-              "traceRows": 128,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 8,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_8",
-              "traceRows": 256,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 9,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_9",
               "traceRows": 1024,
               "constraintCount": 47,
               "maxConstraintLogDegreeBound": 12,
@@ -6804,29 +6494,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_10",
-              "traceRows": 256,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 9,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_11",
-              "traceRows": 2048,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 12,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_device_mldsa_air_0_component_12",
+              "name": "private_device_mldsa_air_0_component_6",
               "traceRows": 16,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 5,
@@ -6837,7 +6505,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_13",
+              "name": "private_device_mldsa_air_0_component_7",
               "traceRows": 2048,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 12,
@@ -6848,7 +6516,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_14",
+              "name": "private_device_mldsa_air_0_component_8",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -6859,7 +6527,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_15",
+              "name": "private_device_mldsa_air_0_component_9",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -6870,7 +6538,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_16",
+              "name": "private_device_mldsa_air_0_component_10",
               "traceRows": 1024,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 11,
@@ -6881,7 +6549,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_17",
+              "name": "private_device_mldsa_air_0_component_11",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -6892,7 +6560,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_18",
+              "name": "private_device_mldsa_air_0_component_12",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -6903,7 +6571,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_19",
+              "name": "private_device_mldsa_air_0_component_13",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -6914,7 +6582,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_20",
+              "name": "private_device_mldsa_air_0_component_14",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -6925,7 +6593,7 @@
               ]
             },
             {
-              "name": "private_device_mldsa_air_0_component_21",
+              "name": "private_device_mldsa_air_0_component_15",
               "traceRows": 16,
               "constraintCount": 18,
               "maxConstraintLogDegreeBound": 6,
@@ -7388,10 +7056,6 @@
               9,
               9,
               9,
-              4,
-              13,
-              7,
-              8,
               10,
               10,
               10,
@@ -7420,8 +7084,6 @@
               10,
               10,
               10,
-              8,
-              11,
               5,
               5,
               6,
@@ -7504,14 +7166,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              4,
-              13,
-              7,
-              8,
               10,
               10,
               10,
@@ -7541,8 +7195,6 @@
               10,
               10,
               10,
-              8,
-              11,
               4,
               5,
               6,
@@ -7624,30 +7276,6 @@
               9,
               9,
               9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              9,
-              4,
-              4,
-              4,
-              4,
-              13,
-              13,
-              13,
-              13,
-              7,
-              7,
-              7,
-              7,
-              8,
-              8,
-              8,
-              8,
               10,
               10,
               10,
@@ -7680,14 +7308,6 @@
               10,
               10,
               10,
-              8,
-              8,
-              8,
-              8,
-              11,
-              11,
-              11,
-              11,
               4,
               4,
               4,
@@ -7735,7 +7355,7 @@
             ],
             "postInteractionM31LogSizes": []
           },
-          "claimedSumCount": 17,
+          "claimedSumCount": 11,
           "maxLogSize": 14,
           "maxConstraintLogDegreeBound": 16,
           "components": [
@@ -7763,60 +7383,16 @@
             {
               "name": "private_revocation_mldsa_air_0_component_2",
               "traceRows": 512,
-              "constraintCount": 51,
+              "constraintCount": 45,
               "maxConstraintLogDegreeBound": 11,
               "traceMaskColumnCounts": [
                 4,
-                57,
-                56
+                53,
+                48
               ]
             },
             {
               "name": "private_revocation_mldsa_air_0_component_3",
-              "traceRows": 16,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 5,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_revocation_mldsa_air_0_component_4",
-              "traceRows": 8192,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 14,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_revocation_mldsa_air_0_component_5",
-              "traceRows": 128,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 8,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_revocation_mldsa_air_0_component_6",
-              "traceRows": 256,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 9,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_revocation_mldsa_air_0_component_7",
               "traceRows": 1024,
               "constraintCount": 47,
               "maxConstraintLogDegreeBound": 12,
@@ -7827,29 +7403,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_8",
-              "traceRows": 256,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 9,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_revocation_mldsa_air_0_component_9",
-              "traceRows": 2048,
-              "constraintCount": 1,
-              "maxConstraintLogDegreeBound": 12,
-              "traceMaskColumnCounts": [
-                1,
-                1,
-                4
-              ]
-            },
-            {
-              "name": "private_revocation_mldsa_air_0_component_10",
+              "name": "private_revocation_mldsa_air_0_component_4",
               "traceRows": 16,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 5,
@@ -7860,7 +7414,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_11",
+              "name": "private_revocation_mldsa_air_0_component_5",
               "traceRows": 32,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 6,
@@ -7871,7 +7425,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_12",
+              "name": "private_revocation_mldsa_air_0_component_6",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -7882,7 +7436,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_13",
+              "name": "private_revocation_mldsa_air_0_component_7",
               "traceRows": 1024,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 11,
@@ -7893,7 +7447,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_14",
+              "name": "private_revocation_mldsa_air_0_component_8",
               "traceRows": 64,
               "constraintCount": 2,
               "maxConstraintLogDegreeBound": 7,
@@ -7904,7 +7458,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_15",
+              "name": "private_revocation_mldsa_air_0_component_9",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -7915,7 +7469,7 @@
               ]
             },
             {
-              "name": "private_revocation_mldsa_air_0_component_16",
+              "name": "private_revocation_mldsa_air_0_component_10",
               "traceRows": 128,
               "constraintCount": 1,
               "maxConstraintLogDegreeBound": 8,
@@ -8141,6 +7695,42 @@
           "component": "private_device_key_binder_air_0_component_0",
           "sign": "positive",
           "multiplicity": "+device_key_unpack_range_gates"
+        },
+        {
+          "module": "issuer_private_message_mldsa",
+          "component": "issuer_private_message_mldsa_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+decomp_range_gates"
+        },
+        {
+          "module": "issuer_private_message_mldsa",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
+          "sign": "positive",
+          "multiplicity": "+sib_range_gates"
+        },
+        {
+          "module": "private_revocation_mldsa",
+          "component": "private_revocation_mldsa_air_0_component_2",
+          "sign": "positive",
+          "multiplicity": "+decomp_range_gates"
+        },
+        {
+          "module": "private_revocation_mldsa",
+          "component": "private_revocation_mldsa_air_0_component_3",
+          "sign": "positive",
+          "multiplicity": "+sib_range_gates"
+        },
+        {
+          "module": "private_device_mldsa",
+          "component": "private_device_mldsa_air_0_component_4",
+          "sign": "positive",
+          "multiplicity": "+decomp_range_gates"
+        },
+        {
+          "module": "private_device_mldsa",
+          "component": "private_device_mldsa_air_0_component_5",
+          "sign": "positive",
+          "multiplicity": "+sib_range_gates"
         }
       ]
     },
@@ -9022,61 +8612,61 @@
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-sample_in_ball_squeeze_byte at stream_base+1"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_11",
+          "component": "issuer_private_message_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+mu_public_prefix_byte"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_12",
+          "component": "issuer_private_message_mldsa_air_0_component_6",
           "sign": "positive",
           "multiplicity": "+private_message_bridge_destination"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_13",
+          "component": "issuer_private_message_mldsa_air_0_component_7",
           "sign": "negative",
           "multiplicity": "-mu_squeeze_bridge_source"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_13",
+          "component": "issuer_private_message_mldsa_air_0_component_7",
           "sign": "positive",
           "multiplicity": "+ct_absorb_bridge_destination"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_14",
+          "component": "issuer_private_message_mldsa_air_0_component_8",
           "sign": "negative",
           "multiplicity": "-w1_bridge_source at stream_base+0"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_14",
+          "component": "issuer_private_message_mldsa_air_0_component_8",
           "sign": "positive",
           "multiplicity": "+ct_absorb_bridge_destination"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_15",
+          "component": "issuer_private_message_mldsa_air_0_component_9",
           "sign": "negative",
           "multiplicity": "-ct_squeeze_bridge_source"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_15",
+          "component": "issuer_private_message_mldsa_air_0_component_9",
           "sign": "positive",
           "multiplicity": "+sib_absorb_bridge_destination"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_16",
+          "component": "issuer_private_message_mldsa_air_0_component_10",
           "sign": "negative",
           "multiplicity": "-remaining_mu_squeeze_sink"
         },
@@ -9100,85 +8690,85 @@
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "negative",
           "multiplicity": "-sample_in_ball_squeeze_byte at stream_base+1"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_13",
+          "component": "private_device_mldsa_air_0_component_7",
           "sign": "positive",
           "multiplicity": "+00||00||public_message prefix bytes"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_14",
+          "component": "private_device_mldsa_air_0_component_8",
           "sign": "positive",
           "multiplicity": "+private_pk bridge destination (tr absorb)"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_15",
+          "component": "private_device_mldsa_air_0_component_9",
           "sign": "negative",
           "multiplicity": "-tr_squeeze_bridge_source"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_15",
+          "component": "private_device_mldsa_air_0_component_9",
           "sign": "positive",
           "multiplicity": "+mu_absorb_bridge_destination"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_16",
+          "component": "private_device_mldsa_air_0_component_10",
           "sign": "negative",
           "multiplicity": "-mu_squeeze_bridge_source"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_16",
+          "component": "private_device_mldsa_air_0_component_10",
           "sign": "positive",
           "multiplicity": "+ct_absorb_bridge_destination"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_17",
+          "component": "private_device_mldsa_air_0_component_11",
           "sign": "negative",
           "multiplicity": "-w1_bridge_source at stream_base+0"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_17",
+          "component": "private_device_mldsa_air_0_component_11",
           "sign": "positive",
           "multiplicity": "+ct_absorb_bridge_destination"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_18",
+          "component": "private_device_mldsa_air_0_component_12",
           "sign": "negative",
           "multiplicity": "-ct_squeeze_bridge_source"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_18",
+          "component": "private_device_mldsa_air_0_component_12",
           "sign": "positive",
           "multiplicity": "+sib_absorb_bridge_destination"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_19",
+          "component": "private_device_mldsa_air_0_component_13",
           "sign": "negative",
           "multiplicity": "-remaining_tr_squeeze_sink"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_20",
+          "component": "private_device_mldsa_air_0_component_14",
           "sign": "negative",
           "multiplicity": "-remaining_mu_squeeze_sink"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_21",
+          "component": "private_device_mldsa_air_0_component_15",
           "sign": "negative",
           "multiplicity": "-remaining_ct_squeeze_sink"
         },
@@ -9190,61 +8780,61 @@
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-sample_in_ball_squeeze_byte at stream_base+1"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_11",
+          "component": "private_revocation_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+mu_public_prefix_byte"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_12",
+          "component": "private_revocation_mldsa_air_0_component_6",
           "sign": "positive",
           "multiplicity": "+private_message_bridge_destination"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_13",
+          "component": "private_revocation_mldsa_air_0_component_7",
           "sign": "negative",
           "multiplicity": "-mu_squeeze_bridge_source"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_13",
+          "component": "private_revocation_mldsa_air_0_component_7",
           "sign": "positive",
           "multiplicity": "+ct_absorb_bridge_destination"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_14",
+          "component": "private_revocation_mldsa_air_0_component_8",
           "sign": "negative",
           "multiplicity": "-w1_bridge_source at stream_base+0"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_14",
+          "component": "private_revocation_mldsa_air_0_component_8",
           "sign": "positive",
           "multiplicity": "+ct_absorb_bridge_destination"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_15",
+          "component": "private_revocation_mldsa_air_0_component_9",
           "sign": "negative",
           "multiplicity": "-ct_squeeze_bridge_source"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_15",
+          "component": "private_revocation_mldsa_air_0_component_9",
           "sign": "positive",
           "multiplicity": "+sib_absorb_bridge_destination"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_16",
+          "component": "private_revocation_mldsa_air_0_component_10",
           "sign": "negative",
           "multiplicity": "-remaining_mu_squeeze_sink"
         }
@@ -10425,7 +10015,7 @@
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_12",
+          "component": "issuer_private_message_mldsa_air_0_component_6",
           "sign": "positive",
           "multiplicity": "+active private issuer message byte"
         },
@@ -10455,7 +10045,7 @@
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_14",
+          "component": "private_device_mldsa_air_0_component_8",
           "sign": "positive",
           "multiplicity": "+active private-pk bridge source at field_id=1"
         }
@@ -10547,7 +10137,7 @@
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+sample_in_ball_is_c"
         }
@@ -10594,102 +10184,6 @@
       ]
     },
     {
-      "name": "r23_issuer_mldsa_decomp_rc4",
-      "challengeOwnerModule": "issuer_private_message_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc4_gate"
-        },
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_3",
-          "sign": "negative",
-          "multiplicity": "-rc4_table_multiplicity (2^4 values)"
-        }
-      ]
-    },
-    {
-      "name": "r24_issuer_mldsa_decomp_rc13",
-      "challengeOwnerModule": "issuer_private_message_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc13_gate"
-        },
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_4",
-          "sign": "negative",
-          "multiplicity": "-rc13_table_multiplicity (2^13 values)"
-        }
-      ]
-    },
-    {
-      "name": "r25_issuer_mldsa_decomp_rc7",
-      "challengeOwnerModule": "issuer_private_message_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc7_gate"
-        },
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_5",
-          "sign": "negative",
-          "multiplicity": "-rc7_table_multiplicity (2^7 values)"
-        }
-      ]
-    },
-    {
-      "name": "r26_issuer_mldsa_decomp_rc8",
-      "challengeOwnerModule": "issuer_private_message_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc8_gate"
-        },
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_6",
-          "sign": "negative",
-          "multiplicity": "-rc8_table_multiplicity (2^8 values)"
-        }
-      ]
-    },
-    {
       "name": "r27_issuer_mldsa_sib_mem",
       "challengeOwnerModule": "issuer_private_message_mldsa",
       "tuple": [
@@ -10713,19 +10207,19 @@
       "uses": [
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+is_core unsorted access"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+is_c challenge access"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-is_sorted sorted-memory access"
         }
@@ -10747,25 +10241,25 @@
       "uses": [
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+accept for read address"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+accept for write-j address"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-read access"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-write_j access"
         }
@@ -10787,13 +10281,13 @@
       "uses": [
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+read value"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-write_i value"
         }
@@ -10815,63 +10309,15 @@
       "uses": [
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+sign_mask value"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-write_j value"
-        }
-      ]
-    },
-    {
-      "name": "r31_issuer_mldsa_sib_rc8",
-      "challengeOwnerModule": "issuer_private_message_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
-          "sign": "positive",
-          "multiplicity": "+sample_in_ball_rc8_gate"
-        },
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_8",
-          "sign": "negative",
-          "multiplicity": "-rc8_table_multiplicity (2^8 values)"
-        }
-      ]
-    },
-    {
-      "name": "r32_issuer_mldsa_sib_rc9",
-      "challengeOwnerModule": "issuer_private_message_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
-          "sign": "positive",
-          "multiplicity": "+sample_in_ball_rc9_gate"
-        },
-        {
-          "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_9",
-          "sign": "negative",
-          "multiplicity": "-rc9_table_multiplicity (2^9 values)"
         }
       ]
     },
@@ -10887,13 +10333,13 @@
       "uses": [
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_7",
+          "component": "issuer_private_message_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+sample_in_ball_rc11_gate"
         },
         {
           "module": "issuer_private_message_mldsa",
-          "component": "issuer_private_message_mldsa_air_0_component_10",
+          "component": "issuer_private_message_mldsa_air_0_component_4",
           "sign": "negative",
           "multiplicity": "-rc11_table_multiplicity (2^11 values)"
         }
@@ -12267,7 +11713,7 @@
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+sample_in_ball_is_c"
         }
@@ -12320,102 +11766,6 @@
       ]
     },
     {
-      "name": "r58_device_mldsa_decomp_rc4",
-      "challengeOwnerModule": "private_device_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_4",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc4_gate"
-        },
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_5",
-          "sign": "negative",
-          "multiplicity": "-rc4_table_multiplicity (2^4 values)"
-        }
-      ]
-    },
-    {
-      "name": "r59_device_mldsa_decomp_rc13",
-      "challengeOwnerModule": "private_device_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_4",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc13_gate"
-        },
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_6",
-          "sign": "negative",
-          "multiplicity": "-rc13_table_multiplicity (2^13 values)"
-        }
-      ]
-    },
-    {
-      "name": "r60_device_mldsa_decomp_rc7",
-      "challengeOwnerModule": "private_device_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_4",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc7_gate"
-        },
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_7",
-          "sign": "negative",
-          "multiplicity": "-rc7_table_multiplicity (2^7 values)"
-        }
-      ]
-    },
-    {
-      "name": "r61_device_mldsa_decomp_rc8",
-      "challengeOwnerModule": "private_device_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_4",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc8_gate"
-        },
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_8",
-          "sign": "negative",
-          "multiplicity": "-rc8_table_multiplicity (2^8 values)"
-        }
-      ]
-    },
-    {
       "name": "r62_device_mldsa_sib_mem",
       "challengeOwnerModule": "private_device_mldsa",
       "tuple": [
@@ -12439,19 +11789,19 @@
       "uses": [
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+is_core unsorted access"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+is_c challenge access"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "negative",
           "multiplicity": "-is_sorted sorted-memory access"
         }
@@ -12473,25 +11823,25 @@
       "uses": [
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+accept for read address"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+accept for write-j address"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "negative",
           "multiplicity": "-read access"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "negative",
           "multiplicity": "-write_j access"
         }
@@ -12513,13 +11863,13 @@
       "uses": [
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+read value"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "negative",
           "multiplicity": "-write_i value"
         }
@@ -12541,63 +11891,15 @@
       "uses": [
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+sign_mask value"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "negative",
           "multiplicity": "-write_j value"
-        }
-      ]
-    },
-    {
-      "name": "r66_device_mldsa_sib_rc8",
-      "challengeOwnerModule": "private_device_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
-          "sign": "positive",
-          "multiplicity": "+sample_in_ball_rc8_gate"
-        },
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_10",
-          "sign": "negative",
-          "multiplicity": "-rc8_table_multiplicity (2^8 values)"
-        }
-      ]
-    },
-    {
-      "name": "r67_device_mldsa_sib_rc9",
-      "challengeOwnerModule": "private_device_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
-          "sign": "positive",
-          "multiplicity": "+sample_in_ball_rc9_gate"
-        },
-        {
-          "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_11",
-          "sign": "negative",
-          "multiplicity": "-rc9_table_multiplicity (2^9 values)"
         }
       ]
     },
@@ -12613,13 +11915,13 @@
       "uses": [
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_9",
+          "component": "private_device_mldsa_air_0_component_5",
           "sign": "positive",
           "multiplicity": "+sample_in_ball_rc11_gate"
         },
         {
           "module": "private_device_mldsa",
-          "component": "private_device_mldsa_air_0_component_12",
+          "component": "private_device_mldsa_air_0_component_6",
           "sign": "negative",
           "multiplicity": "-rc11_table_multiplicity (2^11 values)"
         }
@@ -12651,7 +11953,7 @@
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_12",
+          "component": "private_revocation_mldsa_air_0_component_6",
           "sign": "positive",
           "multiplicity": "+active private revocation-message byte"
         }
@@ -12743,7 +12045,7 @@
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+sample_in_ball_is_c"
         }
@@ -12790,102 +12092,6 @@
       ]
     },
     {
-      "name": "r74_revocation_mldsa_decomp_rc4",
-      "challengeOwnerModule": "private_revocation_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc4_gate"
-        },
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_3",
-          "sign": "negative",
-          "multiplicity": "-rc4_table_multiplicity (2^4 values)"
-        }
-      ]
-    },
-    {
-      "name": "r75_revocation_mldsa_decomp_rc13",
-      "challengeOwnerModule": "private_revocation_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc13_gate"
-        },
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_4",
-          "sign": "negative",
-          "multiplicity": "-rc13_table_multiplicity (2^13 values)"
-        }
-      ]
-    },
-    {
-      "name": "r76_revocation_mldsa_decomp_rc7",
-      "challengeOwnerModule": "private_revocation_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc7_gate"
-        },
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_5",
-          "sign": "negative",
-          "multiplicity": "-rc7_table_multiplicity (2^7 values)"
-        }
-      ]
-    },
-    {
-      "name": "r77_revocation_mldsa_decomp_rc8",
-      "challengeOwnerModule": "private_revocation_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_2",
-          "sign": "positive",
-          "multiplicity": "+decomp_rc8_gate"
-        },
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_6",
-          "sign": "negative",
-          "multiplicity": "-rc8_table_multiplicity (2^8 values)"
-        }
-      ]
-    },
-    {
       "name": "r78_revocation_mldsa_sib_mem",
       "challengeOwnerModule": "private_revocation_mldsa",
       "tuple": [
@@ -12909,19 +12115,19 @@
       "uses": [
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+is_core unsorted access"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+is_c challenge access"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-is_sorted sorted-memory access"
         }
@@ -12943,25 +12149,25 @@
       "uses": [
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+accept for read address"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+accept for write-j address"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-read access"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-write_j access"
         }
@@ -12983,13 +12189,13 @@
       "uses": [
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+read value"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-write_i value"
         }
@@ -13011,63 +12217,15 @@
       "uses": [
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+sign_mask value"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "negative",
           "multiplicity": "-write_j value"
-        }
-      ]
-    },
-    {
-      "name": "r82_revocation_mldsa_sib_rc8",
-      "challengeOwnerModule": "private_revocation_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
-          "sign": "positive",
-          "multiplicity": "+sample_in_ball_rc8_gate"
-        },
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_8",
-          "sign": "negative",
-          "multiplicity": "-rc8_table_multiplicity (2^8 values)"
-        }
-      ]
-    },
-    {
-      "name": "r83_revocation_mldsa_sib_rc9",
-      "challengeOwnerModule": "private_revocation_mldsa",
-      "tuple": [
-        {
-          "name": "value",
-          "scalar": "m31"
-        }
-      ],
-      "uses": [
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
-          "sign": "positive",
-          "multiplicity": "+sample_in_ball_rc9_gate"
-        },
-        {
-          "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_9",
-          "sign": "negative",
-          "multiplicity": "-rc9_table_multiplicity (2^9 values)"
         }
       ]
     },
@@ -13083,13 +12241,13 @@
       "uses": [
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_7",
+          "component": "private_revocation_mldsa_air_0_component_3",
           "sign": "positive",
           "multiplicity": "+sample_in_ball_rc11_gate"
         },
         {
           "module": "private_revocation_mldsa",
-          "component": "private_revocation_mldsa_air_0_component_10",
+          "component": "private_revocation_mldsa_air_0_component_4",
           "sign": "negative",
           "multiplicity": "-rc11_table_multiplicity (2^11 values)"
         }
@@ -13378,421 +12536,313 @@
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c026_r23_issuer_mldsa_decomp_rc4",
+        "name": "c026_r27_issuer_mldsa_sib_mem",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c027_r24_issuer_mldsa_decomp_rc13",
+        "name": "c027_r28_issuer_mldsa_sib_swap",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c028_r25_issuer_mldsa_decomp_rc7",
+        "name": "c028_r29_issuer_mldsa_sib_step_value",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c029_r26_issuer_mldsa_decomp_rc8",
+        "name": "c029_r30_issuer_mldsa_sib_sign_bit",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "issuer_private_message_mldsa",
-        "name": "c030_r27_issuer_mldsa_sib_mem",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "issuer_private_message_mldsa",
-        "name": "c031_r28_issuer_mldsa_sib_swap",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "issuer_private_message_mldsa",
-        "name": "c032_r29_issuer_mldsa_sib_step_value",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "issuer_private_message_mldsa",
-        "name": "c033_r30_issuer_mldsa_sib_sign_bit",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "issuer_private_message_mldsa",
-        "name": "c034_r31_issuer_mldsa_sib_rc8",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "issuer_private_message_mldsa",
-        "name": "c035_r32_issuer_mldsa_sib_rc9",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "issuer_private_message_mldsa",
-        "name": "c036_r33_issuer_mldsa_sib_rc11",
+        "name": "c030_r33_issuer_mldsa_sib_rc11",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "requested_item_sha256",
-        "name": "c037_r34_requested_item_bridge_limbs",
+        "name": "c031_r34_requested_item_bridge_limbs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "requested_item_sha256",
-        "name": "c038_r34_requested_item_digest_bytes",
+        "name": "c032_r34_requested_item_digest_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "requested_item_sha256",
-        "name": "c039_r35_requested_item_field_bytes",
+        "name": "c033_r35_requested_item_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_sha256",
-        "name": "c040_r36_private_mso_bridge_limbs",
+        "name": "c034_r36_private_mso_bridge_limbs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_sha256",
-        "name": "c041_r36_private_mso_digest_bytes",
+        "name": "c035_r36_private_mso_digest_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_sha256",
-        "name": "c042_r37_private_mso_field_bytes",
+        "name": "c036_r37_private_mso_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_cbor_parsers",
-        "name": "c043_r38_outer_parsed_cbor_byte",
+        "name": "c037_r38_outer_parsed_cbor_byte",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_cbor_parsers",
-        "name": "c044_r39_inner_parsed_cbor_byte",
+        "name": "c038_r39_inner_parsed_cbor_byte",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c045_r40_inner_raw_field_bytes",
+        "name": "c039_r40_inner_raw_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c046_r41_private_digest_id",
+        "name": "c040_r41_private_digest_id",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c047_r42_private_item_key",
+        "name": "c041_r42_private_item_key",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_item_binder",
-        "name": "c048_r43_private_item_claim_blinder",
+        "name": "c042_r43_private_item_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c049_r44_private_mso_start",
+        "name": "c043_r44_private_mso_start",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c050_r45_private_device_pk_start",
+        "name": "c044_r45_private_device_pk_start",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c051_r46_private_mso_validity_bytes",
+        "name": "c045_r46_private_mso_validity_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_mso_binder",
-        "name": "c052_r47_private_mso_claim_blinder",
+        "name": "c046_r47_private_mso_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "mdoc_private_mso_validity",
-        "name": "c053_r48_private_mso_validity_claim_blinder",
+        "name": "c047_r48_private_mso_validity_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_value_digests_scanner",
-        "name": "c054_r49_value_digest_id_multiset",
+        "name": "c048_r49_value_digest_id_multiset",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_value_digests_scanner",
-        "name": "c055_r50_value_digest_scanner_claim_blinder",
+        "name": "c049_r50_value_digest_scanner_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_expand_a",
-        "name": "c056_r51_expand_a_rho_cell",
+        "name": "c050_r51_expand_a_rho_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_expand_a",
-        "name": "c057_r52_expand_a_ntt_cell",
+        "name": "c051_r52_expand_a_ntt_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_key_binder",
-        "name": "c058_r53_private_t1_cell",
+        "name": "c052_r53_private_t1_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_key_binder",
-        "name": "c059_r54_private_device_key_claim_blinder",
+        "name": "c053_r54_private_device_key_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c060_device_mldsa_rho_rlc",
+        "name": "c054_device_mldsa_rho_rlc",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c061_device_mldsa_r",
+        "name": "c055_device_mldsa_r",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c062_device_mldsa_s",
+        "name": "c056_device_mldsa_s",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c063_r55_device_mldsa_w_cell",
+        "name": "c057_r55_device_mldsa_w_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c064_r56_device_mldsa_c_cell",
+        "name": "c058_r56_device_mldsa_c_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c065_r57_device_mldsa_eval_at_rs",
+        "name": "c059_r57_device_mldsa_eval_at_rs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c066_r58_device_mldsa_decomp_rc4",
+        "name": "c060_r62_device_mldsa_sib_mem",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c067_r59_device_mldsa_decomp_rc13",
+        "name": "c061_r63_device_mldsa_sib_swap",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c068_r60_device_mldsa_decomp_rc7",
+        "name": "c062_r64_device_mldsa_sib_step_value",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c069_r61_device_mldsa_decomp_rc8",
+        "name": "c063_r65_device_mldsa_sib_sign_bit",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_device_mldsa",
-        "name": "c070_r62_device_mldsa_sib_mem",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_device_mldsa",
-        "name": "c071_r63_device_mldsa_sib_swap",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_device_mldsa",
-        "name": "c072_r64_device_mldsa_sib_step_value",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_device_mldsa",
-        "name": "c073_r65_device_mldsa_sib_sign_bit",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_device_mldsa",
-        "name": "c074_r66_device_mldsa_sib_rc8",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_device_mldsa",
-        "name": "c075_r67_device_mldsa_sib_rc9",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_device_mldsa",
-        "name": "c076_r68_device_mldsa_sib_rc11",
+        "name": "c064_r68_device_mldsa_sib_rc11",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_range",
-        "name": "c077_r69_revocation_message_field_bytes",
+        "name": "c065_r69_revocation_message_field_bytes",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_range",
-        "name": "c078_r70_revocation_range_claim_blinder",
+        "name": "c066_r70_revocation_range_claim_blinder",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c079_revocation_mldsa_rho_rlc",
+        "name": "c067_revocation_mldsa_rho_rlc",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c080_revocation_mldsa_r",
+        "name": "c068_revocation_mldsa_r",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c081_revocation_mldsa_s",
+        "name": "c069_revocation_mldsa_s",
         "encoding": "Blake2sChannel::draw_secure_felt QM31",
         "fixedLength": 16
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c082_r71_revocation_mldsa_w_cell",
+        "name": "c070_r71_revocation_mldsa_w_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c083_r72_revocation_mldsa_c_cell",
+        "name": "c071_r72_revocation_mldsa_c_cell",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c084_r73_revocation_mldsa_eval_at_rs",
+        "name": "c072_r73_revocation_mldsa_eval_at_rs",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c085_r74_revocation_mldsa_decomp_rc4",
+        "name": "c073_r78_revocation_mldsa_sib_mem",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c086_r75_revocation_mldsa_decomp_rc13",
+        "name": "c074_r79_revocation_mldsa_sib_swap",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c087_r76_revocation_mldsa_decomp_rc7",
+        "name": "c075_r80_revocation_mldsa_sib_step_value",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c088_r77_revocation_mldsa_decomp_rc8",
+        "name": "c076_r81_revocation_mldsa_sib_sign_bit",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       },
       {
         "ownerModule": "private_revocation_mldsa",
-        "name": "c089_r78_revocation_mldsa_sib_mem",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_revocation_mldsa",
-        "name": "c090_r79_revocation_mldsa_sib_swap",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_revocation_mldsa",
-        "name": "c091_r80_revocation_mldsa_sib_step_value",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_revocation_mldsa",
-        "name": "c092_r81_revocation_mldsa_sib_sign_bit",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_revocation_mldsa",
-        "name": "c093_r82_revocation_mldsa_sib_rc8",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_revocation_mldsa",
-        "name": "c094_r83_revocation_mldsa_sib_rc9",
-        "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
-        "fixedLength": 32
-      },
-      {
-        "ownerModule": "private_revocation_mldsa",
-        "name": "c095_r84_revocation_mldsa_sib_rc11",
+        "name": "c077_r84_revocation_mldsa_sib_rc11",
         "encoding": "stwo LookupElements::draw: z then alpha, each QM31 secure field",
         "fixedLength": 32
       }
@@ -13813,11 +12863,11 @@
     {
       "name": "mldsa",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 768,
+      "fixedLength": 672,
       "fixedVectorLengths": [
         {
           "name": "claimed_sums",
-          "value": 17
+          "value": 11
         },
         {
           "name": "group_evals",
@@ -13828,11 +12878,11 @@
     {
       "name": "device_mldsa",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 1424,
+      "fixedLength": 1328,
       "fixedVectorLengths": [
         {
           "name": "claimed_sums",
-          "value": 22
+          "value": 16
         },
         {
           "name": "group_evals",
@@ -13843,11 +12893,11 @@
     {
       "name": "revocation_mldsa",
       "encoding": "bincode-1.3 default options (fixed-width little-endian integers)",
-      "fixedLength": 768,
+      "fixedLength": 672,
       "fixedVectorLengths": [
         {
           "name": "claimed_sums",
-          "value": 17
+          "value": 11
         },
         {
           "name": "group_evals",
@@ -14948,22 +13998,6 @@
       "value": 5
     },
     {
-      "name": "r23_issuer_mldsa_decomp_rc4",
-      "value": 1
-    },
-    {
-      "name": "r24_issuer_mldsa_decomp_rc13",
-      "value": 1
-    },
-    {
-      "name": "r25_issuer_mldsa_decomp_rc7",
-      "value": 1
-    },
-    {
-      "name": "r26_issuer_mldsa_decomp_rc8",
-      "value": 1
-    },
-    {
       "name": "r27_issuer_mldsa_sib_mem",
       "value": 4
     },
@@ -14978,14 +14012,6 @@
     {
       "name": "r30_issuer_mldsa_sib_sign_bit",
       "value": 2
-    },
-    {
-      "name": "r31_issuer_mldsa_sib_rc8",
-      "value": 1
-    },
-    {
-      "name": "r32_issuer_mldsa_sib_rc9",
-      "value": 1
     },
     {
       "name": "r33_issuer_mldsa_sib_rc11",
@@ -15096,22 +14122,6 @@
       "value": 5
     },
     {
-      "name": "r58_device_mldsa_decomp_rc4",
-      "value": 1
-    },
-    {
-      "name": "r59_device_mldsa_decomp_rc13",
-      "value": 1
-    },
-    {
-      "name": "r60_device_mldsa_decomp_rc7",
-      "value": 1
-    },
-    {
-      "name": "r61_device_mldsa_decomp_rc8",
-      "value": 1
-    },
-    {
       "name": "r62_device_mldsa_sib_mem",
       "value": 4
     },
@@ -15126,14 +14136,6 @@
     {
       "name": "r65_device_mldsa_sib_sign_bit",
       "value": 2
-    },
-    {
-      "name": "r66_device_mldsa_sib_rc8",
-      "value": 1
-    },
-    {
-      "name": "r67_device_mldsa_sib_rc9",
-      "value": 1
     },
     {
       "name": "r68_device_mldsa_sib_rc11",
@@ -15160,22 +14162,6 @@
       "value": 5
     },
     {
-      "name": "r74_revocation_mldsa_decomp_rc4",
-      "value": 1
-    },
-    {
-      "name": "r75_revocation_mldsa_decomp_rc13",
-      "value": 1
-    },
-    {
-      "name": "r76_revocation_mldsa_decomp_rc7",
-      "value": 1
-    },
-    {
-      "name": "r77_revocation_mldsa_decomp_rc8",
-      "value": 1
-    },
-    {
       "name": "r78_revocation_mldsa_sib_mem",
       "value": 4
     },
@@ -15190,14 +14176,6 @@
     {
       "name": "r81_revocation_mldsa_sib_sign_bit",
       "value": 2
-    },
-    {
-      "name": "r82_revocation_mldsa_sib_rc8",
-      "value": 1
-    },
-    {
-      "name": "r83_revocation_mldsa_sib_rc9",
-      "value": 1
     },
     {
       "name": "r84_revocation_mldsa_sib_rc11",
@@ -15230,28 +14208,28 @@
       "name": "impl.challenge.relation_instances",
       "value": {
         "kind": "unsigned",
-        "value": 87
+        "value": 69
       }
     },
     {
       "name": "impl.challenge.relation_secure_field_draws",
       "value": {
         "kind": "unsigned",
-        "value": 174
+        "value": 138
       }
     },
     {
       "name": "impl.challenge.total_secure_field_draws",
       "value": {
         "kind": "unsigned",
-        "value": 183
+        "value": 147
       }
     },
     {
       "name": "impl.component_count",
       "value": {
         "kind": "unsigned",
-        "value": 95
+        "value": 77
       }
     },
     {
@@ -15332,7 +14310,7 @@
       "name": "impl.mldsa.device_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 22
+        "value": 16
       }
     },
     {
@@ -15346,7 +14324,7 @@
       "name": "impl.mldsa.issuer_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 17
+        "value": 11
       }
     },
     {
@@ -15360,7 +14338,7 @@
       "name": "impl.mldsa.revocation_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 17
+        "value": 11
       }
     },
     {
@@ -15381,7 +14359,7 @@
       "name": "impl.outer_claim_bytes_excluding_stark_and_post_payloads",
       "value": {
         "kind": "unsigned",
-        "value": 3824
+        "value": 3536
       }
     },
     {
@@ -15416,7 +14394,7 @@
       "name": "impl.serialized_claim_bytes_excluding_stark",
       "value": {
         "kind": "unsigned",
-        "value": 24120
+        "value": 23832
       }
     },
     {
@@ -15458,7 +14436,7 @@
       "name": "impl.transcript.global_claimed_sum_count",
       "value": {
         "kind": "unsigned",
-        "value": 94
+        "value": 76
       }
     },
     {
@@ -15541,10 +14519,6 @@
       "PreProcessedColumnId { id: \"mldsa_decomp_start\" }",
       "PreProcessedColumnId { id: \"mldsa_decomp_byte_pos\" }",
       "PreProcessedColumnId { id: \"mldsa_decomp_is_last\" }",
-      "PreProcessedColumnId { id: \"mldsa_value_table/log4/n16\" }",
-      "PreProcessedColumnId { id: \"mldsa_value_table/log13/n8192\" }",
-      "PreProcessedColumnId { id: \"mldsa_value_table/log7/n128\" }",
-      "PreProcessedColumnId { id: \"mldsa_value_table/log8/n256\" }",
       "PreProcessedColumnId { id: \"mldsa_sib_is_stream\" }",
       "PreProcessedColumnId { id: \"mldsa_sib_is_placement\" }",
       "PreProcessedColumnId { id: \"mldsa_sib_is_c\" }",
@@ -15573,7 +14547,6 @@
       "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_5\" }",
       "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_6\" }",
       "PreProcessedColumnId { id: \"mldsa_sib_sign_mask_7\" }",
-      "PreProcessedColumnId { id: \"mldsa_value_table/log11/n2048\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log12/len2534/active\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log12/len2534/offset0/index\" }",
       "PreProcessedColumnId { id: \"mldsa_prefix_shape/log6/len64/offset0/index\" }",
@@ -15711,7 +14684,6 @@
       "PreProcessedColumnId { id: \"mldsa_private_key_ntt_butterfly_index1\" }",
       "PreProcessedColumnId { id: \"mldsa_private_key_ntt_butterfly_twiddle0\" }",
       "PreProcessedColumnId { id: \"mldsa_private_key_ntt_butterfly_twiddle1\" }",
-      "PreProcessedColumnId { id: \"mldsa_private_key_ntt_butterfly_twiddle2\" }",
       "PreProcessedColumnId { id: \"mldsa_private_key_ntt_scaling_MlDsa65_active\" }",
       "PreProcessedColumnId { id: \"mldsa_private_key_ntt_scaling_eval_start\" }",
       "PreProcessedColumnId { id: \"mldsa_private_key_ntt_scaling_eval_end\" }",
@@ -15791,10 +14763,6 @@
       9,
       9,
       9,
-      4,
-      13,
-      7,
-      8,
       10,
       10,
       10,
@@ -15823,7 +14791,6 @@
       10,
       10,
       10,
-      11,
       12,
       12,
       6,
@@ -15954,7 +14921,6 @@
       9,
       9,
       9,
-      15,
       15,
       15,
       15,
@@ -15979,7 +14945,7 @@
       5,
       5
     ],
-    "root": "6b234e76a8f76d542e4154e55b648f936a7c7875421e7bf15eafae6b1c791671"
+    "root": "48f9736086921072e95821d5ee71ae8919c0f912e1b44c6bb811239bb6f68a99"
   },
   "proofSystem": {
     "field": "M31",
@@ -16000,11 +14966,11 @@
         "name": "tree_0_preprocessed",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 248,
+        "maximumOpenedColumns": 242,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 248
+            "count": 242
           }
         ]
       },
@@ -16012,11 +14978,11 @@
         "name": "tree_1_trace",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 4000,
+        "maximumOpenedColumns": 3887,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 3175
+            "count": 3062
           },
           {
             "value": 2,
@@ -16052,15 +15018,15 @@
         "name": "tree_2_interaction",
         "depth": 19,
         "digestBytes": 32,
-        "maximumOpenedColumns": 2092,
+        "maximumOpenedColumns": 1976,
         "sampledValueLengthHistogram": [
           {
             "value": 1,
-            "count": 1684
+            "count": 1640
           },
           {
             "value": 2,
-            "count": 408
+            "count": 336
           }
         ]
       },
