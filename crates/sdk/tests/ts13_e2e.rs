@@ -7,7 +7,7 @@
 use bincode::Options;
 use ciborium::value::Value;
 use euid_zk_sdk::{
-    prove_identity, verify_identity, IdentityError, IdentityStatement, IdentityWitness,
+    IdentityStatement, IdentityWitness, ZkError, ZkMdocWitness, ZkPublicStatement,
 };
 use ml_dsa::signature::Signer;
 use ml_dsa::{EncodedSignature, MlDsa65, SigningKey};
@@ -17,6 +17,21 @@ use std::io::Cursor;
 #[allow(dead_code)]
 #[path = "../../eu-id-prover/tests/support/mldsa_fixture.rs"]
 mod mldsa_fixture;
+
+/// The canonical TS13 flow through the public tagged API.
+fn prove_identity(
+    statement: IdentityStatement,
+    witness: IdentityWitness,
+) -> Result<Vec<u8>, ZkError> {
+    euid_zk_sdk::prove_identity(
+        ZkPublicStatement::Ts13DemoV1(statement),
+        ZkMdocWitness::Ts13DemoV1(witness),
+    )
+}
+
+fn verify_identity(statement: IdentityStatement, proof: Vec<u8>) -> Result<(), ZkError> {
+    euid_zk_sdk::verify_identity(ZkPublicStatement::Ts13DemoV1(statement), proof).map(|_| ())
+}
 
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
@@ -579,7 +594,7 @@ fn ts13_public_input_unlinkability_a1_a2_b_uses_compiled_artifact() {
     unknown_artifact.circuit_hash[0] ^= 1;
     assert!(matches!(
         prove_identity(unknown_artifact, witness_a1.clone()),
-        Err(IdentityError::UnsupportedCircuitHash)
+        Err(ZkError::UnsupportedCircuitHash)
     ));
 
     let proof_a1 = prove_identity(statement_a1.clone(), witness_a1)
@@ -671,7 +686,7 @@ fn ts13_public_input_unlinkability_a1_a2_b_uses_compiled_artifact() {
     let assert_relabel_rejected = |statement: IdentityStatement| {
         assert!(matches!(
             verify_identity(statement, proof_a1.clone()),
-            Err(IdentityError::ProofVerificationFailed)
+            Err(ZkError::ProofVerificationFailed)
         ));
     };
     let mut relabelled = statement_a1.clone();
@@ -733,21 +748,21 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut issuer_auth_mut(document)[3], "issuer signature");
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "issuer protected header",
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut issuer_auth_mut(document)[0], "issuer protected header");
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "issuer MSO payload",
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut issuer_auth_mut(document)[2], "issuer MSO payload");
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
 
     cases.push((
@@ -758,7 +773,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                     Value::Text("eu.europa.ec.eudi.pid.2".to_string());
             });
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "MSO digestAlgorithm",
@@ -767,7 +782,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                 *text_map_value_mut(mso, "digestAlgorithm") = Value::Text("SHA-512".to_string());
             });
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "MSO device-key region",
@@ -785,7 +800,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                 flip_middle_byte(public_key, "MSO device public key");
             });
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
 
     cases.push((
@@ -795,7 +810,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                 flip_middle_byte(text_map_value_mut(item, "random"), "item randomizer");
             });
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "selected item value",
@@ -805,7 +820,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
             });
             update_selected_digest_and_resign(document);
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "selected item digest context",
@@ -825,7 +840,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                 flip_middle_byte(digest, "selected item digest");
             });
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
 
     cases.push((
@@ -833,7 +848,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut device_signature_mut(document)[3], "device signature");
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "device protected header",
@@ -843,14 +858,14 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                 "device protected header",
             );
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
     cases.push((
         "device payload",
         document_case(mutate_document(&fixture.document, |document| {
             flip_middle_byte(&mut device_signature_mut(document)[2], "device payload");
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
 
     let mut wrong_endpoints = base_witness.clone();
@@ -861,7 +876,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
     cases.push((
         "revocation endpoints",
         wrong_endpoints,
-        IdentityError::ProofGenerationFailed,
+        ZkError::ProofGenerationFailed,
     ));
     let mut wrong_revocation_signature = base_witness.clone();
     let signature_index = wrong_revocation_signature.revocation_signature.len() / 2;
@@ -869,7 +884,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
     cases.push((
         "revocation signature",
         wrong_revocation_signature,
-        IdentityError::ProofGenerationFailed,
+        ZkError::ProofGenerationFailed,
     ));
 
     cases.push((
@@ -885,7 +900,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                 });
             });
         })),
-        IdentityError::UnsupportedCredentialShape,
+        ZkError::UnsupportedDemoCredentialShape,
     ));
     cases.push((
         "fixed-shape long MSO",
@@ -901,7 +916,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
                 ));
             });
         })),
-        IdentityError::UnsupportedCredentialShape,
+        ZkError::UnsupportedDemoCredentialShape,
     ));
     cases.push((
         "selected item trailing CBOR",
@@ -909,7 +924,7 @@ fn ts13_exported_prover_rejects_invalid_witness_matrix() {
             append_selected_item_trailing_cbor(document);
             update_selected_digest_and_resign(document);
         })),
-        IdentityError::InvalidPrivateCredential,
+        ZkError::InvalidPrivateCredential,
     ));
 
     assert_eq!(cases.len(), 17);

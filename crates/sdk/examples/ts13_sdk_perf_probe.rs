@@ -12,7 +12,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use euid_zk_sdk::{prove_identity, verify_identity, IdentityStatement, IdentityWitness};
+use euid_zk_sdk::{
+    prove_identity, verify_identity, IdentityStatement, IdentityWitness, ZkMdocWitness,
+    ZkPublicStatement,
+};
 
 const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
@@ -197,8 +200,11 @@ fn run(config: Config) {
 
     for _ in 0..iterations {
         let prove_start = Instant::now();
-        let identity_proof = prove_identity(statement.clone(), witness.clone())
-            .expect("SDK identity TS13 equality proof builds");
+        let identity_proof = prove_identity(
+            ZkPublicStatement::Ts13DemoV1(statement.clone()),
+            ZkMdocWitness::Ts13DemoV1(witness.clone()),
+        )
+        .expect("SDK identity TS13 equality proof builds");
         prove_ms.push(prove_start.elapsed().as_millis());
 
         assert_eq!(&identity_proof[..8], b"EUIDTS13");
@@ -209,8 +215,11 @@ fn run(config: Config) {
         final_proof_envelope_bytes = identity_proof.len();
 
         let verify_start = Instant::now();
-        verify_identity(statement.clone(), identity_proof)
-            .expect("SDK identity TS13 equality envelope verifies");
+        verify_identity(
+            ZkPublicStatement::Ts13DemoV1(statement.clone()),
+            identity_proof,
+        )
+        .expect("SDK identity TS13 equality envelope verifies");
         let elapsed = verify_start.elapsed().as_millis();
         first_verify_ms.get_or_insert(elapsed);
         verify_ms.push(elapsed);
