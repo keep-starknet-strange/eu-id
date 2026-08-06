@@ -20,6 +20,9 @@ sha2 = "0.10"
 rand = "0.8"
 rayon = "1"
 ciborium = "0.2.2"
+# Pinned exactly: `iso_alpha2_to_numeric` must keep returning the same numeric
+# codes across builds.
+celes = "=2.8.2"
 serde_json = "1"
 
 [dev-dependencies]

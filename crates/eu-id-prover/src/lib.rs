@@ -121,6 +121,7 @@ pub fn report_prove_runtime_configuration(
 }
 
 pub use mdoc::{MdocPidRequest, MdocProof, MdocTs13DemoCircuitPublicInput};
+pub use policy::iso_alpha2_to_numeric;
 
 fn extract_ts13_demo(
     document: &[u8],
