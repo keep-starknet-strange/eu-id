@@ -281,6 +281,87 @@ pub fn demo_build_ml_dsa_witness(
     Ok(encode_value(&document))
 }
 
+/// Deterministic ML-DSA-65 demo revocation-authority seed (mirrors the eu-id-prover fixture).
+const MLDSA_REVOCATION_SEED: [u8; 32] = [0x7eu8; 32];
+/// Fixed demo revocation epoch (mirrors the eu-id-prover fixture).
+const DEMO_REVOCATION_EPOCH: u32 = 17;
+
+fn revocation_signing_key() -> SigningKey<MlDsa65> {
+    SigningKey::<MlDsa65>::from_seed(&MLDSA_REVOCATION_SEED.into())
+}
+
+/// The demo revocation authority's ML-DSA-65 public key (`pkEncode`). Goes into
+/// `IdentityStatement.revocation_public_key` on both the prover and verifier side.
+#[uniffi::export]
+pub fn demo_revocation_public_key() -> Vec<u8> {
+    let vk: EncodedVerifyingKey<MlDsa65> = revocation_signing_key().verifying_key().encode();
+    vk.to_vec()
+}
+
+/// The fixed demo revocation epoch, for `IdentityStatement.revocation_epoch`.
+#[uniffi::export]
+pub fn demo_revocation_epoch() -> u32 {
+    DEMO_REVOCATION_EPOCH
+}
+
+/// A demo non-revocation witness: a signed gap `(id_lo, id_hi)` strictly containing
+/// the credential's revocation id, for `IdentityWitness`.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct DemoRevocationWitness {
+    pub id_lo: u64,
+    pub id_hi: u64,
+    pub signature: Vec<u8>,
+}
+
+/// Mint a demo non-revocation witness for the assembled witness `document` (from
+/// [demo_build_ml_dsa_witness]).
+///
+/// Derives the credential's revocation id exactly as the prover does — `SHA-256`
+/// of the issuerAuth payload (`ts13_mso_derived_revocation_id`) — then signs the
+/// minimal gap `(id-1, id+1)` at [demo_revocation_epoch] with the demo revocation
+/// authority. Demo only: a real authority signs gaps that omit revoked ids; here
+/// nothing is revoked, so a unit gap around the id always proves non-revocation.
+#[uniffi::export]
+pub fn demo_revocation_witness(document: Vec<u8>) -> Result<DemoRevocationWitness, ZkError> {
+    let doc = as_map(&decode_value(&document)?, "Document")?;
+    let issuer_signed = as_map(map_get(&doc, "issuerSigned")?, "IssuerSigned")?;
+    let issuer_auth = match map_get(&issuer_signed, "issuerAuth")? {
+        Value::Array(items) if items.len() == 4 => items.clone(),
+        _ => {
+            return Err(ZkError::InvalidInput(
+                "issuerAuth is not a 4-element COSE_Sign1 array".to_string(),
+            ))
+        }
+    };
+    // The prover's `extracted.mso` is the raw issuerAuth payload (issuerAuth[2]).
+    let payload = match &issuer_auth[2] {
+        Value::Bytes(bytes) => bytes.clone(),
+        _ => {
+            return Err(ZkError::InvalidInput(
+                "issuerAuth payload is not a bstr".to_string(),
+            ))
+        }
+    };
+    let id = eu_id_prover::ts13::ts13_mso_derived_revocation_id(&payload);
+    let id_lo = id
+        .checked_sub(1)
+        .ok_or_else(|| ZkError::InvalidInput("revocation id is zero".to_string()))?;
+    let id_hi = id
+        .checked_add(1)
+        .ok_or_else(|| ZkError::InvalidInput("revocation id is u64::MAX".to_string()))?;
+    let message = eu_id_prover::ts13::ts13_revocation_message(id_lo, id_hi, DEMO_REVOCATION_EPOCH);
+    let signature: Vec<u8> = {
+        let sig = revocation_signing_key().sign(&message);
+        let encoded: EncodedSignature<MlDsa65> = sig.encode();
+        encoded.to_vec()
+    };
+    Ok(DemoRevocationWitness {
+        id_lo,
+        id_hi,
+        signature,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
