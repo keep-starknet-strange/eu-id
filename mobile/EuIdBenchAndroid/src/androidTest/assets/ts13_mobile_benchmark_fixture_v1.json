@@ -8,7 +8,7 @@
   "proveApi": "proveIdentity",
   "schema": "euid-ts13-mobile-fixture-v1",
   "statement": {
-    "circuitHash": "bd66463d96593fc58dd6086c52966687dc102765e0aedf83319cc6334932fa61",
+    "circuitHash": "1025d5a96fb65eb9812f202bd9750b849319da484b87687a3672883deabde62e",
     "documentType": "eu.europa.ec.eudi.pid.1",
     "elementIdentifier": "age_over_18",
     "expectedValueCbor": "f5",
