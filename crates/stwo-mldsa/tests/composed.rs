@@ -351,36 +351,13 @@ fn repeated_instance_job_shapes(input: &MlDsaVerifyInput, sib_stream_len: usize)
 }
 
 #[test]
-fn repeated_instance_service_shape_rejects_via_root_mismatch_without_panic() {
-    // Root equality is symmetric. A proof with the wrong root exercises the
-    // same mismatch in both directions.
+fn repeated_instance_service_shape_rejects_without_panic() {
     let msg = big_msg("wrong-12-job-root", 1024);
     let (witness, input) = witness_and_input(8103, &msg);
     let sib_len = stwo_mldsa::sampleinball::stream_len(&witness);
     let proof = prove_mldsa(witness, input, pcs_config()).expect("prove");
     let repeated_shapes = repeated_instance_job_shapes(&proof.input, sib_len);
     assert_eq!(repeated_shapes.len(), 12);
-
-    let wrong_root = {
-        let handle = SharedKeccakRelations::new();
-        let mut service = KeccakServiceVerifier::new(
-            repeated_shapes.clone(),
-            proof.service_claimed_sums.clone(),
-            handle.clone(),
-        );
-        let mut verifier = MlDsaVerifier::new(
-            proof.input.clone(),
-            proof.group_evals.clone(),
-            proof.claimed_sums.clone(),
-            None,
-            handle,
-        );
-        air_core::compute_canonical_preprocessed_root(
-            &mut [&mut service, &mut verifier],
-            proof.stark_proof.config,
-        )
-        .expect("repeated-instance canonical root")
-    };
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let handle = SharedKeccakRelations::new();
@@ -399,13 +376,15 @@ fn repeated_instance_service_shape_rejects_via_root_mismatch_without_panic() {
         air_core::verify_with_expected_preprocessed_root_and_payloads(
             &mut [&mut service, &mut verifier],
             &proof.stark_proof,
-            Some(wrong_root),
+            None,
             &proof.post_interaction_payloads,
         )
     }));
     assert!(matches!(
         result,
-        Ok(Err(air_core::VerifyError::PreprocessedRootMismatch { .. }))
+        Ok(Err(air_core::VerifyError::Stark(
+            stwo::core::verifier::VerificationError::InvalidStructure(ref message)
+        ))) if message.contains("proof layout arity mismatch")
     ));
 }
 
