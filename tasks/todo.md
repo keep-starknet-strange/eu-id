@@ -8,14 +8,56 @@ Branch: `feat/quantum-safe`
 - [x] Bind every shard through its own outer-STARK MLE tieback.
 - [x] Generalize the fixed GKR wire validator to the exact three-instance product shape.
 - [x] Add positive and adversarial tests for shard ranges, boundaries, claims, and payload shape.
-- [ ] Regenerate and verify the source-bound artifact and the in-repository Android fixture.
-- [ ] Run release formatting, Clippy, focused tests, full proof verification, and artifact drift checks.
-- [ ] Compare complete `proveIdentity` and `verifyIdentity` latency, peak RSS, and envelope size.
-- [ ] Review the final diff and record the acceptance result below.
+- [x] Regenerate and verify the source-bound artifact and the in-repository Android fixture.
+- [x] Run release formatting, Clippy, focused tests, full proof verification, and artifact drift checks.
+- [x] Compare complete `proveIdentity` and `verifyIdentity` latency, peak RSS, and envelope size.
+- [x] Review the final diff and record the acceptance result below.
 
 ## Keccak carrier sharding review
 
-Pending.
+- Source checkpoint `c63024912dce05a787c1f65c70e7ec62c69ea323`
+  splits 252 permutations into exact `(base, count, log-size)` shards
+  `(0, 163, 12)`, `(163, 81, 11)`, and `(244, 8, 8)`. Global permutation IDs,
+  aggregate lookup multiplicities, transcript order, and one MLE tie-back per
+  shard remain constrained.
+- Carrier plus tie-back storage falls from 7,487,488 to 5,849,600 physical
+  cells, a 21.88 percent reduction. The complete shared Keccak service falls
+  from 8,448,928 to 6,811,040 cells, a 19.39 percent reduction. Total artifact
+  geometry falls from 14,311,664 to 12,673,776 cells, an 11.45 percent
+  reduction.
+- Mixed-size RoundGKR verification rejects aggregate-preserving shard
+  forgeries, zero denominators, malformed instance counts, layer and mask
+  mismatches, trailing bytes, and nonzero-base carrier attacks. The Keccak,
+  air-core, SDK, live-artifact, A1/A2/B, and regenerated-fixture proof checks
+  pass in release mode.
+- The source-bound circuit hash is
+  `5495bcc86932973ed691540924112b39ed047369eaae95444396b91251816480`.
+  The shape-manifest SHA-256 is
+  `07d916ff24b3ac5a6d13397f76ecf535ea2f9c33c50f5c843992fc32a195dec3`.
+  The fixture SHA-256 is
+  `8c9f9934b794eeff2ce0013fc297fe158b05e4f78c1709620fff6afa8f0559f3`.
+  Artifact drift checking passes.
+- Seven fresh processes measured `proveIdentity` at 985, 996, 1,000, 1,000,
+  996, 1,052, and 993 ms: a 996 ms median, 15.7 percent below the frozen
+  1,182 ms baseline. Median `verifyIdentity` is 42 ms. One measured run used
+  1,141,391,360 bytes maximum RSS. The same-process A1/A2/B median improves
+  from 1,124.114 to 918.470 ms.
+- The fixed envelope grows from 1,376,302 to 1,703,982 bytes because the wire
+  now carries three GKR instances. It remains below the new explicit
+  2,097,152-byte SDK limit; body capacity is 1,703,936 bytes.
+- Changed Rust files pass `rustfmt --check`; targeted release Clippy passes
+  with warnings denied after exempting the pre-existing Keccak doc-list lint
+  and the pinned planner test's tuple-shape lint. The full workspace formatting
+  check still reports unrelated pre-existing drift.
+- The release SDK AAR, its Kotlin/JNI unit tests, the benchmark release APK,
+  and its release instrumentation APK build successfully. Their SHA-256 values
+  are `30a6ce06871017ce5d0137a25f3b7e16784a0604e77a710a281d2067b46fc52b`,
+  `96754397be1689e604fb5c9d957139e0507fe81b66dddd858fbe55d44d60a7c2`,
+  and `acb06c1e12e57909e8c9c791bdd8d847e498584e30c0044b13d54843625e5647`.
+  The host APK contains the exact AAR ARM64 library, and the test APK contains
+  the exact checked-in fixture.
+- The exported UniFFI interface is unchanged, and no Android wallet source was
+  modified.
 
 # Android wallet FFI parity
 
