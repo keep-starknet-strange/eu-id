@@ -1,13 +1,13 @@
 //! GKR offload for carrier LogUp interactions.
 //!
 //! A LogUp GKR proof replaces the carrier component's interaction columns. One
-//! `MleEval` tie-back component binds the GKR input claims to the committed
-//! base trace. The component uses eight committed tree-3 columns.
+//! `MleEval` tie-back component per shard binds the GKR input claims to the
+//! committed base trace. Each component uses eight committed tree-3 columns.
 //!
 //! ## Layout
 //!
 //! The proof puts all five relation families in one `Layer::LogUpMultiplicities`
-//! instance. It uses the order from
+//! instance per carrier shard. Each uses the order from
 //! [`crate::carrier::collect_lookups`]. The lookup slot uses the high index
 //! bits. The trace row uses the low index bits. The GKR OOD point splits as
 //! `r = (r_slot ‖ r_row)`. Each `Relation::combine` is an affine form with
@@ -33,12 +33,13 @@
 //!
 //! ## TS13 demo soundness contribution
 //!
-//! The n=261 profile has 10 slot variables and 13 row variables. Its 23 GKR
-//! layers contain 253 sumcheck rounds. Each round has degree at most three.
+//! The n=252 profile has 10 slot variables and row-variable counts 12, 11, and
+//! 8. Its mixed batch has at most 22 GKR layers and contains 231 sumcheck
+//! rounds. Each round has degree at most three.
 //! Let `q = (2^31 - 1)^4`, the size of QM31. A conservative union bound is
-//! `759/q` for sumcheck, `23/q` for the layer column folds, `1/q` for δ, and
-//! `8191/q` for the outer log13 MLE identity. The total is `8974/q`, which is
-//! about `2^-110.9`. This is only the GKR contribution. The complete analysis
+//! `693/q` for sumcheck, `61/q` for the layer column folds, `1/q` for δ, and
+//! `6397/q` for the three outer MLE identities. The total is `7152/q`, which is
+//! about `2^-111.2`. This is only the GKR contribution. The complete analysis
 //! also includes STARK OODS, LogUp relation collisions, binding hashes, and
 //! PCS terms. It does not claim 128-bit security for the complete system.
 
@@ -58,7 +59,9 @@ use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::lookups::gkr_prover::{prove_batch, Layer};
-use stwo::prover::lookups::gkr_verifier::{partially_verify_batch, Gate, GkrArtifact};
+use stwo::prover::lookups::gkr_verifier::{
+    partially_verify_batch, Gate, GkrArtifact, GkrBatchProof,
+};
 use stwo::prover::lookups::mle::Mle;
 use stwo_constraint_framework::mle_eval::MleCoeffColumnOracle;
 use stwo_constraint_framework::{PointEvaluator, Relation};
@@ -116,44 +119,69 @@ fn eq_weights(r_slot: &[SecureField]) -> Vec<SecureField> {
     ws
 }
 
+#[cfg(test)]
 fn tieback_from_artifact(
     artifact: &GkrArtifact,
     delta: SecureField,
     log_size: u32,
 ) -> Result<RoundTieBack, VerificationError> {
+    let mut tie_backs = tiebacks_from_artifact(artifact, delta, &[log_size])?;
+    Ok(tie_backs.remove(0))
+}
+
+fn tiebacks_from_artifact(
+    artifact: &GkrArtifact,
+    delta: SecureField,
+    log_sizes: &[u32],
+) -> Result<Vec<RoundTieBack>, VerificationError> {
     let bad = |msg: &str| VerificationError::InvalidStructure(format!("carrier GKR: {msg}"));
-    if artifact.n_variables_by_instance.as_slice() != [(LOG_SLOTS + log_size) as usize] {
+    if log_sizes.is_empty() {
+        return Err(bad("missing instances"));
+    }
+    let variable_counts = log_sizes
+        .iter()
+        .map(|log_size| (LOG_SLOTS + log_size) as usize)
+        .collect::<Vec<_>>();
+    if artifact.n_variables_by_instance != variable_counts {
         return Err(bad("wrong instance count or variable count"));
     }
-    let claims = artifact
-        .claims_to_verify_by_instance
-        .first()
-        .ok_or_else(|| bad("missing input-layer claims"))?;
-    let [num_claim, den_claim] = claims.as_slice() else {
-        return Err(bad("input-layer claims must be [num, den]"));
-    };
-    if artifact.ood_point.len() != (LOG_SLOTS + log_size) as usize {
+    if artifact.claims_to_verify_by_instance.len() != log_sizes.len() {
+        return Err(bad("wrong input-layer claim count"));
+    }
+    let max_variables = *variable_counts.iter().max().expect("nonempty instances");
+    if artifact.ood_point.len() != max_variables {
         return Err(bad("OOD point length mismatch"));
     }
-    let (r_slot, r_row) = artifact.ood_point.split_at(LOG_SLOTS as usize);
-    let eq_ws = eq_weights(r_slot);
-    let pad: SecureField = eq_ws[N_TOTAL_LOOKUPS..].iter().copied().sum();
-    Ok(RoundTieBack {
-        r_row: r_row.to_vec(),
-        delta,
-        eq_ws,
-        mle_claim: delta * *num_claim + *den_claim - pad,
-    })
+    variable_counts
+        .into_iter()
+        .zip(&artifact.claims_to_verify_by_instance)
+        .map(|(n_variables, claims)| {
+            let [num_claim, den_claim] = claims.as_slice() else {
+                return Err(bad("input-layer claims must be [num, den]"));
+            };
+            let point = &artifact.ood_point[max_variables - n_variables..];
+            let (r_slot, r_row) = point.split_at(LOG_SLOTS as usize);
+            let eq_ws = eq_weights(r_slot);
+            let pad: SecureField = eq_ws[N_TOTAL_LOOKUPS..].iter().copied().sum();
+            Ok(RoundTieBack {
+                r_row: r_row.to_vec(),
+                delta,
+                eq_ws,
+                mle_claim: delta * *num_claim + *den_claim - pad,
+            })
+        })
+        .collect()
 }
 
 // Prover side.
 
 /// Prover state for the GKR leaves and their independent trace source.
 pub struct RoundGkrProver {
-    fracs: Fractions,
-    data: InteractionData,
+    fracs: Vec<Fractions>,
+    data: Vec<InteractionData>,
     relations: KeccakRelations,
-    log_size: u32,
+    log_sizes: Vec<u32>,
+    claimed_sums: Vec<SecureField>,
     claimed_sum: SecureField,
 }
 
@@ -240,20 +268,34 @@ impl RoundGkrProver {
     /// Build the fraction multiset and its exact sum (== the columnar
     /// `claimed_sum` the offloaded interaction trace would have produced).
     pub fn new(relations: &KeccakRelations, data: InteractionData) -> Self {
-        let fracs = build_fractions(relations, &data);
-        let claimed_sum = global_claimed_sum(&fracs);
-        let log_size = data.log_size;
+        Self::new_batch(relations, vec![data])
+    }
+
+    pub fn new_batch(relations: &KeccakRelations, data: Vec<InteractionData>) -> Self {
+        assert!(!data.is_empty(), "carrier GKR needs one shard");
+        let log_sizes = data.iter().map(|shard| shard.log_size).collect();
+        let fracs = data
+            .iter()
+            .map(|shard| build_fractions(relations, shard))
+            .collect::<Vec<_>>();
+        let claimed_sums = fracs.iter().map(global_claimed_sum).collect::<Vec<_>>();
+        let claimed_sum = claimed_sums.iter().copied().sum();
         Self {
             fracs,
             data,
             relations: relations.clone(),
-            log_size,
+            log_sizes,
+            claimed_sums,
             claimed_sum,
         }
     }
 
     pub fn claimed_sum(&self) -> SecureField {
         self.claimed_sum
+    }
+
+    pub fn claimed_sums(&self) -> &[SecureField] {
+        &self.claimed_sums
     }
 
     /// Flatten to the slot-high/row-low multiplicities instance, prove it on
@@ -263,32 +305,59 @@ impl RoundGkrProver {
         self,
         channel: &mut impl Channel,
     ) -> (Vec<u8>, RoundTieBack, Mle<SimdBackend, SecureField>) {
+        let (blob, mut tie_backs, mut coeff_mles) = self.prove_batch(channel);
+        assert_eq!(tie_backs.len(), 1, "single carrier GKR instance");
+        (blob, tie_backs.remove(0), coeff_mles.remove(0))
+    }
+
+    pub fn prove_batch(
+        self,
+        channel: &mut impl Channel,
+    ) -> (
+        Vec<u8>,
+        Vec<RoundTieBack>,
+        Vec<Mle<SimdBackend, SecureField>>,
+    ) {
         let Self {
             fracs,
             data,
             relations,
-            log_size,
-            claimed_sum,
+            log_sizes,
+            claimed_sums,
+            claimed_sum: _,
         } = self;
-        let n_rows = 1usize << log_size;
-        let layer = gkr_input_layer(fracs, log_size);
-        let (proof, artifact) = prove_batch(channel, vec![layer]);
-        debug_assert_eq!(
-            proof.output_claims_by_instance[0][0],
-            claimed_sum * proof.output_claims_by_instance[0][1],
-            "GKR output claim != carrier claimed sum"
-        );
+        let layers = fracs
+            .into_iter()
+            .zip(log_sizes.iter().copied())
+            .map(|(fracs, log_size)| gkr_input_layer(fracs, log_size))
+            .collect();
+        let (proof, artifact) = prove_batch(channel, layers);
+        debug_assert_eq!(proof.output_claims_by_instance.len(), claimed_sums.len());
+        for (output, claimed_sum) in proof.output_claims_by_instance.iter().zip(&claimed_sums) {
+            debug_assert_eq!(
+                output[0],
+                *claimed_sum * output[1],
+                "GKR output claim != carrier shard claimed sum"
+            );
+        }
         let delta = channel.draw_secure_felt();
-        let tie_back = tieback_from_artifact(&artifact, delta, log_size)
+        let tie_backs = tiebacks_from_artifact(&artifact, delta, &log_sizes)
             .expect("prover-built GKR artifact has the canonical shape");
 
         // c(row) = Σ_slot eq(slot, r_slot) · (δ·num_slot(row) + den_slot(row)).
-        let coeff = build_folded_coefficients(&relations, &data, tie_back.delta, &tie_back.eq_ws);
-        let coeff_mle = Mle::<SimdBackend, SecureField>::new(SecureColumn {
-            data: coeff,
-            length: n_rows,
-        });
-        (encode_gkr_batch_proof(&proof), tie_back, coeff_mle)
+        let coeff_mles = data
+            .iter()
+            .zip(&tie_backs)
+            .map(|(shard, tie_back)| {
+                let coeff =
+                    build_folded_coefficients(&relations, shard, tie_back.delta, &tie_back.eq_ws);
+                Mle::<SimdBackend, SecureField>::new(SecureColumn {
+                    data: coeff,
+                    length: 1usize << shard.log_size,
+                })
+            })
+            .collect();
+        (encode_gkr_batch_proof(&proof), tie_backs, coeff_mles)
     }
 }
 
@@ -302,29 +371,86 @@ pub fn verify_round_gkr(
     log_size: u32,
     channel: &mut impl Channel,
 ) -> Result<RoundTieBack, VerificationError> {
+    let (_, mut tie_backs) = verify_round_gkr_batch(blob, claimed_sum, &[log_size], channel)?;
+    Ok(tie_backs.remove(0))
+}
+
+pub fn verify_round_gkr_batch(
+    blob: &[u8],
+    claimed_sum: SecureField,
+    log_sizes: &[u32],
+    channel: &mut impl Channel,
+) -> Result<(Vec<SecureField>, Vec<RoundTieBack>), VerificationError> {
     let bad = |msg: String| VerificationError::InvalidStructure(format!("carrier GKR: {msg}"));
     let proof =
         decode_gkr_batch_proof(blob).map_err(|e| bad(format!("blob decode failed: {e}")))?;
-    let [output] = proof.output_claims_by_instance.as_slice() else {
-        return Err(bad("expected exactly one GKR instance".into()));
-    };
-    let [num_out, den_out] = output.as_slice() else {
-        return Err(bad("output claims must be [num, den]".into()));
-    };
-    if *den_out == SecureField::zero() {
-        return Err(bad("zero output denominator".into()));
+    validate_batch_shape(&proof, log_sizes).map_err(bad)?;
+    if proof.output_claims_by_instance.len() != log_sizes.len() {
+        return Err(bad("wrong GKR instance count".into()));
     }
-    // The GKR-proven multiset sum must sit exactly where the columnar claimed
-    // sum sat in the global LogUp balance.
-    if *num_out != claimed_sum * *den_out {
+    let mut claimed_sums = Vec::with_capacity(log_sizes.len());
+    for output in &proof.output_claims_by_instance {
+        let [num_out, den_out] = output.as_slice() else {
+            return Err(bad("output claims must be [num, den]".into()));
+        };
+        if *den_out == SecureField::zero() {
+            return Err(bad("zero output denominator".into()));
+        }
+        claimed_sums.push(*num_out / *den_out);
+    }
+    if claimed_sums.iter().copied().sum::<SecureField>() != claimed_sum {
         return Err(bad(
             "output claim does not match the round claimed sum".into()
         ));
     }
-    let artifact = partially_verify_batch(vec![Gate::LogUp], &proof, channel)
+    let artifact = partially_verify_batch(vec![Gate::LogUp; log_sizes.len()], &proof, channel)
         .map_err(|e| bad(format!("replay failed: {e}")))?;
     let delta = channel.draw_secure_felt();
-    tieback_from_artifact(&artifact, delta, log_size)
+    let tie_backs = tiebacks_from_artifact(&artifact, delta, log_sizes)?;
+    Ok((claimed_sums, tie_backs))
+}
+
+/// Reject malformed batch dimensions before entering Stwo's verifier, whose
+/// error paths assume nonempty, mutually consistent layer vectors.
+fn validate_batch_shape(proof: &GkrBatchProof, log_sizes: &[u32]) -> Result<(), String> {
+    if log_sizes.is_empty() {
+        return Err("missing GKR instances".into());
+    }
+    if proof.layer_masks_by_instance.len() != log_sizes.len()
+        || proof.output_claims_by_instance.len() != log_sizes.len()
+    {
+        return Err("wrong GKR instance count".into());
+    }
+
+    let variable_counts = log_sizes
+        .iter()
+        .map(|&log_size| (LOG_SLOTS + log_size) as usize)
+        .collect::<Vec<_>>();
+    for (masks, &variable_count) in proof.layer_masks_by_instance.iter().zip(&variable_counts) {
+        if masks.len() != variable_count {
+            return Err("wrong GKR layer count".into());
+        }
+        if masks.iter().any(|mask| mask.columns().len() != 2) {
+            return Err("GKR LogUp mask must have two columns".into());
+        }
+    }
+
+    let max_variables = variable_counts
+        .into_iter()
+        .max()
+        .expect("nonempty instances");
+    if proof.sumcheck_proofs.len() != max_variables {
+        return Err("wrong GKR sumcheck count".into());
+    }
+    if proof
+        .sumcheck_proofs
+        .iter()
+        .enumerate()
+        .any(|(layer, sumcheck)| sumcheck.round_polys.len() != layer)
+    {
+        return Err("wrong GKR round-polynomial count".into());
+    }
+    Ok(())
 }
 
 // The MLE coefficient-column oracle over the committed carrier columns.
@@ -340,6 +466,7 @@ pub struct RoundCoeffOracle {
     pub delta: SecureField,
     pub eq_ws: Vec<SecureField>,
     pub n_perms: usize,
+    pub perm_id_base: usize,
 }
 
 impl MleCoeffColumnOracle for RoundCoeffOracle {
@@ -357,7 +484,7 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
             self.log_size,
             SecureField::zero(),
         );
-        let lookups = collect_lookups(&mut eval, self.n_perms);
+        let lookups = collect_lookups(&mut eval, self.n_perms, self.perm_id_base);
         assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
         let mut out = SecureField::zero();
         for (s, lk) in lookups.iter().enumerate() {
@@ -375,12 +502,15 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
     use rayon::ThreadPoolBuilder;
     use stwo::core::channel::Blake2sChannel;
     use stwo::core::fields::m31::M31;
     use stwo::core::fields::FieldExpOps;
     use stwo::prover::backend::simd::m31::PackedM31;
     use stwo::prover::backend::Column;
+    use stwo::prover::lookups::gkr_verifier::GkrMask;
     use stwo_constraint_framework::{EvalAtRow, LogupTraceGenerator, ORIGINAL_TRACE_IDX};
 
     use super::*;
@@ -389,12 +519,17 @@ mod tests {
     use crate::{carrier, keccak};
 
     fn carrier_witness(n_perms: usize) -> carrier::Witness {
+        carrier_witness_at(n_perms, 0)
+    }
+
+    fn carrier_witness_at(n_perms: usize, perm_id_base: usize) -> carrier::Witness {
         let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; n_perms];
         for (permutation, input) in inputs.iter_mut().enumerate() {
-            input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
+            input[N_BYTES_IN_STATE] =
+                PackedM31::from(M31::from((perm_id_base + permutation) as u32));
         }
         let boundaries = keccak::generate_boundary_witness(&inputs);
-        carrier::generate(&boundaries)
+        carrier::generate(&boundaries, perm_id_base)
     }
 
     fn carrier_data(n_perms: usize) -> InteractionData {
@@ -739,6 +874,137 @@ mod tests {
     }
 
     #[test]
+    fn mixed_size_batch_roundtrips_with_suffix_ood_points() {
+        let witnesses = [
+            carrier_witness_at(4, 0),
+            carrier_witness_at(2, 4),
+            carrier_witness_at(1, 6),
+        ];
+        let data = witnesses
+            .iter()
+            .map(|witness| witness.interaction.clone())
+            .collect::<Vec<_>>();
+        let log_sizes = data.iter().map(|shard| shard.log_size).collect::<Vec<_>>();
+
+        let mut prover_channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut prover_channel);
+        let prover = RoundGkrProver::new_batch(&relations, data);
+        let claimed_sums = prover.claimed_sums().to_vec();
+        let claimed_sum = prover.claimed_sum();
+        prover_channel.mix_felts(&[claimed_sum]);
+        let (blob, prover_tie_backs, coeff_mles) = prover.prove_batch(&mut prover_channel);
+
+        let mut verifier_channel = Blake2sChannel::default();
+        let _ = KeccakRelations::draw(&mut verifier_channel);
+        verifier_channel.mix_felts(&[claimed_sum]);
+        let (verified_sums, verifier_tie_backs) =
+            verify_round_gkr_batch(&blob, claimed_sum, &log_sizes, &mut verifier_channel)
+                .expect("mixed-size carrier batch verifies");
+
+        assert_eq!(verified_sums, claimed_sums);
+        assert_eq!(prover_tie_backs.len(), log_sizes.len());
+        for (((prover_tie_back, verifier_tie_back), coeff_mle), &log_size) in prover_tie_backs
+            .iter()
+            .zip(&verifier_tie_backs)
+            .zip(&coeff_mles)
+            .zip(&log_sizes)
+        {
+            assert_eq!(prover_tie_back.r_row.len(), log_size as usize);
+            assert_eq!(prover_tie_back.r_row, verifier_tie_back.r_row);
+            assert_eq!(prover_tie_back.delta, verifier_tie_back.delta);
+            assert_eq!(prover_tie_back.eq_ws, verifier_tie_back.eq_ws);
+            assert_eq!(prover_tie_back.mle_claim, verifier_tie_back.mle_claim);
+            assert_eq!(
+                multilinear_eval(&coeff_mle.to_cpu(), &prover_tie_back.r_row),
+                prover_tie_back.mle_claim,
+                "folded coefficient MLE must tie back every shard"
+            );
+        }
+        assert_eq!(
+            prover_channel.draw_secure_felt(),
+            verifier_channel.draw_secure_felt(),
+            "mixed-size prover and verifier transcripts must remain aligned"
+        );
+    }
+
+    fn mixed_batch_blob() -> (Vec<u8>, SecureField, Vec<u32>) {
+        let data = [
+            carrier_witness_at(4, 0).interaction,
+            carrier_witness_at(2, 4).interaction,
+            carrier_witness_at(1, 6).interaction,
+        ]
+        .into_iter()
+        .collect::<Vec<_>>();
+        let log_sizes = data.iter().map(|shard| shard.log_size).collect::<Vec<_>>();
+        let mut channel = Blake2sChannel::default();
+        let relations = KeccakRelations::draw(&mut channel);
+        let prover = RoundGkrProver::new_batch(&relations, data);
+        let claimed_sum = prover.claimed_sum();
+        channel.mix_felts(&[claimed_sum]);
+        let (blob, _, _) = prover.prove_batch(&mut channel);
+        (blob, claimed_sum, log_sizes)
+    }
+
+    fn assert_batch_rejects_without_panic(
+        blob: &[u8],
+        claimed_sum: SecureField,
+        log_sizes: &[u32],
+    ) {
+        let mut channel = Blake2sChannel::default();
+        let _ = KeccakRelations::draw(&mut channel);
+        channel.mix_felts(&[claimed_sum]);
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            verify_round_gkr_batch(blob, claimed_sum, log_sizes, &mut channel)
+        }));
+        assert!(result.is_ok(), "malformed GKR proof must not panic");
+        assert!(result.unwrap().is_err(), "malformed GKR proof must reject");
+    }
+
+    #[test]
+    fn malformed_mixed_batches_reject_without_panicking() {
+        let (blob, claimed_sum, log_sizes) = mixed_batch_blob();
+        assert_batch_rejects_without_panic(&blob, claimed_sum, &[]);
+
+        let mutate_and_reject = |mutate: &dyn Fn(&mut GkrBatchProof)| {
+            let mut proof = decode_gkr_batch_proof(&blob).expect("honest batch decodes");
+            mutate(&mut proof);
+            assert_batch_rejects_without_panic(
+                &encode_gkr_batch_proof(&proof),
+                claimed_sum,
+                &log_sizes,
+            );
+        };
+        mutate_and_reject(&|proof| proof.layer_masks_by_instance[2].clear());
+        mutate_and_reject(&|proof| {
+            proof.layer_masks_by_instance[1][3] = GkrMask::new(Vec::new());
+        });
+        mutate_and_reject(&|proof| {
+            proof.sumcheck_proofs[3].round_polys.pop();
+        });
+        mutate_and_reject(&|proof| {
+            proof.output_claims_by_instance[0].pop();
+        });
+
+        for instance in 0..log_sizes.len() {
+            mutate_and_reject(&|proof| {
+                proof.output_claims_by_instance[instance][1] = SecureField::zero();
+            });
+        }
+
+        mutate_and_reject(&|proof| {
+            let delta = SecureField::one();
+            let denominator_0 = proof.output_claims_by_instance[0][1];
+            let denominator_1 = proof.output_claims_by_instance[1][1];
+            proof.output_claims_by_instance[0][0] += delta * denominator_0;
+            proof.output_claims_by_instance[1][0] -= delta * denominator_1;
+        });
+
+        let mut trailing = blob;
+        trailing.push(0);
+        assert_batch_rejects_without_panic(&trailing, claimed_sum, &log_sizes);
+    }
+
+    #[test]
     fn replayed_numerators_preserve_every_lookup_family() {
         const HEADER_COLUMN: usize = 0;
         const ROUND_COLUMN: usize = 1;
@@ -939,7 +1205,7 @@ mod tests {
         let weights = eq_weights(slot_point);
 
         let mut evaluator = MleMaskEvaluator::new(&witness.trace, row_point, log_size);
-        let lookups = carrier::collect_lookups(&mut evaluator, N_PERMUTATIONS);
+        let lookups = carrier::collect_lookups(&mut evaluator, N_PERMUTATIONS, 0);
         assert_eq!(evaluator.column, witness.trace.len());
         assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
 

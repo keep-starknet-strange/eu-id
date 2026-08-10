@@ -94,11 +94,12 @@ const CANONICAL_DIGEST_IDENTIFIER_INTEGER_WIDTHS: [u8; 3] = [1, 2, 3];
 const CANONICAL_REQUEST_CONTEXT_CORPUS_SHA256: &str =
     "2ba3208731e3eb7b67ef54e0683f28dcb81d1b3811c0d2a1ce1d187ee9c3d77c";
 const CANONICAL_GENERATION_INPUT_SHA256: &str =
-    "ee1ffb4cd733c70f8b165e767e35d89e4e74784862453c151a8f4ac1f5dcd610";
+    "9e789af403f9c570d81a8e004e4c78bb4012dd87d16f5d99620c11c059074454";
 const CANONICAL_EUDI_ARF_COMMIT: &str = "230cd75d9c243e6b4c7b35f3f2bf73f9dff20cdc";
 const CANONICAL_OBSERVED_MAX_DEVICE_COSE_SIG_STRUCTURE_BYTES: u32 = 456;
 const CANONICAL_RELATION_COUNT: usize = 69;
-const CANONICAL_RELATION_USE_COUNT: usize = 218;
+const CANONICAL_RELATION_USE_COUNT: usize = 240;
+const CANONICAL_KECCAK_POST_INTERACTION_COLUMN_COUNT: u32 = 24;
 const RESERVED_TRANSCRIPT_RELATION_NAMES: [&str; 1] = ["r07_keccak_round"];
 const CANONICAL_PUBLIC_MIX_COUNT: usize = 20;
 const CANONICAL_CHALLENGE_ENTRY_COUNT: usize = 78;
@@ -1132,7 +1133,11 @@ impl GenerationInputV1 {
                         )
                     })
                 })?;
-            let expected = if module_ordinal == 2 { 8 } else { 0 };
+            let expected = if module_ordinal == 2 {
+                CANONICAL_KECCAK_POST_INTERACTION_COLUMN_COUNT
+            } else {
+                0
+            };
             if post_interaction_columns != expected {
                 return Err(ArtifactError::InvalidInput(format!(
                     "module {:?} must declare exactly {expected} physical post-interaction columns",
@@ -4493,7 +4498,11 @@ mod tests {
                                 interaction_m31_log_sizes: Vec::new(),
                                 post_interaction_m31_log_sizes: (*name == "shared_keccak_service"
                                     && air_instance_ordinal == 0)
-                                    .then_some(vec![1; 8])
+                                    .then_some(vec![
+                                        1;
+                                        CANONICAL_KECCAK_POST_INTERACTION_COLUMN_COUNT
+                                            as usize
+                                    ])
                                     .unwrap_or_default(),
                             },
                             claimed_sum_count: if zero_component { 0 } else { 1 },
@@ -4969,7 +4978,7 @@ mod tests {
 
     #[test]
     fn canonical_gkr_bound_matches_the_sound_carrier() {
-        assert_eq!(air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES, 20_128);
+        assert_eq!(air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES, 21_368);
         let terms = ts13_demo_proof_bound_terms(&sample_input()).expect("proof bound derives");
         assert_eq!(
             terms
@@ -4977,7 +4986,7 @@ mod tests {
                 .find(|term| term.name == "keccak_round_gkr")
                 .expect("GKR proof-bound term is present")
                 .maximum_serialized_bytes_per_item,
-            20_128
+            21_368
         );
     }
 

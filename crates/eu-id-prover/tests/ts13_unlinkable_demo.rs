@@ -393,7 +393,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [242, 3_887, 1_976, 8, 16]
+                [242, 5_699, 1_976, 24, 16]
             );
             assert_eq!(
                 shape
@@ -401,7 +401,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(Vec::len)
                     .collect::<Vec<_>>(),
-                [242, 3_887, 1_976, 8, 16]
+                [242, 5_699, 1_976, 24, 16]
             );
             let common_query_count = shape.queried_values[0][0];
             assert!(common_query_count > 0);
@@ -415,7 +415,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 .flatten()
                 .all(|&query_count| query_count == common_query_count));
             let mut expected_post_payloads = vec![0; 20];
-            expected_post_payloads[2] = 20_128;
+            expected_post_payloads[2] = 21_368;
             assert_eq!(shape.post_interaction_payload_bytes, expected_post_payloads);
             assert_eq!(shape.fri_last_layer_coefficient_count, 2);
             assert_eq!(shape.sha_table_pair_claim_count, 3);
@@ -461,7 +461,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                 [
                     (8, 4, 12, 0),
                     (2, 1, 4, 0),
-                    (43, 1_957, 888, 8),
+                    (43, 3_769, 888, 24),
                     (0, 0, 0, 0),
                     (2, 2, 8, 0),
                     (54, 105, 148, 0),
@@ -487,7 +487,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                     .iter()
                     .map(|air| air.components.len())
                     .collect::<Vec<_>>(),
-                [3, 1, 13, 0, 2, 11, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 16, 2, 11, 0]
+                [3, 1, 17, 0, 2, 11, 2, 2, 1, 1, 2, 2, 2, 2, 2, 2, 16, 2, 11, 0]
             );
             assert_eq!(
                 geometry
@@ -499,7 +499,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
             );
             assert_eq!(
                 geometry.air_instances[2].post_interaction_log_sizes,
-                [13; 8]
+                [vec![12; 8], vec![11; 8], vec![8; 8]].concat()
             );
             assert!(geometry
                 .air_instances
@@ -516,7 +516,7 @@ fn composed_demo_binds_every_context_role_and_profile_at_capacity() {
                         post + air_post,
                     ]
                 ),
-                [3_887, 1_976, 8]
+                [5_699, 1_976, 24]
             );
             let reject_proof_without_panic = |label: &str, candidate: &eu_id_prover::MdocProof| {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -673,24 +673,26 @@ These fixed components bind the private theorem:
 The Keccak service MUST bind its round GKR output claim to the global LogUp sum
 and the committed trace.
 
-The fixed all-ML-DSA-65 Keccak plan uses 261 permutations:
+The fixed all-ML-DSA-65 Keccak plan uses 252 permutations:
 
-- 32 issuer permutations;
+- 29 issuer permutations;
 - 180 matrix-expansion permutations;
-- 36 device permutations;
-- 13 revocation permutations.
+- 33 device permutations;
+- 10 revocation permutations.
 
 The sound carrier uses 25 rows for each permutation.
-It has 910 committed columns at log size 13.
+It has 906 committed columns split into three globally consecutive shards:
+163 permutations at log size 12, 81 at log size 11, and 8 at log size 8.
+Each shard has an eight-column post-interaction tie-back at the same log size.
 The complete shared service commits these cells:
 
-- 211,104 preprocessed cells;
-- 8,121,376 trace cells;
-- 704,640 interaction cells;
-- 65,536 post-interaction cells;
-- 9,102,656 cells in total.
+- 139,552 preprocessed cells;
+- 6,132,736 trace cells;
+- 487,552 interaction cells;
+- 51,200 post-interaction cells;
+- 6,811,040 cells in total.
 
-The performance campaign gate for this service is 9,200,000 committed cells.
+The performance campaign gate for this service is 6,900,000 committed cells.
 
 ### 8.1 Private `rho` and matrix expansion
 

@@ -66,6 +66,7 @@ const _: () = assert!(N_TOTAL_LOOKUPS == 899);
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug)]
 pub struct Claim {
     pub n_perms: usize,
+    pub perm_id_base: usize,
 }
 
 impl Claim {
@@ -82,6 +83,7 @@ impl Claim {
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.n_perms as u64);
+        channel.mix_u64(self.perm_id_base as u64);
     }
 }
 
@@ -94,6 +96,7 @@ impl Claim {
 pub struct InteractionData {
     pub log_size: u32,
     pub n_perms: usize,
+    pub perm_id_base: usize,
     trace: Vec<ColEval>,
 }
 
@@ -156,7 +159,7 @@ fn pack_round_inputs(
 }
 
 /// Build one carrier witness from scalar permutation boundary rows.
-pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
+pub fn generate(boundaries: &keccak::BoundaryWitness, perm_id_base: usize) -> Witness {
     assert!(boundaries.n_perms > 0, "carrier needs one permutation");
     assert_eq!(
         boundaries.rows.len(),
@@ -166,6 +169,7 @@ pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
 
     let claim = Claim {
         n_perms: boundaries.n_perms,
+        perm_id_base,
     };
     let n_active = claim.n_perms * ROWS_PER_PERMUTATION;
     let n_rows = 1usize << claim.log_size();
@@ -252,6 +256,7 @@ pub fn generate(boundaries: &keccak::BoundaryWitness) -> Witness {
         interaction: InteractionData {
             log_size: claim.log_size(),
             n_perms: claim.n_perms,
+            perm_id_base,
             trace: gkr_trace,
         },
         round: round_data,
@@ -417,13 +422,17 @@ impl FrameworkEval for Eval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let lookups = collect_lookups(&mut eval, self.claim.n_perms);
+        let lookups = collect_lookups(&mut eval, self.claim.n_perms, self.claim.perm_id_base);
         debug_assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
         eval
     }
 }
 
-pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup<E>> {
+pub fn collect_lookups<E: EvalAtRow>(
+    eval: &mut E,
+    n_perms: usize,
+    perm_id_base: usize,
+) -> Vec<Lookup<E>> {
     let header_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
     let round_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
     let final_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
@@ -460,16 +469,19 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
     eval.add_constraint(
         position.clone() - round_active.clone() * (position_mask[0].clone() + one.clone()),
     );
+    let first = header.clone() * (one.clone() - previous_active.clone());
     eval.add_constraint(
         permutation.clone()
             - round_active.clone() * permutation_mask[0].clone()
-            - header.clone() * (permutation_mask[0].clone() + final_mask[0].clone()),
+            - header.clone() * (permutation_mask[0].clone() + final_mask[0].clone())
+            - first * E::F::from(BaseField::from(perm_id_base as u32)),
     );
     eval.add_constraint(end.clone() - previous_active * (one.clone() - active.clone()));
     eval.add_constraint(end.clone() * (final_mask[0].clone() - one.clone()));
     eval.add_constraint(
         end.clone()
-            * (permutation_mask[0].clone() - E::F::from(BaseField::from((n_perms - 1) as u32))),
+            * (permutation_mask[0].clone()
+                - E::F::from(BaseField::from((perm_id_base + n_perms - 1) as u32))),
     );
     let inactive = one - active.clone();
     eval.add_constraint(inactive.clone() * permutation.clone());
@@ -485,11 +497,12 @@ pub fn collect_lookups<E: EvalAtRow>(eval: &mut E, n_perms: usize) -> Vec<Lookup
     }
     // Full 8-lane view for the round arithmetic (chi/iota fold-in): the other
     // 4 lanes are a literal zero in every round, not a committed column.
-    let current_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|byte| {
-        match IOTA_RC_BYTE_INDICES.iter().position(|&b| b == byte) {
-            Some(index) => committed_rc[index].clone(),
-            None => E::F::zero(),
-        }
+    let current_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|byte| match IOTA_RC_BYTE_INDICES
+        .iter()
+        .position(|&b| b == byte)
+    {
+        Some(index) => committed_rc[index].clone(),
+        None => E::F::zero(),
     });
 
     let mut lookups = Vec::with_capacity(N_TOTAL_LOOKUPS);
@@ -713,7 +726,7 @@ fn replay_row<'a>(
         previous,
         column: 0,
     };
-    let lookups = collect_lookups(&mut evaluator, data.n_perms);
+    let lookups = collect_lookups(&mut evaluator, data.n_perms, data.perm_id_base);
     assert_eq!(evaluator.column, N_COLUMNS);
     assert_eq!(lookups.len(), N_TOTAL_LOOKUPS);
     lookups
@@ -846,7 +859,7 @@ mod replay_tests {
             input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
         }
         let boundaries = keccak::generate_boundary_witness(&inputs);
-        let mut witness = generate(&boundaries);
+        let mut witness = generate(&boundaries, 0);
         assert_eq!(witness.trace.len(), N_COLUMNS);
         assert_eq!(witness.interaction.trace().len(), N_COLUMNS);
 

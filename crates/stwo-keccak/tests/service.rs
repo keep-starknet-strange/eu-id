@@ -38,7 +38,8 @@ use stwo_keccak::keccak;
 use stwo_keccak::keccak_round::{N_XOR3_C, N_XOR3_THETA_APPLY};
 use stwo_keccak::relations::{HashIoRelation, KeccakRelations, SharedKeccakRelations};
 use stwo_keccak::service::{
-    service_claimed_sums_len, KeccakServiceProver, KeccakServiceVerifier, PermWitness,
+    service_claimed_sums_len, CarrierShardWitness, KeccakServiceProver, KeccakServiceVerifier,
+    PermWitness,
 };
 use stwo_keccak::sponge::Shape;
 use stwo_keccak::sponge_v::{
@@ -346,7 +347,7 @@ fn install_alternate_iota_witness(run: &mut SpongeVRun) -> PermWitness {
             })
             .collect(),
     };
-    let mut carrier_witness = stwo_keccak::carrier::generate(&boundary_data);
+    let mut carrier_witness = stwo_keccak::carrier::generate(&boundary_data, 0);
     let position = ALTERNATE_IOTA_ROUND + 1;
     let vector_row = position / N_LANES;
     let lane = position % N_LANES;
@@ -381,9 +382,11 @@ fn install_alternate_iota_witness(run: &mut SpongeVRun) -> PermWitness {
         TableMultiplicities::from_carrier_round(&carrier_witness.round, boundary_data.n_perms);
     table_mult.add_sponge(&run.xor, &run.conv);
     PermWitness {
-        carrier_claim: carrier_witness.claim,
-        carrier_trace: carrier_witness.trace,
-        carrier_data: Some(carrier_witness.interaction),
+        shards: vec![CarrierShardWitness {
+            carrier_claim: carrier_witness.claim,
+            carrier_trace: carrier_witness.trace,
+            carrier_data: Some(carrier_witness.interaction),
+        }],
         table_mult,
     }
 }
@@ -677,13 +680,13 @@ fn fixed_capacity_geometry_and_tree_zero_ignore_actual_length() {
 }
 
 #[test]
-fn canonical_n261_carrier_geometry_is_pinned() {
+fn canonical_n261_carrier_shards_are_pinned() {
     const N_PERMUTATIONS: usize = 261;
     const CAPACITY_PERMUTATIONS: usize = 256;
     const SHAKE256_RATE: usize = 136;
     const EXPECTED_SCHEDULE_COLUMNS: usize = 16;
-    const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 7_487_488;
-    const EXPECTED_SERVICE_CELLS: usize = 8_936_864;
+    const EXPECTED_CARRIER_AND_TIEBACK_CELLS: usize = 6_083_584;
+    const EXPECTED_SERVICE_CELLS: usize = 7_532_960;
 
     let capacity_bytes = (CAPACITY_PERMUTATIONS - 1) * SHAKE256_RATE;
     let mut shapes = vec![Shape::with_message_capacity(0, capacity_bytes, 1, 1, 2)
@@ -700,10 +703,15 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     assert_eq!(jobs.n_base_cols(), 1_042);
     assert_eq!(stwo_keccak::sponge_v::n_interaction_cols(&jobs), 848);
 
-    let carrier_claim = stwo_keccak::carrier::Claim {
-        n_perms: N_PERMUTATIONS,
-    };
-    assert_eq!(carrier_claim.log_size(), 13);
+    let carrier_claims = stwo_keccak::service::carrier_shard_claims(N_PERMUTATIONS);
+    assert_eq!(carrier_claims.len(), 3);
+    assert_eq!(
+        carrier_claims
+            .iter()
+            .map(|claim| (claim.perm_id_base, claim.n_perms, claim.log_size()))
+            .collect::<Vec<_>>(),
+        [(0, 163, 12), (163, 81, 11), (244, 17, 9)]
+    );
     assert_eq!(
         N_PERMUTATIONS * stwo_keccak::carrier::ROWS_PER_PERMUTATION,
         6_525
@@ -713,8 +721,11 @@ fn canonical_n261_carrier_geometry_is_pinned() {
     assert_eq!(stwo_keccak::round_gkr::LOG_SLOTS, 10);
     assert_eq!(stwo_keccak::round_gkr::N_TIEBACK_COLUMNS, 8);
     assert_eq!(
-        stwo_keccak::round_gkr::LOG_SLOTS + carrier_claim.log_size(),
-        23
+        carrier_claims
+            .iter()
+            .map(|claim| stwo_keccak::round_gkr::LOG_SLOTS + claim.log_size())
+            .collect::<Vec<_>>(),
+        [22, 21, 19]
     );
 
     let layout = stwo_keccak::service::debug_layout(shapes);
@@ -723,8 +734,12 @@ fn canonical_n261_carrier_geometry_is_pinned() {
             .map(|&log_size| 1usize << log_size)
             .sum::<usize>()
     };
-    let tieback_cells = stwo_keccak::round_gkr::N_TIEBACK_COLUMNS << carrier_claim.log_size();
-    let carrier_cells = stwo_keccak::carrier::N_COLUMNS << carrier_claim.log_size();
+    let carrier_rows = carrier_claims
+        .iter()
+        .map(|claim| 1usize << claim.log_size())
+        .sum::<usize>();
+    let tieback_cells = stwo_keccak::round_gkr::N_TIEBACK_COLUMNS * carrier_rows;
+    let carrier_cells = stwo_keccak::carrier::N_COLUMNS * carrier_rows;
     assert_eq!(
         carrier_cells + tieback_cells,
         EXPECTED_CARRIER_AND_TIEBACK_CELLS
@@ -750,23 +765,100 @@ fn canonical_n261_carrier_geometry_is_pinned() {
 #[test]
 fn carrier_witness_generator_supports_n261() {
     const N_PERMUTATIONS: usize = 261;
-    const EXPECTED_LOG_SIZE: u32 = 13;
+    const EXPECTED_SHARDS: [(usize, usize, u32); 3] = [(0, 163, 12), (163, 81, 11), (244, 17, 9)];
 
     let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; N_PERMUTATIONS];
     for (permutation, input) in inputs.iter_mut().enumerate() {
         input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
     }
     let witness = stwo_keccak::service::build_perm_witness(&inputs);
-    assert_eq!(witness.carrier_claim.n_perms, N_PERMUTATIONS);
-    assert_eq!(witness.carrier_claim.log_size(), EXPECTED_LOG_SIZE);
-    assert_eq!(witness.carrier_trace.len(), stwo_keccak::carrier::N_COLUMNS);
-    assert!(witness
-        .carrier_trace
-        .iter()
-        .all(|column| column.domain.log_size() == EXPECTED_LOG_SIZE));
-    let data = witness.carrier_data.expect("carrier GKR source");
-    assert_eq!(data.log_size, EXPECTED_LOG_SIZE);
-    assert_eq!(data.n_perms, N_PERMUTATIONS);
+    assert_eq!(witness.shards.len(), EXPECTED_SHARDS.len());
+    for (shard, (perm_id_base, n_perms, log_size)) in
+        witness.shards.into_iter().zip(EXPECTED_SHARDS)
+    {
+        assert_eq!(shard.carrier_claim.perm_id_base, perm_id_base);
+        assert_eq!(shard.carrier_claim.n_perms, n_perms);
+        assert_eq!(shard.carrier_claim.log_size(), log_size);
+        assert_eq!(shard.carrier_trace.len(), stwo_keccak::carrier::N_COLUMNS);
+        assert!(shard
+            .carrier_trace
+            .iter()
+            .all(|column| column.domain.log_size() == log_size));
+        let data = shard.carrier_data.expect("carrier GKR source");
+        assert_eq!(data.log_size, log_size);
+        assert_eq!(data.n_perms, n_perms);
+        assert_eq!(data.perm_id_base, perm_id_base);
+    }
+}
+
+#[test]
+fn carrier_shard_planner_boundaries_are_pinned() {
+    let cases: &[(usize, &[(usize, usize, u32)])] = &[
+        (1, &[(0, 1, 5)]),
+        (163, &[(0, 163, 12)]),
+        (164, &[(0, 163, 12), (163, 1, 5)]),
+        (244, &[(0, 163, 12), (163, 81, 11)]),
+        (245, &[(0, 163, 12), (163, 81, 11), (244, 1, 5)]),
+        (252, &[(0, 163, 12), (163, 81, 11), (244, 8, 8)]),
+        (261, &[(0, 163, 12), (163, 81, 11), (244, 17, 9)]),
+    ];
+
+    for &(n_perms, expected) in cases {
+        let actual = stwo_keccak::service::carrier_shard_claims(n_perms)
+            .into_iter()
+            .map(|claim| (claim.perm_id_base, claim.n_perms, claim.log_size()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual, expected,
+            "unexpected plan for {n_perms} permutations"
+        );
+    }
+}
+
+#[test]
+fn nonzero_carrier_shard_base_is_constrained() {
+    const PERMUTATION_COLUMN: usize = 3;
+    const PERM_ID_BASE: usize = 163;
+    const N_PERMUTATIONS: usize = 2;
+
+    let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; N_PERMUTATIONS];
+    for (permutation, input) in inputs.iter_mut().enumerate() {
+        input[N_BYTES_IN_STATE] = PackedM31::from(M31::from((PERM_ID_BASE + permutation) as u32));
+    }
+    let boundaries = keccak::generate_boundary_witness(&inputs);
+    let mut witness = stwo_keccak::carrier::generate(&boundaries, PERM_ID_BASE);
+    let claim = witness.claim;
+    let assert_trace = |trace: &[ColEval]| {
+        let trace = TreeVec::new(vec![
+            Vec::new(),
+            trace.iter().map(|column| column.to_cpu().values).collect(),
+            Vec::new(),
+        ]);
+        let trace = trace.as_cols_ref();
+        let eval = stwo_keccak::carrier::Eval { claim };
+        assert_constraints_on_trace(
+            &trace,
+            eval.log_size(),
+            |row| {
+                eval.evaluate(row);
+            },
+            SecureField::zero(),
+        );
+    };
+
+    assert_trace(&witness.trace);
+    set_carrier_coset_cell(
+        &mut witness.trace[PERMUTATION_COLUMN],
+        0,
+        M31::from((PERM_ID_BASE - 1) as u32),
+    );
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_trace(&witness.trace);
+        }))
+        .is_err(),
+        "the first row must be pinned to the shard's public permutation base"
+    );
 }
 
 #[test]
@@ -1273,7 +1365,7 @@ fn tampered_expand_a_round_base_cell_rejects() {
         None,
         Some(&|perm| {
             use stwo::prover::backend::Column;
-            let col = &mut perm.carrier_trace[20];
+            let col = &mut perm.shards[0].carrier_trace[20];
             let value = col.values.at(0);
             col.values.set(0, value + M31::one());
         }),
@@ -1289,7 +1381,7 @@ fn cross_permutation_carrier_state_swap_rejects() {
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
         let first = N_ROUNDS;
         let second = stwo_keccak::carrier::ROWS_PER_PERMUTATION + N_ROUNDS;
-        let trace = perm
+        let trace = perm.shards[0]
             .carrier_data
             .as_mut()
             .expect("carrier GKR data")
@@ -1308,9 +1400,9 @@ fn cross_permutation_carrier_state_swap_rejects() {
 fn reordered_carrier_positions_reject() {
     let msg = vec![0x40u8; 300];
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        set_carrier_coset_cell(&mut perm.carrier_trace[4], 1, M31::from(2u32));
-        set_carrier_coset_cell(&mut perm.carrier_trace[4], 2, M31::from(1u32));
-        let trace = perm
+        set_carrier_coset_cell(&mut perm.shards[0].carrier_trace[4], 1, M31::from(2u32));
+        set_carrier_coset_cell(&mut perm.shards[0].carrier_trace[4], 2, M31::from(1u32));
+        let trace = perm.shards[0]
             .carrier_data
             .as_mut()
             .expect("carrier GKR data")
@@ -1330,7 +1422,7 @@ fn tampered_carrier_endpoint_source_rejects() {
         vec![1],
         None,
         Some(&|perm| {
-            let trace = perm
+            let trace = perm.shards[0]
                 .carrier_data
                 .as_mut()
                 .expect("carrier GKR data")
@@ -1369,7 +1461,7 @@ fn tampered_carrier_base_cell_rejects() {
         None,
         Some(&|perm| {
             use stwo::prover::backend::Column;
-            let col = &mut perm.carrier_trace[20];
+            let col = &mut perm.shards[0].carrier_trace[20];
             let value = col.values.at(0);
             col.values.set(0, value + M31::one());
         }),
@@ -1385,8 +1477,9 @@ fn missing_carrier_end_marker_rejects() {
 
     let msg = vec![0x45u8; 300];
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        let end_row = perm.carrier_claim.n_perms * stwo_keccak::carrier::ROWS_PER_PERMUTATION;
-        set_carrier_coset_cell(&mut perm.carrier_trace[END_COLUMN], end_row, M31::zero());
+        let shard = &mut perm.shards[0];
+        let end_row = shard.carrier_claim.n_perms * stwo_keccak::carrier::ROWS_PER_PERMUTATION;
+        set_carrier_coset_cell(&mut shard.carrier_trace[END_COLUMN], end_row, M31::zero());
     }));
 }
 
@@ -1397,8 +1490,12 @@ fn missing_carrier_header_role_rejects() {
 
     let msg = vec![0x46u8; 300];
     assert!(perm_rejected(vec![msg], vec![1], &|perm| {
-        set_carrier_coset_cell(&mut perm.carrier_trace[HEADER_COLUMN], 0, M31::zero());
-        let trace = perm
+        set_carrier_coset_cell(
+            &mut perm.shards[0].carrier_trace[HEADER_COLUMN],
+            0,
+            M31::zero(),
+        );
+        let trace = perm.shards[0]
             .carrier_data
             .as_mut()
             .expect("carrier GKR data")
@@ -1417,7 +1514,7 @@ fn row_swapped_gkr_source_column_rejects() {
         vec![1],
         None,
         Some(&|perm| {
-            let trace = perm
+            let trace = perm.shards[0]
                 .carrier_data
                 .as_mut()
                 .expect("carrier GKR data")
@@ -1444,7 +1541,7 @@ fn cyclically_rotated_gkr_source_rejects() {
         vec![1],
         None,
         Some(&|perm| {
-            let trace = perm
+            let trace = perm.shards[0]
                 .carrier_data
                 .as_mut()
                 .expect("carrier GKR data")

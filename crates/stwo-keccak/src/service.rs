@@ -5,7 +5,7 @@
 //!
 //! 1. the job-list sponge ([`crate::sponge_v`]) for every SHAKE-128/256
 //!    sponge job of every hosted instance, one row per permutation;
-//! 2. the 25-row Keccak carrier and its fixed schedule table;
+//! 2. the sharded 25-row Keccak carriers and their fixed schedule table;
 //! 3. the nine spread lookup tables ([`crate::tables_air`]);
 //! 4. the [`KeccakRelations`] draw, published to consumer modules through a
 //!    [`SharedKeccakRelations`] handle (the `SharedFieldRelation` mechanism).
@@ -13,7 +13,7 @@
 //! ## Fixed component commit order (positional across every method)
 //!
 //! ```text
-//! 1. sponge_v   2. carrier   3. schedule table   4. tables ×9
+//! 1. sponge_v   2. carriers   3. schedule table   4. tables ×9   5. tie-backs
 //! ```
 //!
 //! Consumers (stwo-mldsa bridges/prefix/sinks/decomp/sib) emit HashIo tuples
@@ -62,33 +62,109 @@ pub fn service_claimed_sums_len() -> usize {
 }
 
 fn round_log_size(n_perms_total: usize) -> u32 {
-    ((n_perms_total * carrier::ROWS_PER_PERMUTATION) as u32)
-        .next_power_of_two()
-        .ilog2()
-        .max(stwo::prover::backend::simd::m31::LOG_N_LANES)
+    carrier_shard_claims(n_perms_total)
+        .iter()
+        .map(carrier::Claim::log_size)
+        .max()
+        .expect("Keccak service needs one carrier shard")
+}
+
+/// Split complete permutations only when doing so reduces padded carrier rows.
+#[doc(hidden)]
+pub fn carrier_shard_claims(n_perms_total: usize) -> Vec<carrier::Claim> {
+    assert!(n_perms_total > 0, "Keccak service needs one permutation");
+    let single = carrier::Claim {
+        n_perms: n_perms_total,
+        perm_id_base: 0,
+    };
+    let single_rows = 1usize << single.log_size();
+    let mut remaining = n_perms_total;
+    let mut perm_id_base = 0;
+    let mut claims = Vec::with_capacity(3);
+
+    for log_size in [
+        single.log_size().saturating_sub(1),
+        single.log_size().saturating_sub(2),
+    ] {
+        let capacity = ((1usize << log_size) - 1) / carrier::ROWS_PER_PERMUTATION;
+        if capacity == 0 || remaining <= capacity {
+            break;
+        }
+        claims.push(carrier::Claim {
+            n_perms: capacity,
+            perm_id_base,
+        });
+        remaining -= capacity;
+        perm_id_base += capacity;
+    }
+    claims.push(carrier::Claim {
+        n_perms: remaining,
+        perm_id_base,
+    });
+
+    let sharded_rows = claims
+        .iter()
+        .map(|claim| 1usize << claim.log_size())
+        .sum::<usize>();
+    if sharded_rows < single_rows {
+        claims
+    } else {
+        vec![single]
+    }
 }
 
 pub type TraceCol = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
 
 /// The carrier witness and its round-derived table multiplicities.
-pub struct PermWitness {
+pub struct CarrierShardWitness {
     pub carrier_claim: carrier::Claim,
     pub carrier_trace: Vec<TraceCol>,
     pub carrier_data: Option<carrier::InteractionData>,
+}
+
+pub struct PermWitness {
+    pub shards: Vec<CarrierShardWitness>,
     pub table_mult: TableMultiplicities,
 }
 
 /// Build the carrier trace for all permutation requests.
 pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> PermWitness {
     let boundaries = keccak::generate_boundary_witness(perm_inputs);
-    let witness = carrier::generate(&boundaries);
-    let table_mult = TableMultiplicities::from_carrier_round(&witness.round, boundaries.n_perms);
+    let claims = carrier_shard_claims(boundaries.n_perms);
+    let mut rows = boundaries.rows.into_iter();
+    let mut table_mult: Option<TableMultiplicities> = None;
+    let shards = claims
+        .into_iter()
+        .map(|claim| {
+            let shard_rows = rows
+                .by_ref()
+                .take(claim.n_perms * carrier::ROWS_PER_PERMUTATION)
+                .collect();
+            let shard_boundaries = keccak::BoundaryWitness {
+                n_perms: claim.n_perms,
+                rows: shard_rows,
+            };
+            let witness = carrier::generate(&shard_boundaries, claim.perm_id_base);
+            let shard_mult = TableMultiplicities::from_carrier_round(&witness.round, claim.n_perms);
+            match &mut table_mult {
+                Some(total) => total.add(&shard_mult),
+                None => table_mult = Some(shard_mult),
+            }
+            CarrierShardWitness {
+                carrier_claim: witness.claim,
+                carrier_trace: witness.trace,
+                carrier_data: Some(witness.interaction),
+            }
+        })
+        .collect();
+    assert!(
+        rows.next().is_none(),
+        "carrier shard plan covers every permutation"
+    );
 
     PermWitness {
-        carrier_claim: witness.claim,
-        carrier_trace: witness.trace,
-        carrier_data: Some(witness.interaction),
-        table_mult,
+        shards,
+        table_mult: table_mult.expect("carrier shard plan is nonempty"),
     }
 }
 
@@ -134,33 +210,44 @@ enum TieBack {
 
 struct Built {
     sponge: sponge_v::Component,
-    carrier: carrier::Component,
+    carriers: Vec<carrier::Component>,
     schedule: carrier::ScheduleTableComponent,
     tables: Vec<tables_air::Component>,
-    tie_back: TieBack,
+    tie_backs: Vec<TieBack>,
 }
 
 impl Built {
     fn ordered(&self) -> Vec<&dyn Component> {
-        let mut out: Vec<&dyn Component> = vec![&self.sponge, &self.carrier, &self.schedule];
+        let mut out: Vec<&dyn Component> = vec![&self.sponge];
+        out.extend(self.carriers.iter().map(|c| c as &dyn Component));
+        out.push(&self.schedule);
         out.extend(self.tables.iter().map(|c| c as &dyn Component));
-        out.push(match &self.tie_back {
+        out.extend(self.tie_backs.iter().map(|tie_back| match tie_back {
             TieBack::Prover(c) => c.as_ref() as &dyn Component,
             TieBack::Verifier(c) => c.as_ref() as &dyn Component,
-        });
+        }));
         out
     }
     fn ordered_prover(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        let mut out: Vec<&dyn ComponentProver<SimdBackend>> =
-            vec![&self.sponge, &self.carrier, &self.schedule];
+        let mut out: Vec<&dyn ComponentProver<SimdBackend>> = vec![&self.sponge];
+        out.extend(
+            self.carriers
+                .iter()
+                .map(|c| c as &dyn ComponentProver<SimdBackend>),
+        );
+        out.push(&self.schedule);
         out.extend(
             self.tables
                 .iter()
                 .map(|c| c as &dyn ComponentProver<SimdBackend>),
         );
-        match &self.tie_back {
-            TieBack::Prover(c) => out.push(c.as_ref() as &dyn ComponentProver<SimdBackend>),
-            TieBack::Verifier(_) => unreachable!("prover components on a verifier-built service"),
+        for tie_back in &self.tie_backs {
+            match tie_back {
+                TieBack::Prover(c) => out.push(c.as_ref() as &dyn ComponentProver<SimdBackend>),
+                TieBack::Verifier(_) => {
+                    unreachable!("prover components on a verifier-built service")
+                }
+            }
         }
         out
     }
@@ -193,10 +280,11 @@ fn gen_preprocessed(jobs: &JobList) -> Vec<air_core::PreprocessedColumnEval> {
 fn layout_for(jobs: &JobList) -> TreeLayout {
     let ls = jobs.log_size();
     let n = jobs.n_perms_total();
-    let carrier_log_size = round_log_size(n);
 
     let mut trace = vec![ls; jobs.n_base_cols()];
-    trace.extend(vec![carrier_log_size; carrier::N_COLUMNS]);
+    for claim in carrier_shard_claims(n) {
+        trace.extend(vec![claim.log_size(); carrier::N_COLUMNS]);
+    }
     trace.extend(vec![
         carrier::SCHEDULE_TABLE_LOG_SIZE;
         carrier::N_SCHEDULE_TABLE_TRACE
@@ -237,15 +325,19 @@ fn build_base_components(
     jobs: &JobList,
     relations: &KeccakRelations,
     claims: &ServiceClaims,
-    tie_back: &RoundTieBack,
+    carrier_claimed_sums: &[SecureField],
+    tie_backs: &[RoundTieBack],
 ) -> (
     sponge_v::Component,
-    carrier::Component,
+    Vec<carrier::Component>,
     carrier::ScheduleTableComponent,
     Vec<tables_air::Component>,
-    RoundCoeffOracle,
+    Vec<RoundCoeffOracle>,
 ) {
     let n = jobs.n_perms_total();
+    let carrier_claims = carrier_shard_claims(n);
+    assert_eq!(carrier_claims.len(), carrier_claimed_sums.len());
+    assert_eq!(carrier_claims.len(), tie_backs.len());
     let sponge = FrameworkComponent::new(
         allocator,
         sponge_v::Eval {
@@ -254,13 +346,14 @@ fn build_base_components(
         },
         claims.sponge,
     );
-    let carrier = FrameworkComponent::new(
-        allocator,
-        carrier::Eval {
-            claim: carrier::Claim { n_perms: n },
-        },
-        claims.carrier,
-    );
+    let carriers = carrier_claims
+        .iter()
+        .copied()
+        .zip(carrier_claimed_sums)
+        .map(|(claim, &claimed_sum)| {
+            FrameworkComponent::new(allocator, carrier::Eval { claim }, claimed_sum)
+        })
+        .collect::<Vec<_>>();
     let schedule = FrameworkComponent::new(
         allocator,
         carrier::ScheduleTableEval {
@@ -284,15 +377,21 @@ fn build_base_components(
             )
         })
         .collect();
-    let oracle = RoundCoeffOracle {
-        locations: carrier.trace_locations().to_vec(),
-        relations: relations.clone(),
-        log_size: round_log_size(n),
-        delta: tie_back.delta,
-        eq_ws: tie_back.eq_ws.clone(),
-        n_perms: n,
-    };
-    (sponge, carrier, schedule, tables, oracle)
+    let oracles = carriers
+        .iter()
+        .zip(carrier_claims)
+        .zip(tie_backs)
+        .map(|((carrier, claim), tie_back)| RoundCoeffOracle {
+            locations: carrier.trace_locations().to_vec(),
+            relations: relations.clone(),
+            log_size: claim.log_size(),
+            delta: tie_back.delta,
+            eq_ws: tie_back.eq_ws.clone(),
+            n_perms: claim.n_perms,
+            perm_id_base: claim.perm_id_base,
+        })
+        .collect();
+    (sponge, carriers, schedule, tables, oracles)
 }
 
 fn write_selected(
@@ -337,13 +436,14 @@ pub struct KeccakServiceProver {
     built: Option<Built>,
     /// Round GKR state for each prover step:
     /// `write_interaction` creates `round_gkr`;
-    /// `prove_post_interaction` creates `gkr_blob`, `tie_back`, and `coeff_mle`;
+    /// `prove_post_interaction` creates the GKR blob, tie-backs, and coeff MLEs;
     /// `write_post_interaction` commits the tie-back trace;
-    /// `build_components` gives `coeff_mle` to the MleEval component.
+    /// `build_components` gives each coeff MLE to its MleEval component.
     round_gkr: Option<RoundGkrProver>,
-    tie_back: Option<RoundTieBack>,
+    carrier_claimed_sums: Vec<SecureField>,
+    tie_backs: Vec<RoundTieBack>,
     gkr_blob: Vec<u8>,
-    coeff_mle: Option<Mle<SimdBackend, SecureField>>,
+    coeff_mles: Vec<Mle<SimdBackend, SecureField>>,
 }
 
 impl KeccakServiceProver {
@@ -388,9 +488,10 @@ impl KeccakServiceProver {
             claims: ServiceClaims::default(),
             built: None,
             round_gkr: None,
-            tie_back: None,
+            carrier_claimed_sums: Vec::new(),
+            tie_backs: Vec::new(),
             gkr_blob: Vec::new(),
-            coeff_mle: None,
+            coeff_mles: Vec::new(),
         }
     }
 
@@ -436,10 +537,16 @@ impl Air for KeccakServiceProver {
         let relations = KeccakRelations::draw(channel);
         let data = self
             .perm
-            .carrier_data
-            .take()
-            .expect("carrier interaction data is available once");
-        self.round_gkr = Some(RoundGkrProver::new(&relations, data));
+            .shards
+            .iter_mut()
+            .map(|shard| {
+                shard
+                    .carrier_data
+                    .take()
+                    .expect("carrier interaction data is available once")
+            })
+            .collect();
+        self.round_gkr = Some(RoundGkrProver::new_batch(&relations, data));
         self.handle.set(relations.clone());
         self.relations = Some(relations);
     }
@@ -458,33 +565,50 @@ impl Air for KeccakServiceProver {
         Ok(gen_preprocessed(&self.jobs))
     }
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        vec![round_log_size(self.jobs.n_perms_total()); round_gkr::N_TIEBACK_COLUMNS]
+        carrier_shard_claims(self.jobs.n_perms_total())
+            .into_iter()
+            .flat_map(|claim| vec![claim.log_size(); round_gkr::N_TIEBACK_COLUMNS])
+            .collect()
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        let tie_back = self.tie_back.as_ref().expect("prove_post_interaction ran");
-        let (sponge, carrier, schedule, tables, oracle) =
-            build_base_components(allocator, &self.jobs, &rel, &self.claims, tie_back);
-        let mle = self.coeff_mle.take().expect("coeff column built");
+        assert!(!self.tie_backs.is_empty(), "prove_post_interaction ran");
+        let (sponge, carriers, schedule, tables, oracles) = build_base_components(
+            allocator,
+            &self.jobs,
+            &rel,
+            &self.claims,
+            &self.carrier_claimed_sums,
+            &self.tie_backs,
+        );
+        let coeff_mles = std::mem::take(&mut self.coeff_mles);
+        assert_eq!(oracles.len(), coeff_mles.len());
         // Twiddles must cover the quotient eval domain `log_size +
         // composition_log_split` (≤ +2 here from the batch-4 logup components);
         // +4 leaves headroom and the tree is process-cached.
         let twiddles = air_core::twiddles(round_log_size(self.jobs.n_perms_total()) + 4);
-        let tie_back_component = MleEvalProverComponent::generate(
-            allocator,
-            oracle,
-            &tie_back.r_row,
-            mle,
-            tie_back.mle_claim,
-            twiddles,
-            POST_INTERACTION_TREE,
-        );
+        let tie_backs = oracles
+            .into_iter()
+            .zip(&self.tie_backs)
+            .zip(coeff_mles)
+            .map(|((oracle, tie_back), mle)| {
+                TieBack::Prover(Box::new(MleEvalProverComponent::generate(
+                    allocator,
+                    oracle,
+                    &tie_back.r_row,
+                    mle,
+                    tie_back.mle_claim,
+                    twiddles,
+                    POST_INTERACTION_TREE,
+                )))
+            })
+            .collect();
         self.built = Some(Built {
             sponge,
-            carrier,
+            carriers,
             schedule,
             tables,
-            tie_back: TieBack::Prover(Box::new(tie_back_component)),
+            tie_backs,
         });
     }
     fn components(&self) -> Vec<&dyn Component> {
@@ -519,7 +643,9 @@ impl AirProver for KeccakServiceProver {
     }
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let mut evals = sponge_v::generate_base_trace(&self.run);
-        evals.extend(std::mem::take(&mut self.perm.carrier_trace));
+        for shard in &mut self.perm.shards {
+            evals.extend(std::mem::take(&mut shard.carrier_trace));
+        }
         evals.extend(tables_air::generate_trace(&self.perm.table_mult));
         tb.extend_evals(evals);
     }
@@ -536,6 +662,12 @@ impl AirProver for KeccakServiceProver {
             .as_ref()
             .expect("carrier GKR was built after relation draw")
             .claimed_sum();
+        self.carrier_claimed_sums = self
+            .round_gkr
+            .as_ref()
+            .expect("carrier GKR was built after relation draw")
+            .claimed_sums()
+            .to_vec();
         let (tables_ic, tables_tr) =
             tables_air::generate_interaction_trace(&rel, &self.perm.table_mult);
         evals.extend(tables_tr);
@@ -548,26 +680,27 @@ impl AirProver for KeccakServiceProver {
         };
     }
     fn prove_post_interaction(&mut self, channel: &mut air_core::Ch) {
-        let (blob, tie_back, coeff_mle) = self
+        let (blob, tie_backs, coeff_mles) = self
             .round_gkr
             .take()
             .expect("write_interaction ran")
-            .prove(channel);
+            .prove_batch(channel);
         self.gkr_blob = blob;
-        self.tie_back = Some(tie_back);
-        self.coeff_mle = Some(coeff_mle);
+        self.tie_backs = tie_backs;
+        self.coeff_mles = coeff_mles;
     }
     fn take_post_interaction_payload(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.gkr_blob)
     }
     fn write_post_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let tie_back = self.tie_back.as_ref().expect("prove_post_interaction ran");
-        let mle = self.coeff_mle.as_ref().expect("coeff column built");
-        tb.extend_evals(build_tieback_trace(
-            mle,
-            &tie_back.r_row,
-            tie_back.mle_claim,
-        ));
+        assert_eq!(self.tie_backs.len(), self.coeff_mles.len());
+        for (tie_back, mle) in self.tie_backs.iter().zip(&self.coeff_mles) {
+            tb.extend_evals(build_tieback_trace(
+                mle,
+                &tie_back.r_row,
+                tie_back.mle_claim,
+            ));
+        }
     }
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         self.built.as_ref().expect("built").ordered_prover()
@@ -587,7 +720,8 @@ pub struct KeccakServiceVerifier {
     /// The prover's opaque GKR payload (round LogUp offload), handed over by
     /// the orchestrator before `verify_post_interaction`. Empty ⇒ reject.
     gkr_blob: Vec<u8>,
-    tie_back: Option<RoundTieBack>,
+    carrier_claimed_sums: Vec<SecureField>,
+    tie_backs: Vec<RoundTieBack>,
 }
 
 impl KeccakServiceVerifier {
@@ -604,7 +738,8 @@ impl KeccakServiceVerifier {
             relations: None,
             built: None,
             gkr_blob: Vec::new(),
-            tie_back: None,
+            carrier_claimed_sums: Vec::new(),
+            tie_backs: Vec::new(),
         }
     }
 
@@ -637,7 +772,10 @@ impl Air for KeccakServiceVerifier {
         Ok(gen_preprocessed(&self.jobs))
     }
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        vec![round_log_size(self.jobs.n_perms_total()); round_gkr::N_TIEBACK_COLUMNS]
+        carrier_shard_claims(self.jobs.n_perms_total())
+            .into_iter()
+            .flat_map(|claim| vec![claim.log_size(); round_gkr::N_TIEBACK_COLUMNS])
+            .collect()
     }
     fn load_post_interaction_payload(&mut self, payload: &[u8]) {
         self.gkr_blob = payload.to_vec();
@@ -647,33 +785,50 @@ impl Air for KeccakServiceVerifier {
         channel: &mut air_core::Ch,
     ) -> Result<(), VerificationError> {
         // Fail-closed: a missing payload is an empty blob, which fails decode.
-        let tie_back = round_gkr::verify_round_gkr(
+        let log_sizes = carrier_shard_claims(self.jobs.n_perms_total())
+            .iter()
+            .map(carrier::Claim::log_size)
+            .collect::<Vec<_>>();
+        let (carrier_claimed_sums, tie_backs) = round_gkr::verify_round_gkr_batch(
             &self.gkr_blob,
             self.claims.carrier,
-            round_log_size(self.jobs.n_perms_total()),
+            &log_sizes,
             channel,
         )?;
-        self.tie_back = Some(tie_back);
+        self.carrier_claimed_sums = carrier_claimed_sums;
+        self.tie_backs = tie_backs;
         Ok(())
     }
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let rel = self.relations().clone();
-        let tie_back = self.tie_back.as_ref().expect("verify_post_interaction ran");
-        let (sponge, carrier, schedule, tables, oracle) =
-            build_base_components(allocator, &self.jobs, &rel, &self.claims, tie_back);
-        let tie_back_component = MleEvalVerifierComponent::new(
+        assert!(!self.tie_backs.is_empty(), "verify_post_interaction ran");
+        let (sponge, carriers, schedule, tables, oracles) = build_base_components(
             allocator,
-            oracle,
-            &tie_back.r_row,
-            tie_back.mle_claim,
-            POST_INTERACTION_TREE,
+            &self.jobs,
+            &rel,
+            &self.claims,
+            &self.carrier_claimed_sums,
+            &self.tie_backs,
         );
+        let tie_backs = oracles
+            .into_iter()
+            .zip(&self.tie_backs)
+            .map(|(oracle, tie_back)| {
+                TieBack::Verifier(Box::new(MleEvalVerifierComponent::new(
+                    allocator,
+                    oracle,
+                    &tie_back.r_row,
+                    tie_back.mle_claim,
+                    POST_INTERACTION_TREE,
+                )))
+            })
+            .collect();
         self.built = Some(Built {
             sponge,
-            carrier,
+            carriers,
             schedule,
             tables,
-            tie_back: TieBack::Verifier(Box::new(tie_back_component)),
+            tie_backs,
         });
     }
     fn components(&self) -> Vec<&dyn Component> {

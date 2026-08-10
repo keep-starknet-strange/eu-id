@@ -27,13 +27,14 @@ use stwo::prover::lookups::gkr_verifier::{GkrBatchProof, GkrMask};
 use stwo::prover::lookups::sumcheck::SumcheckProof;
 use stwo::prover::lookups::utils::UnivariatePoly;
 
-const TS13_DEMO_GKR_VARIABLE_COUNT: usize = 23;
+const TS13_DEMO_GKR_VARIABLE_COUNTS: [usize; 3] = [22, 21, 18];
+const TS13_DEMO_GKR_MAX_VARIABLE_COUNT: usize = TS13_DEMO_GKR_VARIABLE_COUNTS[0];
 const TS13_DEMO_GKR_MASK_COLUMN_COUNT: usize = 2;
 const TS13_DEMO_GKR_OUTPUT_CLAIM_COUNT: usize = 2;
 const TS13_DEMO_GKR_MAX_POLYNOMIAL_COEFFICIENTS: usize = 4;
 
 /// Maximum canonical GKR payload size accepted by the TS13 demo profile.
-pub const TS13_DEMO_GKR_MAX_PAYLOAD_BYTES: usize = 20_128;
+pub const TS13_DEMO_GKR_MAX_PAYLOAD_BYTES: usize = 21_368;
 
 /// Serializable form of the public [`GkrBatchProof`] data.
 #[derive(Serialize, Deserialize)]
@@ -64,7 +65,7 @@ pub fn is_ts13_demo_gkr_batch_proof_wire(bytes: &[u8]) -> bool {
         return false;
     };
 
-    wire.sumcheck_round_polys.len() == TS13_DEMO_GKR_VARIABLE_COUNT
+    wire.sumcheck_round_polys.len() == TS13_DEMO_GKR_MAX_VARIABLE_COUNT
         && wire
             .sumcheck_round_polys
             .iter()
@@ -75,18 +76,22 @@ pub fn is_ts13_demo_gkr_batch_proof_wire(bytes: &[u8]) -> bool {
                         coefficients.len() <= TS13_DEMO_GKR_MAX_POLYNOMIAL_COEFFICIENTS
                     })
             })
-        && matches!(
-            wire.layer_masks.as_slice(),
-            [layers]
-                if layers.len() == TS13_DEMO_GKR_VARIABLE_COUNT
+        && wire.layer_masks.len() == TS13_DEMO_GKR_VARIABLE_COUNTS.len()
+        && wire
+            .layer_masks
+            .iter()
+            .zip(TS13_DEMO_GKR_VARIABLE_COUNTS)
+            .all(|(layers, variable_count)| {
+                layers.len() == variable_count
                     && layers
                         .iter()
                         .all(|columns| columns.len() == TS13_DEMO_GKR_MASK_COLUMN_COUNT)
-        )
-        && matches!(
-            wire.output_claims.as_slice(),
-            [claims] if claims.len() == TS13_DEMO_GKR_OUTPUT_CLAIM_COUNT
-        )
+            })
+        && wire.output_claims.len() == TS13_DEMO_GKR_VARIABLE_COUNTS.len()
+        && wire
+            .output_claims
+            .iter()
+            .all(|claims| claims.len() == TS13_DEMO_GKR_OUTPUT_CLAIM_COUNT)
 }
 
 /// Serialize a [`GkrBatchProof`] to an opaque byte payload.
@@ -113,7 +118,11 @@ pub fn encode_gkr_batch_proof(proof: &GkrBatchProof) -> Vec<u8> {
 /// Reconstruct a [`GkrBatchProof`] from a payload produced by
 /// [`encode_gkr_batch_proof`]. Return an error if the payload is malformed.
 pub fn decode_gkr_batch_proof(bytes: &[u8]) -> Result<GkrBatchProof, bincode::Error> {
-    let wire: GkrProofWire = bincode::deserialize(bytes)?;
+    let wire: GkrProofWire = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(bytes.len() as u64)
+        .reject_trailing_bytes()
+        .deserialize(bytes)?;
     let sumcheck_proofs = wire
         .sumcheck_round_polys
         .into_iter()
@@ -142,18 +151,23 @@ mod tests {
     fn valid_ts13_demo_wire() -> GkrProofWire {
         let zero = QM31::zero();
         GkrProofWire {
-            sumcheck_round_polys: (0..TS13_DEMO_GKR_VARIABLE_COUNT)
+            sumcheck_round_polys: (0..TS13_DEMO_GKR_MAX_VARIABLE_COUNT)
                 .map(|round| {
                     (0..round)
                         .map(|_| vec![zero; TS13_DEMO_GKR_MAX_POLYNOMIAL_COEFFICIENTS])
                         .collect()
                 })
                 .collect(),
-            layer_masks: vec![vec![
-                vec![[zero; 2]; TS13_DEMO_GKR_MASK_COLUMN_COUNT];
-                TS13_DEMO_GKR_VARIABLE_COUNT
-            ]],
-            output_claims: vec![vec![zero; TS13_DEMO_GKR_OUTPUT_CLAIM_COUNT]],
+            layer_masks: TS13_DEMO_GKR_VARIABLE_COUNTS
+                .into_iter()
+                .map(|variable_count| {
+                    vec![vec![[zero; 2]; TS13_DEMO_GKR_MASK_COLUMN_COUNT]; variable_count]
+                })
+                .collect(),
+            output_claims: vec![
+                vec![zero; TS13_DEMO_GKR_OUTPUT_CLAIM_COUNT];
+                TS13_DEMO_GKR_VARIABLE_COUNTS.len()
+            ],
         }
     }
 
@@ -200,17 +214,25 @@ mod tests {
             &wrong_instance_count
         )));
 
-        let mut wrong_layer_count = valid_ts13_demo_wire();
-        wrong_layer_count.layer_masks[0].pop();
-        assert!(!is_ts13_demo_gkr_batch_proof_wire(&encode_wire(
-            &wrong_layer_count
-        )));
+        for instance in 0..TS13_DEMO_GKR_VARIABLE_COUNTS.len() {
+            let mut wrong_layer_count = valid_ts13_demo_wire();
+            wrong_layer_count.layer_masks[instance].pop();
+            assert!(!is_ts13_demo_gkr_batch_proof_wire(&encode_wire(
+                &wrong_layer_count
+            )));
 
-        let mut wrong_column_count = valid_ts13_demo_wire();
-        wrong_column_count.layer_masks[0][0].pop();
-        assert!(!is_ts13_demo_gkr_batch_proof_wire(&encode_wire(
-            &wrong_column_count
-        )));
+            let mut wrong_column_count = valid_ts13_demo_wire();
+            wrong_column_count.layer_masks[instance][0].pop();
+            assert!(!is_ts13_demo_gkr_batch_proof_wire(&encode_wire(
+                &wrong_column_count
+            )));
+        }
+
+        for (left, right) in [(0, 1), (1, 2)] {
+            let mut reordered = valid_ts13_demo_wire();
+            reordered.layer_masks.swap(left, right);
+            assert!(!is_ts13_demo_gkr_batch_proof_wire(&encode_wire(&reordered)));
+        }
     }
 
     #[test]
@@ -221,11 +243,13 @@ mod tests {
             &wrong_instance_count
         )));
 
-        let mut wrong_claim_count = valid_ts13_demo_wire();
-        wrong_claim_count.output_claims[0].pop();
-        assert!(!is_ts13_demo_gkr_batch_proof_wire(&encode_wire(
-            &wrong_claim_count
-        )));
+        for instance in 0..TS13_DEMO_GKR_VARIABLE_COUNTS.len() {
+            let mut wrong_claim_count = valid_ts13_demo_wire();
+            wrong_claim_count.output_claims[instance].pop();
+            assert!(!is_ts13_demo_gkr_batch_proof_wire(&encode_wire(
+                &wrong_claim_count
+            )));
+        }
     }
 
     #[test]
@@ -240,5 +264,12 @@ mod tests {
         trailing.push(0);
         assert!(trailing.len() <= TS13_DEMO_GKR_MAX_PAYLOAD_BYTES);
         assert!(!is_ts13_demo_gkr_batch_proof_wire(&trailing));
+
+        let mut canonical_then_trailing = encode_gkr_batch_proof(
+            &decode_gkr_batch_proof(&encode_wire(&valid_ts13_demo_wire()))
+                .expect("canonical wire decodes"),
+        );
+        canonical_then_trailing.push(0);
+        assert!(decode_gkr_batch_proof(&canonical_then_trailing).is_err());
     }
 }

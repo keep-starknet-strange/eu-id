@@ -145,8 +145,9 @@ pub fn generate_preprocessed_trace(
     evals
 }
 
-/// Per-table multiplicity vectors. The Dense table has two (xor3, andnot); every
-/// other table has one. Indexed as `TableKind::ALL`, flattened by relation.
+/// Per-table multiplicity vectors. Every table has one relation; the dense
+/// table includes both xor3 and retargeted and-not lookups in that relation.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableMultiplicities {
     /// `per_table[i]` is a vec of `n_relations` multiplicity vectors.
     pub per_table: Vec<Vec<Vec<u32>>>,
@@ -201,6 +202,19 @@ impl TableMultiplicities {
         }
 
         Self { per_table }
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        assert_eq!(self.per_table.len(), other.per_table.len());
+        for (tables, other_tables) in self.per_table.iter_mut().zip(&other.per_table) {
+            assert_eq!(tables.len(), other_tables.len());
+            for (values, other_values) in tables.iter_mut().zip(other_tables) {
+                assert_eq!(values.len(), other_values.len());
+                for (value, other_value) in values.iter_mut().zip(other_values) {
+                    *value += *other_value;
+                }
+            }
+        }
     }
 
     /// Fold in the sponge's lane-0 lookups: the multi-block absorb XOR3 (dense

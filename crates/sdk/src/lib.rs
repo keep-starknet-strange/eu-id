@@ -127,10 +127,9 @@ const SECONDS_PER_DAY: i64 = 86_400;
 /// Compat document envelope over the canonical identity envelope. V3 was the
 /// pre-canonicalization circuit; those proofs no longer verify anywhere.
 const TS13_ENVELOPE_FORMAT_V4: u16 = 4;
-/// The mobile transport rail is under 1 MiB; this leaves bounded headroom
-/// while rejecting oversized inputs before bincode can allocate from an
-/// attacker-controlled length.
-const MAX_TS13_DOCUMENT_PROOF_BYTES: usize = 1_572_864;
+/// Bound the wallet-compatible wrapper while leaving room for the fixed
+/// identity envelope, issuer key, and request binding.
+const MAX_TS13_DOCUMENT_PROOF_BYTES: usize = 2_097_152;
 
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ts13DisclosureKind {
@@ -624,6 +623,11 @@ pub fn ts13_prove_zk_document(
         identity_envelope,
     })
     .map_err(|error| ZkError::Prove(format!("failed to serialize TS13 proof envelope: {error}")))?;
+    if proof.len() > MAX_TS13_DOCUMENT_PROOF_BYTES {
+        return Err(ZkError::Prove(
+            "TS13 proof envelope exceeds size limit".to_string(),
+        ));
+    }
     Ok(Ts13ZkDocument {
         doc_type: request.doctype,
         zk_system_id: request.zk_system_id,
@@ -1082,16 +1086,39 @@ mod tests {
     #[test]
     fn build_zk_document_binds_the_request() {
         let request = supported_request();
-        let document = ts13_build_zk_document(
-            request.clone(),
-            canonical_ts13_disclosures(),
-            vec![1, 2, 3],
-        )
-        .expect("build");
+        let document =
+            ts13_build_zk_document(request.clone(), canonical_ts13_disclosures(), vec![1, 2, 3])
+                .expect("build");
         assert_eq!(document.doc_type, request.doctype);
         assert_eq!(
             document.request_binding_hash,
             ts13_request_binding_hash(&request)
         );
+    }
+
+    #[test]
+    fn proof_envelope_size_limit_is_strict() {
+        let request = supported_request();
+        let request_binding_hash = ts13_request_binding_hash(&request);
+        let encoded = bincode::serialize(&Ts13ProofEnvelope {
+            envelope_format: TS13_ENVELOPE_FORMAT_V4,
+            request_binding_hash: request_binding_hash.clone(),
+            issuer_public_key: vec![7; ML_DSA_65_PUBLIC_KEY_BYTES],
+            identity_envelope: vec![9; 32],
+        })
+        .expect("small proof envelope serializes");
+        let decoded = decode_ts13_proof_envelope(&encoded).expect("small proof envelope decodes");
+        assert_eq!(decoded.request_binding_hash, request_binding_hash);
+
+        let oversized = vec![0; MAX_TS13_DOCUMENT_PROOF_BYTES + 1];
+        assert!(matches!(
+            decode_ts13_proof_envelope(&oversized),
+            Err(ZkError::Verify(_))
+        ));
+
+        let document =
+            ts13_build_zk_document(request.clone(), canonical_ts13_disclosures(), oversized)
+                .expect("document builder leaves proof verification to the verifier");
+        assert!(!ts13_document_matches_request(&request, &document).expect("bounded match"));
     }
 }

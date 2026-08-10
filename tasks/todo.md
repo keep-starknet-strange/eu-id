@@ -1,3 +1,22 @@
+# Keccak carrier sharding
+
+Branch: `feat/quantum-safe`
+
+- [x] Freeze the current 252-permutation geometry, artifact, and complete-proof baseline.
+- [x] Split the carrier into 163/81/8 complete-permutation shards without changing global permutation IDs.
+- [x] Batch the three mixed-size RoundGKR instances behind one aggregate carrier claim.
+- [x] Bind every shard through its own outer-STARK MLE tieback.
+- [x] Generalize the fixed GKR wire validator to the exact three-instance product shape.
+- [x] Add positive and adversarial tests for shard ranges, boundaries, claims, and payload shape.
+- [ ] Regenerate and verify the source-bound artifact and the in-repository Android fixture.
+- [ ] Run release formatting, Clippy, focused tests, full proof verification, and artifact drift checks.
+- [ ] Compare complete `proveIdentity` and `verifyIdentity` latency, peak RSS, and envelope size.
+- [ ] Review the final diff and record the acceptance result below.
+
+## Keccak carrier sharding review
+
+Pending.
+
 # Android wallet FFI parity
 
 Branch: `feat/quantum-safe`
