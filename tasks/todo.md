@@ -1,3 +1,42 @@
+# Android wallet FFI parity
+
+Branch: `feat/quantum-safe`
+
+Contract source: `~/eudi-zk-android-wallet` at `origin/kss/stwo-zk`.
+
+- [x] Inventory every Kotlin import, generated type shape, function signature,
+  package name, library name, and Maven coordinate used by the wallet.
+- [x] Generate the current UniFFI Kotlin surface and diff it against that
+  contract, including host-JVM test packaging.
+- [x] Implement the smallest complete SDK and packaging changes needed for
+  source and runtime compatibility.
+- [x] Add focused contract tests that compile or assert every wallet-used FFI
+  symbol and type shape.
+- [x] Pass Rust formatting, focused SDK tests, binding generation, Android AAR
+  assembly/publication, wallet `zkp-logic` compilation, and app assembly.
+- [x] Review the final diff for unused compatibility code, error-boundary
+  regressions, and exact API parity; record evidence below.
+
+## Android wallet FFI parity review
+
+- Audited `origin/kss/stwo-zk@97d05563`; the original generated surface was
+  missing only the three demo revocation exports and their returned record.
+- Added canonical MSO-derived revocation witness generation and verified the
+  ML-DSA-65 signature, bounds, public key, epoch, and malformed-document error.
+- Generated Kotlin now exposes the exact wallet package, tagged records,
+  functions, parameter names, errors, native component, and Maven coordinates.
+- Android contract tests, the host-native JVM smoke test, the mobile benchmark
+  APK pair, `:zkp-logic:compileDevDebugKotlin`, and `:app:assembleDevDebug` pass.
+  The assembled wallet APK contains both SDK ABIs.
+- Published `com.kss:eu-id-zk-sdk:0.1.0` and
+  `com.kss:eu-id-zk-sdk-jvm:0.1.0` to `mavenLocal()`; the host JAR uses the
+  wallet's Kotlin 2.2.10 metadata and includes the Darwin arm64 native library.
+- The wallet branch's checked-in `StwoZkSystemRoundTripTest` still asserts the
+  obsolete flat statement model. An isolated corrected copy passes the entire
+  `:zkp-logic:testDevDebugUnitTest` task; no wallet source was modified.
+- SDK-only Clippy passes with warnings denied. Whole dependency Clippy remains
+  blocked by a pre-existing rustdoc list-indentation lint in `stwo-keccak`.
+
 # TS13 public-input-unlinkable identity demo
 
 Branch: `codex/ts13-unlinkable-v1`

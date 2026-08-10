@@ -3,7 +3,7 @@
 .DEFAULT_GOAL := help
 RAYON_NUM_THREADS ?= 12
 .PHONY: help dev build test check check-quantum-only-deps fmt perf \
-        publish-android-local clean
+        publish-android-local publish-jvm-local publish-local clean
 
 help:
 	@echo "eu-id — workspace make targets"
@@ -18,6 +18,8 @@ help:
 	@echo "  make clean         remove build artifacts"
 	@echo ""
 	@echo "  make publish-android-local   build + publish the SDK AAR to ~/.m2 (mavenLocal)"
+	@echo "  make publish-jvm-local       build + publish the host JVM SDK JAR to ~/.m2"
+	@echo "  make publish-local           publish both Android and host JVM SDK packages"
 
 dev:
 	@if command -v cargo-watch >/dev/null 2>&1; then \
@@ -49,6 +51,13 @@ perf:
 # Build the Android AAR and publish it to the local Maven repository.
 publish-android-local:
 	cd crates/sdk/android && ./gradlew publishToMavenLocal
+
+# Reuse the Android Gradle wrapper; the JVM project packages only this host's
+# native library for wallet unit tests.
+publish-jvm-local:
+	cd crates/sdk/jvm && ../android/gradlew publishToMavenLocal
+
+publish-local: publish-android-local publish-jvm-local
 
 clean:
 	cargo clean

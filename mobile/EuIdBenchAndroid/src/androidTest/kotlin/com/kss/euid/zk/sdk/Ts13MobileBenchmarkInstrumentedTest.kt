@@ -63,6 +63,8 @@ class Ts13MobileBenchmarkInstrumentedTest {
             revocationIdHi = witnessFixture.getString("revocationIdHi").toULong(),
             revocationSignature = witnessFixture.getString("revocationSignature").decodeHex(),
         )
+        val publicStatement = ZkPublicStatement.Ts13DemoV1(statement)
+        val privateWitness = ZkMdocWitness.Ts13DemoV1(witness)
 
         val timingFile = File(
             InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
@@ -75,7 +77,7 @@ class Ts13MobileBenchmarkInstrumentedTest {
         val proof = try {
             Os.setenv(PROVE_TIMING_ENV, "1", true)
             Os.setenv(PROVE_TIMING_FILE_ENV, timingFile.absolutePath, true)
-            proveIdentity(statement, witness)
+            proveIdentity(publicStatement, privateWitness)
         } finally {
             runCleanup(
                 { restoreEnvironment(PROVE_TIMING_FILE_ENV, previousProveTimingFile) },
@@ -128,7 +130,7 @@ class Ts13MobileBenchmarkInstrumentedTest {
         assertEquals(ENVELOPE_HEADER_BYTES.toLong() + bodyCapacity, proof.size.toLong())
 
         val verifyStarted = SystemClock.elapsedRealtimeNanos()
-        verifyIdentity(statement, proof)
+        assertTrue(verifyIdentity(publicStatement, proof).ok)
         val verifyMs = elapsedMilliseconds(verifyStarted)
         val vmHwmKib = vmHwmKib()
         assertTrue(vmHwmKib > 0)

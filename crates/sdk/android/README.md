@@ -4,16 +4,34 @@ This Gradle project packages the Rust SDK as an Android AAR. The AAR contains
 the UniFFI Kotlin bindings and the native library for each supported ABI. The
 published Maven package declares JNA as a transitive dependency.
 
-The public Kotlin API contains these functions:
+The wallet-facing proof API uses tagged statements and witnesses:
 
-- `proveIdentity(IdentityStatement, IdentityWitness)`
-- `verifyIdentity(IdentityStatement, ByteArray)`
+- `proveIdentity(ZkPublicStatement, ZkMdocWitness): ByteArray`
+- `verifyIdentity(ZkPublicStatement, ByteArray): ZkVerifyResult`
+
+For the TS13 proof, wrap the identity records in their `Ts13DemoV1`
+variants and check the verification result:
+
+```kotlin
+val publicStatement = ZkPublicStatement.Ts13DemoV1(identityStatement)
+val privateWitness = ZkMdocWitness.Ts13DemoV1(identityWitness)
+val proof = proveIdentity(publicStatement, privateWitness)
+check(verifyIdentity(publicStatement, proof).ok)
+```
+
+The demo wallet flow also uses `demoIssuerPublicKey`,
+`demoRevocationPublicKey`, `demoRevocationEpoch`, `demoRevocationWitness`,
+`demoMintMlDsaSignedPidMdoc`, `demoDeviceAuthSigStructure`, and
+`demoBuildMlDsaWitness`.
 
 The SDK uses six proof workers. It sets the proof-thread stack to 2 MiB and
 each worker stack to 16 MiB. The public API has no runtime controls.
 
 The Maven coordinate is `com.kss:eu-id-zk-sdk:0.1.0`. The Kotlin
 package is `com.kss.euid.zk.sdk`.
+
+From the repository root, `make publish-local` publishes that AAR and the
+matching host-test JAR, `com.kss:eu-id-zk-sdk-jvm:0.1.0`, to `mavenLocal()`.
 
 ## Prerequisites
 

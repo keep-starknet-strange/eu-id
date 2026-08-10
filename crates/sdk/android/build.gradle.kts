@@ -115,6 +115,7 @@ tasks.named("preBuild") { dependsOn(generateUniffiBindings) }
 dependencies {
     // Publish JNA as an API dependency.
     api("net.java.dev.jna:jna:5.19.1@aar")
+    testImplementation("junit:junit:4.13.2")
 }
 
 publishing {

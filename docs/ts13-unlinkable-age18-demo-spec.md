@@ -1084,13 +1084,28 @@ A human-selected tuple is not a valid circuit hash.
 
 ### 10.1 API
 
-The exported prover is:
+The exported prover and verifier use tagged theorem inputs:
 
 ```rust
 pub fn prove_identity(
-    statement: IdentityStatement,
-    witness: IdentityWitness,
-) -> Result<Vec<u8>, IdentityError>;
+    statement: ZkPublicStatement,
+    witness: ZkMdocWitness,
+) -> Result<Vec<u8>, ZkError>;
+
+pub fn verify_identity(
+    statement: ZkPublicStatement,
+    proof: Vec<u8>,
+) -> Result<ZkVerifyResult, ZkError>;
+
+pub enum ZkPublicStatement {
+    ProductV1(ProductPublicStatementV1),
+    Ts13DemoV1(IdentityStatement),
+}
+
+pub enum ZkMdocWitness {
+    ProductV1(ProductMdocWitnessV1),
+    Ts13DemoV1(IdentityWitness),
+}
 
 pub struct IdentityWitness {
     pub document: Vec<u8>,
@@ -1104,31 +1119,62 @@ UniFFI exports:
 
 ```kotlin
 fun proveIdentity(
-    statement: IdentityStatement,
-    witness: IdentityWitness,
+    statement: ZkPublicStatement,
+    witness: ZkMdocWitness,
 ): ByteArray
 ```
 
-The statement contains the public values from Section 5.3.
-The statement contains the issuer and revocation public keys.
+The TS13 caller wraps `IdentityStatement` and `IdentityWitness` in the
+corresponding tagged variants:
+
+```kotlin
+val publicStatement = ZkPublicStatement.Ts13DemoV1(identityStatement)
+val privateWitness = ZkMdocWitness.Ts13DemoV1(identityWitness)
+val proof = proveIdentity(publicStatement, privateWitness)
+```
+
+The inner identity statement contains the public values from Section 5.3.
+It contains the issuer and revocation public keys.
 The verifier controls both keys.
 
-`witness.document` contains the canonical private mdoc data.
-The witness contains the private revocation interval and signature.
+`identityWitness.document` contains the canonical private mdoc data.
+The inner witness contains the private revocation interval and signature.
 It MUST NOT contain a trust key or trust-key hash.
 
 UniFFI also exports:
 
 ```kotlin
 fun verifyIdentity(
-    statement: IdentityStatement,
+    statement: ZkPublicStatement,
     proof: ByteArray,
-): Unit
+): ZkVerifyResult
 ```
 
-The function returns only after the complete identity theorem verifies.
-Malformed input returns a typed `IdentityError`.
-UniFFI exports only `proveIdentity` and `verifyIdentity`.
+The function returns `ZkVerifyResult(ok = true)` only after the complete
+identity theorem verifies. Malformed input throws a typed `ZkException`.
+
+The demo wallet issuance and revocation flow additionally uses:
+
+```kotlin
+fun demoIssuerPublicKey(): ByteArray
+fun demoRevocationPublicKey(): ByteArray
+fun demoRevocationEpoch(): UInt
+fun demoRevocationWitness(document: ByteArray): DemoRevocationWitness
+fun demoMintMlDsaSignedPidMdoc(
+    p256IssuerSigned: ByteArray,
+    devicePublicKey: ByteArray,
+): ByteArray
+fun demoDeviceAuthSigStructure(
+    sessionTranscript: ByteArray,
+    doctype: String,
+): ByteArray
+fun demoBuildMlDsaWitness(
+    mlDsaIssuerSigned: ByteArray,
+    sessionTranscript: ByteArray,
+    doctype: String,
+    deviceSignature: ByteArray,
+): ByteArray
+```
 
 ### 10.2 Identity-proof envelope
 
