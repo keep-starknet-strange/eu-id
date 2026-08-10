@@ -61,12 +61,21 @@ pub fn service_claimed_sums_len() -> usize {
     3 + TableKind::ALL.len()
 }
 
-fn round_log_size(n_perms_total: usize) -> u32 {
+/// Limit proof-size growth while recovering the two largest padding gaps.
+const MAX_CARRIER_SHARDS: usize = 3;
+
+fn max_carrier_log_size(n_perms_total: usize) -> u32 {
     carrier_shard_claims(n_perms_total)
         .iter()
         .map(carrier::Claim::log_size)
         .max()
         .expect("Keccak service needs one carrier shard")
+}
+
+/// Maximum complete permutations that fit while reserving one row for the
+/// mandatory end marker immediately after the final active row.
+fn carrier_capacity(log_size: u32) -> usize {
+    ((1usize << log_size) - 1) / carrier::ROWS_PER_PERMUTATION
 }
 
 /// Split complete permutations only when doing so reduces padded carrier rows.
@@ -80,13 +89,11 @@ pub fn carrier_shard_claims(n_perms_total: usize) -> Vec<carrier::Claim> {
     let single_rows = 1usize << single.log_size();
     let mut remaining = n_perms_total;
     let mut perm_id_base = 0;
-    let mut claims = Vec::with_capacity(3);
+    let mut claims = Vec::with_capacity(MAX_CARRIER_SHARDS);
 
-    for log_size in [
-        single.log_size().saturating_sub(1),
-        single.log_size().saturating_sub(2),
-    ] {
-        let capacity = ((1usize << log_size) - 1) / carrier::ROWS_PER_PERMUTATION;
+    for log_size_delta in 1..MAX_CARRIER_SHARDS {
+        let log_size = single.log_size().saturating_sub(log_size_delta as u32);
+        let capacity = carrier_capacity(log_size);
         if capacity == 0 || remaining <= capacity {
             break;
         }
@@ -127,7 +134,7 @@ pub struct PermWitness {
     pub table_mult: TableMultiplicities,
 }
 
-/// Build the carrier trace for all permutation requests.
+/// Build the carrier traces for all permutation requests.
 pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> PermWitness {
     let boundaries = keccak::generate_boundary_witness(perm_inputs);
     let claims = carrier_shard_claims(boundaries.n_perms);
@@ -175,14 +182,14 @@ pub fn build_perm_witness(perm_inputs: &[[PackedM31; N_BYTES_IN_STATE + 1]]) -> 
 #[derive(Clone, Default)]
 struct ServiceClaims {
     sponge: SecureField,
-    carrier: SecureField,
+    carrier_total: SecureField,
     schedule: SecureField,
     tables: Vec<SecureField>,
 }
 
 impl ServiceClaims {
     fn ordered(&self) -> Vec<SecureField> {
-        let mut v = vec![self.sponge, self.carrier, self.schedule];
+        let mut v = vec![self.sponge, self.carrier_total, self.schedule];
         v.extend(self.tables.iter().copied());
         v
     }
@@ -194,7 +201,7 @@ impl ServiceClaims {
         );
         Self {
             sponge: flat[0],
-            carrier: flat[1],
+            carrier_total: flat[1],
             schedule: flat[2],
             tables: flat[3..].to_vec(),
         }
@@ -470,10 +477,10 @@ impl KeccakServiceProver {
         }
         if std::env::var_os("KECCAK_PERMS_DUMP").is_some() {
             eprintln!(
-                "keccak-service n_jobs={} n_perms_total={} round_log_size={}",
+                "keccak-service n_jobs={} n_perms_total={} max_carrier_log_size={}",
                 jobs.jobs.len(),
                 jobs.n_perms_total(),
-                round_log_size(jobs.n_perms_total())
+                max_carrier_log_size(jobs.n_perms_total())
             );
         }
         let run = sponge_v::generate_jobs(&jobs, &messages);
@@ -586,7 +593,7 @@ impl Air for KeccakServiceProver {
         // Twiddles must cover the quotient eval domain `log_size +
         // composition_log_split` (≤ +2 here from the batch-4 logup components);
         // +4 leaves headroom and the tree is process-cached.
-        let twiddles = air_core::twiddles(round_log_size(self.jobs.n_perms_total()) + 4);
+        let twiddles = air_core::twiddles(max_carrier_log_size(self.jobs.n_perms_total()) + 4);
         let tie_backs = oracles
             .into_iter()
             .zip(&self.tie_backs)
@@ -621,7 +628,7 @@ impl AirProver for KeccakServiceProver {
         let n = self.jobs.n_perms_total();
         self.jobs
             .log_size()
-            .max(round_log_size(n))
+            .max(max_carrier_log_size(n))
             .max(TableKind::Dense.log_size())
     }
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -657,24 +664,19 @@ impl AirProver for KeccakServiceProver {
         let (schedule_ic, schedule_trace) =
             carrier::generate_schedule_interaction(&rel, self.jobs.n_perms_total());
         evals.extend(schedule_trace);
-        let carrier_claimed_sum = self
+        let round_gkr = self
             .round_gkr
             .as_ref()
-            .expect("carrier GKR was built after relation draw")
-            .claimed_sum();
-        self.carrier_claimed_sums = self
-            .round_gkr
-            .as_ref()
-            .expect("carrier GKR was built after relation draw")
-            .claimed_sums()
-            .to_vec();
+            .expect("carrier GKR was built after relation draw");
+        let carrier_claimed_sum = round_gkr.claimed_sum();
+        self.carrier_claimed_sums = round_gkr.claimed_sums().to_vec();
         let (tables_ic, tables_tr) =
             tables_air::generate_interaction_trace(&rel, &self.perm.table_mult);
         evals.extend(tables_tr);
         tb.extend_evals(evals);
         self.claims = ServiceClaims {
             sponge: sponge_ic.claimed_sum,
-            carrier: carrier_claimed_sum,
+            carrier_total: carrier_claimed_sum,
             schedule: schedule_ic.claimed_sum,
             tables: tables_ic.claimed_sums,
         };
@@ -791,7 +793,7 @@ impl Air for KeccakServiceVerifier {
             .collect::<Vec<_>>();
         let (carrier_claimed_sums, tie_backs) = round_gkr::verify_round_gkr_batch(
             &self.gkr_blob,
-            self.claims.carrier,
+            self.claims.carrier_total,
             &log_sizes,
             channel,
         )?;

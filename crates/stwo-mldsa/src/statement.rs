@@ -381,12 +381,7 @@ fn draw_relations_common(
         PrivateKeyEvalRelations::from_bindings(bindings, coeffs.eval.clone(), coeffs.range.clone())
     });
     let decomp = DecompRelations::draw_with(wcell, keccak.hash_io.clone(), coeffs.range.clone());
-    let sib = SibRelations::draw_with(
-        channel,
-        ccell,
-        keccak.hash_io.clone(),
-        coeffs.range.clone(),
-    );
+    let sib = SibRelations::draw_with(channel, ccell, keccak.hash_io.clone(), coeffs.range.clone());
 
     Relations {
         rho_rlc,

@@ -128,15 +128,17 @@ class WalletFfiContractTest {
             TrustedIssuers.Certificates(v1 = emptyList()),
             TrustedIssuers.PublicKeys(v1 = emptyList()),
         )
-        val enums = listOf<Any>(
+        listOf(
             PredicateMode.AGE,
             PredicateMode.NAT,
             PredicateMode.AND,
             PredicateMode.OR,
-            NatMode.ANY,
+        ).forEach(::handlePredicateMode)
+        handleNatMode(NatMode.ANY)
+        listOf(
             ZkSystemKind.P256,
             ZkSystemKind.ML_DSA,
-        )
+        ).forEach(::handleZkSystemKind)
         val records = listOf<Any>(
             DemoRevocationWitness(idLo = 0uL, idHi = 1uL, signature = byteArrayOf()),
             ZkVerifyResult(ok = true),
@@ -161,12 +163,71 @@ class WalletFfiContractTest {
 
         assertEquals(17, functions.size)
         assertEquals(2, namedCalls.size)
-        assertEquals(2, publicStatements.size)
-        assertEquals(2, witnesses.size)
-        assertEquals(2, issuerKeys.size)
-        assertEquals(2, trustedIssuers.size)
-        assertEquals(7, enums.size)
+        publicStatements.forEach(::handlePublicStatement)
+        witnesses.forEach(::handleWitness)
+        issuerKeys.forEach(::handleIssuerKey)
+        trustedIssuers.forEach(::handleTrustedIssuers)
+        errors.forEach(::handleZkException)
         assertEquals(3, records.size)
-        assertEquals(14, errors.size)
+    }
+
+    private fun handlePredicateMode(value: PredicateMode) = when (value) {
+        PredicateMode.AGE,
+        PredicateMode.NAT,
+        PredicateMode.AND,
+        PredicateMode.OR,
+        -> Unit
+    }
+
+    private fun handleNatMode(value: NatMode) = when (value) {
+        NatMode.ANY -> Unit
+    }
+
+    private fun handleZkSystemKind(value: ZkSystemKind) = when (value) {
+        ZkSystemKind.P256,
+        ZkSystemKind.ML_DSA,
+        -> Unit
+    }
+
+    private fun handlePublicStatement(value: ZkPublicStatement) = when (value) {
+        is ZkPublicStatement.ProductV1,
+        is ZkPublicStatement.Ts13DemoV1,
+        -> Unit
+    }
+
+    private fun handleWitness(value: ZkMdocWitness) = when (value) {
+        is ZkMdocWitness.ProductV1,
+        is ZkMdocWitness.Ts13DemoV1,
+        -> Unit
+    }
+
+    private fun handleIssuerKey(value: IssuerKey) = when (value) {
+        is IssuerKey.P256,
+        is IssuerKey.MlDsa,
+        -> Unit
+    }
+
+    private fun handleTrustedIssuers(value: TrustedIssuers) = when (value) {
+        is TrustedIssuers.Certificates,
+        is TrustedIssuers.PublicKeys,
+        -> Unit
+    }
+
+    private fun handleZkException(value: ZkException) = when (value) {
+        is ZkException.InvalidInput,
+        is ZkException.Prove,
+        is ZkException.Verify,
+        is ZkException.UnsupportedProofSystem,
+        is ZkException.UnsupportedCircuitHash,
+        is ZkException.UnsupportedDemoCredentialShape,
+        is ZkException.MalformedSessionTranscript,
+        is ZkException.InvalidPublicContext,
+        is ZkException.InvalidPrivateCredential,
+        is ZkException.InvalidRevocationWitness,
+        is ZkException.ProofGenerationFailed,
+        is ZkException.MalformedProofEnvelope,
+        is ZkException.ProofContextMismatch,
+        is ZkException.ProofVerificationFailed,
+        -> Unit
     }
 }

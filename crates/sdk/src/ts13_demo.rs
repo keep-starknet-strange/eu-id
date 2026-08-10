@@ -8,7 +8,13 @@ use serde::Serialize;
 
 const ENVELOPE_MAGIC: &[u8; 8] = b"EUIDTS13";
 const ENVELOPE_VERSION: u16 = 4;
-const ENVELOPE_HEADER_BYTES: usize = 46;
+const ENVELOPE_MAGIC_OFFSET: usize = 0;
+const ENVELOPE_VERSION_OFFSET: usize = ENVELOPE_MAGIC_OFFSET + ENVELOPE_MAGIC.len();
+const ENVELOPE_CIRCUIT_HASH_OFFSET: usize = ENVELOPE_VERSION_OFFSET + size_of::<u16>();
+const ENVELOPE_BODY_CAPACITY_OFFSET: usize = ENVELOPE_CIRCUIT_HASH_OFFSET
+    + eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH.len();
+const ENVELOPE_BODY_OFFSET: usize = ENVELOPE_BODY_CAPACITY_OFFSET + size_of::<u32>();
+const ENVELOPE_HEADER_BYTES: usize = ENVELOPE_BODY_OFFSET;
 const ENVELOPE_CAPACITY_ALIGNMENT: u32 = 65_536;
 const PROOF_BODY_CAPACITY: u32 =
     eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_PROOF_BODY_CAPACITY;
@@ -16,6 +22,7 @@ const PROOF_BODY_CAPACITY: u32 =
 const _: () = assert!(
     PROOF_BODY_CAPACITY != 0 && PROOF_BODY_CAPACITY.is_multiple_of(ENVELOPE_CAPACITY_ALIGNMENT)
 );
+const _: () = assert!(ENVELOPE_HEADER_BYTES == 46);
 
 fn report_prove_timing(phase: &str, elapsed: std::time::Duration) {
     eu_id_prover::report_prove_timing("sdk", phase, elapsed);
@@ -161,20 +168,22 @@ fn encode_envelope_prefix(prefix: &[u8]) -> Result<Vec<u8>, IdentityError> {
         .checked_add(capacity)
         .ok_or(IdentityError::ProofGenerationFailed)?;
     let mut envelope = vec![0; total_len];
-    envelope[..8].copy_from_slice(ENVELOPE_MAGIC);
-    envelope[8..10].copy_from_slice(&ENVELOPE_VERSION.to_le_bytes());
-    envelope[10..42]
+    envelope[ENVELOPE_MAGIC_OFFSET..ENVELOPE_VERSION_OFFSET].copy_from_slice(ENVELOPE_MAGIC);
+    envelope[ENVELOPE_VERSION_OFFSET..ENVELOPE_CIRCUIT_HASH_OFFSET]
+        .copy_from_slice(&ENVELOPE_VERSION.to_le_bytes());
+    envelope[ENVELOPE_CIRCUIT_HASH_OFFSET..ENVELOPE_BODY_CAPACITY_OFFSET]
         .copy_from_slice(&eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH);
-    envelope[42..46].copy_from_slice(&PROOF_BODY_CAPACITY.to_le_bytes());
-    envelope[46..46 + prefix.len()].copy_from_slice(prefix);
+    envelope[ENVELOPE_BODY_CAPACITY_OFFSET..ENVELOPE_BODY_OFFSET]
+        .copy_from_slice(&PROOF_BODY_CAPACITY.to_le_bytes());
+    envelope[ENVELOPE_BODY_OFFSET..ENVELOPE_BODY_OFFSET + prefix.len()].copy_from_slice(prefix);
     Ok(envelope)
 }
 
 fn envelope_body(envelope: &[u8]) -> Result<&[u8], IdentityError> {
     if envelope.len() < ENVELOPE_HEADER_BYTES
-        || &envelope[..8] != ENVELOPE_MAGIC
+        || &envelope[ENVELOPE_MAGIC_OFFSET..ENVELOPE_VERSION_OFFSET] != ENVELOPE_MAGIC
         || u16::from_le_bytes(
-            envelope[8..10]
+            envelope[ENVELOPE_VERSION_OFFSET..ENVELOPE_CIRCUIT_HASH_OFFSET]
                 .try_into()
                 .map_err(|_| IdentityError::MalformedProofEnvelope)?,
         ) != ENVELOPE_VERSION
@@ -182,7 +191,8 @@ fn envelope_body(envelope: &[u8]) -> Result<&[u8], IdentityError> {
         return Err(IdentityError::MalformedProofEnvelope);
     }
 
-    let encoded_hash: [u8; 32] = envelope[10..42]
+    let encoded_hash: [u8; 32] = envelope
+        [ENVELOPE_CIRCUIT_HASH_OFFSET..ENVELOPE_BODY_CAPACITY_OFFSET]
         .try_into()
         .map_err(|_| IdentityError::MalformedProofEnvelope)?;
     if encoded_hash != eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH {
@@ -190,7 +200,7 @@ fn envelope_body(envelope: &[u8]) -> Result<&[u8], IdentityError> {
     }
 
     let encoded_capacity = u32::from_le_bytes(
-        envelope[42..46]
+        envelope[ENVELOPE_BODY_CAPACITY_OFFSET..ENVELOPE_BODY_OFFSET]
             .try_into()
             .map_err(|_| IdentityError::MalformedProofEnvelope)?,
     );
@@ -203,7 +213,7 @@ fn envelope_body(envelope: &[u8]) -> Result<&[u8], IdentityError> {
     if envelope.len() != expected_len {
         return Err(IdentityError::MalformedProofEnvelope);
     }
-    Ok(&envelope[ENVELOPE_HEADER_BYTES..])
+    Ok(&envelope[ENVELOPE_BODY_OFFSET..])
 }
 
 fn decode_canonical_body<T>(body: &[u8]) -> Result<T, IdentityError>
@@ -616,13 +626,22 @@ mod tests {
             envelope.len(),
             ENVELOPE_HEADER_BYTES + PROOF_BODY_CAPACITY as usize
         );
-        assert_eq!(&envelope[..8], b"EUIDTS13");
-        assert_eq!(&envelope[8..10], &4u16.to_le_bytes());
         assert_eq!(
-            &envelope[10..42],
+            &envelope[ENVELOPE_MAGIC_OFFSET..ENVELOPE_VERSION_OFFSET],
+            b"EUIDTS13"
+        );
+        assert_eq!(
+            &envelope[ENVELOPE_VERSION_OFFSET..ENVELOPE_CIRCUIT_HASH_OFFSET],
+            &4u16.to_le_bytes()
+        );
+        assert_eq!(
+            &envelope[ENVELOPE_CIRCUIT_HASH_OFFSET..ENVELOPE_BODY_CAPACITY_OFFSET],
             &eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH
         );
-        assert_eq!(&envelope[42..46], &PROOF_BODY_CAPACITY.to_le_bytes());
+        assert_eq!(
+            &envelope[ENVELOPE_BODY_CAPACITY_OFFSET..ENVELOPE_BODY_OFFSET],
+            &PROOF_BODY_CAPACITY.to_le_bytes()
+        );
         assert_eq!(decode_test_envelope(&envelope), Ok(proof));
     }
 
@@ -681,18 +700,19 @@ mod tests {
         assert_eq!(reject(&wrong_magic), IdentityError::MalformedProofEnvelope);
 
         let mut wrong_version = valid.clone();
-        wrong_version[8..10].copy_from_slice(&3u16.to_le_bytes());
+        wrong_version[ENVELOPE_VERSION_OFFSET..ENVELOPE_CIRCUIT_HASH_OFFSET]
+            .copy_from_slice(&3u16.to_le_bytes());
         assert_eq!(
             reject(&wrong_version),
             IdentityError::MalformedProofEnvelope
         );
 
         let mut wrong_hash = valid.clone();
-        wrong_hash[10] ^= 1;
+        wrong_hash[ENVELOPE_CIRCUIT_HASH_OFFSET] ^= 1;
         assert_eq!(reject(&wrong_hash), IdentityError::UnsupportedCircuitHash);
 
         let mut wrong_capacity = valid.clone();
-        wrong_capacity[42..46]
+        wrong_capacity[ENVELOPE_BODY_CAPACITY_OFFSET..ENVELOPE_BODY_OFFSET]
             .copy_from_slice(&(PROOF_BODY_CAPACITY + ENVELOPE_CAPACITY_ALIGNMENT).to_le_bytes());
         assert_eq!(
             reject(&wrong_capacity),
@@ -724,10 +744,13 @@ mod tests {
     #[test]
     fn unknown_hash_rejects_before_body_decode() {
         let mut envelope = vec![0xff; ENVELOPE_HEADER_BYTES + PROOF_BODY_CAPACITY as usize];
-        envelope[..8].copy_from_slice(b"EUIDTS13");
-        envelope[8..10].copy_from_slice(&4u16.to_le_bytes());
-        envelope[10..42].copy_from_slice(&[0x99; 32]);
-        envelope[42..46].copy_from_slice(&PROOF_BODY_CAPACITY.to_le_bytes());
+        envelope[ENVELOPE_MAGIC_OFFSET..ENVELOPE_VERSION_OFFSET].copy_from_slice(b"EUIDTS13");
+        envelope[ENVELOPE_VERSION_OFFSET..ENVELOPE_CIRCUIT_HASH_OFFSET]
+            .copy_from_slice(&4u16.to_le_bytes());
+        envelope[ENVELOPE_CIRCUIT_HASH_OFFSET..ENVELOPE_BODY_CAPACITY_OFFSET]
+            .copy_from_slice(&[0x99; 32]);
+        envelope[ENVELOPE_BODY_CAPACITY_OFFSET..ENVELOPE_BODY_OFFSET]
+            .copy_from_slice(&PROOF_BODY_CAPACITY.to_le_bytes());
         assert_eq!(
             decode_test_envelope::<DemoProof>(&envelope),
             Err(IdentityError::UnsupportedCircuitHash)

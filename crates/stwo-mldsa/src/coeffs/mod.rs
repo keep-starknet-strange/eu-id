@@ -623,8 +623,7 @@ impl FrameworkEval for CoeffsEval {
         // and carry_hi[2] is already forced 0 outside is_carry, so the two
         // terms never collide.
         let gate = is_digit.clone() * live_mask[5].clone() + is_carry.clone();
-        let value =
-            digit[5].clone() + is_digit.clone() * digit_offset + carry_hi[2].clone();
+        let value = digit[5].clone() + is_digit.clone() * digit_offset + carry_hi[2].clone();
         #[cfg(test)]
         let value = attacked_stream_value::<E>(5, value);
         let bound_id = is_digit.clone() * rc9_id + is_carry.clone() * rc8_id.clone();

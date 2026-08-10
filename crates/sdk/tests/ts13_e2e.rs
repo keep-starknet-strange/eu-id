@@ -6,9 +6,7 @@
 
 use bincode::Options;
 use ciborium::value::Value;
-use euid_zk_sdk::{
-    IdentityStatement, IdentityWitness, ZkError, ZkMdocWitness, ZkPublicStatement,
-};
+use euid_zk_sdk::{IdentityStatement, IdentityWitness, ZkError, ZkMdocWitness, ZkPublicStatement};
 use ml_dsa::signature::Signer;
 use ml_dsa::{EncodedSignature, MlDsa65, SigningKey};
 use sha2::{Digest, Sha256};

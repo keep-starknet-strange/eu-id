@@ -52,10 +52,12 @@ pub const SOURCE_PACKAGE_ROOTS: [&str; 6] = [
     "crates/sdk",
 ];
 
+const SHARED_KECCAK_SERVICE_MODULE: &str = "shared_keccak_service";
+
 pub const CANONICAL_MODULE_ORDER: [&str; 19] = [
     "shared_sha256_tables",
     "shared_mldsa_range_tables",
-    "shared_keccak_service",
+    SHARED_KECCAK_SERVICE_MODULE,
     "ts13_public_context_bind",
     "private_issuer_message_provider",
     "issuer_private_message_mldsa",
@@ -1121,7 +1123,7 @@ impl GenerationInputV1 {
                     .to_owned(),
             ));
         }
-        for (module_ordinal, module) in self.modules.iter().enumerate() {
+        for module in &self.modules {
             let post_interaction_columns =
                 module.air_instances.iter().try_fold(0_u32, |sum, air| {
                     sum.checked_add(checked_column_count(
@@ -1133,7 +1135,7 @@ impl GenerationInputV1 {
                         )
                     })
                 })?;
-            let expected = if module_ordinal == 2 {
+            let expected = if module.name == SHARED_KECCAK_SERVICE_MODULE {
                 CANONICAL_KECCAK_POST_INTERACTION_COLUMN_COUNT
             } else {
                 0
@@ -4224,7 +4226,15 @@ fn validate_live_profile_input(
     let declared_airs = input
         .modules
         .iter()
-        .flat_map(|module| &module.air_instances)
+        .flat_map(|module| {
+            module
+                .air_instances
+                .iter()
+                .enumerate()
+                .map(move |(air_instance_ordinal, air)| {
+                    (module.name.as_str(), air_instance_ordinal, air)
+                })
+        })
         .collect::<Vec<_>>();
     let pcs_shape_matches = proof.fri_log_last_layer_degree_bound
         == input.proof_system.fri_log_last_layer_degree_bound
@@ -4256,7 +4266,7 @@ fn validate_live_profile_input(
             geometry.air_instances.len()
         )));
     }
-    for (ordinal, (declared, live)) in declared_airs
+    for (ordinal, ((_, _, declared), live)) in declared_airs
         .iter()
         .zip(&geometry.air_instances)
         .enumerate()
@@ -4394,9 +4404,9 @@ fn validate_live_profile_input(
         || proof
             .post_interaction_payload_bytes
             .iter()
-            .enumerate()
-            .any(|(index, &bytes)| {
-                if index == 2 {
+            .zip(&declared_airs)
+            .any(|(&bytes, &(module_name, air_instance_ordinal, _))| {
+                if module_name == SHARED_KECCAK_SERVICE_MODULE && air_instance_ordinal == 0 {
                     bytes > air_core::gkr::TS13_DEMO_GKR_MAX_PAYLOAD_BYTES
                 } else {
                     bytes != 0
@@ -4496,7 +4506,8 @@ mod tests {
                                     .into_iter()
                                     .collect(),
                                 interaction_m31_log_sizes: Vec::new(),
-                                post_interaction_m31_log_sizes: (*name == "shared_keccak_service"
+                                post_interaction_m31_log_sizes: (*name
+                                    == SHARED_KECCAK_SERVICE_MODULE
                                     && air_instance_ordinal == 0)
                                     .then_some(vec![
                                         1;

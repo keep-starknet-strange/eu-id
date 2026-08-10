@@ -792,8 +792,51 @@ fn carrier_witness_generator_supports_n261() {
 }
 
 #[test]
+fn sharded_table_multiplicities_equal_the_monolithic_carrier() {
+    const N_PERMUTATIONS: usize = 3;
+    const FIRST_SHARD_PERMUTATIONS: usize = 2;
+
+    let mut inputs = vec![[PackedM31::zero(); N_BYTES_IN_STATE + 1]; N_PERMUTATIONS];
+    for (permutation, input) in inputs.iter_mut().enumerate() {
+        input[0] = PackedM31::from(M31::from(spread_u32((17 * permutation + 3) as u32)));
+        input[N_BYTES_IN_STATE] = PackedM31::from(M31::from(permutation as u32));
+    }
+
+    let monolithic_boundaries = keccak::generate_boundary_witness(&inputs);
+    let monolithic = stwo_keccak::carrier::generate(&monolithic_boundaries, 0);
+    let expected = TableMultiplicities::from_carrier_round(&monolithic.round, N_PERMUTATIONS);
+
+    let split_boundaries = keccak::generate_boundary_witness(&inputs);
+    let mut rows = split_boundaries.rows.into_iter();
+    let first_boundaries = keccak::BoundaryWitness {
+        n_perms: FIRST_SHARD_PERMUTATIONS,
+        rows: rows
+            .by_ref()
+            .take(FIRST_SHARD_PERMUTATIONS * stwo_keccak::carrier::ROWS_PER_PERMUTATION)
+            .collect(),
+    };
+    let second_boundaries = keccak::BoundaryWitness {
+        n_perms: N_PERMUTATIONS - FIRST_SHARD_PERMUTATIONS,
+        rows: rows.collect(),
+    };
+    let first = stwo_keccak::carrier::generate(&first_boundaries, 0);
+    let second = stwo_keccak::carrier::generate(&second_boundaries, FIRST_SHARD_PERMUTATIONS);
+    let mut actual =
+        TableMultiplicities::from_carrier_round(&first.round, FIRST_SHARD_PERMUTATIONS);
+    actual.add(&TableMultiplicities::from_carrier_round(
+        &second.round,
+        N_PERMUTATIONS - FIRST_SHARD_PERMUTATIONS,
+    ));
+
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn carrier_shard_planner_boundaries_are_pinned() {
-    let cases: &[(usize, &[(usize, usize, u32)])] = &[
+    type ExpectedShard = (usize, usize, u32);
+    type PlannerCase<'a> = (usize, &'a [ExpectedShard]);
+
+    let cases: &[PlannerCase<'_>] = &[
         (1, &[(0, 1, 5)]),
         (163, &[(0, 163, 12)]),
         (164, &[(0, 163, 12), (163, 1, 5)]),
@@ -812,6 +855,54 @@ fn carrier_shard_planner_boundaries_are_pinned() {
             actual, expected,
             "unexpected plan for {n_perms} permutations"
         );
+    }
+}
+
+#[test]
+fn carrier_shard_planner_invariants_hold_across_ranges() {
+    const MAX_TEST_PERMUTATIONS: usize = 4_096;
+    const EXPECTED_MAX_SHARDS: usize = 3;
+
+    for n_perms in 1..=MAX_TEST_PERMUTATIONS {
+        let claims = stwo_keccak::service::carrier_shard_claims(n_perms);
+        assert!(!claims.is_empty(), "empty plan for {n_perms} permutations");
+        assert!(
+            claims.len() <= EXPECTED_MAX_SHARDS,
+            "too many shards for {n_perms} permutations"
+        );
+
+        let mut next_base = 0;
+        let mut sharded_rows = 0;
+        for claim in &claims {
+            assert!(claim.n_perms > 0, "empty shard for {n_perms} permutations");
+            assert_eq!(
+                claim.perm_id_base, next_base,
+                "noncontiguous permutation ids for {n_perms} permutations"
+            );
+            let active_rows = claim.n_perms * stwo_keccak::carrier::ROWS_PER_PERMUTATION;
+            let padded_rows = 1usize << claim.log_size();
+            assert!(
+                active_rows < padded_rows,
+                "shard does not reserve its END row for {n_perms} permutations"
+            );
+            next_base += claim.n_perms;
+            sharded_rows += padded_rows;
+        }
+        assert_eq!(next_base, n_perms, "plan coverage changed");
+
+        let singleton = stwo_keccak::carrier::Claim {
+            n_perms,
+            perm_id_base: 0,
+        };
+        let singleton_rows = 1usize << singleton.log_size();
+        if claims.len() == 1 {
+            assert_eq!(sharded_rows, singleton_rows);
+        } else {
+            assert!(
+                sharded_rows < singleton_rows,
+                "sharding must strictly reduce padded rows for {n_perms} permutations"
+            );
+        }
     }
 }
 

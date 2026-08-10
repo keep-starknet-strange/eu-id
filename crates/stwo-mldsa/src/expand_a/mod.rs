@@ -1135,12 +1135,18 @@ fn gen_rejection_interaction(
         });
         // C7b: lo4/hi4 Rc4 lookups (gated by accept, mirroring accept_slack).
         entries.push(if data.accept {
-            (one, range_denominator(&relations.range, data.lo4, RcKind::Rc4))
+            (
+                one,
+                range_denominator(&relations.range, data.lo4, RcKind::Rc4),
+            )
         } else {
             (zero, one)
         });
         entries.push(if data.accept {
-            (one, range_denominator(&relations.range, data.hi4, RcKind::Rc4))
+            (
+                one,
+                range_denominator(&relations.range, data.hi4, RcKind::Rc4),
+            )
         } else {
             (zero, one)
         });

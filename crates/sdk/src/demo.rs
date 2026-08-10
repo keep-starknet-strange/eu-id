@@ -11,15 +11,12 @@
 //! and the demo agree.
 
 use ciborium::value::Value;
+use eu_id_prover::ts13_demo::{ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES};
 use ml_dsa::signature::{Keypair, Signer};
 use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, SigningKey};
 
 use crate::ZkError;
 
-/// FIPS 204 ML-DSA-65 `pkEncode` length.
-const ML_DSA_65_PK_BYTES: usize = 1_952;
-/// FIPS 204 ML-DSA-65 `sigEncode` length.
-const ML_DSA_65_SIG_BYTES: usize = 3_309;
 /// CBOR tag 24 (`encoded-cbor`), wrapping `MobileSecurityObjectBytes`.
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 /// COSE alg id for ML-DSA-65 (`stwo_mldsa::constants::COSE_ALG_ML_DSA_65`).
@@ -112,34 +109,34 @@ fn lift_mso(payload: &[u8]) -> Result<Value, ZkError> {
 
 /// A copy of `mso` with `deviceKeyInfo.deviceKey` replaced by `device_key`.
 fn replace_device_key(mso: &Value, device_key: Value) -> Result<Value, ZkError> {
+    let mut out = mso.clone();
+    let Value::Map(entries) = &mut out else {
+        return Err(ZkError::InvalidInput(
+            "expected a CBOR map for MobileSecurityObject".to_string(),
+        ));
+    };
     let mut replaced = false;
-    let out = as_map(mso, "MobileSecurityObject")?
-        .into_iter()
-        .map(|(k, v)| {
-            if matches!(&k, Value::Text(t) if t == "deviceKeyInfo") {
-                let new_info = as_map(&v, "deviceKeyInfo")?
-                    .into_iter()
-                    .map(|(dk, dv)| {
-                        if matches!(&dk, Value::Text(t) if t == "deviceKey") {
-                            replaced = true;
-                            (dk, device_key.clone())
-                        } else {
-                            (dk, dv)
-                        }
-                    })
-                    .collect();
-                Ok((k, Value::Map(new_info)))
-            } else {
-                Ok((k, v))
+    for (key, value) in entries {
+        if matches!(key, Value::Text(text) if text == "deviceKeyInfo") {
+            let Value::Map(device_key_info) = value else {
+                return Err(ZkError::InvalidInput(
+                    "expected a CBOR map for deviceKeyInfo".to_string(),
+                ));
+            };
+            for (key, value) in device_key_info {
+                if matches!(key, Value::Text(text) if text == "deviceKey") {
+                    *value = device_key.clone();
+                    replaced = true;
+                }
             }
-        })
-        .collect::<Result<Vec<_>, ZkError>>()?;
+        }
+    }
     if !replaced {
         return Err(ZkError::InvalidInput(
             "MSO has no deviceKeyInfo.deviceKey to replace".to_string(),
         ));
     }
-    Ok(Value::Map(out))
+    Ok(out)
 }
 
 /// The demo issuer's ML-DSA-65 public key (`pkEncode`). The verifier pins
@@ -220,9 +217,9 @@ pub fn demo_mint_ml_dsa_signed_pid_mdoc(
     p256_issuer_signed: Vec<u8>,
     device_public_key: Vec<u8>,
 ) -> Result<Vec<u8>, ZkError> {
-    if device_public_key.len() != ML_DSA_65_PK_BYTES {
+    if device_public_key.len() != ML_DSA_65_PUBLIC_KEY_BYTES {
         return Err(ZkError::InvalidInput(format!(
-            "device_public_key must be a {ML_DSA_65_PK_BYTES}-byte ML-DSA-65 pkEncode, got {}",
+            "device_public_key must be a {ML_DSA_65_PUBLIC_KEY_BYTES}-byte ML-DSA-65 pkEncode, got {}",
             device_public_key.len()
         )));
     }
@@ -309,9 +306,9 @@ pub fn demo_build_ml_dsa_witness(
     doctype: String,
     device_signature: Vec<u8>,
 ) -> Result<Vec<u8>, ZkError> {
-    if device_signature.len() != ML_DSA_65_SIG_BYTES {
+    if device_signature.len() != ML_DSA_65_SIGNATURE_BYTES {
         return Err(ZkError::InvalidInput(format!(
-            "device_signature must be a {ML_DSA_65_SIG_BYTES}-byte ML-DSA-65 sigEncode, got {}",
+            "device_signature must be a {ML_DSA_65_SIGNATURE_BYTES}-byte ML-DSA-65 sigEncode, got {}",
             device_signature.len()
         )));
     }
@@ -416,6 +413,49 @@ mod tests {
             ("nameSpaces".into(), name_spaces),
             ("issuerAuth".into(), issuer_auth),
         ]))
+    }
+
+    #[test]
+    fn device_key_replacement_updates_duplicates_and_preserves_map_errors() {
+        let replacement = Value::Bytes(vec![7]);
+        let device_key_info = || {
+            Value::Map(vec![
+                ("deviceKey".into(), "first".into()),
+                ("deviceKey".into(), "second".into()),
+            ])
+        };
+        let mso = Value::Map(vec![
+            ("deviceKeyInfo".into(), device_key_info()),
+            ("deviceKeyInfo".into(), device_key_info()),
+        ]);
+
+        let replaced = replace_device_key(&mso, replacement.clone()).expect("replace keys");
+        let replaced_entries = as_map(&replaced, "MobileSecurityObject").expect("MSO map");
+        let replaced_keys = replaced_entries
+            .iter()
+            .filter(|(key, _)| matches!(key, Value::Text(text) if text == "deviceKeyInfo"))
+            .flat_map(|(_, value)| as_map(value, "deviceKeyInfo").expect("device key map"))
+            .filter(|(key, _)| matches!(key, Value::Text(text) if text == "deviceKey"))
+            .collect::<Vec<_>>();
+        assert_eq!(replaced_keys.len(), 4);
+        assert!(replaced_keys.iter().all(|(_, value)| value == &replacement));
+
+        for (malformed, message) in [
+            (Value::Null, "expected a CBOR map for MobileSecurityObject"),
+            (
+                Value::Map(vec![("deviceKeyInfo".into(), Value::Null)]),
+                "expected a CBOR map for deviceKeyInfo",
+            ),
+            (
+                Value::Map(vec![("deviceKeyInfo".into(), Value::Map(Vec::new()))]),
+                "MSO has no deviceKeyInfo.deviceKey to replace",
+            ),
+        ] {
+            assert_eq!(
+                replace_device_key(&malformed, replacement.clone()),
+                Err(ZkError::InvalidInput(message.to_string()))
+            );
+        }
     }
 
     #[test]
@@ -573,7 +613,7 @@ mod tests {
             issuer_signed,
             eu_id_prover::mdoc::openid4vp_session_transcript(b"revocation-probe"),
             PID_NS.to_string(),
-            vec![0u8; ML_DSA_65_SIG_BYTES],
+            vec![0u8; ML_DSA_65_SIGNATURE_BYTES],
         )
         .expect("build document");
 
@@ -581,7 +621,10 @@ mod tests {
         assert_eq!(witness.id_lo + 1, expected_id);
         assert_eq!(witness.id_hi - 1, expected_id);
         assert_eq!(demo_revocation_epoch(), DEMO_REVOCATION_EPOCH);
-        assert_eq!(demo_revocation_public_key().len(), ML_DSA_65_PK_BYTES);
+        assert_eq!(
+            demo_revocation_public_key().len(),
+            ML_DSA_65_PUBLIC_KEY_BYTES
+        );
 
         let message = eu_id_prover::ts13::ts13_revocation_message(
             witness.id_lo,

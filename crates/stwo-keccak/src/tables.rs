@@ -20,7 +20,7 @@
 //!   `(spread_byte, spread_hi)` with `spread_hi = spread(byte >> r)`. Because
 //!   spread is additive across disjoint bit ranges, `spread_byte = spread_hi·4^r
 //!   + spread_lo`, so `spread_lo = spread_byte − spread_hi·4^r` is a derived
-//!   linear expression, not a committed column.
+//!     linear expression, not a committed column.
 //! - `conv`: `2^8 × 2`, `(byte, spread(byte))`. Used only at the HashIo
 //!   boundary to convert absorbed message bytes into spread form and squeezed
 //!   spread limbs back into bytes. Both directions are certified by the one
@@ -118,8 +118,8 @@ mod tests {
             for b2 in 0u32..256 {
                 let andnot = (!b1) & b2 & 0xFF;
                 let lhs = spread_u32(b1 ^ b2) as i64;
-                let rhs = 2 * spread_u32(andnot) as i64 + spread_u32(b1) as i64
-                    - spread_u32(b2) as i64;
+                let rhs =
+                    2 * spread_u32(andnot) as i64 + spread_u32(b1) as i64 - spread_u32(b2) as i64;
                 assert_eq!(lhs, rhs, "b1={b1:#x} b2={b2:#x}");
             }
         }
@@ -141,13 +141,9 @@ mod tests {
                 let key = (spread_u32(b1) + spread_u32(b2)) as usize;
                 let [k, table_xor_out] = t[key];
                 assert_eq!(k as usize, key);
-                let out = (table_xor_out as i64 - spread_u32(b1) as i64 + spread_u32(b2) as i64)
-                    / 2;
-                assert_eq!(
-                    unspread_u32(out as u32),
-                    andnot,
-                    "b1={b1:#x} b2={b2:#x}"
-                );
+                let out =
+                    (table_xor_out as i64 - spread_u32(b1) as i64 + spread_u32(b2) as i64) / 2;
+                assert_eq!(unspread_u32(out as u32), andnot, "b1={b1:#x} b2={b2:#x}");
             }
         }
     }

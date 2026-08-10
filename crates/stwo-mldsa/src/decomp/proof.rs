@@ -34,11 +34,12 @@ use air_core::{
 
 use crate::air_util::{padded_log_size, ColEval};
 use crate::binding::STREAM_ID_CTILDE_ABSORB;
+use crate::coeffs::tables::RcKind;
 use crate::coeffs::tables::{
     gen_range_table_interaction, gen_range_table_multiplicities, gen_range_table_preprocessed,
-    range_table_log_size, range_table_preprocessed_ids, RangeTableEval, RANGE_TABLE_INTERACTION_COLS,
+    range_table_log_size, range_table_preprocessed_ids, RangeTableEval,
+    RANGE_TABLE_INTERACTION_COLS,
 };
-use crate::coeffs::tables::RcKind;
 use crate::profile::ML_DSA_65;
 use crate::witness::MlDsaWitness;
 
@@ -52,8 +53,8 @@ use super::{
 #[cfg(test)]
 use super::{
     gen_decomp_interaction_with_test_options, gen_decomp_metadata_with_test_options,
-    DecompTracePoke, COL_HINT_ACC, COL_LANE0, COL_V_ZERO, L_A_HI, L_B_HI, L_HINT, L_S0,
-    L_SIGN_HI, L_SIGN_VAL, L_W, L_W0, L_W1, L_W1P, L_WRAPK, L_WRAP_M,
+    DecompTracePoke, COL_HINT_ACC, COL_LANE0, COL_V_ZERO, L_A_HI, L_B_HI, L_HINT, L_S0, L_SIGN_HI,
+    L_SIGN_VAL, L_W, L_W0, L_W1, L_W1P, L_WRAPK, L_WRAP_M,
 };
 use crate::balancer::{
     gen_balancer_interaction, gen_balancer_trace, BalancerEval, BalancerRelation,
@@ -81,7 +82,10 @@ fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
 
 fn all_preprocessed_log_sizes() -> Vec<u32> {
     let mut sizes = vec![decomp_log_size(); decomp_preprocessed_ids(ML_DSA_65).len()];
-    sizes.extend(vec![range_table_log_size(); range_table_preprocessed_ids().len()]);
+    sizes.extend(vec![
+        range_table_log_size();
+        range_table_preprocessed_ids().len()
+    ]);
     sizes
 }
 
@@ -308,7 +312,8 @@ fn build_components(
 
 fn module_trace_layout() -> Vec<u32> {
     let mut trace = vec![decomp_log_size(); N_BASE_COLS];
-    trace.push(range_table_log_size()); // one multiplicity column
+    // The shared range table has one multiplicity column.
+    trace.push(range_table_log_size());
     // Each balancer writes `1 + arity` base columns (enabler + tuple cells).
     for _ in 0..crate::balancer::balancer_base_cols(crate::binding::WCELL_ARITY) {
         trace.push(wcell_log_size());

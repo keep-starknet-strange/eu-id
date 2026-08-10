@@ -128,6 +128,9 @@ where
         [PackedM31::zero(); N_BYTES_IN_STATE + 2],
     );
 
+    // SAFETY: both allocations have exactly one entry per SIMD row. The
+    // parallel zip below visits every row once, and `fill_row` initializes
+    // every trace cell and lookup tuple before either allocation is returned.
     let (mut trace, mut lookup_data) = unsafe {
         (
             ComponentTrace::<N_ARITHMETIC_COLUMNS>::uninitialized(log_size),

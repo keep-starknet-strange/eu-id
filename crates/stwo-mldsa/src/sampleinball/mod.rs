@@ -76,9 +76,9 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
-use crate::constants::{N, TAU};
 use crate::coeffs::tables::RcKind;
 use crate::coeffs::RcUses;
+use crate::constants::{N, TAU};
 use crate::profile::MlDsaProfile;
 use crate::witness::MlDsaWitness;
 use relations::SibRelations;
@@ -120,7 +120,8 @@ pub const MAX_SIB_SQUEEZE_BYTES: usize = SHAKE256_RATE * MAX_SIB_SQUEEZE_BLOCKS;
 
 // Compile-time coupling: the per-profile squeeze budget consumed at
 // statement.rs must never exceed this component's fixed storage cap.
-const _: () = assert!(crate::profile::ML_DSA_65.sample_in_ball_squeeze_blocks() <= MAX_SIB_SQUEEZE_BLOCKS);
+const _: () =
+    assert!(crate::profile::ML_DSA_65.sample_in_ball_squeeze_blocks() <= MAX_SIB_SQUEEZE_BLOCKS);
 
 // The stream stage binds the verifier-selected resource cap. `active` selects
 // only the FIPS-consumed prefix. The c stage follows the selected stream rows.
@@ -1941,7 +1942,10 @@ mod tests {
             ("accept_hi (Rc8)", GateKind::WitnessWithBooleanity),
             ("reject_lo (Rc8)", GateKind::WitnessWithBooleanity),
             ("reject_hi (Rc8)", GateKind::WitnessWithBooleanity),
-            ("s_daddr (Rc8, gate=not_first)", GateKind::WitnessWithBooleanity),
+            (
+                "s_daddr (Rc8, gate=not_first)",
+                GateKind::WitnessWithBooleanity,
+            ),
             ("s_dts (Rc11, gate=s_same)", GateKind::WitnessWithBooleanity),
         ];
         assert_eq!(

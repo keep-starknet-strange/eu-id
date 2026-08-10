@@ -119,6 +119,7 @@ const TS13_DEVICE_AUTH_PROFILE: &str = "iso18013-5";
 const TS13_PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const TS13_PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 const TS13_NUM_ATTRIBUTES: u32 = 1;
+const TS13_AGE_THRESHOLD_YEARS: u32 = 18;
 const TS13_POTENTIAL_ISSUERS: u32 = 1;
 const TS13_REVOCATION_ENABLED: bool = true;
 const TS13_REVOCATION_ID_WIDTH_BYTES: u32 = 8;
@@ -215,7 +216,7 @@ pub struct Ts13MdocWitness {
 #[uniffi::export]
 pub fn zk_contract_v1() -> ZkContract {
     ZkContract {
-        system_name: "stwo-euid-v1".to_string(),
+        system_name: TS13_SYSTEM_ID.to_string(),
         spec_id_pid: "stwo-euid-pid-v1".to_string(),
         pid_namespace: TS13_PID_NAMESPACE.to_string(),
         doctype_pid: TS13_PID_DOCTYPE.to_string(),
@@ -232,11 +233,12 @@ pub fn zk_contract_v1() -> ZkContract {
     }
 }
 
-fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    lower_hex(&Sha256::digest(bytes))
 }
 
 fn cbor_bytes(value: Value) -> Vec<u8> {
@@ -390,17 +392,14 @@ fn ts13_request_binding_hash(request: &Ts13PresentationRequest) -> String {
             Value::from(request.revocation_epoch),
         ),
     ]);
-    hex_sha256(&cbor_bytes(value))
+    sha256_hex(&cbor_bytes(value))
 }
 
 /// The canonical circuit hash as the lowercase hex string carried in
 /// [`Ts13PresentationRequest::circuit_hash`].
 #[uniffi::export]
 pub fn ts13_default_circuit_hash() -> String {
-    ts13_demo_circuit_hash()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    lower_hex(&ts13_demo_circuit_hash())
 }
 
 /// Raw artifact-derived circuit hash required by [`IdentityStatement`].
@@ -545,7 +544,7 @@ fn decode_ts13_proof_envelope(proof: &[u8]) -> Result<Ts13ProofEnvelope, ZkError
 fn canonical_ts13_disclosures() -> Vec<Ts13DisclosedAttribute> {
     vec![Ts13DisclosedAttribute {
         namespace: TS13_PID_NAMESPACE.to_string(),
-        name: result_age_over(18),
+        name: result_age_over(TS13_AGE_THRESHOLD_YEARS),
         value_cbor: cbor_bytes(Value::Bool(true)),
         disclosure: Ts13DisclosureKind::Equality,
     }]
@@ -562,7 +561,7 @@ fn ts13_identity_statement(
         zk_system_id: request.zk_system_id.clone(),
         document_type: request.doctype.clone(),
         namespace: request.namespace.clone(),
-        element_identifier: result_age_over(18),
+        element_identifier: result_age_over(TS13_AGE_THRESHOLD_YEARS),
         expected_value_cbor: cbor_bytes(Value::Bool(true)),
         timestamp_epoch_seconds: i64::from(request.current_date_epoch_day) * SECONDS_PER_DAY,
         session_transcript: request.session_transcript.clone(),
@@ -582,7 +581,7 @@ fn ts13_witness_issuer_key(
                 || !request
                     .trusted_issuer_hashes
                     .iter()
-                    .any(|trusted| trusted == &hex_sha256(key))
+                    .any(|trusted| trusted == &sha256_hex(key))
         })
     {
         return Err(ZkError::InvalidInput(
@@ -641,11 +640,9 @@ pub fn ts13_prove_zk_document(
 fn ts13_document_matches_request(
     request: &Ts13PresentationRequest,
     document: &Ts13ZkDocument,
-) -> Result<bool, ZkError> {
-    if ts13_validate_presentation_request(request).is_err()
-        || document.proof.len() > MAX_TS13_DOCUMENT_PROOF_BYTES
-    {
-        return Ok(false);
+) -> bool {
+    if ts13_validate_presentation_request(request).is_err() {
+        return false;
     }
     if document.doc_type != request.doctype
         || document.zk_system_id != request.zk_system_id
@@ -653,9 +650,9 @@ fn ts13_document_matches_request(
         || document.request_binding_hash != ts13_request_binding_hash(request)
         || document.disclosed_attributes != canonical_ts13_disclosures()
     {
-        return Ok(false);
+        return false;
     }
-    Ok(true)
+    true
 }
 
 #[uniffi::export]
@@ -663,7 +660,7 @@ pub fn ts13_verify_zk_document(
     request: &Ts13PresentationRequest,
     document: &Ts13ZkDocument,
 ) -> Result<bool, ZkError> {
-    if !ts13_document_matches_request(request, document)? {
+    if !ts13_document_matches_request(request, document) {
         return Ok(false);
     }
     let Ok(envelope) = decode_ts13_proof_envelope(&document.proof) else {
@@ -673,7 +670,7 @@ pub fn ts13_verify_zk_document(
         || !request
             .trusted_issuer_hashes
             .iter()
-            .any(|trusted| trusted == &hex_sha256(&envelope.issuer_public_key))
+            .any(|trusted| trusted == &sha256_hex(&envelope.issuer_public_key))
     {
         return Ok(false);
     }
@@ -933,6 +930,10 @@ mod tests {
         assert_eq!(ts13_default_circuit_hash().len(), 64);
         assert!(is_lower_hex_sha256(&ts13_default_circuit_hash()));
         assert_eq!(
+            ts13_default_circuit_hash(),
+            lower_hex(&ts13_demo_circuit_hash())
+        );
+        assert_eq!(
             ts13_demo_circuit_hash(),
             eu_id_prover::ts13_demo_artifact_constants::TS13_DEMO_CIRCUIT_HASH.to_vec()
         );
@@ -1036,7 +1037,7 @@ mod tests {
             device_auth_profile: TS13_DEVICE_AUTH_PROFILE.to_string(),
             current_date_epoch_day: 20_000,
             session_transcript: vec![0x83, 0xF6, 0xF6, 0x80],
-            trusted_issuer_hashes: vec![hex_sha256(b"issuer")],
+            trusted_issuer_hashes: vec![sha256_hex(b"issuer")],
             revocation_public_key: vec![0u8; ML_DSA_65_PUBLIC_KEY_BYTES],
             revocation_epoch: 17,
         }
@@ -1061,7 +1062,7 @@ mod tests {
         ));
 
         let mut request = supported_request();
-        request.circuit_hash = hex_sha256(b"stale");
+        request.circuit_hash = sha256_hex(b"stale");
         assert!(matches!(
             ts13_validate_presentation_request(&request),
             Err(ZkError::InvalidInput(_))
@@ -1119,6 +1120,7 @@ mod tests {
         let document =
             ts13_build_zk_document(request.clone(), canonical_ts13_disclosures(), oversized)
                 .expect("document builder leaves proof verification to the verifier");
-        assert!(!ts13_document_matches_request(&request, &document).expect("bounded match"));
+        assert!(ts13_document_matches_request(&request, &document));
+        assert_eq!(ts13_verify_zk_document(&request, &document), Ok(false));
     }
 }

@@ -372,10 +372,7 @@ impl FrameworkEval for Sha256Eval {
         // The 2 unaliased final slots (`h_out` word `N_STATE_WORDS - 1`)
         // keep the plain finalization-only pin — never live at `t = 15`.
         let not_r63 = E::F::one() - r63.clone();
-        for cell in [
-            &h_out[N_STATE_WORDS - 1].0,
-            &h_out[N_STATE_WORDS - 1].1,
-        ] {
+        for cell in [&h_out[N_STATE_WORDS - 1].0, &h_out[N_STATE_WORDS - 1].1] {
             eval.add_constraint(not_r63.clone() * cell.clone());
         }
 
@@ -585,9 +582,15 @@ impl FrameworkEval for Sha256Eval {
 
         // (P.H) Length-field encoding.
         let gate_length = r15.clone() * is_length_block.clone();
-        eval.add_constraint(gate_length.clone() * (w_msg(14).0.clone() - bit_length_w14_lo.clone()));
-        eval.add_constraint(gate_length.clone() * (w_msg(14).1.clone() - bit_length_w14_hi.clone()));
-        eval.add_constraint(gate_length.clone() * (w_msg(15).0.clone() - bit_length_w15_lo.clone()));
+        eval.add_constraint(
+            gate_length.clone() * (w_msg(14).0.clone() - bit_length_w14_lo.clone()),
+        );
+        eval.add_constraint(
+            gate_length.clone() * (w_msg(14).1.clone() - bit_length_w14_hi.clone()),
+        );
+        eval.add_constraint(
+            gate_length.clone() * (w_msg(15).0.clone() - bit_length_w15_lo.clone()),
+        );
         eval.add_constraint(gate_length * (w_msg(15).1.clone() - bit_length_w15_hi.clone()));
 
         // ---- field provider (four bytes on each input-word row) ----

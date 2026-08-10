@@ -24,6 +24,8 @@ mod tests {
     fn alpha2_maps_to_iso_numeric_and_rejects_unknown_codes() {
         assert_eq!(iso_alpha2_to_numeric("DE"), Some(276));
         assert_eq!(iso_alpha2_to_numeric("FR"), Some(250));
+        assert_eq!(iso_alpha2_to_numeric("cy"), Some(196));
+        assert_eq!(iso_alpha2_to_numeric("US"), Some(840));
         assert_eq!(iso_alpha2_to_numeric("XK"), Some(383));
         assert_eq!(iso_alpha2_to_numeric("ZZ"), None);
         assert_eq!(iso_alpha2_to_numeric(""), None);

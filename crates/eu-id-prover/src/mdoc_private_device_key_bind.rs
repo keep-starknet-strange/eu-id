@@ -66,7 +66,8 @@ const MAIN_LOGUP_SITES: usize = 23;
 /// Matches the `finalize_logup_batched(LOGUP_BATCH)` call in `evaluate()`; degree-recounted
 /// safe at +2 (all numerators here are degree <=1, so batch-4 folding tops out at D5).
 const LOGUP_BATCH: usize = 4;
-const MAIN_INTERACTION_COLS: usize = MAIN_LOGUP_SITES.div_ceil(LOGUP_BATCH) * SECURE_EXTENSION_DEGREE;
+const MAIN_INTERACTION_COLS: usize =
+    MAIN_LOGUP_SITES.div_ceil(LOGUP_BATCH) * SECURE_EXTENSION_DEGREE;
 const BLINDER_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 
 const PP_ACTIVE: usize = 0;

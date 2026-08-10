@@ -28,9 +28,6 @@ rayon = "1"
 # version the eu-id-prover fixture uses.
 ciborium = "0.2.2"
 ml-dsa = "0.1.1"
-# FFI transport compression keeps the exported byte API stable while
-# compressing the inner proof payload of the TS13 presentation envelope.
-bzip2 = "0.6"
 # Issuer-key pins and the TS13 request binding hash are SHA-256 digests.
 sha2 = "0.10"
 

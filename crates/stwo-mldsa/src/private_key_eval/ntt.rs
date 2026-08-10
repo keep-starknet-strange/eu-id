@@ -450,8 +450,7 @@ fn add_mul_constraints<E: EvalAtRow>(
 ) {
     let c2046 = E::F::from(m31(2046));
     let c4096 = E::F::from(m31(4096));
-    let e0 =
-        constant[0].clone() * input[0].clone() - quotient[0].clone() - output[0].clone();
+    let e0 = constant[0].clone() * input[0].clone() - quotient[0].clone() - output[0].clone();
     eval.add_constraint(gate.clone() * (e0 - c4096.clone() * carries[0].clone()));
     let e1 = constant[0].clone() * input[1].clone() + constant[1].clone() * input[0].clone()
         - quotient[1].clone()
@@ -1379,9 +1378,10 @@ mod tests {
         // new nibble-based limbs.
         let mutant_b0 = value & 0xff;
         let mutant_b1 = (value >> 8) & 0xff;
-        let mutant_denominator: SecureField = relations
-            .ntt
-            .combine(&[m31(0), m31(0), m31(0), m31(mutant_b0), m31(mutant_b1)]);
+        let mutant_denominator: SecureField =
+            relations
+                .ntt
+                .combine(&[m31(0), m31(0), m31(0), m31(mutant_b0), m31(mutant_b1)]);
         assert_ne!(
             correct_denominator, mutant_denominator,
             "reusing the old byte-split limbs as the new 12/11-bit limbs must not \

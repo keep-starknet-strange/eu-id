@@ -84,11 +84,11 @@ use stwo_constraint_framework::{
 };
 
 use crate::air_util::{circle_row_to_coset, col_eval, enc_signed, m31, ColEval};
+use crate::coeffs::tables::RcKind;
+use crate::coeffs::RcUses;
 #[cfg(test)]
 use crate::constants::GAMMA2;
 use crate::constants::{K, N, Q};
-use crate::coeffs::tables::RcKind;
-use crate::coeffs::RcUses;
 use crate::profile::{MlDsaProfile, ML_DSA_65};
 use crate::witness::MlDsaWitness;
 use relations::DecompRelations;
@@ -274,14 +274,14 @@ mod range_provenance_tests {
     #[test]
     fn decomp_range_lookup_gates_are_preprocessed_and_boolean() {
         const SITES: &[(&str, GateKind)] = &[
-            ("w1 (Rc4)", GateKind::Preprocessed),          // mod.rs ~:644, gate=enabler_pre
-            ("a_lo/b_lo (Rc13)", GateKind::Preprocessed),   // mod.rs ~:671, gate=enabler_pre
-            ("a_hi/b_hi (Rc7)", GateKind::Preprocessed),    // mod.rs ~:678, gate=enabler_pre
-            ("sign_lo (Rc13)", GateKind::Preprocessed),     // mod.rs ~:702, gate=enabler_pre
-            ("sign_hi (Rc7)", GateKind::Preprocessed),      // mod.rs ~:707, gate=enabler_pre
-            ("w1' (Rc4)", GateKind::Preprocessed),          // mod.rs ~:729, gate=enabler_pre
-            ("hint_acc (Rc8)", GateKind::Preprocessed),     // mod.rs ~:789, gate=is_last
-            ("acc_room (Rc8)", GateKind::Preprocessed),     // mod.rs ~:794, gate=is_last
+            ("w1 (Rc4)", GateKind::Preprocessed), // mod.rs ~:644, gate=enabler_pre
+            ("a_lo/b_lo (Rc13)", GateKind::Preprocessed), // mod.rs ~:671, gate=enabler_pre
+            ("a_hi/b_hi (Rc7)", GateKind::Preprocessed), // mod.rs ~:678, gate=enabler_pre
+            ("sign_lo (Rc13)", GateKind::Preprocessed), // mod.rs ~:702, gate=enabler_pre
+            ("sign_hi (Rc7)", GateKind::Preprocessed), // mod.rs ~:707, gate=enabler_pre
+            ("w1' (Rc4)", GateKind::Preprocessed), // mod.rs ~:729, gate=enabler_pre
+            ("hint_acc (Rc8)", GateKind::Preprocessed), // mod.rs ~:789, gate=is_last
+            ("acc_room (Rc8)", GateKind::Preprocessed), // mod.rs ~:794, gate=is_last
         ];
         assert_eq!(
             SITES.len(),
@@ -1436,7 +1436,10 @@ fn lane_rc(
                 RcField::SignLo => (sign_val & ((1 << 13) - 1)) as u32,
                 RcField::SignHi => (sign_val >> 13) as u32,
             };
-            (one, range_denominator(&relations.range, val, field.rc_kind()))
+            (
+                one,
+                range_denominator(&relations.range, val, field.rc_kind()),
+            )
         }
         None => (zero, one),
     }

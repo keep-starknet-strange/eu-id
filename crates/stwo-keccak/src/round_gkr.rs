@@ -217,7 +217,7 @@ fn claimed_sum_from_parts(numerators: &[PackedM31], denominators: &[PackedQM31])
     total.to_array().iter().copied().sum()
 }
 
-fn global_claimed_sum(fracs: &Fractions) -> SecureField {
+fn shard_claimed_sum(fracs: &Fractions) -> SecureField {
     claimed_sum_from_parts(fracs.numerators(), fracs.denominators())
 }
 
@@ -278,7 +278,7 @@ impl RoundGkrProver {
             .iter()
             .map(|shard| build_fractions(relations, shard))
             .collect::<Vec<_>>();
-        let claimed_sums = fracs.iter().map(global_claimed_sum).collect::<Vec<_>>();
+        let claimed_sums = fracs.iter().map(shard_claimed_sum).collect::<Vec<_>>();
         let claimed_sum = claimed_sums.iter().copied().sum();
         Self {
             fracs,
@@ -385,9 +385,6 @@ pub fn verify_round_gkr_batch(
     let proof =
         decode_gkr_batch_proof(blob).map_err(|e| bad(format!("blob decode failed: {e}")))?;
     validate_batch_shape(&proof, log_sizes).map_err(bad)?;
-    if proof.output_claims_by_instance.len() != log_sizes.len() {
-        return Err(bad("wrong GKR instance count".into()));
-    }
     let mut claimed_sums = Vec::with_capacity(log_sizes.len());
     for output in &proof.output_claims_by_instance {
         let [num_out, den_out] = output.as_slice() else {
@@ -974,12 +971,25 @@ mod tests {
                 &log_sizes,
             );
         };
+        mutate_and_reject(&|proof| {
+            proof.layer_masks_by_instance.pop();
+        });
+        mutate_and_reject(&|proof| {
+            proof.output_claims_by_instance.pop();
+        });
+        mutate_and_reject(&|proof| {
+            proof.sumcheck_proofs.pop();
+        });
         mutate_and_reject(&|proof| proof.layer_masks_by_instance[2].clear());
         mutate_and_reject(&|proof| {
             proof.layer_masks_by_instance[1][3] = GkrMask::new(Vec::new());
         });
         mutate_and_reject(&|proof| {
             proof.sumcheck_proofs[3].round_polys.pop();
+        });
+        mutate_and_reject(&|proof| {
+            let extra = proof.sumcheck_proofs[3].round_polys[0].clone();
+            proof.sumcheck_proofs[3].round_polys.push(extra);
         });
         mutate_and_reject(&|proof| {
             proof.output_claims_by_instance[0].pop();
@@ -1068,8 +1078,8 @@ mod tests {
         let honest = build_fractions(&relations, &data);
         let shifted = build_fractions(&relations, &rotated);
         assert_eq!(
-            global_claimed_sum(&honest),
-            global_claimed_sum(&shifted),
+            shard_claimed_sum(&honest),
+            shard_claimed_sum(&shifted),
             "a logical row rotation must preserve the fraction multiset"
         );
 
@@ -1152,7 +1162,7 @@ mod tests {
 
         let generic_values =
             generic_layer_values(generic_gkr_input_layer_reference(&fracs, log_size));
-        let multiplicities_sum = global_claimed_sum(&fracs);
+        let multiplicities_sum = shard_claimed_sum(&fracs);
         assert_eq!(
             multiplicities_sum,
             slotwise_claimed_sum_reference(&fracs),
@@ -1256,7 +1266,7 @@ mod tests {
         let mut verifier_channel = Blake2sChannel::default();
         let _ = KeccakRelations::draw(&mut verifier_channel);
         let fracs = build_fractions(&relations, &data);
-        let sum = global_claimed_sum(&fracs);
+        let sum = shard_claimed_sum(&fracs);
         let generic_layer = generic_gkr_input_layer_reference(&fracs, log_size);
         let generic_coeff_layer = generic_gkr_input_layer_reference(&fracs, log_size);
         let multiplicities_layer = gkr_input_layer(fracs, log_size);

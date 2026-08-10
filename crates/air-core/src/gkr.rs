@@ -16,7 +16,7 @@
 //! proof against the shared Fiat-Shamir channel in `verify_post_interaction`
 //! with
 //! [`partially_verify_batch`](stwo::prover::lookups::gkr_verifier::partially_verify_batch)):
-//! The channel state already binds trees 1 and 2, the relations, and the claimed
+//! The channel state already binds trees 0-2, the relations, and the claimed
 //! sums. A changed payload changes the channel state. The sumcheck or circuit
 //! check then rejects the proof.
 

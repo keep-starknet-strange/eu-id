@@ -31,11 +31,12 @@ use crate::balancer::{
     BALANCER_INTERACTION_COLS,
 };
 use crate::binding::{CCELL_ARITY, HASH_IO_ARITY, STREAM_ID_SIB_SQUEEZE};
+use crate::coeffs::tables::RcKind;
 use crate::coeffs::tables::{
     gen_range_table_interaction, gen_range_table_multiplicities, gen_range_table_preprocessed,
-    range_table_log_size, range_table_preprocessed_ids, RangeTableEval, RANGE_TABLE_INTERACTION_COLS,
+    range_table_log_size, range_table_preprocessed_ids, RangeTableEval,
+    RANGE_TABLE_INTERACTION_COLS,
 };
-use crate::coeffs::tables::RcKind;
 use crate::constants::N;
 use crate::profile::ML_DSA_65;
 use crate::witness::MlDsaWitness;
@@ -77,7 +78,10 @@ fn all_preprocessed_ids() -> Vec<PreProcessedColumnId> {
 
 fn all_preprocessed_log_sizes(log_size: u32) -> Vec<u32> {
     let mut sizes = vec![log_size; sib_preprocessed_ids().len()];
-    sizes.extend(vec![range_table_log_size(); range_table_preprocessed_ids().len()]);
+    sizes.extend(vec![
+        range_table_log_size();
+        range_table_preprocessed_ids().len()
+    ]);
     sizes
 }
 

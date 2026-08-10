@@ -1855,7 +1855,8 @@ impl Air for MdocPrivateItemBind {
             trace: vec![self.log_size; trace_col::COUNT],
             interaction: vec![
                 self.log_size;
-                self.main_interaction_sites().div_ceil(LOGUP_BATCH) * SECURE_EXTENSION_DEGREE
+                self.main_interaction_sites().div_ceil(LOGUP_BATCH)
+                    * SECURE_EXTENSION_DEGREE
                     + SECURE_EXTENSION_DEGREE
             ],
         }
