@@ -68,7 +68,7 @@ The proof enforces these checks together:
 ## Build and test
 
 The repository pins its Rust nightly in `rust-toolchain.toml`. Release builds
-use fat LTO and one code-generation unit. The commands default to 12 Cargo and
+use fat LTO and two code-generation units. The commands default to 12 Cargo and
 Rayon workers. Proof-heavy tests use one test thread.
 
 ```bash

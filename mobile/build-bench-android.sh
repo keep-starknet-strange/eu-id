@@ -21,8 +21,8 @@ import pathlib, sys, tomllib
 profile = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["profile"]["release"]
 print(profile.get("lto"), profile.get("codegen-units"))
 ' "$WORKSPACE_ROOT/Cargo.toml")"
-if [[ "$PROFILE_SETTINGS" != "fat 1" ]]; then
-    echo "release profile must use fat LTO and one codegen unit, got: $PROFILE_SETTINGS" >&2
+if [[ "$PROFILE_SETTINGS" != "fat 2" ]]; then
+    echo "release profile must use fat LTO and two codegen units, got: $PROFILE_SETTINGS" >&2
     exit 1
 fi
 LTO_MODE="${PROFILE_SETTINGS%% *}"

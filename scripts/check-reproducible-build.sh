@@ -27,8 +27,8 @@ import pathlib, sys, tomllib
 p = tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["profile"]["release"]
 print(p.get("lto"), p.get("codegen-units"))
 ' "$workspace_root/Cargo.toml")"
-if [[ "$release_profile" != "fat 1" ]]; then
-    echo "release profile must use fat LTO and one codegen unit, got: $release_profile" >&2
+if [[ "$release_profile" != "fat 2" ]]; then
+    echo "release profile must use fat LTO and two codegen units, got: $release_profile" >&2
     exit 1
 fi
 case "$host_target" in
