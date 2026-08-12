@@ -89,7 +89,8 @@ impl Layout {
     pub const COL_MSG_START: usize = Self::COL_SCHED_ENTRY_END;
     pub const COL_H_IN_START: usize = Self::COL_MSG_START + 1;
     pub const COL_H_IN_END: usize = Self::COL_H_IN_START + 2 * N_STATE_WORDS;
-    /// `t = 63` family.
+    /// `t = 63` family. The first 30 cells are also the padding-role
+    /// witness on the disjoint `t = 15` family.
     pub const COL_FINAL_CARRIES_START: usize = Self::COL_H_IN_END;
     pub const COL_FINAL_CARRIES_END: usize = Self::COL_FINAL_CARRIES_START + 2 * N_STATE_WORDS;
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
@@ -108,8 +109,9 @@ impl Layout {
     pub const COL_DIGEST_BYTES_START: usize = Self::COL_IS_MSG_LAST + 1;
     pub const COL_DIGEST_BYTES_END: usize = Self::COL_DIGEST_BYTES_START + DIGEST_BYTES;
 
-    /// Per-block padding-role region, live on the `t = 15` row.
-    pub const COL_PADDING_START: usize = Self::COL_DIGEST_BYTES_END;
+    /// Per-block padding-role region, aliased onto the first 30 cells of the
+    /// 32-cell finalization-carry/output region.
+    pub const COL_PADDING_START: usize = Self::COL_FINAL_CARRIES_START;
     pub const COL_IS_MARKER_BLOCK: usize = Self::COL_PADDING_START;
     pub const COL_IS_LENGTH_BLOCK: usize = Self::COL_PADDING_START + 1;
     pub const COL_IS_MARKER_WORD_START: usize = Self::COL_PADDING_START + 2;
@@ -125,7 +127,7 @@ impl Layout {
     pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
 
     /// Private packed-message key, flat over each message's blocks.
-    pub const COL_MSG_ID: usize = Self::COL_PADDING_END;
+    pub const COL_MSG_ID: usize = Self::COL_DIGEST_BYTES_END;
     /// Private block number, reset at each message start.
     pub const COL_MSG_BLOCK: usize = Self::COL_MSG_ID + 1;
     pub const TOTAL_COLS: usize = Self::COL_MSG_BLOCK + 1;
@@ -275,6 +277,7 @@ pub(crate) fn generate_trace_base_columns(
     let n_rows = 1usize << log_size;
     let n_real_rows = witness.total_blocks() * ROWS_PER_BLOCK;
     assert!(n_real_rows <= n_rows, "packed SHA trace is too small");
+    assert!(n_real_rows.is_multiple_of(ROWS_PER_BLOCK));
     let decoys = decoy_witnesses_for_padding(n_real_rows, n_rows);
 
     if log_size < LOG_N_LANES || rayon::current_num_threads() == 1 {
@@ -338,6 +341,7 @@ fn generate_trace_scalar(
 ) -> Vec<Vec<BaseField>> {
     let n_rows = 1usize << log_size;
     let n_real_rows = witness.total_blocks() * ROWS_PER_BLOCK;
+    assert!(n_real_rows.is_multiple_of(ROWS_PER_BLOCK));
     let mut cols = vec![vec![BaseField::from(0u32); n_rows]; Layout::TOTAL_COLS];
     for row_idx in 0..n_real_rows {
         let (message_idx, block_idx) = locate_block(witness, row_idx / ROWS_PER_BLOCK);
@@ -409,7 +413,11 @@ fn disabled_decoy_row_values(decoy: &Sha256Witness, t: usize) -> Vec<BaseField> 
     values[Layout::COL_IS_MSG_LAST] = BaseField::from(0u32);
     values[Layout::COL_MSG_ID] = BaseField::from(0u32);
     values[Layout::COL_MSG_BLOCK] = BaseField::from(0u32);
-    values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
+    // These cells alias live finalization data at t=63, so only clear the
+    // padding-family view on other decoy rows.
+    if t != N_ROUNDS - 1 {
+        values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
+    }
     values
 }
 
@@ -916,13 +924,14 @@ mod tests {
             + 2 * N_STATE_WORDS // h_out
             + 1 // is_msg_last
             + DIGEST_BYTES
-            + PADDING_ROW_COLS
             + 2; // msg_id + msg_block
         assert_eq!(Layout::TOTAL_COLS, expected);
         assert_eq!(ROUND_COLS, 216);
         assert_eq!(SCHEDULE_ENTRY_COLS, 6);
         assert_eq!(PADDING_ROW_COLS, 30);
-        assert_eq!(Layout::TOTAL_COLS, 371);
+        assert_eq!(Layout::TOTAL_COLS, 341);
+        assert_eq!(Layout::COL_PADDING_START, Layout::COL_FINAL_CARRIES_START);
+        assert!(Layout::COL_PADDING_END <= Layout::COL_H_OUT_END);
     }
 
     /// Round family, schedule family, and boundary families round-trip a

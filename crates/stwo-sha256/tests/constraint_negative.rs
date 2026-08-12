@@ -218,6 +218,70 @@ fn honest_fixture() -> (Vec<Vec<BaseField>>, u32) {
 }
 
 #[test]
+fn rejects_aliased_cells_outside_round_15_and_round_63() {
+    let (trace, log_size) = honest_fixture();
+    assert_air_accepts(&trace, log_size);
+    let natural_row = stwo_sha256::constants::N_ROUNDS - 2;
+    for column in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
+        let mut mutated = trace.clone();
+        add_one_natural(&mut mutated, column, natural_row, log_size);
+        assert!(
+            row_has_constraint_failure(&mutated, log_size, natural_row),
+            "aliased column {column} must be zero outside t=15/t=63"
+        );
+    }
+}
+
+#[test]
+fn rejects_padding_value_in_aliased_slot_at_round_63() {
+    let (mut trace, log_size) = honest_fixture();
+    let natural_row = stwo_sha256::constants::N_ROUNDS - 1;
+    add_one_natural(&mut trace, Layout::COL_PADDING_START, natural_row, log_size);
+    assert!(row_has_constraint_failure(&trace, log_size, natural_row));
+}
+
+#[test]
+fn rejects_marker_flag_on_disabled_round_15() {
+    let (mut trace, log_size) = honest_fixture();
+    let disabled_t15 = 4 * ROWS_PER_BLOCK + 15;
+    assert_eq!(
+        trace[Layout::COL_ENABLER][Layout::row_slot(disabled_t15, log_size)].0,
+        0
+    );
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MARKER_BLOCK,
+        disabled_t15,
+        1,
+        log_size,
+    );
+    assert!(row_has_constraint_failure(&trace, log_size, disabled_t15));
+}
+
+#[test]
+fn rejects_live_padding_cells_on_disabled_round_15() {
+    let (trace, log_size) = honest_fixture();
+    let disabled_t15 = 4 * ROWS_PER_BLOCK + 15;
+    let inert_length_cells = [
+        Layout::COL_BIT_LENGTH_W14_LO,
+        Layout::COL_BIT_LENGTH_W14_HI,
+        Layout::COL_BIT_LENGTH_W15_LO,
+        Layout::COL_BIT_LENGTH_W15_HI,
+    ];
+    for column in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
+        if inert_length_cells.contains(&column) {
+            continue;
+        }
+        let mut mutated = trace.clone();
+        set_natural(&mut mutated, column, disabled_t15, 1, log_size);
+        assert!(
+            row_has_constraint_failure(&mutated, log_size, disabled_t15),
+            "live padding cell {column} must reject on a disabled t=15 row"
+        );
+    }
+}
+
+#[test]
 fn honest_packed_trace_satisfies_all_base_constraints() {
     let (trace, log_size) = honest_fixture();
     assert_air_accepts(&trace, log_size);

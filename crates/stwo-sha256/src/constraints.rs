@@ -55,8 +55,8 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Base constraints have degree three or less.
-        // A boundary gate has degree two and multiplies a linear identity.
+        // Base constraints have degree four or less. The ceiling is the
+        // r15-gated, derived padding-role expression multiplied by W.
         // `finalize_logup_batched` uses four fractions per interaction column.
         // The resulting LogUp constraint has degree five or less.
         // `log_size + 2` supplies the required composition domain.
@@ -423,6 +423,35 @@ impl FrameworkEval for Sha256Eval {
             h_out_prev[j] = (lo_prev, hi_prev);
         }
 
+        // Padding aliases the first 30 of these 32 physical cells: all 16
+        // final carries, then the first 14 h_out limbs. The t=15 and t=63
+        // preprocessed selectors are disjoint.
+        let aliased: [E::F; crate::trace::PADDING_ROW_COLS] = std::array::from_fn(|i| {
+            if i < 2 * N_STATE_WORDS {
+                let (word, hi) = (i / 2, i % 2 == 1);
+                if hi {
+                    final_carries[word].1.clone()
+                } else {
+                    final_carries[word].0.clone()
+                }
+            } else {
+                let i = i - 2 * N_STATE_WORDS;
+                let (word, hi) = (i / 2, i % 2 == 1);
+                if hi {
+                    h_out[word].1.clone()
+                } else {
+                    h_out[word].0.clone()
+                }
+            }
+        });
+        let neither_r15_nor_r63 = E::F::one() - r15.clone() - r63.clone();
+        for cell in &aliased {
+            eval.add_constraint(neither_r15_nor_r63.clone() * cell.clone());
+        }
+        let not_r63 = E::F::one() - r63.clone();
+        eval.add_constraint(not_r63.clone() * h_out[N_STATE_WORDS - 1].0.clone());
+        eval.add_constraint(not_r63 * h_out[N_STATE_WORDS - 1].1.clone());
+
         // Finalization: h_out[j] = h_in[j] + working[j] (mod 2³²), on the
         // t = 63 row. `h_in[j]` is the same block's t = 0 row (offset −63).
         // `working[j]` is the state after round 63 — `a_new`/`e_new` of
@@ -505,38 +534,40 @@ impl FrameworkEval for Sha256Eval {
         }
         // ---- §10.4 padding-role constraints (t = 15 rows) ----
         //
-        // Identical algebra to the wide layout. The block's message words
-        // `W[j]` are the `W` columns of rows `t = j`, i.e. `w[15 − j]` from
-        // here. On every row outside a real t = 15 row all padding cells
-        // are zero, so each identity holds vacuously.
-        let is_marker_block = eval.next_trace_mask();
-        let is_length_block = eval.next_trace_mask();
-        let is_marker_word: [E::F; N_INPUT_WORDS] = std::array::from_fn(|_| eval.next_trace_mask());
-        let marker_byte_sel: [E::F; WORD_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
-        let marker_word_byte: [E::F; WORD_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
-        let bit_length_w14_lo = eval.next_trace_mask();
-        let bit_length_w14_hi = eval.next_trace_mask();
-        let bit_length_w15_lo = eval.next_trace_mask();
-        let bit_length_w15_hi = eval.next_trace_mask();
+        // These are views over the aliased finalization region. Every P.*
+        // identity below uses bare r15 so it also binds disabled t=15 rows,
+        // while ignoring live t=63 finalization values.
+        let is_marker_block = aliased[0].clone();
+        let is_length_block = aliased[1].clone();
+        let is_marker_word: [E::F; N_INPUT_WORDS] = std::array::from_fn(|j| aliased[2 + j].clone());
+        let marker_byte_sel: [E::F; WORD_BYTES] =
+            std::array::from_fn(|b| aliased[2 + N_INPUT_WORDS + b].clone());
+        let marker_word_byte: [E::F; WORD_BYTES] =
+            std::array::from_fn(|b| aliased[2 + N_INPUT_WORDS + WORD_BYTES + b].clone());
+        let bit_length_base = 2 + N_INPUT_WORDS + 2 * WORD_BYTES;
+        let bit_length_w14_lo = aliased[bit_length_base].clone();
+        let bit_length_w14_hi = aliased[bit_length_base + 1].clone();
+        let bit_length_w15_lo = aliased[bit_length_base + 2].clone();
+        let bit_length_w15_hi = aliased[bit_length_base + 3].clone();
 
         // The block's message word `W[j]`, from the t = 15 row's viewpoint.
         let w_msg = |j: usize| -> &(E::F, E::F) { &w[15 - j] };
 
-        // (P.A) Binary checks (ungated — all cells are 0 off-family).
+        // (P.A) Binary checks.
         for flag in [&is_marker_block, &is_length_block] {
-            eval.add_constraint(flag.clone() * (E::F::one() - flag.clone()));
+            eval.add_constraint(r15.clone() * flag.clone() * (E::F::one() - flag.clone()));
         }
         for bit in is_marker_word.iter() {
-            eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
+            eval.add_constraint(r15.clone() * bit.clone() * (E::F::one() - bit.clone()));
         }
         for bit in marker_byte_sel.iter() {
-            eval.add_constraint(bit.clone() * (E::F::one() - bit.clone()));
+            eval.add_constraint(r15.clone() * bit.clone() * (E::F::one() - bit.clone()));
         }
 
         // (P.A') Mn1: pin the padding-role flags to 0 on disabled rows.
         let one_minus_enabler = E::F::one() - enabler.clone();
         for flag in [&is_marker_block, &is_length_block] {
-            eval.add_constraint(one_minus_enabler.clone() * flag.clone());
+            eval.add_constraint(r15.clone() * one_minus_enabler.clone() * flag.clone());
         }
 
         // (P.B) One-hot sums match the block role.
@@ -544,12 +575,12 @@ impl FrameworkEval for Sha256Eval {
             .iter()
             .cloned()
             .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
-        eval.add_constraint(sum_is_marker_word - is_marker_block.clone());
+        eval.add_constraint(r15.clone() * (sum_is_marker_word - is_marker_block.clone()));
         let sum_marker_byte_sel: E::F = marker_byte_sel
             .iter()
             .cloned()
             .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
-        eval.add_constraint(sum_marker_byte_sel - is_marker_block.clone());
+        eval.add_constraint(r15.clone() * (sum_marker_byte_sel - is_marker_block.clone()));
 
         // (P.C) Derive the live auxiliary expression instead of committing it.
         let is_length_only_block =
@@ -575,28 +606,32 @@ impl FrameworkEval for Sha256Eval {
             sum_w_lo += is_marker.clone() * w_msg(j).0.clone();
         }
         eval.add_constraint(
-            sum_w_hi
-                - byte_base.clone() * marker_word_byte[0].clone()
-                - marker_word_byte[1].clone(),
+            r15.clone()
+                * (sum_w_hi
+                    - byte_base.clone() * marker_word_byte[0].clone()
+                    - marker_word_byte[1].clone()),
         );
         eval.add_constraint(
-            sum_w_lo
-                - byte_base.clone() * marker_word_byte[2].clone()
-                - marker_word_byte[3].clone(),
+            r15.clone()
+                * (sum_w_lo
+                    - byte_base.clone() * marker_word_byte[2].clone()
+                    - marker_word_byte[3].clone()),
         );
 
         // (P.E) The marker byte is `0x80`.
         let marker_value = E::F::from(M31::from(0x80u32));
         for b in 0..WORD_BYTES {
             eval.add_constraint(
-                marker_byte_sel[b].clone() * (marker_word_byte[b].clone() - marker_value.clone()),
+                r15.clone()
+                    * marker_byte_sel[b].clone()
+                    * (marker_word_byte[b].clone() - marker_value.clone()),
             );
         }
 
         // (P.F) Bytes strictly after the marker byte are zero.
         let mut cum_byte_sel = E::F::from(M31::from(0u32));
         for b in 0..WORD_BYTES {
-            eval.add_constraint(cum_byte_sel.clone() * marker_word_byte[b].clone());
+            eval.add_constraint(r15.clone() * cum_byte_sel.clone() * marker_word_byte[b].clone());
             cum_byte_sel += marker_byte_sel[b].clone();
         }
 
@@ -604,26 +639,20 @@ impl FrameworkEval for Sha256Eval {
         // exception. See the wide-layout derivation for the W[14]/W[15]
         // case analysis).
         for (j, cum_marker) in cum_marker_word.iter().enumerate().take(14) {
-            let gate = cum_marker.clone() + is_length_only_block.clone();
+            let gate = r15.clone() * (cum_marker.clone() + is_length_only_block.clone());
             eval.add_constraint(gate.clone() * w_msg(j).0.clone());
             eval.add_constraint(gate * w_msg(j).1.clone());
         }
-        eval.add_constraint(marker_word_post_strict_15.clone() * w_msg(15).0.clone());
-        eval.add_constraint(marker_word_post_strict_15.clone() * w_msg(15).1.clone());
+        let gate_post_strict_15 = r15.clone() * marker_word_post_strict_15.clone();
+        eval.add_constraint(gate_post_strict_15.clone() * w_msg(15).0.clone());
+        eval.add_constraint(gate_post_strict_15 * w_msg(15).1.clone());
 
         // (P.H) Length-field encoding.
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(14).0.clone() - bit_length_w14_lo.clone()),
-        );
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(14).1.clone() - bit_length_w14_hi.clone()),
-        );
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(15).0.clone() - bit_length_w15_lo.clone()),
-        );
-        eval.add_constraint(
-            is_length_block.clone() * (w_msg(15).1.clone() - bit_length_w15_hi.clone()),
-        );
+        let gate_length = r15.clone() * is_length_block.clone();
+        eval.add_constraint(gate_length.clone() * (w_msg(14).0.clone() - bit_length_w14_lo));
+        eval.add_constraint(gate_length.clone() * (w_msg(14).1.clone() - bit_length_w14_hi));
+        eval.add_constraint(gate_length.clone() * (w_msg(15).0.clone() - bit_length_w15_lo));
+        eval.add_constraint(gate_length * (w_msg(15).1.clone() - bit_length_w15_hi));
 
         // ---- packed active prefix and message metadata ----
         eval.add_constraint(

@@ -985,9 +985,9 @@ mod tests {
     #[test]
     fn packed_shared_table_masked_width_is_exact() {
         assert_eq!(CLAIM_MASK_TRACE_COLUMNS, 4);
-        assert_eq!(Layout::TOTAL_COLS, 371);
-        assert_eq!(base_trace_log_sizes(14, 0, false, false).len(), 371);
-        assert_eq!(base_trace_log_sizes(14, 0, false, true).len(), 375);
+        assert_eq!(Layout::TOTAL_COLS, 341);
+        assert_eq!(base_trace_log_sizes(14, 0, false, false).len(), 341);
+        assert_eq!(base_trace_log_sizes(14, 0, false, true).len(), 345);
         assert!(base_trace_log_sizes(14, 0, false, true)
             .iter()
             .all(|&log_size| log_size == 14));
