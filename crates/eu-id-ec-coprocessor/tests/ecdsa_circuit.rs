@@ -1073,28 +1073,6 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
     )
     .unwrap();
 
-    let mut malformed_batch = bundle.clone();
-    malformed_batch
-        .proximity_batch
-        .as_mut()
-        .unwrap()
-        .columns
-        .pop();
-    let malformed_batch_verdict = std::panic::catch_unwind(|| {
-        verify_mdoc_p4b_circuit_bundle(
-            &issuer_public,
-            &device_public,
-            &revocation_public,
-            &malformed_batch,
-            TEST_SEED,
-        )
-    });
-    assert!(
-        malformed_batch_verdict.is_ok(),
-        "a malformed flat batch length must not panic the P4b verifier"
-    );
-    assert!(malformed_batch_verdict.unwrap().is_err());
-
     let mut legacy_opening = bundle.clone();
     legacy_opening.proximity_openings.push(ColumnOpening {
         index: 0,
@@ -1111,7 +1089,67 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         ),
         Err(ImplementedCircuitProofError::NonCanonicalBundle),
     ));
-
+    let mut malformed_batches = vec![
+        ("legacy opening alongside batch", legacy_opening),
+        ("missing A batch", {
+            let mut malformed = bundle.clone();
+            malformed.proximity_batch = None;
+            malformed
+        }),
+        ("missing B batch", {
+            let mut malformed = bundle.clone();
+            malformed.proximity_batch_b = None;
+            malformed
+        }),
+    ];
+    for (label, use_b, mutation) in [
+        ("A short columns", false, 0u8),
+        ("A extra columns", false, 1),
+        ("A missing frontier", false, 2),
+        ("A extra frontier", false, 3),
+        ("A corrupt frontier", false, 4),
+        ("A reordered frontier", false, 5),
+        ("B short columns", true, 0),
+        ("B extra columns", true, 1),
+        ("B missing frontier", true, 2),
+        ("B extra frontier", true, 3),
+        ("B corrupt frontier", true, 4),
+        ("B reordered frontier", true, 5),
+    ] {
+        let mut malformed = bundle.clone();
+        let batch = if use_b {
+            malformed.proximity_batch_b.as_mut().unwrap()
+        } else {
+            malformed.proximity_batch.as_mut().unwrap()
+        };
+        match mutation {
+            0 => {
+                batch.columns.pop();
+            }
+            1 => batch.columns.push(Fp::ZERO),
+            2 => {
+                batch.frontier.pop();
+            }
+            3 => batch.frontier.push([0u8; 32]),
+            4 => batch.frontier[0][0] ^= 1,
+            5 => batch.frontier.swap(0, 1),
+            _ => unreachable!(),
+        }
+        malformed_batches.push((label, malformed));
+    }
+    for (label, malformed) in malformed_batches {
+        let verdict = std::panic::catch_unwind(|| {
+            verify_mdoc_p4b_circuit_bundle(
+                &issuer_public,
+                &device_public,
+                &revocation_public,
+                &malformed,
+                TEST_SEED,
+            )
+        });
+        assert!(verdict.is_ok(), "{label} must not panic the P4b verifier");
+        assert!(verdict.unwrap().is_err(), "{label} must reject");
+    }
     let mut corrupt_claim_blind_check = bundle.clone();
     corrupt_claim_blind_check.claim_blind_check.combined_row[0] =
         corrupt_claim_blind_check.claim_blind_check.combined_row[0] + Fp::ONE;
