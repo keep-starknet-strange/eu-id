@@ -66,8 +66,9 @@ const MDOC_SCOPE_UNORDERED_MAP_DEPTH: usize = 3;
 const _: () = assert!(MAX_PRESENTED_NATIONALITIES == 1usize << MDOC_SCOPE_NATIONALITY_SLACK_BITS);
 const DIGEST_EXIT_REQUIRES_SELECTED_ITEMS: u32 = 1;
 const DIGEST_ID_UNIVERSE_LOG_SIZE: u32 = 16;
-const ITEM_DIGEST_LOG_SIZE: u32 = 9;
+pub(crate) const ITEM_DIGEST_LOG_SIZE: u32 = 9;
 const ITEM_DIGEST_MESSAGE_ID_BASE: u32 = 3;
+const MDOC_SCOPE_TRANSCRIPT_VERSION: u64 = 4;
 
 pub(crate) const ISSUER_SIG_STRUCTURE_STREAM_ID: u32 = 0x4d53_0000;
 pub(crate) const ISSUER_PAYLOAD_STREAM_ID: u32 = 0x4d53_0001;
@@ -4202,10 +4203,11 @@ impl MdocScope {
 impl Air for MdocScope {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(0x4d44_4f43_5343_4f50);
-        channel.mix_u64(3);
+        channel.mix_u64(MDOC_SCOPE_TRANSCRIPT_VERSION);
         channel.mix_u64(u64::from(self.payload_hash_binding));
         channel.mix_u64(u64::from(self.metadata.log_size));
         channel.mix_u64(u64::from(self.table_log_size));
+        channel.mix_u64(u64::from(ITEM_DIGEST_LOG_SIZE));
         channel.mix_u64(u64::from(DIGEST_ID_UNIVERSE_LOG_SIZE));
         for chunk in self.statement.request_binding.chunks_exact(8) {
             channel.mix_u64(u64::from_be_bytes(

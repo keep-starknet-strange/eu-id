@@ -80,6 +80,7 @@ def outputs(workspace: Path) -> dict[str, bytes]:
             },
             "product_bounds": {
                 "item_cbor_log_size": 11,
+                "item_digest_log_size": 9,
                 "max_attributes": 2,
                 "max_cbor_log_size": 13,
                 "max_issuer_sig_structure_bytes": 6164,

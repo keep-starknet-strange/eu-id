@@ -231,6 +231,10 @@ mod tests {
             manifest["product_bounds"]["max_scope_log_size"],
             PRODUCT_MAX_SCOPE_LOG_SIZE
         );
+        assert_eq!(
+            manifest["product_bounds"]["item_digest_log_size"],
+            crate::mdoc_scope::ITEM_DIGEST_LOG_SIZE
+        );
     }
 
     #[test]
