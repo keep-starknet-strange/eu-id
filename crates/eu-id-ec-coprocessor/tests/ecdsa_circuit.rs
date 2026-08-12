@@ -13,10 +13,11 @@ use eu_id_ec_coprocessor::ecdsa::{
     verify_implemented_circuit_bundle, verify_implemented_circuit_bundle_batch_with_projection,
     verify_implemented_circuit_proofs, verify_implemented_circuits, verify_mdoc_p4b_circuit_bundle,
     verify_witness, EcdsaInput, EcdsaPublicProjection, ImplementedCircuitBundle,
-    ImplementedCircuitBundleEntry, LayoutSlot, MdocP4bMacKeyShares, Witness, WitnessError,
-    MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, MDOC_P4B_MAC_HALF_COUNT, N_LIMBS,
+    ImplementedCircuitBundleEntry, ImplementedCircuitProofError, LayoutSlot, MdocP4bMacKeyShares,
+    Witness, WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, MDOC_P4B_MAC_HALF_COUNT, N_LIMBS,
 };
 use eu_id_ec_coprocessor::ligero::{commit_witness, product_circle_params};
+use eu_id_ec_coprocessor::merkle::ColumnOpening;
 use eu_id_ec_coprocessor::sumcheck::{prove_circuit, CircuitPads};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;
@@ -1071,6 +1072,45 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
         TEST_SEED,
     )
     .unwrap();
+
+    let mut malformed_batch = bundle.clone();
+    malformed_batch
+        .proximity_batch
+        .as_mut()
+        .unwrap()
+        .columns
+        .pop();
+    let malformed_batch_verdict = std::panic::catch_unwind(|| {
+        verify_mdoc_p4b_circuit_bundle(
+            &issuer_public,
+            &device_public,
+            &revocation_public,
+            &malformed_batch,
+            TEST_SEED,
+        )
+    });
+    assert!(
+        malformed_batch_verdict.is_ok(),
+        "a malformed flat batch length must not panic the P4b verifier"
+    );
+    assert!(malformed_batch_verdict.unwrap().is_err());
+
+    let mut legacy_opening = bundle.clone();
+    legacy_opening.proximity_openings.push(ColumnOpening {
+        index: 0,
+        column: Vec::new(),
+        path: Vec::new(),
+    });
+    assert!(matches!(
+        verify_mdoc_p4b_circuit_bundle(
+            &issuer_public,
+            &device_public,
+            &revocation_public,
+            &legacy_opening,
+            TEST_SEED,
+        ),
+        Err(ImplementedCircuitProofError::NonCanonicalBundle),
+    ));
 
     let mut corrupt_claim_blind_check = bundle.clone();
     corrupt_claim_blind_check.claim_blind_check.combined_row[0] =
