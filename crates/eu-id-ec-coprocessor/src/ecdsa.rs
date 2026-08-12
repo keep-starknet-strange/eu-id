@@ -3,15 +3,15 @@ use std::time::{Duration, Instant};
 
 use crate::ligero::{
     commit_witness_with_quadratics_profiled, product_circle_params, quadratic_committed_len,
-    quadratic_route_claims, verify_and_authenticate_split_openings,
-    verify_authenticated_split_claim_batch, verify_claim_batch, verify_claim_blind_check,
-    verify_openings, verify_quadratic_batch, verify_split_claim_blind_check, LigeroClaimBatch,
-    LigeroClaimBlindCheck, LigeroError, LigeroLinearClaim, LigeroLinearTerm, LigeroParams,
-    LigeroProximityClaim, LigeroQuadraticBatch, LigeroQuadraticConstraint,
-    LIGERO_AUXILIARY_ROW_COUNT,
+    quadratic_route_claims, verify_and_authenticate_split_batch_openings,
+    verify_authenticated_quadratic_batch, verify_authenticated_split_claim_batch,
+    verify_authenticated_split_claim_blind_check, verify_claim_batch, verify_claim_blind_check,
+    verify_openings, verify_quadratic_batch, LigeroClaimBatch, LigeroClaimBlindCheck, LigeroError,
+    LigeroLinearClaim, LigeroLinearTerm, LigeroParams, LigeroProximityClaim, LigeroQuadraticBatch,
+    LigeroQuadraticConstraint, LIGERO_AUXILIARY_ROW_COUNT,
 };
 use crate::mac::{bytes_to_bits, gf128_tag, Gf128, GF128_BITS};
-use crate::merkle::ColumnOpening;
+use crate::merkle::{ColumnBatchOpening, ColumnOpening};
 use crate::sumcheck::{
     circuit_pad_len, circuit_quadratic_constraints, prove_circuit, prove_evaluated_circuit,
     prove_evaluated_circuit_sorted_sparse, verify_circuit, verify_circuit_sorted_sparse,
@@ -337,6 +337,8 @@ pub struct ImplementedCircuitBundle {
     pub proximity_openings: Vec<ColumnOpening>,
     #[serde(default)]
     pub proximity_openings_b: Vec<ColumnOpening>,
+    pub proximity_batch: Option<ColumnBatchOpening>,
+    pub proximity_batch_b: Option<ColumnBatchOpening>,
     pub proximity_claim: LigeroProximityClaim,
     pub claim_batch: LigeroClaimBatch,
     pub claim_blind_check: LigeroClaimBlindCheck,
@@ -949,6 +951,8 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
             root_b: None,
             proximity_openings,
             proximity_openings_b: Vec::new(),
+            proximity_batch: None,
+            proximity_batch_b: None,
             proximity_claim,
             claim_batch,
             claim_blind_check,
@@ -1262,11 +1266,11 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
         &quadratic_batch,
         transcript_seed,
     );
-    let proximity_openings = commitment
-        .open_columns(&opening_indices)
+    let proximity_batch = commitment
+        .open_batch(&opening_indices)
         .map_err(ImplementedCircuitProofError::Ligero)?;
-    let proximity_openings_b = commitment_b
-        .open_columns(&opening_indices)
+    let proximity_batch_b = commitment_b
+        .open_batch(&opening_indices)
         .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_openings = opening_start.elapsed();
     profile.claim_batch = claim_start.elapsed();
@@ -1284,8 +1288,10 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
             params,
             root,
             root_b: Some(root_b),
-            proximity_openings,
-            proximity_openings_b,
+            proximity_openings: Vec::new(),
+            proximity_openings_b: Vec::new(),
+            proximity_batch: Some(proximity_batch),
+            proximity_batch_b: Some(proximity_batch_b),
             proximity_claim,
             claim_batch,
             claim_blind_check,
@@ -1368,6 +1374,17 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     let root_b = bundle
         .root_b
         .ok_or(ImplementedCircuitProofError::ProximityOpeningRejected)?;
+    if !bundle.proximity_openings.is_empty() || !bundle.proximity_openings_b.is_empty() {
+        return Err(ImplementedCircuitProofError::NonCanonicalBundle);
+    }
+    let proximity_batch = bundle
+        .proximity_batch
+        .as_ref()
+        .ok_or(ImplementedCircuitProofError::NonCanonicalBundle)?;
+    let proximity_batch_b = bundle
+        .proximity_batch_b
+        .as_ref()
+        .ok_or(ImplementedCircuitProofError::NonCanonicalBundle)?;
     let full_root = mdoc_p4b_full_root(bundle.root, root_b);
     let av = draw_mdoc_p4b_av(transcript_seed, bundle.root);
     let projections = [
@@ -1405,38 +1422,26 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
             + ligero_row_count(committed_len_b, bundle.params.row_len),
         transcript_seed,
     );
-    verify_ligero_opening_indices(
+    let opening_indices = ligero_opening_indices(
         IMPLEMENTED_BUNDLE_LIGERO_LABEL,
         full_root,
         bundle.params,
-        &bundle.proximity_openings,
         &bundle.proximity_claim,
         &bundle.entries,
         &bundle.claim_batch,
         &bundle.claim_blind_check,
         &bundle.quadratic_batch,
         transcript_seed,
-    )?;
-    verify_ligero_opening_indices(
-        IMPLEMENTED_BUNDLE_LIGERO_LABEL,
-        full_root,
-        bundle.params,
-        &bundle.proximity_openings_b,
-        &bundle.proximity_claim,
-        &bundle.entries,
-        &bundle.claim_batch,
-        &bundle.claim_blind_check,
-        &bundle.quadratic_batch,
-        transcript_seed,
-    )?;
-    let authenticated_openings = verify_and_authenticate_split_openings(
+    );
+    let authenticated_openings = verify_and_authenticate_split_batch_openings(
         bundle.root,
         root_b,
         bundle.params,
         expanded_committed_len,
         committed_len_b,
-        &bundle.proximity_openings,
-        &bundle.proximity_openings_b,
+        &opening_indices,
+        proximity_batch,
+        proximity_batch_b,
         &bundle.proximity_claim,
         &proximity_gamma,
     )
@@ -1448,14 +1453,8 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         bundle.params,
         transcript_seed,
     );
-    if !verify_split_claim_blind_check(
-        bundle.root,
-        root_b,
-        bundle.params,
-        expanded_committed_len,
-        committed_len_b,
-        &bundle.proximity_openings,
-        &bundle.proximity_openings_b,
+    if !verify_authenticated_split_claim_blind_check(
+        authenticated_openings,
         &bundle.claim_blind_check,
         claim_blind_challenge,
     )
@@ -1573,12 +1572,10 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         &quadratic_constraints,
         transcript_seed,
     );
-    if !verify_quadratic_batch(
-        bundle.root,
-        bundle.params,
+    if !verify_authenticated_quadratic_batch(
+        authenticated_openings,
         committed_len,
         quadratic_constraints.len(),
-        &bundle.proximity_openings,
         &bundle.quadratic_batch,
         &quadratic_challenges,
     )
@@ -1637,6 +1634,8 @@ pub fn verify_implemented_circuit_bundle_batch_with_projection_profiled(
     let setup_start = Instant::now();
     if bundle.root_b.is_some()
         || !bundle.proximity_openings_b.is_empty()
+        || bundle.proximity_batch.is_some()
+        || bundle.proximity_batch_b.is_some()
         || !bundle.mac_tags.is_empty()
     {
         return Err(ImplementedCircuitProofError::NonCanonicalBundle);

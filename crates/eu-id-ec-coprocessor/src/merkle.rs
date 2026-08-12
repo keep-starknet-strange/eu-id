@@ -1,6 +1,7 @@
 use blake2::{Blake2s256, Digest};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Fp;
 
@@ -18,6 +19,17 @@ pub struct ColumnOpening {
     pub path: Vec<MerkleSibling>,
 }
 
+/// Canonical authentication of several transcript-selected columns.
+///
+/// Columns are concatenated in the caller-supplied index order. The indices
+/// themselves are transcript-derived and therefore are not serialized.
+/// `frontier` contains only missing siblings, in level/index order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ColumnBatchOpening {
+    pub columns: Vec<Fp>,
+    pub frontier: Vec<[u8; 32]>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MerkleSibling {
     pub hash: [u8; 32],
@@ -29,6 +41,10 @@ pub enum MerkleError {
     EmptyMatrix,
     RaggedMatrix,
     ColumnOutOfRange,
+    DuplicateColumn,
+    ZeroColumnLength,
+    WrongBatchLength,
+    InvalidBatchProof,
 }
 
 pub fn commit_columns(rows: &[Vec<Fp>]) -> Result<MerkleCommitment, MerkleError> {
@@ -105,6 +121,31 @@ impl MerkleCommitment {
             path,
         })
     }
+
+    pub fn open_batch(&self, indices: &[usize]) -> Result<ColumnBatchOpening, MerkleError> {
+        validate_indices(indices, self.columns.len())?;
+
+        let mut columns = Vec::with_capacity(indices.len() * self.columns[0].len());
+        for &index in indices {
+            columns.extend_from_slice(&self.columns[index]);
+        }
+
+        let mut frontier = Vec::new();
+        let mut known = indices.iter().copied().collect::<BTreeSet<_>>();
+        let mut width = self.columns.len();
+        for level in &self.levels[..self.levels.len() - 1] {
+            for &index in &known {
+                let sibling = index ^ 1;
+                if sibling < width && !known.contains(&sibling) {
+                    frontier.push(level[sibling]);
+                }
+            }
+            known = known.into_iter().map(|index| index / 2).collect();
+            width = width.div_ceil(2);
+        }
+
+        Ok(ColumnBatchOpening { columns, frontier })
+    }
 }
 
 pub fn verify_column(root: [u8; 32], opening: &ColumnOpening) -> Result<bool, MerkleError> {
@@ -117,6 +158,85 @@ pub fn verify_column(root: [u8; 32], opening: &ColumnOpening) -> Result<bool, Me
         };
     }
     Ok(hash == root)
+}
+
+/// Verifies a canonical batch opening.
+///
+/// Every frontier hash must be consumed exactly once. Missing, extra, or
+/// reordered columns/frontier hashes therefore fail closed.
+pub fn verify_batch(
+    root: [u8; 32],
+    width: usize,
+    indices: &[usize],
+    column_len: usize,
+    opening: &ColumnBatchOpening,
+) -> Result<bool, MerkleError> {
+    validate_indices(indices, width)?;
+    if column_len == 0 {
+        return Err(MerkleError::ZeroColumnLength);
+    }
+    let expected_values = indices
+        .len()
+        .checked_mul(column_len)
+        .ok_or(MerkleError::WrongBatchLength)?;
+    if opening.columns.len() != expected_values {
+        return Err(MerkleError::WrongBatchLength);
+    }
+
+    let mut known = BTreeMap::new();
+    for (&index, column) in indices.iter().zip(opening.columns.chunks_exact(column_len)) {
+        known.insert(index, leaf_hash(index, column));
+    }
+
+    let mut frontier = opening.frontier.iter().copied();
+    let mut level_width = width;
+    while level_width > 1 {
+        let mut parents = BTreeMap::new();
+        for (&index, &hash) in &known {
+            let sibling_index = index ^ 1;
+            if index & 1 == 1 && known.contains_key(&sibling_index) {
+                continue;
+            }
+            let sibling = if sibling_index >= level_width {
+                hash
+            } else if let Some(&sibling) = known.get(&sibling_index) {
+                sibling
+            } else {
+                frontier.next().ok_or(MerkleError::InvalidBatchProof)?
+            };
+            let parent = if index & 1 == 0 {
+                node_hash(hash, sibling)
+            } else {
+                node_hash(sibling, hash)
+            };
+            if parents.insert(index / 2, parent).is_some() {
+                return Err(MerkleError::InvalidBatchProof);
+            }
+        }
+        known = parents;
+        level_width = level_width.div_ceil(2);
+    }
+
+    if frontier.next().is_some() || known.len() != 1 {
+        return Err(MerkleError::InvalidBatchProof);
+    }
+    Ok(known.get(&0) == Some(&root))
+}
+
+fn validate_indices(indices: &[usize], width: usize) -> Result<(), MerkleError> {
+    if width == 0 || indices.is_empty() {
+        return Err(MerkleError::EmptyMatrix);
+    }
+    let mut unique = BTreeSet::new();
+    for &index in indices {
+        if index >= width {
+            return Err(MerkleError::ColumnOutOfRange);
+        }
+        if !unique.insert(index) {
+            return Err(MerkleError::DuplicateColumn);
+        }
+    }
+    Ok(())
 }
 
 fn build_levels(mut current: Vec<[u8; 32]>) -> Vec<Vec<[u8; 32]>> {

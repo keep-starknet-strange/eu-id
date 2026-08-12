@@ -3,7 +3,10 @@ use crate::circle_fft::{
     circle_evaluate, circle_multiply_data_vanishing, circle_product_fft, circle_product_ifft,
     circle_weight_coeffs, CircleGeom, CircleRsError, PRODUCT_CIRCLE_GEOM,
 };
-use crate::merkle::{commit_columns, verify_column, ColumnOpening, MerkleCommitment, MerkleError};
+use crate::merkle::{
+    commit_columns, verify_batch, verify_column, ColumnBatchOpening, ColumnOpening,
+    MerkleCommitment, MerkleError,
+};
 use crate::Fp;
 #[cfg(test)]
 use crate::Mle;
@@ -545,6 +548,13 @@ impl LigeroCommitment {
             .collect()
     }
 
+    pub fn open_batch(&self, indices: &[usize]) -> Result<ColumnBatchOpening, LigeroError> {
+        if indices.len() != self.params.openings {
+            return Err(LigeroError::WrongOpeningCount);
+        }
+        self.merkle.open_batch(indices).map_err(LigeroError::Merkle)
+    }
+
     pub fn proximity_claim(&self, gamma: &[Fp]) -> Result<LigeroProximityClaim, LigeroError> {
         if gamma.is_empty() {
             return Err(LigeroError::EmptyGamma);
@@ -821,45 +831,140 @@ pub fn verify_split_openings(
     Ok(true)
 }
 
+#[derive(Clone, Copy)]
+enum AuthenticatedColumns<'a> {
+    Legacy(&'a [ColumnOpening]),
+    Batch {
+        indices: &'a [usize],
+        columns: &'a [Fp],
+        rows: usize,
+    },
+}
+
+impl<'a> AuthenticatedColumns<'a> {
+    fn len(self) -> usize {
+        match self {
+            Self::Legacy(openings) => openings.len(),
+            Self::Batch { indices, .. } => indices.len(),
+        }
+    }
+
+    fn index(self, position: usize) -> usize {
+        match self {
+            Self::Legacy(openings) => openings[position].index,
+            Self::Batch { indices, .. } => indices[position],
+        }
+    }
+
+    fn column(self, position: usize) -> &'a [Fp] {
+        match self {
+            Self::Legacy(openings) => &openings[position].column,
+            Self::Batch { columns, rows, .. } => &columns[position * rows..(position + 1) * rows],
+        }
+    }
+
+    fn verify_legacy(self, root: [u8; 32], position: usize) -> Result<bool, LigeroError> {
+        match self {
+            Self::Legacy(openings) => {
+                verify_column(root, &openings[position]).map_err(LigeroError::Merkle)
+            }
+            Self::Batch { .. } => Ok(true),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct AuthenticatedSplitOpenings<'a> {
     params: LigeroParams,
     committed_len_a: usize,
     committed_len_b: usize,
-    openings_a: &'a [ColumnOpening],
-    openings_b: &'a [ColumnOpening],
+    openings_a: AuthenticatedColumns<'a>,
+    openings_b: AuthenticatedColumns<'a>,
 }
 
-pub(crate) fn verify_and_authenticate_split_openings<'a>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn verify_and_authenticate_split_batch_openings<'a>(
     root_a: [u8; 32],
     root_b: [u8; 32],
     params: LigeroParams,
     committed_len_a: usize,
     committed_len_b: usize,
-    openings_a: &'a [ColumnOpening],
-    openings_b: &'a [ColumnOpening],
+    indices: &'a [usize],
+    openings_a: &'a ColumnBatchOpening,
+    openings_b: &'a ColumnBatchOpening,
     claim: &LigeroProximityClaim,
     gamma: &[Fp],
 ) -> Result<Option<AuthenticatedSplitOpenings<'a>>, LigeroError> {
-    if !verify_split_openings(
+    params.validate()?;
+    if indices.len() != params.openings {
+        return Err(LigeroError::WrongOpeningCount);
+    }
+    if gamma.is_empty() {
+        return Err(LigeroError::EmptyGamma);
+    }
+    if claim.combined_row.len() != params.degree_bound {
+        return Err(LigeroError::WrongClaimLength);
+    }
+    let (rows_a, opening_rows_a) = committed_opening_rows(committed_len_a, params.row_len)?;
+    let (rows_b, opening_rows_b) = committed_opening_rows(committed_len_b, params.row_len)?;
+    if gamma.len() != rows_a + rows_b {
+        return Err(LigeroError::WrongGammaLength);
+    }
+    if !verify_batch(
         root_a,
-        root_b,
-        params,
-        committed_len_a,
-        committed_len_b,
+        params.codeword_len,
+        indices,
+        opening_rows_a,
         openings_a,
-        openings_b,
-        claim,
-        gamma,
-    )? {
+    )
+    .map_err(LigeroError::Merkle)?
+        || !verify_batch(
+            root_b,
+            params.codeword_len,
+            indices,
+            opening_rows_b,
+            openings_b,
+        )
+        .map_err(LigeroError::Merkle)?
+    {
         return Ok(None);
     }
-    Ok(Some(AuthenticatedSplitOpenings {
+
+    let authenticated = AuthenticatedSplitOpenings {
         params,
         committed_len_a,
         committed_len_b,
-        openings_a,
-        openings_b,
-    }))
+        openings_a: AuthenticatedColumns::Batch {
+            indices,
+            columns: &openings_a.columns,
+            rows: opening_rows_a,
+        },
+        openings_b: AuthenticatedColumns::Batch {
+            indices,
+            columns: &openings_b.columns,
+            rows: opening_rows_b,
+        },
+    };
+    for position in 0..indices.len() {
+        let column_a = authenticated.openings_a.column(position);
+        let column_b = authenticated.openings_b.column(position);
+        let mask_value = column_a[rows_a] + column_b[rows_b];
+        let combined_a = gamma[..rows_a]
+            .iter()
+            .copied()
+            .zip(column_a)
+            .fold(mask_value, |acc, (coeff, value)| acc + coeff * *value);
+        let combined = gamma[rows_a..]
+            .iter()
+            .copied()
+            .zip(column_b)
+            .fold(combined_a, |acc, (coeff, value)| acc + coeff * *value);
+        let expected = code_evaluate(params, &claim.combined_row, indices[position])?;
+        if expected != combined {
+            return Ok(None);
+        }
+    }
+    Ok(Some(authenticated))
 }
 
 pub fn verify_claim_blind_check(
@@ -946,6 +1051,41 @@ pub fn verify_split_claim_blind_check(
             + challenge
                 * (opening_a.column[rows_a + CLAIM_BLIND_ROW_OFFSET]
                     + opening_b.column[rows_b + CLAIM_BLIND_ROW_OFFSET]);
+        if expected != actual {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+pub(crate) fn verify_authenticated_split_claim_blind_check(
+    authenticated: AuthenticatedSplitOpenings<'_>,
+    check: &LigeroClaimBlindCheck,
+    challenge: Fp,
+) -> Result<bool, LigeroError> {
+    let params = authenticated.params;
+    params.validate()?;
+    if check.combined_row.len() != params.claim_degree_bound() {
+        return Err(LigeroError::WrongClaimLength);
+    }
+    if claim_extraction_sum(params, &check.combined_row) != Fp::ZERO {
+        return Ok(false);
+    }
+    let (rows_a, _) = committed_opening_rows(authenticated.committed_len_a, params.row_len)?;
+    let (rows_b, _) = committed_opening_rows(authenticated.committed_len_b, params.row_len)?;
+    for position in 0..authenticated.openings_a.len() {
+        let column_a = authenticated.openings_a.column(position);
+        let column_b = authenticated.openings_b.column(position);
+        let expected = code_evaluate(
+            params,
+            &check.combined_row,
+            authenticated.openings_a.index(position),
+        )?;
+        let actual = column_a[rows_a + CLAIM_BLIND_MASK_ROW_OFFSET]
+            + column_b[rows_b + CLAIM_BLIND_MASK_ROW_OFFSET]
+            + challenge
+                * (column_a[rows_a + CLAIM_BLIND_ROW_OFFSET]
+                    + column_b[rows_b + CLAIM_BLIND_ROW_OFFSET]);
         if expected != actual {
             return Ok(false);
         }
@@ -1195,8 +1335,8 @@ pub fn verify_split_claim_batch(
         params,
         committed_len_a,
         committed_len_b,
-        openings_a,
-        openings_b,
+        AuthenticatedColumns::Legacy(openings_a),
+        AuthenticatedColumns::Legacy(openings_b),
         batch,
         claims,
         gamma,
@@ -1234,8 +1374,8 @@ fn verify_split_claim_batch_inner(
     params: LigeroParams,
     committed_len_a: usize,
     committed_len_b: usize,
-    openings_a: &[ColumnOpening],
-    openings_b: &[ColumnOpening],
+    openings_a: AuthenticatedColumns<'_>,
+    openings_b: AuthenticatedColumns<'_>,
     batch: &LigeroClaimBatch,
     claims: &[LigeroLinearClaim],
     gamma: &[Fp],
@@ -1270,17 +1410,20 @@ fn verify_split_claim_batch_inner(
         .ok_or(LigeroError::InvalidRowLength)?;
     // Validate every attacker-carried index and row shape before using an
     // index to gather an encoded response value.
-    for (opening_a, opening_b) in openings_a.iter().zip(openings_b) {
-        if opening_a.index != opening_b.index || opening_a.index >= params.codeword_len {
+    for position in 0..openings_a.len() {
+        if openings_a.index(position) != openings_b.index(position)
+            || openings_a.index(position) >= params.codeword_len
+        {
             return Err(LigeroError::ColumnOutOfRange);
         }
-        if opening_a.column.len() != opening_rows_a || opening_b.column.len() != opening_rows_b {
+        if openings_a.column(position).len() != opening_rows_a
+            || openings_b.column(position).len() != opening_rows_b
+        {
             return Err(LigeroError::WrongGammaLength);
         }
     }
-    let opening_indices = openings_a
-        .iter()
-        .map(|opening| opening.index)
+    let opening_indices = (0..openings_a.len())
+        .map(|position| openings_a.index(position))
         .collect::<Vec<_>>();
     // Compute one evaluator for each open column.
     // The batch and all row weights share this evaluator.
@@ -1298,23 +1441,24 @@ fn verify_split_claim_batch_inner(
         &column_eval,
     )?;
 
-    for (opening_position, (opening_a, opening_b)) in openings_a.iter().zip(openings_b).enumerate()
-    {
+    for opening_position in 0..openings_a.len() {
         if let SplitOpeningAuthentication::Verify { root_a, root_b } = authentication {
-            if !verify_column(root_a, opening_a).map_err(LigeroError::Merkle)?
-                || !verify_column(root_b, opening_b).map_err(LigeroError::Merkle)?
+            if !openings_a.verify_legacy(root_a, opening_position)?
+                || !openings_b.verify_legacy(root_b, opening_position)?
             {
                 return Ok(false);
             }
         }
-        let blind_value = opening_a.column[rows_a + CLAIM_BLIND_ROW_OFFSET]
-            + opening_b.column[rows_b + CLAIM_BLIND_ROW_OFFSET];
+        let column_a = openings_a.column(opening_position);
+        let column_b = openings_b.column(opening_position);
+        let blind_value =
+            column_a[rows_a + CLAIM_BLIND_ROW_OFFSET] + column_b[rows_b + CLAIM_BLIND_ROW_OFFSET];
         let mut combined = blind_value;
         for (row, weights_at_openings) in &weight_evaluations.residual_rows {
             let value = if *row < rows_a {
-                opening_a.column[*row]
+                column_a[*row]
             } else {
-                opening_b.column[*row - rows_a]
+                column_b[*row - rows_a]
             };
             combined = combined + weights_at_openings[opening_position] * value;
         }
@@ -1324,9 +1468,9 @@ fn verify_split_claim_batch_inner(
                 .iter()
                 .fold(Fp::ZERO, |acc, (row, scale)| {
                     let value = if *row < rows_a {
-                        opening_a.column[*row]
+                        column_a[*row]
                     } else {
-                        opening_b.column[*row - rows_a]
+                        column_b[*row - rows_a]
                     };
                     acc + *scale * value
                 });
@@ -1456,6 +1600,50 @@ pub fn verify_quadratic_batch(
     batch: &LigeroQuadraticBatch,
     challenges: &[Fp],
 ) -> Result<bool, LigeroError> {
+    verify_quadratic_batch_inner(
+        Some(root),
+        params,
+        committed_len,
+        quadratic_constraints,
+        AuthenticatedColumns::Legacy(openings),
+        batch,
+        challenges,
+    )
+}
+
+pub(crate) fn verify_authenticated_quadratic_batch(
+    authenticated: AuthenticatedSplitOpenings<'_>,
+    committed_len: usize,
+    quadratic_constraints: usize,
+    batch: &LigeroQuadraticBatch,
+    challenges: &[Fp],
+) -> Result<bool, LigeroError> {
+    let expanded_committed_len =
+        quadratic_committed_len(committed_len, authenticated.params, quadratic_constraints)?;
+    if expanded_committed_len != authenticated.committed_len_a {
+        return Err(LigeroError::InvalidRowLength);
+    }
+    verify_quadratic_batch_inner(
+        None,
+        authenticated.params,
+        committed_len,
+        quadratic_constraints,
+        authenticated.openings_a,
+        batch,
+        challenges,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_quadratic_batch_inner(
+    root: Option<[u8; 32]>,
+    params: LigeroParams,
+    committed_len: usize,
+    quadratic_constraints: usize,
+    openings: AuthenticatedColumns<'_>,
+    batch: &LigeroQuadraticBatch,
+    challenges: &[Fp],
+) -> Result<bool, LigeroError> {
     params.validate()?;
     if quadratic_constraints == 0 {
         return Ok(batch.quotient.is_empty() && challenges.is_empty());
@@ -1491,24 +1679,28 @@ pub fn verify_quadratic_batch(
     let y_start = x_start + quadratic_triples;
     let z_start = y_start + quadratic_triples;
 
-    for opening in openings {
-        if opening.index >= params.codeword_len {
+    for position in 0..openings.len() {
+        let index = openings.index(position);
+        let column = openings.column(position);
+        if index >= params.codeword_len {
             return Err(LigeroError::ColumnOutOfRange);
         }
-        if opening.column.len() != expected_rows {
+        if column.len() != expected_rows {
             return Err(LigeroError::WrongGammaLength);
         }
-        if !verify_column(root, opening).map_err(LigeroError::Merkle)? {
-            return Ok(false);
+        if let Some(root) = root {
+            if !openings.verify_legacy(root, position)? {
+                return Ok(false);
+            }
         }
-        let mut combined = opening.column[committed_rows + QUADRATIC_BLIND_ROW_OFFSET];
+        let mut combined = column[committed_rows + QUADRATIC_BLIND_ROW_OFFSET];
         for (index, challenge) in challenges.iter().copied().enumerate() {
-            let x = opening.column[x_start + index];
-            let y = opening.column[y_start + index];
-            let z = opening.column[z_start + index];
+            let x = column[x_start + index];
+            let y = column[y_start + index];
+            let z = column[z_start + index];
             combined = combined + challenge * (z - x * y);
         }
-        if response_codeword[opening.index] != combined {
+        if response_codeword[index] != combined {
             return Ok(false);
         }
     }
