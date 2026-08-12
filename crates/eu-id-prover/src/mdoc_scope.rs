@@ -3523,18 +3523,116 @@ fn digest_id_uniqueness_interaction_trace(
     logup.finalize_last()
 }
 
-fn scope_item_digest_interaction_trace(
+type PackedScopeFraction = (PackedQM31, PackedQM31);
+
+trait ScopeFractionSiteSink {
+    fn push(&mut self, site: Vec<PackedScopeFraction>);
+    fn site_count(&self) -> usize;
+}
+
+struct PairwiseScopeLogup {
+    logup: LogupTraceGenerator,
+    n_vec_rows: usize,
+    pending: Option<Vec<PackedScopeFraction>>,
+    site_count: usize,
+}
+
+impl PairwiseScopeLogup {
+    fn new(log_size: u32) -> Self {
+        Self {
+            logup: LogupTraceGenerator::new(log_size),
+            n_vec_rows: 1usize << (log_size - LOG_N_LANES),
+            pending: None,
+            site_count: 0,
+        }
+    }
+
+    fn finalize(mut self) -> (Vec<MdocScopeColumnEval>, QM31) {
+        if let Some(site) = self.pending.take() {
+            self.logup.col_from_iter(site.into_iter());
+        }
+        self.logup.finalize_last()
+    }
+}
+
+impl ScopeFractionSiteSink for PairwiseScopeLogup {
+    fn push(&mut self, site: Vec<PackedScopeFraction>) {
+        assert_eq!(site.len(), self.n_vec_rows);
+        self.site_count += 1;
+        let Some(left) = self.pending.take() else {
+            self.pending = Some(site);
+            return;
+        };
+        self.logup.col_from_iter(
+            left.into_iter()
+                .zip(site)
+                .map(|((n0, d0), (n1, d1))| (n0 * d1 + n1 * d0, d0 * d1)),
+        );
+    }
+
+    fn site_count(&self) -> usize {
+        self.site_count
+    }
+}
+
+#[cfg(test)]
+struct EagerScopeFractionSites {
+    n_vec_rows: usize,
+    sites: Vec<Vec<PackedScopeFraction>>,
+}
+
+#[cfg(test)]
+impl EagerScopeFractionSites {
+    fn new(log_size: u32) -> Self {
+        Self {
+            n_vec_rows: 1usize << (log_size - LOG_N_LANES),
+            sites: Vec::new(),
+        }
+    }
+
+    fn finalize(self, log_size: u32) -> (Vec<MdocScopeColumnEval>, QM31) {
+        let mut logup = LogupTraceGenerator::new(log_size);
+        let mut site = 0usize;
+        while site + 1 < self.sites.len() {
+            let left = &self.sites[site];
+            let right = &self.sites[site + 1];
+            logup.col_from_iter((0..self.n_vec_rows).map(|row| {
+                let (n0, d0) = left[row];
+                let (n1, d1) = right[row];
+                (n0 * d1 + n1 * d0, d0 * d1)
+            }));
+            site += 2;
+        }
+        if site < self.sites.len() {
+            logup.col_from_iter((0..self.n_vec_rows).map(|row| self.sites[site][row]));
+        }
+        logup.finalize_last()
+    }
+}
+
+#[cfg(test)]
+impl ScopeFractionSiteSink for EagerScopeFractionSites {
+    fn push(&mut self, site: Vec<PackedScopeFraction>) {
+        assert_eq!(site.len(), self.n_vec_rows);
+        self.sites.push(site);
+    }
+
+    fn site_count(&self) -> usize {
+        self.sites.len()
+    }
+}
+
+fn write_scope_item_digest_interaction_sites(
+    sites: &mut impl ScopeFractionSiteSink,
     base: &[MdocScopeColumnEval],
     item_preprocessed: &[MdocScopeColumnEval],
     item_digest_relation: &PackedShaDigestRelation,
     digest_byte_relation: &MdocScopeDigestByteRelation,
     claim_mask: Option<(&ClaimMaskTrace, QM31)>,
-) -> (Vec<MdocScopeColumnEval>, QM31) {
+) {
     assert_eq!(base.len(), SCOPE_DIGEST_BYTES);
-    let item_count = item_preprocessed.len();
     let n_vec_rows = 1usize << (ITEM_DIGEST_LOG_SIZE - LOG_N_LANES);
     let broadcast = |value: u32| PackedM31::broadcast(m31(value));
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::new();
 
     for (item, aggregate) in item_preprocessed.iter().enumerate() {
         for (byte_index, value) in base.iter().enumerate() {
@@ -3576,27 +3674,50 @@ fn scope_item_digest_interaction_trace(
                 .collect(),
         );
     }
+}
 
+fn scope_item_digest_interaction_trace(
+    base: &[MdocScopeColumnEval],
+    item_preprocessed: &[MdocScopeColumnEval],
+    item_digest_relation: &PackedShaDigestRelation,
+    digest_byte_relation: &MdocScopeDigestByteRelation,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
+) -> (Vec<MdocScopeColumnEval>, QM31) {
+    let item_count = item_preprocessed.len();
+    let mut sites = PairwiseScopeLogup::new(ITEM_DIGEST_LOG_SIZE);
+    write_scope_item_digest_interaction_sites(
+        &mut sites,
+        base,
+        item_preprocessed,
+        item_digest_relation,
+        digest_byte_relation,
+        claim_mask,
+    );
     debug_assert_eq!(
-        sites.len(),
+        sites.site_count(),
         item_count * (SCOPE_DIGEST_BYTES + 1) + usize::from(claim_mask.is_some())
     );
-    let mut logup = LogupTraceGenerator::new(ITEM_DIGEST_LOG_SIZE);
-    let mut site = 0usize;
-    while site + 1 < sites.len() {
-        let left = &sites[site];
-        let right = &sites[site + 1];
-        logup.col_from_iter((0..n_vec_rows).map(|row| {
-            let (n0, d0) = left[row];
-            let (n1, d1) = right[row];
-            (n0 * d1 + n1 * d0, d0 * d1)
-        }));
-        site += 2;
-    }
-    if site < sites.len() {
-        logup.col_from_iter((0..n_vec_rows).map(|row| sites[site][row]));
-    }
-    logup.finalize_last()
+    sites.finalize()
+}
+
+#[cfg(test)]
+fn scope_item_digest_interaction_trace_eager(
+    base: &[MdocScopeColumnEval],
+    item_preprocessed: &[MdocScopeColumnEval],
+    item_digest_relation: &PackedShaDigestRelation,
+    digest_byte_relation: &MdocScopeDigestByteRelation,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
+) -> (Vec<MdocScopeColumnEval>, QM31) {
+    let mut sites = EagerScopeFractionSites::new(ITEM_DIGEST_LOG_SIZE);
+    write_scope_item_digest_interaction_sites(
+        &mut sites,
+        base,
+        item_preprocessed,
+        item_digest_relation,
+        digest_byte_relation,
+        claim_mask,
+    );
+    sites.finalize(ITEM_DIGEST_LOG_SIZE)
 }
 
 fn packed_action_grid<B: ScopeInteractionBase + ?Sized>(
@@ -3621,7 +3742,8 @@ fn packed_action_sum(grid: &ScopeActionGrid<PackedM31>, actions: &[ScopeAction])
 }
 
 #[allow(clippy::too_many_arguments)]
-fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
+fn write_scope_interaction_sites<B: ScopeInteractionBase + ?Sized>(
+    sites: &mut impl ScopeFractionSiteSink,
     log_size: u32,
     columns: &ScopeTraceColumns,
     base: &B,
@@ -3638,9 +3760,8 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
     digest_byte_relation: &MdocScopeDigestByteRelation,
     claim_mask_trace: Option<&ClaimMaskTrace>,
     claim_mask_beta: Option<QM31>,
-) -> (Vec<MdocScopeColumnEval>, QM31) {
+) {
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::new();
     let broadcast = |value: u32| PackedM31::broadcast(m31(value));
     let base_at = |column: usize, row: usize| base.at(column, row);
 
@@ -3928,23 +4049,100 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
         (None, None) => {}
         _ => panic!("mdoc scope claim-mask trace and challenge must be configured together"),
     }
+}
 
-    let mut logup = LogupTraceGenerator::new(log_size);
-    let mut site = 0usize;
-    while site + 1 < sites.len() {
-        let left = &sites[site];
-        let right = &sites[site + 1];
-        logup.col_from_iter((0..n_vec_rows).map(|row| {
-            let (n0, d0) = left[row];
-            let (n1, d1) = right[row];
-            (n0 * d1 + n1 * d0, d0 * d1)
-        }));
-        site += 2;
-    }
-    if site < sites.len() {
-        logup.col_from_iter((0..n_vec_rows).map(|row| sites[site][row]));
-    }
-    logup.finalize_last()
+#[allow(clippy::too_many_arguments)]
+fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
+    log_size: u32,
+    columns: &ScopeTraceColumns,
+    base: &B,
+    stream_ids: &[u32],
+    raw_target_stream_ids: &[u32],
+    parsed_relations: &[ParsedCborByteRelation],
+    raw_relations: &[FieldBytesRelation],
+    semantic_relation: &FieldBytesRelation,
+    payload_hash_relation: Option<&FieldBytesRelation>,
+    dfa_relation: &MdocScopeDfaRelation,
+    state_relation: &MdocScopeStateRelation,
+    digest_id_relation: &MdocScopeDigestIdRelation,
+    digest_id_uniqueness_relation: &MdocScopeDigestIdUniquenessRelation,
+    digest_byte_relation: &MdocScopeDigestByteRelation,
+    claim_mask_trace: Option<&ClaimMaskTrace>,
+    claim_mask_beta: Option<QM31>,
+) -> (Vec<MdocScopeColumnEval>, QM31) {
+    let mut sites = PairwiseScopeLogup::new(log_size);
+    write_scope_interaction_sites(
+        &mut sites,
+        log_size,
+        columns,
+        base,
+        stream_ids,
+        raw_target_stream_ids,
+        parsed_relations,
+        raw_relations,
+        semantic_relation,
+        payload_hash_relation,
+        dfa_relation,
+        state_relation,
+        digest_id_relation,
+        digest_id_uniqueness_relation,
+        digest_byte_relation,
+        claim_mask_trace,
+        claim_mask_beta,
+    );
+    debug_assert_eq!(
+        sites.site_count(),
+        parsed_relations.len()
+            + raw_relations.len()
+            + 4
+            + usize::from(payload_hash_relation.is_some())
+            + 3
+            + usize::from(claim_mask_trace.is_some()),
+    );
+    sites.finalize()
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn scope_interaction_trace_eager<B: ScopeInteractionBase + ?Sized>(
+    log_size: u32,
+    columns: &ScopeTraceColumns,
+    base: &B,
+    stream_ids: &[u32],
+    raw_target_stream_ids: &[u32],
+    parsed_relations: &[ParsedCborByteRelation],
+    raw_relations: &[FieldBytesRelation],
+    semantic_relation: &FieldBytesRelation,
+    payload_hash_relation: Option<&FieldBytesRelation>,
+    dfa_relation: &MdocScopeDfaRelation,
+    state_relation: &MdocScopeStateRelation,
+    digest_id_relation: &MdocScopeDigestIdRelation,
+    digest_id_uniqueness_relation: &MdocScopeDigestIdUniquenessRelation,
+    digest_byte_relation: &MdocScopeDigestByteRelation,
+    claim_mask_trace: Option<&ClaimMaskTrace>,
+    claim_mask_beta: Option<QM31>,
+) -> (Vec<MdocScopeColumnEval>, QM31) {
+    let mut sites = EagerScopeFractionSites::new(log_size);
+    write_scope_interaction_sites(
+        &mut sites,
+        log_size,
+        columns,
+        base,
+        stream_ids,
+        raw_target_stream_ids,
+        parsed_relations,
+        raw_relations,
+        semantic_relation,
+        payload_hash_relation,
+        dfa_relation,
+        state_relation,
+        digest_id_relation,
+        digest_id_uniqueness_relation,
+        digest_byte_relation,
+        claim_mask_trace,
+        claim_mask_beta,
+    );
+    sites.finalize(log_size)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -4737,6 +4935,30 @@ mod tests {
             .into_iter()
             .max()
             .unwrap_or(0) as u32
+    }
+
+    fn assert_interaction_trace_eq(
+        label: &str,
+        left: &(Vec<MdocScopeColumnEval>, QM31),
+        right: &(Vec<MdocScopeColumnEval>, QM31),
+    ) {
+        assert_eq!(left.1, right.1, "{label} claimed sum");
+        assert_eq!(left.0.len(), right.0.len(), "{label} column count");
+        for (column, (left, right)) in left.0.iter().zip(&right.0).enumerate() {
+            let left = left
+                .data
+                .iter()
+                .copied()
+                .flat_map(PackedM31::to_array)
+                .collect::<Vec<_>>();
+            let right = right
+                .data
+                .iter()
+                .copied()
+                .flat_map(PackedM31::to_array)
+                .collect::<Vec<_>>();
+            assert_eq!(left, right, "{label} column {column}");
+        }
     }
 
     fn symbolic_scope_eval(item_count: usize) -> MdocScopeEval {
@@ -5942,7 +6164,7 @@ mod tests {
         let digest_id_relation = MdocScopeDigestIdRelation::dummy();
         let digest_id_uniqueness_relation = MdocScopeDigestIdUniquenessRelation::dummy();
         let digest_byte_relation = MdocScopeDigestByteRelation::dummy();
-        let (interaction, claimed_sum) = scope_interaction_trace(
+        let streamed = scope_interaction_trace(
             scope.metadata.log_size,
             &columns,
             &base,
@@ -5960,9 +6182,29 @@ mod tests {
             None,
             None,
         );
+        let eager = scope_interaction_trace_eager(
+            scope.metadata.log_size,
+            &columns,
+            &base,
+            &stream_ids,
+            &scope.raw_target_stream_ids(),
+            &parsed_relations,
+            &raw_relations,
+            &semantic_relation,
+            Some(&payload_hash_relation),
+            &dfa_relation,
+            &state_relation,
+            &digest_id_relation,
+            &digest_id_uniqueness_relation,
+            &digest_byte_relation,
+            None,
+            None,
+        );
+        assert_eq!(scope.n_interaction_sites(), 19, "unmasked site parity");
+        assert_interaction_trace_eq("odd main scope sites", &streamed, &eager);
         let compact_base =
             ScopeActiveInteractionBase::new(scope.metadata.log_size, &columns, witness);
-        let (compact_interaction, compact_claimed_sum) = scope_interaction_trace(
+        let compact = scope_interaction_trace(
             scope.metadata.log_size,
             &columns,
             &compact_base,
@@ -5980,26 +6222,13 @@ mod tests {
             None,
             None,
         );
-        assert_eq!(compact_claimed_sum, claimed_sum);
-        assert_eq!(compact_interaction.len(), interaction.len());
-        for (compact, full) in compact_interaction.iter().zip(interaction.iter()) {
-            assert_eq!(
-                compact
-                    .data
-                    .iter()
-                    .flat_map(|value| value.to_array())
-                    .collect::<Vec<_>>(),
-                full.data
-                    .iter()
-                    .flat_map(|value| value.to_array())
-                    .collect::<Vec<_>>(),
-            );
-        }
+        assert_interaction_trace_eq("compact main scope base", &compact, &streamed);
+        let (interaction, claimed_sum) = streamed;
         let mut ring =
             ClaimMaskRing::new(&[scope.metadata.log_size, scope.metadata.log_size]).unwrap();
         let mask = ring.take(scope.metadata.log_size).unwrap();
         let beta = QM31::from_m31_array([m31(3), m31(5), m31(7), m31(11)]);
-        let (_, masked_claimed_sum) = scope_interaction_trace(
+        let masked = scope_interaction_trace(
             scope.metadata.log_size,
             &columns,
             &base,
@@ -6017,6 +6246,27 @@ mod tests {
             Some(&mask),
             Some(beta),
         );
+        let eager_masked = scope_interaction_trace_eager(
+            scope.metadata.log_size,
+            &columns,
+            &base,
+            &stream_ids,
+            &scope.raw_target_stream_ids(),
+            &parsed_relations,
+            &raw_relations,
+            &semantic_relation,
+            Some(&payload_hash_relation),
+            &dfa_relation,
+            &state_relation,
+            &digest_id_relation,
+            &digest_id_uniqueness_relation,
+            &digest_byte_relation,
+            Some(&mask),
+            Some(beta),
+        );
+        assert_eq!(scope.n_interaction_sites() + 1, 20, "masked site parity");
+        assert_interaction_trace_eq("even masked main scope sites", &masked, &eager_masked);
+        let masked_claimed_sum = masked.1;
         assert_eq!(masked_claimed_sum - claimed_sum, beta * mask.target_sum());
         let trees = TreeVec::new(vec![
             vec![],
@@ -6065,13 +6315,27 @@ mod tests {
         let item_digest_relation = PackedShaDigestRelation::dummy();
         let digest_byte_relation = MdocScopeDigestByteRelation::dummy();
         let base = scope_item_digest_trace(&digests, [0x45; 32]);
-        let (interaction, claimed_sum) = scope_item_digest_interaction_trace(
+        let streamed = scope_item_digest_interaction_trace(
             &base,
             &item_preprocessed,
             &item_digest_relation,
             &digest_byte_relation,
             None,
         );
+        let eager = scope_item_digest_interaction_trace_eager(
+            &base,
+            &item_preprocessed,
+            &item_digest_relation,
+            &digest_byte_relation,
+            None,
+        );
+        assert_eq!(
+            scope.statement.items.len() * (SCOPE_DIGEST_BYTES + 1),
+            66,
+            "unmasked item site parity",
+        );
+        assert_interaction_trace_eq("even item sites", &streamed, &eager);
+        let (interaction, claimed_sum) = streamed;
         let zero = QM31::from_u32_unchecked(0, 0, 0, 0);
 
         let provider_sum = |item_digests: &[[u8; SCOPE_DIGEST_BYTES]]| {
@@ -6103,13 +6367,27 @@ mod tests {
         let mut ring = ClaimMaskRing::new(&[ITEM_DIGEST_LOG_SIZE, ITEM_DIGEST_LOG_SIZE]).unwrap();
         let mask = ring.take(ITEM_DIGEST_LOG_SIZE).unwrap();
         let beta = QM31::from_m31_array([m31(3), m31(5), m31(7), m31(11)]);
-        let (_, masked_sum) = scope_item_digest_interaction_trace(
+        let masked = scope_item_digest_interaction_trace(
             &base,
             &item_preprocessed,
             &item_digest_relation,
             &digest_byte_relation,
             Some((&mask, beta)),
         );
+        let eager_masked = scope_item_digest_interaction_trace_eager(
+            &base,
+            &item_preprocessed,
+            &item_digest_relation,
+            &digest_byte_relation,
+            Some((&mask, beta)),
+        );
+        assert_eq!(
+            scope.statement.items.len() * (SCOPE_DIGEST_BYTES + 1) + 1,
+            67,
+            "masked item site parity",
+        );
+        assert_interaction_trace_eq("odd masked item sites", &masked, &eager_masked);
+        let masked_sum = masked.1;
         assert_eq!(masked_sum - claimed_sum, beta * mask.target_sum());
 
         let assert_item_trace = |base: Vec<MdocScopeColumnEval>,
