@@ -81,6 +81,10 @@ const MAC_BATCH_CANONICAL_SLACK_BITS_START: usize =
     MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE;
 const MAC_BATCH_CANONICAL_CARRIES_START: usize = MAC_BATCH_CANONICAL_SLACK_BITS_START
     + MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_BITS;
+const MAC_BATCH_GROUP_A_USED_INPUTS: usize = MAC_BATCH_CANONICAL_CARRIES_START
+    + MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_CARRIES;
+const MAC_BATCH_GROUP_B_USED_INPUTS: usize =
+    MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE;
 const MAC_BATCH_CANONICAL_CONSTRAINTS_PER_VALUE: usize =
     MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES + 2 + MAC_BATCH_CANONICAL_BITS;
 const MAC_BATCH_CANONICAL_CONSTRAINTS: usize =
@@ -1208,10 +1212,11 @@ fn prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
         .collect::<Vec<_>>();
     let committed_values_b = mac_batch_group_b_input(mac_key_shares, &av, &mac_values, &mac_tags)
         .map_err(ImplementedCircuitProofError::Witness)?;
+    let committed_values_b = &committed_values_b[..MAC_BATCH_GROUP_B_USED_INPUTS];
     let params_b = implemented_circuit_ligero_params(committed_values_b.len());
     debug_assert_eq!(params, params_b);
     let (commitment_b, commit_profile_b) =
-        commit_witness_with_quadratics_profiled(&committed_values_b, params_b, &[])
+        commit_witness_with_quadratics_profiled(committed_values_b, params_b, &[])
             .map_err(ImplementedCircuitProofError::Ligero)?;
     profile.ligero_row_encode += commit_profile_b.row_encode;
     profile.ligero_merkle_build += commit_profile_b.merkle_build;
@@ -1510,7 +1515,7 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
     let expanded_committed_len =
         quadratic_committed_len(committed_len, expected_params, quadratic_constraints.len())
             .map_err(ImplementedCircuitProofError::Ligero)?;
-    let committed_len_b = 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE;
+    let committed_len_b = MAC_BATCH_GROUP_B_USED_INPUTS;
     profile.setup = setup_start.elapsed();
 
     let start = Instant::now();
@@ -2276,6 +2281,28 @@ fn circuit_gate_count(circuit: &Circuit) -> usize {
         .sum()
 }
 
+fn circuit_used_input_len(circuit: &Circuit) -> usize {
+    circuit
+        .layers()
+        .last()
+        .expect("non-empty circuit")
+        .terms()
+        .iter()
+        .flat_map(|term| [term.l, term.r])
+        .max()
+        .map(|index| index as usize + 1)
+        .expect("P4b circuit input layer has terms")
+}
+
+fn mdoc_p4b_committed_input_len(role: MdocP4bCircuitRole, circuit: &Circuit) -> usize {
+    match role {
+        MdocP4bCircuitRole::MacBatch => MAC_BATCH_GROUP_A_USED_INPUTS,
+        MdocP4bCircuitRole::IssuerEcdsa
+        | MdocP4bCircuitRole::DeviceEcdsa
+        | MdocP4bCircuitRole::RevocationEcdsa => circuit_used_input_len(circuit),
+    }
+}
+
 fn implemented_circuit_ligero_params(_input_len: usize) -> LigeroParams {
     // `product_circle_params` is the single source for the live code geometry and
     // opening count. This query/PoW target is a configuration heuristic, not
@@ -2398,10 +2425,7 @@ fn mdoc_p4b_verifier_bundle_pad_layouts(
     let mut offset = witness_len;
     let mut layouts = Vec::with_capacity(circuits.len());
     for instance in circuits {
-        let input_len = match instance.role {
-            MdocP4bCircuitRole::MacBatch => 1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE,
-            _ => verifier_circuit_input_len(&instance.circuit),
-        };
+        let input_len = mdoc_p4b_committed_input_len(instance.role, &instance.circuit);
         let input_offset = offset;
         offset += input_len;
         let pad_len = circuit_pad_len(&instance.circuit);
@@ -2459,8 +2483,8 @@ fn mdoc_p4b_committed_values(
     let mut all_pads = Vec::with_capacity(instances.len());
     for instance in instances {
         let input_offset = committed_values.len();
-        committed_values.extend_from_slice(&instance.input);
-        let input_len = instance.input.len();
+        let input_len = mdoc_p4b_committed_input_len(instance.role, &instance.circuit);
+        committed_values.extend_from_slice(&instance.input[..input_len]);
         let pads = CircuitPads::fresh(&instance.circuit);
         let pad_offset = committed_values.len();
         let pad_len = pads.values().len();
@@ -2817,7 +2841,7 @@ fn add_mac_split_circuit_verification_claims(
         });
         terms.push(LigeroLinearTerm {
             offset: group_b_offset,
-            len: 1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE,
+            len: MAC_BATCH_GROUP_B_USED_INPUTS,
             point: subpoint,
             coefficient: coefficient * split,
         });
@@ -6070,6 +6094,16 @@ mod tests {
         ]
     }
 
+    fn assert_prefix_mle_matches_full_zero_padded_input(input: &[Fp], prefix_len: usize) {
+        assert!(
+            input[prefix_len..].iter().all(|&value| value == Fp::ZERO),
+            "the omitted circuit-input suffix must be statically zero",
+        );
+        let full = Mle::new(input.to_vec());
+        let prefix = Mle::new(input[..prefix_len].to_vec());
+        assert_eq!(prefix, full);
+    }
+
     #[test]
     fn validated_witness_rejects_invalid_inputs_in_every_p4b_role() {
         let inputs = p4b_test_inputs();
@@ -6177,6 +6211,7 @@ mod tests {
         let verifier_instances = mdoc_p4b_verifier_instances(&[0; 16], &zero_tags).unwrap();
         let (expected_layouts, expected_len) =
             mdoc_p4b_verifier_bundle_pad_layouts(&verifier_instances, 0);
+        assert_eq!(committed.len(), 53_515);
         assert_eq!(committed.len(), expected_len);
         assert_eq!(layouts.len(), expected_layouts.len());
         for ((layout, expected), instance) in layouts.iter().zip(&expected_layouts).zip(&instances)
@@ -6187,9 +6222,45 @@ mod tests {
             assert_eq!(layout.pad_len, expected.pad_len);
             assert_eq!(
                 &committed[layout.input_offset..layout.input_offset + layout.input_len],
-                instance.input.as_slice(),
+                &instance.input[..layout.input_len],
             );
+            assert_prefix_mle_matches_full_zero_padded_input(&instance.input, layout.input_len);
+            if instance.role != MdocP4bCircuitRole::MacBatch {
+                let expected_layers = instance
+                    .circuit
+                    .evaluate_input(instance.input.clone())
+                    .unwrap();
+                let mut suffix_mutated = instance.input.clone();
+                suffix_mutated[layout.input_len..].fill(Fp::from_u64(13));
+                let mutated_layers = instance.circuit.evaluate_input(suffix_mutated).unwrap();
+                assert_eq!(
+                    &mutated_layers[..mutated_layers.len() - 1],
+                    &expected_layers[..expected_layers.len() - 1],
+                );
+            }
         }
+    }
+
+    #[test]
+    fn p4b_committed_prefixes_match_exact_circuit_support() {
+        let expected_ecdsa = [105, 4, 5_251, 7_695, 19, 1_546, 1_183];
+        let circuits = implemented_circuit_verifier_instances().unwrap();
+        assert_eq!(circuits.len(), expected_ecdsa.len());
+        for (instance, expected) in circuits.iter().zip(expected_ecdsa) {
+            assert_eq!(circuit_used_input_len(&instance.circuit), expected);
+            let full_len = verifier_circuit_input_len(&instance.circuit);
+            assert_eq!(expected.next_power_of_two(), full_len);
+            assert!(instance
+                .circuit
+                .layers()
+                .last()
+                .unwrap()
+                .terms()
+                .iter()
+                .all(|term| term.l < expected as u32 && term.r < expected as u32));
+        }
+        assert_eq!(MAC_BATCH_GROUP_A_USED_INPUTS, 5_122);
+        assert_eq!(MAC_BATCH_GROUP_B_USED_INPUTS, 7_168);
     }
 
     #[test]
@@ -6354,6 +6425,57 @@ mod tests {
             MAC_BATCH_INPUT_LOG_SIZE
         );
         assert_eq!([values[6], values[7]], gf128_halves_from_be32(revocation.z));
+    }
+
+    #[test]
+    fn p4b_mac_zero_suffixes_are_outside_circuit_support() {
+        let issuer = p4b_microbench_input(19);
+        let device = p4b_microbench_input(23);
+        let revocation = p4b_microbench_input(29);
+        let key_shares = p4b_microbench_key_shares();
+        let av = [0x5au8; 16];
+        let values = mdoc_p4b_mac_values(&issuer, &device, &revocation);
+        let tags = key_shares
+            .0
+            .iter()
+            .zip(&values)
+            .map(|(ap, x)| gf128_tag(ap, &av, x))
+            .collect::<Vec<_>>();
+        let group_a = mac_batch_group_a_input(&key_shares, &values).unwrap();
+        let group_b = mac_batch_group_b_input(&key_shares, &av, &values, &tags).unwrap();
+        assert_prefix_mle_matches_full_zero_padded_input(&group_a, MAC_BATCH_GROUP_A_USED_INPUTS);
+        assert_prefix_mle_matches_full_zero_padded_input(&group_b, MAC_BATCH_GROUP_B_USED_INPUTS);
+
+        let circuit = build_mac_batch_circuit(&av, &tags).unwrap();
+        let input_indices = circuit
+            .layers()
+            .last()
+            .unwrap()
+            .terms()
+            .iter()
+            .flat_map(|term| [term.l as usize, term.r as usize])
+            .collect::<Vec<_>>();
+        assert!(input_indices.iter().all(|&index| {
+            index < MAC_BATCH_GROUP_A_USED_INPUTS
+                || (MAC_BATCH_GROUP_B_INPUT_START
+                    ..MAC_BATCH_GROUP_B_INPUT_START + MAC_BATCH_GROUP_B_USED_INPUTS)
+                    .contains(&index)
+        }));
+        assert!(input_indices.contains(&(MAC_BATCH_GROUP_A_USED_INPUTS - 1)));
+        assert!(input_indices
+            .contains(&(MAC_BATCH_GROUP_B_INPUT_START + MAC_BATCH_GROUP_B_USED_INPUTS - 1)));
+        let input = mac_batch_input_with_av(&key_shares, &av, &values, &tags).unwrap();
+        let expected = circuit.evaluate_input(input.clone()).unwrap();
+        let mut suffix_mutated = input;
+        suffix_mutated[MAC_BATCH_GROUP_A_USED_INPUTS..MAC_BATCH_GROUP_B_INPUT_START]
+            .fill(Fp::from_u64(7));
+        suffix_mutated[MAC_BATCH_GROUP_B_INPUT_START + MAC_BATCH_GROUP_B_USED_INPUTS..]
+            .fill(Fp::from_u64(11));
+        let suffix_mutated = circuit.evaluate_input(suffix_mutated).unwrap();
+        assert_eq!(
+            &suffix_mutated[..suffix_mutated.len() - 1],
+            &expected[..expected.len() - 1],
+        );
     }
 
     #[test]

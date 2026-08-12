@@ -16,8 +16,8 @@ use eu_id_ec_coprocessor::ecdsa::{
     ImplementedCircuitBundleEntry, ImplementedCircuitProofError, LayoutSlot, MdocP4bMacKeyShares,
     Witness, WitnessError, MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, MDOC_P4B_MAC_HALF_COUNT, N_LIMBS,
 };
-use eu_id_ec_coprocessor::ligero::{commit_witness, product_circle_params};
-use eu_id_ec_coprocessor::merkle::ColumnOpening;
+use eu_id_ec_coprocessor::ligero::{commit_witness, product_circle_params, LigeroError};
+use eu_id_ec_coprocessor::merkle::{ColumnOpening, MerkleError};
 use eu_id_ec_coprocessor::sumcheck::{prove_circuit, CircuitPads};
 use eu_id_ec_coprocessor::CoprocessorChannel;
 use eu_id_ec_coprocessor::Fp;
@@ -27,6 +27,10 @@ use p256::AffinePoint;
 use sha2::{Digest as _, Sha256};
 
 const TEST_SEED: [u8; 32] = [9u8; 32];
+const PREFIX_GROUP_A_OPENING_ROWS: usize = 217;
+const PREFIX_GROUP_B_OPENING_ROWS: usize = 32;
+const LEGACY_FULL_GROUP_A_OPENING_ROWS: usize = 285;
+const LEGACY_FULL_GROUP_B_OPENING_ROWS: usize = 36;
 
 fn fp_from_coord(coord: &[u8]) -> Fp {
     let mut bytes = [0u8; 32];
@@ -1031,6 +1035,15 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
     )
     .unwrap();
 
+    assert_eq!(
+        bundle.proximity_batch.as_ref().unwrap().columns.len(),
+        bundle.params.openings * PREFIX_GROUP_A_OPENING_ROWS,
+    );
+    assert_eq!(
+        bundle.proximity_batch_b.as_ref().unwrap().columns.len(),
+        bundle.params.openings * PREFIX_GROUP_B_OPENING_ROWS,
+    );
+
     assert_eq!(bundle.mac_tags.len(), MDOC_P4B_MAC_HALF_COUNT);
     assert_eq!(
         MDOC_P4B_MAC_COMMITTED_PRIVATE_INPUTS, 10_242,
@@ -1101,6 +1114,27 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
             malformed.proximity_batch_b = None;
             malformed
         }),
+        ("old full-row A batch", {
+            let mut malformed = bundle.clone();
+            malformed.proximity_batch.as_mut().unwrap().columns.resize(
+                bundle.params.openings * LEGACY_FULL_GROUP_A_OPENING_ROWS,
+                Fp::ZERO,
+            );
+            bincode::deserialize(&bincode::serialize(&malformed).unwrap()).unwrap()
+        }),
+        ("old full-row B batch", {
+            let mut malformed = bundle.clone();
+            malformed
+                .proximity_batch_b
+                .as_mut()
+                .unwrap()
+                .columns
+                .resize(
+                    bundle.params.openings * LEGACY_FULL_GROUP_B_OPENING_ROWS,
+                    Fp::ZERO,
+                );
+            bincode::deserialize(&bincode::serialize(&malformed).unwrap()).unwrap()
+        }),
     ];
     for (label, use_b, mutation) in [
         ("A short columns", false, 0u8),
@@ -1148,7 +1182,17 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
             )
         });
         assert!(verdict.is_ok(), "{label} must not panic the P4b verifier");
-        assert!(verdict.unwrap().is_err(), "{label} must reject");
+        let verdict = verdict.unwrap();
+        if label.starts_with("old full-row") {
+            assert!(matches!(
+                verdict,
+                Err(ImplementedCircuitProofError::Ligero(LigeroError::Merkle(
+                    MerkleError::WrongBatchLength
+                )))
+            ));
+        } else {
+            assert!(verdict.is_err(), "{label} must reject");
+        }
     }
     let mut corrupt_claim_blind_check = bundle.clone();
     corrupt_claim_blind_check.claim_blind_check.combined_row[0] =
