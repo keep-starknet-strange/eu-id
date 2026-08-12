@@ -248,6 +248,8 @@ impl Layout {
     }
 }
 
+const _: () = assert!(Layout::COL_PADDING_END <= Layout::COL_H_OUT_END);
+
 /// Return the 32 big-endian bytes of one `h_out` value.
 ///
 /// Each state word has the order `[hi.b1, hi.b0, lo.b1, lo.b0]`. The trace,
@@ -1074,7 +1076,6 @@ mod tests {
         assert_eq!(PADDING_ROW_COLS, 30);
         assert_eq!(Layout::TOTAL_COLS, 197);
         assert_eq!(Layout::COL_PADDING_START, Layout::COL_FINAL_CARRIES_START);
-        assert!(Layout::COL_PADDING_END <= Layout::COL_H_OUT_END);
     }
 
     /// Round family, schedule family, and boundary families round-trip a

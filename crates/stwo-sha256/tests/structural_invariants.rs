@@ -9,7 +9,6 @@ fn packed_layout_has_exact_width_and_stable_offsets() {
     assert_eq!(PADDING_ROW_COLS, 30);
     assert_eq!(DIGEST_BYTES, 32);
     assert_eq!(Layout::COL_PADDING_START, Layout::COL_FINAL_CARRIES_START);
-    assert!(Layout::COL_PADDING_END <= Layout::COL_H_OUT_END);
     assert_eq!(Layout::COL_MSG_ID, Layout::COL_DIGEST_BYTES_END);
     assert_eq!(Layout::COL_MSG_BLOCK, Layout::COL_MSG_ID + 1);
 }
