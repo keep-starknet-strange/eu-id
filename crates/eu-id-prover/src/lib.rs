@@ -100,7 +100,7 @@ use stwo::core::pcs::PcsConfig;
 pub(crate) mod ec_coprocessor {
     use eu_id_ec_coprocessor::ecdsa::{
         EcdsaInput as S4EcdsaInput, EcdsaPublicProjection as S4EcdsaPublicProjection,
-        ImplementedCircuitBundle, ImplementedCircuitProofError, Witness, WitnessError,
+        ImplementedCircuitBundle, ImplementedCircuitProofError, ValidatedWitness, WitnessError,
     };
     use eu_id_ec_coprocessor::TranscriptSeed;
     use stwo_p256::types::EcdsaVerifyInput;
@@ -133,17 +133,10 @@ pub(crate) mod ec_coprocessor {
         S4EcdsaPublicProjection::message_hash_only(input.message_hash.0)
     }
 
-    pub(crate) fn generate_witness_from_stwo(
+    pub(crate) fn generate_validated_witness_from_stwo(
         input: &EcdsaVerifyInput,
-    ) -> Result<Witness, WitnessError> {
-        eu_id_ec_coprocessor::ecdsa::generate_witness(&input_from_stwo(input))
-    }
-
-    pub(crate) fn verify_witness_from_stwo(
-        input: &EcdsaVerifyInput,
-        witness: &Witness,
-    ) -> Result<(), WitnessError> {
-        eu_id_ec_coprocessor::ecdsa::verify_witness(&input_from_stwo(input), witness)
+    ) -> Result<ValidatedWitness, WitnessError> {
+        ValidatedWitness::generate(input_from_stwo(input))
     }
 
     pub(crate) fn implemented_circuit_transcript_shapes_from_stwo() -> Result<
@@ -159,26 +152,17 @@ pub(crate) mod ec_coprocessor {
         eu_id_ec_coprocessor::ecdsa::ecdsa_public_projection_transcript_segments(projection)
     }
 
-    pub(crate) fn prove_mdoc_p4b_circuit_bundle_from_stwo(
-        issuer_input: &EcdsaVerifyInput,
-        issuer_projection: &S4EcdsaPublicProjection,
-        issuer_witness: &Witness,
-        device_input: &EcdsaVerifyInput,
-        device_projection: &S4EcdsaPublicProjection,
-        device_witness: &Witness,
-        revocation: (&EcdsaVerifyInput, &S4EcdsaPublicProjection, &Witness),
+    pub(crate) fn prove_mdoc_p4b_circuit_bundle_from_validated(
+        issuer: &ValidatedWitness,
+        device: &ValidatedWitness,
+        revocation: &ValidatedWitness,
         mac_key_shares: &eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         transcript_seed: TranscriptSeed,
     ) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
-        let revocation_input = input_from_stwo(revocation.0);
-        eu_id_ec_coprocessor::ecdsa::prove_mdoc_p4b_circuit_bundle(
-            &input_from_stwo(issuer_input),
-            issuer_projection,
-            issuer_witness,
-            &input_from_stwo(device_input),
-            device_projection,
-            device_witness,
-            (&revocation_input, revocation.1, revocation.2),
+        eu_id_ec_coprocessor::ecdsa::prove_mdoc_p4b_circuit_bundle_from_validated(
+            issuer,
+            device,
+            revocation,
             mac_key_shares,
             transcript_seed,
         )

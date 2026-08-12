@@ -323,6 +323,27 @@ pub struct Witness {
     pub values: Vec<Fp>,
 }
 
+/// An ECDSA witness generated and signature-checked by this crate.
+///
+/// The private fields make this a capability for internal proving paths that
+/// must not repeat the expensive deterministic witness generation performed
+/// by [`verify_witness`]. Public proving APIs that accept [`Witness`] remain
+/// checked at their trust boundary.
+#[doc(hidden)]
+pub struct ValidatedWitness {
+    input: EcdsaInput,
+    witness: Witness,
+}
+
+impl ValidatedWitness {
+    #[doc(hidden)]
+    pub fn generate(input: EcdsaInput) -> Result<Self, WitnessError> {
+        let witness = generate_witness(&input)?;
+        require_valid_signature(&input, &witness)?;
+        Ok(Self { input, witness })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ImplementedCircuitProofs {
     pub proofs: Vec<CircuitSumcheckProof>,
@@ -600,6 +621,10 @@ pub fn verify_witness(input: &EcdsaInput, witness: &Witness) -> Result<(), Witne
     ] {
         require_equal_slot(slot, &expected, witness)?;
     }
+    require_valid_signature(input, witness)
+}
+
+fn require_valid_signature(input: &EcdsaInput, witness: &Witness) -> Result<(), WitnessError> {
     let final_reduction = layout_range(LayoutSlot::FinalReduction);
     let signature_r = Fp::from_bytes_be(input.r).ok_or(WitnessError::NonCanonicalScalar)?;
     if witness.values[final_reduction.start + 1] != signature_r {
@@ -1034,7 +1059,6 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     mac_key_shares: &MdocP4bMacKeyShares,
     transcript_seed: TranscriptSeed,
 ) -> Result<(ImplementedCircuitBundle, MdocP4bProveProfile), ImplementedCircuitProofError> {
-    let mut profile = MdocP4bProveProfile::default();
     let start = Instant::now();
     let (revocation_input, revocation_projection, revocation_witness) = revocation;
     validate_mdoc_p4b_projection_shapes(
@@ -1046,7 +1070,82 @@ pub fn prove_mdoc_p4b_circuit_bundle_profiled(
     verify_witness(device_input, device_witness).map_err(ImplementedCircuitProofError::Witness)?;
     verify_witness(revocation_input, revocation_witness)
         .map_err(ImplementedCircuitProofError::Witness)?;
-    profile.witness_check = start.elapsed();
+    let witness_check = start.elapsed();
+
+    let (bundle, mut profile) = prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
+        issuer_input,
+        issuer_projection,
+        issuer_witness,
+        device_input,
+        device_projection,
+        device_witness,
+        revocation,
+        mac_key_shares,
+        transcript_seed,
+    )?;
+    profile.witness_check = witness_check;
+    Ok((bundle, profile))
+}
+
+/// Proves from witnesses generated and signature-checked by this crate.
+///
+/// This capability-based entry point exists for the product prover, which
+/// constructs all three witnesses itself. Callers with ordinary [`Witness`]
+/// values must use [`prove_mdoc_p4b_circuit_bundle`], which remains checked.
+#[doc(hidden)]
+pub fn prove_mdoc_p4b_circuit_bundle_from_validated(
+    issuer: &ValidatedWitness,
+    device: &ValidatedWitness,
+    revocation: &ValidatedWitness,
+    mac_key_shares: &MdocP4bMacKeyShares,
+    transcript_seed: TranscriptSeed,
+) -> Result<ImplementedCircuitBundle, ImplementedCircuitProofError> {
+    let [issuer_projection, device_projection, revocation_projection] =
+        validated_mdoc_p4b_projections(issuer, device, revocation);
+    prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
+        &issuer.input,
+        &issuer_projection,
+        &issuer.witness,
+        &device.input,
+        &device_projection,
+        &device.witness,
+        (
+            &revocation.input,
+            &revocation_projection,
+            &revocation.witness,
+        ),
+        mac_key_shares,
+        transcript_seed,
+    )
+    .map(|(bundle, _)| bundle)
+}
+
+fn validated_mdoc_p4b_projections(
+    issuer: &ValidatedWitness,
+    device: &ValidatedWitness,
+    revocation: &ValidatedWitness,
+) -> [EcdsaPublicProjection; 3] {
+    [
+        EcdsaPublicProjection::issuer_key_only(issuer.input.qx, issuer.input.qy),
+        EcdsaPublicProjection::message_hash_only(device.input.z),
+        EcdsaPublicProjection::public_key_only(revocation.input.qx, revocation.input.qy),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
+    issuer_input: &EcdsaInput,
+    issuer_projection: &EcdsaPublicProjection,
+    issuer_witness: &Witness,
+    device_input: &EcdsaInput,
+    device_projection: &EcdsaPublicProjection,
+    device_witness: &Witness,
+    revocation: (&EcdsaInput, &EcdsaPublicProjection, &Witness),
+    mac_key_shares: &MdocP4bMacKeyShares,
+    transcript_seed: TranscriptSeed,
+) -> Result<(ImplementedCircuitBundle, MdocP4bProveProfile), ImplementedCircuitProofError> {
+    let mut profile = MdocP4bProveProfile::default();
+    let (revocation_input, revocation_projection, revocation_witness) = revocation;
 
     let start = Instant::now();
     let mut instances = Vec::new();

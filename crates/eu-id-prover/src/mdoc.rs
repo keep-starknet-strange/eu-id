@@ -4056,9 +4056,9 @@ struct MdocCoprocessorBindingProver {
     /// Revocation sorted-pair signature, proven as the bundle's third ECDSA
     /// instance set.
     revocation_input: EcdsaVerifyInput,
-    issuer_witness: eu_id_ec_coprocessor::ecdsa::Witness,
-    device_witness: eu_id_ec_coprocessor::ecdsa::Witness,
-    revocation_witness: eu_id_ec_coprocessor::ecdsa::Witness,
+    issuer_witness: Option<eu_id_ec_coprocessor::ecdsa::ValidatedWitness>,
+    device_witness: Option<eu_id_ec_coprocessor::ecdsa::ValidatedWitness>,
+    revocation_witness: Option<eu_id_ec_coprocessor::ecdsa::ValidatedWitness>,
     mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
     mac_state: MdocP4bMacSharedState,
     bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
@@ -4080,24 +4080,22 @@ impl MdocCoprocessorBindingProver {
         mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         mac_state: MdocP4bMacSharedState,
     ) -> Result<Self, Error> {
-        let issuer_witness = crate::ec_coprocessor::generate_witness_from_stwo(&issuer_input)
-            .map_err(Error::CoprocessorWitness)?;
-        let device_witness = crate::ec_coprocessor::generate_witness_from_stwo(&device_input)
-            .map_err(Error::CoprocessorWitness)?;
-        // Build and check the revocation witness before proof generation.
-        // Return an error for an invalid sorted-pair signature.
-        let revocation_witness =
-            crate::ec_coprocessor::generate_witness_from_stwo(&revocation_input)
+        let issuer_witness =
+            crate::ec_coprocessor::generate_validated_witness_from_stwo(&issuer_input)
                 .map_err(Error::CoprocessorWitness)?;
-        crate::ec_coprocessor::verify_witness_from_stwo(&revocation_input, &revocation_witness)
-            .map_err(Error::CoprocessorWitness)?;
+        let device_witness =
+            crate::ec_coprocessor::generate_validated_witness_from_stwo(&device_input)
+                .map_err(Error::CoprocessorWitness)?;
+        let revocation_witness =
+            crate::ec_coprocessor::generate_validated_witness_from_stwo(&revocation_input)
+                .map_err(Error::CoprocessorWitness)?;
         Ok(Self {
             issuer_input,
             device_input,
             revocation_input,
-            issuer_witness,
-            device_witness,
-            revocation_witness,
+            issuer_witness: Some(issuer_witness),
+            device_witness: Some(device_witness),
+            revocation_witness: Some(revocation_witness),
             mac_key_shares,
             mac_state,
             bundle: None,
@@ -4159,19 +4157,22 @@ impl AirProver for MdocCoprocessorBindingProver {
         crate::mix_coprocessor_tagged_projections(channel, &tagged)
             .expect("mdoc coprocessor public projections mix");
         let seed = crate::draw_coprocessor_seed(channel);
-        let revocation = (
-            &self.revocation_input,
-            &revocation_projection,
-            &self.revocation_witness,
-        );
-        let bundle = crate::ec_coprocessor::prove_mdoc_p4b_circuit_bundle_from_stwo(
-            &self.issuer_input,
-            &issuer_projection,
-            &self.issuer_witness,
-            &self.device_input,
-            &device_projection,
-            &self.device_witness,
-            revocation,
+        let issuer_witness = self
+            .issuer_witness
+            .as_ref()
+            .expect("mdoc issuer witness is available");
+        let device_witness = self
+            .device_witness
+            .as_ref()
+            .expect("mdoc device witness is available");
+        let revocation_witness = self
+            .revocation_witness
+            .as_ref()
+            .expect("mdoc revocation witness is available");
+        let bundle = crate::ec_coprocessor::prove_mdoc_p4b_circuit_bundle_from_validated(
+            issuer_witness,
+            device_witness,
+            revocation_witness,
             &self.mac_key_shares,
             seed,
         )
@@ -4183,9 +4184,9 @@ impl AirProver for MdocCoprocessorBindingProver {
         });
         crate::mix_coprocessor_rejoin(channel, &bundle).expect("mdoc coprocessor rejoin mixes");
         self.bundle = Some(bundle);
-        self.issuer_witness.values.clear();
-        self.device_witness.values.clear();
-        self.revocation_witness.values.clear();
+        self.issuer_witness.take();
+        self.device_witness.take();
+        self.revocation_witness.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
