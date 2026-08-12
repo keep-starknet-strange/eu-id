@@ -33,8 +33,8 @@ use crate::witness::{compute_packed_sha256_witness, PackedSha256Error};
 /// the canonical recipe. The laptop benchmark pins the production values.
 #[derive(Clone, Debug)]
 pub struct ProverConfig {
-    /// `log2` of the SHA-256 component's trace row count. Each row is one
-    /// round of one padded block (64 rows per block).
+    /// `log2` of the SHA-256 component's trace row count. Each padded block
+    /// uses three state-seed rows followed by 64 round rows (67 total).
     ///
     /// **Must satisfy `log_n_rows ≥ trace::min_log_size(n_blocks)`**
     /// or [`prove_sha256`] returns [`Sha256ProveError::TraceTooSmall`]. The
@@ -61,7 +61,7 @@ pub struct ProverConfig {
     /// batching variable-length messages into a single component.
     ///
     /// **`Default` sets this to `min_log_size(1) = 7`** — one padded block
-    /// (64 rows) plus padding. Larger messages must override. See the
+    /// (67 rows) plus padding. Larger messages must override. See the
     /// recipe above.
     pub log_n_rows: u32,
     /// Stwo PCS configuration (FRI + PoW parameters). Use
@@ -236,7 +236,7 @@ fn prove_sha256_inner(
 
 /// Largest `log_n_rows` that the verifier accepts.
 ///
-/// One block uses 64 trace rows. Thus, `2^MAX_LOG_N_ROWS` rows correspond to
+/// One block uses 67 trace rows. Thus, `2^MAX_LOG_N_ROWS` rows correspond to
 /// approximately 1 GiB of padded input. This denial-of-service guard is not a
 /// protocol limit. It limits allocations from an untrusted value such as `63`.
 /// The lower limit is `LOG_N_LANES`.

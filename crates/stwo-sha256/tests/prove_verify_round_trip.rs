@@ -4,12 +4,32 @@ use sha2::{Digest, Sha256};
 use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
 use stwo_sha256::interaction::InteractionClaim;
 use stwo_sha256::stark::{prove_sha256, verify_sha256_proof, ProverConfig, Sha256ProveError};
-use stwo_sha256::trace::{generate_trace, min_log_size, Layout, ROWS_PER_BLOCK};
+use stwo_sha256::trace::{
+    generate_trace, min_log_size, Layout, ROWS_PER_BLOCK, STATE_SEED_ROWS, WORD_BIT_COLS,
+};
 use stwo_sha256::types::PackedSha256Witness;
 use stwo_sha256::witness::{compute_packed_sha256_witness, PackedSha256Error};
 
 fn packed(message_set: &[&[u8]]) -> PackedSha256Witness {
     compute_packed_sha256_witness(message_set).expect("packed witness")
+}
+
+fn seeded_state_word(
+    trace: &[Vec<stwo::core::fields::m31::BaseField>],
+    block: usize,
+    word: usize,
+    log_size: u32,
+) -> u32 {
+    let lane = usize::from(word >= 4);
+    let position = word % 4;
+    let slot = if position == 0 {
+        Layout::round_row_slot(block, 0, log_size)
+    } else {
+        Layout::seed_row_slot(block, STATE_SEED_ROWS - position, log_size)
+    };
+    (0..WORD_BIT_COLS).fold(0u32, |value, bit| {
+        value | (trace[Layout::round_operand_bit(lane, bit)][slot].0 << bit)
+    })
 }
 
 #[test]
@@ -23,7 +43,7 @@ fn packed_trace_contains_four_messages_in_structural_order() {
     let mut global_block = 0;
     for (message_id, &message_blocks) in blocks.iter().enumerate() {
         for block in 0..message_blocks {
-            let slot = Layout::round_row_slot(global_block, 0, log_size);
+            let slot = Layout::seed_row_slot(global_block, 0, log_size);
             assert_eq!(trace[Layout::COL_MSG_ID][slot].0, message_id as u32);
             assert_eq!(trace[Layout::COL_MSG_BLOCK][slot].0, block as u32);
             assert_eq!(trace[Layout::COL_MSG_START][slot].0, u32::from(block == 0));
@@ -68,28 +88,31 @@ fn packed_four_and_five_message_traces_match_native_sha_and_geometry() {
 
         for (message_id, message) in messages.iter().enumerate() {
             for block in 0..blocks[message_id] {
-                let start = Layout::round_row_slot(next_block + block, 0, log_size);
+                let start = Layout::seed_row_slot(next_block + block, 0, log_size);
                 assert_eq!(trace[Layout::COL_MSG_ID][start].0, message_id as u32);
                 assert_eq!(trace[Layout::COL_MSG_BLOCK][start].0, block as u32);
                 assert_eq!(trace[Layout::COL_MSG_START][start].0, u32::from(block == 0));
                 for t in 0..ROWS_PER_BLOCK {
-                    let slot = Layout::round_row_slot(next_block + block, t, log_size);
+                    let slot =
+                        Layout::row_slot((next_block + block) * ROWS_PER_BLOCK + t, log_size);
                     assert_eq!(trace[Layout::COL_MSG_ID][slot].0, message_id as u32);
                     assert_eq!(trace[Layout::COL_MSG_BLOCK][slot].0, block as u32);
                 }
                 if block == 0 {
                     for word in 0..8 {
-                        let (lo, hi) = Layout::h_in_word(word);
                         let iv = stwo_sha256::constants::IV[word];
-                        assert_eq!(trace[lo][start].0, iv & 0xffff);
-                        assert_eq!(trace[hi][start].0, iv >> 16);
+                        assert_eq!(seeded_state_word(&trace, next_block, word, log_size), iv);
                     }
                 }
             }
 
             next_block += stwo_sha256::native::n_blocks_for(message.len());
             let terminal_block = next_block - 1;
-            let slot = Layout::row_slot(terminal_block * ROWS_PER_BLOCK + 63, log_size);
+            let slot = Layout::round_row_slot(
+                terminal_block,
+                stwo_sha256::constants::N_ROUNDS - 1,
+                log_size,
+            );
             let actual: Vec<u8> = (0..32)
                 .map(|index| trace[Layout::digest_byte(index)][slot].0 as u8)
                 .collect();
@@ -97,8 +120,8 @@ fn packed_four_and_five_message_traces_match_native_sha_and_geometry() {
             assert_eq!(actual.as_slice(), &expected[..]);
         }
         assert!(
-            (1usize << log_size) - next_block * ROWS_PER_BLOCK >= ROWS_PER_BLOCK,
-            "packed trace must retain a complete disabled block"
+            (1usize << log_size) - next_block * ROWS_PER_BLOCK >= 1,
+            "packed trace must retain a disabled successor row"
         );
     }
 }

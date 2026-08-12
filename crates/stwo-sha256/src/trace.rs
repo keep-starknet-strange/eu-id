@@ -1,8 +1,8 @@
 //! Trace construction for the SHA-256 AIR.
 //!
-//! The trace has one row for each SHA round. The natural row index is
-//! `b * 64 + t` for block `b` and round `t`. [`Layout::row_slot`] converts
-//! this index to Stwo bit-reversed circle-domain order.
+//! Each block has three state-seed rows followed by one row for each SHA
+//! round. The seed rows place h3/h7, h2/h6, and h1/h5 in the rolling a/e
+//! bit lanes; round zero places h0/h4 there.
 //!
 //! A mask offset of `-k` reads the row that is `k` rounds earlier. The AIR uses
 //! these reads for state updates, schedule recurrence, and block chaining. See
@@ -24,20 +24,22 @@ use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::m31::{PackedM31, LOG_N_LANES, N_LANES};
 
 use crate::constants::{DIGEST_BYTES, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS, WORD_BYTES};
-use crate::native::{lower_sigma0, lower_sigma1};
+use crate::native::{big_sigma0, big_sigma1, ch, lower_sigma0, lower_sigma1, maj};
 use crate::types::{AddCarries, PackedSha256Witness, PaddingRowWitness, Sha256Witness, WordLimbs};
 
 use rand::RngCore;
 
-/// Rows one block occupies in the rotated layout: one per round.
-pub const ROWS_PER_BLOCK: usize = N_ROUNDS;
+/// State rows before round zero. They seed the rolling a/e bit lanes.
+pub const STATE_SEED_ROWS: usize = 3;
+
+/// Rows one block occupies: three state seeds and one row per round.
+pub const ROWS_PER_BLOCK: usize = STATE_SEED_ROWS + N_ROUNDS;
 
 /// Bits per SHA-256 word, committed LSB-first.
 pub const WORD_BIT_COLS: usize = 32;
-/// Round operand bit columns. The hybrid AIR keeps operand aliases as
-/// committed bits so Maj/Ch formulas stay degree 3 even on boundary rows.
-/// Operand order: `[a, b, c, e, f, g]`.
-pub const ROUND_BIT_OPERANDS: usize = 6;
+/// Rolling state bit columns. Only a/e are committed; b/c/d and f/g/h are
+/// read from the preceding three rows. Operand order: `[a, e]`.
+pub const ROUND_BIT_OPERANDS: usize = 2;
 pub const ROUND_OPERAND_BIT_COLS: usize = ROUND_BIT_OPERANDS * WORD_BIT_COLS;
 /// Columns of the round family: 8 word-results × 2 limbs + 4 carry pairs
 /// × 2 ends = 24, then committed operand bits. Σ0/Σ1/Maj/Ch are computed
@@ -85,13 +87,11 @@ impl Layout {
     /// Schedule family — live on rows with `t ≥ 16`.
     pub const COL_SCHED_ENTRY_START: usize = Self::COL_ROUND_END;
     pub const COL_SCHED_ENTRY_END: usize = Self::COL_SCHED_ENTRY_START + SCHEDULE_ENTRY_COLS;
-    /// `t = 0` family.
+    /// Message-start marker, written on each block's first seed row.
     pub const COL_MSG_START: usize = Self::COL_SCHED_ENTRY_END;
-    pub const COL_H_IN_START: usize = Self::COL_MSG_START + 1;
-    pub const COL_H_IN_END: usize = Self::COL_H_IN_START + 2 * N_STATE_WORDS;
     /// `t = 63` family. The first 30 cells are also the padding-role
     /// witness on the disjoint `t = 15` family.
-    pub const COL_FINAL_CARRIES_START: usize = Self::COL_H_IN_END;
+    pub const COL_FINAL_CARRIES_START: usize = Self::COL_MSG_START + 1;
     pub const COL_FINAL_CARRIES_END: usize = Self::COL_FINAL_CARRIES_START + 2 * N_STATE_WORDS;
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
     pub const COL_H_OUT_END: usize = Self::COL_H_OUT_START + 2 * N_STATE_WORDS;
@@ -132,13 +132,6 @@ impl Layout {
     pub const COL_MSG_BLOCK: usize = Self::COL_MSG_ID + 1;
     pub const TOTAL_COLS: usize = Self::COL_MSG_BLOCK + 1;
 
-    /// `(lo, hi)` slot for the `j`-th word of `h_in` (`t = 0` row).
-    #[inline]
-    pub const fn h_in_word(j: usize) -> (usize, usize) {
-        let base = Self::COL_H_IN_START + 2 * j;
-        (base, base + 1)
-    }
-
     /// `(lo, hi)` slot for the row's schedule word `W[t]`.
     /// Columns of the schedule family's leading cells, in order:
     /// `σ0_lo, σ0_hi, σ1_lo, σ1_hi, carry_lo, carry_hi`. Live on rows with
@@ -155,9 +148,10 @@ impl Layout {
         Self::COL_W_BITS_START + bit
     }
 
-    /// Column of a round operand bit. Operand order is `[a, b, c, e, f, g]`.
+    /// Column of a rolling state bit. Operand order is `[a, e]`.
     #[inline]
     pub const fn round_operand_bit(operand_idx: usize, bit: usize) -> usize {
+        debug_assert!(operand_idx < ROUND_BIT_OPERANDS);
         Self::COL_ROUND_START + 24 + operand_idx * WORD_BIT_COLS + bit
     }
 
@@ -219,7 +213,7 @@ impl Layout {
         Self::COL_MARKER_WORD_BYTE_START + b
     }
 
-    /// Storage slot of natural row `row_idx` (`= block · 64 + round`), for a
+    /// Storage slot of a natural row in the 67-row block layout, for a
     /// trace of size `2^log_size`.
     ///
     /// Row `r` has coset index `r`. First, map it to a circle-domain index.
@@ -240,7 +234,17 @@ impl Layout {
     /// Storage slot of `(block_idx, round_t)`.
     #[inline]
     pub fn round_row_slot(block_idx: usize, round_t: usize, log_size: u32) -> usize {
-        Self::row_slot(block_idx * ROWS_PER_BLOCK + round_t, log_size)
+        Self::row_slot(
+            block_idx * ROWS_PER_BLOCK + STATE_SEED_ROWS + round_t,
+            log_size,
+        )
+    }
+
+    /// Storage slot of one of the three state-seed rows.
+    #[inline]
+    pub fn seed_row_slot(block_idx: usize, seed: usize, log_size: u32) -> usize {
+        debug_assert!(seed < STATE_SEED_ROWS);
+        Self::row_slot(block_idx * ROWS_PER_BLOCK + seed, log_size)
     }
 }
 
@@ -279,15 +283,24 @@ pub(crate) fn generate_trace_base_columns(
     assert!(n_real_rows <= n_rows, "packed SHA trace is too small");
     assert!(n_real_rows.is_multiple_of(ROWS_PER_BLOCK));
     let decoys = decoy_witnesses_for_padding(n_real_rows, n_rows);
+    generate_trace_base_columns_with_decoys(witness, log_size, &decoys)
+}
 
+fn generate_trace_base_columns_with_decoys(
+    witness: &PackedSha256Witness,
+    log_size: u32,
+    decoys: &[Sha256Witness],
+) -> Vec<BaseColumn> {
     if log_size < LOG_N_LANES || rayon::current_num_threads() == 1 {
-        return generate_trace_scalar(witness, log_size, &decoys)
+        return generate_trace_scalar(witness, log_size, decoys)
             .into_iter()
             .map(|values| values.into_iter().collect())
             .collect();
     }
 
     use rayon::prelude::*;
+    let n_rows = 1usize << log_size;
+    let n_real_rows = witness.total_blocks() * ROWS_PER_BLOCK;
     let mut row_values = (0..n_rows)
         .into_par_iter()
         .map(|row_idx| {
@@ -299,20 +312,31 @@ pub(crate) fn generate_trace_base_columns(
             }
             let (message_idx, block_idx) = locate_block(witness, row_idx / ROWS_PER_BLOCK);
             let mut values = vec![BaseField::from(0u32); Layout::TOTAL_COLS];
-            write_round_row_values(
-                &mut values,
-                &witness.messages[message_idx],
-                block_idx,
-                row_idx % ROWS_PER_BLOCK,
-                n_rows,
-                message_idx,
-                block_idx == 0,
-                witness.messages[message_idx].blocks.len() - 1 == block_idx,
-            );
+            let block_row = row_idx % ROWS_PER_BLOCK;
+            if block_row < STATE_SEED_ROWS {
+                write_seed_row_values(
+                    &mut values,
+                    &witness.messages[message_idx],
+                    block_idx,
+                    block_row,
+                    message_idx,
+                    block_idx == 0,
+                );
+            } else {
+                write_round_row_values(
+                    &mut values,
+                    &witness.messages[message_idx],
+                    block_idx,
+                    block_row - STATE_SEED_ROWS,
+                    message_idx,
+                    witness.messages[message_idx].blocks.len() - 1 == block_idx,
+                );
+            }
             values
         })
         .collect::<Vec<_>>();
     fill_schedule_sigma_words_rows(&mut row_values);
+    fill_round_function_limbs_rows(&mut row_values);
 
     let packed_rows = 1usize << (log_size - LOG_N_LANES);
     (0..Layout::TOTAL_COLS)
@@ -346,17 +370,28 @@ fn generate_trace_scalar(
     for row_idx in 0..n_real_rows {
         let (message_idx, block_idx) = locate_block(witness, row_idx / ROWS_PER_BLOCK);
         let slot = Layout::row_slot(row_idx, log_size);
-        write_round_row(
-            &mut cols,
-            slot,
-            &witness.messages[message_idx],
-            block_idx,
-            row_idx % ROWS_PER_BLOCK,
-            n_rows,
-            message_idx,
-            block_idx == 0,
-            witness.messages[message_idx].blocks.len() - 1 == block_idx,
-        );
+        let block_row = row_idx % ROWS_PER_BLOCK;
+        if block_row < STATE_SEED_ROWS {
+            write_seed_row(
+                &mut cols,
+                slot,
+                &witness.messages[message_idx],
+                block_idx,
+                block_row,
+                message_idx,
+                block_idx == 0,
+            );
+        } else {
+            write_round_row(
+                &mut cols,
+                slot,
+                &witness.messages[message_idx],
+                block_idx,
+                block_row - STATE_SEED_ROWS,
+                message_idx,
+                witness.messages[message_idx].blocks.len() - 1 == block_idx,
+            );
+        }
     }
     for row_idx in n_real_rows..n_rows {
         let slot = Layout::row_slot(row_idx, log_size);
@@ -368,6 +403,7 @@ fn generate_trace_scalar(
         }
     }
     fill_schedule_sigma_words_columns(&mut cols, log_size);
+    fill_round_function_limbs_columns(&mut cols, log_size);
     cols
 }
 
@@ -386,12 +422,7 @@ fn decoy_witnesses_for_padding_with(
     rng: &mut impl RngCore,
 ) -> Vec<Sha256Witness> {
     let pad_rows = n_rows.saturating_sub(n_real_rows);
-    debug_assert_eq!(
-        pad_rows % ROWS_PER_BLOCK,
-        0,
-        "SHA padding rows should split into whole decoy blocks"
-    );
-    (0..(pad_rows / ROWS_PER_BLOCK))
+    (0..pad_rows.div_ceil(ROWS_PER_BLOCK))
         .map(|_| random_one_block_decoy_witness(rng))
         .collect()
 }
@@ -405,9 +436,13 @@ fn random_one_block_decoy_witness(rng: &mut impl RngCore) -> Sha256Witness {
     witness
 }
 
-fn disabled_decoy_row_values(decoy: &Sha256Witness, t: usize) -> Vec<BaseField> {
+fn disabled_decoy_row_values(decoy: &Sha256Witness, block_row: usize) -> Vec<BaseField> {
     let mut values = vec![BaseField::from(0u32); Layout::TOTAL_COLS];
-    write_round_row_values(&mut values, decoy, 0, t, 64, 0, false, false);
+    if block_row < STATE_SEED_ROWS {
+        write_seed_row_values(&mut values, decoy, 0, block_row, 0, false);
+    } else {
+        write_round_row_values(&mut values, decoy, 0, block_row - STATE_SEED_ROWS, 0, false);
+    }
     values[Layout::COL_ENABLER] = BaseField::from(0u32);
     values[Layout::COL_MSG_START] = BaseField::from(0u32);
     values[Layout::COL_IS_MSG_LAST] = BaseField::from(0u32);
@@ -415,7 +450,7 @@ fn disabled_decoy_row_values(decoy: &Sha256Witness, t: usize) -> Vec<BaseField> 
     values[Layout::COL_MSG_BLOCK] = BaseField::from(0u32);
     // These cells alias live finalization data at t=63, so only clear the
     // padding-family view on other decoy rows.
-    if t != N_ROUNDS - 1 {
+    if block_row != STATE_SEED_ROWS + N_ROUNDS - 1 {
         values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
     }
     values
@@ -429,22 +464,11 @@ fn write_round_row(
     witness: &Sha256Witness,
     block_idx: usize,
     t: usize,
-    n_rows: usize,
     message_idx: usize,
-    msg_start: bool,
     is_msg_last: bool,
 ) {
     let mut values = vec![BaseField::from(0u32); cols.len()];
-    write_round_row_values(
-        &mut values,
-        witness,
-        block_idx,
-        t,
-        n_rows,
-        message_idx,
-        msg_start,
-        is_msg_last,
-    );
+    write_round_row_values(&mut values, witness, block_idx, t, message_idx, is_msg_last);
     for (column, value) in cols.iter_mut().zip(values) {
         column[row] = value;
     }
@@ -457,9 +481,7 @@ fn write_round_row_values(
     witness: &Sha256Witness,
     block_idx: usize,
     t: usize,
-    _n_rows: usize,
     message_idx: usize,
-    msg_start: bool,
     is_msg_last: bool,
 ) {
     let block = &witness.blocks[block_idx];
@@ -497,7 +519,7 @@ fn write_round_row_values(
         row[r[16 + 2 * i]] = m31(c.lo);
         row[r[16 + 2 * i + 1]] = m31(c.hi);
     }
-    write_round_operand_bits_row(row, round);
+    write_round_state_bits_row(row, round.state_in[0].to_u32(), round.state_in[4].to_u32());
 
     // Schedule family. The sigma words are filled for every row in a later
     // pass from the committed W bits; only the recurrence carries are live
@@ -507,16 +529,6 @@ fn write_round_row_values(
         let [_s0_lo, _s0_hi, _s1_lo, _s1_hi, c_lo, c_hi] = Layout::schedule_entry();
         row[c_lo] = m31(entry.carries.lo);
         row[c_hi] = m31(entry.carries.hi);
-    }
-
-    // t = 0 family: block-input state.
-    if t == 0 {
-        row[Layout::COL_MSG_START] = BaseField::from(msg_start as u32);
-        for j in 0..N_STATE_WORDS {
-            let (lo, hi) = Layout::h_in_word(j);
-            row[lo] = m31(block.h_in[j].lo);
-            row[hi] = m31(block.h_in[j].hi);
-        }
     }
 
     // t = 63 family: finalization + digest view.
@@ -545,6 +557,53 @@ fn write_round_row_values(
     if t == 15 {
         write_padding_row_values(row, &block.padding_row);
     }
+}
+
+fn write_seed_row(
+    cols: &mut [Vec<BaseField>],
+    row: usize,
+    witness: &Sha256Witness,
+    block_idx: usize,
+    seed: usize,
+    message_idx: usize,
+    msg_start: bool,
+) {
+    let mut values = vec![BaseField::from(0u32); cols.len()];
+    write_seed_row_values(
+        &mut values,
+        witness,
+        block_idx,
+        seed,
+        message_idx,
+        msg_start,
+    );
+    for (column, value) in cols.iter_mut().zip(values) {
+        column[row] = value;
+    }
+}
+
+fn write_seed_row_values(
+    row: &mut [BaseField],
+    witness: &Sha256Witness,
+    block_idx: usize,
+    seed: usize,
+    message_idx: usize,
+    msg_start: bool,
+) {
+    debug_assert!(seed < STATE_SEED_ROWS);
+    let block = &witness.blocks[block_idx];
+    let state_index = STATE_SEED_ROWS - seed;
+    row[Layout::COL_ENABLER] = BaseField::from(1u32);
+    write_round_state_bits_row(
+        row,
+        block.h_in[state_index].to_u32(),
+        block.h_in[N_STATE_WORDS / 2 + state_index].to_u32(),
+    );
+    if seed == 0 {
+        row[Layout::COL_MSG_START] = BaseField::from(msg_start as u32);
+    }
+    row[Layout::COL_MSG_ID] = m31(message_idx as u32);
+    row[Layout::COL_MSG_BLOCK] = m31(block_idx as u32);
 }
 
 fn locate_block(witness: &PackedSha256Witness, global_block: usize) -> (usize, usize) {
@@ -578,15 +637,8 @@ fn write_word_limbs_row(row: &mut [BaseField], base: usize, word: u32) {
     row[base + 1] = m31(word >> 16);
 }
 
-fn write_round_operand_bits_row(row: &mut [BaseField], round: &crate::types::RoundWitness) {
-    let words = [
-        round.state_in[0].to_u32(),
-        round.state_in[1].to_u32(),
-        round.state_in[2].to_u32(),
-        round.state_in[4].to_u32(),
-        round.state_in[5].to_u32(),
-        round.state_in[6].to_u32(),
-    ];
+fn write_round_state_bits_row(row: &mut [BaseField], a: u32, e: u32) {
+    let words = [a, e];
     for (operand_idx, &word) in words.iter().enumerate() {
         write_word_bits_row(row, Layout::round_operand_bit(operand_idx, 0), word);
     }
@@ -632,12 +684,66 @@ fn fill_schedule_sigma_words_columns(cols: &mut [Vec<BaseField>], log_size: u32)
     }
 }
 
+fn fill_round_function_limbs_rows(rows: &mut [Vec<BaseField>]) {
+    let n_rows = rows.len();
+    let round = Layout::round_col();
+    for row_idx in 0..n_rows {
+        let state_word = |back: usize, operand: usize| {
+            round_state_word_from_row(&rows[(row_idx + n_rows - back) % n_rows], operand)
+        };
+        let words = [
+            big_sigma0(state_word(0, 0)),
+            big_sigma1(state_word(0, 1)),
+            ch(state_word(0, 1), state_word(1, 1), state_word(2, 1)),
+            maj(state_word(0, 0), state_word(1, 0), state_word(2, 0)),
+        ];
+        for (index, word) in words.into_iter().enumerate() {
+            write_word_limbs_row(&mut rows[row_idx], round[2 * index], word);
+        }
+    }
+}
+
+fn fill_round_function_limbs_columns(cols: &mut [Vec<BaseField>], log_size: u32) {
+    let n_rows = 1usize << log_size;
+    let round = Layout::round_col();
+    for storage_row in 0..n_rows {
+        let coset_index =
+            circle_domain_index_to_coset_index(bit_reverse_index(storage_row, log_size), log_size);
+        let state_word = |back: usize, operand: usize| {
+            let target_coset = (coset_index + n_rows - back) % n_rows;
+            let target_storage = bit_reverse_index(
+                coset_index_to_circle_domain_index(target_coset, log_size),
+                log_size,
+            );
+            (0..WORD_BIT_COLS).fold(0u32, |word, bit| {
+                word | (cols[Layout::round_operand_bit(operand, bit)][target_storage].0 << bit)
+            })
+        };
+        let words = [
+            big_sigma0(state_word(0, 0)),
+            big_sigma1(state_word(0, 1)),
+            ch(state_word(0, 1), state_word(1, 1), state_word(2, 1)),
+            maj(state_word(0, 0), state_word(1, 0), state_word(2, 0)),
+        ];
+        for (index, word) in words.into_iter().enumerate() {
+            cols[round[2 * index]][storage_row] = m31(word & 0xffff);
+            cols[round[2 * index + 1]][storage_row] = m31(word >> 16);
+        }
+    }
+}
+
 fn word_from_row_bits(row: &[BaseField]) -> u32 {
     let mut word = 0u32;
     for bit in 0..WORD_BIT_COLS {
         word |= row[Layout::w_bit(bit)].0 << bit;
     }
     word
+}
+
+fn round_state_word_from_row(row: &[BaseField], operand: usize) -> u32 {
+    (0..WORD_BIT_COLS).fold(0u32, |word, bit| {
+        word | (row[Layout::round_operand_bit(operand, bit)].0 << bit)
+    })
 }
 
 fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
@@ -661,12 +767,12 @@ fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
 /// Return the minimum `log_size` for `n_blocks`.
 ///
 /// The trace size is the smallest power of two greater than
-/// `64 * n_blocks`. This rule adds at least one padding row for the
+/// `67 * n_blocks`. This rule adds at least one padding row for the
 /// `is_msg_last` gate. The result is also at least `LOG_MIN`.
 pub fn min_log_size(n_blocks: usize) -> u32 {
     const LOG_MIN: u32 = 4; // SIMD lane count is 16 → at least 16 rows.
     let rows = n_blocks.max(1) * ROWS_PER_BLOCK;
-    // Strictly-greater power of two: 64·n real rows never fill the trace.
+    // Strictly-greater power of two: 67·n real rows never fill the trace.
     let needed = (rows + 1).next_power_of_two().ilog2();
     needed.max(LOG_MIN)
 }
@@ -675,6 +781,7 @@ pub fn min_log_size(n_blocks: usize) -> u32 {
 mod tests {
     use super::*;
     use crate::witness::{compute_packed_sha256_witness, compute_sha256_witness};
+    use rand::{rngs::StdRng, SeedableRng};
     use sha2::{Digest as Sha2Digest, Sha256};
 
     fn sha2_reference(msg: &[u8]) -> [u8; 32] {
@@ -745,7 +852,7 @@ mod tests {
         digest_byte_columns_match(&[0x77; 150]);
     }
 
-    /// Enabler is 1 on exactly the `64 · n_blocks` real rows. The boundary
+    /// Enabler is 1 on exactly the `67 · n_blocks` real rows. The boundary
     /// flags live on their designated round rows only. The preprocessed
     /// first-row selector marks row 0.
     #[test]
@@ -765,16 +872,17 @@ mod tests {
             .sum();
         assert_eq!(enabled as usize, n_blocks * ROWS_PER_BLOCK);
 
-        // msg_start: only at (block 0, t = 0).
+        // msg_start: only at block zero's first seed row.
         for b in 0..n_blocks {
+            let seed0 = Layout::seed_row_slot(b, 0, log_size);
+            assert_eq!(
+                trace[Layout::COL_MSG_START][seed0].0,
+                u32::from(b == 0),
+                "msg_start at block {b} seed zero"
+            );
             for t in 0..N_ROUNDS {
                 let slot = Layout::round_row_slot(b, t, log_size);
-                let expected = u32::from(b == 0 && t == 0);
-                assert_eq!(
-                    trace[Layout::COL_MSG_START][slot].0,
-                    expected,
-                    "msg_start at ({b}, {t})"
-                );
+                assert_eq!(trace[Layout::COL_MSG_START][slot].0, 0);
                 let expected_last = u32::from(b == n_blocks - 1 && t == N_ROUNDS - 1);
                 assert_eq!(
                     trace[Layout::COL_IS_MSG_LAST][slot].0,
@@ -799,13 +907,39 @@ mod tests {
     }
 
     #[test]
+    fn scalar_and_simd_writers_match_with_partial_decoy_block() {
+        let messages: [&[u8]; 5] = [b"a", b"bc", b"def", b"ghij", b"klmno"];
+        let packed = compute_packed_sha256_witness(&messages).unwrap();
+        let log_size = 9;
+        let n_rows = 1usize << log_size;
+        let n_real_rows = packed.total_blocks() * ROWS_PER_BLOCK;
+        assert_ne!((n_rows - n_real_rows) % ROWS_PER_BLOCK, 0);
+
+        let mut rng = StdRng::seed_from_u64(0x5348_4131_3937);
+        let decoys = decoy_witnesses_for_padding_with(n_real_rows, n_rows, &mut rng);
+        let scalar = generate_trace_scalar(&packed, log_size, &decoys);
+        let simd = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap()
+            .install(|| {
+                generate_trace_base_columns_with_decoys(&packed, log_size, &decoys)
+                    .into_iter()
+                    .map(BaseColumn::into_cpu_vec)
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(simd, scalar);
+    }
+
+    #[test]
     fn padding_rows_are_fresh_sha_decoys_with_public_flags_zero() {
         let witness = compute_sha256_witness(b"abc");
         let log_size = min_log_size(witness.blocks.len());
         let real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
         let first_real_slot = Layout::round_row_slot(0, 0, log_size);
         let first_pad_slot = Layout::row_slot(real_rows, log_size);
-        let pad_t15_slot = Layout::row_slot(real_rows + 15, log_size);
+        let first_pad_round_slot = Layout::row_slot(real_rows + STATE_SEED_ROWS, log_size);
+        let pad_t15_slot = Layout::row_slot(real_rows + STATE_SEED_ROWS + 15, log_size);
 
         let packed = compute_packed_sha256_witness(&[b"abc"]).unwrap();
         let first = generate_trace(&packed, log_size);
@@ -832,29 +966,43 @@ mod tests {
             );
         }
 
-        let decoy_cols = [
-            Layout::COL_W_LO,
-            Layout::COL_W_HI,
-            Layout::round_operand_bit(0, 0),
-            Layout::round_operand_bit(3, 0),
-            Layout::round_operand_bit(1, 0),
-            Layout::round_operand_bit(4, 0),
-        ];
+        let mut decoy_cols: Vec<_> = (Layout::COL_W_LO..Layout::COL_ROUND_END).collect();
+        decoy_cols.extend((0..ROUND_BIT_OPERANDS).flat_map(|operand| {
+            (0..WORD_BIT_COLS).map(move |bit| Layout::round_operand_bit(operand, bit))
+        }));
         assert!(
             decoy_cols
                 .iter()
-                .any(|&col| first[col][first_pad_slot] != BaseField::from(0u32)),
+                .any(|&col| first[col][first_pad_round_slot] != BaseField::from(0u32)),
             "padding arithmetic cells should no longer be all zero"
         );
         assert!(
             decoy_cols
                 .iter()
-                .any(|&col| first[col][first_pad_slot] != second[col][first_pad_slot]),
+                .any(|&col| first[col][first_pad_round_slot] != second[col][first_pad_round_slot]),
             "same-witness padding arithmetic cells should be fresh per trace"
         );
     }
 
-    /// h_in of the first block (its `t = 0` row) is the IV.
+    fn seeded_state_word(
+        trace: &[Vec<BaseField>],
+        block: usize,
+        word: usize,
+        log_size: u32,
+    ) -> u32 {
+        let lane = usize::from(word >= N_STATE_WORDS / 2);
+        let position = word % (N_STATE_WORDS / 2);
+        let slot = if position == 0 {
+            Layout::round_row_slot(block, 0, log_size)
+        } else {
+            Layout::seed_row_slot(block, STATE_SEED_ROWS - position, log_size)
+        };
+        (0..WORD_BIT_COLS).fold(0u32, |value, bit| {
+            value | (trace[Layout::round_operand_bit(lane, bit)][slot].0 << bit)
+        })
+    }
+
+    /// The first message's four rolling seed positions equal the IV.
     #[test]
     fn h_in_of_first_message_block_is_iv() {
         use crate::constants::IV;
@@ -862,16 +1010,13 @@ mod tests {
         let log_size = min_log_size(witness.blocks.len());
         let packed = compute_packed_sha256_witness(&[b"abc"]).unwrap();
         let trace = generate_trace(&packed, log_size);
-        let slot = Layout::round_row_slot(0, 0, log_size);
         for (j, &iv) in IV.iter().enumerate() {
-            let (lo_col, hi_col) = Layout::h_in_word(j);
-            let word = trace[lo_col][slot].0 + (trace[hi_col][slot].0 << 16);
-            assert_eq!(word, iv, "h_in[{j}] != IV");
+            assert_eq!(seeded_state_word(&trace, 0, j, log_size), iv, "h[{j}]");
         }
     }
 
-    /// Block chaining: block b's `h_in` (t = 0 row) equals block b−1's
-    /// `h_out` (t = 63 row) — the two rows are coset neighbours.
+    /// Block chaining: block b's rolling seed state equals block b−1's
+    /// `h_out` at t = 63.
     #[test]
     fn block_chain_h_out_to_h_in_continuity() {
         let witness = compute_sha256_witness(&[0x22; 200]);
@@ -880,27 +1025,26 @@ mod tests {
         let packed = compute_packed_sha256_witness(&[&[0x22; 200][..]]).unwrap();
         let trace = generate_trace(&packed, log_size);
         for b in 1..witness.blocks.len() {
-            let cur = Layout::round_row_slot(b, 0, log_size);
             let prev = Layout::round_row_slot(b - 1, N_ROUNDS - 1, log_size);
             for j in 0..N_STATE_WORDS {
-                let (in_lo, in_hi) = Layout::h_in_word(j);
                 let (out_lo, out_hi) = Layout::h_out_word(j);
-                assert_eq!(trace[in_lo][cur], trace[out_lo][prev], "lo j={j} b={b}");
-                assert_eq!(trace[in_hi][cur], trace[out_hi][prev], "hi j={j} b={b}");
+                let input = seeded_state_word(&trace, b, j, log_size);
+                let output = trace[out_lo][prev].0 | (trace[out_hi][prev].0 << 16);
+                assert_eq!(input, output, "word j={j} b={b}");
             }
         }
     }
 
-    /// Coset adjacency: `(b, 0)` and `(b − 1, 63)` are natural-row
-    /// neighbours, so the AIR's offset `−1` from a `t = 0` row lands on the
+    /// Coset geometry: `(b, 0)` and `(b − 1, 63)` are four rows apart, so the
+    /// AIR's offset `−4` from a `t = 0` row lands on the
     /// previous block's `t = 63` row.
     #[test]
     fn round_rows_are_coset_adjacent() {
         let log_size = 9;
         for b in 1..4usize {
             assert_eq!(
-                b * ROWS_PER_BLOCK - 1,
-                (b - 1) * ROWS_PER_BLOCK + (N_ROUNDS - 1),
+                b * ROWS_PER_BLOCK + STATE_SEED_ROWS - 4,
+                (b - 1) * ROWS_PER_BLOCK + STATE_SEED_ROWS + (N_ROUNDS - 1),
             );
         }
         // Natural indices map to slots injectively.
@@ -919,17 +1063,16 @@ mod tests {
             + ROUND_COLS
             + SCHEDULE_ENTRY_COLS
             + 1 // msg_start
-            + 2 * N_STATE_WORDS // h_in
             + 2 * N_STATE_WORDS // final carries
             + 2 * N_STATE_WORDS // h_out
             + 1 // is_msg_last
             + DIGEST_BYTES
             + 2; // msg_id + msg_block
         assert_eq!(Layout::TOTAL_COLS, expected);
-        assert_eq!(ROUND_COLS, 216);
+        assert_eq!(ROUND_COLS, 88);
         assert_eq!(SCHEDULE_ENTRY_COLS, 6);
         assert_eq!(PADDING_ROW_COLS, 30);
-        assert_eq!(Layout::TOTAL_COLS, 341);
+        assert_eq!(Layout::TOTAL_COLS, 197);
         assert_eq!(Layout::COL_PADDING_START, Layout::COL_FINAL_CARRIES_START);
         assert!(Layout::COL_PADDING_END <= Layout::COL_H_OUT_END);
     }
@@ -968,7 +1111,7 @@ mod tests {
                 } else {
                     // Sigma words are defined on every row from W[t-15].
                     let n_rows = 1usize << log_size;
-                    let natural = b * ROWS_PER_BLOCK + t;
+                    let natural = b * ROWS_PER_BLOCK + STATE_SEED_ROWS + t;
                     let w15_slot = Layout::row_slot((natural + n_rows - 15) % n_rows, log_size);
                     let w15 = trace[Layout::COL_W_LO][w15_slot].0
                         | (trace[Layout::COL_W_HI][w15_slot].0 << 16);

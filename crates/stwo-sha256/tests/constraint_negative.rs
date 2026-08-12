@@ -10,9 +10,10 @@ use stwo_constraint_framework::{
 };
 
 use stwo_sha256::components::{is_first_row_column_id, round_cyclic_column_ids};
+use stwo_sha256::constants::N_ROUNDS;
 use stwo_sha256::constraints::Sha256Eval;
 use stwo_sha256::relations::Sha256Relations;
-use stwo_sha256::trace::{generate_trace, Layout, ROWS_PER_BLOCK};
+use stwo_sha256::trace::{generate_trace, Layout, ROWS_PER_BLOCK, STATE_SEED_ROWS, WORD_BIT_COLS};
 use stwo_sha256::witness::compute_packed_sha256_witness;
 
 #[derive(Debug, Clone)]
@@ -76,27 +77,29 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         if column == is_first_row_column_id() {
             return BaseField::from(u32::from(self.natural_row == 0));
         }
-        let t = self.natural_row % stwo_sha256::constants::N_ROUNDS;
+        let position = self.natural_row % ROWS_PER_BLOCK;
+        let is_round = position >= STATE_SEED_ROWS;
+        let t = position.saturating_sub(STATE_SEED_ROWS);
         let cyclic = round_cyclic_column_ids();
         let flag = |value: bool| BaseField::from(u32::from(value));
         if column == cyclic[0] {
-            BaseField::from(stwo_sha256::constants::K[t] & 0xffff)
+            BaseField::from(u32::from(is_round) * (stwo_sha256::constants::K[t] & 0xffff))
         } else if column == cyclic[1] {
-            BaseField::from(stwo_sha256::constants::K[t] >> 16)
+            BaseField::from(u32::from(is_round) * (stwo_sha256::constants::K[t] >> 16))
         } else if column == cyclic[2] {
-            flag(t == 0)
+            flag(position == 0)
         } else if column == cyclic[3] {
-            flag(t == 1)
+            flag(is_round && t == 0)
         } else if column == cyclic[4] {
-            flag(t == 2)
+            flag(is_round && t == 15)
         } else if column == cyclic[5] {
-            flag(t == 3)
+            flag(is_round && t == stwo_sha256::constants::N_ROUNDS - 1)
         } else if column == cyclic[6] {
-            flag(t == 15)
+            flag(is_round && t >= 16)
         } else if column == cyclic[7] {
-            flag(t == stwo_sha256::constants::N_ROUNDS - 1)
+            flag(is_round)
         } else if column == cyclic[8] {
-            flag(t >= 16)
+            BaseField::from(u32::from(is_round) * t as u32)
         } else {
             panic!("unknown SHA preprocessed column {column:?}");
         }
@@ -199,6 +202,37 @@ fn add_one_natural(trace: &mut [Vec<BaseField>], column: usize, natural_row: usi
     trace[column][slot] += BaseField::from(1);
 }
 
+fn flip_natural(trace: &mut [Vec<BaseField>], column: usize, natural_row: usize, log_size: u32) {
+    let slot = Layout::row_slot(natural_row, log_size);
+    trace[column][slot] = BaseField::from(1 - trace[column][slot].0);
+}
+
+fn set_seeded_state_word(
+    trace: &mut [Vec<BaseField>],
+    block: usize,
+    word: usize,
+    value: u32,
+    log_size: u32,
+) {
+    let lane = usize::from(word >= 4);
+    let position = word % 4;
+    let natural_row = block * ROWS_PER_BLOCK
+        + if position == 0 {
+            STATE_SEED_ROWS
+        } else {
+            STATE_SEED_ROWS - position
+        };
+    for bit in 0..WORD_BIT_COLS {
+        set_natural(
+            trace,
+            Layout::round_operand_bit(lane, bit),
+            natural_row,
+            (value >> bit) & 1,
+            log_size,
+        );
+    }
+}
+
 fn set_block_column(
     trace: &mut [Vec<BaseField>],
     column: usize,
@@ -221,7 +255,7 @@ fn honest_fixture() -> (Vec<Vec<BaseField>>, u32) {
 fn rejects_aliased_cells_outside_round_15_and_round_63() {
     let (trace, log_size) = honest_fixture();
     assert_air_accepts(&trace, log_size);
-    let natural_row = stwo_sha256::constants::N_ROUNDS - 2;
+    let natural_row = STATE_SEED_ROWS + stwo_sha256::constants::N_ROUNDS - 2;
     for column in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
         let mut mutated = trace.clone();
         add_one_natural(&mut mutated, column, natural_row, log_size);
@@ -235,7 +269,7 @@ fn rejects_aliased_cells_outside_round_15_and_round_63() {
 #[test]
 fn rejects_padding_value_in_aliased_slot_at_round_63() {
     let (mut trace, log_size) = honest_fixture();
-    let natural_row = stwo_sha256::constants::N_ROUNDS - 1;
+    let natural_row = STATE_SEED_ROWS + stwo_sha256::constants::N_ROUNDS - 1;
     add_one_natural(&mut trace, Layout::COL_PADDING_START, natural_row, log_size);
     assert!(row_has_constraint_failure(&trace, log_size, natural_row));
 }
@@ -243,7 +277,7 @@ fn rejects_padding_value_in_aliased_slot_at_round_63() {
 #[test]
 fn rejects_marker_flag_on_disabled_round_15() {
     let (mut trace, log_size) = honest_fixture();
-    let disabled_t15 = 4 * ROWS_PER_BLOCK + 15;
+    let disabled_t15 = 4 * ROWS_PER_BLOCK + STATE_SEED_ROWS + 15;
     assert_eq!(
         trace[Layout::COL_ENABLER][Layout::row_slot(disabled_t15, log_size)].0,
         0
@@ -261,7 +295,7 @@ fn rejects_marker_flag_on_disabled_round_15() {
 #[test]
 fn rejects_live_padding_cells_on_disabled_round_15() {
     let (trace, log_size) = honest_fixture();
-    let disabled_t15 = 4 * ROWS_PER_BLOCK + 15;
+    let disabled_t15 = 4 * ROWS_PER_BLOCK + STATE_SEED_ROWS + 15;
     let inert_length_cells = [
         Layout::COL_BIT_LENGTH_W14_LO,
         Layout::COL_BIT_LENGTH_W14_HI,
@@ -288,6 +322,28 @@ fn honest_packed_trace_satisfies_all_base_constraints() {
 }
 
 #[test]
+fn five_message_active_to_decoy_boundary_satisfies_constraints() {
+    let long = [0x42; 100];
+    let messages: [&[u8]; 5] = [b"a", &long, b"z", b"q", &long];
+    let witness = compute_packed_sha256_witness(&messages).unwrap();
+    let log_size = 9;
+    let total_blocks = 7;
+    let first_disabled = total_blocks * ROWS_PER_BLOCK;
+    assert_eq!((1usize << log_size) - first_disabled, 43);
+
+    let trace = generate_trace(&witness, log_size);
+    let last_active_slot = Layout::row_slot(first_disabled - 1, log_size);
+    let first_disabled_slot = Layout::row_slot(first_disabled, log_size);
+    assert_eq!(trace[Layout::COL_ENABLER][last_active_slot].0, 1);
+    assert_eq!(trace[Layout::COL_MSG_ID][last_active_slot].0, 4);
+    assert_eq!(trace[Layout::COL_MSG_BLOCK][last_active_slot].0, 1);
+    assert_eq!(trace[Layout::COL_ENABLER][first_disabled_slot].0, 0);
+    assert_eq!(trace[Layout::COL_MSG_ID][first_disabled_slot].0, 0);
+    assert_eq!(trace[Layout::COL_MSG_BLOCK][first_disabled_slot].0, 0);
+    assert_air_accepts(&trace, log_size);
+}
+
+#[test]
 fn packed_capacity_errors_are_checked() {
     assert!(matches!(
         compute_packed_sha256_witness(&[]),
@@ -299,7 +355,7 @@ fn packed_capacity_errors_are_checked() {
         stwo_sha256::air::Sha256Prover::new(&witness, 14),
         Err(stwo_sha256::witness::PackedSha256Error::TraceTooSmall {
             real_blocks: 256,
-            max_real_blocks: 255
+            max_real_blocks: 244
         })
     ));
 }
@@ -318,7 +374,7 @@ fn base_trace_mutations_are_rejected() {
     for row in 5..512 {
         set_natural(&mut trace, Layout::COL_ENABLER, row, 0, log_size);
     }
-    assert_air_rejects("non-R0 cutoff", &trace, log_size);
+    assert_air_rejects("mid-block cutoff", &trace, log_size);
 
     let mut trace = honest.clone();
     set_natural(&mut trace, Layout::COL_ENABLER, 511, 1, log_size);
@@ -338,7 +394,7 @@ fn base_trace_mutations_are_rejected() {
         1,
         log_size,
     );
-    assert_air_rejects("start on wrong round", &trace, log_size);
+    assert_air_rejects("start on wrong block row", &trace, log_size);
 
     let mut trace = honest.clone();
     set_natural(
@@ -351,21 +407,29 @@ fn base_trace_mutations_are_rejected() {
     assert_air_rejects("start while disabled", &trace, log_size);
 
     let mut trace = honest.clone();
-    let (h_in_lo, _) = Layout::h_in_word(0);
-    add_one_natural(&mut trace, h_in_lo, ROWS_PER_BLOCK, log_size);
+    let a_bit0 = Layout::round_operand_bit(0, 0);
+    flip_natural(
+        &mut trace,
+        a_bit0,
+        ROWS_PER_BLOCK + STATE_SEED_ROWS,
+        log_size,
+    );
     assert_air_rejects("start without IV", &trace, log_size);
 
     let mut trace = honest.clone();
     for word in 0..8 {
-        let (lo, hi) = Layout::h_in_word(word);
         let value = stwo_sha256::constants::IV[word];
-        set_natural(&mut trace, lo, 2 * ROWS_PER_BLOCK, value & 0xffff, log_size);
-        set_natural(&mut trace, hi, 2 * ROWS_PER_BLOCK, value >> 16, log_size);
+        set_seeded_state_word(&mut trace, 2, word, value, log_size);
     }
     assert_air_rejects("IV on continuation", &trace, log_size);
 
     let mut trace = honest.clone();
-    add_one_natural(&mut trace, h_in_lo, 2 * ROWS_PER_BLOCK, log_size);
+    flip_natural(
+        &mut trace,
+        a_bit0,
+        2 * ROWS_PER_BLOCK + STATE_SEED_ROWS,
+        log_size,
+    );
     assert_air_rejects("broken chain", &trace, log_size);
 
     let mut trace = honest.clone();
@@ -418,19 +482,37 @@ fn base_trace_mutations_are_rejected() {
     assert_air_rejects("block mid-row", &trace, log_size);
 
     let mut trace = honest.clone();
-    set_natural(&mut trace, Layout::COL_IS_MSG_LAST, 62, 1, log_size);
-    assert_air_rejects("terminal forged", &trace, log_size);
-
-    let mut trace = honest.clone();
-    set_natural(&mut trace, Layout::COL_IS_MSG_LAST, 63, 0, log_size);
-    assert_air_rejects("terminal cleared", &trace, log_size);
-
-    let mut trace = honest.clone();
-    set_natural(&mut trace, Layout::COL_IS_MSG_LAST, 63, 0, log_size);
     set_natural(
         &mut trace,
         Layout::COL_IS_MSG_LAST,
-        ROWS_PER_BLOCK + 63,
+        STATE_SEED_ROWS + N_ROUNDS - 2,
+        1,
+        log_size,
+    );
+    assert_air_rejects("terminal forged", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        STATE_SEED_ROWS + N_ROUNDS - 1,
+        0,
+        log_size,
+    );
+    assert_air_rejects("terminal cleared", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        STATE_SEED_ROWS + N_ROUNDS - 1,
+        0,
+        log_size,
+    );
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        ROWS_PER_BLOCK + STATE_SEED_ROWS + N_ROUNDS - 1,
         1,
         log_size,
     );
@@ -440,7 +522,7 @@ fn base_trace_mutations_are_rejected() {
     set_natural(
         &mut trace,
         Layout::COL_IS_MSG_LAST,
-        4 * ROWS_PER_BLOCK + 63,
+        4 * ROWS_PER_BLOCK + STATE_SEED_ROWS + N_ROUNDS - 1,
         1,
         log_size,
     );

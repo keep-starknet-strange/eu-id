@@ -23,9 +23,9 @@
 //! - 4 range tables (`Range_2`, `Range_4`, `Range_5`, `Range_8`)
 //! - 1 `is_first_row` selector at the main `Sha256Eval` trace's `log_n_rows`
 //!   — value `1` at storage index `Layout::row_slot(0, log_n_rows) = 0`,
-//!   zero elsewhere. The AIR pins `msg_start ≡ is_first_row`, which
-//!   anchors the §10.3 chain at block 0's IV binding (docs/research/sha256-air-design.md §11 L2).
-//! - 9 round-cyclic columns of the rotated one-row-per-round layout.
+//!   zero elsewhere. The AIR requires a message start on that row, which
+//!   anchors block 0's IV binding.
+//! - 9 block-cyclic columns for the three seed rows plus 64 round rows.
 //!
 //! Total committed columns: `4·1 + 1 + 9 = 14`.
 
@@ -215,34 +215,39 @@ fn generate_preprocessed_trace_uncached(
         log_sizes.push(log_n_rows);
     }
 
-    // ---- 9 round-cyclic columns at the main trace's log_n_rows ----
+    // ---- 9 block-cyclic columns at the main trace's log_n_rows ----
     //
-    // Each column depends only on `t = natural_row mod 64`.
-    // Storage slot `s` holds `f(natural(s) mod 64)`.
+    // Each column depends on the position in a 67-row block: three seed rows
+    // followed by 64 rounds.
     // `Layout::row_slot` defines the natural-to-storage mapping.
     // Fill a natural-order buffer, then scatter it through that mapping.
     // The order matches `components::round_cyclic_column_ids`:
-    // `k_lo, k_hi, is_round_0, _1, _2, _3, _15, _63, is_schedule`.
+    // `k_lo, k_hi, block_start, r0, r15, r63, is_schedule, is_round,
+    // round_index`.
     {
         use crate::constants::{K, N_ROUNDS};
+        use crate::trace::{ROWS_PER_BLOCK, STATE_SEED_ROWS};
         let domain = CanonicCoset::new(log_n_rows).circle_domain();
         let n_rows = 1usize << log_n_rows;
-        let fns: [Box<dyn Fn(usize) -> u32>; 9] = [
-            Box::new(|t| K[t] & 0xFFFF),
-            Box::new(|t| K[t] >> 16),
-            Box::new(|t| u32::from(t == 0)),
-            Box::new(|t| u32::from(t == 1)),
-            Box::new(|t| u32::from(t == 2)),
-            Box::new(|t| u32::from(t == 3)),
-            Box::new(|t| u32::from(t == 15)),
-            Box::new(|t| u32::from(t == N_ROUNDS - 1)),
-            Box::new(|t| u32::from(t >= 16)),
-        ];
-        for f in fns {
+        for column in 0..9 {
             let mut vals = vec![BaseField::from(0u32); n_rows];
             for natural in 0..n_rows {
-                vals[Layout::row_slot(natural, log_n_rows)] =
-                    BaseField::from(f(natural % N_ROUNDS));
+                let position = natural % ROWS_PER_BLOCK;
+                let is_round = position >= STATE_SEED_ROWS;
+                let t = position.saturating_sub(STATE_SEED_ROWS);
+                let value = match column {
+                    0 => u32::from(is_round) * (K[t] & 0xffff),
+                    1 => u32::from(is_round) * (K[t] >> 16),
+                    2 => u32::from(position == 0),
+                    3 => u32::from(is_round && t == 0),
+                    4 => u32::from(is_round && t == 15),
+                    5 => u32::from(is_round && t == N_ROUNDS - 1),
+                    6 => u32::from(is_round && t >= 16),
+                    7 => u32::from(is_round),
+                    8 => u32::from(is_round) * t as u32,
+                    _ => unreachable!(),
+                };
+                vals[Layout::row_slot(natural, log_n_rows)] = BaseField::from(value);
             }
             let col: BaseColumn = vals.into_iter().collect();
             evals.push(CircleEvaluation::new(domain, col));

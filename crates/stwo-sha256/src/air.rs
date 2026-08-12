@@ -124,8 +124,7 @@ impl<'a> Sha256Prover<'a> {
                 max,
             });
         }
-        let max_real_blocks =
-            ((1usize << log_n_rows) / crate::trace::ROWS_PER_BLOCK).saturating_sub(1);
+        let max_real_blocks = ((1usize << log_n_rows) - 1) / crate::trace::ROWS_PER_BLOCK;
         let real_blocks = witness.total_blocks();
         if real_blocks > max_real_blocks {
             return Err(PackedSha256Error::TraceTooSmall {
@@ -832,9 +831,9 @@ fn interaction_trace_log_sizes(
     // SECURE_EXTENSION_DEGREE = 4 base-field columns at the same log_size.
     const EXT: usize = SECURE_EXTENSION_DEGREE;
 
-    // The Sha256Eval consumer has 42 range checks per row.
-    // It adds one lookup for an enabled digest provider.
-    // It also adds one lookup for each exposed window byte.
+    // The Sha256Eval consumer has 58 range checks per row.
+    // It adds one lookup for an enabled digest provider and four lookups for
+    // the exposed input-word bytes.
     // Batch these sites in columns at `log_n_rows`.
     // Virtual W-bit field expressions do not add range lookups.
     // See `interaction::sha256_interaction`.
@@ -985,11 +984,22 @@ mod tests {
     #[test]
     fn packed_shared_table_masked_width_is_exact() {
         assert_eq!(CLAIM_MASK_TRACE_COLUMNS, 4);
-        assert_eq!(Layout::TOTAL_COLS, 341);
-        assert_eq!(base_trace_log_sizes(14, 0, false, false).len(), 341);
-        assert_eq!(base_trace_log_sizes(14, 0, false, true).len(), 345);
+        assert_eq!(Layout::TOTAL_COLS, 197);
+        assert_eq!(base_trace_log_sizes(14, 0, false, false).len(), 197);
+        assert_eq!(base_trace_log_sizes(14, 0, false, true).len(), 201);
         assert!(base_trace_log_sizes(14, 0, false, true)
             .iter()
             .all(|&log_size| log_size == 14));
+    }
+
+    #[test]
+    fn claim_mask_fills_the_final_sha_lookup_batch() {
+        let lookup_sites = sha_lookups_per_row(true, true);
+        assert_eq!(lookup_sites, 63);
+        assert_eq!(lookup_sites + 1, 64);
+        assert_eq!(
+            (lookup_sites + 1).div_ceil(crate::interaction::SHA_CONSUMER_LOGUP_BATCH),
+            16
+        );
     }
 }

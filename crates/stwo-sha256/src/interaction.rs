@@ -75,12 +75,12 @@ pub const SHA_CONSUMER_LOGUP_BATCH: usize = 4;
 
 /// Total lookup sites `Sha256Eval` fires per row. The packed digest provider
 /// adds one width-33 yield site and the complete padded-message provider adds
-/// 64 width-3 yield sites. Both providers are fixed-width and fire only on
-/// their gated boundary rows. The evaluator and interaction writer share this
-/// count and the same lookup order.
+/// four width-3 sites, one per byte of the current input word.
 #[inline]
 pub fn sha_lookups_per_row(expose_digest: bool, expose_field: bool) -> usize {
-    SHA_LOOKUPS_PER_ROW_BASE + usize::from(expose_digest) + usize::from(expose_field) * 64
+    SHA_LOOKUPS_PER_ROW_BASE
+        + usize::from(expose_digest)
+        + usize::from(expose_field) * crate::constants::WORD_BYTES
 }
 
 // ---------------------------------------------------------------------------
@@ -494,17 +494,16 @@ fn write_round_row_lookups(
         *cursor += 1;
     }
 
-    // ---- 7. Full padded-message stream (provider, block's t = 15 row) ----
+    // ---- 7. Full padded-message stream (four bytes on input-word rows) ----
     //
     // Every packed message gets its own field namespace. The byte index is
     // local to that message and resets at every message boundary.
     if expose_field {
-        if t == 15 {
-            for byte_in_block in 0..crate::constants::BLOCK_BYTES {
-                let word_idx = byte_in_block / crate::constants::WORD_BYTES;
-                let byte_in_word = byte_in_block % crate::constants::WORD_BYTES;
-                let limb = block.schedule[word_idx];
+        if t < crate::constants::N_INPUT_WORDS {
+            let limb = block.schedule[t];
+            for byte_in_word in 0..crate::constants::WORD_BYTES {
                 let value = word_be_bytes(limb.lo, limb.hi)[byte_in_word];
+                let byte_in_block = t * crate::constants::WORD_BYTES + byte_in_word;
                 let tuple = [
                     BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + message_idx as u32),
                     BaseField::from(
@@ -517,7 +516,7 @@ fn write_round_row_lookups(
                 *cursor += 1;
             }
         } else {
-            *cursor += 64;
+            *cursor += crate::constants::WORD_BYTES;
         }
     }
 }
@@ -801,8 +800,8 @@ mod tests {
     fn packed_lookup_width_is_fixed() {
         assert_eq!(sha_lookups_per_row(false, false), 58);
         assert_eq!(sha_lookups_per_row(true, false), 59);
-        assert_eq!(sha_lookups_per_row(false, true), 122);
-        assert_eq!(sha_lookups_per_row(true, true), 123);
+        assert_eq!(sha_lookups_per_row(false, true), 62);
+        assert_eq!(sha_lookups_per_row(true, true), 63);
     }
 
     #[test]
@@ -923,7 +922,7 @@ mod tests {
         let real_blocks = witness.total_blocks();
         for (start, end, expected) in [
             (0, 2, 2 * real_blocks * 48),
-            (2, 10, 8 * real_blocks * 64),
+            (2, 10, 8 * real_blocks * crate::constants::N_ROUNDS),
             (10, 26, real_blocks * 16),
             (26, 58, real_blocks * 32),
         ] {
@@ -934,7 +933,7 @@ mod tests {
                 .count();
             assert_eq!(actual, expected, "base lookup sites {start}..{end}");
         }
-        for natural_row in real_blocks * crate::constants::N_ROUNDS..(1usize << log_size) {
+        for natural_row in real_blocks * crate::trace::ROWS_PER_BLOCK..(1usize << log_size) {
             let slot = Layout::row_slot(natural_row, log_size);
             for fraction in &base {
                 assert_eq!(fraction[slot], (SecureField::zero(), SecureField::one()));
@@ -942,8 +941,8 @@ mod tests {
         }
 
         let product = sha256_lookup_fractions(&relations, &witness, log_size, true, true);
-        assert_eq!(product.len(), 123);
-        for natural_row in real_blocks * crate::constants::N_ROUNDS..(1usize << log_size) {
+        assert_eq!(product.len(), 63);
+        for natural_row in real_blocks * crate::trace::ROWS_PER_BLOCK..(1usize << log_size) {
             let slot = Layout::row_slot(natural_row, log_size);
             for fraction in &product {
                 assert_eq!(fraction[slot], (SecureField::zero(), SecureField::one()));

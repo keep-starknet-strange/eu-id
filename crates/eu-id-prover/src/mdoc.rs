@@ -7299,8 +7299,9 @@ mod mdoc_sha_table_tests {
                 let block_count = stwo_sha256::native::n_blocks_for(message.len());
                 next_block += block_count;
                 let terminal_block = next_block - 1;
-                let terminal_slot = stwo_sha256::trace::Layout::row_slot(
-                    terminal_block * stwo_sha256::trace::ROWS_PER_BLOCK + 63,
+                let terminal_slot = stwo_sha256::trace::Layout::round_row_slot(
+                    terminal_block,
+                    stwo_sha256::constants::N_ROUNDS - 1,
                     crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
                 );
                 assert_eq!(

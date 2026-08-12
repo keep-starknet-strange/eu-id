@@ -19,16 +19,11 @@ use crate::relations::Sha256Relations;
 use crate::trace::WORD_BIT_COLS;
 use crate::types::LIMB_BITS;
 
-enum WordBitMasks<F> {
-    Sparse([[F; 3]; WORD_BIT_COLS]),
-    Full([[F; 16]; WORD_BIT_COLS]),
-}
-
-/// AIR evaluator over the rotated one-row-per-round layout.
+/// AIR evaluator over the three-seed-row plus 64-round layout.
 #[derive(Clone)]
 pub struct Sha256Eval {
     /// `log2` of the row count (the smallest power of two **strictly**
-    /// greater than `64 · block count`, per [`crate::trace::min_log_size`]).
+    /// greater than `67 · block count`, per [`crate::trace::min_log_size`]).
     pub log_size: u32,
     /// The four active `Range_k` channels plus cross-component digest and
     /// selected-field channels.
@@ -68,19 +63,17 @@ impl FrameworkEval for Sha256Eval {
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         // ---- preprocessed round-cyclic columns ----
         //
-        // All functions of `t = natural_row mod 64` alone, committed once
-        // per circuit (see `crate::preprocessed`): the round constant
-        // `K[t]`'s limbs, the boundary indicators, and the schedule gate.
+        // Block-cyclic selectors for three seed rows followed by 64 rounds.
         let cyclic = round_cyclic_column_ids();
         let k_lo = eval.get_preprocessed_column(cyclic[0].clone());
         let k_hi = eval.get_preprocessed_column(cyclic[1].clone());
-        let r0 = eval.get_preprocessed_column(cyclic[2].clone());
-        let r1 = eval.get_preprocessed_column(cyclic[3].clone());
-        let r2 = eval.get_preprocessed_column(cyclic[4].clone());
-        let r3 = eval.get_preprocessed_column(cyclic[5].clone());
-        let r15 = eval.get_preprocessed_column(cyclic[6].clone());
-        let r63 = eval.get_preprocessed_column(cyclic[7].clone());
-        let is_sched = eval.get_preprocessed_column(cyclic[8].clone());
+        let block_start = eval.get_preprocessed_column(cyclic[2].clone());
+        let r0 = eval.get_preprocessed_column(cyclic[3].clone());
+        let r15 = eval.get_preprocessed_column(cyclic[4].clone());
+        let r63 = eval.get_preprocessed_column(cyclic[5].clone());
+        let is_sched = eval.get_preprocessed_column(cyclic[6].clone());
+        let is_round = eval.get_preprocessed_column(cyclic[7].clone());
+        let round_index = eval.get_preprocessed_column(cyclic[8].clone());
         let first_row = eval.get_preprocessed_column(is_first_row_column_id());
 
         // ---- header ----
@@ -94,10 +87,12 @@ impl FrameworkEval for Sha256Eval {
 
         // The row-family gates. Each is `enabler · indicator` — degree 2,
         // used both as constraint gates and as LogUp multiplicities.
+        let gate_round = enabler.clone() * is_round.clone();
+        let gate_block_start = enabler.clone() * block_start.clone();
         let gate_r0 = enabler.clone() * r0.clone();
-        let gate_r15 = enabler.clone() * r15.clone();
         let gate_r63 = enabler.clone() * r63.clone();
         let gate_sched = enabler.clone() * is_sched.clone();
+        let gate_input = enabler.clone() * (is_round.clone() - is_sched.clone());
 
         // ---- W: the row's schedule word, read at every offset any family
         // needs. `w[k]` is `W[t−k]`: the schedule recurrence reads k ∈
@@ -116,32 +111,16 @@ impl FrameworkEval for Sha256Eval {
             ],
         );
         let w: [(E::F, E::F); 17] = std::array::from_fn(|k| (w_lo[k].clone(), w_hi[k].clone()));
-        // Consume each physical W-bit column exactly once. The standalone
-        // path needs only the three SHA and padding offsets; the optional
-        // packed-stream provider requests all W[0..15] offsets at t=15.
-        let w_bits_m = if !self.expose_field {
-            WordBitMasks::Sparse(std::array::from_fn(|_| {
-                eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15])
-            }))
-        } else {
-            WordBitMasks::Full(std::array::from_fn(|_| {
-                eval.next_interaction_mask(
-                    ORIGINAL_TRACE_IDX,
-                    [
-                        0, -1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12, -13, -14, -15,
-                    ],
-                )
-            }))
-        };
+        // Current W plus the two schedule-sigma offsets. Field exposure now
+        // emits four bytes on each input-word row, so it also uses offset 0.
+        let w_bits_m: [[E::F; 3]; WORD_BIT_COLS] =
+            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -2, -15]));
         let w_bit_at = |bit: usize, offset: usize| -> E::F {
-            match &w_bits_m {
-                WordBitMasks::Full(full) => full[bit][offset].clone(),
-                WordBitMasks::Sparse(sparse) => match offset {
-                    0 => sparse[bit][0].clone(),
-                    2 => sparse[bit][1].clone(),
-                    15 => sparse[bit][2].clone(),
-                    _ => unreachable!("sparse W-bit masks contain offsets 0, 2, and 15"),
-                },
+            match offset {
+                0 => w_bits_m[bit][0].clone(),
+                2 => w_bits_m[bit][1].clone(),
+                15 => w_bits_m[bit][2].clone(),
+                _ => unreachable!("W-bit masks contain offsets 0, 2, and 15"),
             }
         };
         let w_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 0));
@@ -157,10 +136,10 @@ impl FrameworkEval for Sha256Eval {
         let maj = (eval.next_trace_mask(), eval.next_trace_mask());
         let t1 = (eval.next_trace_mask(), eval.next_trace_mask());
         let t2 = (eval.next_trace_mask(), eval.next_trace_mask());
-        let a_new_lo = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
-        let a_new_hi = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
-        let e_new_lo = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
-        let e_new_hi = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -4]);
+        let a_new_lo = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3]);
+        let a_new_hi = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3]);
+        let e_new_lo = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3]);
+        let e_new_hi = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3]);
         let a_new = (a_new_lo[0].clone(), a_new_hi[0].clone());
         let e_new = (e_new_lo[0].clone(), e_new_hi[0].clone());
 
@@ -169,20 +148,20 @@ impl FrameworkEval for Sha256Eval {
         let e_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
         let a_new_carry = (eval.next_trace_mask(), eval.next_trace_mask());
 
-        let a_bits_m: [[E::F; 3]; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2]));
-        let b_bits_m: [[E::F; 2]; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]));
-        let c_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|_| eval.next_trace_mask());
-        let e_bits_m: [[E::F; 3]; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2]));
-        let f_bits_m: [[E::F; 2]; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]));
-        let g_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|_| eval.next_trace_mask());
+        let a_bits_m: [[E::F; 8]; WORD_BIT_COLS] = std::array::from_fn(|_| {
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -63, -64, -65, -66])
+        });
+        let e_bits_m: [[E::F; 8]; WORD_BIT_COLS] = std::array::from_fn(|_| {
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -63, -64, -65, -66])
+        });
         let a_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| a_bits_m[i][0].clone());
-        let b_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| b_bits_m[i][0].clone());
+        let b_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| a_bits_m[i][1].clone());
+        let c_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| a_bits_m[i][2].clone());
+        let d_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| a_bits_m[i][3].clone());
         let e_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| e_bits_m[i][0].clone());
-        let f_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| f_bits_m[i][0].clone());
+        let f_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| e_bits_m[i][1].clone());
+        let g_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| e_bits_m[i][2].clone());
+        let h_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| e_bits_m[i][3].clone());
 
         // ---- schedule family (live t ≥ 16) ----
         let s0 = (eval.next_trace_mask(), eval.next_trace_mask());
@@ -190,42 +169,10 @@ impl FrameworkEval for Sha256Eval {
         let sched_carry_lo = eval.next_trace_mask();
         let sched_carry_hi = eval.next_trace_mask();
 
-        // ---- t = 0 family ----
-        //
-        // Read `msg_start` at offset −15.
-        // The packed-stream provider on row `t = 15` uses this block-zero value.
-        let [msg_start, _, msg_start_next] =
-            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -15, 1]);
-
-        // `h_in`: this block's input state (t = 0 row), laid out (lo, hi)
-        // per word — reads interleave accordingly. Offsets −1..−3 feed the
-        // Working-state boundary selects occur on rows t ∈ {1, 2, 3}. Offset −63
-        // feeds the finalization adds on the t = 63 row of the same block.
-        let mut h_in_lo: [[E::F; 5]; N_STATE_WORDS] =
-            std::array::from_fn(|_| std::array::from_fn(|_| E::F::from(M31::from(0u32))));
-        let mut h_in_hi: [[E::F; 5]; N_STATE_WORDS] =
-            std::array::from_fn(|_| std::array::from_fn(|_| E::F::from(M31::from(0u32))));
-        for j in 0..N_STATE_WORDS {
-            h_in_lo[j] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -63]);
-            h_in_hi[j] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1, -2, -3, -63]);
-        }
-
-        // IV binding on the anchor row.
-        for (j, &iv_word) in IV.iter().enumerate() {
-            let iv_lo = E::F::from(M31::from(iv_word & 0xFFFF));
-            let iv_hi = E::F::from(M31::from(iv_word >> LIMB_BITS));
-            eval.add_constraint(msg_start.clone() * (h_in_lo[j][0].clone() - iv_lo));
-            eval.add_constraint(msg_start.clone() * (h_in_hi[j][0].clone() - iv_hi));
-        }
-
-        // Working-state words of `h_in` that recompose against committed
-        // boolean bit-planes on the t = 0 row (b/c/f/g operand range checks).
-        let h_in_word =
-            |j: usize| -> (E::F, E::F) { (h_in_lo[j][0].clone(), h_in_hi[j][0].clone()) };
-        let h_in_1 = h_in_word(1);
-        let h_in_2 = h_in_word(2);
-        let h_in_5 = h_in_word(5);
-        let h_in_6 = h_in_word(6);
+        // msg_start is committed on seed row zero. Offset -3 reads it from
+        // round zero; +1 from round 63 reads the next block's seed zero.
+        let [msg_start, msg_start_at_round0, msg_start_next] =
+            eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -3, 1]);
 
         // ---- schedule constraints (gate: enabler · is_schedule) ----
         //
@@ -249,101 +196,47 @@ impl FrameworkEval for Sha256Eval {
             &self.relations,
         );
 
-        // ---- working-state boundary selects ----
-        //
-        // The state for round `t` comes from an earlier row or `h_in`.
-        // Preprocessed round indicators select the source.
-        // Each selection has degree two.
-        // An `enabler`-gated linear identity gives a maximum degree of three.
-        let not_r0 = E::F::one() - r0.clone();
-        let not_r01 = E::F::one() - r0.clone() - r1.clone();
-        let not_r012 = E::F::one() - r0.clone() - r1.clone() - r2.clone();
-        let not_r0123 = E::F::one() - r0.clone() - r1.clone() - r2.clone() - r3.clone();
-        let boundary_select = |h_word: [usize; 4],
-                               new_lo: &[E::F; 5],
-                               new_hi: &[E::F; 5],
-                               slot: usize|
-         -> (E::F, E::F) {
-            // slot 0 → a/e (uses h_in[h_word[0]]@0, new@−1),
-            // slot 1 → b/f, slot 2 → c/g, slot 3 → d/h.
-            match slot {
-                0 => (
-                    r0.clone() * h_in_lo[h_word[0]][0].clone() + not_r0.clone() * new_lo[1].clone(),
-                    r0.clone() * h_in_hi[h_word[0]][0].clone() + not_r0.clone() * new_hi[1].clone(),
-                ),
-                1 => (
-                    r0.clone() * h_in_lo[h_word[1]][0].clone()
-                        + r1.clone() * h_in_lo[h_word[0]][1].clone()
-                        + not_r01.clone() * new_lo[2].clone(),
-                    r0.clone() * h_in_hi[h_word[1]][0].clone()
-                        + r1.clone() * h_in_hi[h_word[0]][1].clone()
-                        + not_r01.clone() * new_hi[2].clone(),
-                ),
-                2 => (
-                    r0.clone() * h_in_lo[h_word[2]][0].clone()
-                        + r1.clone() * h_in_lo[h_word[1]][1].clone()
-                        + r2.clone() * h_in_lo[h_word[0]][2].clone()
-                        + not_r012.clone() * new_lo[3].clone(),
-                    r0.clone() * h_in_hi[h_word[2]][0].clone()
-                        + r1.clone() * h_in_hi[h_word[1]][1].clone()
-                        + r2.clone() * h_in_hi[h_word[0]][2].clone()
-                        + not_r012.clone() * new_hi[3].clone(),
-                ),
-                3 => (
-                    r0.clone() * h_in_lo[h_word[3]][0].clone()
-                        + r1.clone() * h_in_lo[h_word[2]][1].clone()
-                        + r2.clone() * h_in_lo[h_word[1]][2].clone()
-                        + r3.clone() * h_in_lo[h_word[0]][3].clone()
-                        + not_r0123.clone() * new_lo[4].clone(),
-                    r0.clone() * h_in_hi[h_word[3]][0].clone()
-                        + r1.clone() * h_in_hi[h_word[2]][1].clone()
-                        + r2.clone() * h_in_hi[h_word[1]][2].clone()
-                        + r3.clone() * h_in_hi[h_word[0]][3].clone()
-                        + not_r0123.clone() * new_hi[4].clone(),
-                ),
-                _ => unreachable!(),
-            }
-        };
-        // Only `d` and `h` enter the round additions as words. The `a` and `e`
-        // values enter through their bit planes. The `b`, `c`, `f`, and `g`
-        // values also enter through committed bit planes.
-        let a_in = boundary_select([0, 1, 2, 3], &a_new_lo, &a_new_hi, 0);
-        let e_in = boundary_select([4, 5, 6, 7], &e_new_lo, &e_new_hi, 0);
-        let d_in = boundary_select([0, 1, 2, 3], &a_new_lo, &a_new_hi, 3);
-        let h_in_state = boundary_select([4, 5, 6, 7], &e_new_lo, &e_new_hi, 3);
+        // Current and preceding rolling rows are a/b/c/d and e/f/g/h.
+        let a_in = word_from_bits::<E>(&a_bits);
+        let e_in = word_from_bits::<E>(&e_bits);
+        let d_in = word_from_bits::<E>(&d_bits);
+        let h_in_state = word_from_bits::<E>(&h_bits);
+        let initial_state = [
+            a_in.clone(),
+            word_from_bits::<E>(&b_bits),
+            word_from_bits::<E>(&c_bits),
+            d_in.clone(),
+            e_in.clone(),
+            word_from_bits::<E>(&f_bits),
+            word_from_bits::<E>(&g_bits),
+            h_in_state.clone(),
+        ];
+
+        // Every packed message start binds its seed/round-zero state to IV.
+        for (word, &iv_word) in initial_state.iter().zip(&IV) {
+            eval.add_constraint(
+                msg_start_at_round0.clone()
+                    * (word.0.clone() - E::F::from(M31::from(iv_word & 0xffff))),
+            );
+            eval.add_constraint(
+                msg_start_at_round0.clone()
+                    * (word.1.clone() - E::F::from(M31::from(iv_word >> LIMB_BITS))),
+            );
+        }
 
         // ---- round constraints ----
         constrain_boolean_bits::<E>(&mut eval, &w_bits);
         constrain_boolean_bits::<E>(&mut eval, &a_bits);
-        constrain_boolean_bits::<E>(&mut eval, &b_bits);
-        constrain_boolean_bits::<E>(&mut eval, &c_bits);
         constrain_boolean_bits::<E>(&mut eval, &e_bits);
-        constrain_boolean_bits::<E>(&mut eval, &f_bits);
-        constrain_boolean_bits::<E>(&mut eval, &g_bits);
+        constrain_word_recomposition::<E>(&mut eval, gate_round.clone(), &w[0], &w_bits);
 
-        constrain_word_recomposition::<E>(&mut eval, enabler.clone(), &w[0], &w_bits);
-        constrain_word_recomposition::<E>(&mut eval, enabler.clone(), &a_in, &a_bits);
-        constrain_word_recomposition::<E>(&mut eval, enabler.clone(), &e_in, &e_bits);
-        constrain_word_recomposition::<E>(&mut eval, gate_r0.clone(), &h_in_1, &b_bits);
-        constrain_word_recomposition::<E>(&mut eval, gate_r0.clone(), &h_in_2, &c_bits);
-        constrain_word_recomposition::<E>(&mut eval, gate_r0.clone(), &h_in_5, &f_bits);
-        constrain_word_recomposition::<E>(&mut eval, gate_r0.clone(), &h_in_6, &g_bits);
-
-        let gate_r1 = enabler.clone() * r1.clone();
-        let gate_not_r0 = enabler.clone() * not_r0.clone();
-        let gate_not_r01 = enabler.clone() * not_r01.clone();
-        for i in 0..WORD_BIT_COLS {
-            eval.add_constraint(gate_not_r0.clone() * (b_bits[i].clone() - a_bits_m[i][1].clone()));
-            eval.add_constraint(gate_r1.clone() * (c_bits[i].clone() - b_bits_m[i][1].clone()));
-            eval.add_constraint(
-                gate_not_r01.clone() * (c_bits[i].clone() - a_bits_m[i][2].clone()),
-            );
-            eval.add_constraint(gate_not_r0.clone() * (f_bits[i].clone() - e_bits_m[i][1].clone()));
-            eval.add_constraint(gate_r1.clone() * (g_bits[i].clone() - f_bits_m[i][1].clone()));
-            eval.add_constraint(
-                gate_not_r01.clone() * (g_bits[i].clone() - e_bits_m[i][2].clone()),
-            );
-        }
+        // After round zero, each row's rolling a/e input equals the previous
+        // row's round output. Seed rows supply the round-zero exception.
+        let gate_after_r0 = gate_round.clone() - gate_r0.clone();
+        eval.add_constraint(gate_after_r0.clone() * (a_in.0.clone() - a_new_lo[1].clone()));
+        eval.add_constraint(gate_after_r0.clone() * (a_in.1.clone() - a_new_hi[1].clone()));
+        eval.add_constraint(gate_after_r0.clone() * (e_in.0.clone() - e_new_lo[1].clone()));
+        eval.add_constraint(gate_after_r0 * (e_in.1.clone() - e_new_hi[1].clone()));
 
         let sigma0_bits = big_sigma0_expr_bits::<E>(&a_bits);
         let sigma1_bits = big_sigma1_expr_bits::<E>(&e_bits);
@@ -359,7 +252,7 @@ impl FrameworkEval for Sha256Eval {
         let k_t = (k_lo.clone(), k_hi.clone());
         emit_mod_2_32_add_linear(
             &mut eval,
-            enabler.clone(),
+            gate_round.clone(),
             &[
                 h_in_state.clone(),
                 sigma1.clone(),
@@ -375,7 +268,7 @@ impl FrameworkEval for Sha256Eval {
         );
         emit_mod_2_32_add_linear(
             &mut eval,
-            enabler.clone(),
+            gate_round.clone(),
             &[sigma0.clone(), maj.clone()],
             &t2,
             &t2_carry.0,
@@ -385,7 +278,7 @@ impl FrameworkEval for Sha256Eval {
         );
         emit_mod_2_32_add_linear(
             &mut eval,
-            enabler.clone(),
+            gate_round.clone(),
             &[d_in.clone(), t1.clone()],
             &e_new,
             &e_new_carry.0,
@@ -395,7 +288,7 @@ impl FrameworkEval for Sha256Eval {
         );
         emit_mod_2_32_add_linear(
             &mut eval,
-            enabler.clone(),
+            gate_round.clone(),
             &[t1.clone(), t2.clone()],
             &a_new,
             &a_new_carry.0,
@@ -408,17 +301,15 @@ impl FrameworkEval for Sha256Eval {
         let final_carries: [(E::F, E::F); N_STATE_WORDS] =
             std::array::from_fn(|_| (eval.next_trace_mask(), eval.next_trace_mask()));
 
-        // h_out, each limb read at [0, −1]: offset 0 feeds the finalization
-        // on the t = 63 row. Offset −1 feeds the block-chain constraint on
-        // the next block's t = 0 row (its coset predecessor is this t = 63
-        // row).
+        // Offset -4 maps a continuation block's round zero past its three
+        // seed rows to the preceding block's round 63.
         let mut h_out: [(E::F, E::F); N_STATE_WORDS] =
             std::array::from_fn(|_| (E::F::from(M31::from(0u32)), E::F::from(M31::from(0u32))));
         let mut h_out_prev: [(E::F, E::F); N_STATE_WORDS] =
             std::array::from_fn(|_| (E::F::from(M31::from(0u32)), E::F::from(M31::from(0u32))));
         for j in 0..N_STATE_WORDS {
-            let [lo_cur, lo_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
-            let [hi_cur, hi_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
+            let [lo_cur, lo_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -4]);
+            let [hi_cur, hi_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -4]);
             h_out[j] = (lo_cur, hi_cur);
             h_out_prev[j] = (lo_prev, hi_prev);
         }
@@ -452,11 +343,8 @@ impl FrameworkEval for Sha256Eval {
         eval.add_constraint(not_r63.clone() * h_out[N_STATE_WORDS - 1].0.clone());
         eval.add_constraint(not_r63 * h_out[N_STATE_WORDS - 1].1.clone());
 
-        // Finalization: h_out[j] = h_in[j] + working[j] (mod 2³²), on the
-        // t = 63 row. `h_in[j]` is the same block's t = 0 row (offset −63).
-        // `working[j]` is the state after round 63 — `a_new`/`e_new` of
-        // this row and the three before it. The trace commits all addends.
-        // The degree-two gate keeps each constraint at degree three or less.
+        // Finalization reads h_in from rolling offsets 63..66 and the
+        // post-round state from a_new/e_new at offsets 0..3.
         let working = |j: usize| -> (E::F, E::F) {
             match j {
                 0..=3 => (a_new_lo[j].clone(), a_new_hi[j].clone()),
@@ -464,12 +352,20 @@ impl FrameworkEval for Sha256Eval {
                 _ => unreachable!(),
             }
         };
+        let h_in_final: [(E::F, E::F); N_STATE_WORDS] = std::array::from_fn(|j| {
+            let (masks, offset) = if j < 4 {
+                (&a_bits_m, 4 + j)
+            } else {
+                (&e_bits_m, j)
+            };
+            let bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|bit| masks[bit][offset].clone());
+            word_from_bits::<E>(&bits)
+        });
         for j in 0..N_STATE_WORDS {
-            let h_in_final = (h_in_lo[j][4].clone(), h_in_hi[j][4].clone());
             emit_mod_2_32_add_linear(
                 &mut eval,
                 gate_r63.clone(),
-                &[h_in_final, working(j)],
+                &[h_in_final[j].clone(), working(j)],
                 &h_out[j],
                 &final_carries[j].0,
                 &final_carries[j].1,
@@ -478,17 +374,15 @@ impl FrameworkEval for Sha256Eval {
             );
         }
 
-        // Connect each continuation block input to the prior block output.
-        // Offset −1 selects the prior `t = 63` row.
-        // `enabler·is_round_0 − msg_start` enables only continuation rows.
-        // IV binding controls the anchor row.
-        let chain_gate = gate_r0.clone() - msg_start.clone();
+        // Continuation seed bits equal the prior block's output. Message
+        // starts are instead IV-bound above.
+        let chain_gate = gate_r0.clone() - msg_start_at_round0.clone();
         for j in 0..N_STATE_WORDS {
             eval.add_constraint(
-                chain_gate.clone() * (h_in_lo[j][0].clone() - h_out_prev[j].0.clone()),
+                chain_gate.clone() * (initial_state[j].0.clone() - h_out_prev[j].0.clone()),
             );
             eval.add_constraint(
-                chain_gate.clone() * (h_in_hi[j][0].clone() - h_out_prev[j].1.clone()),
+                chain_gate.clone() * (initial_state[j].1.clone() - h_out_prev[j].1.clone()),
             );
         }
 
@@ -659,28 +553,31 @@ impl FrameworkEval for Sha256Eval {
             enabler.clone() * (E::F::one() - enabler_prev.clone()) - first_row.clone(),
         );
         eval.add_constraint(
-            enabler_prev.clone() * (E::F::one() - enabler.clone()) * (E::F::one() - r0.clone()),
+            enabler_prev.clone()
+                * (E::F::one() - enabler.clone())
+                * (E::F::one() - block_start.clone()),
         );
         eval.add_constraint(msg_start.clone() * (msg_start.clone() - E::F::one()));
-        eval.add_constraint(msg_start.clone() * (E::F::one() - gate_r0.clone()));
+        eval.add_constraint(msg_start.clone() * (E::F::one() - gate_block_start.clone()));
         eval.add_constraint(first_row.clone() * (msg_start.clone() - E::F::one()));
 
         let [msg_id, msg_id_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         let [msg_block, msg_block_prev] = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [0, -1]);
         eval.add_constraint(first_row.clone() * msg_id.clone());
         eval.add_constraint(
-            (enabler.clone() - gate_r0.clone()) * (msg_id.clone() - msg_id_prev.clone()),
+            (enabler.clone() - gate_block_start.clone()) * (msg_id.clone() - msg_id_prev.clone()),
         );
         eval.add_constraint(
-            (gate_r0.clone() - first_row.clone())
+            (gate_block_start.clone() - first_row.clone())
                 * (msg_id.clone() - msg_id_prev.clone() - msg_start.clone()),
         );
         eval.add_constraint(msg_start.clone() * msg_block.clone());
         eval.add_constraint(
-            (enabler.clone() - gate_r0.clone()) * (msg_block.clone() - msg_block_prev.clone()),
+            (enabler.clone() - gate_block_start.clone())
+                * (msg_block.clone() - msg_block_prev.clone()),
         );
         eval.add_constraint(
-            (gate_r0.clone() - msg_start.clone())
+            (gate_block_start.clone() - msg_start.clone())
                 * (msg_block.clone() - msg_block_prev - E::F::one()),
         );
 
@@ -695,24 +592,21 @@ impl FrameworkEval for Sha256Eval {
             ));
         }
 
-        // ---- full padded-message provider (t = 15 rows) ----
+        // ---- full padded-message provider (four bytes per input-word row) ----
         if self.expose_field {
             let base = E::F::from(M31::from(crate::relations::PACKED_SHA_STREAM_FIELD_BASE));
-            for byte_in_block in 0..crate::constants::BLOCK_BYTES {
-                let word_idx = byte_in_block / WORD_BYTES;
-                let byte_in_word = byte_in_block % WORD_BYTES;
+            for byte_in_word in 0..WORD_BYTES {
                 let first_bit = (WORD_BYTES - 1 - byte_in_word) * 8;
-                let round_offset = 15 - word_idx;
                 let value = (0..8).fold(E::F::from(M31::from(0u32)), |acc, bit| {
-                    acc + w_bit_at(first_bit + bit, round_offset)
-                        * E::F::from(M31::from(1u32 << bit))
+                    acc + w_bit_at(first_bit + bit, 0) * E::F::from(M31::from(1u32 << bit))
                 });
                 let byte_index = msg_block.clone()
                     * E::F::from(M31::from(crate::constants::BLOCK_BYTES as u32))
-                    + E::F::from(M31::from(byte_in_block as u32));
+                    + round_index.clone() * E::F::from(M31::from(WORD_BYTES as u32))
+                    + E::F::from(M31::from(byte_in_word as u32));
                 eval.add_to_relation(RelationEntry::base(
                     &self.relations.field.field,
-                    -gate_r15.clone(),
+                    -gate_input.clone(),
                     &[base.clone() + msg_id.clone(), byte_index, value],
                 ));
             }
@@ -819,6 +713,13 @@ fn limb_sum<E: EvalAtRow>(bits: &[E::F; WORD_BIT_COLS], start: usize) -> E::F {
         acc += f_const::<E>(1u32 << i) * bits[start + i].clone();
     }
     acc
+}
+
+fn word_from_bits<E: EvalAtRow>(bits: &[E::F; WORD_BIT_COLS]) -> (E::F, E::F) {
+    (
+        limb_sum::<E>(bits, 0),
+        limb_sum::<E>(bits, LIMB_BITS as usize),
+    )
 }
 
 fn constrain_word_recomposition<E: EvalAtRow>(
@@ -968,5 +869,36 @@ fn wire_range_check<E: EvalAtRow>(
             mult,
             &[value],
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stwo_constraint_framework::expr::ExprEvaluator;
+
+    #[test]
+    fn symbolic_degree_fits_declared_bound_with_all_optional_sites() {
+        let log_size = 14;
+        let eval = Sha256Eval {
+            log_size,
+            relations: Sha256Relations::dummy(),
+            expose_digest: true,
+            expose_field: true,
+            claim_mask_beta: Some(QM31::from_u32_unchecked(3, 5, 7, 11)),
+        };
+        let declared = eval.max_constraint_log_degree_bound();
+        let measured = eval
+            .evaluate(ExprEvaluator::new())
+            .constraint_degree_bounds()
+            .into_iter()
+            .max()
+            .unwrap_or(0) as u32;
+        let supported = (1u32 << (declared - log_size)) + 1;
+        assert_eq!(measured, 5);
+        assert!(
+            measured <= supported,
+            "degree {measured} exceeds {supported}"
+        );
     }
 }

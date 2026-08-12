@@ -142,25 +142,21 @@ pub fn is_first_row_column_id() -> PreProcessedColumnId {
     id("is_first_row")
 }
 
-/// IDs for the nine cyclic columns in the one-row-per-round layout.
-///
-/// All columns use the main trace `log_n_rows`.
-/// They depend only on `t = natural_row mod 64`.
-/// `k_lo` and `k_hi` hold the limbs of `K[t]`.
-/// The `is_round_{0,1,2,3,15,63}` columns select boundaries and gates.
-/// `is_schedule` is the `t ≥ 16` schedule gate.
+/// IDs for the nine cyclic columns in the three-seed-row layout.
+/// The order is K limbs, block start, round 0/15/63, schedule gate, round
+/// gate, and round index.
 /// This order matches `crate::preprocessed::generate_preprocessed_trace`.
 pub fn round_cyclic_column_ids() -> [PreProcessedColumnId; 9] {
     [
         id("k_lo"),
         id("k_hi"),
+        id("block_start"),
         id("is_round_0"),
-        id("is_round_1"),
-        id("is_round_2"),
-        id("is_round_3"),
         id("is_round_15"),
         id("is_round_63"),
         id("is_schedule"),
+        id("is_round"),
+        id("round_index"),
     ]
 }
 

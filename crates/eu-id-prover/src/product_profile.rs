@@ -144,6 +144,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stwo_sha256::trace::ROWS_PER_BLOCK;
 
     #[test]
     fn product_profile_pin_is_exact() {
@@ -239,9 +240,9 @@ mod tests {
         assert_eq!(n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES), 1);
         assert_eq!(n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES), 17);
         assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 229);
-        let block_slots = 1usize << (PRODUCT_SHA_LOG_N_ROWS - 6);
-        assert_eq!(block_slots, 256);
-        assert_eq!(block_slots - PRODUCT_MAX_PACKED_SHA_BLOCKS, 27);
-        assert!(block_slots - PRODUCT_MAX_PACKED_SHA_BLOCKS >= 1);
+        let max_real_blocks = ((1usize << PRODUCT_SHA_LOG_N_ROWS) - 1) / ROWS_PER_BLOCK;
+        assert_eq!(max_real_blocks, 244);
+        assert_eq!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS, 15);
+        assert!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS >= 1);
     }
 }

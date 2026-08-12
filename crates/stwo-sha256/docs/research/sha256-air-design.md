@@ -10,8 +10,9 @@ decode, packed Maj/Ch, XOR, or split-pack tables.
 
 ## Row model
 
-One SHA-256 block uses 64 trace rows. Each row represents one compression
-round. The natural row index is `block * 64 + round`.
+One SHA-256 block uses 67 trace rows: three state-seed rows followed by 64
+compression-round rows. Round `t` has natural row index
+`block * 67 + 3 + t`.
 
 Stwo stores rows in bit-reversed circle-domain order. Cross-row masks read
 earlier rounds, earlier schedule words, and the prior block output.
@@ -74,11 +75,13 @@ terms must cancel.
 
 ## State chain
 
-The preprocessed `is_first_row` selector anchors the first block. The AIR
-requires the SHA-256 initial value on that block.
+The preprocessed `is_first_row` selector anchors the first block. The first
+three rows seed `h3/h7`, `h2/h6`, and `h1/h5`; round zero seeds `h0/h4` in
+the rolling `a/e` bit lanes. The AIR requires the SHA-256 initial value on
+every packed message start.
 
-Each round reads the prior round state. The AIR checks all eight state words.
-Round 63 produces the compression result.
+Each round reads the current `a/e` lanes and the prior three rolling rows to
+recover all eight state words. Round 63 produces the compression result.
 
 Each continuation block receives the prior block output. Every message start
 resets to the IV, and the packed metadata columns enforce message/block
@@ -125,7 +128,8 @@ default. A provider without a consumer gives a nonzero LogUp total.
 The optional packed-stream provider emits every padded-stream byte. Each tuple
 contains `(BASE + message_id, byte_index, byte_value)`, where `byte_index`
 starts at zero for each message and advances across its 64-byte blocks.
-The AIR derives the bytes from the existing `W` bit planes at `t = 15`.
+The AIR derives four bytes from the existing `W` bit planes on each input-word
+round `t = 0..15`.
 
 A consumer component must require each emitted byte on the same shared field
 relation. The standalone proof leaves this provider off by default.
