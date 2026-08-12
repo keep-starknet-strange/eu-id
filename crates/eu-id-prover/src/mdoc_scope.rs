@@ -68,7 +68,7 @@ const DIGEST_EXIT_REQUIRES_SELECTED_ITEMS: u32 = 1;
 const DIGEST_ID_UNIVERSE_LOG_SIZE: u32 = 16;
 pub(crate) const ITEM_DIGEST_LOG_SIZE: u32 = 9;
 const ITEM_DIGEST_MESSAGE_ID_BASE: u32 = 3;
-const MDOC_SCOPE_TRANSCRIPT_VERSION: u64 = 4;
+const MDOC_SCOPE_TRANSCRIPT_VERSION: u64 = 5;
 
 pub(crate) const ISSUER_SIG_STRUCTURE_STREAM_ID: u32 = 0x4d53_0000;
 pub(crate) const ISSUER_PAYLOAD_STREAM_ID: u32 = 0x4d53_0001;
@@ -335,6 +335,12 @@ const ALL_SCOPE_ACTIONS: [ScopeAction; 47] = [
     ScopeAction::MapKeyExit2,
 ];
 const SCOPE_ACTION_COUNT: usize = ALL_SCOPE_ACTIONS.len();
+const SCOPE_ACTION_GRID_ROWS: usize = 6;
+const SCOPE_ACTION_GRID_COLS: usize = 8;
+const SCOPE_ACTION_COMMITTED_ROWS: usize = SCOPE_ACTION_GRID_ROWS - 1;
+const SCOPE_ACTION_COMMITTED_COLS: usize = SCOPE_ACTION_GRID_COLS - 1;
+const SCOPE_ACTION_SPARE_INDEX: usize = SCOPE_ACTION_COUNT;
+const _: () = assert!(SCOPE_ACTION_COUNT + 1 == SCOPE_ACTION_GRID_ROWS * SCOPE_ACTION_GRID_COLS);
 
 impl ScopeAction {
     fn index(self) -> usize {
@@ -1987,7 +1993,8 @@ struct ScopeTraceColumns {
     map_accumulator_after: std::ops::Range<usize>,
     map_full_before: std::ops::Range<usize>,
     map_full_after: std::ops::Range<usize>,
-    action_flags: std::ops::Range<usize>,
+    action_rows: std::ops::Range<usize>,
+    action_cols: std::ops::Range<usize>,
     p0: usize,
     p1: usize,
     slack_bits: std::ops::Range<usize>,
@@ -2041,8 +2048,10 @@ impl ScopeTraceColumns {
         next += MDOC_SCOPE_UNORDERED_MAP_DEPTH;
         let map_full_after = next..next + MDOC_SCOPE_UNORDERED_MAP_DEPTH;
         next += MDOC_SCOPE_UNORDERED_MAP_DEPTH;
-        let action_flags = next..next + SCOPE_ACTION_COUNT;
-        next += SCOPE_ACTION_COUNT;
+        let action_rows = next..next + SCOPE_ACTION_COMMITTED_ROWS;
+        next += SCOPE_ACTION_COMMITTED_ROWS;
+        let action_cols = next..next + SCOPE_ACTION_COMMITTED_COLS;
+        next += SCOPE_ACTION_COMMITTED_COLS;
         let p0 = take(&mut next);
         let p1 = take(&mut next);
         let slack_bits = next..next + SCOPE_SLACK_BITS;
@@ -2078,7 +2087,8 @@ impl ScopeTraceColumns {
             map_accumulator_after,
             map_full_before,
             map_full_after,
-            action_flags,
+            action_rows,
+            action_cols,
             p0,
             p1,
             slack_bits,
@@ -2372,7 +2382,8 @@ fn scope_item_digest_trace(
 fn scope_zero_columns(columns: &ScopeTraceColumns) -> Vec<usize> {
     let mut zero_columns = vec![columns.active, columns.first, columns.last];
     zero_columns.extend(columns.stream_selectors.clone());
-    zero_columns.extend(columns.action_flags.clone());
+    zero_columns.extend(columns.action_rows.clone());
+    zero_columns.extend(columns.action_cols.clone());
     zero_columns.extend(columns.raw_selectors.clone());
     zero_columns
 }
@@ -2423,7 +2434,15 @@ fn populate_scope_active_row(
         values[columns.map_full_after.start + level][row_index] =
             m31(applied.after.map_full[level]);
     }
-    values[columns.action_flags.start + applied.edge.action.index()][row_index] = m31(1);
+    let action_index = applied.edge.action.index();
+    let action_row = action_index / SCOPE_ACTION_GRID_COLS;
+    let action_col = action_index % SCOPE_ACTION_GRID_COLS;
+    if action_row < SCOPE_ACTION_COMMITTED_ROWS {
+        values[columns.action_rows.start + action_row][row_index] = m31(1);
+    }
+    if action_col < SCOPE_ACTION_COMMITTED_COLS {
+        values[columns.action_cols.start + action_col][row_index] = m31(1);
+    }
     values[columns.p0][row_index] = m31(applied.edge.p0);
     values[columns.p1][row_index] = m31(applied.edge.p1);
     if applied.edge.action.emits_raw() {
@@ -2531,14 +2550,81 @@ fn f_const<E: EvalAtRow>(value: u32) -> E::F {
     E::F::from(m31(value))
 }
 
-fn action_sum<E: EvalAtRow>(
-    trace: &[E::F],
-    columns: &ScopeTraceColumns,
-    actions: &[ScopeAction],
-) -> E::F {
-    actions.iter().fold(f_const::<E>(0), |sum, action| {
-        sum + trace[columns.action_flags.start + action.index()].clone()
-    })
+#[derive(Clone, Debug)]
+struct ScopeActionGrid<F> {
+    rows: [F; SCOPE_ACTION_GRID_ROWS],
+    cols: [F; SCOPE_ACTION_GRID_COLS],
+}
+
+impl<F> ScopeActionGrid<F>
+where
+    F: Clone + std::ops::Add<Output = F> + std::ops::Sub<Output = F> + std::ops::Mul<Output = F>,
+{
+    fn new(active: F, committed_rows: &[F], committed_cols: &[F], zero: F) -> Self {
+        assert_eq!(committed_rows.len(), SCOPE_ACTION_COMMITTED_ROWS);
+        assert_eq!(committed_cols.len(), SCOPE_ACTION_COMMITTED_COLS);
+        let row_sum = committed_rows
+            .iter()
+            .cloned()
+            .fold(zero.clone(), |sum, selector| sum + selector);
+        let col_sum = committed_cols
+            .iter()
+            .cloned()
+            .fold(zero, |sum, selector| sum + selector);
+        let derived_row = active.clone() - row_sum;
+        let derived_col = active - col_sum;
+        Self {
+            rows: std::array::from_fn(|index| {
+                committed_rows
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| derived_row.clone())
+            }),
+            cols: std::array::from_fn(|index| {
+                committed_cols
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| derived_col.clone())
+            }),
+        }
+    }
+
+    fn selector(&self, action: ScopeAction) -> F {
+        let index = action.index();
+        self.rows[index / SCOPE_ACTION_GRID_COLS].clone()
+            * self.cols[index % SCOPE_ACTION_GRID_COLS].clone()
+    }
+
+    fn sum(&self, actions: &[ScopeAction], zero: F) -> F {
+        actions
+            .iter()
+            .fold(zero, |sum, &action| sum + self.selector(action))
+    }
+
+    fn code(&self, zero: F, mut constant: impl FnMut(u32) -> F) -> F {
+        let row_code = self
+            .rows
+            .iter()
+            .enumerate()
+            .fold(zero.clone(), |sum, (row, selector)| {
+                sum + selector.clone() * constant((row * SCOPE_ACTION_GRID_COLS) as u32)
+            });
+        self.cols
+            .iter()
+            .enumerate()
+            .fold(row_code, |sum, (col, selector)| {
+                sum + selector.clone() * constant(col as u32)
+            })
+    }
+
+    fn spare(&self) -> F {
+        self.rows[SCOPE_ACTION_SPARE_INDEX / SCOPE_ACTION_GRID_COLS].clone()
+            * self.cols[SCOPE_ACTION_SPARE_INDEX % SCOPE_ACTION_GRID_COLS].clone()
+    }
+}
+
+fn action_sum<E: EvalAtRow>(grid: &ScopeActionGrid<E::F>, actions: &[ScopeAction]) -> E::F {
+    grid.sum(actions, f_const::<E>(0))
 }
 
 fn item_selector<E: EvalAtRow>(value: E::F, item: usize, item_count: usize) -> E::F {
@@ -2557,11 +2643,12 @@ fn item_selector<E: EvalAtRow>(value: E::F, item: usize, item_count: usize) -> E
 
 fn scope_constraint_log_degree_bound(log_size: u32, item_count: usize) -> u32 {
     debug_assert!((1..=MDOC_SCOPE_MAX_ITEMS).contains(&item_count));
-    // The highest-degree constraint updates `seen`: a linear selected-id flag
-    // times the degree-(item_count - 1) item selector, a linear unseen flag,
-    // and the outer active gate. Its degree is item_count + 2, so the quotient
-    // needs ceil(log2(item_count + 1)) extra domain bits.
-    let quotient_factor = u32::try_from(item_count + 1)
+    // A factored action selector has degree two. The field-emission constraint
+    // has degree five; for three or four items the selected-ID `seen` update
+    // reaches item_count + 3. Product V2 has two items, so its existing log+2
+    // composition domain does not grow.
+    let max_constraint_degree = (item_count + 3).max(5);
+    let quotient_factor = u32::try_from(max_constraint_degree - 1)
         .expect("the fixed mdoc item count fits u32")
         .next_power_of_two()
         .trailing_zeros()
@@ -2613,32 +2700,26 @@ impl FrameworkEval for MdocScopeEval {
                 sum + selector.clone() * f_const::<E>(slot as u32)
             });
 
-        let action_flags = trace[columns.action_flags.clone()].to_vec();
-        let action_sum_all = action_flags
-            .iter()
-            .cloned()
-            .fold(zero.clone(), |a, b| a + b);
-        eval.add_constraint(action_sum_all - active.clone());
-        for flag in &action_flags {
-            eval.add_constraint(flag.clone() * (flag.clone() - one.clone()));
+        let action_grid = ScopeActionGrid::new(
+            active.clone(),
+            &trace[columns.action_rows.clone()],
+            &trace[columns.action_cols.clone()],
+            zero.clone(),
+        );
+        for selector in action_grid.rows.iter().chain(&action_grid.cols) {
+            eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
         }
-        let action_code = action_flags
-            .iter()
-            .enumerate()
-            .fold(zero.clone(), |sum, (index, flag)| {
-                sum + flag.clone() * f_const::<E>(index as u32)
-            });
-        let action = |which: ScopeAction| trace[columns.action_flags.start + which.index()].clone();
+        // Grid cell 47 is deliberately unassigned. Reject it in this AIR
+        // rather than relying on a missing DFA table tuple to break LogUp.
+        eval.add_constraint(action_grid.spare());
+        let action_code = action_grid.code(zero.clone(), f_const::<E>);
+        let action = |which: ScopeAction| action_grid.selector(which);
 
         let raw_selectors = trace[columns.raw_selectors.clone()].to_vec();
         for selector in &raw_selectors {
             eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
         }
-        let emit_raw = action_sum::<E>(
-            &trace,
-            &columns,
-            &[ScopeAction::RawStay, ScopeAction::RawExit],
-        );
+        let emit_raw = action_sum::<E>(&action_grid, &[ScopeAction::RawStay, ScopeAction::RawExit]);
         let raw_sum = raw_selectors
             .iter()
             .cloned()
@@ -2712,8 +2793,7 @@ impl FrameworkEval for MdocScopeEval {
         }
 
         let begin_bstr = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::BeginBstr0,
                 ScopeAction::BeginBstr1,
@@ -2721,8 +2801,7 @@ impl FrameworkEval for MdocScopeEval {
             ],
         );
         let begin_array = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::BeginArray0,
                 ScopeAction::BeginArray1,
@@ -2730,8 +2809,7 @@ impl FrameworkEval for MdocScopeEval {
             ],
         );
         let begin_digest_map = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::BeginDigestMap0,
                 ScopeAction::BeginDigestMap1,
@@ -2740,8 +2818,7 @@ impl FrameworkEval for MdocScopeEval {
         );
         let begin_any = begin_bstr.clone() + begin_array.clone() + begin_digest_map.clone();
         let decrement = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::RawStay,
                 ScopeAction::RawExit,
@@ -2756,8 +2833,7 @@ impl FrameworkEval for MdocScopeEval {
             ],
         );
         let increment_position = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::RawStay,
                 ScopeAction::RawExit,
@@ -2787,8 +2863,7 @@ impl FrameworkEval for MdocScopeEval {
         );
 
         let selected_id = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::SelectedDigestId0,
                 ScopeAction::SelectedDigestId1,
@@ -2796,8 +2871,7 @@ impl FrameworkEval for MdocScopeEval {
             ],
         );
         let unknown_id = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::UnknownDigestId0,
                 ScopeAction::UnknownDigestId1,
@@ -2917,8 +2991,7 @@ impl FrameworkEval for MdocScopeEval {
                 * (arg_lo.clone() - trace[columns.p0].clone() - slack.clone()),
         );
         let stay = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::RawStay,
                 ScopeAction::IgnoreStay,
@@ -2928,8 +3001,7 @@ impl FrameworkEval for MdocScopeEval {
             ],
         );
         let exit = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::RawExit,
                 ScopeAction::IgnoreExit,
@@ -2952,8 +3024,7 @@ impl FrameworkEval for MdocScopeEval {
         let exact = action(ScopeAction::Exact);
         eval.add_constraint(exact * (byte.clone() - trace[columns.p0].clone()));
         let begin_unordered_map = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::BeginMap0,
                 ScopeAction::BeginMap1,
@@ -2968,8 +3039,7 @@ impl FrameworkEval for MdocScopeEval {
         );
         eval.add_constraint(begin_unordered_map * (arg_lo.clone() - trace[columns.p0].clone()));
         let unordered_map_key = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::MapKeyStay0,
                 ScopeAction::MapKeyStay1,
@@ -2982,8 +3052,7 @@ impl FrameworkEval for MdocScopeEval {
         eval.add_constraint(unordered_map_key.clone() * (header.clone() - one.clone()));
         eval.add_constraint(unordered_map_key * (byte.clone() - trace[columns.p0].clone()));
         let non_header_actions = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::Any,
                 ScopeAction::Argument,
@@ -3051,8 +3120,7 @@ impl FrameworkEval for MdocScopeEval {
         }
 
         let id0 = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::ItemDigestId0,
                 ScopeAction::SelectedDigestId0,
@@ -3060,8 +3128,7 @@ impl FrameworkEval for MdocScopeEval {
             ],
         );
         let id1 = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::ItemDigestId1,
                 ScopeAction::SelectedDigestId1,
@@ -3069,8 +3136,7 @@ impl FrameworkEval for MdocScopeEval {
             ],
         );
         let id2 = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::ItemDigestId2,
                 ScopeAction::SelectedDigestId2,
@@ -3094,8 +3160,7 @@ impl FrameworkEval for MdocScopeEval {
         eval.add_constraint(id2 * (byte.clone() - f_const::<E>(0x19)));
 
         let emit_field = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::FieldByte,
                 ScopeAction::FieldExact,
@@ -3110,8 +3175,7 @@ impl FrameworkEval for MdocScopeEval {
         let digit_field = action(ScopeAction::FieldDigit);
         let nat_first = action(ScopeAction::NatAlphaFirst);
         let nat_second = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[ScopeAction::NatAlphaStay, ScopeAction::NatAlphaExit],
         );
         let expected_field = (fixed_field.clone() + exact_field.clone() + digit_field.clone())
@@ -3186,8 +3250,7 @@ impl FrameworkEval for MdocScopeEval {
         }
 
         let item_id_provider = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::ItemDigestId0,
                 ScopeAction::ItemDigestId1,
@@ -3205,8 +3268,7 @@ impl FrameworkEval for MdocScopeEval {
             std::slice::from_ref(&arg_lo),
         ));
         let emit_digest_byte = action_sum::<E>(
-            &trace,
-            &columns,
+            &action_grid,
             &[
                 ScopeAction::SelectedDigestByte,
                 ScopeAction::SelectedDigestStay,
@@ -3537,17 +3599,25 @@ fn scope_item_digest_interaction_trace(
     logup.finalize_last()
 }
 
-fn packed_action_sum<B: ScopeInteractionBase + ?Sized>(
+fn packed_action_grid<B: ScopeInteractionBase + ?Sized>(
     base: &B,
     columns: &ScopeTraceColumns,
     row: usize,
-    actions: &[ScopeAction],
-) -> PackedM31 {
-    actions
-        .iter()
-        .fold(PackedM31::broadcast(m31(0)), |sum, action| {
-            sum + base.at(columns.action_flags.start + action.index(), row)
-        })
+) -> ScopeActionGrid<PackedM31> {
+    let committed_rows: [PackedM31; SCOPE_ACTION_COMMITTED_ROWS] =
+        std::array::from_fn(|index| base.at(columns.action_rows.start + index, row));
+    let committed_cols: [PackedM31; SCOPE_ACTION_COMMITTED_COLS] =
+        std::array::from_fn(|index| base.at(columns.action_cols.start + index, row));
+    ScopeActionGrid::new(
+        base.at(columns.active, row),
+        &committed_rows,
+        &committed_cols,
+        PackedM31::broadcast(m31(0)),
+    )
+}
+
+fn packed_action_sum(grid: &ScopeActionGrid<PackedM31>, actions: &[ScopeAction]) -> PackedM31 {
+    grid.sum(actions, PackedM31::broadcast(m31(0)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3615,10 +3685,9 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
     sites.push(
         (0..n_vec_rows)
             .map(|row| {
+                let action_grid = packed_action_grid(base, columns, row);
                 let emit = packed_action_sum(
-                    base,
-                    columns,
-                    row,
+                    &action_grid,
                     &[
                         ScopeAction::FieldByte,
                         ScopeAction::FieldExact,
@@ -3656,10 +3725,9 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
     sites.push(
         (0..n_vec_rows)
             .map(|row| {
+                let action_grid = packed_action_grid(base, columns, row);
                 let selected = packed_action_sum(
-                    base,
-                    columns,
-                    row,
+                    &action_grid,
                     &[
                         ScopeAction::SelectedDigestId0,
                         ScopeAction::SelectedDigestId1,
@@ -3667,9 +3735,7 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
                     ],
                 );
                 let provider = packed_action_sum(
-                    base,
-                    columns,
-                    row,
+                    &action_grid,
                     &[
                         ScopeAction::ItemDigestId0,
                         ScopeAction::ItemDigestId1,
@@ -3690,10 +3756,9 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
     sites.push(
         (0..n_vec_rows)
             .map(|row| {
+                let action_grid = packed_action_grid(base, columns, row);
                 let digest_key = packed_action_sum(
-                    base,
-                    columns,
-                    row,
+                    &action_grid,
                     &[
                         ScopeAction::SelectedDigestId0,
                         ScopeAction::SelectedDigestId1,
@@ -3717,10 +3782,9 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
     sites.push(
         (0..n_vec_rows)
             .map(|row| {
+                let action_grid = packed_action_grid(base, columns, row);
                 let emit = packed_action_sum(
-                    base,
-                    columns,
-                    row,
+                    &action_grid,
                     &[
                         ScopeAction::SelectedDigestByte,
                         ScopeAction::SelectedDigestStay,
@@ -3745,11 +3809,8 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
                         sum + base_at(columns.stream_selectors.start + slot, row)
                             * broadcast(slot as u32)
                     });
-                let action_code =
-                    (0..SCOPE_ACTION_COUNT).fold(PackedM31::broadcast(m31(0)), |sum, action| {
-                        sum + base_at(columns.action_flags.start + action, row)
-                            * broadcast(action as u32)
-                    });
+                let action_code = packed_action_grid(base, columns, row)
+                    .code(PackedM31::broadcast(m31(0)), broadcast);
                 let denominator = dfa_relation.combine(&[
                     stream_slot,
                     base_at(columns.state_before, row),
@@ -4701,7 +4762,9 @@ mod tests {
 
     #[test]
     fn scope_expression_degrees_match_item_count_bounds() {
-        for (item_count, expected_degree) in [(1, 3), (2, 4), (3, 5), (4, 6)] {
+        for (item_count, expected_degree, expected_bound) in
+            [(1, 5, 18), (2, 5, 18), (3, 6, 19), (4, 7, 19)]
+        {
             let eval = symbolic_scope_eval(item_count);
             let declared = eval.max_constraint_log_degree_bound();
             let measured = symbolic_max_degree(eval);
@@ -4709,7 +4772,17 @@ mod tests {
 
             assert_eq!(measured, expected_degree, "item count {item_count}");
             assert_eq!(declared, required, "item count {item_count}");
+            assert_eq!(declared, expected_bound, "item count {item_count}");
         }
+
+        assert_eq!(
+            scope_constraint_log_degree_bound(
+                crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE,
+                crate::product_profile::PRODUCT_MAX_ATTRIBUTES,
+            ),
+            crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE + 2,
+            "the two-item Product V2 composition domain must not grow",
+        );
     }
 
     #[test]
@@ -4991,11 +5064,195 @@ mod tests {
             .collect()
     }
 
+    fn action_grid(active: bool, index: Option<usize>) -> ScopeActionGrid<M31> {
+        let mut committed_rows = [m31(0); SCOPE_ACTION_COMMITTED_ROWS];
+        let mut committed_cols = [m31(0); SCOPE_ACTION_COMMITTED_COLS];
+        if let Some(index) = index {
+            assert!(index < SCOPE_ACTION_GRID_ROWS * SCOPE_ACTION_GRID_COLS);
+            let row = index / SCOPE_ACTION_GRID_COLS;
+            let col = index % SCOPE_ACTION_GRID_COLS;
+            if row < SCOPE_ACTION_COMMITTED_ROWS {
+                committed_rows[row] = m31(1);
+            }
+            if col < SCOPE_ACTION_COMMITTED_COLS {
+                committed_cols[col] = m31(1);
+            }
+        }
+        ScopeActionGrid::new(
+            m31(u32::from(active)),
+            &committed_rows,
+            &committed_cols,
+            m31(0),
+        )
+    }
+
     #[test]
-    fn action_table_is_explicit_dense_and_complete() {
+    fn action_grid_exhaustively_encodes_the_dense_action_table() {
         assert_eq!(SCOPE_ACTION_COUNT, ALL_SCOPE_ACTIONS.len());
-        for (index, action) in ALL_SCOPE_ACTIONS.into_iter().enumerate() {
-            assert_eq!(action.index(), index);
+        assert_eq!(
+            SCOPE_ACTION_COUNT + 1,
+            SCOPE_ACTION_GRID_ROWS * SCOPE_ACTION_GRID_COLS,
+        );
+        for (expected_index, expected_action) in ALL_SCOPE_ACTIONS.into_iter().enumerate() {
+            assert_eq!(expected_action.index(), expected_index);
+            let grid = action_grid(true, Some(expected_index));
+
+            assert_eq!(
+                grid.rows.iter().filter(|&&value| value == m31(1)).count(),
+                1
+            );
+            assert_eq!(
+                grid.cols.iter().filter(|&&value| value == m31(1)).count(),
+                1
+            );
+            assert_eq!(grid.spare(), m31(0), "action {expected_index}");
+            assert_eq!(
+                grid.code(m31(0), m31),
+                m31(expected_index as u32),
+                "action {expected_index}",
+            );
+            for action in ALL_SCOPE_ACTIONS {
+                assert_eq!(
+                    grid.selector(action),
+                    m31(u32::from(action == expected_action)),
+                    "selected {expected_index}, candidate {}",
+                    action.index(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inactive_action_grid_is_all_zero() {
+        let grid = action_grid(false, None);
+
+        assert!(grid
+            .rows
+            .iter()
+            .chain(&grid.cols)
+            .all(|&value| value == m31(0)));
+        assert_eq!(grid.code(m31(0), m31), m31(0));
+        assert_eq!(grid.spare(), m31(0));
+        assert!(ALL_SCOPE_ACTIONS
+            .into_iter()
+            .all(|action| grid.selector(action) == m31(0)));
+    }
+
+    #[test]
+    fn action_grid_boolean_constraints_reject_non_boolean_selectors() {
+        let mut committed_rows = [m31(0); SCOPE_ACTION_COMMITTED_ROWS];
+        let mut committed_cols = [m31(0); SCOPE_ACTION_COMMITTED_COLS];
+        committed_rows[0] = m31(2);
+        committed_cols[0] = m31(1);
+        let grid = ScopeActionGrid::new(m31(1), &committed_rows, &committed_cols, m31(0));
+
+        let residues = grid
+            .rows
+            .iter()
+            .chain(&grid.cols)
+            .map(|&selector| selector * (selector - m31(1)))
+            .collect::<Vec<_>>();
+        assert_ne!(residues[0], m31(0), "the committed value 2 is rejected");
+        assert!(residues.into_iter().any(|residue| residue != m31(0)));
+
+        committed_rows = [m31(0); SCOPE_ACTION_COMMITTED_ROWS];
+        committed_rows[0] = m31(1);
+        committed_rows[1] = m31(1);
+        let grid = ScopeActionGrid::new(m31(1), &committed_rows, &committed_cols, m31(0));
+        let derived_row = grid.rows[SCOPE_ACTION_COMMITTED_ROWS];
+        assert_ne!(
+            derived_row * (derived_row - m31(1)),
+            m31(0),
+            "two Boolean committed rows make the derived row non-Boolean",
+        );
+    }
+
+    #[test]
+    fn spare_action_code_47_is_locally_rejected() {
+        let grid = action_grid(true, Some(SCOPE_ACTION_SPARE_INDEX));
+
+        assert!(grid
+            .rows
+            .iter()
+            .chain(&grid.cols)
+            .all(|&selector| selector * (selector - m31(1)) == m31(0)));
+        assert_eq!(grid.code(m31(0), m31), m31(47));
+        assert!(ALL_SCOPE_ACTIONS
+            .into_iter()
+            .all(|action| grid.selector(action) == m31(0)));
+        assert_eq!(grid.spare(), m31(1), "the local AIR residue must fail");
+    }
+
+    #[test]
+    fn product_scope_trace_layout_pins_the_factored_action_columns() {
+        let scope = construct_product(&[b"FR", b"DE"], true).unwrap();
+        let columns = scope.columns();
+
+        assert_eq!(columns.action_rows, 60..65);
+        assert_eq!(columns.action_cols, 65..72);
+        assert_eq!(columns.total, 97);
+        let layout = scope.layout();
+        let mut expected_trace = vec![scope.metadata.log_size; columns.total];
+        expected_trace.push(scope.table_log_size);
+        expected_trace.extend(vec![ITEM_DIGEST_LOG_SIZE; SCOPE_DIGEST_BYTES]);
+        expected_trace.push(DIGEST_ID_UNIVERSE_LOG_SIZE);
+        assert_eq!(layout.trace, expected_trace);
+    }
+
+    #[test]
+    fn action_grid_trace_encoding_and_padding_are_exact() {
+        let scope = construct_product(&[b"FR", b"DE"], true).unwrap();
+        let witness = scope.witness.as_ref().unwrap();
+        let columns = scope.columns();
+        let log_size = scope.metadata.log_size;
+        let base = scope_base_trace(
+            log_size,
+            &columns,
+            witness,
+            scope.handles.parsed_streams.len(),
+            scope.handles.raw_streams.len(),
+            [0x5a; 32],
+        )
+        .into_iter()
+        .map(|column| column.to_cpu().values)
+        .collect::<Vec<_>>();
+        let circle_row = |coset_row| {
+            bit_reverse_index(
+                coset_index_to_circle_domain_index(coset_row, log_size),
+                log_size,
+            )
+        };
+
+        for (coset_row, witness_row) in witness.active_rows.iter().enumerate() {
+            let row = circle_row(coset_row);
+            let committed_rows: [M31; SCOPE_ACTION_COMMITTED_ROWS] =
+                std::array::from_fn(|index| base[columns.action_rows.start + index][row]);
+            let committed_cols: [M31; SCOPE_ACTION_COMMITTED_COLS] =
+                std::array::from_fn(|index| base[columns.action_cols.start + index][row]);
+            let grid = ScopeActionGrid::new(m31(1), &committed_rows, &committed_cols, m31(0));
+
+            assert_eq!(grid.selector(witness_row.applied.edge.action), m31(1));
+            assert_eq!(
+                grid.code(m31(0), m31),
+                m31(witness_row.applied.edge.action.index() as u32),
+            );
+            assert_eq!(grid.spare(), m31(0));
+        }
+
+        for coset_row in witness.active_rows.len()..(1usize << log_size) {
+            let row = circle_row(coset_row);
+            assert_eq!(base[columns.active][row], m31(0));
+            for column in columns
+                .action_rows
+                .clone()
+                .chain(columns.action_cols.clone())
+            {
+                assert_eq!(
+                    base[column][row],
+                    m31(0),
+                    "column {column}, row {coset_row}",
+                );
+            }
         }
     }
 
