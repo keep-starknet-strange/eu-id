@@ -6974,6 +6974,11 @@ mod mdoc_sha_table_tests {
             "mdoc scope published a deterministic private claim"
         );
         assert_ne!(
+            proof_a.mdoc_scope_interaction_claim.item_digest_claimed_sum,
+            proof_b.mdoc_scope_interaction_claim.item_digest_claimed_sum,
+            "mdoc item-digest provider published a deterministic private claim"
+        );
+        assert_ne!(
             proof_a.mso_exact_cbor_interaction_claim.claimed_sum,
             proof_b.mso_exact_cbor_interaction_claim.claimed_sum,
             "exact-MSO parser published a deterministic private claim"

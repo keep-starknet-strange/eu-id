@@ -66,6 +66,7 @@ const MDOC_SCOPE_UNORDERED_MAP_DEPTH: usize = 3;
 const _: () = assert!(MAX_PRESENTED_NATIONALITIES == 1usize << MDOC_SCOPE_NATIONALITY_SLACK_BITS);
 const DIGEST_EXIT_REQUIRES_SELECTED_ITEMS: u32 = 1;
 const DIGEST_ID_UNIVERSE_LOG_SIZE: u32 = 16;
+const ITEM_DIGEST_LOG_SIZE: u32 = 9;
 const ITEM_DIGEST_MESSAGE_ID_BASE: u32 = 3;
 
 pub(crate) const ISSUER_SIG_STRUCTURE_STREAM_ID: u32 = 0x4d53_0000;
@@ -1993,7 +1994,6 @@ struct ScopeTraceColumns {
     raw_selectors: std::ops::Range<usize>,
     field_id: usize,
     field_index: usize,
-    digest_values: std::ops::Range<usize>,
     total: usize,
 }
 
@@ -2051,8 +2051,6 @@ impl ScopeTraceColumns {
         next += raw_outputs;
         let field_id = take(&mut next);
         let field_index = take(&mut next);
-        let digest_values = next..next + SCOPE_DIGEST_BYTES;
-        next += SCOPE_DIGEST_BYTES;
         Self {
             active,
             first,
@@ -2087,7 +2085,6 @@ impl ScopeTraceColumns {
             raw_selectors,
             field_id,
             field_index,
-            digest_values,
             total: next,
         }
     }
@@ -2189,17 +2186,16 @@ fn scope_table_preprocessed_columns(
         .collect()
 }
 
-/// Walk-side preprocessed columns (per-item digest aggregation flags) at the
-/// walk component's log size.
-fn scope_walk_preprocessed_columns(log_size: u32, item_count: usize) -> Vec<MdocScopeColumnEval> {
-    let domain = 1usize << log_size;
+/// Per-item digest aggregation flags at the fixed item-provider height.
+fn scope_item_digest_preprocessed_columns(item_count: usize) -> Vec<MdocScopeColumnEval> {
+    let domain = 1usize << ITEM_DIGEST_LOG_SIZE;
     let mut columns = vec![vec![m31(0); domain]; item_count];
     for (item, column) in columns.iter_mut().enumerate() {
         column[item] = m31(1);
     }
     columns
         .into_iter()
-        .map(|values| scope_column(log_size, values))
+        .map(|values| scope_column(ITEM_DIGEST_LOG_SIZE, values))
         .collect()
 }
 
@@ -2213,13 +2209,12 @@ fn digest_id_universe_column() -> MdocScopeColumnEval {
 /// All scope preprocessed columns in [`scope_preprocessed_ids`] order: the DFA
 /// edge table, the walk's digest-item flags, and the fixed `u16` ID universe.
 fn scope_preprocessed_columns(
-    log_size: u32,
     table_log_size: u32,
     table_edges: &[(usize, DfaEdge)],
     item_count: usize,
 ) -> Vec<MdocScopeColumnEval> {
     let mut columns = scope_table_preprocessed_columns(table_log_size, table_edges);
-    columns.extend(scope_walk_preprocessed_columns(log_size, item_count));
+    columns.extend(scope_item_digest_preprocessed_columns(item_count));
     columns.push(digest_id_universe_column());
     columns
 }
@@ -2335,13 +2330,41 @@ fn scope_base_trace(
         values[columns.inverse][row_index] = row.applied.inverse;
     }
 
-    populate_scope_item_digest_values(&mut values, columns, &witness.item_digest_bytes);
-
     debug_assert_eq!(columns.stream_selectors.len(), stream_count);
     debug_assert_eq!(columns.raw_selectors.len(), raw_count);
     values
         .into_iter()
         .map(|column| scope_column(log_size, column))
+        .collect()
+}
+
+/// Fixed-height trace for the digest values selected by the semantic walk.
+///
+/// The active item rows are deterministic. Every inactive cell is replayed
+/// from one fresh per-proof seed so tree one and tree two use identical base
+/// values without retaining the materialized columns between commitments.
+fn scope_item_digest_trace(
+    item_digest_bytes: &[[u8; SCOPE_DIGEST_BYTES]],
+    seed: [u8; 32],
+) -> Vec<MdocScopeColumnEval> {
+    assert!(item_digest_bytes.len() <= MDOC_SCOPE_MAX_ITEMS);
+    let domain = 1usize << ITEM_DIGEST_LOG_SIZE;
+    let mut rng = StdRng::from_seed(seed);
+    let mut values = (0..SCOPE_DIGEST_BYTES)
+        .map(|_| {
+            (0..domain)
+                .map(|_| random_m31(&mut rng))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for (item, digest) in item_digest_bytes.iter().enumerate() {
+        for (byte, value) in digest.iter().copied().enumerate() {
+            values[byte][item] = m31(u32::from(value));
+        }
+    }
+    values
+        .into_iter()
+        .map(|column| scope_column(ITEM_DIGEST_LOG_SIZE, column))
         .collect()
 }
 
@@ -2423,18 +2446,6 @@ fn populate_scope_active_row(
     values[columns.field_index][row_index] = m31(index);
 }
 
-fn populate_scope_item_digest_values(
-    values: &mut [Vec<M31>],
-    columns: &ScopeTraceColumns,
-    item_digest_bytes: &[[u8; 32]],
-) {
-    for (item, digest) in item_digest_bytes.iter().enumerate() {
-        for (byte, value) in digest.iter().copied().enumerate() {
-            values[columns.digest_values.start + byte][item] = m31(u32::from(value));
-        }
-    }
-}
-
 trait ScopeInteractionBase {
     fn at(&self, column: usize, row: usize) -> PackedM31;
 }
@@ -2466,7 +2477,6 @@ impl ScopeActiveInteractionBase {
         for (row_index, row) in witness.active_rows.iter().enumerate() {
             populate_scope_active_row(&mut values, columns, row_index, row);
         }
-        populate_scope_item_digest_values(&mut values, columns, &witness.item_digest_bytes);
         let mut zero_columns = vec![false; columns.total];
         for column in scope_zero_columns(columns) {
             zero_columns[column] = true;
@@ -2507,7 +2517,6 @@ struct MdocScopeEval {
     raw_relations: Vec<FieldBytesRelation>,
     semantic_relation: FieldBytesRelation,
     payload_hash_relation: Option<FieldBytesRelation>,
-    item_digest_relation: PackedShaDigestRelation,
     item_count: usize,
     dfa_relation: MdocScopeDfaRelation,
     state_relation: MdocScopeStateRelation,
@@ -2574,9 +2583,6 @@ impl FrameworkEval for MdocScopeEval {
         let raw_count = self.raw_relations.len();
         let columns = ScopeTraceColumns::new(stream_count, raw_count);
 
-        let aggregate: Vec<E::F> = (0..item_count)
-            .map(|item| eval.get_preprocessed_column(scope_col_id(&format!("digest_item_{item}"))))
-            .collect();
         let trace: Vec<E::F> = (0..columns.total).map(|_| eval.next_trace_mask()).collect();
 
         let zero = f_const::<E>(0);
@@ -3212,32 +3218,6 @@ impl FrameworkEval for MdocScopeEval {
             &[trace[columns.p0].clone(), trace[columns.p1].clone(), byte],
         ));
 
-        for item in 0..item_count {
-            let values = trace[columns.digest_values.clone()].to_vec();
-            for (byte_index, value) in values.iter().enumerate() {
-                eval.add_to_relation(RelationEntry::new(
-                    &self.digest_byte_relation,
-                    E::EF::from(aggregate[item].clone()),
-                    &[
-                        f_const::<E>(item as u32),
-                        f_const::<E>(byte_index as u32),
-                        value.clone(),
-                    ],
-                ));
-            }
-            let mut digest_tuple = Vec::with_capacity(1 + values.len());
-            digest_tuple.push(f_const::<E>(
-                ITEM_DIGEST_MESSAGE_ID_BASE
-                    + u32::try_from(item).expect("item digest index fits u32"),
-            ));
-            digest_tuple.extend(values.iter().cloned());
-            eval.add_to_relation(RelationEntry::new(
-                &self.item_digest_relation,
-                E::EF::from(aggregate[item].clone()),
-                &digest_tuple,
-            ));
-        }
-
         eval.add_to_relation(RelationEntry::new(
             &self.dfa_relation,
             E::EF::from(active.clone()),
@@ -3292,6 +3272,68 @@ impl FrameworkEval for MdocScopeEval {
             -E::EF::from(active - last),
             &next_state_tuple,
         ));
+
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
+        eval.finalize_logup_in_pairs();
+        eval
+    }
+}
+
+/// Fixed-height provider for the selected item digests.
+///
+/// Each public item selector activates one row. That row provides the same
+/// 32 `(item, byte_index, byte)` tuples consumed by the semantic walk and the
+/// same keyed SHA digest tuple consumed by the packed SHA component.
+struct MdocScopeItemDigestEval {
+    item_count: usize,
+    item_digest_relation: PackedShaDigestRelation,
+    digest_byte_relation: MdocScopeDigestByteRelation,
+    claim_mask_beta: Option<QM31>,
+}
+
+impl FrameworkEval for MdocScopeItemDigestEval {
+    fn log_size(&self) -> u32 {
+        ITEM_DIGEST_LOG_SIZE
+    }
+
+    fn max_constraint_log_degree_bound(&self) -> u32 {
+        ITEM_DIGEST_LOG_SIZE + 1
+    }
+
+    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        let aggregate: Vec<E::F> = (0..self.item_count)
+            .map(|item| eval.get_preprocessed_column(scope_col_id(&format!("digest_item_{item}"))))
+            .collect();
+        let values: Vec<E::F> = (0..SCOPE_DIGEST_BYTES)
+            .map(|_| eval.next_trace_mask())
+            .collect();
+
+        for (item, item_active) in aggregate.into_iter().enumerate() {
+            for (byte_index, value) in values.iter().enumerate() {
+                eval.add_to_relation(RelationEntry::new(
+                    &self.digest_byte_relation,
+                    E::EF::from(item_active.clone()),
+                    &[
+                        f_const::<E>(item as u32),
+                        f_const::<E>(byte_index as u32),
+                        value.clone(),
+                    ],
+                ));
+            }
+            let mut digest_tuple = Vec::with_capacity(1 + values.len());
+            digest_tuple.push(f_const::<E>(
+                ITEM_DIGEST_MESSAGE_ID_BASE
+                    + u32::try_from(item).expect("item digest index fits u32"),
+            ));
+            digest_tuple.extend(values.iter().cloned());
+            eval.add_to_relation(RelationEntry::new(
+                &self.item_digest_relation,
+                E::EF::from(item_active),
+                &digest_tuple,
+            ));
+        }
 
         if let Some(beta) = self.claim_mask_beta {
             add_claim_mask_fraction(&mut eval, beta);
@@ -3418,6 +3460,82 @@ fn digest_id_uniqueness_interaction_trace(
     logup.finalize_last()
 }
 
+fn scope_item_digest_interaction_trace(
+    base: &[MdocScopeColumnEval],
+    item_preprocessed: &[MdocScopeColumnEval],
+    item_digest_relation: &PackedShaDigestRelation,
+    digest_byte_relation: &MdocScopeDigestByteRelation,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
+) -> (Vec<MdocScopeColumnEval>, QM31) {
+    assert_eq!(base.len(), SCOPE_DIGEST_BYTES);
+    let item_count = item_preprocessed.len();
+    let n_vec_rows = 1usize << (ITEM_DIGEST_LOG_SIZE - LOG_N_LANES);
+    let broadcast = |value: u32| PackedM31::broadcast(m31(value));
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::new();
+
+    for (item, aggregate) in item_preprocessed.iter().enumerate() {
+        for (byte_index, value) in base.iter().enumerate() {
+            sites.push(
+                (0..n_vec_rows)
+                    .map(|row| {
+                        let numerator = PackedQM31::from(aggregate.data[row]);
+                        let denominator = digest_byte_relation.combine(&[
+                            broadcast(item as u32),
+                            broadcast(byte_index as u32),
+                            value.data[row],
+                        ]);
+                        (numerator, denominator)
+                    })
+                    .collect(),
+            );
+        }
+        sites.push(
+            (0..n_vec_rows)
+                .map(|row| {
+                    let numerator = PackedQM31::from(aggregate.data[row]);
+                    let mut tuple = Vec::with_capacity(1 + SCOPE_DIGEST_BYTES);
+                    tuple.push(broadcast(
+                        ITEM_DIGEST_MESSAGE_ID_BASE
+                            + u32::try_from(item).expect("item digest index fits u32"),
+                    ));
+                    tuple.extend(base.iter().map(|column| column.data[row]));
+                    (numerator, item_digest_relation.combine(&tuple))
+                })
+                .collect(),
+        );
+    }
+
+    if let Some((mask, beta)) = claim_mask {
+        assert_eq!(mask.log_size(), ITEM_DIGEST_LOG_SIZE);
+        sites.push(
+            (0..n_vec_rows)
+                .map(|row| mask.packed_fraction_at(row, beta))
+                .collect(),
+        );
+    }
+
+    debug_assert_eq!(
+        sites.len(),
+        item_count * (SCOPE_DIGEST_BYTES + 1) + usize::from(claim_mask.is_some())
+    );
+    let mut logup = LogupTraceGenerator::new(ITEM_DIGEST_LOG_SIZE);
+    let mut site = 0usize;
+    while site + 1 < sites.len() {
+        let left = &sites[site];
+        let right = &sites[site + 1];
+        logup.col_from_iter((0..n_vec_rows).map(|row| {
+            let (n0, d0) = left[row];
+            let (n1, d1) = right[row];
+            (n0 * d1 + n1 * d0, d0 * d1)
+        }));
+        site += 2;
+    }
+    if site < sites.len() {
+        logup.col_from_iter((0..n_vec_rows).map(|row| sites[site][row]));
+    }
+    logup.finalize_last()
+}
+
 fn packed_action_sum<B: ScopeInteractionBase + ?Sized>(
     base: &B,
     columns: &ScopeTraceColumns,
@@ -3436,15 +3554,12 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
     log_size: u32,
     columns: &ScopeTraceColumns,
     base: &B,
-    walk_preprocessed: &[MdocScopeColumnEval],
     stream_ids: &[u32],
     raw_target_stream_ids: &[u32],
     parsed_relations: &[ParsedCborByteRelation],
     raw_relations: &[FieldBytesRelation],
     semantic_relation: &FieldBytesRelation,
     payload_hash_relation: Option<&FieldBytesRelation>,
-    item_digest_relation: &PackedShaDigestRelation,
-    item_count: usize,
     dfa_relation: &MdocScopeDfaRelation,
     state_relation: &MdocScopeStateRelation,
     digest_id_relation: &MdocScopeDigestIdRelation,
@@ -3621,44 +3736,6 @@ fn scope_interaction_trace<B: ScopeInteractionBase + ?Sized>(
             .collect(),
     );
 
-    for item in 0..item_count {
-        let aggregate = &walk_preprocessed[item];
-        for byte in 0..SCOPE_DIGEST_BYTES {
-            sites.push(
-                (0..n_vec_rows)
-                    .map(|row| {
-                        let numerator = PackedQM31::from(aggregate.data[row]);
-                        let denominator = digest_byte_relation.combine(&[
-                            broadcast(item as u32),
-                            broadcast(byte as u32),
-                            base_at(columns.digest_values.start + byte, row),
-                        ]);
-                        (numerator, denominator)
-                    })
-                    .collect(),
-            );
-        }
-        sites.push(
-            (0..n_vec_rows)
-                .map(|row| {
-                    let numerator = PackedQM31::from(aggregate.data[row]);
-                    let values: Vec<_> = columns
-                        .digest_values
-                        .clone()
-                        .map(|column| base_at(column, row))
-                        .collect();
-                    let mut digest_tuple = Vec::with_capacity(1 + values.len());
-                    digest_tuple.push(broadcast(
-                        ITEM_DIGEST_MESSAGE_ID_BASE
-                            + u32::try_from(item).expect("item digest index fits u32"),
-                    ));
-                    digest_tuple.extend(values);
-                    (numerator, item_digest_relation.combine(&digest_tuple))
-                })
-                .collect(),
-        );
-    }
-
     sites.push(
         (0..n_vec_rows)
             .map(|row| {
@@ -3817,6 +3894,7 @@ pub(crate) struct MdocScopeProofMetadata {
 pub(crate) struct MdocScopeInteractionClaim {
     pub(crate) claimed_sum: QM31,
     pub(crate) table_claimed_sum: QM31,
+    pub(crate) item_digest_claimed_sum: QM31,
     pub(crate) digest_id_uniqueness_claimed_sum: QM31,
 }
 
@@ -3832,6 +3910,7 @@ pub(crate) struct MdocScope {
     payload_hash_binding: bool,
     witness: Option<MdocScopeWitness>,
     trace_seed: Option<[u8; 32]>,
+    item_digest_trace_seed: Option<[u8; 32]>,
     dfa_relation: Option<MdocScopeDfaRelation>,
     state_relation: Option<MdocScopeStateRelation>,
     digest_id_relation: Option<MdocScopeDigestIdRelation>,
@@ -3839,11 +3918,13 @@ pub(crate) struct MdocScope {
     digest_byte_relation: Option<MdocScopeDigestByteRelation>,
     claim_mask_trace: Option<ClaimMaskTrace>,
     table_claim_mask_trace: Option<ClaimMaskTrace>,
+    item_digest_claim_mask_trace: Option<ClaimMaskTrace>,
     digest_id_uniqueness_claim_mask_trace: Option<ClaimMaskTrace>,
     claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocScopeInteractionClaim>,
     component: Option<MdocScopeComponent>,
     table_component: Option<FrameworkComponent<MdocScopeDfaTableEval>>,
+    item_digest_component: Option<FrameworkComponent<MdocScopeItemDigestEval>>,
     digest_id_uniqueness_component: Option<FrameworkComponent<MdocScopeDigestIdUniverseEval>>,
 }
 
@@ -3881,6 +3962,11 @@ impl MdocScope {
         let log_size = scope_log_size(witness.active_rows.len())?;
         let table_log_size = scope_log_size(table_edges.len())?;
         let metadata = MdocScopeProofMetadata { log_size };
+        let mut rng = rand::thread_rng();
+        let mut trace_seed = [0u8; 32];
+        rng.fill_bytes(&mut trace_seed);
+        let mut item_digest_trace_seed = [0u8; 32];
+        rng.fill_bytes(&mut item_digest_trace_seed);
         Ok(Self {
             statement,
             metadata,
@@ -3890,11 +3976,8 @@ impl MdocScope {
             handles,
             payload_hash_binding: false,
             witness: Some(witness),
-            trace_seed: Some({
-                let mut seed = [0u8; 32];
-                rand::thread_rng().fill_bytes(&mut seed);
-                seed
-            }),
+            trace_seed: Some(trace_seed),
+            item_digest_trace_seed: Some(item_digest_trace_seed),
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
@@ -3902,11 +3985,13 @@ impl MdocScope {
             digest_byte_relation: None,
             claim_mask_trace: None,
             table_claim_mask_trace: None,
+            item_digest_claim_mask_trace: None,
             digest_id_uniqueness_claim_mask_trace: None,
             claim_mask_challenge: None,
             interaction_claim: None,
             component: None,
             table_component: None,
+            item_digest_component: None,
             digest_id_uniqueness_component: None,
         })
     }
@@ -3942,6 +4027,7 @@ impl MdocScope {
             payload_hash_binding: false,
             witness: None,
             trace_seed: None,
+            item_digest_trace_seed: None,
             dfa_relation: None,
             state_relation: None,
             digest_id_relation: None,
@@ -3949,11 +4035,13 @@ impl MdocScope {
             digest_byte_relation: None,
             claim_mask_trace: None,
             table_claim_mask_trace: None,
+            item_digest_claim_mask_trace: None,
             digest_id_uniqueness_claim_mask_trace: None,
             claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             component: None,
             table_component: None,
+            item_digest_component: None,
             digest_id_uniqueness_component: None,
         })
     }
@@ -4045,6 +4133,7 @@ impl MdocScope {
         vec![
             self.metadata.log_size,
             self.table_log_size,
+            ITEM_DIGEST_LOG_SIZE,
             DIGEST_ID_UNIVERSE_LOG_SIZE,
         ]
     }
@@ -4054,14 +4143,16 @@ impl MdocScope {
         traces: Vec<ClaimMaskTrace>,
         challenge: SharedClaimMaskChallenge,
     ) -> Self {
-        let [walk, table, digest_id_uniqueness]: [ClaimMaskTrace; 3] = traces
+        let [walk, table, item_digest, digest_id_uniqueness]: [ClaimMaskTrace; 4] = traces
             .try_into()
-            .unwrap_or_else(|_| panic!("mdoc scope expects exactly three claim masks"));
+            .unwrap_or_else(|_| panic!("mdoc scope expects exactly four claim masks"));
         assert_eq!(walk.log_size(), self.metadata.log_size);
         assert_eq!(table.log_size(), self.table_log_size);
+        assert_eq!(item_digest.log_size(), ITEM_DIGEST_LOG_SIZE);
         assert_eq!(digest_id_uniqueness.log_size(), DIGEST_ID_UNIVERSE_LOG_SIZE);
         self.claim_mask_trace = Some(walk);
         self.table_claim_mask_trace = Some(table);
+        self.item_digest_claim_mask_trace = Some(item_digest);
         self.digest_id_uniqueness_claim_mask_trace = Some(digest_id_uniqueness);
         self.claim_mask_challenge = Some(challenge);
         self
@@ -4090,13 +4181,17 @@ impl MdocScope {
             + self.handles.raw_streams.len()
             + 4 // semantic, digest-id binding, digest-id uniqueness, digest-byte
             + usize::from(self.payload_hash_binding)
-            + self.statement.items.len() * (SCOPE_DIGEST_BYTES + 1)
             + 3 // DFA consume and state consume/provider
             + usize::from(self.claim_mask_challenge.is_some())
     }
 
     fn n_table_interaction_sites(&self) -> usize {
         1 + usize::from(self.claim_mask_challenge.is_some())
+    }
+
+    fn n_item_digest_interaction_sites(&self) -> usize {
+        self.statement.items.len() * (SCOPE_DIGEST_BYTES + 1)
+            + usize::from(self.claim_mask_challenge.is_some())
     }
 
     fn n_digest_id_uniqueness_interaction_sites(&self) -> usize {
@@ -4176,10 +4271,14 @@ impl Air for MdocScope {
         let mask_columns =
             usize::from(self.claim_mask_challenge.is_some()) * CLAIM_MASK_TRACE_COLUMNS;
         let mut preprocessed = vec![self.table_log_size; SCOPE_PREPROCESSED_FIXED_COLS];
-        preprocessed.extend(vec![self.metadata.log_size; self.statement.items.len()]);
+        preprocessed.extend(vec![ITEM_DIGEST_LOG_SIZE; self.statement.items.len()]);
         preprocessed.push(DIGEST_ID_UNIVERSE_LOG_SIZE);
         let mut trace = vec![self.metadata.log_size; columns.total + mask_columns];
         trace.extend(vec![self.table_log_size; 1 + mask_columns]);
+        trace.extend(vec![
+            ITEM_DIGEST_LOG_SIZE;
+            SCOPE_DIGEST_BYTES + mask_columns
+        ]);
         trace.extend(vec![DIGEST_ID_UNIVERSE_LOG_SIZE; 1 + mask_columns]);
         let mut interaction = vec![
             self.metadata.log_size;
@@ -4188,6 +4287,11 @@ impl Air for MdocScope {
         interaction.extend(vec![
             self.table_log_size;
             self.n_table_interaction_sites().div_ceil(2)
+                * SECURE_EXTENSION_DEGREE
+        ]);
+        interaction.extend(vec![
+            ITEM_DIGEST_LOG_SIZE;
+            self.n_item_digest_interaction_sites().div_ceil(2)
                 * SECURE_EXTENSION_DEGREE
         ]);
         interaction.extend(vec![
@@ -4208,6 +4312,7 @@ impl Air for MdocScope {
         vec![
             claim.claimed_sum,
             claim.table_claimed_sum,
+            claim.item_digest_claimed_sum,
             claim.digest_id_uniqueness_claimed_sum,
         ]
     }
@@ -4221,7 +4326,6 @@ impl Air for MdocScope {
     ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
     {
         Ok(scope_preprocessed_columns(
-            self.metadata.log_size,
             self.table_log_size,
             &self.table_edges,
             self.statement.items.len(),
@@ -4247,7 +4351,6 @@ impl Air for MdocScope {
                 payload_hash_relation: self
                     .payload_hash_binding
                     .then(|| self.handles.payload_hash_fields.get()),
-                item_digest_relation: self.item_digest_relation(),
                 item_count: self.statement.items.len(),
                 dfa_relation: self
                     .dfa_relation
@@ -4285,6 +4388,19 @@ impl Air for MdocScope {
             },
             claim.table_claimed_sum,
         ));
+        self.item_digest_component = Some(FrameworkComponent::new(
+            allocator,
+            MdocScopeItemDigestEval {
+                item_count: self.statement.items.len(),
+                item_digest_relation: self.item_digest_relation(),
+                digest_byte_relation: self
+                    .digest_byte_relation
+                    .clone()
+                    .expect("mdoc scope digest-byte relation drawn"),
+                claim_mask_beta: self.claim_mask_beta(),
+            },
+            claim.item_digest_claimed_sum,
+        ));
         self.digest_id_uniqueness_component = Some(FrameworkComponent::new(
             allocator,
             MdocScopeDigestIdUniverseEval {
@@ -4306,6 +4422,9 @@ impl Air for MdocScope {
             self.table_component
                 .as_ref()
                 .expect("mdoc scope DFA table component is built"),
+            self.item_digest_component
+                .as_ref()
+                .expect("mdoc scope item-digest component is built"),
             self.digest_id_uniqueness_component
                 .as_ref()
                 .expect("mdoc scope digest-id uniqueness component is built"),
@@ -4318,12 +4437,14 @@ impl AirProver for MdocScope {
         self.metadata
             .log_size
             .max(self.table_log_size)
+            .max(ITEM_DIGEST_LOG_SIZE)
             .max(DIGEST_ID_UNIVERSE_LOG_SIZE)
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
         scope_constraint_log_degree_bound(self.metadata.log_size, self.statement.items.len())
             .max(self.table_log_size + 1)
+            .max(ITEM_DIGEST_LOG_SIZE + 1)
             .max(DIGEST_ID_UNIVERSE_LOG_SIZE + 1)
     }
 
@@ -4336,7 +4457,6 @@ impl AirProver for MdocScope {
             "eu_id_prover::mdoc_scope::MdocScope",
             &scope_preprocessed_ids(self.statement.items.len()),
             &scope_preprocessed_columns(
-                self.metadata.log_size,
                 self.table_log_size,
                 &self.table_edges,
                 self.statement.items.len(),
@@ -4351,7 +4471,6 @@ impl AirProver for MdocScope {
     ) {
         let all_ids = scope_preprocessed_ids(self.statement.items.len());
         let all_columns = scope_preprocessed_columns(
-            self.metadata.log_size,
             self.table_log_size,
             &self.table_edges,
             self.statement.items.len(),
@@ -4391,6 +4510,14 @@ impl AirProver for MdocScope {
         if let Some(mask) = &self.table_claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
+        tb.extend_evals(scope_item_digest_trace(
+            &witness.item_digest_bytes,
+            self.item_digest_trace_seed
+                .expect("mdoc scope item-digest trace seed is set"),
+        ));
+        if let Some(mask) = &self.item_digest_claim_mask_trace {
+            tb.extend_evals(mask.columns().to_vec());
+        }
         tb.extend_evals(vec![digest_id_uniqueness_trace(
             &witness.digest_id_multiplicities,
         )]);
@@ -4406,8 +4533,6 @@ impl AirProver for MdocScope {
             .as_ref()
             .expect("mdoc scope prover has a witness");
         let base = ScopeActiveInteractionBase::new(self.metadata.log_size, &columns, witness);
-        let walk_preprocessed =
-            scope_walk_preprocessed_columns(self.metadata.log_size, self.statement.items.len());
         let parsed_relations = self.parsed_relations();
         let raw_relations = self.raw_relations();
         let item_digest_relation = self.item_digest_relation();
@@ -4432,7 +4557,6 @@ impl AirProver for MdocScope {
             self.metadata.log_size,
             &columns,
             &base,
-            &walk_preprocessed,
             &stream_specs(self.statement.items.len())
                 .into_iter()
                 .map(|spec| spec.stream_id)
@@ -4442,8 +4566,6 @@ impl AirProver for MdocScope {
             &raw_relations,
             &self.handles.semantic_fields.get(),
             payload_hash_relation.as_ref(),
-            &item_digest_relation,
-            self.statement.items.len(),
             dfa_relation,
             state_relation,
             digest_id_relation,
@@ -4469,6 +4591,26 @@ impl AirProver for MdocScope {
             table_claim_mask,
         );
         tb.extend_evals(table_interaction);
+        let item_digest_trace = scope_item_digest_trace(
+            &witness.item_digest_bytes,
+            self.item_digest_trace_seed
+                .expect("mdoc scope item-digest trace seed is set"),
+        );
+        let item_digest_preprocessed =
+            scope_item_digest_preprocessed_columns(self.statement.items.len());
+        let item_digest_claim_mask = self
+            .item_digest_claim_mask_trace
+            .as_ref()
+            .zip(self.claim_mask_beta());
+        let (item_digest_interaction, item_digest_claimed_sum) =
+            scope_item_digest_interaction_trace(
+                &item_digest_trace,
+                &item_digest_preprocessed,
+                &item_digest_relation,
+                digest_byte_relation,
+                item_digest_claim_mask,
+            );
+        tb.extend_evals(item_digest_interaction);
         let digest_id_uniqueness_trace =
             digest_id_uniqueness_trace(&witness.digest_id_multiplicities);
         let digest_id_uniqueness_claim_mask = self
@@ -4485,12 +4627,14 @@ impl AirProver for MdocScope {
         self.interaction_claim = Some(MdocScopeInteractionClaim {
             claimed_sum,
             table_claimed_sum,
+            item_digest_claimed_sum,
             digest_id_uniqueness_claimed_sum,
         });
         // The witness has now supplied both committed trees.  Components only
         // retain the public statement, relations, and claimed sums.
         self.witness.take();
         self.trace_seed.take();
+        self.item_digest_trace_seed.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -4501,6 +4645,9 @@ impl AirProver for MdocScope {
             self.table_component
                 .as_ref()
                 .expect("mdoc scope DFA table component is built"),
+            self.item_digest_component
+                .as_ref()
+                .expect("mdoc scope item-digest component is built"),
             self.digest_id_uniqueness_component
                 .as_ref()
                 .expect("mdoc scope digest-id uniqueness component is built"),
@@ -4540,7 +4687,6 @@ mod tests {
             raw_relations: vec![FieldBytesRelation::dummy()],
             semantic_relation: FieldBytesRelation::dummy(),
             payload_hash_relation: Some(FieldBytesRelation::dummy()),
-            item_digest_relation: PackedShaDigestRelation::dummy(),
             item_count,
             dfa_relation: MdocScopeDfaRelation::dummy(),
             state_relation: MdocScopeStateRelation::dummy(),
@@ -4579,6 +4725,21 @@ mod tests {
         // headroom represented by the declared log+1 bound.
         assert_eq!(measured, 1);
         assert_eq!(declared, 17);
+    }
+
+    #[test]
+    fn item_digest_expression_degree_matches_bound() {
+        let eval = MdocScopeItemDigestEval {
+            item_count: 2,
+            item_digest_relation: PackedShaDigestRelation::dummy(),
+            digest_byte_relation: MdocScopeDigestByteRelation::dummy(),
+            claim_mask_beta: None,
+        };
+        let declared = eval.max_constraint_log_degree_bound();
+        let measured = symbolic_max_degree(eval);
+
+        assert_eq!(measured, 3);
+        assert_eq!(declared, ITEM_DIGEST_LOG_SIZE + 1);
     }
 
     fn encoded_bstr(bytes: &[u8]) -> Vec<u8> {
@@ -5345,6 +5506,125 @@ mod tests {
         assert_ne!(first_values, second_values);
     }
 
+    fn packed_column_values(column: &MdocScopeColumnEval) -> Vec<M31> {
+        column
+            .data
+            .iter()
+            .copied()
+            .flat_map(PackedM31::to_array)
+            .collect()
+    }
+
+    fn column_value_at_coset_row(
+        column: &MdocScopeColumnEval,
+        log_size: u32,
+        coset_row: usize,
+    ) -> M31 {
+        let circle_row = bit_reverse_index(
+            coset_index_to_circle_domain_index(coset_row, log_size),
+            log_size,
+        );
+        column.data[circle_row / N_LANES].to_array()[circle_row % N_LANES]
+    }
+
+    #[test]
+    fn item_digest_trace_replays_one_seed_and_refreshes_inactive_rows() {
+        let scope = construct_product(&[b"FR", b"DE"], true).unwrap();
+        let digests = &scope.witness.as_ref().unwrap().item_digest_bytes;
+        let first = scope_item_digest_trace(digests, [0x31; 32]);
+        let replay = scope_item_digest_trace(digests, [0x31; 32]);
+        let fresh = scope_item_digest_trace(digests, [0x32; 32]);
+
+        assert_eq!(first.len(), SCOPE_DIGEST_BYTES);
+        for (byte_index, ((first_column, replay_column), fresh_column)) in
+            first.iter().zip(&replay).zip(&fresh).enumerate()
+        {
+            assert_eq!(
+                packed_column_values(first_column),
+                packed_column_values(replay_column),
+                "tree-one/tree-two seed replay must be exact",
+            );
+            for (item, digest) in digests.iter().enumerate() {
+                assert_eq!(
+                    column_value_at_coset_row(first_column, ITEM_DIGEST_LOG_SIZE, item),
+                    m31(u32::from(digest[byte_index])),
+                );
+                assert_eq!(
+                    column_value_at_coset_row(fresh_column, ITEM_DIGEST_LOG_SIZE, item),
+                    column_value_at_coset_row(first_column, ITEM_DIGEST_LOG_SIZE, item),
+                    "active item bytes must not depend on the padding seed",
+                );
+            }
+        }
+        assert!(first
+            .iter()
+            .zip(&fresh)
+            .any(|(left, right)| { packed_column_values(left) != packed_column_values(right) }));
+    }
+
+    #[test]
+    fn item_digest_layout_and_claim_mask_order_are_fixed() {
+        let scope = construct_product(&[b"FR", b"DE"], true).unwrap();
+        let logs = scope.ordered_claim_mask_log_sizes();
+        assert_eq!(
+            logs,
+            vec![
+                scope.metadata.log_size,
+                scope.table_log_size,
+                ITEM_DIGEST_LOG_SIZE,
+                DIGEST_ID_UNIVERSE_LOG_SIZE,
+            ]
+        );
+        let mut ring = ClaimMaskRing::new(&logs).unwrap();
+        let masks = logs
+            .iter()
+            .map(|&log_size| ring.take(log_size).unwrap())
+            .collect();
+        ring.finish().unwrap();
+        let scope = scope.with_claim_masks(masks, SharedClaimMaskChallenge::new());
+        let layout = scope.layout();
+        let mask_columns = CLAIM_MASK_TRACE_COLUMNS;
+
+        let mut expected_preprocessed = vec![scope.table_log_size; SCOPE_PREPROCESSED_FIXED_COLS];
+        expected_preprocessed.extend(vec![ITEM_DIGEST_LOG_SIZE; scope.statement.items.len()]);
+        expected_preprocessed.push(DIGEST_ID_UNIVERSE_LOG_SIZE);
+        assert_eq!(layout.preprocessed, expected_preprocessed);
+
+        let mut expected_trace =
+            vec![scope.metadata.log_size; scope.columns().total + mask_columns];
+        expected_trace.extend(vec![scope.table_log_size; 1 + mask_columns]);
+        expected_trace.extend(vec![
+            ITEM_DIGEST_LOG_SIZE;
+            SCOPE_DIGEST_BYTES + mask_columns
+        ]);
+        expected_trace.extend(vec![DIGEST_ID_UNIVERSE_LOG_SIZE; 1 + mask_columns]);
+        assert_eq!(layout.trace, expected_trace);
+
+        assert_eq!(scope.n_item_digest_interaction_sites(), 67);
+        let item_interaction_columns =
+            scope.n_item_digest_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE;
+        assert_eq!(item_interaction_columns, 34 * SECURE_EXTENSION_DEGREE);
+        let mut expected_interaction = vec![
+            scope.metadata.log_size;
+            scope.n_interaction_sites().div_ceil(2)
+                * SECURE_EXTENSION_DEGREE
+        ];
+        expected_interaction.extend(vec![
+            scope.table_log_size;
+            scope.n_table_interaction_sites().div_ceil(2)
+                * SECURE_EXTENSION_DEGREE
+        ]);
+        expected_interaction.extend(vec![ITEM_DIGEST_LOG_SIZE; item_interaction_columns]);
+        expected_interaction.extend(vec![
+            DIGEST_ID_UNIVERSE_LOG_SIZE;
+            scope
+                .n_digest_id_uniqueness_interaction_sites()
+                .div_ceil(2)
+                * SECURE_EXTENSION_DEGREE
+        ]);
+        assert_eq!(layout.interaction, expected_interaction);
+    }
+
     #[test]
     fn payload_hash_interaction_site_is_opt_in() {
         let mut default_scope = construct_product(&[b"FR", b"DE"], true).unwrap();
@@ -5359,6 +5639,7 @@ mod tests {
         assert_eq!(bound_scope.n_interaction_sites(), default_sites + 1);
         let expected_columns = (default_sites + 1).div_ceil(2) * SECURE_EXTENSION_DEGREE
             + bound_scope.n_table_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
+            + bound_scope.n_item_digest_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
             + bound_scope
                 .n_digest_id_uniqueness_interaction_sites()
                 .div_ceil(2)
@@ -5385,8 +5666,6 @@ mod tests {
             scope.handles.raw_streams.len(),
             [0x42; 32],
         );
-        let preprocessed =
-            scope_walk_preprocessed_columns(scope.metadata.log_size, scope.statement.items.len());
         let stream_ids = stream_specs(scope.statement.items.len())
             .into_iter()
             .map(|spec| spec.stream_id)
@@ -5397,7 +5676,6 @@ mod tests {
         let raw_relations = (0..scope.handles.raw_streams.len())
             .map(|_| FieldBytesRelation::dummy())
             .collect::<Vec<_>>();
-        let item_digest_relation = PackedShaDigestRelation::dummy();
         let semantic_relation = FieldBytesRelation::dummy();
         let payload_hash_relation = FieldBytesRelation::dummy();
         let dfa_relation = MdocScopeDfaRelation::dummy();
@@ -5409,15 +5687,12 @@ mod tests {
             scope.metadata.log_size,
             &columns,
             &base,
-            &preprocessed,
             &stream_ids,
             &scope.raw_target_stream_ids(),
             &parsed_relations,
             &raw_relations,
             &semantic_relation,
             Some(&payload_hash_relation),
-            &item_digest_relation,
-            scope.statement.items.len(),
             &dfa_relation,
             &state_relation,
             &digest_id_relation,
@@ -5432,15 +5707,12 @@ mod tests {
             scope.metadata.log_size,
             &columns,
             &compact_base,
-            &preprocessed,
             &stream_ids,
             &scope.raw_target_stream_ids(),
             &parsed_relations,
             &raw_relations,
             &semantic_relation,
             Some(&payload_hash_relation),
-            &item_digest_relation,
-            scope.statement.items.len(),
             &dfa_relation,
             &state_relation,
             &digest_id_relation,
@@ -5472,15 +5744,12 @@ mod tests {
             scope.metadata.log_size,
             &columns,
             &base,
-            &preprocessed,
             &stream_ids,
             &scope.raw_target_stream_ids(),
             &parsed_relations,
             &raw_relations,
             &semantic_relation,
             Some(&payload_hash_relation),
-            &item_digest_relation,
-            scope.statement.items.len(),
             &dfa_relation,
             &state_relation,
             &digest_id_relation,
@@ -5491,10 +5760,7 @@ mod tests {
         );
         assert_eq!(masked_claimed_sum - claimed_sum, beta * mask.target_sum());
         let trees = TreeVec::new(vec![
-            preprocessed
-                .into_iter()
-                .map(|column| column.to_cpu().values)
-                .collect(),
+            vec![],
             base.into_iter()
                 .map(|column| column.to_cpu().values)
                 .collect(),
@@ -5514,7 +5780,6 @@ mod tests {
             raw_relations,
             semantic_relation,
             payload_hash_relation: Some(payload_hash_relation),
-            item_digest_relation,
             item_count: scope.statement.items.len(),
             dfa_relation,
             state_relation,
@@ -5531,6 +5796,114 @@ mod tests {
             },
             claimed_sum,
         );
+    }
+
+    #[test]
+    fn item_digest_component_is_masked_and_byte_mutation_unbalances_consumers() {
+        let scope = construct_product(&[b"FR", b"DE"], true).unwrap();
+        let digests = scope.witness.as_ref().unwrap().item_digest_bytes.clone();
+        let item_preprocessed = scope_item_digest_preprocessed_columns(scope.statement.items.len());
+        let item_digest_relation = PackedShaDigestRelation::dummy();
+        let digest_byte_relation = MdocScopeDigestByteRelation::dummy();
+        let base = scope_item_digest_trace(&digests, [0x45; 32]);
+        let (interaction, claimed_sum) = scope_item_digest_interaction_trace(
+            &base,
+            &item_preprocessed,
+            &item_digest_relation,
+            &digest_byte_relation,
+            None,
+        );
+        let zero = QM31::from_u32_unchecked(0, 0, 0, 0);
+
+        let provider_sum = |item_digests: &[[u8; SCOPE_DIGEST_BYTES]]| {
+            item_digests
+                .iter()
+                .enumerate()
+                .fold(zero, |sum, (item, digest)| {
+                    let byte_sum =
+                        digest
+                            .iter()
+                            .enumerate()
+                            .fold(zero, |sum, (byte_index, &value)| {
+                                let denominator: QM31 = digest_byte_relation.combine(&[
+                                    m31(item as u32),
+                                    m31(byte_index as u32),
+                                    m31(u32::from(value)),
+                                ]);
+                                sum + denominator.inverse()
+                            });
+                    let mut tuple = Vec::with_capacity(1 + SCOPE_DIGEST_BYTES);
+                    tuple.push(m31(ITEM_DIGEST_MESSAGE_ID_BASE + item as u32));
+                    tuple.extend(digest.iter().map(|&value| m31(u32::from(value))));
+                    let denominator: QM31 = item_digest_relation.combine(&tuple);
+                    sum + byte_sum + denominator.inverse()
+                })
+        };
+        assert_eq!(claimed_sum, provider_sum(&digests));
+
+        let mut ring = ClaimMaskRing::new(&[ITEM_DIGEST_LOG_SIZE, ITEM_DIGEST_LOG_SIZE]).unwrap();
+        let mask = ring.take(ITEM_DIGEST_LOG_SIZE).unwrap();
+        let beta = QM31::from_m31_array([m31(3), m31(5), m31(7), m31(11)]);
+        let (_, masked_sum) = scope_item_digest_interaction_trace(
+            &base,
+            &item_preprocessed,
+            &item_digest_relation,
+            &digest_byte_relation,
+            Some((&mask, beta)),
+        );
+        assert_eq!(masked_sum - claimed_sum, beta * mask.target_sum());
+
+        let assert_item_trace = |base: Vec<MdocScopeColumnEval>,
+                                 interaction: Vec<MdocScopeColumnEval>,
+                                 expected_sum: QM31| {
+            let trees = TreeVec::new(vec![
+                item_preprocessed
+                    .iter()
+                    .map(|column| column.to_cpu().values)
+                    .collect(),
+                base.into_iter()
+                    .map(|column| column.to_cpu().values)
+                    .collect(),
+                interaction
+                    .into_iter()
+                    .map(|column| column.to_cpu().values)
+                    .collect(),
+            ]);
+            let trace = trees.as_cols_ref();
+            let eval = MdocScopeItemDigestEval {
+                item_count: scope.statement.items.len(),
+                item_digest_relation: item_digest_relation.clone(),
+                digest_byte_relation: digest_byte_relation.clone(),
+                claim_mask_beta: None,
+            };
+            assert_constraints_on_trace(
+                &trace,
+                ITEM_DIGEST_LOG_SIZE,
+                |row| {
+                    let _ = eval.evaluate(row);
+                },
+                expected_sum,
+            );
+        };
+        assert_item_trace(base, interaction, claimed_sum);
+
+        let mut mutated_digests = digests.clone();
+        mutated_digests[0][0] ^= 1;
+        let mutated_base = scope_item_digest_trace(&mutated_digests, [0x45; 32]);
+        let (mutated_interaction, mutated_sum) = scope_item_digest_interaction_trace(
+            &mutated_base,
+            &item_preprocessed,
+            &item_digest_relation,
+            &digest_byte_relation,
+            None,
+        );
+        assert_eq!(mutated_sum, provider_sum(&mutated_digests));
+        assert_ne!(mutated_sum, claimed_sum);
+        assert_item_trace(mutated_base, mutated_interaction, mutated_sum);
+
+        let honest_consumers = -claimed_sum;
+        assert_eq!(claimed_sum + honest_consumers, zero);
+        assert_ne!(mutated_sum + honest_consumers, zero);
     }
 
     #[test]
