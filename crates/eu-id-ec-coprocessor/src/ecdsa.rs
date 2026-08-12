@@ -6062,6 +6062,191 @@ mod tests {
         }
     }
 
+    fn p4b_test_inputs() -> [EcdsaInput; 3] {
+        [
+            signed_p4b_input(7, b"validated issuer"),
+            signed_p4b_input(9, b"validated device"),
+            signed_p4b_input(11, b"validated revocation"),
+        ]
+    }
+
+    #[test]
+    fn validated_witness_rejects_invalid_inputs_in_every_p4b_role() {
+        let inputs = p4b_test_inputs();
+        let role_names = ["issuer", "device", "revocation"];
+        for (role, input) in inputs.into_iter().enumerate() {
+            let other_key = inputs[(role + 1) % inputs.len()];
+            let mut cases = Vec::new();
+
+            let mut invalid = input;
+            invalid.r[31] ^= 1;
+            cases.push(("invalid r", invalid));
+            let mut invalid = input;
+            invalid.s[31] ^= 1;
+            cases.push(("invalid s", invalid));
+            let mut invalid = input;
+            invalid.z[0] ^= 1;
+            cases.push(("invalid z", invalid));
+            let mut invalid = input;
+            invalid.qx = other_key.qx;
+            invalid.qy = other_key.qy;
+            cases.push(("invalid key", invalid));
+            let mut invalid = input;
+            invalid.r = [0; 32];
+            cases.push(("zero r", invalid));
+            let mut invalid = input;
+            invalid.s = [0; 32];
+            cases.push(("zero s", invalid));
+            let mut invalid = input;
+            invalid.r = be_from_words(&P256_ORDER);
+            cases.push(("noncanonical r", invalid));
+            let mut invalid = input;
+            invalid.s = be_from_words(&P256_ORDER);
+            cases.push(("noncanonical s", invalid));
+            let mut invalid = input;
+            invalid.qx = be_from_words(&P256_FIELD_MODULUS);
+            cases.push(("noncanonical qx", invalid));
+            let mut invalid = input;
+            invalid.qy = be_from_words(&P256_FIELD_MODULUS);
+            cases.push(("noncanonical qy", invalid));
+            let mut invalid = input;
+            invalid.qx = [0; 32];
+            invalid.qy = [0; 32];
+            cases.push(("off-curve key", invalid));
+
+            for (case, invalid) in cases {
+                assert!(
+                    ValidatedWitness::generate(invalid).is_err(),
+                    "{} {case} unexpectedly produced a validated witness",
+                    role_names[role],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validated_path_preserves_core_inputs_projections_and_layouts() {
+        let inputs = p4b_test_inputs();
+        let validated = inputs.map(|input| ValidatedWitness::generate(input).unwrap());
+        let raw = inputs.map(|input| generate_witness(&input).unwrap());
+        for (validated, raw) in validated.iter().zip(&raw) {
+            assert_eq!(validated.witness, *raw);
+        }
+
+        let projections =
+            validated_mdoc_p4b_projections(&validated[0], &validated[1], &validated[2]);
+        assert_eq!(
+            projections,
+            [
+                EcdsaPublicProjection::issuer_key_only(inputs[0].qx, inputs[0].qy),
+                EcdsaPublicProjection::message_hash_only(inputs[1].z),
+                EcdsaPublicProjection::public_key_only(inputs[2].qx, inputs[2].qy),
+            ]
+        );
+
+        let mut instances = Vec::new();
+        for (role, validated) in validated.iter().enumerate() {
+            let validated_instances =
+                implemented_circuit_instances(&validated.input, &validated.witness).unwrap();
+            let raw_instances = implemented_circuit_instances(&inputs[role], &raw[role]).unwrap();
+            assert_eq!(validated_instances.len(), raw_instances.len());
+            for (validated_instance, raw_instance) in validated_instances.iter().zip(&raw_instances)
+            {
+                assert_eq!(validated_instance.label, raw_instance.label);
+                assert_eq!(validated_instance.slot, raw_instance.slot);
+                assert_eq!(validated_instance.circuit, raw_instance.circuit);
+                assert_eq!(validated_instance.input, raw_instance.input);
+            }
+            instances.extend(
+                validated_instances
+                    .into_iter()
+                    .map(|instance| MdocP4bProverInstance::ecdsa(role, instance)),
+            );
+        }
+
+        let key_shares = p4b_microbench_key_shares();
+        let mac_values = mdoc_p4b_mac_values(&inputs[0], &inputs[1], &inputs[2]);
+        let zero_tags = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
+        instances.push(MdocP4bProverInstance {
+            label: MDOC_P4B_MAC_BATCH_LABEL,
+            role: MdocP4bCircuitRole::MacBatch,
+            circuit: build_mac_batch_circuit(&[0; 16], &zero_tags).unwrap(),
+            input: mac_batch_group_a_input(&key_shares, &mac_values).unwrap(),
+        });
+        let (committed, layouts, _) = mdoc_p4b_committed_values(&instances);
+        let verifier_instances = mdoc_p4b_verifier_instances(&[0; 16], &zero_tags).unwrap();
+        let (expected_layouts, expected_len) =
+            mdoc_p4b_verifier_bundle_pad_layouts(&verifier_instances, 0);
+        assert_eq!(committed.len(), expected_len);
+        assert_eq!(layouts.len(), expected_layouts.len());
+        for ((layout, expected), instance) in layouts.iter().zip(&expected_layouts).zip(&instances)
+        {
+            assert_eq!(layout.input_offset, expected.input_offset);
+            assert_eq!(layout.input_len, expected.input_len);
+            assert_eq!(layout.pad_offset, expected.pad_offset);
+            assert_eq!(layout.pad_len, expected.pad_len);
+            assert_eq!(
+                &committed[layout.input_offset..layout.input_offset + layout.input_len],
+                instance.input.as_slice(),
+            );
+        }
+    }
+
+    #[test]
+    fn checked_p4b_api_rejects_mutated_witness_in_every_role() {
+        let inputs = p4b_test_inputs();
+        let projections = [
+            EcdsaPublicProjection::issuer_key_only(inputs[0].qx, inputs[0].qy),
+            EcdsaPublicProjection::message_hash_only(inputs[1].z),
+            EcdsaPublicProjection::public_key_only(inputs[2].qx, inputs[2].qy),
+        ];
+        let witnesses = inputs.map(|input| generate_witness(&input).unwrap());
+        for role in 0..inputs.len() {
+            let mut mutated = witnesses.clone();
+            let value = &mut mutated[role].values[layout_range(LayoutSlot::UScalars).start];
+            *value = *value + Fp::ONE;
+            assert!(matches!(
+                prove_mdoc_p4b_circuit_bundle(
+                    &inputs[0],
+                    &projections[0],
+                    &mutated[0],
+                    &inputs[1],
+                    &projections[1],
+                    &mutated[1],
+                    (&inputs[2], &projections[2], &mutated[2]),
+                    &p4b_microbench_key_shares(),
+                    [9; 32],
+                ),
+                Err(ImplementedCircuitProofError::Witness(_))
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "focused release gate: real validated P4b bundle proof"]
+    fn validated_p4b_bundle_proves_and_verifies() {
+        let inputs = p4b_test_inputs();
+        let validated = inputs.map(|input| ValidatedWitness::generate(input).unwrap());
+        let projections =
+            validated_mdoc_p4b_projections(&validated[0], &validated[1], &validated[2]);
+        let bundle = prove_mdoc_p4b_circuit_bundle_from_validated(
+            &validated[0],
+            &validated[1],
+            &validated[2],
+            &p4b_microbench_key_shares(),
+            [9; 32],
+        )
+        .unwrap();
+        verify_mdoc_p4b_circuit_bundle(
+            &projections[0],
+            &projections[1],
+            &projections[2],
+            &bundle,
+            [9; 32],
+        )
+        .unwrap();
+    }
+
     fn d1_manual_signature_input(z: U256Words, nonce_point: ProjectivePoint) -> EcdsaInput {
         let mut secret = [0u8; 32];
         secret[31] = 1;
