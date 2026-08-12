@@ -280,3 +280,171 @@ fn finalize_hash(hasher: Blake2s256) -> [u8; 32] {
     out.copy_from_slice(&digest);
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn matrix(rows: usize, columns: usize) -> Vec<Vec<Fp>> {
+        (0..rows)
+            .map(|row| {
+                (0..columns)
+                    .map(|column| Fp::from_u64((row * columns + column + 1) as u64))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn canonical_batch_round_trip_preserves_requested_column_order() {
+        let rows = matrix(5, 7);
+        let commitment = commit_columns(&rows).unwrap();
+        let indices = [5, 1, 6];
+        let opening = commitment.open_batch(&indices).unwrap();
+
+        assert!(verify_batch(
+            commitment.root(),
+            rows[0].len(),
+            &indices,
+            rows.len(),
+            &opening,
+        )
+        .unwrap());
+        for (position, index) in indices.into_iter().enumerate() {
+            let single = commitment.open(index).unwrap();
+            assert_eq!(
+                &opening.columns[position * rows.len()..(position + 1) * rows.len()],
+                single.column,
+            );
+        }
+
+        let reordered_indices = [1, 5, 6];
+        assert!(!verify_batch(
+            commitment.root(),
+            rows[0].len(),
+            &reordered_indices,
+            rows.len(),
+            &opening,
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn canonical_batch_round_trips_every_small_nonempty_subset() {
+        for width in 1..=9 {
+            let rows = matrix(3, width);
+            let commitment = commit_columns(&rows).unwrap();
+            for selected in 1usize..(1usize << width) {
+                let indices = (0..width)
+                    .filter(|index| selected & (1 << index) != 0)
+                    .collect::<Vec<_>>();
+                let opening = commitment.open_batch(&indices).unwrap();
+                assert!(
+                    verify_batch(commitment.root(), width, &indices, rows.len(), &opening,)
+                        .unwrap()
+                );
+                if indices.len() == width {
+                    assert!(opening.frontier.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_batch_rejects_duplicate_and_out_of_range_indices() {
+        let rows = matrix(4, 8);
+        let commitment = commit_columns(&rows).unwrap();
+        let opening = commitment.open_batch(&[1, 4]).unwrap();
+
+        assert_eq!(
+            commitment.open_batch(&[1, 1]).unwrap_err(),
+            MerkleError::DuplicateColumn,
+        );
+        assert_eq!(
+            verify_batch(commitment.root(), 8, &[1, 1], 4, &opening).unwrap_err(),
+            MerkleError::DuplicateColumn,
+        );
+        assert_eq!(
+            commitment.open_batch(&[8]).unwrap_err(),
+            MerkleError::ColumnOutOfRange,
+        );
+        assert_eq!(
+            verify_batch(commitment.root(), 8, &[1, 8], 4, &opening).unwrap_err(),
+            MerkleError::ColumnOutOfRange,
+        );
+    }
+
+    #[test]
+    fn canonical_batch_rejects_missing_extra_and_unused_data() {
+        let rows = matrix(5, 7);
+        let commitment = commit_columns(&rows).unwrap();
+        let indices = [0, 3, 6];
+        let opening = commitment.open_batch(&indices).unwrap();
+
+        let mut missing_column_value = opening.clone();
+        missing_column_value.columns.pop();
+        assert_eq!(
+            verify_batch(commitment.root(), 7, &indices, 5, &missing_column_value).unwrap_err(),
+            MerkleError::WrongBatchLength,
+        );
+        let mut extra_column_value = opening.clone();
+        extra_column_value.columns.push(Fp::ZERO);
+        assert_eq!(
+            verify_batch(commitment.root(), 7, &indices, 5, &extra_column_value).unwrap_err(),
+            MerkleError::WrongBatchLength,
+        );
+        assert_eq!(
+            verify_batch(commitment.root(), 7, &indices, 6, &opening).unwrap_err(),
+            MerkleError::WrongBatchLength,
+        );
+
+        let mut missing_frontier = opening.clone();
+        missing_frontier.frontier.pop();
+        assert_eq!(
+            verify_batch(commitment.root(), 7, &indices, 5, &missing_frontier).unwrap_err(),
+            MerkleError::InvalidBatchProof,
+        );
+        let mut unused_frontier = opening;
+        unused_frontier.frontier.push([0u8; 32]);
+        assert_eq!(
+            verify_batch(commitment.root(), 7, &indices, 5, &unused_frontier).unwrap_err(),
+            MerkleError::InvalidBatchProof,
+        );
+
+        let mut corrupt_frontier = commitment.open_batch(&indices).unwrap();
+        corrupt_frontier.frontier[0][0] ^= 1;
+        assert!(!verify_batch(commitment.root(), 7, &indices, 5, &corrupt_frontier).unwrap());
+        let mut reordered_frontier = commitment.open_batch(&indices).unwrap();
+        reordered_frontier.frontier.swap(0, 1);
+        assert!(!verify_batch(commitment.root(), 7, &indices, 5, &reordered_frontier).unwrap());
+    }
+
+    #[test]
+    fn canonical_batch_rejects_empty_indices() {
+        let rows = matrix(2, 1);
+        let commitment = commit_columns(&rows).unwrap();
+        assert_eq!(
+            commitment.open_batch(&[]).unwrap_err(),
+            MerkleError::EmptyMatrix,
+        );
+        let opening = ColumnBatchOpening {
+            columns: Vec::new(),
+            frontier: Vec::new(),
+        };
+        assert_eq!(
+            verify_batch(commitment.root(), 1, &[], 2, &opening).unwrap_err(),
+            MerkleError::EmptyMatrix,
+        );
+    }
+
+    #[test]
+    fn zero_width_batch_is_rejected_without_panicking() {
+        let opening = ColumnBatchOpening {
+            columns: Vec::new(),
+            frontier: Vec::new(),
+        };
+        let verdict = std::panic::catch_unwind(|| verify_batch([0u8; 32], 1, &[0], 0, &opening));
+        assert!(verdict.is_ok());
+        assert_eq!(verdict.unwrap(), Err(MerkleError::ZeroColumnLength));
+    }
+}

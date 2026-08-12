@@ -2554,6 +2554,8 @@ mod tests {
         let indices = opening_indices(params);
         let openings_a = commitment_a.open_columns(&indices).unwrap();
         let openings_b = commitment_b.open_columns(&indices).unwrap();
+        let batch_opening_a = commitment_a.open_batch(&indices).unwrap();
+        let batch_opening_b = commitment_b.open_batch(&indices).unwrap();
 
         let public = verify_split_claim_batch(
             commitment_a.root(),
@@ -2568,14 +2570,15 @@ mod tests {
             &gamma,
         )
         .unwrap();
-        let authenticated = verify_and_authenticate_split_openings(
+        let authenticated = verify_and_authenticate_split_batch_openings(
             commitment_a.root(),
             commitment_b.root(),
             params,
             values_a.len(),
             values_b.len(),
-            &openings_a,
-            &openings_b,
+            &indices,
+            &batch_opening_a,
+            &batch_opening_b,
             &proximity_claim,
             &proximity_gamma,
         )
@@ -2601,14 +2604,15 @@ mod tests {
             &gamma,
         )
         .unwrap();
-        let authenticated = verify_and_authenticate_split_openings(
+        let authenticated = verify_and_authenticate_split_batch_openings(
             commitment_a.root(),
             commitment_b.root(),
             params,
             values_a.len(),
             values_b.len(),
-            &openings_a,
-            &openings_b,
+            &indices,
+            &batch_opening_a,
+            &batch_opening_b,
             &proximity_claim,
             &proximity_gamma,
         )
@@ -2620,16 +2624,17 @@ mod tests {
         assert_eq!(reused_tamper, public_tamper);
         assert!(!reused_tamper);
 
-        let mut tampered_openings_a = openings_a.clone();
-        tampered_openings_a[0].column[0] = tampered_openings_a[0].column[0] + Fp::ONE;
-        assert!(verify_and_authenticate_split_openings(
+        let mut tampered_opening_a = batch_opening_a.clone();
+        tampered_opening_a.columns[0] = tampered_opening_a.columns[0] + Fp::ONE;
+        assert!(verify_and_authenticate_split_batch_openings(
             commitment_a.root(),
             commitment_b.root(),
             params,
             values_a.len(),
             values_b.len(),
-            &tampered_openings_a,
-            &openings_b,
+            &indices,
+            &tampered_opening_a,
+            &batch_opening_b,
             &proximity_claim,
             &proximity_gamma,
         )
@@ -2638,14 +2643,15 @@ mod tests {
 
         let mut wrong_root_b = commitment_b.root();
         wrong_root_b[0] ^= 1;
-        assert!(verify_and_authenticate_split_openings(
+        assert!(verify_and_authenticate_split_batch_openings(
             commitment_a.root(),
             wrong_root_b,
             params,
             values_a.len(),
             values_b.len(),
-            &openings_a,
-            &openings_b,
+            &indices,
+            &batch_opening_a,
+            &batch_opening_b,
             &proximity_claim,
             &proximity_gamma,
         )

@@ -1144,8 +1144,8 @@ fn mdoc_p4b_bundle_accepts_honest_mac_tags_and_rejects_tag_tamper() {
     );
 
     let mut tampered_b_opening = bundle;
-    tampered_b_opening.proximity_openings_b[0].column[0] =
-        tampered_b_opening.proximity_openings_b[0].column[0] + Fp::ONE;
+    let batch_b = tampered_b_opening.proximity_batch_b.as_mut().unwrap();
+    batch_b.columns[0] = batch_b.columns[0] + Fp::ONE;
     assert!(
         verify_mdoc_p4b_circuit_bundle(
             &issuer_public,
@@ -1502,6 +1502,25 @@ fn bundle_byte_breakdown(
             openings.iter().map(|o| serialized_len(&o.index)).sum(),
         );
     }
+    for (field, opening) in [
+        ("proximity_batch", bundle.proximity_batch.as_ref()),
+        ("proximity_batch_b", bundle.proximity_batch_b.as_ref()),
+    ] {
+        let Some(opening) = opening else {
+            continue;
+        };
+        push(
+            format!("{field}.columns flat ligero openings"),
+            serialized_len(&opening.columns),
+        );
+        push(
+            format!(
+                "{field}.frontier canonical merkle multiproof ({} hashes)",
+                opening.frontier.len(),
+            ),
+            serialized_len(&opening.frontier),
+        );
+    }
 
     push(
         "proximity_claim.combined_row".to_string(),
@@ -1604,7 +1623,7 @@ fn mdoc_p4b_bundle_byte_breakdown_accounts_every_serialized_byte() {
          row_len {} codeword_len {}",
         total as f64 / 1024.0,
         bundle.entries.len(),
-        bundle.proximity_openings.len(),
+        bundle.params.openings,
         bundle.params.row_len,
         bundle.params.codeword_len,
     );
@@ -1634,13 +1653,15 @@ fn mdoc_p4b_bundle_byte_breakdown_accounts_every_serialized_byte() {
         bincode::serialize(&bundle).unwrap().len(),
         "serialized_size must agree with the bytes the proof actually carries",
     );
-    // Independent completeness check on the taxonomy: the eleven top-level
+    // Independent completeness check on the taxonomy: the top-level
     // fields already cover the whole bundle, so no field was left out above.
     let top_level = serialized_len(&bundle.params)
         + serialized_len(&bundle.root)
         + serialized_len(&bundle.root_b)
         + serialized_len(&bundle.proximity_openings)
         + serialized_len(&bundle.proximity_openings_b)
+        + serialized_len(&bundle.proximity_batch)
+        + serialized_len(&bundle.proximity_batch_b)
         + serialized_len(&bundle.proximity_claim)
         + serialized_len(&bundle.claim_batch)
         + serialized_len(&bundle.claim_blind_check)
@@ -1651,10 +1672,10 @@ fn mdoc_p4b_bundle_byte_breakdown_accounts_every_serialized_byte() {
         top_level, total,
         "every bundle field must be represented in the breakdown",
     );
-    // The residual is exactly the length prefix of the three Vec fields that
-    // were split into sub-field rows: entries, and both opening groups.
+    // The residual is exactly the two batch presence tags plus the length
+    // prefixes of entries and the two absent legacy opening vectors.
     assert_eq!(
-        framing, 24,
-        "framing residual must stay the three split Vec length prefixes",
+        framing, 26,
+        "framing residual must stay the two option tags and three Vec length prefixes",
     );
 }
