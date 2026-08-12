@@ -13,7 +13,8 @@ use std::{fmt::Write as _, fs, path::PathBuf, time::Instant};
 
 use euid_zk_sdk::{
     product_circuit_hash, product_profile_id, product_root_policy_hash, prove_identity,
-    verify_identity, PredicateMode, ZkMdocWitness, ZkPublicStatement,
+    verify_identity, PredicateMode, ProductMdocWitnessV2, ProductPublicStatementV2, ZkMdocWitness,
+    ZkPublicStatement,
 };
 use sha2::{Digest, Sha256};
 
@@ -52,7 +53,7 @@ fn raw_stark_proof(envelope: &[u8]) -> Option<Vec<u8>> {
     zstd::bulk::decompress(compressed, MAX_RAW_PROOF_BYTES).ok()
 }
 
-fn fixture() -> (ZkPublicStatement, ZkMdocWitness) {
+fn fixture() -> (ProductPublicStatementV2, ProductMdocWitnessV2) {
     let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
     let issuer_key = fixture.statement.issuer_input.public_key.clone();
     let (revocation, revocation_witness) =
@@ -67,7 +68,7 @@ fn fixture() -> (ZkPublicStatement, ZkMdocWitness) {
     accepted_alpha2_countries.sort_unstable();
     accepted_alpha2_countries.dedup();
     (
-        ZkPublicStatement {
+        ProductPublicStatementV2 {
             spec_id: "stwo-euid-pid-v1".to_string(),
             version: 2,
             profile_id: product_profile_id(),
@@ -86,7 +87,7 @@ fn fixture() -> (ZkPublicStatement, ZkMdocWitness) {
             revocation_public_key_y: revocation.revocation_public_key.y.0.to_vec(),
             revocation_epoch: revocation.epoch,
         },
-        ZkMdocWitness {
+        ProductMdocWitnessV2 {
             document: fixture.document,
             revocation_id_lo: revocation_witness.id_lo,
             revocation_id_hi: revocation_witness.id_hi,
@@ -160,7 +161,8 @@ fn main() {
         for _ in 0..iters {
             let (s, w) = (statement.clone(), witness.clone());
             let start = Instant::now();
-            proof = prove_identity(s, w).expect("identity proof builds");
+            proof = prove_identity(ZkPublicStatement::ProductV2(s), ZkMdocWitness::ProductV2(w))
+                .expect("identity proof builds");
             prove_ms.push(start.elapsed().as_millis());
             envelope_bytes.push(proof.len());
             envelope_sha256_all.push(envelope_sha256(&proof));
@@ -180,7 +182,8 @@ fn main() {
         for _ in 0..iters {
             let (s, p) = (statement.clone(), proof.clone());
             let start = Instant::now();
-            let result = verify_identity(s, p).expect("verify returns");
+            let result =
+                verify_identity(ZkPublicStatement::ProductV2(s), p).expect("verify returns");
             verify_ms.push(start.elapsed().as_millis());
             assert!(result.ok, "identity proof must verify");
         }

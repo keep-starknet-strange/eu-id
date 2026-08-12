@@ -1,4 +1,4 @@
-//! Translation from the SDK's [`ZkPublicStatement`] to the production mdoc
+//! Translation from the SDK's [`ProductPublicStatementV2`] to the production mdoc
 //! prover's public [`Policy`].
 //!
 //! The mapping is deterministic and side-effect-free. Both proving and
@@ -10,23 +10,28 @@
 
 use eu_id_prover::{Date, Policy};
 
-use crate::{ZkError, ZkPublicStatement};
+use crate::{ProductPublicStatementV2, ZkError};
 
 /// Build a [`ZkError::InvalidInput`] with an actionable message.
 fn invalid(msg: impl Into<String>) -> ZkError {
     ZkError::InvalidInput(msg.into())
 }
 
-/// Map a [`ZkPublicStatement`] to the prover's [`Policy`].
+/// Map a [`ProductPublicStatementV2`] to the prover's [`Policy`].
 ///
 /// It uses only public request values. Proving and verification therefore build
 /// the same policy without reading credential attributes.
-pub(crate) fn to_policy(statement: &ZkPublicStatement) -> Result<Policy, ZkError> {
+pub(crate) fn to_policy(statement: &ProductPublicStatementV2) -> Result<Policy, ZkError> {
     let mode = statement.predicate_mode;
 
-    let epoch_day = i32::try_from(statement.now_epoch_seconds / 86_400)
-        .map_err(|_| invalid("now_epoch_seconds is outside the supported date range"))?;
-    let current = epoch_day_to_date(epoch_day)?;
+    let timestamp =
+        eu_id_prover::mdoc::utc_timestamp_from_epoch_seconds(statement.now_epoch_seconds)
+            .map_err(|_| invalid("now_epoch_seconds is outside the supported date range"))?;
+    let current = Date {
+        year: u32::from(timestamp.year),
+        month: u32::from(timestamp.month),
+        day: u32::from(timestamp.day),
+    };
 
     // Age leg: real threshold when active, else neutralized to 0 (cutoff =
     // today ⇒ every real DOB clears it).
@@ -114,68 +119,34 @@ fn validate_min_age(current: Date, min_age: u32) -> Result<(), ZkError> {
     Ok(())
 }
 
-/// Convert an epoch-day integer (days since 1970-01-01) to a [`Date`].
-///
-/// Convert with the inverse of Howard Hinnant's `days_from_civil` algorithm.
-/// The conversion is exact over the proleptic Gregorian range.
-fn epoch_day_to_date(epoch_day: i32) -> Result<Date, ZkError> {
-    let z = i64::from(epoch_day) + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let year = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = year + i64::from(month <= 2);
-
-    let year = u32::try_from(year).map_err(|_| {
-        invalid(format!(
-            "today_epoch_day {epoch_day} maps to a year outside the supported range"
-        ))
-    })?;
-    Ok(Date {
-        year,
-        month: month as u32,
-        day: day as u32,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PredicateMode;
+    use crate::{
+        PredicateMode, PRODUCT_DOCTYPE, PRODUCT_NAMESPACE, PRODUCT_SPEC_ID,
+        PRODUCT_STATEMENT_VERSION,
+    };
+    use eu_id_prover::product_profile::PRODUCT_PROFILE_ID;
 
-    /// Forward Gregorian-to-epoch-day (Hinnant) — the inverse of the function
-    /// under test, used to cross-check it over a sweep of dates.
-    fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-        let y = if m <= 2 { y - 1 } else { y };
-        let era = if y >= 0 { y } else { y - 399 } / 400;
-        let yoe = y - era * 400; // [0, 399]
-        let mp = if m > 2 { m - 3 } else { m + 9 };
-        let doy = (153 * mp + 2) / 5 + d - 1; // [0, 365]
-        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
-        era * 146_097 + doe - 719_468
-    }
+    const TEST_NOW_EPOCH_SECONDS: u64 = 1_577_836_800;
 
     fn date(year: u32, month: u32, day: u32) -> Date {
         Date { year, month, day }
     }
 
-    fn statement_with(mode: PredicateMode) -> ZkPublicStatement {
-        ZkPublicStatement {
-            spec_id: "stwo-euid-pid-v1".to_string(),
-            version: 2,
-            profile_id: "eudi-pid-p256-identity".to_string(),
+    fn statement_with(mode: PredicateMode) -> ProductPublicStatementV2 {
+        ProductPublicStatementV2 {
+            spec_id: PRODUCT_SPEC_ID.to_string(),
+            version: PRODUCT_STATEMENT_VERSION,
+            profile_id: PRODUCT_PROFILE_ID.to_string(),
             circuit_hash: "00".repeat(32),
             root_policy_hash: vec![0; 32],
-            doctype: "eu.europa.ec.eudi.pid.1".to_string(),
-            namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+            doctype: PRODUCT_DOCTYPE.to_string(),
+            namespace: PRODUCT_NAMESPACE.to_string(),
             issuer_public_key_x: vec![0x11; 32],
             issuer_public_key_y: vec![0x22; 32],
             // 2020-01-01T00:00:00Z.
-            now_epoch_seconds: u64::try_from(days_from_civil(2020, 1, 1)).unwrap() * 86_400,
+            now_epoch_seconds: TEST_NOW_EPOCH_SECONDS,
             session_transcript: vec![0xab, 0xcd],
             predicate_mode: mode,
             age_threshold_years: Some(18),
@@ -184,36 +155,6 @@ mod tests {
             revocation_public_key_x: vec![0x33; 32],
             revocation_public_key_y: vec![0x44; 32],
             revocation_epoch: 1,
-        }
-    }
-
-    // ---- epoch-day conversion ---------------------------------------------
-
-    #[test]
-    fn epoch_day_known_vectors() {
-        assert_eq!(epoch_day_to_date(0).unwrap(), date(1970, 1, 1));
-        assert_eq!(epoch_day_to_date(10_957).unwrap(), date(2000, 1, 1));
-        assert_eq!(epoch_day_to_date(-1).unwrap(), date(1969, 12, 31));
-    }
-
-    #[test]
-    fn epoch_day_round_trips_against_forward_algorithm() {
-        // A sweep across leap years, month/day boundaries, and both eras.
-        for &(y, m, d) in &[
-            (1970, 1, 1),
-            (1999, 12, 31),
-            (2000, 2, 29), // leap
-            (2020, 2, 29), // leap
-            (2021, 3, 1),
-            (2024, 6, 23),
-            (2100, 2, 28), // non-leap century
-        ] {
-            let ed = days_from_civil(y, m, d) as i32;
-            assert_eq!(
-                epoch_day_to_date(ed).unwrap(),
-                date(y as u32, m as u32, d as u32),
-                "epoch day {ed}"
-            );
         }
     }
 

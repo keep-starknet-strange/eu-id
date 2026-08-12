@@ -13,7 +13,11 @@
 //! The current composed proof is transparent and is not zero-knowledge.
 //!
 //! ## What the proof binds
-//! `prove_identity` runs the product mdoc prover and returns the sole V8 envelope.
+//! Product V2 through `prove_identity` runs the product mdoc prover and returns
+//! the sole V8 envelope. Product V1 and the current wallet's TS13-tagged
+//! age-only call shape are explicit legacy/demo adapters over the same P-256
+//! prover. They are rejected unless the build enables, respectively,
+//! `legacy-product-v1-demo` or `current-wallet-p256-demo`.
 //! The envelope contains only `version = 8` and the compressed proof.
 //! The two layers bind complementary data:
 //!
@@ -38,6 +42,10 @@ use std::io::Read;
 
 use bincode::Options;
 use ciborium::value::Value;
+use eu_id_prover::product_profile::{
+    PRODUCT_BIRTH_DATE_ELEMENT, PRODUCT_DOCTYPE, PRODUCT_NAMESPACE, PRODUCT_NATIONALITY_ELEMENT,
+    PRODUCT_SPEC_ID, PRODUCT_STATEMENT_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -52,45 +60,12 @@ uniffi::setup_scaffolding!();
 #[cfg(feature = "bench-jni")]
 mod android_bench_jni;
 
+mod compat;
+pub use compat::*;
+
 // This module builds the prover policy from the UniFFI statement.
 mod mapping;
 
-/// Which predicate(s) the statement asserts.
-///
-/// `Age` / `Nat` activate one predicate. `And` activates both. The
-/// corresponding optional fields on [`ZkPublicStatement`] must be present for
-/// whichever predicates are active.
-#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PredicateMode {
-    Age,
-    Nat,
-    And,
-}
-
-impl PredicateMode {
-    /// Stable string token used in the canonical CBOR (`predicate_mode`).
-    fn as_token(self) -> &'static str {
-        match self {
-            PredicateMode::Age => "age",
-            PredicateMode::Nat => "nat",
-            PredicateMode::And => "and",
-        }
-    }
-
-    fn uses_age(self) -> bool {
-        matches!(self, PredicateMode::Age | PredicateMode::And)
-    }
-
-    fn uses_nat(self) -> bool {
-        matches!(self, PredicateMode::Nat | PredicateMode::And)
-    }
-}
-
-const PRODUCT_SPEC_ID: &str = "stwo-euid-pid-v1";
-const PRODUCT_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
-const PRODUCT_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
-const PRODUCT_BIRTH_DATE_ELEMENT: &str = "birth_date";
-const PRODUCT_NATIONALITY_ELEMENT: &str = "nationality";
 const NAT_MODE_ANY_TOKEN: &str = "any";
 
 #[uniffi::export]
@@ -108,8 +83,27 @@ pub fn product_root_policy_hash() -> Vec<u8> {
     eu_id_prover::product_profile::product_root_policy_hash().to_vec()
 }
 
+/// Convert an ISO 3166-1 alpha-2 code to its numeric identifier.
+///
+/// Product V1 and the wallet contract use numeric identifiers. Product V2
+/// uses canonical alpha-2 values internally.
+#[uniffi::export]
+pub fn iso_alpha2_to_numeric(alpha2: String) -> Option<u32> {
+    celes::Country::from_alpha2(alpha2)
+        .ok()
+        .and_then(|country| u32::try_from(country.value).ok())
+}
+
+#[cfg(any(feature = "legacy-product-v1-demo", test))]
+fn iso_numeric_to_alpha2(numeric: u32) -> Option<String> {
+    usize::try_from(numeric)
+        .ok()
+        .and_then(|value| celes::Country::from_value(value).ok())
+        .map(|country| country.alpha2.to_string())
+}
+
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
-pub struct ZkPublicStatement {
+pub struct ProductPublicStatementV2 {
     pub spec_id: String,
     pub version: u32,
     pub profile_id: String,
@@ -139,7 +133,7 @@ pub struct ZkPublicStatement {
 
 /// The PRIVATE witness for the production identity proof path.
 #[derive(uniffi::Record, Clone, Debug)]
-pub struct ZkMdocWitness {
+pub struct ProductMdocWitnessV2 {
     /// Full CBOR mdoc document returned by the wallet.
     pub document: Vec<u8>,
     pub revocation_id_lo: u64,
@@ -148,14 +142,14 @@ pub struct ZkMdocWitness {
     pub revocation_signature_s: Vec<u8>,
 }
 
-/// The verdict returned by [`verify_identity`].
-#[derive(uniffi::Record, Clone, Debug)]
+/// The verdict returned by [`verify_product_identity`].
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct ZkVerifyResult {
     pub ok: bool,
 }
 
 /// Errors surfaced across the FFI boundary.
-#[derive(uniffi::Error, thiserror::Error, Debug)]
+#[derive(uniffi::Error, thiserror::Error, Clone, Debug, PartialEq, Eq)]
 pub enum ZkError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
@@ -163,6 +157,28 @@ pub enum ZkError {
     Prove(String),
     #[error("verification failed: {0}")]
     Verify(String),
+    #[error("unsupported proof system")]
+    UnsupportedProofSystem,
+    #[error("unsupported circuit hash")]
+    UnsupportedCircuitHash,
+    #[error("unsupported demo credential shape")]
+    UnsupportedDemoCredentialShape,
+    #[error("malformed session transcript")]
+    MalformedSessionTranscript,
+    #[error("invalid public context")]
+    InvalidPublicContext,
+    #[error("invalid private credential")]
+    InvalidPrivateCredential,
+    #[error("invalid revocation witness")]
+    InvalidRevocationWitness,
+    #[error("proof generation failed")]
+    ProofGenerationFailed,
+    #[error("malformed proof envelope")]
+    MalformedProofEnvelope,
+    #[error("proof context mismatch")]
+    ProofContextMismatch,
+    #[error("proof verification failed")]
+    ProofVerificationFailed,
 }
 
 /// Build an RFC 8949 deterministic map whose keys are CBOR text strings.
@@ -188,7 +204,7 @@ fn canonical_text_map(mut entries: Vec<(Value, Value)>) -> Value {
 /// active.
 ///
 /// This function is private so proving and verification use one encoder.
-fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
+fn encode_statement(s: &ProductPublicStatementV2) -> Vec<u8> {
     let mut entries: Vec<(Value, Value)> = vec![
         ("v".into(), Value::from(s.version)),
         ("spec_id".into(), s.spec_id.as_str().into()),
@@ -255,7 +271,7 @@ fn encode_statement(s: &ZkPublicStatement) -> Vec<u8> {
     // Writing to a Vec cannot fail.
     // A CBOR serialization error indicates a library defect.
     ciborium::ser::into_writer(&canonical_text_map(entries), &mut out)
-        .expect("CBOR serialization of ZkPublicStatement is infallible");
+        .expect("CBOR serialization of ProductPublicStatementV2 is infallible");
     out
 }
 
@@ -266,7 +282,6 @@ struct MdocProofEnvelope {
 }
 
 const MDOC_PROOF_ENVELOPE_VERSION: u16 = 8;
-const PRODUCT_STATEMENT_VERSION: u32 = 2;
 const REQUEST_BINDING_DOMAIN: &[u8] = b"eudi-mdoc-proof-request-v3\0";
 const P256_COORDINATE_BYTES: usize = 32;
 const MAX_ACCEPTED_ALPHA2_COUNTRIES: usize = 249;
@@ -288,7 +303,7 @@ fn bounded_bincode_options(limit: usize) -> impl Options {
         .with_limit(limit as u64)
 }
 
-fn request_binding(statement: &ZkPublicStatement) -> [u8; 32] {
+fn request_binding(statement: &ProductPublicStatementV2) -> [u8; 32] {
     let statement_bytes = encode_statement(statement);
     let mut digest = Sha256::new();
     digest.update(REQUEST_BINDING_DOMAIN);
@@ -297,7 +312,9 @@ fn request_binding(statement: &ZkPublicStatement) -> [u8; 32] {
     digest.finalize().into()
 }
 
-fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<(), ZkError> {
+fn reconstruct_mdoc_statement(
+    statement: &ProductPublicStatementV2,
+) -> Result<eu_id_prover::MdocStatement, ZkError> {
     if statement.spec_id != PRODUCT_SPEC_ID {
         return Err(ZkError::InvalidInput(format!(
             "unsupported spec_id `{}`; expected `{}`",
@@ -342,26 +359,20 @@ fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<
             "issuer P-256 public-key y-coordinate must be {P256_COORDINATE_BYTES} bytes"
         )));
     }
-    if eu_id_prover::mdoc::p256_affine_point_from_coordinates(
+    let issuer_public_key = eu_id_prover::mdoc::p256_affine_point_from_coordinates(
         &statement.issuer_public_key_x,
         &statement.issuer_public_key_y,
     )
-    .is_none()
-    {
-        return Err(ZkError::InvalidInput(
-            "issuer public key is not a valid P-256 point".to_string(),
-        ));
-    }
-    if eu_id_prover::mdoc::p256_affine_point_from_coordinates(
+    .ok_or_else(|| {
+        ZkError::InvalidInput("issuer public key is not a valid P-256 point".to_string())
+    })?;
+    let revocation_public_key = eu_id_prover::mdoc::p256_affine_point_from_coordinates(
         &statement.revocation_public_key_x,
         &statement.revocation_public_key_y,
     )
-    .is_none()
-    {
-        return Err(ZkError::InvalidInput(
-            "revocation_public_key is not a valid P-256 point".to_string(),
-        ));
-    }
+    .ok_or_else(|| {
+        ZkError::InvalidInput("revocation_public_key is not a valid P-256 point".to_string())
+    })?;
     if statement.now_epoch_seconds == 0
         || statement
             .now_epoch_seconds
@@ -381,11 +392,14 @@ fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<
             )
         })?;
 
-    let (requires_age, requires_nat) = match statement.predicate_mode {
-        PredicateMode::Age => (true, false),
-        PredicateMode::Nat => (false, true),
-        PredicateMode::And => (true, true),
-    };
+    if statement.predicate_mode == PredicateMode::Or {
+        return Err(ZkError::InvalidInput(
+            "OR predicates are not supported by the Product V2 circuit".to_string(),
+        ));
+    }
+
+    let requires_age = statement.predicate_mode.uses_age();
+    let requires_nat = statement.predicate_mode.uses_nat();
     if statement.age_threshold_years.is_some() != requires_age {
         return Err(ZkError::InvalidInput(if requires_age {
             "age predicate active but `age_threshold_years` is absent".to_string()
@@ -407,17 +421,40 @@ fn validate_product_statement_contract(statement: &ZkPublicStatement) -> Result<
                 "accepted nationality set exceeds {MAX_ACCEPTED_ALPHA2_COUNTRIES} entries"
             )));
         }
+        // Keep the public contract's error precedence before policy mapping,
+        // which validates the age leg first for `And` statements.
         if accepted.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(ZkError::InvalidInput(
                 "accepted nationality set must be sorted and unique".to_string(),
             ));
         }
     }
-    mapping::to_policy(statement)?;
-    Ok(())
+    let policy = mapping::to_policy(statement)?;
+    let device_hash = eu_id_prover::mdoc::device_authentication_sig_structure_hash(
+        &statement.session_transcript,
+        &statement.doctype,
+    )
+    .map_err(|error| {
+        ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {error:?}"))
+    })?;
+
+    Ok(eu_id_prover::MdocStatement {
+        request_binding: request_binding(statement),
+        doctype: statement.doctype.clone(),
+        namespace: statement.namespace.clone(),
+        issuer_public_key,
+        device_message_hash: eu_id_prover::mdoc::p256_digest(device_hash),
+        verification_time_epoch_seconds: statement.now_epoch_seconds,
+        ts13_revocation: eu_id_prover::mdoc::MdocRevocationPublicInputs {
+            revocation_public_key,
+            epoch: statement.revocation_epoch,
+        },
+        attributes: expected_mdoc_attributes(statement.predicate_mode),
+        policy,
+    })
 }
 
-fn validate_product_witness(witness: &ZkMdocWitness) -> Result<(), ZkError> {
+fn validate_product_document(witness: &ProductMdocWitnessV2) -> Result<(), ZkError> {
     if witness.document.is_empty() {
         return Err(ZkError::InvalidInput(
             "mdoc document must not be empty".to_string(),
@@ -472,7 +509,7 @@ fn decode_mdoc_proof_envelope(proof: &[u8]) -> Result<MdocProofEnvelope, ZkError
 /// Stack size for the dedicated prover/verifier thread. The combined prover
 /// overflows the small default worker-thread stack with `EXC_BAD_ACCESS`. A 32 MiB
 /// stack provides the headroom that the FFI harness established on the device.
-const PROVER_STACK_SIZE: usize = 32 * 1024 * 1024;
+const IDENTITY_WORKER_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 /// Run `work` on a dedicated large-stack thread and join it, returning its
 /// result.
@@ -491,7 +528,7 @@ where
 {
     let handle = std::thread::Builder::new()
         .name(format!("euid-{role}"))
-        .stack_size(PROVER_STACK_SIZE)
+        .stack_size(IDENTITY_WORKER_STACK_SIZE)
         .spawn(work)
         .map_err(|e| thread_error(format!("failed to spawn {role} thread: {e}")))?;
     match handle.join() {
@@ -635,49 +672,9 @@ fn expected_mdoc_attributes(
     attributes
 }
 
-fn reconstruct_mdoc_statement(
-    statement: &ZkPublicStatement,
-) -> Result<eu_id_prover::MdocStatement, ZkError> {
-    validate_product_statement_contract(statement)?;
-    let issuer_public_key = eu_id_prover::mdoc::p256_affine_point_from_coordinates(
-        &statement.issuer_public_key_x,
-        &statement.issuer_public_key_y,
-    )
-    .ok_or_else(|| ZkError::InvalidInput("invalid issuer P-256 public key".to_string()))?;
-    let revocation_public_key = eu_id_prover::mdoc::p256_affine_point_from_coordinates(
-        &statement.revocation_public_key_x,
-        &statement.revocation_public_key_y,
-    )
-    .ok_or_else(|| ZkError::InvalidInput("invalid revocation P-256 public key".to_string()))?;
-    let device_hash = eu_id_prover::mdoc::device_authentication_sig_structure_hash(
-        &statement.session_transcript,
-        &statement.doctype,
-    )
-    .map_err(|error| {
-        ZkError::InvalidInput(format!("invalid DeviceAuthentication input: {error:?}"))
-    })?;
-    let device_message_hash = eu_id_prover::mdoc::p256_digest(device_hash);
-    let attributes = expected_mdoc_attributes(statement.predicate_mode);
-
-    Ok(eu_id_prover::MdocStatement {
-        request_binding: request_binding(statement),
-        doctype: statement.doctype.clone(),
-        namespace: statement.namespace.clone(),
-        issuer_public_key,
-        device_message_hash,
-        verification_time_epoch_seconds: statement.now_epoch_seconds,
-        ts13_revocation: eu_id_prover::mdoc::MdocRevocationPublicInputs {
-            revocation_public_key,
-            epoch: statement.revocation_epoch,
-        },
-        attributes,
-        policy: mapping::to_policy(statement)?,
-    })
-}
-
 fn mdoc_request(
-    statement: &ZkPublicStatement,
-    witness: &ZkMdocWitness,
+    statement: &ProductPublicStatementV2,
+    witness: &ProductMdocWitnessV2,
     public_statement: &eu_id_prover::MdocStatement,
 ) -> Result<eu_id_prover::MdocPidRequest, ZkError> {
     if witness.revocation_id_lo >= witness.revocation_id_hi {
@@ -711,7 +708,7 @@ fn mdoc_request(
 #[cfg(test)]
 fn mdoc_statement_matches_public_statement(
     mdoc_statement: &eu_id_prover::MdocStatement,
-    statement: &ZkPublicStatement,
+    statement: &ProductPublicStatementV2,
 ) -> Result<bool, ZkError> {
     Ok(mdoc_statement == &reconstruct_mdoc_statement(statement)?)
 }
@@ -723,14 +720,13 @@ fn mdoc_statement_matches_public_statement(
 ///
 /// The returned envelope binds the caller's complete public statement to the
 /// production mdoc proof and runs on the SDK's dedicated large-stack thread.
-#[uniffi::export]
-pub fn prove_identity(
-    statement: ZkPublicStatement,
-    witness: ZkMdocWitness,
+fn prove_product_identity(
+    statement: ProductPublicStatementV2,
+    witness: ProductMdocWitnessV2,
 ) -> Result<Vec<u8>, ZkError> {
     on_large_stack("prover", ZkError::Prove, move || {
         let expected_mdoc_statement = reconstruct_mdoc_statement(&statement)?;
-        validate_product_witness(&witness)?;
+        validate_product_document(&witness)?;
         let policy = expected_mdoc_statement.policy.clone();
         let request = mdoc_request(&statement, &witness, &expected_mdoc_statement)?;
         let document = witness.document;
@@ -758,30 +754,461 @@ pub fn prove_identity(
 /// Verify a production identity proof against the caller's public statement.
 ///
 /// Malformed or mismatched proof bytes fail closed with `ok = false`.
-#[uniffi::export]
-pub fn verify_identity(
-    statement: ZkPublicStatement,
+fn verify_product_identity(
+    statement: ProductPublicStatementV2,
     proof: Vec<u8>,
 ) -> Result<ZkVerifyResult, ZkError> {
     on_large_stack("verifier", ZkError::Verify, move || {
         let mdoc_statement = reconstruct_mdoc_statement(&statement)?;
-        let envelope = match decode_mdoc_proof_envelope(&proof) {
-            Ok(envelope) => envelope,
-            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        let Ok(envelope) = decode_mdoc_proof_envelope(&proof) else {
+            return Ok(ZkVerifyResult { ok: false });
         };
-        let stark_proof_bincode = match decompress_stark_proof_from_ffi(&envelope.compressed_proof)
-        {
-            Ok(bytes) => bytes,
-            Err(_) => return Ok(ZkVerifyResult { ok: false }),
+        let Ok(stark_proof_bincode) = decompress_stark_proof_from_ffi(&envelope.compressed_proof)
+        else {
+            return Ok(ZkVerifyResult { ok: false });
         };
-        let stark_proof = match decode_stark_proof(&stark_proof_bincode) {
-            Some(stark_proof) => stark_proof,
-            None => return Ok(ZkVerifyResult { ok: false }),
+        let Some(stark_proof) = decode_stark_proof(&stark_proof_bincode) else {
+            return Ok(ZkVerifyResult { ok: false });
         };
         Ok(ZkVerifyResult {
             ok: eu_id_prover::verify_product_mdoc(&stark_proof, &mdoc_statement).is_ok(),
         })
     })
+}
+
+#[cfg(any(feature = "legacy-product-v1-demo", test))]
+const LEGACY_PRODUCT_STATEMENT_VERSION: u32 = 1;
+#[cfg(any(feature = "legacy-product-v1-demo", test))]
+const SECONDS_PER_DAY: u64 = 86_400;
+#[cfg(any(feature = "legacy-product-v1-demo", test))]
+const NOON_SECONDS: u64 = 43_200;
+
+/// Convert the historical wallet statement into the current product theorem.
+///
+/// Product V1 is a demo compatibility profile. Its day is interpreted as noon
+/// UTC and its revocation authority is the SDK's fixed demo P-256 authority.
+/// Product V2 remains the production interface with exact verifier-owned time,
+/// pins, and revocation inputs.
+#[cfg(any(feature = "legacy-product-v1-demo", test))]
+fn product_v1_statement(
+    statement: ProductPublicStatementV1,
+) -> Result<ProductPublicStatementV2, ZkError> {
+    if statement.version != LEGACY_PRODUCT_STATEMENT_VERSION {
+        return Err(ZkError::InvalidInput(format!(
+            "legacy Product V1 statement version must be {LEGACY_PRODUCT_STATEMENT_VERSION}"
+        )));
+    }
+    if statement.predicate_mode == PredicateMode::Or {
+        return Err(ZkError::InvalidInput(
+            "OR predicates are not supported by the Product circuit".to_string(),
+        ));
+    }
+    let IssuerKey::P256 { x, y } = statement.issuer_key else {
+        return Err(ZkError::UnsupportedProofSystem);
+    };
+    let epoch_day = u64::try_from(statement.today_epoch_day)
+        .map_err(|_| ZkError::InvalidInput("today_epoch_day must not be negative".to_string()))?;
+    let now_epoch_seconds = epoch_day
+        .checked_mul(SECONDS_PER_DAY)
+        .and_then(|seconds| seconds.checked_add(NOON_SECONDS))
+        .ok_or_else(|| ZkError::InvalidInput("today_epoch_day is out of range".to_string()))?;
+    let accepted_alpha2_countries = statement
+        .accepted_numeric_countries
+        .map(|countries| {
+            if countries.len() > MAX_ACCEPTED_ALPHA2_COUNTRIES {
+                return Err(ZkError::InvalidInput(format!(
+                    "accepted nationality set exceeds {MAX_ACCEPTED_ALPHA2_COUNTRIES} entries"
+                )));
+            }
+            countries
+                .into_iter()
+                .map(|numeric| {
+                    iso_numeric_to_alpha2(numeric).ok_or_else(|| {
+                        ZkError::InvalidInput(format!(
+                            "{numeric} is not an assigned ISO 3166-1 numeric country code"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|mut countries| {
+                    countries.sort_unstable();
+                    countries.dedup();
+                    countries
+                })
+        })
+        .transpose()?;
+    let revocation = eu_id_prover::ts13::demo_ts13_revocation_statement();
+
+    Ok(ProductPublicStatementV2 {
+        spec_id: statement.spec_id,
+        version: PRODUCT_STATEMENT_VERSION,
+        profile_id: product_profile_id(),
+        circuit_hash: product_circuit_hash(),
+        root_policy_hash: product_root_policy_hash(),
+        doctype: statement.doctype,
+        namespace: statement.namespace,
+        issuer_public_key_x: x,
+        issuer_public_key_y: y,
+        now_epoch_seconds,
+        session_transcript: statement.nonce,
+        predicate_mode: statement.predicate_mode,
+        age_threshold_years: statement.age_threshold_years,
+        accepted_alpha2_countries,
+        revocation_public_key_x: revocation.revocation_public_key.x.0.to_vec(),
+        revocation_public_key_y: revocation.revocation_public_key.y.0.to_vec(),
+        revocation_epoch: revocation.epoch,
+    })
+}
+
+#[cfg(any(feature = "legacy-product-v1-demo", test))]
+fn product_v1_witness(witness: ProductMdocWitnessV1) -> Result<ProductMdocWitnessV2, ZkError> {
+    let trusted_certificates = match witness.trusted_issuers {
+        TrustedIssuers::Certificates(certificates) if !certificates.is_empty() => certificates,
+        TrustedIssuers::Certificates(_) => {
+            return Err(ZkError::InvalidInput(
+                "legacy Product V1 requires at least one issuer certificate".to_string(),
+            ));
+        }
+        TrustedIssuers::PublicKeys(_) => return Err(ZkError::UnsupportedProofSystem),
+    };
+
+    let mso = eu_id_prover::mdoc::product_mso_payload(&witness.document)
+        .map_err(|error| ZkError::InvalidInput(format!("invalid product mdoc: {error:?}")))?;
+    let document_certificates = eu_id_prover::mdoc::product_x5chain_certificates(&witness.document)
+        .map_err(|error| ZkError::InvalidInput(format!("invalid product x5chain: {error:?}")))?;
+    if trusted_certificates != document_certificates {
+        return Err(ZkError::InvalidInput(
+            "legacy Product V1 trusted certificates must match the document x5chain".to_string(),
+        ));
+    }
+    let (_, revocation) = eu_id_prover::ts13::demo_ts13_revocation_inputs(&mso);
+    if !(revocation.id_lo < revocation.id && revocation.id < revocation.id_hi) {
+        return Err(ZkError::InvalidRevocationWitness);
+    }
+
+    Ok(ProductMdocWitnessV2 {
+        document: witness.document,
+        revocation_id_lo: revocation.id_lo,
+        revocation_id_hi: revocation.id_hi,
+        revocation_signature_r: revocation.signature.r.0.to_vec(),
+        revocation_signature_s: revocation.signature.s.0.to_vec(),
+    })
+}
+
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+const P256_PUBLIC_KEY_BYTES: usize = 64;
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+const P256_SIGNATURE_BYTES: usize = 64;
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+const AGE_RESULT_PREFIX: &str = "age_over_";
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+const CBOR_TRUE: &[u8] = &[0xf5];
+
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+fn split_p256_coordinates(bytes: &[u8], label: &str) -> Result<(Vec<u8>, Vec<u8>), ZkError> {
+    if bytes.len() != P256_PUBLIC_KEY_BYTES {
+        return Err(ZkError::InvalidInput(format!(
+            "{label} must be {P256_PUBLIC_KEY_BYTES}-byte x||y"
+        )));
+    }
+    Ok((bytes[..32].to_vec(), bytes[32..].to_vec()))
+}
+
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+fn join_p256_coordinates(x: &[u8], y: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(P256_PUBLIC_KEY_BYTES);
+    bytes.extend_from_slice(x);
+    bytes.extend_from_slice(y);
+    bytes
+}
+
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+fn legacy_ts13_p256_statement(
+    statement: IdentityStatement,
+    document_issuer_key: Option<(Vec<u8>, Vec<u8>)>,
+) -> Result<ProductPublicStatementV2, ZkError> {
+    if statement.circuit_hash != product_circuit_hash().into_bytes() {
+        return Err(ZkError::UnsupportedCircuitHash);
+    }
+    if statement.zk_system_id != PRODUCT_SPEC_ID
+        || statement.document_type != PRODUCT_DOCTYPE
+        || statement.namespace != PRODUCT_NAMESPACE
+        || statement.expected_value_cbor != CBOR_TRUE
+    {
+        return Err(ZkError::UnsupportedDemoCredentialShape);
+    }
+    let threshold = statement
+        .element_identifier
+        .strip_prefix(AGE_RESULT_PREFIX)
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|threshold| result_age_over(*threshold) == statement.element_identifier)
+        .ok_or(ZkError::UnsupportedDemoCredentialShape)?;
+    let now_epoch_seconds = u64::try_from(statement.timestamp_epoch_seconds)
+        .map_err(|_| ZkError::InvalidInput("timestamp must not be negative".to_string()))?;
+
+    let issuer_key = if statement.trusted_issuer_public_key.is_empty() {
+        document_issuer_key.ok_or_else(|| {
+            ZkError::InvalidInput(
+                "verifier must supply the trusted issuer P-256 key as x||y".to_string(),
+            )
+        })?
+    } else {
+        let key = split_p256_coordinates(
+            &statement.trusted_issuer_public_key,
+            "trusted issuer P-256 key",
+        )?;
+        if document_issuer_key
+            .as_ref()
+            .is_some_and(|expected| expected != &key)
+        {
+            return Err(ZkError::InvalidInput(
+                "trusted issuer key does not match the document x5chain leaf".to_string(),
+            ));
+        }
+        key
+    };
+
+    let revocation = eu_id_prover::ts13::demo_ts13_revocation_statement();
+    let expected_revocation_key = join_p256_coordinates(
+        &revocation.revocation_public_key.x.0,
+        &revocation.revocation_public_key.y.0,
+    );
+    if statement.revocation_public_key != expected_revocation_key
+        || statement.revocation_epoch != revocation.epoch
+    {
+        return Err(ZkError::InvalidPublicContext);
+    }
+
+    Ok(ProductPublicStatementV2 {
+        spec_id: statement.zk_system_id,
+        version: PRODUCT_STATEMENT_VERSION,
+        profile_id: product_profile_id(),
+        circuit_hash: product_circuit_hash(),
+        root_policy_hash: product_root_policy_hash(),
+        doctype: statement.document_type,
+        namespace: statement.namespace,
+        issuer_public_key_x: issuer_key.0,
+        issuer_public_key_y: issuer_key.1,
+        now_epoch_seconds,
+        session_transcript: statement.session_transcript,
+        predicate_mode: PredicateMode::Age,
+        age_threshold_years: Some(threshold),
+        accepted_alpha2_countries: None,
+        revocation_public_key_x: revocation.revocation_public_key.x.0.to_vec(),
+        revocation_public_key_y: revocation.revocation_public_key.y.0.to_vec(),
+        revocation_epoch: revocation.epoch,
+    })
+}
+
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+fn legacy_ts13_p256_witness(witness: IdentityWitness) -> Result<ProductMdocWitnessV2, ZkError> {
+    if witness.revocation_signature.len() != P256_SIGNATURE_BYTES {
+        return Err(ZkError::InvalidRevocationWitness);
+    }
+    Ok(ProductMdocWitnessV2 {
+        document: witness.document,
+        revocation_id_lo: witness.revocation_id_lo,
+        revocation_id_hi: witness.revocation_id_hi,
+        revocation_signature_r: witness.revocation_signature[..32].to_vec(),
+        revocation_signature_s: witness.revocation_signature[32..].to_vec(),
+    })
+}
+
+#[cfg(any(feature = "current-wallet-p256-demo", test))]
+fn legacy_ts13_p256_prover_inputs(
+    statement: IdentityStatement,
+    witness: IdentityWitness,
+) -> Result<(ProductPublicStatementV2, ProductMdocWitnessV2), ZkError> {
+    let issuer_key = eu_id_prover::mdoc::product_issuer_public_key(&witness.document)
+        .map_err(|error| ZkError::InvalidInput(format!("invalid product issuer key: {error:?}")))?;
+    let statement = legacy_ts13_p256_statement(
+        statement,
+        Some((issuer_key.x.0.to_vec(), issuer_key.y.0.to_vec())),
+    )?;
+    let witness = legacy_ts13_p256_witness(witness)?;
+    Ok((statement, witness))
+}
+
+/// Prove the theorem selected by the tagged wallet statement.
+///
+/// Product V1 is available only in an explicit `legacy-product-v1-demo` build.
+#[uniffi::export]
+pub fn prove_identity(
+    statement: ZkPublicStatement,
+    witness: ZkMdocWitness,
+) -> Result<Vec<u8>, ZkError> {
+    match (statement, witness) {
+        (ZkPublicStatement::ProductV2(statement), ZkMdocWitness::ProductV2(witness)) => {
+            prove_product_identity(statement, witness)
+        }
+        (ZkPublicStatement::ProductV1(statement), ZkMdocWitness::ProductV1(witness)) => {
+            #[cfg(feature = "legacy-product-v1-demo")]
+            {
+                prove_product_identity(
+                    product_v1_statement(statement)?,
+                    product_v1_witness(witness)?,
+                )
+            }
+            #[cfg(not(feature = "legacy-product-v1-demo"))]
+            {
+                drop((statement, witness));
+                Err(ZkError::UnsupportedProofSystem)
+            }
+        }
+        (ZkPublicStatement::Ts13DemoV1(statement), ZkMdocWitness::Ts13DemoV1(witness)) => {
+            #[cfg(feature = "current-wallet-p256-demo")]
+            {
+                let (statement, witness) = legacy_ts13_p256_prover_inputs(statement, witness)?;
+                prove_product_identity(statement, witness)
+            }
+            #[cfg(not(feature = "current-wallet-p256-demo"))]
+            {
+                drop((statement, witness));
+                Err(ZkError::UnsupportedProofSystem)
+            }
+        }
+        _ => Err(ZkError::UnsupportedProofSystem),
+    }
+}
+
+/// Verify the theorem selected by the tagged wallet statement.
+#[uniffi::export]
+pub fn verify_identity(
+    statement: ZkPublicStatement,
+    proof: Vec<u8>,
+) -> Result<ZkVerifyResult, ZkError> {
+    match statement {
+        ZkPublicStatement::ProductV2(statement) => verify_product_identity(statement, proof),
+        ZkPublicStatement::ProductV1(statement) => {
+            #[cfg(feature = "legacy-product-v1-demo")]
+            {
+                verify_product_identity(product_v1_statement(statement)?, proof)
+            }
+            #[cfg(not(feature = "legacy-product-v1-demo"))]
+            {
+                drop((statement, proof));
+                Err(ZkError::UnsupportedProofSystem)
+            }
+        }
+        ZkPublicStatement::Ts13DemoV1(statement) => {
+            #[cfg(feature = "current-wallet-p256-demo")]
+            {
+                verify_product_identity(legacy_ts13_p256_statement(statement, None)?, proof)
+            }
+            #[cfg(not(feature = "current-wallet-p256-demo"))]
+            {
+                drop((statement, proof));
+                Err(ZkError::UnsupportedProofSystem)
+            }
+        }
+    }
+}
+
+/// This SDK build links the P-256 product prover.
+#[uniffi::export]
+pub fn zk_system() -> ZkSystemKind {
+    ZkSystemKind::P256
+}
+
+/// Returns the current P-256 circuit pin in the legacy wallet's byte field.
+///
+/// This is available only in an explicit legacy/demo compatibility artifact;
+/// the proof still runs the P-256 product circuit, not TS13/ML-DSA.
+#[uniffi::export]
+pub fn ts13_demo_circuit_hash() -> Vec<u8> {
+    #[cfg(feature = "current-wallet-p256-demo")]
+    {
+        product_circuit_hash().into_bytes()
+    }
+    #[cfg(not(feature = "current-wallet-p256-demo"))]
+    {
+        Vec::new()
+    }
+}
+
+/// The untouched wallet ignores this value on its P-256 branch. An empty value
+/// tells the compatibility prover to derive the leaf from the witness x5chain;
+/// verification still requires an independently trusted 64-byte x||y key.
+#[uniffi::export]
+pub fn demo_issuer_public_key() -> Vec<u8> {
+    Vec::new()
+}
+
+#[uniffi::export]
+pub fn demo_revocation_public_key() -> Vec<u8> {
+    #[cfg(feature = "current-wallet-p256-demo")]
+    {
+        let statement = eu_id_prover::ts13::demo_ts13_revocation_statement();
+        join_p256_coordinates(
+            &statement.revocation_public_key.x.0,
+            &statement.revocation_public_key.y.0,
+        )
+    }
+    #[cfg(not(feature = "current-wallet-p256-demo"))]
+    {
+        Vec::new()
+    }
+}
+
+#[uniffi::export]
+pub fn demo_revocation_epoch() -> u32 {
+    #[cfg(feature = "current-wallet-p256-demo")]
+    {
+        eu_id_prover::ts13::demo_ts13_revocation_statement().epoch
+    }
+    #[cfg(not(feature = "current-wallet-p256-demo"))]
+    {
+        0
+    }
+}
+
+#[uniffi::export]
+pub fn demo_revocation_witness(document: Vec<u8>) -> Result<DemoRevocationWitness, ZkError> {
+    #[cfg(feature = "current-wallet-p256-demo")]
+    {
+        let mso = eu_id_prover::mdoc::product_mso_payload(&document)
+            .map_err(|error| ZkError::InvalidInput(format!("invalid product mdoc: {error:?}")))?;
+        let (_, witness) = eu_id_prover::ts13::demo_ts13_revocation_inputs(&mso);
+        let mut signature = Vec::with_capacity(P256_SIGNATURE_BYTES);
+        signature.extend_from_slice(&witness.signature.r.0);
+        signature.extend_from_slice(&witness.signature.s.0);
+        Ok(DemoRevocationWitness {
+            id_lo: witness.id_lo,
+            id_hi: witness.id_hi,
+            signature,
+        })
+    }
+    #[cfg(not(feature = "current-wallet-p256-demo"))]
+    {
+        drop(document);
+        Err(ZkError::UnsupportedProofSystem)
+    }
+}
+
+#[uniffi::export]
+pub fn demo_mint_ml_dsa_signed_pid_mdoc(
+    _p256_issuer_signed: Vec<u8>,
+    _device_public_key: Vec<u8>,
+) -> Result<Vec<u8>, ZkError> {
+    Err(ZkError::UnsupportedProofSystem)
+}
+
+#[uniffi::export]
+pub fn demo_device_auth_sig_structure(
+    _session_transcript: Vec<u8>,
+    _doctype: String,
+) -> Result<Vec<u8>, ZkError> {
+    Err(ZkError::UnsupportedProofSystem)
+}
+
+#[uniffi::export]
+pub fn demo_build_ml_dsa_witness(
+    _ml_dsa_issuer_signed: Vec<u8>,
+    _session_transcript: Vec<u8>,
+    _doctype: String,
+    _device_signature: Vec<u8>,
+) -> Result<Vec<u8>, ZkError> {
+    Err(ZkError::UnsupportedProofSystem)
 }
 
 #[cfg(test)]
@@ -806,20 +1233,20 @@ mod tests {
         }
     }
 
-    fn sample_statement() -> ZkPublicStatement {
+    fn sample_statement() -> ProductPublicStatementV2 {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let issuer_key = fixture.statement.issuer_input.public_key;
         let session_transcript = fixture.request.session_transcript;
         let (revocation, _) =
             eu_id_prover::ts13::demo_ts13_revocation_inputs(&fixture.extracted.mso);
-        ZkPublicStatement {
-            spec_id: "stwo-euid-pid-v1".to_string(),
+        ProductPublicStatementV2 {
+            spec_id: PRODUCT_SPEC_ID.to_string(),
             version: PRODUCT_STATEMENT_VERSION,
             profile_id: product_profile_id(),
             circuit_hash: product_circuit_hash(),
             root_policy_hash: product_root_policy_hash(),
-            doctype: "eu.europa.ec.eudi.pid.1".to_string(),
-            namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+            doctype: PRODUCT_DOCTYPE.to_string(),
+            namespace: PRODUCT_NAMESPACE.to_string(),
             issuer_public_key_x: issuer_key.x.0.to_vec(),
             issuer_public_key_y: issuer_key.y.0.to_vec(),
             now_epoch_seconds: 20_637 * 86_400 + 43_200,
@@ -837,7 +1264,7 @@ mod tests {
         }
     }
 
-    /// The product pin gate must fire through the public `verify_identity`
+    /// The product pin gate must fire through the public `verify_product_identity`
     /// entry point, and it must fire BEFORE any proof parsing: honest pins
     /// with a garbage proof reach the decoder (clean `ok: false`), while a
     /// corrupted pin surfaces the pin error without a verdict.
@@ -846,7 +1273,7 @@ mod tests {
         let (statement, _, _) = honest_mdoc_statement();
         let garbage_proof = vec![0u8; 64];
 
-        let control = verify_identity(statement.clone(), garbage_proof.clone())
+        let control = verify_product_identity(statement.clone(), garbage_proof.clone())
             .expect("honest pins with a garbage proof must reach the proof decoder");
         assert!(!control.ok, "garbage proof unexpectedly verified");
 
@@ -862,7 +1289,7 @@ mod tests {
             ("wrong root_policy_hash", wrong_root),
             ("both pins wrong", wrong_both),
         ] {
-            match verify_identity(tampered, garbage_proof.clone()) {
+            match verify_product_identity(tampered, garbage_proof.clone()) {
                 Err(err) => assert!(
                     format!("{err:?}").contains("circuit_hash, or root_policy_hash"),
                     "{label}: expected the product pin gate, got {err:?}"
@@ -875,20 +1302,24 @@ mod tests {
         }
     }
 
-    fn honest_mdoc_statement() -> (ZkPublicStatement, eu_id_prover::MdocStatement, [u8; 32]) {
+    fn honest_mdoc_statement() -> (
+        ProductPublicStatementV2,
+        eu_id_prover::MdocStatement,
+        [u8; 32],
+    ) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let extraction_device_hash = fixture.extracted.device_ecdsa_input.message_hash.0;
         let issuer_key = fixture.statement.issuer_input.public_key.clone();
         let (revocation, revocation_witness) =
             eu_id_prover::ts13::demo_ts13_revocation_inputs(&fixture.extracted.mso);
-        let statement = ZkPublicStatement {
-            spec_id: "stwo-euid-pid-v1".to_string(),
+        let statement = ProductPublicStatementV2 {
+            spec_id: PRODUCT_SPEC_ID.to_string(),
             version: PRODUCT_STATEMENT_VERSION,
             profile_id: product_profile_id(),
             circuit_hash: product_circuit_hash(),
             root_policy_hash: product_root_policy_hash(),
-            doctype: "eu.europa.ec.eudi.pid.1".to_string(),
-            namespace: "eu.europa.ec.eudi.pid.1".to_string(),
+            doctype: PRODUCT_DOCTYPE.to_string(),
+            namespace: PRODUCT_NAMESPACE.to_string(),
             issuer_public_key_x: issuer_key.x.0.to_vec(),
             issuer_public_key_y: issuer_key.y.0.to_vec(),
             now_epoch_seconds: 20_637 * 86_400 + 43_200,
@@ -922,7 +1353,8 @@ mod tests {
         (statement, mdoc_statement, extraction_device_hash)
     }
 
-    fn canonical_v2_mdoc_sdk_fixture() -> (ZkPublicStatement, ZkMdocWitness, Vec<Vec<u8>>) {
+    fn canonical_v2_mdoc_sdk_fixture(
+    ) -> (ProductPublicStatementV2, ProductMdocWitnessV2, Vec<Vec<u8>>) {
         let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
         let issuer_key = fixture.statement.issuer_input.public_key.clone();
         let (revocation, revocation_witness) =
@@ -943,8 +1375,8 @@ mod tests {
             .map(|attribute| attribute.item.clone())
             .collect();
         (
-            ZkPublicStatement {
-                spec_id: "stwo-euid-pid-v1".to_string(),
+            ProductPublicStatementV2 {
+                spec_id: PRODUCT_SPEC_ID.to_string(),
                 version: PRODUCT_STATEMENT_VERSION,
                 profile_id: product_profile_id(),
                 circuit_hash: product_circuit_hash(),
@@ -962,7 +1394,7 @@ mod tests {
                 revocation_public_key_y: revocation.revocation_public_key.y.0.to_vec(),
                 revocation_epoch: revocation.epoch,
             },
-            ZkMdocWitness {
+            ProductMdocWitnessV2 {
                 document: fixture.document,
                 revocation_id_lo: revocation_witness.id_lo,
                 revocation_id_hi: revocation_witness.id_hi,
@@ -971,6 +1403,301 @@ mod tests {
             },
             selected_items,
         )
+    }
+
+    fn legacy_statement_from(statement: &ProductPublicStatementV2) -> ProductPublicStatementV1 {
+        ProductPublicStatementV1 {
+            spec_id: statement.spec_id.clone(),
+            version: LEGACY_PRODUCT_STATEMENT_VERSION,
+            doctype: statement.doctype.clone(),
+            namespace: statement.namespace.clone(),
+            issuer_key: IssuerKey::P256 {
+                x: statement.issuer_public_key_x.clone(),
+                y: statement.issuer_public_key_y.clone(),
+            },
+            today_epoch_day: i32::try_from(statement.now_epoch_seconds / SECONDS_PER_DAY)
+                .expect("fixture epoch day fits i32"),
+            nonce: statement.session_transcript.clone(),
+            predicate_mode: statement.predicate_mode,
+            age_threshold_years: statement.age_threshold_years,
+            accepted_numeric_countries: statement.accepted_alpha2_countries.as_ref().map(
+                |countries| {
+                    countries
+                        .iter()
+                        .map(|country| {
+                            iso_alpha2_to_numeric(country.clone())
+                                .expect("fixture country has an ISO numeric value")
+                        })
+                        .collect()
+                },
+            ),
+            nat_mode: NatMode::Any,
+        }
+    }
+
+    fn legacy_ts13_statement_from(
+        statement: &ProductPublicStatementV2,
+        include_issuer_key: bool,
+    ) -> IdentityStatement {
+        IdentityStatement {
+            circuit_hash: product_circuit_hash().into_bytes(),
+            zk_system_id: statement.spec_id.clone(),
+            document_type: statement.doctype.clone(),
+            namespace: statement.namespace.clone(),
+            element_identifier: result_age_over(
+                statement
+                    .age_threshold_years
+                    .expect("age-only fixture has a threshold"),
+            ),
+            expected_value_cbor: CBOR_TRUE.to_vec(),
+            timestamp_epoch_seconds: i64::try_from(statement.now_epoch_seconds)
+                .expect("fixture timestamp fits i64"),
+            session_transcript: statement.session_transcript.clone(),
+            trusted_issuer_public_key: if include_issuer_key {
+                join_p256_coordinates(
+                    &statement.issuer_public_key_x,
+                    &statement.issuer_public_key_y,
+                )
+            } else {
+                Vec::new()
+            },
+            revocation_public_key: join_p256_coordinates(
+                &statement.revocation_public_key_x,
+                &statement.revocation_public_key_y,
+            ),
+            revocation_epoch: statement.revocation_epoch,
+        }
+    }
+
+    fn legacy_ts13_witness_from(witness: &ProductMdocWitnessV2) -> IdentityWitness {
+        let mut signature = Vec::with_capacity(P256_SIGNATURE_BYTES);
+        signature.extend_from_slice(&witness.revocation_signature_r);
+        signature.extend_from_slice(&witness.revocation_signature_s);
+        IdentityWitness {
+            document: witness.document.clone(),
+            revocation_id_lo: witness.revocation_id_lo,
+            revocation_id_hi: witness.revocation_id_hi,
+            revocation_signature: signature,
+        }
+    }
+
+    #[test]
+    fn legacy_product_v1_maps_to_the_current_product_profile() {
+        let expected = sample_statement();
+        let legacy = legacy_statement_from(&expected);
+        let mapped = product_v1_statement(legacy).expect("legacy statement maps");
+
+        assert_eq!(mapped, expected);
+        assert_eq!(iso_alpha2_to_numeric("GR".to_string()), Some(300));
+        assert_eq!(iso_alpha2_to_numeric("cy".to_string()), Some(196));
+        assert_eq!(iso_alpha2_to_numeric("US".to_string()), Some(840));
+        assert_eq!(iso_alpha2_to_numeric("ZZ".to_string()), None);
+    }
+
+    #[test]
+    fn legacy_product_v1_rejects_unsupported_semantics() {
+        let base = sample_statement();
+
+        let mut statement = legacy_statement_from(&base);
+        statement.predicate_mode = PredicateMode::Or;
+        assert_eq!(
+            product_v1_statement(statement),
+            Err(ZkError::InvalidInput(
+                "OR predicates are not supported by the Product circuit".to_string()
+            ))
+        );
+
+        let mut statement = legacy_statement_from(&base);
+        statement.issuer_key = IssuerKey::MlDsa {
+            pk_hash: vec![0; 32],
+        };
+        assert_eq!(
+            product_v1_statement(statement),
+            Err(ZkError::UnsupportedProofSystem)
+        );
+
+        let mut statement = legacy_statement_from(&base);
+        statement.accepted_numeric_countries = Some(vec![999]);
+        assert!(matches!(
+            product_v1_statement(statement),
+            Err(ZkError::InvalidInput(message)) if message.contains("999")
+        ));
+
+        let mut statement = legacy_statement_from(&base);
+        statement.accepted_numeric_countries = Some(vec![300; MAX_ACCEPTED_ALPHA2_COUNTRIES + 1]);
+        assert!(matches!(
+            product_v1_statement(statement),
+            Err(ZkError::InvalidInput(message)) if message.contains("exceeds")
+        ));
+    }
+
+    #[test]
+    fn legacy_product_v1_witness_uses_the_document_chain_and_demo_revocation() {
+        let (_, expected, _) = canonical_v2_mdoc_sdk_fixture();
+        let certificates =
+            eu_id_prover::mdoc::product_x5chain_certificates(&expected.document).unwrap();
+        let mapped = product_v1_witness(ProductMdocWitnessV1 {
+            document: expected.document.clone(),
+            trusted_issuers: TrustedIssuers::Certificates(certificates),
+        })
+        .expect("legacy witness maps");
+
+        assert_eq!(mapped.document, expected.document);
+        assert_eq!(mapped.revocation_id_lo, expected.revocation_id_lo);
+        assert_eq!(mapped.revocation_id_hi, expected.revocation_id_hi);
+        assert_eq!(
+            mapped.revocation_signature_r,
+            expected.revocation_signature_r
+        );
+        assert_eq!(
+            mapped.revocation_signature_s,
+            expected.revocation_signature_s
+        );
+
+        let error = product_v1_witness(ProductMdocWitnessV1 {
+            document: expected.document,
+            trusted_issuers: TrustedIssuers::Certificates(vec![vec![0]]),
+        })
+        .expect_err("mismatched certificate must fail");
+        assert!(matches!(error, ZkError::InvalidInput(message) if message.contains("must match")));
+    }
+
+    #[test]
+    fn legacy_ts13_wallet_shape_maps_to_the_age_only_product_theorem() {
+        let (mut expected_statement, expected_witness, _) = canonical_v2_mdoc_sdk_fixture();
+        expected_statement.predicate_mode = PredicateMode::Age;
+        expected_statement.accepted_alpha2_countries = None;
+
+        let holder_statement = legacy_ts13_statement_from(&expected_statement, false);
+        let holder_witness = legacy_ts13_witness_from(&expected_witness);
+        let (mapped_statement, mapped_witness) =
+            legacy_ts13_p256_prover_inputs(holder_statement.clone(), holder_witness)
+                .expect("untouched holder inputs map");
+        assert_eq!(mapped_statement, expected_statement);
+        assert_eq!(mapped_witness.document, expected_witness.document);
+        assert_eq!(
+            mapped_witness.revocation_id_lo,
+            expected_witness.revocation_id_lo
+        );
+        assert_eq!(
+            mapped_witness.revocation_id_hi,
+            expected_witness.revocation_id_hi
+        );
+        assert_eq!(
+            mapped_witness.revocation_signature_r,
+            expected_witness.revocation_signature_r
+        );
+        assert_eq!(
+            mapped_witness.revocation_signature_s,
+            expected_witness.revocation_signature_s
+        );
+
+        let verifier_statement = legacy_ts13_statement_from(&expected_statement, true);
+        assert_eq!(
+            legacy_ts13_p256_statement(verifier_statement, None).expect("trusted verifier maps"),
+            expected_statement
+        );
+        assert!(matches!(
+            legacy_ts13_p256_statement(holder_statement, None),
+            Err(ZkError::InvalidInput(message)) if message.contains("verifier must supply")
+        ));
+    }
+
+    #[test]
+    fn legacy_ts13_wallet_shape_rejects_non_age_or_untrusted_context() {
+        let (mut statement, witness, _) = canonical_v2_mdoc_sdk_fixture();
+        statement.predicate_mode = PredicateMode::Age;
+        statement.accepted_alpha2_countries = None;
+        let mut identity = legacy_ts13_statement_from(&statement, false);
+
+        identity.element_identifier = "nationality_in_set".to_string();
+        assert!(matches!(
+            legacy_ts13_p256_prover_inputs(identity, legacy_ts13_witness_from(&witness)),
+            Err(ZkError::UnsupportedDemoCredentialShape)
+        ));
+
+        let mut identity = legacy_ts13_statement_from(&statement, true);
+        identity.trusted_issuer_public_key[0] ^= 1;
+        assert!(matches!(
+            legacy_ts13_p256_prover_inputs(identity, legacy_ts13_witness_from(&witness)),
+            Err(ZkError::InvalidInput(message)) if message.contains("does not match")
+        ));
+    }
+
+    #[test]
+    #[cfg(not(feature = "current-wallet-p256-demo"))]
+    fn tagged_api_dispatches_and_inactive_ts13_fails_closed() {
+        let statement = sample_statement();
+        let result = verify_identity(
+            ZkPublicStatement::ProductV2(statement),
+            b"not a proof envelope".to_vec(),
+        )
+        .expect("valid Product V2 statement reaches proof decoding");
+        assert!(!result.ok);
+
+        let ts13 = IdentityStatement {
+            circuit_hash: Vec::new(),
+            zk_system_id: "stwo-euid-v1".to_string(),
+            document_type: PRODUCT_DOCTYPE.to_string(),
+            namespace: PRODUCT_NAMESPACE.to_string(),
+            element_identifier: result_age_over(18),
+            expected_value_cbor: vec![0xf5],
+            timestamp_epoch_seconds: 1,
+            session_transcript: Vec::new(),
+            trusted_issuer_public_key: Vec::new(),
+            revocation_public_key: Vec::new(),
+            revocation_epoch: 0,
+        };
+        assert_eq!(
+            verify_identity(ZkPublicStatement::Ts13DemoV1(ts13), Vec::new()),
+            Err(ZkError::UnsupportedProofSystem)
+        );
+        assert_eq!(zk_system(), ZkSystemKind::P256);
+        assert!(ts13_demo_circuit_hash().is_empty());
+        assert_eq!(
+            demo_revocation_witness(Vec::new()),
+            Err(ZkError::UnsupportedProofSystem)
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "current-wallet-p256-demo")]
+    fn current_wallet_p256_demo_exports_exact_product_inputs() {
+        let (_, witness, _) = canonical_v2_mdoc_sdk_fixture();
+        let expected = legacy_ts13_witness_from(&witness);
+        let actual = demo_revocation_witness(witness.document).expect("demo witness builds");
+
+        assert_eq!(
+            ts13_demo_circuit_hash(),
+            product_circuit_hash().into_bytes()
+        );
+        assert!(demo_issuer_public_key().is_empty());
+        assert_eq!(demo_revocation_public_key().len(), P256_PUBLIC_KEY_BYTES);
+        assert_eq!(demo_revocation_epoch(), 51);
+        assert_eq!(actual.id_lo, expected.revocation_id_lo);
+        assert_eq!(actual.id_hi, expected.revocation_id_hi);
+        assert_eq!(actual.signature, expected.revocation_signature);
+    }
+
+    #[test]
+    #[cfg(not(feature = "legacy-product-v1-demo"))]
+    fn product_v1_dispatch_requires_the_explicit_demo_feature() {
+        let statement = legacy_statement_from(&sample_statement());
+        let witness = ProductMdocWitnessV1 {
+            document: Vec::new(),
+            trusted_issuers: TrustedIssuers::Certificates(Vec::new()),
+        };
+        assert_eq!(
+            prove_identity(
+                ZkPublicStatement::ProductV1(statement.clone()),
+                ZkMdocWitness::ProductV1(witness),
+            ),
+            Err(ZkError::UnsupportedProofSystem),
+        );
+        assert_eq!(
+            verify_identity(ZkPublicStatement::ProductV1(statement), Vec::new()),
+            Err(ZkError::UnsupportedProofSystem),
+        );
     }
 
     #[test]
@@ -1213,8 +1940,8 @@ mod tests {
         let issuer_key = demo.statement.issuer_input.public_key.clone();
         let (revocation, revocation_witness) =
             eu_id_prover::ts13::demo_ts13_revocation_inputs(&demo.extracted.mso);
-        let claimed_statement = ZkPublicStatement {
-            spec_id: "stwo-euid-pid-v1".to_string(),
+        let claimed_statement = ProductPublicStatementV2 {
+            spec_id: PRODUCT_SPEC_ID.to_string(),
             version: PRODUCT_STATEMENT_VERSION,
             profile_id: product_profile_id(),
             circuit_hash: product_circuit_hash(),
@@ -1284,7 +2011,7 @@ mod tests {
         let proof_bytes = encode_mdoc_proof_envelope(&envelope).unwrap();
 
         assert!(
-            !verify_identity(claimed_statement, proof_bytes)
+            !verify_product_identity(claimed_statement, proof_bytes)
                 .expect("verification returns")
                 .ok,
             "C1 attack (age predicate never proven) must be rejected end-to-end"
@@ -1304,7 +2031,8 @@ mod tests {
             .extracted
             .birth_date_binding
             .0;
-        let proof = prove_identity(statement.clone(), witness).expect("identity proof builds");
+        let proof =
+            prove_product_identity(statement.clone(), witness).expect("identity proof builds");
         let envelope = decode_mdoc_proof_envelope(&proof).expect("V8 envelope decodes");
         assert_eq!(envelope.version, MDOC_PROOF_ENVELOPE_VERSION);
         assert!(!envelope.compressed_proof.is_empty());
@@ -1321,7 +2049,7 @@ mod tests {
             assert!(!raw_proof.windows(bytes.len()).any(|window| window == bytes));
         }
         assert!(
-            verify_identity(statement.clone(), proof.clone())
+            verify_product_identity(statement.clone(), proof.clone())
                 .expect("identity verification returns")
                 .ok,
             "canonical v2 fixture must verify through the SDK identity API"
@@ -1330,20 +2058,80 @@ mod tests {
         let mut changed = statement.clone();
         changed.session_transcript =
             eu_id_prover::mdoc::openid4vp_session_transcript(b"other-session");
-        assert!(!verify_identity(changed, proof.clone()).unwrap().ok);
+        assert!(!verify_product_identity(changed, proof.clone()).unwrap().ok);
 
         let mut changed = statement.clone();
         changed.now_epoch_seconds += 1;
-        assert!(!verify_identity(changed, proof.clone()).unwrap().ok);
+        assert!(!verify_product_identity(changed, proof.clone()).unwrap().ok);
 
         let mut changed = statement.clone();
         changed.age_threshold_years = Some(changed.age_threshold_years.unwrap() + 1);
-        assert!(!verify_identity(changed, proof.clone()).unwrap().ok);
+        assert!(!verify_product_identity(changed, proof.clone()).unwrap().ok);
 
         let mut age_statement = statement.clone();
         age_statement.predicate_mode = PredicateMode::Age;
         age_statement.accepted_alpha2_countries = None;
-        assert!(!verify_identity(age_statement, proof).unwrap().ok);
+        assert!(!verify_product_identity(age_statement, proof).unwrap().ok);
+    }
+
+    #[test]
+    #[cfg(feature = "legacy-product-v1-demo")]
+    #[ignore = "runs the product mdoc STWO prover through the legacy Product V1 adapter"]
+    fn legacy_product_v1_round_trips_through_the_tagged_wallet_api() {
+        let (statement, witness, _) = canonical_v2_mdoc_sdk_fixture();
+        let legacy_statement = legacy_statement_from(&statement);
+        let certificates =
+            eu_id_prover::mdoc::product_x5chain_certificates(&witness.document).unwrap();
+        let legacy_witness = ProductMdocWitnessV1 {
+            document: witness.document,
+            trusted_issuers: TrustedIssuers::Certificates(certificates),
+        };
+
+        let proof = prove_identity(
+            ZkPublicStatement::ProductV1(legacy_statement.clone()),
+            ZkMdocWitness::ProductV1(legacy_witness),
+        )
+        .expect("legacy Product V1 proof builds");
+        assert!(
+            verify_identity(ZkPublicStatement::ProductV1(legacy_statement), proof)
+                .expect("legacy Product V1 verification returns")
+                .ok
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "current-wallet-p256-demo")]
+    #[ignore = "runs the P-256 prover through the untouched wallet's TS13-tagged age adapter"]
+    fn current_wallet_age_round_trips_through_the_tagged_api() {
+        let (mut statement, witness, _) = canonical_v2_mdoc_sdk_fixture();
+        statement.predicate_mode = PredicateMode::Age;
+        statement.accepted_alpha2_countries = None;
+        let holder_statement = legacy_ts13_statement_from(&statement, false);
+        let verifier_statement = legacy_ts13_statement_from(&statement, true);
+        let holder_witness = legacy_ts13_witness_from(&witness);
+
+        let proof = prove_identity(
+            ZkPublicStatement::Ts13DemoV1(holder_statement),
+            ZkMdocWitness::Ts13DemoV1(holder_witness),
+        )
+        .expect("untouched wallet age proof builds");
+        assert!(
+            verify_identity(
+                ZkPublicStatement::Ts13DemoV1(verifier_statement.clone()),
+                proof.clone(),
+            )
+            .expect("trusted verifier returns")
+            .ok
+        );
+
+        let mut wrong_session = verifier_statement;
+        wrong_session.session_transcript =
+            eu_id_prover::mdoc::openid4vp_session_transcript(b"other-session");
+        assert!(
+            !verify_identity(ZkPublicStatement::Ts13DemoV1(wrong_session), proof)
+                .expect("wrong session returns a verdict")
+                .ok
+        );
     }
 
     #[test]
@@ -1356,21 +2144,22 @@ mod tests {
         let mut age_only = base.clone();
         age_only.predicate_mode = PredicateMode::Age;
         age_only.accepted_alpha2_countries = None;
-        let proof = prove_identity(age_only.clone(), witness.clone()).expect("age-only proves");
+        let proof =
+            prove_product_identity(age_only.clone(), witness.clone()).expect("age-only proves");
         assert!(
-            verify_identity(age_only, proof.clone())
+            verify_product_identity(age_only, proof.clone())
                 .expect("age-only verification returns")
                 .ok,
             "age-only statement must verify through the SDK identity API"
         );
-        assert!(!verify_identity(base.clone(), proof).unwrap().ok);
+        assert!(!verify_product_identity(base.clone(), proof).unwrap().ok);
 
         let mut nat_only = base;
         nat_only.predicate_mode = PredicateMode::Nat;
         nat_only.age_threshold_years = None;
-        let proof = prove_identity(nat_only.clone(), witness).expect("nat-only proves");
+        let proof = prove_product_identity(nat_only.clone(), witness).expect("nat-only proves");
         assert!(
-            verify_identity(nat_only, proof)
+            verify_product_identity(nat_only, proof)
                 .expect("nat-only verification returns")
                 .ok,
             "nat-only statement must verify through the SDK identity API"
@@ -1512,7 +2301,7 @@ mod tests {
     #[test]
     fn product_contract_rejects_every_unsupported_identity_label() {
         let statement = sample_statement();
-        validate_product_statement_contract(&statement).unwrap();
+        reconstruct_mdoc_statement(&statement).unwrap();
 
         let mut invalid = Vec::new();
         let mut changed = statement.clone();
@@ -1530,7 +2319,7 @@ mod tests {
 
         for statement in invalid {
             assert!(matches!(
-                validate_product_statement_contract(&statement),
+                reconstruct_mdoc_statement(&statement),
                 Err(ZkError::InvalidInput(_))
             ));
         }
@@ -1538,9 +2327,9 @@ mod tests {
 
     #[test]
     fn product_contract_bounds_and_canonicalizes_public_vectors() {
-        let rejects = |statement: ZkPublicStatement| {
+        let rejects = |statement: ProductPublicStatementV2| {
             assert!(matches!(
-                validate_product_statement_contract(&statement),
+                reconstruct_mdoc_statement(&statement),
                 Err(ZkError::InvalidInput(_))
             ));
         };
@@ -1566,29 +2355,46 @@ mod tests {
         let mut changed = sample_statement();
         changed.predicate_mode = PredicateMode::Age;
         changed.accepted_alpha2_countries = None;
-        validate_product_statement_contract(&changed).unwrap();
+        reconstruct_mdoc_statement(&changed).unwrap();
         changed.accepted_alpha2_countries = Some(vec!["BE".to_string(), "CY".to_string()]);
         rejects(changed);
 
         let mut changed = sample_statement();
         changed.predicate_mode = PredicateMode::Nat;
         changed.age_threshold_years = None;
-        validate_product_statement_contract(&changed).unwrap();
+        reconstruct_mdoc_statement(&changed).unwrap();
         changed.age_threshold_years = Some(18);
         rejects(changed);
 
         let mut changed = sample_statement();
         changed.accepted_alpha2_countries = Some(vec!["CY".to_string(), "BE".to_string()]);
-        rejects(changed);
+        assert!(matches!(
+            reconstruct_mdoc_statement(&changed),
+            Err(ZkError::InvalidInput(message))
+                if message == "accepted nationality set must be sorted and unique"
+        ));
 
         let mut changed = sample_statement();
         changed.accepted_alpha2_countries =
             Some(vec!["BE".to_string(), "BE".to_string(), "CY".to_string()]);
-        rejects(changed);
+        assert!(matches!(
+            reconstruct_mdoc_statement(&changed),
+            Err(ZkError::InvalidInput(message))
+                if message == "accepted nationality set must be sorted and unique"
+        ));
+
+        let mut changed = sample_statement();
+        changed.age_threshold_years = Some(200);
+        changed.accepted_alpha2_countries = Some(vec!["CY".to_string(), "BE".to_string()]);
+        assert!(matches!(
+            reconstruct_mdoc_statement(&changed),
+            Err(ZkError::InvalidInput(message))
+                if message == "accepted nationality set must be sorted and unique"
+        ));
 
         let mut changed = sample_statement();
         changed.accepted_alpha2_countries = Some(vec!["BE".to_string()]);
-        validate_product_statement_contract(&changed).unwrap();
+        reconstruct_mdoc_statement(&changed).unwrap();
 
         let mut changed = sample_statement();
         changed.accepted_alpha2_countries = Some(Vec::new());
@@ -1604,8 +2410,8 @@ mod tests {
         rejects(changed);
     }
 
-    fn bounded_witness(document: Vec<u8>) -> ZkMdocWitness {
-        ZkMdocWitness {
+    fn bounded_witness(document: Vec<u8>) -> ProductMdocWitnessV2 {
+        ProductMdocWitnessV2 {
             document,
             revocation_id_lo: 0,
             revocation_id_hi: u64::MAX,
@@ -1615,22 +2421,22 @@ mod tests {
     }
 
     #[test]
-    fn product_witness_rejects_unbounded_documents() {
-        validate_product_witness(&bounded_witness(vec![0x80])).unwrap();
+    fn product_document_rejects_unbounded_inputs() {
+        validate_product_document(&bounded_witness(vec![0x80])).unwrap();
 
         for witness in [
             bounded_witness(Vec::new()),
             bounded_witness(vec![0; MAX_PRODUCT_MDOC_DOCUMENT_BYTES + 1]),
         ] {
             assert!(matches!(
-                validate_product_witness(&witness),
+                validate_product_document(&witness),
                 Err(ZkError::InvalidInput(_))
             ));
         }
     }
 
     #[test]
-    fn product_witness_rejects_malformed_or_deep_cbor_before_decoding() {
+    fn product_document_rejects_malformed_or_deep_cbor_before_decoding() {
         for document in [
             vec![0x9f, 0xff],
             [vec![0x81; 9], vec![0xf6]].concat(),
@@ -1638,7 +2444,7 @@ mod tests {
         ] {
             let witness = bounded_witness(document);
             assert!(matches!(
-                validate_product_witness(&witness),
+                validate_product_document(&witness),
                 Err(ZkError::InvalidInput(message)) if message.contains("CBOR structure")
             ));
         }
@@ -1669,7 +2475,7 @@ mod tests {
     fn public_entry_points_validate_the_product_contract_before_proof_processing() {
         let mut statement = sample_statement();
         statement.version = PRODUCT_STATEMENT_VERSION + 1;
-        let witness = ZkMdocWitness {
+        let witness = ProductMdocWitnessV2 {
             document: Vec::new(),
             revocation_id_lo: 0,
             revocation_id_hi: u64::MAX,
@@ -1678,11 +2484,11 @@ mod tests {
         };
 
         assert!(matches!(
-            prove_identity(statement.clone(), witness),
+            prove_product_identity(statement.clone(), witness),
             Err(ZkError::InvalidInput(_))
         ));
         assert!(matches!(
-            verify_identity(statement, Vec::new()),
+            verify_product_identity(statement, Vec::new()),
             Err(ZkError::InvalidInput(_))
         ));
     }
@@ -1691,7 +2497,7 @@ mod tests {
     fn public_entry_points_reject_a_noncanonical_session_transcript() {
         let mut statement = sample_statement();
         statement.session_transcript = vec![0x9f, 0xff];
-        let witness = ZkMdocWitness {
+        let witness = ProductMdocWitnessV2 {
             document: Vec::new(),
             revocation_id_lo: 0,
             revocation_id_hi: u64::MAX,
@@ -1700,11 +2506,11 @@ mod tests {
         };
 
         assert!(matches!(
-            prove_identity(statement.clone(), witness),
+            prove_product_identity(statement.clone(), witness),
             Err(ZkError::InvalidInput(_))
         ));
         assert!(matches!(
-            verify_identity(statement, Vec::new()),
+            verify_product_identity(statement, Vec::new()),
             Err(ZkError::InvalidInput(_))
         ));
     }
@@ -1713,7 +2519,7 @@ mod tests {
     fn verify_rejects_a_malformed_proof() {
         // Garbage bytes do not deserialize to an envelope -> fail-closed, no error.
         let s = sample_statement();
-        let result = verify_identity(s, b"not a proof envelope".to_vec()).unwrap();
+        let result = verify_product_identity(s, b"not a proof envelope".to_vec()).unwrap();
         assert!(!result.ok);
     }
 
@@ -1872,7 +2678,7 @@ mod tests {
             compressed_proof: b"not a zstd frame".to_vec(),
         })
         .unwrap();
-        assert!(!verify_identity(statement, envelope).unwrap().ok);
+        assert!(!verify_product_identity(statement, envelope).unwrap().ok);
     }
 
     #[test]
@@ -1884,7 +2690,7 @@ mod tests {
             compressed_proof: compressed_junk,
         })
         .unwrap();
-        assert!(!verify_identity(statement, envelope).unwrap().ok);
+        assert!(!verify_product_identity(statement, envelope).unwrap().ok);
     }
 
     #[test]

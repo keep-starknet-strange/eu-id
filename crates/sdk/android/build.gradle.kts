@@ -28,6 +28,18 @@ val reproducibleBuild = workspaceRoot.resolve("scripts/reproducible-build.sh")
 val allowDirtyBuild = providers.gradleProperty("allowDirtyBuild")
     .map(String::toBoolean)
     .getOrElse(false)
+val legacyProductV1Demo = providers.gradleProperty("legacyProductV1Demo")
+    .map(String::toBoolean)
+    .getOrElse(false)
+val currentWalletP256Demo = providers.gradleProperty("currentWalletP256Demo")
+    .map(String::toBoolean)
+    .getOrElse(false)
+val sdkFeatures = buildList {
+    if (legacyProductV1Demo) add("legacy-product-v1-demo")
+    if (currentWalletP256Demo) add("current-wallet-p256-demo")
+}
+val sdkFeatureArguments =
+    if (sdkFeatures.isEmpty()) emptyList() else listOf("--features", sdkFeatures.joinToString(","))
 
 // Read the published version from `[workspace.package]`.
 // This value keeps the AAR version equal to the Rust crate version.
@@ -41,6 +53,11 @@ val cargoVersion: String = run {
 // Keep generated files out of the checked-in source tree.
 val jniLibsOut = layout.buildDirectory.dir("generated/jniLibs").get().asFile
 val bindingsOut = layout.buildDirectory.dir("generated/uniffi").get().asFile
+
+fun File.deleteRecursivelyOrFail() {
+    check(!exists() || deleteRecursively()) { "Failed to delete $absolutePath" }
+}
+
 val legacyGeneratedDirs = listOf(
     file("$projectDir/src/main/jniLibs"),
     file("$projectDir/src/main/kotlin"),
@@ -138,17 +155,18 @@ val cargoNdkBuild by tasks.registering(GeneratedDirectoryExec::class) {
     inputs.property("ndkVersion", ndkVer)
     inputs.property("cargoNdkVersion", cargoNdkVer)
     inputs.property("allowDirtyBuild", allowDirtyBuild)
+    inputs.property("legacyProductV1Demo", legacyProductV1Demo)
+    inputs.property("currentWalletP256Demo", currentWalletP256Demo)
     environment("CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS", linkerFlags.joinToString(" "))
     environment("CARGO_TARGET_X86_64_LINUX_ANDROID_RUSTFLAGS", linkerFlags.joinToString(" "))
     val dirtyArgument = if (allowDirtyBuild) listOf("--allow-dirty") else emptyList()
     commandLine(
         listOf("bash", reproducibleBuild.absolutePath) + dirtyArgument + listOf(
-        cargoExe, "ndk",
-        "-t", "arm64-v8a", "-t", "x86_64",
-        "-o", jniLibsOut.absolutePath,
-        "rustc", "--locked", "--offline", "--release", "-p", "sdk", "--lib",
-        "--crate-type", "cdylib",
-        ),
+            cargoExe, "ndk",
+            "-t", "arm64-v8a", "-t", "x86_64",
+            "-o", jniLibsOut.absolutePath,
+            "rustc", "--locked", "--offline", "--release", "-p", "sdk", "--lib",
+        ) + sdkFeatureArguments + listOf("--crate-type", "cdylib"),
     )
     inputs.files(rustWorkspaceInputs).withPathSensitivity(PathSensitivity.RELATIVE)
     outputDirectory.set(jniLibsOut)
@@ -157,7 +175,7 @@ val cargoNdkBuild by tasks.registering(GeneratedDirectoryExec::class) {
         require(actual == "cargo-ndk $cargoNdkVer") {
             "cargo-ndk $cargoNdkVer is required, got ${actual.ifEmpty { "unknown" }}"
         }
-        project.delete(outputDirectory)
+        outputDirectory.get().asFile.deleteRecursivelyOrFail()
     }
 }
 
@@ -185,7 +203,7 @@ val generateUniffiBindings by tasks.registering(GeneratedDirectoryExec::class) {
     inputs.file(uniffiConfig).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.file(builtLib).withPathSensitivity(PathSensitivity.NONE)
     outputDirectory.set(bindingsOut)
-    doFirst { project.delete(outputDirectory) }
+    doFirst { outputDirectory.get().asFile.deleteRecursivelyOrFail() }
 }
 
 androidComponents.onVariants { variant ->

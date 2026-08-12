@@ -41,7 +41,7 @@ use stwo_constraint_framework::{
 pub(crate) const MDOC_CBOR_MAX_DEPTH: usize = 8;
 const MDOC_CBOR_MIN_LOG_SIZE: u32 = 9;
 const MDOC_CBOR_MAX_LOG_SIZE: u32 = 17;
-const MDOC_CBOR_BLIND_ROWS: usize = 256;
+pub(crate) const MDOC_CBOR_BLIND_ROWS: usize = 256;
 pub(crate) const MDOC_CBOR_MAX_ACTIVE_BYTES: usize =
     (1usize << MDOC_CBOR_MAX_LOG_SIZE) - MDOC_CBOR_BLIND_ROWS;
 const SHA_BLOCK_BYTES: usize = 64;

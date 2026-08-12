@@ -67,7 +67,6 @@ use stwo_sha256::witness::compute_packed_sha256_witness;
 use crate::mdoc_cbor_stream::{
     MdocCborInputMode, MdocCborStream, MdocCborStreamInteractionClaim, MdocCborWitness,
 };
-use crate::product_profile::Policy;
 
 use crate::mdoc_mac::{
     MdocMacBind, MdocMacInteractionClaim, MdocP4bMacPublic, MdocP4bMacSharedState,
@@ -78,6 +77,15 @@ use crate::mdoc_scope::{
     MDOC_SCOPE_MAX_ITEMS, MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID, NORMALIZED_MSO_STREAM_ID,
 };
 use crate::mdoc_validity::{mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim};
+use crate::product_profile::{
+    Policy, PRODUCT_BIRTH_DATE_ELEMENT, PRODUCT_DOCTYPE, PRODUCT_FIXED_PACKED_SHA_MESSAGES,
+    PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES, PRODUCT_ITEM_CBOR_LOG_SIZE,
+    PRODUCT_MAX_ATTRIBUTES, PRODUCT_MAX_CBOR_LOG_SIZE, PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES,
+    PRODUCT_MAX_MSO_PAYLOAD_BYTES, PRODUCT_MAX_PACKED_SHA_MESSAGES,
+    PRODUCT_MAX_SELECTED_ITEM_BYTES, PRODUCT_NAMESPACE, PRODUCT_NATIONALITY_ELEMENT,
+    PRODUCT_TS13_REVOCATION_MESSAGE_BYTES,
+};
+use crate::ts13::ts13_revocation_message_bytes;
 
 use crate::Error;
 use air_core::claim_mask::{
@@ -87,11 +95,24 @@ use air_core::claim_mask::{
 
 /// Current product profile: deterministic CBOR with text-form values.
 const MDOC_PROFILE_VERSION: &str = "2.0";
-const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
 const PRODUCT_SEMANTICS_ERROR: &str =
     "product profile requires 1..=2 mdoc 2.0 text-date/alpha-2 predicate attributes";
 const DEMO_REQUEST_BINDING: [u8; 32] = [0x51; 32];
 const DEMO_VERIFICATION_TIME_EPOCH_SECONDS: u64 = 1_783_080_000;
+const ES256_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x26];
+const CBOR_TAG_ENCODED_CBOR: u64 = 24;
+const CBOR_TAG_FULL_DATE: u64 = 1004;
+pub(crate) const MDOC_MSO_PAYLOAD_FIELD_ID: u32 = MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID;
+const MDOC_REVOCATION_MESSAGE_FIELD_ID: u32 = 41;
+const PRODUCT_SESSION_TRANSCRIPT_BYTES: usize = 56;
+const PACKED_SHA_ISSUER_SLOT: u32 = 0;
+const PACKED_SHA_MSO_SLOT: u32 = 1;
+const PACKED_SHA_REVOCATION_SLOT: u32 = 2;
+const PACKED_SHA_ITEM_SLOT_BASE: u32 = 3;
+const DEMO_PRIVATE_RANDOM_CANARY: [u8; 32] = [
+    0x9f, 0x4a, 0x7c, 0x1d, 0x2e, 0x8b, 0x63, 0x50, 0xa6, 0xd9, 0x41, 0x73, 0xbc, 0x05, 0x28, 0xee,
+    0x4d, 0x7a, 0x91, 0x63, 0xf0, 0xc2, 0xb8, 0x5e, 0x11, 0x74, 0xda, 0xc9, 0x6e, 0x3f, 0x70, 0x2b,
+];
 
 fn take_claim_masks(
     ring: &mut ClaimMaskRing,
@@ -102,22 +123,6 @@ fn take_claim_masks(
         .map(|&log_size| ring.take(log_size))
         .collect()
 }
-const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
-const ES256_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x26];
-const CBOR_TAG_ENCODED_CBOR: u64 = 24;
-const CBOR_TAG_FULL_DATE: u64 = 1004;
-pub(crate) const MDOC_MSO_PAYLOAD_FIELD_ID: u32 = MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID;
-const MDOC_REVOCATION_MESSAGE_FIELD_ID: u32 = 41;
-const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
-const PRODUCT_SESSION_TRANSCRIPT_BYTES: usize = 56;
-const PACKED_SHA_ISSUER_SLOT: u32 = 0;
-const PACKED_SHA_MSO_SLOT: u32 = 1;
-const PACKED_SHA_REVOCATION_SLOT: u32 = 2;
-const PACKED_SHA_ITEM_SLOT_BASE: u32 = 3;
-const DEMO_PRIVATE_RANDOM_CANARY: [u8; 32] = [
-    0x9f, 0x4a, 0x7c, 0x1d, 0x2e, 0x8b, 0x63, 0x50, 0xa6, 0xd9, 0x41, 0x73, 0xbc, 0x05, 0x28, 0xee,
-    0x4d, 0x7a, 0x91, 0x63, 0xf0, 0xc2, 0xb8, 0x5e, 0x11, 0x74, 0xda, 0xc9, 0x6e, 0x3f, 0x70, 0x2b,
-];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
@@ -352,22 +357,25 @@ fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Resul
 pub(crate) fn validate_product_requested_attributes(
     attributes: &[MdocRequestedAttribute],
 ) -> Result<(), MdocError> {
-    if !(1..=crate::product_profile::PRODUCT_MAX_ATTRIBUTES).contains(&attributes.len()) {
+    if !(1..=PRODUCT_MAX_ATTRIBUTES).contains(&attributes.len()) {
         return Err(MdocError::InvalidAttributeCount {
             count: attributes.len(),
         });
     }
     validate_requested_attributes(attributes)?;
     let current_layout = match attributes {
-        [attribute] => matches!(
-            (attribute.element_identifier.as_str(), &attribute.mode),
-            ("birth_date", MdocDisclosureMode::AgeOver)
-                | ("nationality", MdocDisclosureMode::Alpha2Set)
-        ),
+        [attribute] => match &attribute.mode {
+            MdocDisclosureMode::AgeOver => {
+                attribute.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
+            }
+            MdocDisclosureMode::Alpha2Set => {
+                attribute.element_identifier == PRODUCT_NATIONALITY_ELEMENT
+            }
+        },
         [birth_date, nationality] => {
-            birth_date.element_identifier == "birth_date"
+            birth_date.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
                 && matches!(birth_date.mode, MdocDisclosureMode::AgeOver)
-                && nationality.element_identifier == "nationality"
+                && nationality.element_identifier == PRODUCT_NATIONALITY_ELEMENT
                 && matches!(nationality.mode, MdocDisclosureMode::Alpha2Set)
         }
         _ => false,
@@ -383,21 +391,20 @@ fn validate_product_sha_input_sizes(
     issuer: &[u8],
     selected_items: &[&[u8]],
 ) -> Result<(), MdocError> {
-    if mso.len() > crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES {
+    if mso.len() > PRODUCT_MAX_MSO_PAYLOAD_BYTES {
         return Err(MdocError::InputTooLarge {
             input: "MSO payload",
             actual: mso.len(),
-            maximum: crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES,
+            maximum: PRODUCT_MAX_MSO_PAYLOAD_BYTES,
         });
     }
     let issuer_maximum = mso
         .len()
-        .checked_add(crate::product_profile::PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES)
+        .checked_add(PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES)
         .ok_or(MdocError::InputTooLarge {
             input: "MSO payload",
             actual: mso.len(),
-            maximum: usize::MAX
-                - crate::product_profile::PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES,
+            maximum: usize::MAX - PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES,
         })?;
     if issuer.len() > issuer_maximum {
         return Err(MdocError::InputTooLarge {
@@ -407,22 +414,22 @@ fn validate_product_sha_input_sizes(
         });
     }
     for &item in selected_items {
-        if item.len() > crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES {
+        if item.len() > PRODUCT_MAX_SELECTED_ITEM_BYTES {
             return Err(MdocError::InputTooLarge {
                 input: "selected IssuerSignedItem",
                 actual: item.len(),
-                maximum: crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES,
+                maximum: PRODUCT_MAX_SELECTED_ITEM_BYTES,
             });
         }
     }
     let invalid_count = MdocError::InvalidAttributeCount {
         count: selected_items.len(),
     };
-    let message_count = 3usize
+    let message_count = PRODUCT_FIXED_PACKED_SHA_MESSAGES
         .checked_add(selected_items.len())
         .ok_or_else(|| invalid_count.clone())?;
-    if selected_items.len() > crate::product_profile::PRODUCT_MAX_ATTRIBUTES
-        || message_count > crate::product_profile::PRODUCT_MAX_PACKED_SHA_MESSAGES
+    if selected_items.len() > PRODUCT_MAX_ATTRIBUTES
+        || message_count > PRODUCT_MAX_PACKED_SHA_MESSAGES
     {
         return Err(invalid_count);
     }
@@ -430,10 +437,10 @@ fn validate_product_sha_input_sizes(
 }
 
 pub(crate) fn validate_product_mdoc_request(request: &MdocPidRequest) -> Result<(), MdocError> {
-    if request.doctype != PID_DOCTYPE {
+    if request.doctype != PRODUCT_DOCTYPE {
         return Err(MdocError::ProductDoctypeMismatch);
     }
-    if request.namespace != PID_NAMESPACE {
+    if request.namespace != PRODUCT_NAMESPACE {
         return Err(MdocError::ProductNamespaceMismatch);
     }
     strict_verification_timestamp(request.verification_time_epoch_seconds)?;
@@ -551,11 +558,11 @@ pub struct DemoMdocCircuitFixture {
 pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
     demo_mdoc_circuit_fixture_with_attributes(vec![
         MdocRequestedAttribute {
-            element_identifier: "birth_date".to_string(),
+            element_identifier: PRODUCT_BIRTH_DATE_ELEMENT.to_string(),
             mode: MdocDisclosureMode::AgeOver,
         },
         MdocRequestedAttribute {
-            element_identifier: "nationality".to_string(),
+            element_identifier: PRODUCT_NATIONALITY_ELEMENT.to_string(),
             mode: MdocDisclosureMode::Alpha2Set,
         },
     ])
@@ -571,8 +578,8 @@ fn demo_mdoc_circuit_fixture_with_attributes(
         crate::ts13::demo_ts13_revocation_inputs(&demo_document.mso_payload);
     let request = MdocPidRequest {
         request_binding: DEMO_REQUEST_BINDING,
-        doctype: PID_DOCTYPE.to_string(),
-        namespace: PID_NAMESPACE.to_string(),
+        doctype: PRODUCT_DOCTYPE.to_string(),
+        namespace: PRODUCT_NAMESPACE.to_string(),
         attributes,
         session_transcript,
         required_issuer_public_key: demo_document.issuer_key.clone(),
@@ -621,8 +628,7 @@ fn extract_product_pid_mdoc_inner(
     document: &[u8],
     request: &MdocPidRequest,
 ) -> Result<ExtractedPidMdoc, MdocError> {
-    let requested_attributes = request.attributes.clone();
-    validate_requested_attributes(&requested_attributes)?;
+    let requested_attributes = &request.attributes;
     let doc = decode_value(document)?;
     let doc_map = current_product_document_map(&doc, request)?;
     let doctype = text_field(doc_map, "docType")?.to_string();
@@ -646,7 +652,7 @@ fn extract_product_pid_mdoc_inner(
     )?;
 
     let mso = parse_mso(&issuer_auth.payload, &request.namespace)?;
-    if !is_supported_mdoc_profile_version(&mso.version) {
+    if mso.version != MDOC_PROFILE_VERSION {
         return Err(MdocError::UnsupportedMsoVersion(mso.version));
     }
     if mso.doc_type != request.doctype {
@@ -655,9 +661,9 @@ fn extract_product_pid_mdoc_inner(
     let device_key = mso.device_key;
 
     let namespace_items = namespace_items(issuer_signed, &request.namespace)?;
-    validate_current_product_selected_items(namespace_items, &requested_attributes)?;
+    validate_current_product_selected_items(namespace_items, requested_attributes)?;
     let mut extracted_attributes = Vec::with_capacity(requested_attributes.len());
-    for attribute in &requested_attributes {
+    for attribute in requested_attributes {
         let item = find_item(namespace_items, &attribute.element_identifier)?
             .ok_or_else(|| MdocError::ElementMissing(attribute.element_identifier.clone()))?;
         validate_item_digest(
@@ -777,7 +783,7 @@ fn extract_product_pid_mdoc_inner(
         request_binding: request.request_binding,
         doctype,
         namespace: request.namespace.clone(),
-        attributes: requested_attributes,
+        attributes: request.attributes.clone(),
         extracted_attributes,
         birth_date_bytes: parsed_birth.bytes,
         birth_date_binding: parsed_birth.binding,
@@ -1153,12 +1159,21 @@ fn mdoc_scope_parser_count(attribute_count: usize) -> Option<usize> {
     attribute_count.checked_mul(2)?.checked_add(3)
 }
 
-fn ts13_revocation_message_bytes(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
-    let mut bytes = [0u8; TS13_REVOCATION_MESSAGE_LEN];
-    bytes[..8].copy_from_slice(&id_lo.to_le_bytes());
-    bytes[8..16].copy_from_slice(&id_hi.to_le_bytes());
-    bytes[16..].copy_from_slice(&epoch.to_le_bytes());
-    bytes
+fn product_parser_max_message_len(input: &MdocScopeParserInput) -> Option<u32> {
+    let bytes = match input {
+        MdocScopeParserInput::ShaIssuer => PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES,
+        MdocScopeParserInput::ShaItem(_) => PRODUCT_MAX_SELECTED_ITEM_BYTES,
+        MdocScopeParserInput::Raw(_) => return None,
+    };
+    Some(u32::try_from(bytes).expect("product parser byte bound fits u32"))
+}
+
+const fn product_parser_log_size(slot: usize) -> u32 {
+    if slot < 3 {
+        PRODUCT_MAX_CBOR_LOG_SIZE
+    } else {
+        PRODUCT_ITEM_CBOR_LOG_SIZE
+    }
 }
 
 fn current_product_circuit_semantics(statement: &MdocCircuitStatement) -> bool {
@@ -1184,23 +1199,26 @@ fn current_product_circuit_semantics(statement: &MdocCircuitStatement) -> bool {
     let unique_nationality = nationality_indices.next().is_none();
 
     let current_attribute_layout = match statement.attributes.as_slice() {
-        [attribute] => matches!(
-            (attribute.element_identifier.as_str(), &attribute.mode),
-            ("birth_date", MdocDisclosureMode::AgeOver)
-                | ("nationality", MdocDisclosureMode::Alpha2Set)
-        ),
+        [attribute] => match &attribute.mode {
+            MdocDisclosureMode::AgeOver => {
+                attribute.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
+            }
+            MdocDisclosureMode::Alpha2Set => {
+                attribute.element_identifier == PRODUCT_NATIONALITY_ELEMENT
+            }
+        },
         [birth_date, nationality] => {
-            birth_date.element_identifier == "birth_date"
+            birth_date.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
                 && matches!(birth_date.mode, MdocDisclosureMode::AgeOver)
-                && nationality.element_identifier == "nationality"
+                && nationality.element_identifier == PRODUCT_NATIONALITY_ELEMENT
                 && matches!(nationality.mode, MdocDisclosureMode::Alpha2Set)
         }
         _ => false,
     };
 
     statement.request_binding != [0u8; 32]
-        && statement.doctype == PID_DOCTYPE
-        && statement.namespace == PID_NAMESPACE
+        && statement.doctype == PRODUCT_DOCTYPE
+        && statement.namespace == PRODUCT_NAMESPACE
         && validate_product_policy(&statement.policy, statement.verification_time_epoch_seconds)
             .is_ok()
         && current_attribute_layout
@@ -1212,8 +1230,8 @@ fn current_product_circuit_semantics(statement: &MdocCircuitStatement) -> bool {
 
 fn current_product_public_semantics(statement: &MdocPublicStatement) -> bool {
     statement.request_binding != [0u8; 32]
-        && statement.doctype == PID_DOCTYPE
-        && statement.namespace == PID_NAMESPACE
+        && statement.doctype == PRODUCT_DOCTYPE
+        && statement.namespace == PRODUCT_NAMESPACE
         && validate_product_policy(&statement.policy, statement.verification_time_epoch_seconds)
             .is_ok()
         && validate_product_requested_attributes(&statement.attributes).is_ok()
@@ -1266,6 +1284,51 @@ fn nat_public_input_for(statement: &MdocCircuitStatement) -> predicates::NatPubl
 /// depth at most eight. Only structurally valid input reaches `ciborium`.
 pub fn validate_product_mdoc_cbor_structure(bytes: &[u8]) -> Result<(), MdocError> {
     validate_product_cbor_structure(bytes)
+}
+
+/// Returns the issuerAuth payload from a structurally valid product document.
+///
+/// The legacy Product V1 SDK bridge uses these exact signed MSO bytes only to
+/// create its deterministic demo revocation witness. The production extractor
+/// still performs the complete document, signature, issuer, and policy checks.
+pub fn product_mso_payload(document: &[u8]) -> Result<Vec<u8>, MdocError> {
+    Ok(product_issuer_auth(document)?.payload)
+}
+
+/// Returns the exact issuerAuth x5chain carried by a product document.
+pub fn product_x5chain_certificates(document: &[u8]) -> Result<Vec<Vec<u8>>, MdocError> {
+    let issuer_auth = product_issuer_auth(document)?;
+    let unprotected = expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?;
+    if unprotected.len() != 1 || value_i128(&unprotected[0].0).ok() != Some(33) {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "issuerAuth unprotected header must contain only x5chain",
+        ));
+    }
+    x5chain_certificates(&unprotected[0].1)
+        .map(|certificates| certificates.into_iter().map(<[u8]>::to_vec).collect())
+}
+
+/// Returns the P-256 leaf key carried by a product document's issuerAuth.
+///
+/// Legacy wallet adapters use this only while constructing a prover statement.
+/// Verifiers must still supply an independently trusted issuer key.
+pub fn product_issuer_public_key(document: &[u8]) -> Result<AffinePoint, MdocError> {
+    let issuer_auth = product_issuer_auth(document)?;
+    let unprotected = expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?;
+    if unprotected.len() != 1 || value_i128(&unprotected[0].0).ok() != Some(33) {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "issuerAuth unprotected header must contain only x5chain",
+        ));
+    }
+    leaf_key_from_x5chain(&unprotected[0].1)
+}
+
+fn product_issuer_auth(document: &[u8]) -> Result<CoseSign1, MdocError> {
+    validate_product_cbor_structure(document)?;
+    let document = decode_value(document)?;
+    let document = expect_map(&document, "product document")?;
+    let issuer_signed = map_field(document, "issuerSigned")?;
+    parse_cose_sign1(value_field(issuer_signed, "issuerAuth")?)
 }
 
 /// Largest raw CBOR envelope accepted by the product structural parser.
@@ -1617,7 +1680,7 @@ fn demo_mdoc_document_with_values(
     // Profile v2: canonical IssuerSignedItemBytes with PID Rulebook values.
     let birth_date_item = demo_issuer_signed_item(
         7,
-        "birth_date",
+        PRODUCT_BIRTH_DATE_ELEMENT,
         Value::Tag(
             CBOR_TAG_FULL_DATE,
             Box::new(Value::Text(birth_date.to_string())),
@@ -1626,7 +1689,7 @@ fn demo_mdoc_document_with_values(
     );
     let nationality_item = demo_issuer_signed_item(
         9,
-        "nationality",
+        PRODUCT_NATIONALITY_ELEMENT,
         Value::Array(
             nationalities
                 .iter()
@@ -1647,12 +1710,12 @@ fn demo_mdoc_document_with_values(
     ];
     let mso = canonicalize_product_cbor_value(Value::Map(vec![
         ("version".into(), MDOC_PROFILE_VERSION.into()),
-        ("docType".into(), PID_DOCTYPE.into()),
+        ("docType".into(), PRODUCT_DOCTYPE.into()),
         ("digestAlgorithm".into(), "SHA-256".into()),
         (
             "valueDigests".into(),
             Value::Map(vec![(
-                PID_NAMESPACE.into(),
+                PRODUCT_NAMESPACE.into(),
                 Value::Map(value_digest_entries),
             )]),
         ),
@@ -1687,18 +1750,21 @@ fn demo_mdoc_document_with_values(
     let device_signature = demo_cose_sign1_detached(
         &device_signing_key,
         Value::Map(Vec::new()),
-        &device_authentication_bytes(session_transcript, PID_DOCTYPE)
+        &device_authentication_bytes(session_transcript, PRODUCT_DOCTYPE)
             .expect("demo device auth payload builds"),
     );
 
     let bytes = encode_value(Value::Map(vec![
-        ("docType".into(), PID_DOCTYPE.into()),
+        ("docType".into(), PRODUCT_DOCTYPE.into()),
         (
             "issuerSigned".into(),
             Value::Map(vec![
                 (
                     "nameSpaces".into(),
-                    Value::Map(vec![(PID_NAMESPACE.into(), Value::Array(namespace_items))]),
+                    Value::Map(vec![(
+                        PRODUCT_NAMESPACE.into(),
+                        Value::Array(namespace_items),
+                    )]),
                 ),
                 ("issuerAuth".into(), issuer_auth),
             ]),
@@ -1968,7 +2034,7 @@ fn validate_current_product_mso_fields(mso: &[(Value, Value)]) -> Result<(), Mdo
     let value_digests = map_field(mso, "valueDigests")?;
     require_single_text_field(
         value_digests,
-        PID_NAMESPACE,
+        PRODUCT_NAMESPACE,
         "valueDigests must contain exactly one PID namespace",
     )?;
     let namespace_digests = expect_map(&value_digests[0].1, "valueDigests PID namespace")?;
@@ -2231,6 +2297,14 @@ fn caller_authoritative_leaf_key(
     x5chain: &Value,
     required_key: &AffinePoint,
 ) -> Result<AffinePoint, MdocError> {
+    let issuer_key = leaf_key_from_x5chain(x5chain)?;
+    if &issuer_key != required_key {
+        return Err(MdocError::UntrustedIssuerCertificate);
+    }
+    Ok(issuer_key)
+}
+
+fn leaf_key_from_x5chain(x5chain: &Value) -> Result<AffinePoint, MdocError> {
     let certificates = x5chain_certificates(x5chain)?;
     if certificates.len() != 1 {
         return Err(MdocError::InvalidCertificate(
@@ -2238,11 +2312,7 @@ fn caller_authoritative_leaf_key(
         ));
     }
     let certificate = parse_x509_certificate(certificates[0])?;
-    let issuer_key = affine_point_from_spki(certificate.spki_der)?;
-    if &issuer_key != required_key {
-        return Err(MdocError::UntrustedIssuerCertificate);
-    }
-    Ok(issuer_key)
+    affine_point_from_spki(certificate.spki_der)
 }
 
 fn x5chain_certificates(value: &Value) -> Result<Vec<&[u8]>, MdocError> {
@@ -2840,10 +2910,13 @@ fn validate_product_fixed_shape_logs(
     scope_log_size: u32,
 ) -> Result<(), Error> {
     let sha_shape_is_fixed = sha_log_size == crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
-    let mut cbor_log_sizes = cbor_log_sizes.into_iter().peekable();
-    let cbor_shape_is_fixed = cbor_log_sizes.peek().is_some()
+    let cbor_log_sizes = cbor_log_sizes.into_iter().collect::<Vec<_>>();
+    let cbor_shape_is_fixed = cbor_log_sizes.len() >= 3
         && cbor_log_sizes
-            .all(|log_size| log_size == crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE);
+            .iter()
+            .copied()
+            .enumerate()
+            .all(|(slot, log_size)| log_size == product_parser_log_size(slot));
     if !sha_shape_is_fixed
         || !cbor_shape_is_fixed
         || scope_log_size != crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE
@@ -3686,7 +3759,7 @@ fn revocation_range_interaction_trace(
             .collect(),
     );
     let epoch_bytes = epoch.to_le_bytes();
-    for byte_idx in 0..TS13_REVOCATION_MESSAGE_LEN {
+    for byte_idx in 0..PRODUCT_TS13_REVOCATION_MESSAGE_BYTES {
         sites.push(
             (0..n_vec_rows)
                 .map(|vec_row| {
@@ -3831,7 +3904,7 @@ impl FrameworkEval for MdocRevocationRangeEval {
             &digest_values,
         ));
         let field_id = m31_const::<E>(MDOC_REVOCATION_MESSAGE_FIELD_ID);
-        for byte_idx in 0..TS13_REVOCATION_MESSAGE_LEN {
+        for byte_idx in 0..PRODUCT_TS13_REVOCATION_MESSAGE_BYTES {
             let value = match byte_idx {
                 0..=7 => values[REVOCATION_U64_BYTES + byte_idx].clone(),
                 8..=15 => values[2 * REVOCATION_U64_BYTES + byte_idx - 8].clone(),
@@ -3869,7 +3942,7 @@ impl Air for MdocRevocationRangeBind {
             ],
             interaction: vec![
                 MDOC_REVOCATION_RANGE_LOG_SIZE;
-                (1 + TS13_REVOCATION_MESSAGE_LEN
+                (1 + PRODUCT_TS13_REVOCATION_MESSAGE_BYTES
                     + usize::from(self.claim_mask_challenge.is_some()))
                 .div_ceil(2)
                     * SECURE_EXTENSION_DEGREE
@@ -4212,7 +4285,7 @@ pub(crate) fn prove_mdoc_circuit(
 
 fn product_sha_messages<'a>(
     extracted: &'a ExtractedPidMdoc,
-    revocation_message: &'a [u8; TS13_REVOCATION_MESSAGE_LEN],
+    revocation_message: &'a [u8; PRODUCT_TS13_REVOCATION_MESSAGE_BYTES],
 ) -> Result<Vec<&'a [u8]>, MdocError> {
     let selected_items: Vec<&[u8]> = extracted
         .extracted_attributes
@@ -4225,7 +4298,7 @@ fn product_sha_messages<'a>(
         &selected_items,
     )?;
 
-    let mut messages = Vec::with_capacity(3 + selected_items.len());
+    let mut messages = Vec::with_capacity(PRODUCT_FIXED_PACKED_SHA_MESSAGES + selected_items.len());
     messages.push(extracted.issuer_sig_structure.as_slice());
     messages.push(extracted.mso.as_slice());
     messages.push(revocation_message.as_slice());
@@ -4294,11 +4367,11 @@ fn prove_mdoc_circuit_with_pcs_config(
     }
     let mut mdoc_cbor_streams = Vec::with_capacity(parser_specs.len());
     for (slot, spec) in parser_specs.into_iter().enumerate() {
-        let (input_handle, input_field_id, max_message_len) = match spec.input {
+        let max_message_len = product_parser_max_message_len(&spec.input);
+        let (input_handle, input_field_id) = match spec.input {
             MdocScopeParserInput::ShaIssuer => (
                 sha_field.clone(),
                 PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ISSUER_SLOT,
-                Some(6_164),
             ),
             MdocScopeParserInput::ShaItem(index) => {
                 if index >= extracted.extracted_attributes.len() {
@@ -4309,10 +4382,9 @@ fn prove_mdoc_circuit_with_pcs_config(
                 (
                     sha_field.clone(),
                     PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ITEM_SLOT_BASE + index as u32,
-                    Some(1_024),
                 )
             }
-            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id, None),
+            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id),
         };
         let bytes = match spec.mode {
             MdocCborInputMode::ShaPadded => {
@@ -4327,7 +4399,7 @@ fn prove_mdoc_circuit_with_pcs_config(
             input_field_id,
             input_handle,
             Some(spec.parsed),
-            crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE,
+            product_parser_log_size(slot),
             max_message_len,
         )
         .map_err(|error| Error::Prove(format!("mdoc CBOR parser: {error}")))?;
@@ -4342,8 +4414,7 @@ fn prove_mdoc_circuit_with_pcs_config(
         scope_handles.payload_hash_fields.clone(),
         None,
         crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE,
-        u32::try_from(crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES)
-            .expect("product MSO bound fits u32"),
+        u32::try_from(PRODUCT_MAX_MSO_PAYLOAD_BYTES).expect("product MSO bound fits u32"),
     )
     .map_err(|error| Error::Prove(format!("exact MSO CBOR/SHA binding: {error}")))?;
 
@@ -4726,11 +4797,11 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
         .map_err(|error| Error::Verify(format!("mdoc parser specs: {error}")))?;
     let mut mdoc_cbor_streams = Vec::with_capacity(expected_parser_count);
     for (index, spec) in parser_specs.into_iter().enumerate() {
-        let (input_handle, input_field_id, max_message_len) = match spec.input {
+        let max_message_len = product_parser_max_message_len(&spec.input);
+        let (input_handle, input_field_id) = match spec.input {
             MdocScopeParserInput::ShaIssuer => (
                 sha_field.clone(),
                 PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ISSUER_SLOT,
-                Some(6_164),
             ),
             MdocScopeParserInput::ShaItem(item_index) => {
                 if item_index >= attribute_count {
@@ -4741,10 +4812,9 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
                 (
                     sha_field.clone(),
                     PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ITEM_SLOT_BASE + item_index as u32,
-                    Some(1_024),
                 )
             }
-            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id, None),
+            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id),
         };
         mdoc_cbor_streams.push(
             MdocCborStream::verifier(
@@ -4768,8 +4838,7 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
         scope_handles.payload_hash_fields.clone(),
         None,
         crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE,
-        u32::try_from(crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES)
-            .expect("product MSO bound fits u32"),
+        u32::try_from(PRODUCT_MAX_MSO_PAYLOAD_BYTES).expect("product MSO bound fits u32"),
         proof.mso_exact_cbor_interaction_claim.clone(),
     )
     .map_err(|error| Error::Verify(format!("exact MSO CBOR/SHA binding: {error}")))?;
@@ -4794,7 +4863,7 @@ fn verify_mdoc_circuit_with_pcs_config_impl(
         PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
         -1,
         true,
-        TS13_REVOCATION_MESSAGE_LEN,
+        PRODUCT_TS13_REVOCATION_MESSAGE_BYTES,
         revocation_message_field.clone(),
         sha_field.clone(),
         proof.revocation_message_bind_interaction_claim.clone(),
@@ -6208,7 +6277,7 @@ mod mdoc_sha_table_tests {
         let mut transcript = openid4vp_session_transcript(b"request-context");
         transcript.push(0);
         assert!(matches!(
-            device_authentication_bytes(&transcript, PID_DOCTYPE),
+            device_authentication_bytes(&transcript, PRODUCT_DOCTYPE),
             Err(MdocError::Cbor(message)) if message.contains("trailing bytes")
         ));
     }
@@ -6760,7 +6829,7 @@ mod mdoc_sha_table_tests {
             );
         assert_ne!(extended_mso_total, zero);
 
-        let revocation_message = [0x5a; TS13_REVOCATION_MESSAGE_LEN];
+        let revocation_message = [0x5a; PRODUCT_TS13_REVOCATION_MESSAGE_BYTES];
         let revocation_padded = stwo_sha256::native::pad_message(&revocation_message);
         let (_, revocation_bridge) = exact_sha_message_interaction_trace(
             &revocation_message,
@@ -6805,13 +6874,36 @@ mod mdoc_sha_table_tests {
     fn product_fixed_shape_rejects_downward_log_mutations() {
         const SHA: u32 = crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
         const CBOR: u32 = crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE;
+        const ITEM_CBOR: u32 = crate::product_profile::PRODUCT_ITEM_CBOR_LOG_SIZE;
         const SCOPE: u32 = crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE;
 
-        validate_product_fixed_shape_logs(SHA, [CBOR, CBOR], SCOPE).unwrap();
+        validate_product_fixed_shape_logs(SHA, [CBOR, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR], SCOPE)
+            .unwrap();
         for (sha, cbor, scope, label) in [
-            (SHA - 1, [CBOR, CBOR], SCOPE, "SHA"),
-            (SHA, [CBOR - 1, CBOR], SCOPE, "CBOR"),
-            (SHA, [CBOR, CBOR], SCOPE - 1, "scope"),
+            (
+                SHA - 1,
+                [CBOR, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR],
+                SCOPE,
+                "SHA",
+            ),
+            (
+                SHA,
+                [CBOR - 1, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR],
+                SCOPE,
+                "issuer CBOR",
+            ),
+            (
+                SHA,
+                [CBOR, CBOR, CBOR, ITEM_CBOR - 1, ITEM_CBOR],
+                SCOPE,
+                "item CBOR",
+            ),
+            (
+                SHA,
+                [CBOR, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR],
+                SCOPE - 1,
+                "scope",
+            ),
         ] {
             assert!(
                 matches!(
@@ -7258,8 +7350,8 @@ mod coprocessor_tests {
             crate::ts13::demo_ts13_revocation_inputs(&document.mso_payload);
         let request = MdocPidRequest {
             request_binding: DEMO_REQUEST_BINDING,
-            doctype: PID_DOCTYPE.to_string(),
-            namespace: PID_NAMESPACE.to_string(),
+            doctype: PRODUCT_DOCTYPE.to_string(),
+            namespace: PRODUCT_NAMESPACE.to_string(),
             attributes,
             session_transcript,
             required_issuer_public_key: document.issuer_key.clone(),
@@ -7891,10 +7983,6 @@ mod coprocessor_tests {
             }
         }
     }
-}
-
-fn is_supported_mdoc_profile_version(version: &str) -> bool {
-    version == MDOC_PROFILE_VERSION
 }
 
 fn value_field<'a>(map: &'a [(Value, Value)], field: &'static str) -> Result<&'a Value, MdocError> {

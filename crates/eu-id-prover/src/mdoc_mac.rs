@@ -56,11 +56,6 @@ const CONSUMER_INTERACTION_COLS: usize = 2 * INTERACTION_COLS_PER_FRACTION;
 // Binding: issuer digest + revocation digest + 32 device-key bytes + two
 // half-value sites + optional committed claim mask = 37 fractions.
 const BINDING_INTERACTION_COLS: usize = 19 * INTERACTION_COLS_PER_FRACTION;
-const CHECK_NEW_SELECTOR_BOOLS: bool = false;
-const CHECK_S_CONSTRAINTS: bool = true;
-const CHECK_POST_COLUMN_CONSTRAINTS: bool = true;
-const CHECK_POST_CONSTRAINTS: bool = true;
-const CHECK_POST_FINAL_TAG: bool = true;
 const ISSUER_SHA_MSG_ID: u32 = 0;
 const REVOCATION_SHA_MSG_ID: u32 = 2;
 
@@ -127,27 +122,6 @@ pub(crate) struct MdocMacBind {
     consumer_decoys: Option<MacConsumerDecoyRows>,
     consumer_component: Option<ConsumerComponent>,
     binding_component: Option<BindingComponent>,
-}
-
-impl Clone for MdocMacBind {
-    fn clone(&self) -> Self {
-        Self {
-            rows: self.rows.clone(),
-            mac_state: self.mac_state.clone(),
-            packed_sha_digest_handle: self.packed_sha_digest_handle.clone(),
-            packed_sha_digest_relation: None,
-            issuer_field_handle: self.issuer_field_handle.clone(),
-            tags: self.tags,
-            av: self.av,
-            mac_half_relation: None,
-            claim_mask_traces: self.claim_mask_traces.clone(),
-            claim_mask_challenge: self.claim_mask_challenge.clone(),
-            interaction_claim: self.interaction_claim.clone(),
-            consumer_decoys: self.consumer_decoys.clone(),
-            consumer_component: None,
-            binding_component: None,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -438,11 +412,7 @@ impl Air for MdocMacBind {
     }
 
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
-            std::iter::repeat_n(CONSUMER_LOG_SIZE, POST_TRACE_COLS).collect()
-        } else {
-            Vec::new()
-        }
+        std::iter::repeat_n(CONSUMER_LOG_SIZE, POST_TRACE_COLS).collect()
     }
 
     fn verify_post_interaction(
@@ -575,16 +545,6 @@ impl FrameworkEval for MacConsumerEval {
         eval.add_constraint(last.clone() * (last.clone() - one.clone()));
         eval.add_constraint(first.clone() * (one.clone() - active.clone()));
         eval.add_constraint(last.clone() * (one.clone() - active.clone()));
-        for selector in &mac_selectors {
-            if CHECK_NEW_SELECTOR_BOOLS {
-                eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
-            }
-        }
-        for selector in &step_selectors {
-            if CHECK_NEW_SELECTOR_BOOLS {
-                eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
-            }
-        }
 
         let ap_bit = eval.next_trace_mask();
         let s_pairs = (0..GF_BITS)
@@ -592,20 +552,12 @@ impl FrameworkEval for MacConsumerEval {
                 eval.next_interaction_mask(stwo_constraint_framework::ORIGINAL_TRACE_IDX, [0, -1])
             })
             .collect::<Vec<_>>();
-        let term_bits = if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
-            (0..GF_BITS)
-                .map(|_| eval.next_interaction_mask::<1>(3, [0])[0].clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let post_acc_pairs = if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
-            (0..GF_BITS)
-                .map(|_| eval.next_interaction_mask(3, [0, -1]))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let term_bits = (0..GF_BITS)
+            .map(|_| eval.next_interaction_mask::<1>(3, [0])[0].clone())
+            .collect::<Vec<_>>();
+        let post_acc_pairs = (0..GF_BITS)
+            .map(|_| eval.next_interaction_mask(3, [0, -1]))
+            .collect::<Vec<_>>();
         let s_bits = s_pairs
             .iter()
             .map(|pair| pair[0].clone())
@@ -628,14 +580,10 @@ impl FrameworkEval for MacConsumerEval {
             eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
         }
         for bit in &post_acc_bits {
-            if CHECK_POST_COLUMN_CONSTRAINTS {
-                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-            }
+            eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
         }
         for bit in &term_bits {
-            if CHECK_POST_COLUMN_CONSTRAINTS {
-                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-            }
+            eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
         }
 
         let mut mac_index = m31_const::<E>(0);
@@ -654,13 +602,11 @@ impl FrameworkEval for MacConsumerEval {
             &half_values,
         ));
 
-        if CHECK_S_CONSTRAINTS {
-            for bit_index in 0..GF_BITS {
-                let expected = mul_x_bit_expr::<E>(bit_index, &s_prev_bits);
-                eval.add_constraint(
-                    (active.clone() - first.clone()) * (s_bits[bit_index].clone() - expected),
-                );
-            }
+        for bit_index in 0..GF_BITS {
+            let expected = mul_x_bit_expr::<E>(bit_index, &s_prev_bits);
+            eval.add_constraint(
+                (active.clone() - first.clone()) * (s_bits[bit_index].clone() - expected),
+            );
         }
 
         let av_bits = bytes_to_bits(&self.av);
@@ -675,37 +621,31 @@ impl FrameworkEval for MacConsumerEval {
             .iter()
             .map(bytes_to_bits)
             .collect::<Vec<[bool; GF_BITS]>>();
-        if CHECK_POST_CONSTRAINTS {
-            for bit_index in 0..GF_BITS {
-                let term = term_bits[bit_index].clone();
-                let mut expected = av_row_bit.clone() * s_bits[bit_index].clone()
-                    + step_selectors[bit_index].clone() * ap_bit.clone();
-                if av_bits[bit_index] {
-                    expected = expected
-                        - m31_const::<E>(2)
-                            * step_selectors[bit_index].clone()
-                            * ap_bit.clone()
-                            * s_bits[bit_index].clone();
-                }
-                eval.add_constraint(active.clone() * term.clone() - expected);
-                eval.add_constraint(
-                    first.clone() * (post_acc_bits[bit_index].clone() - term.clone())
-                        + (active.clone() - first.clone())
-                            * (post_acc_bits[bit_index].clone()
-                                - xor_expr::<E>(post_acc_prev_bits[bit_index].clone(), term)),
-                );
-                let mut tag_bit = m31_const::<E>(0);
-                for (mac_index, selector) in mac_selectors.iter().enumerate() {
-                    if tag_bits[mac_index][bit_index] {
-                        tag_bit += selector.clone();
-                    }
-                }
-                if CHECK_POST_FINAL_TAG {
-                    eval.add_constraint(
-                        last.clone() * (post_acc_bits[bit_index].clone() - tag_bit),
-                    );
+        for bit_index in 0..GF_BITS {
+            let term = term_bits[bit_index].clone();
+            let mut expected = av_row_bit.clone() * s_bits[bit_index].clone()
+                + step_selectors[bit_index].clone() * ap_bit.clone();
+            if av_bits[bit_index] {
+                expected = expected
+                    - m31_const::<E>(2)
+                        * step_selectors[bit_index].clone()
+                        * ap_bit.clone()
+                        * s_bits[bit_index].clone();
+            }
+            eval.add_constraint(active.clone() * term.clone() - expected);
+            eval.add_constraint(
+                first.clone() * (post_acc_bits[bit_index].clone() - term.clone())
+                    + (active.clone() - first.clone())
+                        * (post_acc_bits[bit_index].clone()
+                            - xor_expr::<E>(post_acc_prev_bits[bit_index].clone(), term)),
+            );
+            let mut tag_bit = m31_const::<E>(0);
+            for (mac_index, selector) in mac_selectors.iter().enumerate() {
+                if tag_bits[mac_index][bit_index] {
+                    tag_bit += selector.clone();
                 }
             }
+            eval.add_constraint(last.clone() * (post_acc_bits[bit_index].clone() - tag_bit));
         }
 
         if let Some(beta) = self.claim_mask_beta {

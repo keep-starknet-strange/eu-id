@@ -3,7 +3,10 @@
 use predicates::{Date, NatPublicInput, PublicInput as AgePublicInput};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use stwo_sha256::constants::BLOCK_BYTES;
 use stwo_sha256::native::n_blocks_for;
+
+use crate::mdoc_cbor_stream::MDOC_CBOR_BLIND_ROWS;
 
 /// Returns whether `code` is an assigned ISO 3166-1 alpha-2 code.
 pub fn is_assigned_iso_alpha2(code: [u8; 2]) -> bool {
@@ -49,7 +52,14 @@ impl Policy {
     }
 }
 
+// Canonical identifiers shared by the SDK request and the mdoc circuit.
+pub const PRODUCT_SPEC_ID: &str = "stwo-euid-pid-v1";
+pub const PRODUCT_STATEMENT_VERSION: u32 = 2;
 pub const PRODUCT_PROFILE_ID: &str = "eudi-pid-p256-identity";
+pub const PRODUCT_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
+pub const PRODUCT_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
+pub const PRODUCT_BIRTH_DATE_ELEMENT: &str = "birth_date";
+pub const PRODUCT_NATIONALITY_ELEMENT: &str = "nationality";
 pub const PRODUCT_MAX_ATTRIBUTES: usize = 2;
 pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 6 * 1024;
 pub const PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES: usize = 20;
@@ -57,22 +67,45 @@ pub const PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES: usize =
     PRODUCT_MAX_MSO_PAYLOAD_BYTES + PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES;
 pub const PRODUCT_MAX_SELECTED_ITEM_BYTES: usize = 1_024;
 pub const PRODUCT_SHA_LOG_N_ROWS: u32 = 14;
-pub const PRODUCT_MAX_PACKED_SHA_MESSAGES: usize = 5;
-pub const PRODUCT_MAX_CBOR_LOG_SIZE: u32 = 15;
-pub const PRODUCT_MAX_SCOPE_LOG_SIZE: u32 = 16;
+// Issuer Sig_structure, MSO, and revocation message precede selected items.
+pub const PRODUCT_FIXED_PACKED_SHA_MESSAGES: usize = 3;
+pub const PRODUCT_MAX_PACKED_SHA_MESSAGES: usize =
+    PRODUCT_FIXED_PACKED_SHA_MESSAGES + PRODUCT_MAX_ATTRIBUTES;
+pub const PRODUCT_TS13_REVOCATION_MESSAGE_BYTES: usize =
+    2 * core::mem::size_of::<u64>() + core::mem::size_of::<u32>();
+pub const PRODUCT_MAX_CBOR_LOG_SIZE: u32 = 13;
+pub const PRODUCT_ITEM_CBOR_LOG_SIZE: u32 = 11;
+pub const PRODUCT_MAX_SCOPE_LOG_SIZE: u32 = 15;
+pub const PRODUCT_MAX_SCOPE_ACTIVE_ROWS: usize = 2 * PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES
+    + PRODUCT_MAX_MSO_PAYLOAD_BYTES
+    + 2 * PRODUCT_MAX_ATTRIBUTES * PRODUCT_MAX_SELECTED_ITEM_BYTES;
 
-const _: () = assert!(stwo_sha256::native::n_blocks_for(6_164) == 97);
-const _: () = assert!(stwo_sha256::native::n_blocks_for(6_144) == 97);
-const _: () = assert!(stwo_sha256::native::n_blocks_for(20) == 1);
-const _: () = assert!(stwo_sha256::native::n_blocks_for(1_024) == 17);
+const _: () =
+    assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES) == 97);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES) == 97);
+const _: () =
+    assert!(stwo_sha256::native::n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES) == 1);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES) == 17);
 const PRODUCT_MAX_PACKED_SHA_BLOCKS: usize = n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES)
     + n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES)
-    + n_blocks_for(20)
+    + n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES)
     + PRODUCT_MAX_ATTRIBUTES * n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES);
 const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS == 229);
 const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS <= 255);
 const _: () = assert!(PRODUCT_MAX_PACKED_SHA_MESSAGES == 5);
 const _: () = assert!(PRODUCT_SHA_LOG_N_ROWS == 14);
+const _: () = assert!(
+    n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES) * BLOCK_BYTES + MDOC_CBOR_BLIND_ROWS
+        <= 1usize << PRODUCT_MAX_CBOR_LOG_SIZE
+);
+const _: () = assert!(
+    n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES) * BLOCK_BYTES + MDOC_CBOR_BLIND_ROWS
+        <= 1usize << PRODUCT_ITEM_CBOR_LOG_SIZE
+);
+const _: () = assert!(
+    PRODUCT_MAX_SCOPE_ACTIVE_ROWS + crate::mdoc_scope::MDOC_SCOPE_BLIND_ROWS
+        <= 1usize << PRODUCT_MAX_SCOPE_LOG_SIZE
+);
 
 const PROFILE_MANIFEST: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -190,6 +223,10 @@ mod tests {
             PRODUCT_MAX_CBOR_LOG_SIZE
         );
         assert_eq!(
+            manifest["product_bounds"]["item_cbor_log_size"],
+            PRODUCT_ITEM_CBOR_LOG_SIZE
+        );
+        assert_eq!(
             manifest["product_bounds"]["max_scope_log_size"],
             PRODUCT_MAX_SCOPE_LOG_SIZE
         );
@@ -197,10 +234,10 @@ mod tests {
 
     #[test]
     fn packed_sha_product_capacity_is_exact() {
-        assert_eq!(n_blocks_for(6_164), 97);
-        assert_eq!(n_blocks_for(6_144), 97);
-        assert_eq!(n_blocks_for(20), 1);
-        assert_eq!(n_blocks_for(1_024), 17);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES), 97);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES), 97);
+        assert_eq!(n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES), 1);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES), 17);
         assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 229);
         let block_slots = 1usize << (PRODUCT_SHA_LOG_N_ROWS - 6);
         assert_eq!(block_slots, 256);

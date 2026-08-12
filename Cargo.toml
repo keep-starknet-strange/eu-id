@@ -18,7 +18,7 @@ edition = "2021"
 
 [profile.release]
 lto = "fat"
-codegen-units = 1
+codegen-units = 2
 
 [workspace.dependencies]
 stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "8c9983908642f719032e7b7977f3c2081c84a2d9", features = ["prover"] }

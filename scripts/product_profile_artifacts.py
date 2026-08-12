@@ -79,13 +79,14 @@ def outputs(workspace: Path) -> dict[str, bytes]:
                 "queries": 54,
             },
             "product_bounds": {
+                "item_cbor_log_size": 11,
                 "max_attributes": 2,
-                "max_cbor_log_size": 15,
+                "max_cbor_log_size": 13,
                 "max_issuer_sig_structure_bytes": 6164,
                 "max_mso_payload_bytes": 6144,
                 "max_packed_sha_messages": 5,
                 "max_selected_item_bytes": 1024,
-                "max_scope_log_size": 16,
+                "max_scope_log_size": 15,
                 "packed_sha_message_order": [
                     "issuer_sig_structure",
                     "mso",

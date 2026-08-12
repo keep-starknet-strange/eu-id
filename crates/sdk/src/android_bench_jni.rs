@@ -8,7 +8,10 @@ use jni::objects::JClass;
 use jni::sys::{jboolean, jstring};
 use jni::JNIEnv;
 
-use crate::{prove_identity, verify_identity, PredicateMode, ZkMdocWitness, ZkPublicStatement};
+use crate::{
+    prove_identity, verify_identity, PredicateMode, ProductMdocWitnessV2, ProductPublicStatementV2,
+    ZkMdocWitness, ZkPublicStatement,
+};
 
 const CORE_METRIC_HOST_AVAILABLE: u32 = 0;
 const PRODUCT_STATEMENT: &str = "sdk_identity_product";
@@ -136,7 +139,7 @@ fn result_json(result: IdentityBenchResult) -> String {
     )
 }
 
-fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
+fn benchmark_fixture() -> (ProductPublicStatementV2, ProductMdocWitnessV2) {
     let fixture = eu_id_prover::mdoc::demo_mdoc_circuit_fixture();
     let issuer_key = fixture.statement.issuer_input.public_key.clone();
     let (revocation, revocation_witness) =
@@ -151,9 +154,9 @@ fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
     accepted_alpha2_countries.sort_unstable();
     accepted_alpha2_countries.dedup();
     (
-        ZkPublicStatement {
-            spec_id: "stwo-euid-pid-v1".to_string(),
-            version: 2,
+        ProductPublicStatementV2 {
+            spec_id: crate::PRODUCT_SPEC_ID.to_string(),
+            version: crate::PRODUCT_STATEMENT_VERSION,
             profile_id: crate::product_profile_id(),
             circuit_hash: crate::product_circuit_hash(),
             root_policy_hash: crate::product_root_policy_hash(),
@@ -161,7 +164,7 @@ fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
             namespace: fixture.request.namespace,
             issuer_public_key_x: issuer_key.x.0.to_vec(),
             issuer_public_key_y: issuer_key.y.0.to_vec(),
-            now_epoch_seconds: 20_637 * 86_400 + 43_200,
+            now_epoch_seconds: fixture.request.verification_time_epoch_seconds,
             session_transcript: fixture.request.session_transcript,
             predicate_mode: PredicateMode::And,
             age_threshold_years: Some(fixture.statement.policy.min_age_years),
@@ -170,7 +173,7 @@ fn benchmark_fixture() -> (ZkPublicStatement, ZkMdocWitness) {
             revocation_public_key_y: revocation.revocation_public_key.y.0.to_vec(),
             revocation_epoch: revocation.epoch,
         },
-        ZkMdocWitness {
+        ProductMdocWitnessV2 {
             document: fixture.document,
             revocation_id_lo: revocation_witness.id_lo,
             revocation_id_hi: revocation_witness.id_hi,
@@ -191,7 +194,10 @@ fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult 
         let frequency_before = cpu_frequency_snapshot(&monitored_cpu_ids);
         let cpu_started = process_cpu_time();
         let started = Instant::now();
-        let proof = match prove_identity(prove_statement, witness) {
+        let proof = match prove_identity(
+            ZkPublicStatement::ProductV2(prove_statement),
+            ZkMdocWitness::ProductV2(witness),
+        ) {
             Ok(proof) => proof,
             Err(error) => {
                 eprintln!("SDK proveIdentity benchmark failed: {error}");
@@ -212,7 +218,7 @@ fn run_identity_benchmark(threading: BenchmarkThreading) -> IdentityBenchResult 
         let proof_bytes = proof.len() as u64;
 
         let started = Instant::now();
-        let ok = match verify_identity(verify_statement, proof) {
+        let ok = match verify_identity(ZkPublicStatement::ProductV2(verify_statement), proof) {
             Ok(result) => result.ok,
             Err(error) => {
                 eprintln!("SDK verifyIdentity benchmark failed: {error}");

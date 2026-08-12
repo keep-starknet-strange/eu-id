@@ -3,7 +3,7 @@
 // It is not a cross-platform release artifact.
 // The JAR lets wallet and verifier tests run without an Android target.
 //
-// `buildNative_<platform>` builds the native libraries.
+// `buildNative_<platform>` builds the current host's native library.
 // `generateUniffiBindings` creates the Kotlin bindings.
 // The JAR contains the bindings and one host-native library.
 // Maven Publish sends the test artifact only to the local Maven repository.
@@ -27,6 +27,18 @@ val reproducibleBuild = workspaceRoot.resolve("scripts/reproducible-build.sh")
 val allowDirtyBuild = providers.gradleProperty("allowDirtyBuild")
     .map(String::toBoolean)
     .getOrElse(false)
+val legacyProductV1Demo = providers.gradleProperty("legacyProductV1Demo")
+    .map(String::toBoolean)
+    .getOrElse(false)
+val currentWalletP256Demo = providers.gradleProperty("currentWalletP256Demo")
+    .map(String::toBoolean)
+    .getOrElse(false)
+val sdkFeatures = buildList {
+    if (legacyProductV1Demo) add("legacy-product-v1-demo")
+    if (currentWalletP256Demo) add("current-wallet-p256-demo")
+}
+val sdkFeatureArguments =
+    if (sdkFeatures.isEmpty()) emptyList() else listOf("--features", sdkFeatures.joinToString(","))
 
 // Read the published version from `[workspace.package]`.
 // This value keeps the JAR version equal to the Rust crate version.
@@ -43,6 +55,10 @@ val nativeLibsDir = layout.buildDirectory.dir("nativeLibs").get().asFile
 val cargoTargetDir = System.getenv("CARGO_TARGET_DIR")?.let { configured ->
     File(configured).let { if (it.isAbsolute) it else workspaceRoot.resolve(configured) }
 } ?: workspaceRoot.resolve("target")
+
+fun File.deleteRecursivelyOrFail() {
+    check(!exists() || deleteRecursively()) { "Failed to delete $absolutePath" }
+}
 
 // Add the common Cargo directory for Gradle processes.
 val toolBinDirs = listOf(
@@ -118,42 +134,43 @@ val hostNativeTarget = when ("$HOST_OS-$HOST_ARCH") {
     )
     else -> error("Unsupported JVM native host: $HOST_OS-$HOST_ARCH")
 }
-val nativeTargets = listOf(hostNativeTarget)
-
-val buildNativeTasks = nativeTargets.map { t ->
-    tasks.register<Exec>("buildNative_${t.jnaPrefix.replace('-', '_')}") {
-        group = "rust"
-        description = "Build ${t.rustTarget} -> ${t.jnaPrefix}/${t.libFile}"
-        workingDir = workspaceRoot
-        environment("PATH", toolPath)
-        val dirtyArgument = if (allowDirtyBuild) listOf("--allow-dirty") else emptyList()
-        if (t.rustTarget.endsWith("apple-darwin")) {
-            val targetName = t.rustTarget.uppercase().replace('-', '_')
-            environment(
-                "CARGO_TARGET_${targetName}_RUSTFLAGS",
-                "-C link-arg=-Wl,-install_name,@rpath/${t.libFile}",
-            )
-        }
-        commandLine(
-            listOf("bash", reproducibleBuild.absolutePath) + dirtyArgument + listOf(
-                cargoExe, "rustc", "--locked", "--offline", "--release", "-p", "sdk", "--lib",
-                "--target", t.rustTarget, "--crate-type", "cdylib",
-            ),
+val hostNativeTask = tasks.register<Exec>(
+    "buildNative_${hostNativeTarget.jnaPrefix.replace('-', '_')}",
+) {
+    group = "rust"
+    description = "Build ${hostNativeTarget.rustTarget} -> ${hostNativeTarget.jnaPrefix}/${hostNativeTarget.libFile}"
+    workingDir = workspaceRoot
+    environment("PATH", toolPath)
+    val dirtyArgument = if (allowDirtyBuild) listOf("--allow-dirty") else emptyList()
+    if (hostNativeTarget.rustTarget.endsWith("apple-darwin")) {
+        val targetName = hostNativeTarget.rustTarget.uppercase().replace('-', '_')
+        environment(
+            "CARGO_TARGET_${targetName}_RUSTFLAGS",
+            "-C link-arg=-Wl,-install_name,@rpath/${hostNativeTarget.libFile}",
         )
-
-        inputs.property("allowDirtyBuild", allowDirtyBuild)
-        inputs.files(rustWorkspaceInputs).withPathSensitivity(PathSensitivity.RELATIVE)
-        val builtLib = cargoTargetDir.resolve("${t.rustTarget}/release/${t.libFile}")
-        val destDir = File(nativeLibsDir, t.jnaPrefix)
-        val packagedLib = File(destDir, t.libFile)
-        outputs.files(builtLib, packagedLib)
-        doFirst { project.delete(packagedLib) }
-        doLast { copy { from(builtLib); into(destDir) } }
     }
+    commandLine(
+        listOf("bash", reproducibleBuild.absolutePath) + dirtyArgument + listOf(
+            cargoExe, "rustc", "--locked", "--offline", "--release", "-p", "sdk", "--lib",
+            "--target", hostNativeTarget.rustTarget,
+        ) + sdkFeatureArguments + listOf("--crate-type", "cdylib"),
+    )
+
+    inputs.property("allowDirtyBuild", allowDirtyBuild)
+    inputs.property("legacyProductV1Demo", legacyProductV1Demo)
+    inputs.property("currentWalletP256Demo", currentWalletP256Demo)
+    inputs.files(rustWorkspaceInputs).withPathSensitivity(PathSensitivity.RELATIVE)
+    val builtLib = cargoTargetDir.resolve(
+        "${hostNativeTarget.rustTarget}/release/${hostNativeTarget.libFile}",
+    )
+    val destDir = File(nativeLibsDir, hostNativeTarget.jnaPrefix)
+    val packagedLib = File(destDir, hostNativeTarget.libFile)
+    outputs.files(builtLib, packagedLib)
+    doFirst { packagedLib.deleteRecursivelyOrFail() }
+    doLast { copy { from(builtLib); into(destDir) } }
 }
 
 // Read the UniFFI metadata from the host library.
-val hostNativeTask = buildNativeTasks.single()
 val hostLib = cargoTargetDir.resolve(
     "${hostNativeTarget.rustTarget}/release/${hostNativeTarget.libFile}",
 )
@@ -180,7 +197,7 @@ val generateUniffiBindings by tasks.registering(Exec::class) {
     inputs.file(uniffiConfig).withPathSensitivity(PathSensitivity.RELATIVE)
     inputs.file(hostLib).withPathSensitivity(PathSensitivity.NONE)
     outputs.dir(generatedKotlinDir)
-    doFirst { project.delete(generatedKotlinDir) }
+    doFirst { generatedKotlinDir.deleteRecursivelyOrFail() }
 }
 
 // Add the generated Kotlin bindings and native libraries to the JAR.
@@ -188,7 +205,11 @@ sourceSets["main"].java.srcDir(generatedKotlinDir)
 sourceSets["main"].resources.srcDir(nativeLibsDir)
 
 tasks.named("compileKotlin") { dependsOn(generateUniffiBindings) }
-tasks.named("processResources") { dependsOn(buildNativeTasks) }
+tasks.named("processResources") { dependsOn(hostNativeTask) }
+tasks.withType<Test>().configureEach {
+    systemProperty("legacyProductV1Demo", legacyProductV1Demo)
+    systemProperty("currentWalletP256Demo", currentWalletP256Demo)
+}
 
 dependencies {
     // Export the JNA-based UniFFI runtime to consumers.

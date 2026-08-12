@@ -27,6 +27,13 @@ crate-type = ["rlib"]
 bindgen = ["uniffi/cli"]
 # Benchmark-only Android JNI adapter around the exact UniFFI identity API.
 bench-jni = ["dep:jni", "dep:libc", "dep:memory-stats", "dep:rayon"]
+# Enable the historical Product V1 wallet bridge.
+legacy-product-v1-demo = []
+# Enable the untouched current wallet's TS13-tagged age-only call shape over
+# the P-256 product prover. This profile mints revocation evidence with an
+# embedded demo authority and must be packaged explicitly. Production builds
+# use Product V2.
+current-wallet-p256-demo = []
 
 [dependencies]
 # Use the production allocator that the benchmarks measure.
@@ -50,6 +57,9 @@ bincode = "1"
 # Compress the proof in the version 8 transport envelope.
 zstd = { version = "0.13", default-features = false }
 sha2 = "0.10"
+# Legacy Product V1 uses ISO 3166-1 numeric country identifiers. Convert the
+# complete assigned set into Product V2's canonical alpha-2 representation.
+celes = "=2.8.2"
 jni = { version = "0.21", optional = true, default-features = false }
 libc = { version = "0.2", optional = true }
 memory-stats = { version = "1.2", optional = true, features = ["always_use_statm"] }
