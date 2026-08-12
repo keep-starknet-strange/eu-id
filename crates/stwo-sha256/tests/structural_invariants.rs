@@ -3,10 +3,10 @@ use stwo_sha256::trace::{Layout, PADDING_ROW_COLS, ROUND_COLS, SCHEDULE_ENTRY_CO
 
 #[test]
 fn packed_layout_has_exact_width_and_stable_offsets() {
-    assert_eq!(Layout::TOTAL_COLS, 438);
+    assert_eq!(Layout::TOTAL_COLS, 371);
     assert_eq!(ROUND_COLS, 216);
-    assert_eq!(SCHEDULE_ENTRY_COLS, 70);
-    assert_eq!(PADDING_ROW_COLS, 33);
+    assert_eq!(SCHEDULE_ENTRY_COLS, 6);
+    assert_eq!(PADDING_ROW_COLS, 30);
     assert_eq!(DIGEST_BYTES, 32);
     assert_eq!(Layout::COL_MSG_ID, Layout::COL_PADDING_END);
     assert_eq!(Layout::COL_MSG_BLOCK, Layout::COL_MSG_ID + 1);

@@ -39,40 +39,32 @@ pub const WORD_BIT_COLS: usize = 32;
 /// Operand order: `[a, b, c, e, f, g]`.
 pub const ROUND_BIT_OPERANDS: usize = 6;
 pub const ROUND_OPERAND_BIT_COLS: usize = ROUND_BIT_OPERANDS * WORD_BIT_COLS;
-/// Schedule lower-sigma output bits. The AIR checks the formulas on all rows.
-/// It checks recomposition into `s0` and `s1` only on active schedule rows.
-pub const SCHEDULE_SIGMA_OUTPUT_BIT_COLS: usize = 2 * WORD_BIT_COLS;
 /// Columns of the round family: 8 word-results × 2 limbs + 4 carry pairs
 /// × 2 ends = 24, then committed operand bits. Σ0/Σ1/Maj/Ch are computed
 /// directly from those boolean bit-planes (no packed-group columns).
 pub const ROUND_COLS: usize = 8 * 2 + 4 * 2 + ROUND_OPERAND_BIT_COLS;
-/// Columns of the schedule family (live for `t ≥ 16`):
-/// `σ0`, `σ1`, carries (= 6), then lower-sigma output bits.
-pub const SCHEDULE_ENTRY_COLS: usize = 6 + SCHEDULE_SIGMA_OUTPUT_BIT_COLS;
+/// Columns of the schedule family: `σ0`, `σ1`, and carries. The sigma
+/// words are constrained on every row; the recurrence and carries are live
+/// only for `t ≥ 16`.
+pub const SCHEDULE_ENTRY_COLS: usize = 6;
 /// Columns dedicated to the per-block padding-role witness (§10.4 of the
 /// validated design), live on each block's `t = 15` row. Laid out in the
 /// order `write_padding_row_values` writes them:
 ///
 /// 1. `is_marker_block` (1)
 /// 2. `is_length_block` (1)
-/// 3. `is_length_only_block` (1)  — aux, `(1 − is_marker) · is_length`
-/// 4. `is_marker_only_block` (1)  — aux, `is_marker · (1 − is_length)`
-/// 5. `is_marker_word[16]` (16)   — one-hot for the marker's word index
-/// 6. `marker_byte_sel[4]` (4)    — one-hot for byte-in-word, BE order
-/// 7. `marker_word_byte[4]` (4)   — BE byte decomposition of `W[marker_word_idx]`
-/// 8. `marker_word_post_strict_15` (1) — aux, cum(15) · (1 − is_length)
-/// 9. `bit_length_w14_lo` (1)
-/// 10. `bit_length_w14_hi` (1)
-/// 11. `bit_length_w15_lo` (1)
-/// 12. `bit_length_w15_hi` (1)
+/// 3. `is_marker_word[16]` (16)   — one-hot for the marker's word index
+/// 4. `marker_byte_sel[4]` (4)    — one-hot for byte-in-word, BE order
+/// 5. `marker_word_byte[4]` (4)   — BE byte decomposition of `W[marker_word_idx]`
+/// 6. `bit_length_w14_lo` (1)
+/// 7. `bit_length_w14_hi` (1)
+/// 8. `bit_length_w15_lo` (1)
+/// 9. `bit_length_w15_hi` (1)
 ///
-/// `4 flags + 16 one-hot word selectors + 4 byte selectors + 4 marker bytes
-///     + 1 post-strict aux + 4 bit-length limbs = 33` cells per block.
-///
-/// A valid trace always has `marker_word_post_strict_14 = 0`. No marker block
-/// puts the marker before `W[14]`. Thus, the trace does not contain that
-/// symmetric auxiliary value. See [`crate::types::PaddingRowWitness`].
-pub const PADDING_ROW_COLS: usize = 4 + N_INPUT_WORDS + WORD_BYTES + WORD_BYTES + 1 + 4;
+/// `2 flags + 16 one-hot word selectors + 4 byte selectors + 4 marker bytes
+/// + 4 bit-length limbs = 30` cells per block. The former auxiliary flags
+/// are derived in the AIR, or deleted when unused.
+pub const PADDING_ROW_COLS: usize = 2 + N_INPUT_WORDS + WORD_BYTES + WORD_BYTES + 4;
 
 /// Named column-range layout. Every range is in `[start, end)`. The column
 /// index in `Vec<Vec<BaseField>>` equals the start-of-range offset plus any
@@ -120,19 +112,16 @@ impl Layout {
     pub const COL_PADDING_START: usize = Self::COL_DIGEST_BYTES_END;
     pub const COL_IS_MARKER_BLOCK: usize = Self::COL_PADDING_START;
     pub const COL_IS_LENGTH_BLOCK: usize = Self::COL_PADDING_START + 1;
-    pub const COL_IS_LENGTH_ONLY_BLOCK: usize = Self::COL_PADDING_START + 2;
-    pub const COL_IS_MARKER_ONLY_BLOCK: usize = Self::COL_PADDING_START + 3;
-    pub const COL_IS_MARKER_WORD_START: usize = Self::COL_PADDING_START + 4;
+    pub const COL_IS_MARKER_WORD_START: usize = Self::COL_PADDING_START + 2;
     pub const COL_IS_MARKER_WORD_END: usize = Self::COL_IS_MARKER_WORD_START + N_INPUT_WORDS;
     pub const COL_MARKER_BYTE_SEL_START: usize = Self::COL_IS_MARKER_WORD_END;
     pub const COL_MARKER_BYTE_SEL_END: usize = Self::COL_MARKER_BYTE_SEL_START + WORD_BYTES;
     pub const COL_MARKER_WORD_BYTE_START: usize = Self::COL_MARKER_BYTE_SEL_END;
     pub const COL_MARKER_WORD_BYTE_END: usize = Self::COL_MARKER_WORD_BYTE_START + WORD_BYTES;
-    pub const COL_MARKER_WORD_POST_STRICT_15: usize = Self::COL_MARKER_WORD_BYTE_END;
-    pub const COL_BIT_LENGTH_W14_LO: usize = Self::COL_MARKER_WORD_BYTE_END + 1;
-    pub const COL_BIT_LENGTH_W14_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 2;
-    pub const COL_BIT_LENGTH_W15_LO: usize = Self::COL_MARKER_WORD_BYTE_END + 3;
-    pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 4;
+    pub const COL_BIT_LENGTH_W14_LO: usize = Self::COL_MARKER_WORD_BYTE_END;
+    pub const COL_BIT_LENGTH_W14_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 1;
+    pub const COL_BIT_LENGTH_W15_LO: usize = Self::COL_MARKER_WORD_BYTE_END + 2;
+    pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 3;
     pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
 
     /// Private packed-message key, flat over each message's blocks.
@@ -168,13 +157,6 @@ impl Layout {
     #[inline]
     pub const fn round_operand_bit(operand_idx: usize, bit: usize) -> usize {
         Self::COL_ROUND_START + 24 + operand_idx * WORD_BIT_COLS + bit
-    }
-
-    /// Column of a lower-sigma output bit in the schedule family. `which` is
-    /// `0` for `σ0(W[t-15])`, `1` for `σ1(W[t-2])`.
-    #[inline]
-    pub const fn schedule_sigma_bit(which: usize, bit: usize) -> usize {
-        Self::COL_SCHED_ENTRY_START + 6 + which * WORD_BIT_COLS + bit
     }
 
     /// The round family's leading columns, in order:
@@ -327,7 +309,7 @@ pub(crate) fn generate_trace_base_columns(
             values
         })
         .collect::<Vec<_>>();
-    fill_schedule_sigma_bits_rows(&mut row_values);
+    fill_schedule_sigma_words_rows(&mut row_values);
 
     let packed_rows = 1usize << (log_size - LOG_N_LANES);
     (0..Layout::TOTAL_COLS)
@@ -381,7 +363,7 @@ fn generate_trace_scalar(
             column[slot] = value;
         }
     }
-    fill_schedule_sigma_bits_columns(&mut cols, log_size);
+    fill_schedule_sigma_words_columns(&mut cols, log_size);
     cols
 }
 
@@ -467,13 +449,12 @@ fn write_round_row_values(
     witness: &Sha256Witness,
     block_idx: usize,
     t: usize,
-    n_rows: usize,
+    _n_rows: usize,
     message_idx: usize,
     msg_start: bool,
     is_msg_last: bool,
 ) {
     let block = &witness.blocks[block_idx];
-    let natural_row = block_idx * ROWS_PER_BLOCK + t;
     row[Layout::COL_ENABLER] = BaseField::from(1u32);
 
     // The row's schedule word.
@@ -510,18 +491,12 @@ fn write_round_row_values(
     }
     write_round_operand_bits_row(row, round);
 
-    // Schedule family (t ≥ 16).
-    let sched_sigma0_word = lower_sigma0(schedule_word_at_offset(witness, natural_row, n_rows, 15));
-    let sched_sigma1_word = lower_sigma1(schedule_word_at_offset(witness, natural_row, n_rows, 2));
-    write_word_bits_row(row, Layout::schedule_sigma_bit(0, 0), sched_sigma0_word);
-    write_word_bits_row(row, Layout::schedule_sigma_bit(1, 0), sched_sigma1_word);
+    // Schedule family. The sigma words are filled for every row in a later
+    // pass from the committed W bits; only the recurrence carries are live
+    // for t ≥ 16.
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
-        let [s0_lo, s0_hi, s1_lo, s1_hi, c_lo, c_hi] = Layout::schedule_entry();
-        row[s0_lo] = m31(entry.lower_sigma0.lo);
-        row[s0_hi] = m31(entry.lower_sigma0.hi);
-        row[s1_lo] = m31(entry.lower_sigma1.lo);
-        row[s1_hi] = m31(entry.lower_sigma1.hi);
+        let [_s0_lo, _s0_hi, _s1_lo, _s1_hi, c_lo, c_hi] = Layout::schedule_entry();
         row[c_lo] = m31(entry.carries.lo);
         row[c_hi] = m31(entry.carries.hi);
     }
@@ -589,6 +564,12 @@ fn write_word_bits_row(row: &mut [BaseField], base: usize, word: u32) {
     }
 }
 
+#[inline]
+fn write_word_limbs_row(row: &mut [BaseField], base: usize, word: u32) {
+    row[base] = m31(word & 0xffff);
+    row[base + 1] = m31(word >> 16);
+}
+
 fn write_round_operand_bits_row(row: &mut [BaseField], round: &crate::types::RoundWitness) {
     let words = [
         round.state_in[0].to_u32(),
@@ -603,42 +584,22 @@ fn write_round_operand_bits_row(row: &mut [BaseField], round: &crate::types::Rou
     }
 }
 
-fn schedule_word_at_offset(
-    witness: &Sha256Witness,
-    natural_row: usize,
-    n_rows: usize,
-    back: usize,
-) -> u32 {
-    let n_real_rows = witness.blocks.len() * ROWS_PER_BLOCK;
-    let target = (natural_row + n_rows - back) % n_rows;
-    if target >= n_real_rows {
-        return 0;
-    }
-    let block_idx = target / ROWS_PER_BLOCK;
-    let t = target % ROWS_PER_BLOCK;
-    witness.blocks[block_idx].schedule[t].to_u32()
-}
-
-fn fill_schedule_sigma_bits_rows(rows: &mut [Vec<BaseField>]) {
+fn fill_schedule_sigma_words_rows(rows: &mut [Vec<BaseField>]) {
     let n_rows = rows.len();
+    let [s0_lo, s0_hi, s1_lo, s1_hi, ..] = Layout::schedule_entry();
     for row_idx in 0..n_rows {
         let w_m15 = word_from_row_bits(&rows[(row_idx + n_rows - 15) % n_rows]);
         let w_m2 = word_from_row_bits(&rows[(row_idx + n_rows - 2) % n_rows]);
-        write_word_bits_row(
-            &mut rows[row_idx],
-            Layout::schedule_sigma_bit(0, 0),
-            lower_sigma0(w_m15),
-        );
-        write_word_bits_row(
-            &mut rows[row_idx],
-            Layout::schedule_sigma_bit(1, 0),
-            lower_sigma1(w_m2),
-        );
+        write_word_limbs_row(&mut rows[row_idx], s0_lo, lower_sigma0(w_m15));
+        write_word_limbs_row(&mut rows[row_idx], s1_lo, lower_sigma1(w_m2));
+        debug_assert_eq!(s0_hi, s0_lo + 1);
+        debug_assert_eq!(s1_hi, s1_lo + 1);
     }
 }
 
-fn fill_schedule_sigma_bits_columns(cols: &mut [Vec<BaseField>], log_size: u32) {
+fn fill_schedule_sigma_words_columns(cols: &mut [Vec<BaseField>], log_size: u32) {
     let n_rows = 1usize << log_size;
+    let [s0_lo, s0_hi, s1_lo, s1_hi, ..] = Layout::schedule_entry();
     for storage_row in 0..n_rows {
         let coset_index =
             circle_domain_index_to_coset_index(bit_reverse_index(storage_row, log_size), log_size);
@@ -656,10 +617,10 @@ fn fill_schedule_sigma_bits_columns(cols: &mut [Vec<BaseField>], log_size: u32) 
         };
         let s0 = lower_sigma0(word_at_offset(15));
         let s1 = lower_sigma1(word_at_offset(2));
-        for bit in 0..WORD_BIT_COLS {
-            cols[Layout::schedule_sigma_bit(0, bit)][storage_row] = m31((s0 >> bit) & 1);
-            cols[Layout::schedule_sigma_bit(1, bit)][storage_row] = m31((s1 >> bit) & 1);
-        }
+        cols[s0_lo][storage_row] = m31(s0 & 0xffff);
+        cols[s0_hi][storage_row] = m31(s0 >> 16);
+        cols[s1_lo][storage_row] = m31(s1 & 0xffff);
+        cols[s1_hi][storage_row] = m31(s1 >> 16);
     }
 }
 
@@ -674,8 +635,6 @@ fn word_from_row_bits(row: &[BaseField]) -> u32 {
 fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
     row[Layout::COL_IS_MARKER_BLOCK] = m31(p.is_marker_block);
     row[Layout::COL_IS_LENGTH_BLOCK] = m31(p.is_length_block);
-    row[Layout::COL_IS_LENGTH_ONLY_BLOCK] = m31(p.is_length_only_block);
-    row[Layout::COL_IS_MARKER_ONLY_BLOCK] = m31(p.is_marker_only_block);
     for (j, &v) in p.is_marker_word.iter().enumerate() {
         row[Layout::is_marker_word(j)] = m31(v);
     }
@@ -685,7 +644,6 @@ fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
     for (b, &v) in p.marker_word_byte.iter().enumerate() {
         row[Layout::marker_word_byte(b)] = m31(v);
     }
-    row[Layout::COL_MARKER_WORD_POST_STRICT_15] = m31(p.marker_word_post_strict_15);
     row[Layout::COL_BIT_LENGTH_W14_LO] = m31(p.bit_length_w14_lo);
     row[Layout::COL_BIT_LENGTH_W14_HI] = m31(p.bit_length_w14_hi);
     row[Layout::COL_BIT_LENGTH_W15_LO] = m31(p.bit_length_w15_lo);
@@ -962,8 +920,9 @@ mod tests {
             + 2; // msg_id + msg_block
         assert_eq!(Layout::TOTAL_COLS, expected);
         assert_eq!(ROUND_COLS, 216);
-        assert_eq!(SCHEDULE_ENTRY_COLS, 70);
-        assert_eq!(Layout::TOTAL_COLS, 438);
+        assert_eq!(SCHEDULE_ENTRY_COLS, 6);
+        assert_eq!(PADDING_ROW_COLS, 30);
+        assert_eq!(Layout::TOTAL_COLS, 371);
     }
 
     /// Round family, schedule family, and boundary families round-trip a
@@ -991,16 +950,22 @@ mod tests {
                     block.rounds[t].state_in[0].to_u32() & 1
                 );
                 // Schedule family: σ0 output limb.
+                let [s0_lo, s0_hi, ..] = Layout::schedule_entry();
                 if t >= 16 {
-                    let [s0_lo, ..] = Layout::schedule_entry();
                     assert_eq!(
                         trace[s0_lo][slot].0,
                         block.schedule_entries[t - 16].lower_sigma0.lo
                     );
                 } else {
-                    // Schedule family is zero on t < 16 rows.
-                    let [s0_lo, ..] = Layout::schedule_entry();
-                    assert_eq!(trace[s0_lo][slot].0, 0);
+                    // Sigma words are defined on every row from W[t-15].
+                    let n_rows = 1usize << log_size;
+                    let natural = b * ROWS_PER_BLOCK + t;
+                    let w15_slot = Layout::row_slot((natural + n_rows - 15) % n_rows, log_size);
+                    let w15 = trace[Layout::COL_W_LO][w15_slot].0
+                        | (trace[Layout::COL_W_HI][w15_slot].0 << 16);
+                    let expected = lower_sigma0(w15);
+                    assert_eq!(trace[s0_lo][slot].0, expected & 0xffff);
+                    assert_eq!(trace[s0_hi][slot].0, expected >> 16);
                 }
                 // t = 15 family.
                 if t == 15 {

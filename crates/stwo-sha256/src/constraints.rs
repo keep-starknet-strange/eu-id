@@ -189,10 +189,6 @@ impl FrameworkEval for Sha256Eval {
         let s1 = (eval.next_trace_mask(), eval.next_trace_mask());
         let sched_carry_lo = eval.next_trace_mask();
         let sched_carry_hi = eval.next_trace_mask();
-        let sched_sigma0_bits: [E::F; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_trace_mask());
-        let sched_sigma1_bits: [E::F; WORD_BIT_COLS] =
-            std::array::from_fn(|_| eval.next_trace_mask());
 
         // ---- t = 0 family ----
         //
@@ -234,17 +230,14 @@ impl FrameworkEval for Sha256Eval {
         // ---- schedule constraints (gate: enabler · is_schedule) ----
         //
         // W[t] = σ1(W[t−2]) + W[t−7] + σ0(W[t−15]) + W[t−16] (mod 2³²).
-        // Check the lower-sigma bit formulas without a gate. This choice keeps
-        // `gate_sched` out of their degree-three XOR expressions. Apply the
-        // gate only to linear recomposition into live schedule limbs.
+        // Recompose the sigma words ungated from the already-committed W bits.
+        // Only the recurrence that consumes them is schedule-gated.
         let w_m15_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 15));
         let w_m2_bits: [E::F; WORD_BIT_COLS] = std::array::from_fn(|i| w_bit_at(i, 2));
         let lower_sigma0_bits = lower_sigma0_expr_bits::<E>(&w_m15_bits);
         let lower_sigma1_bits = lower_sigma1_expr_bits::<E>(&w_m2_bits);
-        constrain_bits_equal::<E>(&mut eval, &sched_sigma0_bits, &lower_sigma0_bits);
-        constrain_bits_equal::<E>(&mut eval, &sched_sigma1_bits, &lower_sigma1_bits);
-        constrain_word_recomposition::<E>(&mut eval, gate_sched.clone(), &s0, &sched_sigma0_bits);
-        constrain_word_recomposition::<E>(&mut eval, gate_sched.clone(), &s1, &sched_sigma1_bits);
+        constrain_word_recomposition_ungated::<E>(&mut eval, &s0, &lower_sigma0_bits);
+        constrain_word_recomposition_ungated::<E>(&mut eval, &s1, &lower_sigma1_bits);
         emit_mod_2_32_add_linear(
             &mut eval,
             gate_sched.clone(),
@@ -327,8 +320,6 @@ impl FrameworkEval for Sha256Eval {
         constrain_boolean_bits::<E>(&mut eval, &e_bits);
         constrain_boolean_bits::<E>(&mut eval, &f_bits);
         constrain_boolean_bits::<E>(&mut eval, &g_bits);
-        constrain_boolean_bits::<E>(&mut eval, &sched_sigma0_bits);
-        constrain_boolean_bits::<E>(&mut eval, &sched_sigma1_bits);
 
         constrain_word_recomposition::<E>(&mut eval, enabler.clone(), &w[0], &w_bits);
         constrain_word_recomposition::<E>(&mut eval, enabler.clone(), &a_in, &a_bits);
@@ -520,12 +511,9 @@ impl FrameworkEval for Sha256Eval {
         // are zero, so each identity holds vacuously.
         let is_marker_block = eval.next_trace_mask();
         let is_length_block = eval.next_trace_mask();
-        let is_length_only_block = eval.next_trace_mask();
-        let is_marker_only_block = eval.next_trace_mask();
         let is_marker_word: [E::F; N_INPUT_WORDS] = std::array::from_fn(|_| eval.next_trace_mask());
         let marker_byte_sel: [E::F; WORD_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
         let marker_word_byte: [E::F; WORD_BYTES] = std::array::from_fn(|_| eval.next_trace_mask());
-        let marker_word_post_strict_15 = eval.next_trace_mask();
         let bit_length_w14_lo = eval.next_trace_mask();
         let bit_length_w14_hi = eval.next_trace_mask();
         let bit_length_w15_lo = eval.next_trace_mask();
@@ -535,13 +523,7 @@ impl FrameworkEval for Sha256Eval {
         let w_msg = |j: usize| -> &(E::F, E::F) { &w[15 - j] };
 
         // (P.A) Binary checks (ungated — all cells are 0 off-family).
-        for flag in [
-            &is_marker_block,
-            &is_length_block,
-            &is_length_only_block,
-            &is_marker_only_block,
-            &marker_word_post_strict_15,
-        ] {
+        for flag in [&is_marker_block, &is_length_block] {
             eval.add_constraint(flag.clone() * (E::F::one() - flag.clone()));
         }
         for bit in is_marker_word.iter() {
@@ -553,12 +535,7 @@ impl FrameworkEval for Sha256Eval {
 
         // (P.A') Mn1: pin the padding-role flags to 0 on disabled rows.
         let one_minus_enabler = E::F::one() - enabler.clone();
-        for flag in [
-            &is_marker_block,
-            &is_length_block,
-            &is_length_only_block,
-            &is_marker_only_block,
-        ] {
+        for flag in [&is_marker_block, &is_length_block] {
             eval.add_constraint(one_minus_enabler.clone() * flag.clone());
         }
 
@@ -574,15 +551,9 @@ impl FrameworkEval for Sha256Eval {
             .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
         eval.add_constraint(sum_marker_byte_sel - is_marker_block.clone());
 
-        // (P.C) Aux-flag definitions.
-        eval.add_constraint(
-            is_length_only_block.clone()
-                - (E::F::one() - is_marker_block.clone()) * is_length_block.clone(),
-        );
-        eval.add_constraint(
-            is_marker_only_block.clone()
-                - is_marker_block.clone() * (E::F::one() - is_length_block.clone()),
-        );
+        // (P.C) Derive the live auxiliary expression instead of committing it.
+        let is_length_only_block =
+            (E::F::one() - is_marker_block.clone()) * is_length_block.clone();
 
         // Cumulative one-hot marker-word prefix sums.
         let mut cum_marker_word: [E::F; N_INPUT_WORDS] =
@@ -591,11 +562,9 @@ impl FrameworkEval for Sha256Eval {
             cum_marker_word[j] = cum_marker_word[j - 1].clone() + is_marker_word[j - 1].clone();
         }
 
-        // (P.C') marker-word post-strict aux for the `W[15]` slot.
-        eval.add_constraint(
-            marker_word_post_strict_15.clone()
-                - cum_marker_word[15].clone() * (E::F::one() - is_length_block.clone()),
-        );
+        // (P.C') Derive the marker-word post-strict expression in the AIR.
+        let marker_word_post_strict_15 =
+            cum_marker_word[15].clone() * (E::F::one() - is_length_block.clone());
 
         // (P.D) Marker-word byte assembly.
         let byte_base = E::F::from(M31::from(1u32 << 8));
@@ -845,16 +814,6 @@ fn constrain_word_recomposition_ungated<E: EvalAtRow>(
 fn constrain_boolean_bits<E: EvalAtRow>(eval: &mut E, bits: &[E::F; WORD_BIT_COLS]) {
     for bit in bits {
         eval.add_constraint(bit.clone() * (bit.clone() - E::F::one()));
-    }
-}
-
-fn constrain_bits_equal<E: EvalAtRow>(
-    eval: &mut E,
-    lhs: &[E::F; WORD_BIT_COLS],
-    rhs: &[E::F; WORD_BIT_COLS],
-) {
-    for i in 0..WORD_BIT_COLS {
-        eval.add_constraint(lhs[i].clone() - rhs[i].clone());
     }
 }
 

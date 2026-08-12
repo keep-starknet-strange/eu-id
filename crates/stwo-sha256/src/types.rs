@@ -163,14 +163,8 @@ pub struct ScheduleEntryWitness {
 /// marker-and-length blocks. One-hot vectors locate the `0x80` marker. Four
 /// 16-bit values contain the FIPS length field from `W[14]` and `W[15]`.
 ///
-/// Three small auxiliary booleans (`is_length_only_block`,
-/// `is_marker_only_block`, and `marker_word_post_strict_15`) keep each AIR
-/// constraint at degree two. The witness generator derives them from the
-/// primary fields.
-///
-/// The type has only a `_15` auxiliary. In the two-block padding case, the
-/// marker is in `W[14]` or `W[15]`. It is never before `W[14]`. A symmetric
-/// `_14` value would always be zero.
+/// Padding auxiliary expressions are derived in the AIR from these primary
+/// fields rather than committed as separate columns.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaddingRowWitness {
     /// 1 iff this block contains the `0x80` padding marker.
@@ -178,12 +172,6 @@ pub struct PaddingRowWitness {
     /// 1 iff this block is the final block (carries the bit-length in its
     /// last 8 bytes / `W[14]` / `W[15]`).
     pub is_length_block: u32,
-    /// Aux: `(1 − is_marker_block) · is_length_block`. 1 on a pure
-    /// length-only block (Case B's last block).
-    pub is_length_only_block: u32,
-    /// Aux: `is_marker_block · (1 − is_length_block)`. 1 on a pure
-    /// marker-only block (Case B's penultimate block).
-    pub is_marker_only_block: u32,
     /// One-hot indicator: `is_marker_word[j] == 1` iff word index `j` holds
     /// the `0x80` byte. All-zero on non-marker rows. Sums to
     /// `is_marker_block`.
@@ -196,14 +184,6 @@ pub struct PaddingRowWitness {
     /// order. All-zero on non-marker rows. The constraint layer binds
     /// these to `W[marker_word_idx]` via the `is_marker_word` selector.
     pub marker_word_byte: [u32; WORD_BYTES],
-    /// Aux: `cumulative_marker_word_sel[15] · (1 − is_length_block)`.
-    /// 1 iff this row is a marker-only block whose marker sits strictly
-    /// before `W[15]` — i.e., marker at `W[14]` (overflow Case B with
-    /// `msg.len() % 64 ∈ [56, 60)`). Then `W[15]` of this block must be
-    /// 0, which the AIR enforces. Committed as a separate column so the
-    /// `W[15]`-zero gate is degree 2 instead of the degree-3 triple
-    /// product `cum[15] · (1 − is_length_block) · W[15]`.
-    pub marker_word_post_strict_15: u32,
     /// Lo 16-bit limb of `W[14]` of the length block — the low half of
     /// the 32-bit high word of the bit-length. 0 on non-length-block rows.
     pub bit_length_w14_lo: u32,
@@ -248,9 +228,6 @@ impl PaddingRowWitness {
 
         let is_marker_block = u32::from(block_idx == marker_block_idx);
         let is_length_block = u32::from(block_idx == length_block_idx);
-        let is_length_only_block = (1 - is_marker_block) * is_length_block;
-        let is_marker_only_block = is_marker_block * (1 - is_length_block);
-
         let mut is_marker_word = [0u32; N_INPUT_WORDS];
         let mut marker_byte_sel = [0u32; WORD_BYTES];
         let mut marker_word_byte = [0u32; WORD_BYTES];
@@ -270,9 +247,6 @@ impl PaddingRowWitness {
             }
         }
 
-        let cumulative = |upto: usize| -> u32 { is_marker_word[..upto].iter().sum() };
-        let marker_word_post_strict_15 = cumulative(15) * (1 - is_length_block);
-
         let (bit_length_w14_lo, bit_length_w14_hi, bit_length_w15_lo, bit_length_w15_hi) =
             if is_length_block == 1 {
                 let bit_length = message_byte_length.wrapping_mul(8);
@@ -291,12 +265,9 @@ impl PaddingRowWitness {
         Self {
             is_marker_block,
             is_length_block,
-            is_length_only_block,
-            is_marker_only_block,
             is_marker_word,
             marker_byte_sel,
             marker_word_byte,
-            marker_word_post_strict_15,
             bit_length_w14_lo,
             bit_length_w14_hi,
             bit_length_w15_lo,
