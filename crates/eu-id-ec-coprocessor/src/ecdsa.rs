@@ -12,9 +12,12 @@ use crate::ligero::{
 };
 use crate::mac::{bytes_to_bits, gf128_tag, Gf128, GF128_BITS};
 use crate::merkle::{ColumnBatchOpening, ColumnOpening};
+#[cfg(test)]
+use crate::sumcheck::prove_evaluated_circuit;
 use crate::sumcheck::{
-    circuit_pad_len, circuit_quadratic_constraints, prove_circuit, prove_evaluated_circuit,
-    prove_evaluated_circuit_sorted_sparse, verify_circuit, verify_circuit_sorted_sparse,
+    circuit_pad_len, circuit_quadratic_constraints, prove_circuit,
+    prove_evaluated_circuit_sorted_sparse_with_verification,
+    prove_evaluated_circuit_with_verification, verify_circuit, verify_circuit_sorted_sparse,
     CircuitPads, CircuitSumcheckProof, CircuitVerification, InputClaims, SumcheckError,
 };
 #[cfg(test)]
@@ -908,9 +911,8 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
             mix_bundle_signature_index(signature_index, &mut channel);
             channel.mix_bytes(instance.label);
             mix_ecdsa_public_projection(projection, &mut channel);
-            let mut verifier_channel = channel.clone();
             let family_start = Instant::now();
-            let proof = prove_evaluated_circuit(
+            let (proof, verification) = prove_evaluated_circuit_with_verification(
                 &instance.circuit,
                 &layers,
                 &all_pads[signature_index][family_index],
@@ -918,9 +920,6 @@ pub fn prove_implemented_circuit_bundle_batch_unchecked_with_projection_profiled
                 &mut channel,
             )
             .map_err(ImplementedCircuitProofError::Sumcheck)?;
-            let verification =
-                verify_circuit(&instance.circuit, &proof, root, &mut verifier_channel)
-                    .map_err(ImplementedCircuitProofError::Sumcheck)?;
             profile.sumcheck_by_family[family_index] += family_start.elapsed();
             entries.push(ImplementedCircuitBundleEntry { proof });
             verifications.push(verification);
@@ -1280,30 +1279,24 @@ fn prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
                 &av,
                 &mac_tags,
             );
-            let mut verifier_channel = channel.clone();
             let instance_start = Instant::now();
-            let proof = match instance.role {
-                MdocP4bCircuitRole::MacBatch => prove_evaluated_circuit_sorted_sparse(
-                    &circuit,
-                    &layers,
-                    &pads[instance_index],
-                    full_root,
-                    &mut channel,
-                ),
-                _ => prove_evaluated_circuit(
-                    &circuit,
-                    &layers,
-                    &pads[instance_index],
-                    full_root,
-                    &mut channel,
-                ),
-            }
-            .map_err(ImplementedCircuitProofError::Sumcheck)?;
-            let verification = match instance.role {
+            let (proof, verification) = match instance.role {
                 MdocP4bCircuitRole::MacBatch => {
-                    verify_circuit_sorted_sparse(&circuit, &proof, full_root, &mut verifier_channel)
+                    prove_evaluated_circuit_sorted_sparse_with_verification(
+                        &circuit,
+                        &layers,
+                        &pads[instance_index],
+                        full_root,
+                        &mut channel,
+                    )
                 }
-                _ => verify_circuit(&circuit, &proof, full_root, &mut verifier_channel),
+                _ => prove_evaluated_circuit_with_verification(
+                    &circuit,
+                    &layers,
+                    &pads[instance_index],
+                    full_root,
+                    &mut channel,
+                ),
             }
             .map_err(ImplementedCircuitProofError::Sumcheck)?;
             Ok((
