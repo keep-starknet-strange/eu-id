@@ -27,8 +27,8 @@ use p256::AffinePoint;
 use sha2::{Digest as _, Sha256};
 
 const TEST_SEED: [u8; 32] = [9u8; 32];
-const PREFIX_GROUP_A_OPENING_ROWS: usize = 217;
-const PREFIX_GROUP_B_OPENING_ROWS: usize = 32;
+const PREFIX_GROUP_A_OPENING_ROWS: usize = 112;
+const PREFIX_GROUP_B_OPENING_ROWS: usize = 18;
 const LEGACY_FULL_GROUP_A_OPENING_ROWS: usize = 285;
 const LEGACY_FULL_GROUP_B_OPENING_ROWS: usize = 36;
 

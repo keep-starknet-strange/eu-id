@@ -1,7 +1,7 @@
 use crate::circle_fft::{
     circle_data_sum, circle_divide_data_vanishing, circle_encode, circle_encode_row,
     circle_evaluate, circle_multiply_data_vanishing, circle_product_fft, circle_product_ifft,
-    circle_weight_coeffs, CircleGeom, CircleRsError, PRODUCT_CIRCLE_GEOM,
+    circle_weight_coeffs, warm_circle_tables, CircleGeom, CircleRsError, PRODUCT_CIRCLE_GEOM,
 };
 use crate::merkle::{
     commit_columns, verify_batch, verify_column, ColumnBatchOpening, ColumnOpening,
@@ -225,16 +225,16 @@ impl LigeroParams {
 }
 
 /// Product Circle parameters. The largest response is the quadratic check,
-/// with bound `2*512 + 2 = 1026`. `e = 1534` is maximal because
-/// `2e < 4096 - 1026`. With `t = 196`, the proximity term is below 2^-132,
-/// and the 256 row-pad slots still exceed the opening count.
+/// with bound `2*1024 + 2 = 2050`. `e = 3070` is maximal because
+/// `2e < 8192 - 2050`. With `t = 196`, the proximity term is below 2^-132,
+/// and the 512 row-pad slots still exceed the opening count.
 pub fn product_circle_params() -> LigeroParams {
     LigeroParams {
         row_len: PRODUCT_CIRCLE_GEOM.data_slots,
         degree_bound: PRODUCT_CIRCLE_GEOM.row_message_len,
         codeword_len: PRODUCT_CIRCLE_GEOM.codeword_len,
         openings: 196,
-        proximity_radius: 1534,
+        proximity_radius: 3070,
     }
 }
 
@@ -421,6 +421,10 @@ fn append_quadratic_rows(
     for rows in [&x_rows, &y_rows, &z_rows] {
         for data in rows {
             let geom = params.circle_geom().expect("validated product params");
+            // Build the shared circle-FFT tables now, on one thread, so the one-time
+            // build parallelizes across the free rayon pool instead of serializing
+            // behind the cache lock during the parallel row encode below.
+            warm_circle_tables(geom);
             let mut row_pads =
                 draw_uniform_fps(rng, geom.row_message_len - geom.data_slots).into_iter();
             let (coefficients, codeword) = circle_encode_row(geom, data, || {
@@ -1093,7 +1097,11 @@ pub(crate) fn verify_authenticated_split_claim_blind_check(
     Ok(true)
 }
 
-const STRUCTURED_CLAIM_MIN_ROWS: usize = 4;
+// Factoring pays off once a claim term spans enough physical rows that the
+// shared shifted-column templates beat a dense per-cell scatter. With the
+// product row_len of 512, two rows already cover 1024 cells, so the threshold
+// is lower than it was at row_len 256.
+const STRUCTURED_CLAIM_MIN_ROWS: usize = 2;
 
 struct ClaimWeightTemplate {
     values: Vec<Fp>,
@@ -1231,12 +1239,17 @@ fn claim_weight_plan(
         for term in &claim.terms {
             let scale = coeff * term.coefficient;
             let row_span = ((term.offset % params.row_len) + term.len).div_ceil(params.row_len);
+            let row_log = params.row_len.ilog2() as usize;
             let fixed = term
                 .point
                 .iter()
                 .all(|&value| value == Fp::ZERO || value == Fp::ONE);
+            // The factored path splits the eq tensor into within-row (`row_log`
+            // low bits) and row-index (remaining high bits) factors, so it
+            // requires at least `row_log` point coordinates.
             let factor = structured
                 && params.row_len.is_power_of_two()
+                && term.point.len() >= row_log
                 && row_span >= STRUCTURED_CLAIM_MIN_ROWS
                 && !fixed;
             if factor {
@@ -1887,23 +1900,42 @@ fn batched_row_weights(
     if claims.len() != gamma.len() {
         return Err(LigeroError::WrongGammaLength);
     }
-
-    let mut rows = vec![vec![Fp::ZERO; params.row_len]; committed_rows];
-    for (claim, coeff) in claims.iter().zip(gamma.iter().copied()) {
+    // Validate every claim up front, in order, so the error surface matches the
+    // previous serial loop exactly before any parallel work starts.
+    for claim in claims {
         validate_linear_claim(params, committed_rows, claim)?;
-        // Expand each equality bit product into one dense tensor.
-        // Doubling costs `O(2^m)` instead of `m` products for each cell.
-        // Then, scatter the scaled tensor into the row and column windows.
-        for term in &claim.terms {
-            let scale = coeff * term.coefficient;
-            let eq = eq_tensor(&term.point);
-            for local in 0..term.len {
-                let global = term.offset + local;
-                let cell = &mut rows[global / params.row_len][global % params.row_len];
-                *cell = *cell + scale * eq[local];
-            }
-        }
     }
+
+    // Accumulate per-claim row weights into per-task dense matrices, then sum.
+    // Base-field addition is exact and associative, so the parallel reduction is
+    // bit-identical to the prior serial accumulation: the transcript is unchanged.
+    let zero_rows = || vec![vec![Fp::ZERO; params.row_len]; committed_rows];
+    let rows = claims
+        .par_iter()
+        .zip(gamma.par_iter().copied())
+        .fold(zero_rows, |mut rows, (claim, coeff)| {
+            // Expand each equality bit product into one dense tensor.
+            // Doubling costs `O(2^m)` instead of `m` products for each cell.
+            // Then, scatter the scaled tensor into the row and column windows.
+            for term in &claim.terms {
+                let scale = coeff * term.coefficient;
+                let eq = eq_tensor(&term.point);
+                for local in 0..term.len {
+                    let global = term.offset + local;
+                    let cell = &mut rows[global / params.row_len][global % params.row_len];
+                    *cell = *cell + scale * eq[local];
+                }
+            }
+            rows
+        })
+        .reduce(zero_rows, |mut left, right| {
+            for (dst, src) in left.iter_mut().zip(right) {
+                for (d, s) in dst.iter_mut().zip(src) {
+                    *d = *d + s;
+                }
+            }
+            left
+        });
 
     Ok(rows
         .into_iter()
@@ -2184,15 +2216,18 @@ mod tests {
     fn parallel_claim_weight_evaluation_matches_serial_order_and_values() {
         let params = product_circle_params();
         let committed_rows = 8;
+        // One structured term spanning exactly four 512-wide rows (factored into
+        // column templates) and one short single-row term (left as a residual
+        // scatter), so the fixture exercises both ordered collections.
         let claims = vec![
             LigeroLinearClaim::mle(
                 0,
-                1024,
-                (0..10).map(|bit| Fp::from_u64(3 + bit * 5)).collect(),
+                2048,
+                (0..11).map(|bit| Fp::from_u64(3 + bit * 5)).collect(),
                 Fp::ZERO,
             ),
             LigeroLinearClaim::mle(
-                1024,
+                2048,
                 256,
                 (0..8).map(|bit| Fp::from_u64(71 + bit * 7)).collect(),
                 Fp::ZERO,
@@ -2908,8 +2943,8 @@ mod tests {
         assert!(!verify(&batch, &claims, &opening_tamper, &openings_b));
     }
 
-    /// The product (ℓ=256) committed-mask soundness pin. The quadratic response has
-    /// degree bound 1026, forcing `e = 1534`. `t = 196` leaves a one-opening
+    /// The product (ℓ=512) committed-mask soundness pin. The quadratic response has
+    /// degree bound 2050, forcing `e = 3070`. `t = 196` leaves a one-opening
     /// margin over the first count that keeps the total error below 2^-132.
     #[test]
     fn product_soundness_error_meets_target() {
@@ -2917,15 +2952,15 @@ mod tests {
         assert!(params.validate().is_ok());
         assert!(params.validate_quadratic().is_ok());
         assert_eq!(params.openings, 196);
-        assert_eq!(params.proximity_radius, 1534);
-        assert_eq!(params.claim_degree_bound(), 770);
-        assert_eq!(params.quadratic_degree_bound(), 1026);
+        assert_eq!(params.proximity_radius, 3070);
+        assert_eq!(params.claim_degree_bound(), 1538);
+        assert_eq!(params.quadratic_degree_bound(), 2050);
         assert_eq!(
             params
                 .circle_geom()
                 .expect("the product uses a Circle code")
                 .product_domain_len,
-            2048
+            4096
         );
         // Value-pad ZK budget: every opening consumes one per-row pad slot.
         assert!(params.degree_bound - params.row_len >= params.openings);

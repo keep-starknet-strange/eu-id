@@ -26,6 +26,8 @@ rand = "0.8"
 ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 sha2 = "0.10"
 ciborium = "0.2.2"
+# Parallelize per-row witness trace generation across columns.
+rayon = "1"
 
 [dev-dependencies]
 serde_json = "1"

@@ -697,6 +697,7 @@ dependencies = [
  "p256",
  "predicates",
  "rand",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",

@@ -34,6 +34,8 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use rayon::prelude::*;
+
 use crate::Fp;
 
 /// The circle-code geometry. All sizes are powers of two.
@@ -58,14 +60,16 @@ impl CircleGeom {
 }
 
 /// Product geometry. The committed-mask layer proves products of two
-/// degree-512 rows, whose circle-basis bound is `2*512 + 2 = 1026`. Thus,
-/// the product domain is 2048, the smallest power of two strictly above that
-/// bound. The per-row value-pad budget is `512 − 256 = 256`.
+/// degree-1024 rows, whose circle-basis bound is `2*1024 + 2 = 2050`. Thus,
+/// the product domain is 4096, the smallest power of two strictly above that
+/// bound. The per-row value-pad budget is `1024 − 512 = 512`. The 2× aspect
+/// ratio (row_len 512 vs the prior 256) halves the opened-row count at a fixed
+/// soundness target, shrinking the proof's dominant opened-columns term.
 pub const PRODUCT_CIRCLE_GEOM: CircleGeom = CircleGeom {
-    data_slots: 256,
-    row_message_len: 512,
-    codeword_len: 4096,
-    product_domain_len: 2048,
+    data_slots: 512,
+    row_message_len: 1024,
+    codeword_len: 8192,
+    product_domain_len: 4096,
 };
 
 /// (p + 1) / 2^96 for the P-256 base prime: the odd cofactor of the circle
@@ -547,35 +551,47 @@ struct DataWindow {
 /// [`evaluate_at`] over the domain, so `Σ_j c_j·basis_sums[j]` equals
 /// `Σ_s evaluate_at(c, s)` exactly.
 fn build_basis_sums(domain: &[CirclePoint], len: usize) -> Vec<Fp> {
-    let mut sums = vec![Fp::ZERO; len];
     if len == 0 {
-        return sums;
+        return Vec::new();
     }
     let pi_count = if len <= 2 {
         0
     } else {
         usize::BITS as usize - (len - 1).leading_zeros() as usize - 1
     };
-    for &point in domain {
-        let mut pis = Vec::with_capacity(pi_count);
-        if pi_count > 0 {
-            pis.push(point.x);
-            for _ in 1..pi_count {
-                let last = *pis.last().expect("non-empty");
-                pis.push(last.square() + last.square() - Fp::ONE);
-            }
-        }
-        for (j, sum) in sums.iter_mut().enumerate() {
-            let mut basis = if j & 1 == 1 { point.y } else { Fp::ONE };
-            for (k, &pi) in pis.iter().enumerate() {
-                if (j >> (k + 1)) & 1 == 1 {
-                    basis = basis * pi;
+    // Each window point contributes an independent basis vector into `sums`, so
+    // accumulate per-task partial sums in parallel and combine them. Base-field
+    // addition is exact and associative, so the result is bit-identical to the
+    // serial accumulation — the cached table contents are unchanged.
+    let zero = || vec![Fp::ZERO; len];
+    domain
+        .par_iter()
+        .fold(zero, |mut sums, &point| {
+            let mut pis = Vec::with_capacity(pi_count);
+            if pi_count > 0 {
+                pis.push(point.x);
+                for _ in 1..pi_count {
+                    let last = *pis.last().expect("non-empty");
+                    pis.push(last.square() + last.square() - Fp::ONE);
                 }
             }
-            *sum = *sum + basis;
-        }
-    }
-    sums
+            for (j, sum) in sums.iter_mut().enumerate() {
+                let mut basis = if j & 1 == 1 { point.y } else { Fp::ONE };
+                for (k, &pi) in pis.iter().enumerate() {
+                    if (j >> (k + 1)) & 1 == 1 {
+                        basis = basis * pi;
+                    }
+                }
+                *sum = *sum + basis;
+            }
+            sums
+        })
+        .reduce(zero, |mut left, right| {
+            for (dst, src) in left.iter_mut().zip(right) {
+                *dst = *dst + src;
+            }
+            left
+        })
 }
 
 fn build_data_window(geom: CircleGeom) -> DataWindow {
@@ -633,6 +649,16 @@ fn data_window(geom: CircleGeom) -> &'static DataWindow {
     guard
         .entry(geom)
         .or_insert_with(|| Box::leak(Box::new(build_data_window(geom))))
+}
+
+/// Eagerly builds and caches the data-window tables for `geom`.
+///
+/// Call this from a single-threaded context *before* parallel row encoding.
+/// Otherwise the first `circle_encode_row` inside a `par_chunks` builds the
+/// tables while every other rayon worker blocks on the cache `Mutex`, leaving
+/// the one-time build effectively single-threaded.
+pub fn warm_circle_tables(geom: CircleGeom) {
+    let _ = data_window(geom);
 }
 
 /// Encodes one masked witness row.

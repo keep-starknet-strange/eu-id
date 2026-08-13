@@ -17,6 +17,7 @@ use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
 use rand::RngCore;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
 use stwo::core::channel::{Blake2sChannel, Channel};
@@ -767,17 +768,32 @@ fn mdoc_cbor_base_columns_with_bound(
 ) -> Vec<Vec<M31>> {
     let n_rows = 1usize << witness.log_size;
     let bound_columns = usize::from(max_message_len.is_some()) * MDOC_CBOR_MESSAGE_BOUND_BITS;
-    let mut columns = vec![vec![m31(0); n_rows]; MDOC_CBOR_TRACE_COLS + bound_columns];
-    for row_index in 0..n_rows {
-        let values = witness
-            .rows
-            .get(row_index)
-            .map(row_values)
-            .unwrap_or_else(inactive_row_values);
-        for (column, value) in columns.iter_mut().zip(values) {
-            column[row_index] = value;
-        }
-    }
+    // Each row's cell values are an independent pure function of the witness row,
+    // so compute them row-major in parallel, then transpose to column-major.
+    // The transpose is pure data movement; the emitted columns are identical to a
+    // serial row loop, so the committed trace is unchanged.
+    let row_major: Vec<Vec<M31>> = (0..n_rows)
+        .into_par_iter()
+        .map(|row_index| {
+            witness
+                .rows
+                .get(row_index)
+                .map(row_values)
+                .unwrap_or_else(inactive_row_values)
+        })
+        .collect();
+    let mut columns: Vec<Vec<M31>> = Vec::with_capacity(MDOC_CBOR_TRACE_COLS + bound_columns);
+    columns.par_extend(
+        (0..MDOC_CBOR_TRACE_COLS)
+            .into_par_iter()
+            .map(|column_index| {
+                let mut column = Vec::with_capacity(n_rows);
+                for values in &row_major {
+                    column.push(values[column_index]);
+                }
+                column
+            }),
+    );
     if let Some(max) = max_message_len {
         assert!(max <= 1 << MDOC_CBOR_MESSAGE_BOUND_BITS);
         let message_len =
@@ -787,9 +803,10 @@ fn mdoc_cbor_base_columns_with_bound(
             .expect("fixed CBOR message bound was validated");
         let root_end = witness.message_len - 1;
         for bit in 0..MDOC_CBOR_MESSAGE_BOUND_BITS {
-            let column = &mut columns[MDOC_CBOR_TRACE_COLS + bit];
+            let mut column = vec![m31(0); n_rows];
             column.fill_with(random_m31_cell);
             column[root_end] = m31((slack >> bit) & 1);
+            columns.push(column);
         }
     }
     columns
