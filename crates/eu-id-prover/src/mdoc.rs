@@ -5412,13 +5412,15 @@ pub fn mdoc_proof_byte_breakdown(
 }
 
 pub fn mdoc_production_pcs_config() -> PcsConfig {
-    // `20 + 54 * 2` is the configured query/PoW work-factor heuristic. It is
-    // not a theorem-level composed soundness bound for this QM31 proof.
+    // `20 + 84 * 2` is the configured query/PoW work-factor heuristic. It is
+    // not a theorem-level composed soundness bound for this QM31 proof; under
+    // the standard Johnson-bound correlated-agreement conjecture this is a
+    // ~104-bit FRI floor (84 queries + 20 PoW grinding bits).
     // A fold step of three reduces the proof size.
     // The verifier pins this exact configuration.
     PcsConfig {
         pow_bits: 20,
-        fri_config: FriConfig::new(1, 2, 54, 3),
+        fri_config: FriConfig::new(1, 2, 84, 3),
         lifting_log_size: None,
     }
 }

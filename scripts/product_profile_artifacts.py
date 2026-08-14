@@ -76,7 +76,7 @@ def outputs(workspace: Path) -> dict[str, bytes]:
                 "fold_step": 3,
                 "log_blowup_factor": 2,
                 "pow_bits": 20,
-                "queries": 54,
+                "queries": 84,
             },
             "product_bounds": {
                 "item_cbor_log_size": 11,
