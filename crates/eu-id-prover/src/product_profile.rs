@@ -62,15 +62,23 @@ pub const PRODUCT_BIRTH_DATE_ELEMENT: &str = "birth_date";
 pub const PRODUCT_NATIONALITY_ELEMENT: &str = "nationality";
 pub const PRODUCT_MAX_ATTRIBUTES: usize = 2;
 // The MSO payload cap is sized for the real PID credential (~1-2 KiB of
-// value-digests plus device key and validity) with ~2x headroom, not a
-// theoretical maximum. Together with the packed digest-id universe this keeps
-// the scope walk at log14, which halves the STARK composition/FRI domain.
-pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 3584;
+// value-digests plus device key and validity) with headroom, not a theoretical
+// maximum. The MSO holds 32-byte digests, not attribute values, so even a full
+// PID (with a portrait) keeps a small MSO. Together with the packed digest-id
+// universe this keeps the scope walk at log14.
+pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 3328;
 pub const PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES: usize = 20;
 pub const PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES: usize =
     PRODUCT_MAX_MSO_PAYLOAD_BYTES + PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES;
-pub const PRODUCT_MAX_SELECTED_ITEM_BYTES: usize = 1_024;
-pub const PRODUCT_SHA_LOG_N_ROWS: u32 = 14;
+// The selected-item cap bounds one disclosed IssuerSignedItem (32-byte salt +
+// elementIdentifier + elementValue). It comfortably covers the disclosed
+// attributes this product proves (birth_date, nationality — both well under
+// 128 bytes). It is NOT large enough for a portrait/photo attribute (a JPEG is
+// kilobytes): disclosing a portrait would need a larger cap and keeps the
+// packed SHA at log14. See the note in tasks/todo.md — revisit if portrait
+// disclosure ever enters scope.
+pub const PRODUCT_MAX_SELECTED_ITEM_BYTES: usize = 256;
+pub const PRODUCT_SHA_LOG_N_ROWS: u32 = 13;
 // Issuer Sig_structure, MSO, and revocation message precede selected items.
 pub const PRODUCT_FIXED_PACKED_SHA_MESSAGES: usize = 3;
 pub const PRODUCT_MAX_PACKED_SHA_MESSAGES: usize =
@@ -85,19 +93,19 @@ pub const PRODUCT_MAX_SCOPE_ACTIVE_ROWS: usize = 2 * PRODUCT_MAX_ISSUER_SIG_STRU
     + 2 * PRODUCT_MAX_ATTRIBUTES * PRODUCT_MAX_SELECTED_ITEM_BYTES;
 
 const _: () =
-    assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES) == 57);
-const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES) == 57);
+    assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES) == 53);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES) == 53);
 const _: () =
     assert!(stwo_sha256::native::n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES) == 1);
-const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES) == 17);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES) == 5);
 const PRODUCT_MAX_PACKED_SHA_BLOCKS: usize = n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES)
     + n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES)
     + n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES)
     + PRODUCT_MAX_ATTRIBUTES * n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES);
-const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS == 149);
-const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS <= 255);
+const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS == 117);
+const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS <= 127);
 const _: () = assert!(PRODUCT_MAX_PACKED_SHA_MESSAGES == 5);
-const _: () = assert!(PRODUCT_SHA_LOG_N_ROWS == 14);
+const _: () = assert!(PRODUCT_SHA_LOG_N_ROWS == 13);
 const _: () = assert!(
     n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES) * BLOCK_BYTES + MDOC_CBOR_BLIND_ROWS
         <= 1usize << PRODUCT_MAX_CBOR_LOG_SIZE
@@ -243,14 +251,14 @@ mod tests {
 
     #[test]
     fn packed_sha_product_capacity_is_exact() {
-        assert_eq!(n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES), 57);
-        assert_eq!(n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES), 57);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES), 53);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES), 53);
         assert_eq!(n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES), 1);
-        assert_eq!(n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES), 17);
-        assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 149);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES), 5);
+        assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 117);
         let max_real_blocks = ((1usize << PRODUCT_SHA_LOG_N_ROWS) - 1) / ROWS_PER_BLOCK;
-        assert_eq!(max_real_blocks, 244);
-        assert_eq!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS, 95);
+        assert_eq!(max_real_blocks, 122);
+        assert_eq!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS, 5);
         assert!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS >= 1);
     }
 }

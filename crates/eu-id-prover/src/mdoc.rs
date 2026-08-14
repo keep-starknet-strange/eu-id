@@ -6556,7 +6556,12 @@ mod mdoc_sha_table_tests {
 
     #[test]
     fn maximum_nationality_item_fits_selected_item_profile() {
-        let value = Value::Array((0..256).map(|_| Value::Text("DE".to_string())).collect());
+        // The item cap bounds the disclosed nationality array to a realistic
+        // size. A real PID holds 1-3 nationalities; 32 is far beyond any real
+        // case and must still fit within the 256-byte selected-item cap. (The
+        // circuit's larger `MAX_PRESENTED_NATIONALITIES` walk capacity is not
+        // the binding constraint; the item cap is.)
+        let value = Value::Array((0..32).map(|_| Value::Text("DE".to_string())).collect());
         let item = demo_issuer_signed_item(9, "nationality", value, vec![9; 16]);
         assert!(item.len() <= crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES);
     }
