@@ -64,14 +64,9 @@ const MAC_HALF_TAG_CONSTRAINTS: usize = GF128_BITS;
 const MAC_HALF_LOCAL_CONSTRAINTS: usize = MAC_HALF_BOOL_CONSTRAINTS + MAC_HALF_TAG_CONSTRAINTS;
 const MAC_BATCH_GROUP_A_INPUT_LOG_SIZE: usize = 13;
 const MAC_BATCH_GROUP_B_INPUT_LOG_SIZE: usize = 13;
-const MAC_BATCH_INPUT_LOG_SIZE: usize = 14;
-const MAC_BATCH_TREE_LOG_SIZE: usize = 14;
 const MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
 const MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE: usize = GF128_BITS * MAC_HALF_PARITY_Q_BITS;
 const MAC_HALF_GROUP_B_INPUT_START: usize = 1usize << MAC_HALF_GROUP_A_INPUT_LOG_SIZE;
-const MAC_BATCH_GROUP_B_INPUT_START: usize = 1usize << MAC_BATCH_GROUP_A_INPUT_LOG_SIZE;
-const MAC_BATCH_OUTPUT_STRIDE: usize = GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS;
-const MAC_BATCH_TREE_HALF_WIDTH: usize = mac_half_tree_width();
 /// Whole 256-bit MAC values that must be canonical P-256 base-field elements.
 ///
 /// Only the device-key x/y coordinates use this range check. Issuer and
@@ -89,10 +84,23 @@ const MAC_BATCH_GROUP_A_USED_INPUTS: usize = MAC_BATCH_CANONICAL_CARRIES_START
     + MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_CARRIES;
 const MAC_BATCH_GROUP_B_USED_INPUTS: usize =
     MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE;
-const MAC_BATCH_CANONICAL_CONSTRAINTS_PER_VALUE: usize =
-    MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES + 2 + MAC_BATCH_CANONICAL_BITS;
-const MAC_BATCH_CANONICAL_CONSTRAINTS: usize =
-    MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_CONSTRAINTS_PER_VALUE;
+/// The canonicality sub-instance input: a const-one wire followed by the two
+/// values' slack and carry bits (`value + slack = p - 1` per 256-bit MAC
+/// value pair that must stay canonical).
+const MAC_CANONICAL_CONST_ONE_INDEX: usize = 0;
+const MAC_CANONICAL_SLACK_BITS_START: usize = 1;
+const MAC_CANONICAL_CARRIES_START: usize =
+    MAC_CANONICAL_SLACK_BITS_START + MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_BITS;
+/// Committed input length of the canonicality sub-instance.
+const MAC_CANONICAL_USED_INPUTS: usize =
+    MAC_CANONICAL_CARRIES_START + MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_BATCH_CANONICAL_CARRIES;
+const MAC_CANONICAL_INPUT_LOG_SIZE: usize = 11;
+/// Per-value canonicality constraints: booleanity of every slack/carry bit
+/// plus the two zero end-carry pins.
+const MAC_CANONICAL_CONSTRAINTS_PER_VALUE: usize =
+    MAC_BATCH_CANONICAL_BITS + MAC_BATCH_CANONICAL_CARRIES + 2;
+const MAC_CANONICAL_CONSTRAINTS: usize =
+    MAC_BATCH_CANONICAL_VALUE_COUNT * MAC_CANONICAL_CONSTRAINTS_PER_VALUE;
 pub const MAC_HALF_CONST_ONE_INDEX: usize = 0;
 pub const MAC_HALF_X_BITS_START: usize = 1;
 pub const MAC_HALF_AP_BITS_START: usize = MAC_HALF_X_BITS_START + GF128_BITS;
@@ -1177,17 +1185,10 @@ fn prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
         instances.push(MdocP4bProverInstance::ecdsa(2, instance));
     }
     let mac_values = mdoc_p4b_mac_values(issuer_input, device_input, revocation_input);
-    let mac_tags_placeholder = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
-    let circuit = build_mac_batch_circuit(&[0u8; 16], &mac_tags_placeholder)
-        .map_err(ImplementedCircuitProofError::Circuit)?;
-    let input = mac_batch_group_a_input(mac_key_shares, &mac_values)
-        .map_err(ImplementedCircuitProofError::Witness)?;
-    instances.push(MdocP4bProverInstance {
-        label: MDOC_P4B_MAC_BATCH_LABEL,
-        role: MdocP4bCircuitRole::MacBatch,
-        circuit,
-        input,
-    });
+    instances.extend(mdoc_p4b_mac_half_prover_instances(
+        mac_key_shares,
+        &mac_values,
+    )?);
 
     let (committed_values, layouts, pads) = mdoc_p4b_committed_values(&instances);
     let mut quadratic_constraints = Vec::new();
@@ -1265,13 +1266,15 @@ fn prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
         .enumerate()
         .map(|(instance_index, instance)| {
             let circuit = match instance.role {
-                MdocP4bCircuitRole::MacBatch => build_mac_batch_circuit(&av, &mac_tags)
-                    .map_err(ImplementedCircuitProofError::Circuit)?,
+                MdocP4bCircuitRole::MacHalf(half) => {
+                    build_mac_half_circuit(&av, &mac_tags[half])
+                        .map_err(ImplementedCircuitProofError::Circuit)?
+                }
                 _ => instance.circuit.clone(),
             };
             let input = match instance.role {
-                MdocP4bCircuitRole::MacBatch => {
-                    mac_batch_input_with_av(mac_key_shares, &av, &mac_values, &mac_tags)
+                MdocP4bCircuitRole::MacHalf(half) => {
+                    mac_half_input_with_av(&mac_key_shares.0[half], &av, &mac_values[half])
                         .map_err(ImplementedCircuitProofError::Witness)?
                 }
                 _ => instance.input.clone(),
@@ -1290,7 +1293,7 @@ fn prove_mdoc_p4b_circuit_bundle_unchecked_profiled(
             );
             let instance_start = Instant::now();
             let (proof, verification) = match instance.role {
-                MdocP4bCircuitRole::MacBatch => {
+                MdocP4bCircuitRole::MacHalf(_) => {
                     prove_evaluated_circuit_sorted_sparse_with_verification(
                         &circuit,
                         &layers,
@@ -1591,7 +1594,7 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
             );
             let start = Instant::now();
             let claims = match instance.role {
-                MdocP4bCircuitRole::MacBatch => verify_circuit_sorted_sparse(
+                MdocP4bCircuitRole::MacHalf(_) => verify_circuit_sorted_sparse(
                     &instance.circuit,
                     &entry.proof,
                     full_root,
@@ -1615,10 +1618,11 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
         ));
         let start = Instant::now();
         match instance.role {
-            MdocP4bCircuitRole::MacBatch => add_mac_split_circuit_verification_claims(
+            MdocP4bCircuitRole::MacHalf(half) => add_mac_half_split_circuit_verification_claims(
                 &mut linear_claims,
                 layout,
                 expanded_committed_len,
+                half,
                 &verification,
             )?,
             _ => add_circuit_verification_claims(&mut linear_claims, layout, &verification),
@@ -1650,10 +1654,11 @@ pub fn verify_mdoc_p4b_circuit_bundle_profiled(
                     layout,
                 )?;
             }
-            MdocP4bCircuitRole::MacBatch => {
-                for index in 0..MDOC_P4B_MAC_HALF_COUNT {
-                    add_mac_half_public_const_claim(&mut linear_claims, layout, index);
-                }
+            MdocP4bCircuitRole::MacHalf(_) => {
+                add_mac_half_public_const_claim(&mut linear_claims, layout);
+            }
+            MdocP4bCircuitRole::MacCanonicality => {
+                // The const-one pin lives in `add_mac_canonicality_claims`.
             }
         }
         profile.consistency += start.elapsed();
@@ -2177,14 +2182,30 @@ fn mdoc_p4b_instance_channel(
             channel.mix_bytes(label);
             mix_ecdsa_public_projection(&projections[2], &mut channel);
         }
-        MdocP4bCircuitRole::MacBatch => {
+        MdocP4bCircuitRole::MacHalf(half) => {
+            // Each half channel binds the shared two-root commitment, the
+            // shared MAC challenge, the half's own tag, and a unique half
+            // index before any challenge is drawn. The halves are symmetric
+            // circuits, so the index mix is what makes the eight channels
+            // independent; the root/av mixes bind every half to the same
+            // Ligero commitments.
             channel.mix_bytes(MDOC_P4B_MAC_PUBLIC_LABEL);
             channel.mix_bytes(&root);
             channel.mix_bytes(av);
-            channel.mix_bytes(&(mac_tags.len() as u64).to_be_bytes());
-            for tag in mac_tags {
-                channel.mix_bytes(tag);
-            }
+            channel.mix_bytes(&mac_tags[half]);
+            channel.mix_bytes(MDOC_P4B_MAC_HALF_INDEX_LABEL);
+            channel.mix_bytes(&(half as u64).to_be_bytes());
+            channel.mix_bytes(label);
+        }
+        MdocP4bCircuitRole::MacCanonicality => {
+            // The canonicality sub-instance shares the MAC domain and binds
+            // the same root/av; its distinct label and reserved index keep
+            // its channel independent from every half channel.
+            channel.mix_bytes(MDOC_P4B_MAC_PUBLIC_LABEL);
+            channel.mix_bytes(&root);
+            channel.mix_bytes(av);
+            channel.mix_bytes(MDOC_P4B_MAC_HALF_INDEX_LABEL);
+            channel.mix_bytes(&(MDOC_P4B_MAC_HALF_COUNT as u64).to_be_bytes());
             channel.mix_bytes(label);
         }
     }
@@ -2298,7 +2319,8 @@ fn circuit_used_input_len(circuit: &Circuit) -> usize {
 
 fn mdoc_p4b_committed_input_len(role: MdocP4bCircuitRole, circuit: &Circuit) -> usize {
     match role {
-        MdocP4bCircuitRole::MacBatch => MAC_BATCH_GROUP_A_USED_INPUTS,
+        MdocP4bCircuitRole::MacHalf(_) => MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+        MdocP4bCircuitRole::MacCanonicality => MAC_CANONICAL_USED_INPUTS,
         MdocP4bCircuitRole::IssuerEcdsa
         | MdocP4bCircuitRole::DeviceEcdsa
         | MdocP4bCircuitRole::RevocationEcdsa => circuit_used_input_len(circuit),
@@ -2333,7 +2355,8 @@ enum MdocP4bCircuitRole {
     IssuerEcdsa,
     DeviceEcdsa,
     RevocationEcdsa,
-    MacBatch,
+    MacHalf(usize),
+    MacCanonicality,
 }
 
 struct MdocP4bProverInstance {
@@ -2371,8 +2394,19 @@ struct MdocP4bClaimInventory {
     linear_claim_touched_rows: usize,
 }
 
-const MDOC_P4B_MAC_BATCH_LABEL: &[u8] = b"s4-mdoc-p4b-affine-mac-batch-v3";
+const MDOC_P4B_MAC_HALF_LABELS: [&[u8]; MDOC_P4B_MAC_HALF_COUNT] = [
+    b"s4-mdoc-p4b-affine-mac-half-0-v3",
+    b"s4-mdoc-p4b-affine-mac-half-1-v3",
+    b"s4-mdoc-p4b-affine-mac-half-2-v3",
+    b"s4-mdoc-p4b-affine-mac-half-3-v3",
+    b"s4-mdoc-p4b-affine-mac-half-4-v3",
+    b"s4-mdoc-p4b-affine-mac-half-5-v3",
+    b"s4-mdoc-p4b-affine-mac-half-6-v3",
+    b"s4-mdoc-p4b-affine-mac-half-7-v3",
+];
+const MDOC_P4B_MAC_CANONICAL_LABEL: &[u8] = b"s4-mdoc-p4b-affine-mac-canonical-v3";
 const MDOC_P4B_MAC_PUBLIC_LABEL: &[u8] = b"s4-mdoc-p4b-affine-mac-public-v3";
+const MDOC_P4B_MAC_HALF_INDEX_LABEL: &[u8] = b"s4-mdoc-p4b-affine-mac-half-index-v3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct BundleCircuitLayout {
@@ -2477,6 +2511,50 @@ fn prover_committed_values(
     (committed_values, all_layouts, all_pads)
 }
 
+/// Build the MAC prover instances: eight half sub-instances plus the
+/// canonicality sub-instance.
+///
+/// The eight MAC halves are independent GKR sub-instances so they prove in
+/// parallel. Each commits its own 512-value group_a block (the exact bytes of
+/// the former batch layout). The canonicality sub-instance commits the
+/// const-one wire and the slack/carry witness bits so every former batch
+/// group_a value stays committed exactly once. The half circuits carry a
+/// placeholder `av`/tag: the real per-half circuits and circuit inputs are
+/// rebuilt with the drawn `av` inside the parallel prove loop, exactly like
+/// the former single batch instance.
+fn mdoc_p4b_mac_half_prover_instances(
+    mac_key_shares: &MdocP4bMacKeyShares,
+    mac_values: &[Gf128; MDOC_P4B_MAC_HALF_COUNT],
+) -> Result<Vec<MdocP4bProverInstance>, ImplementedCircuitProofError> {
+    let mac_group_a = mac_batch_group_a_input(mac_key_shares, mac_values)
+        .map_err(ImplementedCircuitProofError::Witness)?;
+    let mut instances = Vec::with_capacity(MDOC_P4B_MAC_HALF_COUNT + 1);
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        let block_start = mac_batch_half_group_a_input_offset(half);
+        let input =
+            mac_group_a[block_start..block_start + MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE].to_vec();
+        instances.push(MdocP4bProverInstance {
+            label: MDOC_P4B_MAC_HALF_LABELS[half],
+            role: MdocP4bCircuitRole::MacHalf(half),
+            circuit: build_mac_half_circuit(&[0u8; 16], &[0u8; 16])
+                .map_err(ImplementedCircuitProofError::Circuit)?,
+            input,
+        });
+    }
+    let mut canonical_input = vec![Fp::ZERO; 1usize << MAC_CANONICAL_INPUT_LOG_SIZE];
+    canonical_input[MAC_CANONICAL_CONST_ONE_INDEX] = Fp::ONE;
+    canonical_input[MAC_CANONICAL_SLACK_BITS_START..MAC_CANONICAL_USED_INPUTS].copy_from_slice(
+        &mac_group_a[MAC_BATCH_CANONICAL_SLACK_BITS_START..MAC_BATCH_GROUP_A_USED_INPUTS],
+    );
+    instances.push(MdocP4bProverInstance {
+        label: MDOC_P4B_MAC_CANONICAL_LABEL,
+        role: MdocP4bCircuitRole::MacCanonicality,
+        circuit: build_mac_canonical_circuit().map_err(ImplementedCircuitProofError::Circuit)?,
+        input: canonical_input,
+    });
+    Ok(instances)
+}
+
 fn mdoc_p4b_committed_values(
     instances: &[MdocP4bProverInstance],
 ) -> (Vec<Fp>, Vec<BundleCircuitLayout>, Vec<CircuitPads>) {
@@ -2526,7 +2604,7 @@ fn mdoc_p4b_row_inventory(
                 ecdsa_input_rows +=
                     row_span_count(layout.input_offset, layout.input_len, params.row_len);
             }
-            MdocP4bCircuitRole::MacBatch => {
+            MdocP4bCircuitRole::MacHalf(_) | MdocP4bCircuitRole::MacCanonicality => {
                 mac_input_values += layout.input_len;
                 mac_input_rows +=
                     row_span_count(layout.input_offset, layout.input_len, params.row_len);
@@ -2592,7 +2670,8 @@ fn mdoc_p4b_role_name(role: MdocP4bCircuitRole) -> &'static str {
         MdocP4bCircuitRole::IssuerEcdsa => "issuer_ecdsa",
         MdocP4bCircuitRole::DeviceEcdsa => "device_ecdsa",
         MdocP4bCircuitRole::RevocationEcdsa => "revocation_ecdsa",
-        MdocP4bCircuitRole::MacBatch => "mac_batch",
+        MdocP4bCircuitRole::MacHalf(_) => "mac_half",
+        MdocP4bCircuitRole::MacCanonicality => "mac_canonicality",
     }
 }
 
@@ -2604,6 +2683,12 @@ fn mdoc_p4b_verifier_instances(
     av: &Gf128,
     mac_tags: &[Gf128],
 ) -> Result<Vec<MdocP4bVerifierInstance>, ImplementedCircuitProofError> {
+    if mac_tags.len() != MDOC_P4B_MAC_HALF_COUNT {
+        return Err(ImplementedCircuitProofError::WrongProofCount {
+            expected: MDOC_P4B_MAC_HALF_COUNT,
+            actual: mac_tags.len(),
+        });
+    }
     let mut instances = Vec::new();
     for instance in
         implemented_circuit_verifier_instances().map_err(ImplementedCircuitProofError::Circuit)?
@@ -2632,11 +2717,18 @@ fn mdoc_p4b_verifier_instances(
             circuit: instance.circuit,
         });
     }
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        instances.push(MdocP4bVerifierInstance {
+            label: MDOC_P4B_MAC_HALF_LABELS[half],
+            role: MdocP4bCircuitRole::MacHalf(half),
+            circuit: build_mac_half_circuit(av, &mac_tags[half])
+                .map_err(ImplementedCircuitProofError::Circuit)?,
+        });
+    }
     instances.push(MdocP4bVerifierInstance {
-        label: MDOC_P4B_MAC_BATCH_LABEL,
-        role: MdocP4bCircuitRole::MacBatch,
-        circuit: build_mac_batch_circuit(av, mac_tags)
-            .map_err(ImplementedCircuitProofError::Circuit)?,
+        label: MDOC_P4B_MAC_CANONICAL_LABEL,
+        role: MdocP4bCircuitRole::MacCanonicality,
+        circuit: build_mac_canonical_circuit().map_err(ImplementedCircuitProofError::Circuit)?,
     });
     Ok(instances)
 }
@@ -2702,10 +2794,11 @@ fn mdoc_p4b_prover_claim_batch(
             .map_err(ImplementedCircuitProofError::Ligero)?;
     for ((instance, layout), verification) in instances.iter().zip(layouts).zip(verifications) {
         match instance.role {
-            MdocP4bCircuitRole::MacBatch => add_mac_split_circuit_verification_claims(
+            MdocP4bCircuitRole::MacHalf(half) => add_mac_half_split_circuit_verification_claims(
                 &mut claims,
                 layout,
                 group_b_offset,
+                half,
                 verification,
             )?,
             _ => add_circuit_verification_claims(&mut claims, layout, verification),
@@ -2720,10 +2813,11 @@ fn mdoc_p4b_prover_claim_batch(
             MdocP4bCircuitRole::RevocationEcdsa => {
                 add_family_fixed_claims(&mut claims, &projections[2], instance.label, layout)?;
             }
-            MdocP4bCircuitRole::MacBatch => {
-                for half in 0..MDOC_P4B_MAC_HALF_COUNT {
-                    add_mac_half_public_const_claim(&mut claims, layout, half);
-                }
+            MdocP4bCircuitRole::MacHalf(_) => {
+                add_mac_half_public_const_claim(&mut claims, layout);
+            }
+            MdocP4bCircuitRole::MacCanonicality => {
+                // The const-one pin lives in `add_mac_canonicality_claims`.
             }
         }
     }
@@ -2805,10 +2899,25 @@ fn add_circuit_verification_claims(
     ));
 }
 
-fn add_mac_split_circuit_verification_claims(
+/// Map one MAC half instance's sumcheck input claims onto its committed
+/// slices of the shared group_a/group_b Ligero commitments.
+///
+/// The half circuit input is `[group_a block | group_b parity quotients]`
+/// zero-padded to `1 << MAC_HALF_INPUT_LOG_SIZE`: positions `[0, 512)` are the
+/// group_a block, `[512, 1024)` the first 512 group_b quotients, and
+/// `[1024, 1408)` the remaining 384. For an input claim point
+/// `r = (u, s, t)` with `s = r[MAC_HALF_GROUP_A_INPUT_LOG_SIZE]` and `t` the
+/// next bit, the input MLE therefore splits exactly as
+/// `(1-s)(1-t)·A(u) + s(1-t)·B_lo(u) + (1-s)t·B_hi(u)`, where `A` is the
+/// half's committed 512-value group_a block and `B_lo`/`B_hi` its committed
+/// group_b slice `[half*896, +512)` / `[+512, +896)`. Every half's terms point
+/// at its own slice of the SAME two commitments, so the aggregated claim
+/// batch binds all eight halves exactly like the former single batch claim.
+fn add_mac_half_split_circuit_verification_claims(
     claims: &mut Vec<LigeroLinearClaim>,
     layout_a: &BundleCircuitLayout,
     group_b_offset: usize,
+    half: usize,
     verification: &CircuitVerification,
 ) -> Result<(), ImplementedCircuitProofError> {
     for constraint in &verification.layer_constraints {
@@ -2828,24 +2937,32 @@ fn add_mac_split_circuit_verification_claims(
     }
 
     let beta = verification.input_challenge;
-    let mut terms = Vec::with_capacity(6);
+    let group_b_half_offset = group_b_offset + mac_batch_half_group_b_input_offset(half);
+    let mut terms = Vec::with_capacity(8);
     for (point, coefficient) in verification.input_claims.points.iter().zip([Fp::ONE, beta]) {
-        if point.len() != MAC_BATCH_INPUT_LOG_SIZE {
+        if point.len() != MAC_HALF_INPUT_LOG_SIZE {
             return Err(ImplementedCircuitProofError::InputClaimOpeningRejected);
         }
-        let split = point[MAC_BATCH_GROUP_A_INPUT_LOG_SIZE];
-        let subpoint = point[..MAC_BATCH_GROUP_A_INPUT_LOG_SIZE].to_vec();
+        let split = point[MAC_HALF_GROUP_A_INPUT_LOG_SIZE];
+        let high = point[MAC_HALF_GROUP_A_INPUT_LOG_SIZE + 1];
+        let subpoint = point[..MAC_HALF_GROUP_A_INPUT_LOG_SIZE].to_vec();
         terms.push(LigeroLinearTerm {
             offset: layout_a.input_offset,
-            len: layout_a.input_len,
+            len: MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
             point: subpoint.clone(),
-            coefficient: coefficient * (Fp::ONE - split),
+            coefficient: coefficient * (Fp::ONE - split) * (Fp::ONE - high),
         });
         terms.push(LigeroLinearTerm {
-            offset: group_b_offset,
-            len: MAC_BATCH_GROUP_B_USED_INPUTS,
+            offset: group_b_half_offset,
+            len: MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+            point: subpoint.clone(),
+            coefficient: coefficient * split * (Fp::ONE - high),
+        });
+        terms.push(LigeroLinearTerm {
+            offset: group_b_half_offset + MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+            len: MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE - MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
             point: subpoint,
-            coefficient: coefficient * split,
+            coefficient: coefficient * (Fp::ONE - split) * high,
         });
     }
     terms.push(LigeroLinearTerm {
@@ -2985,16 +3102,128 @@ fn add_c14_public_claims(
 fn add_mac_half_public_const_claim(
     claims: &mut Vec<LigeroLinearClaim>,
     layout: &BundleCircuitLayout,
-    half: usize,
 ) {
-    let offset = mac_batch_half_group_a_input_offset(half);
     add_fixed_claim(
         claims,
         layout.input_offset,
-        layout.input_len,
-        offset + MAC_HALF_CONST_ONE_INDEX,
+        MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+        MAC_HALF_CONST_ONE_INDEX,
         Fp::ONE,
     );
+}
+/// Committed position of the half instance's group_a x bits.
+fn mac_half_x_bit_position(half_layout: &BundleCircuitLayout, bit: usize) -> usize {
+    debug_assert!(bit < GF128_BITS);
+    half_layout.input_offset + MAC_HALF_X_BITS_START + bit
+}
+
+fn mac_canonical_slack_index(value: usize, bit: usize) -> usize {
+    debug_assert!(value < MAC_BATCH_CANONICAL_VALUE_COUNT);
+    debug_assert!(bit < MAC_BATCH_CANONICAL_BITS);
+    MAC_CANONICAL_SLACK_BITS_START + value * MAC_BATCH_CANONICAL_BITS + bit
+}
+
+fn mac_canonical_carry_index(value: usize, bit: usize) -> usize {
+    debug_assert!(value < MAC_BATCH_CANONICAL_VALUE_COUNT);
+    debug_assert!(bit < MAC_BATCH_CANONICAL_CARRIES);
+    MAC_CANONICAL_CARRIES_START + value * MAC_BATCH_CANONICAL_CARRIES + bit
+}
+
+/// Single-layer canonicality sub-circuit for the two whole-field MAC values
+/// (device qx/qy): booleanity of every committed slack/carry bit plus the two
+/// zero end-carry pins per value — exactly the constraints the deleted batch
+/// input layer enforced, minus the per-bit addition equations. Those are
+/// linear and checked as claims against the same commitment (see
+/// `add_mac_canonicality_claims`), so the proven statement is identical.
+fn build_mac_canonical_circuit() -> Result<Circuit, CircuitError> {
+    let mut terms = Vec::with_capacity(2 * MAC_CANONICAL_CONSTRAINTS);
+    let mut out = 0usize;
+    for value in 0..MAC_BATCH_CANONICAL_VALUE_COUNT {
+        for bit in 0..MAC_BATCH_CANONICAL_BITS {
+            add_bool_constraint(&mut terms, out, mac_canonical_slack_index(value, bit));
+            out += 1;
+        }
+        for bit in 0..MAC_BATCH_CANONICAL_CARRIES {
+            add_bool_constraint(&mut terms, out, mac_canonical_carry_index(value, bit));
+            out += 1;
+        }
+        for bit in [0, MAC_BATCH_CANONICAL_BITS] {
+            add_linear(
+                &mut terms,
+                out,
+                mac_canonical_carry_index(value, bit),
+                Fp::ONE,
+            );
+            out += 1;
+        }
+    }
+    debug_assert_eq!(out, MAC_CANONICAL_CONSTRAINTS);
+    Circuit::new(vec![Layer::new(
+        MAC_CANONICAL_INPUT_LOG_SIZE,
+        MAC_CANONICAL_INPUT_LOG_SIZE,
+        terms,
+    )?])
+}
+
+/// Linear half of the P-256 canonicality proof for the two whole-field MAC
+/// values (device qx/qy): the per-bit addition
+/// `value + slack + carry - 2·carry' = p-1 bit` over the halves' committed x
+/// bits and the canonicality instance's committed slack/carry bits. Together
+/// with the sub-circuit's booleanity and pin constraints this is the
+/// identical statement the deleted batch input layer enforced in-circuit.
+fn add_mac_canonicality_claims(
+    claims: &mut Vec<LigeroLinearClaim>,
+    mac_layouts: &[BundleCircuitLayout],
+    canonical_layout: &BundleCircuitLayout,
+) {
+    add_fixed_claim(
+        claims,
+        canonical_layout.input_offset,
+        canonical_layout.input_len,
+        MAC_CANONICAL_CONST_ONE_INDEX,
+        Fp::ONE,
+    );
+    for value in 0..MAC_BATCH_CANONICAL_VALUE_COUNT {
+        let first_half = MAC_BATCH_CANONICAL_FIRST_HALF + 2 * value;
+        for bit in 0..MAC_BATCH_CANONICAL_BITS {
+            let value_offset = mac_half_x_bit_position(
+                &mac_layouts[first_half + bit / GF128_BITS],
+                bit % GF128_BITS,
+            );
+            claims.push(LigeroLinearClaim::affine(
+                vec![
+                    LigeroLinearTerm {
+                        offset: value_offset,
+                        len: 1,
+                        point: Vec::new(),
+                        coefficient: Fp::ONE,
+                    },
+                    LigeroLinearTerm {
+                        offset: canonical_layout.input_offset
+                            + mac_canonical_slack_index(value, bit),
+                        len: 1,
+                        point: Vec::new(),
+                        coefficient: Fp::ONE,
+                    },
+                    LigeroLinearTerm {
+                        offset: canonical_layout.input_offset
+                            + mac_canonical_carry_index(value, bit),
+                        len: 1,
+                        point: Vec::new(),
+                        coefficient: Fp::ONE,
+                    },
+                    LigeroLinearTerm {
+                        offset: canonical_layout.input_offset
+                            + mac_canonical_carry_index(value, bit + 1),
+                        len: 1,
+                        point: Vec::new(),
+                        coefficient: -Fp::from_u64(2),
+                    },
+                ],
+                fp_bit(scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit)),
+            ));
+        }
+    }
 }
 
 fn add_ecdsa_consistency_claims(
@@ -3143,15 +3372,41 @@ fn add_mdoc_p4b_consistency_claims(
         b"s4-ecdsa-c3-c5-scalar-setup",
     )?;
     let device_c2 = find(MdocP4bCircuitRole::DeviceEcdsa, b"s4-ecdsa-c2-canonicality")?;
-    let mac = find(MdocP4bCircuitRole::MacBatch, MDOC_P4B_MAC_BATCH_LABEL)?;
-    add_mac_digest_binding(claims, issuer_c3, mac, 0, 1);
-    add_mac_field_binding(claims, device_c2, C2_QX_INDEX as usize, mac, 2, 3);
-    add_mac_field_binding(claims, device_c2, C2_QY_INDEX as usize, mac, 4, 5);
     let revocation_c3 = find(
         MdocP4bCircuitRole::RevocationEcdsa,
         b"s4-ecdsa-c3-c5-scalar-setup",
     )?;
-    add_mac_digest_binding(claims, revocation_c3, mac, 6, 7);
+    let mac_layouts = identities
+        .iter()
+        .zip(layouts)
+        .filter_map(|((instance_role, _), layout)| {
+            matches!(instance_role, MdocP4bCircuitRole::MacHalf(_)).then_some(*layout)
+        })
+        .collect::<Vec<_>>();
+    if mac_layouts.len() != MDOC_P4B_MAC_HALF_COUNT {
+        return Err(ImplementedCircuitProofError::CrossFamilyBindingRejected);
+    }
+    let mac_canonical = find(
+        MdocP4bCircuitRole::MacCanonicality,
+        MDOC_P4B_MAC_CANONICAL_LABEL,
+    )?;
+    add_mac_digest_binding(claims, issuer_c3, &mac_layouts[0], &mac_layouts[1]);
+    add_mac_field_binding(
+        claims,
+        device_c2,
+        C2_QX_INDEX as usize,
+        &mac_layouts[2],
+        &mac_layouts[3],
+    );
+    add_mac_field_binding(
+        claims,
+        device_c2,
+        C2_QY_INDEX as usize,
+        &mac_layouts[4],
+        &mac_layouts[5],
+    );
+    add_mac_digest_binding(claims, revocation_c3, &mac_layouts[6], &mac_layouts[7]);
+    add_mac_canonicality_claims(claims, &mac_layouts, mac_canonical);
     Ok(())
 }
 
@@ -3163,14 +3418,13 @@ fn add_mdoc_p4b_consistency_claims(
 fn add_mac_digest_binding(
     claims: &mut Vec<LigeroLinearClaim>,
     c3_layout: &BundleCircuitLayout,
-    mac_layout: &BundleCircuitLayout,
-    low_half: usize,
-    high_half: usize,
+    low_half_layout: &BundleCircuitLayout,
+    high_half_layout: &BundleCircuitLayout,
 ) {
     let (point, _) = mac_half_x_recompose_claim_point();
-    for (digest_bit_start, mac_half) in [
-        (C3_Z_BITS_START, low_half),
-        (C3_Z_BITS_START + GF128_BITS, high_half),
+    for (digest_bit_start, half_layout) in [
+        (C3_Z_BITS_START, low_half_layout),
+        (C3_Z_BITS_START + GF128_BITS, high_half_layout),
     ] {
         claims.push(LigeroLinearClaim::affine(
             vec![
@@ -3181,9 +3435,7 @@ fn add_mac_digest_binding(
                     coefficient: Fp::ONE,
                 },
                 LigeroLinearTerm {
-                    offset: mac_layout.input_offset
-                        + mac_batch_half_group_a_input_offset(mac_half)
-                        + MAC_HALF_X_BITS_START,
+                    offset: half_layout.input_offset + MAC_HALF_X_BITS_START,
                     len: GF128_BITS,
                     point: point.clone(),
                     coefficient: -Fp::ONE,
@@ -3198,25 +3450,21 @@ fn add_mac_field_binding(
     claims: &mut Vec<LigeroLinearClaim>,
     field_layout: &BundleCircuitLayout,
     field_index: usize,
-    mac_layout: &BundleCircuitLayout,
-    low_half: usize,
-    high_half: usize,
+    low_half_layout: &BundleCircuitLayout,
+    high_half_layout: &BundleCircuitLayout,
 ) {
     let (point, scale) = mac_half_x_recompose_claim_point();
-    let half_term = |half, coefficient| {
-        let offset = mac_batch_half_group_a_input_offset(half);
-        LigeroLinearTerm {
-            offset: mac_layout.input_offset + offset + MAC_HALF_X_BITS_START,
-            len: GF128_BITS,
-            point: point.clone(),
-            coefficient,
-        }
+    let half_term = |half_layout: &BundleCircuitLayout, coefficient| LigeroLinearTerm {
+        offset: half_layout.input_offset + MAC_HALF_X_BITS_START,
+        len: GF128_BITS,
+        point: point.clone(),
+        coefficient,
     };
     claims.push(LigeroLinearClaim::affine(
         vec![
             fixed_term(field_layout, field_index, scale),
-            half_term(low_half, -Fp::ONE),
-            half_term(high_half, -two_pow_128()),
+            half_term(low_half_layout, -Fp::ONE),
+            half_term(high_half_layout, -two_pow_128()),
         ],
         Fp::ZERO,
     ));
@@ -3375,21 +3623,6 @@ pub fn build_mac_half_circuit(av: &Gf128, tag: &Gf128) -> Result<Circuit, Circui
     ])
 }
 
-fn build_mac_batch_circuit(av: &Gf128, tags: &[Gf128]) -> Result<Circuit, CircuitError> {
-    if tags.len() != MDOC_P4B_MAC_HALF_COUNT {
-        return Err(CircuitError::InvalidTermIndex);
-    }
-    let av_bits = bytes_to_bits(av);
-    let tag_bits: [[bool; GF128_BITS]; MDOC_P4B_MAC_HALF_COUNT] =
-        std::array::from_fn(|index| bytes_to_bits(&tags[index]));
-    let local_constraints = mac_half_local_constraint_count();
-    Circuit::new(vec![
-        mac_batch_final_layer(local_constraints)?,
-        mac_batch_parity_layer(&tag_bits, local_constraints)?,
-        mac_batch_input_layer(&av_bits)?,
-    ])
-}
-
 pub fn mac_half_input_with_av(ap: &Gf128, av: &Gf128, x: &Gf128) -> Result<Vec<Fp>, WitnessError> {
     let mut input = vec![Fp::ZERO; 1usize << MAC_HALF_INPUT_LOG_SIZE];
     let group_a = mac_half_group_a_input(ap, x)?;
@@ -3517,21 +3750,6 @@ fn mac_batch_group_b_input(
     Ok(input)
 }
 
-fn mac_batch_input_with_av(
-    mac_key_shares: &MdocP4bMacKeyShares,
-    av: &Gf128,
-    mac_values: &[Gf128; MDOC_P4B_MAC_HALF_COUNT],
-    mac_tags: &[Gf128],
-) -> Result<Vec<Fp>, WitnessError> {
-    let mut input = vec![Fp::ZERO; 1usize << MAC_BATCH_INPUT_LOG_SIZE];
-    let group_a = mac_batch_group_a_input(mac_key_shares, mac_values)?;
-    input[..group_a.len()].copy_from_slice(&group_a);
-    let group_b = mac_batch_group_b_input(mac_key_shares, av, mac_values, mac_tags)?;
-    input[MAC_BATCH_GROUP_B_INPUT_START..MAC_BATCH_GROUP_B_INPUT_START + group_b.len()]
-        .copy_from_slice(&group_b);
-    Ok(input)
-}
-
 pub fn gf128_halves_from_be32(value: [u8; 32]) -> [Gf128; 2] {
     let mut lo = [0u8; 16];
     let mut hi = [0u8; 16];
@@ -3604,141 +3822,6 @@ fn mac_half_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitEr
     Layer::new(MAC_HALF_TREE_LOG_SIZE, MAC_HALF_INPUT_LOG_SIZE, terms)
 }
 
-fn mac_batch_input_layer(av_bits: &[bool; GF128_BITS]) -> Result<Layer, CircuitError> {
-    let av_fold = av_linear_fold_slots(av_bits);
-    let mut terms = Vec::new();
-    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
-        let input_offset = mac_batch_half_group_a_input_offset(half);
-        let b_input_offset = mac_batch_half_group_b_full_input_offset(half);
-        add_linear(
-            &mut terms,
-            mac_batch_tree_const_index(half),
-            input_offset + MAC_HALF_CONST_ONE_INDEX,
-            Fp::ONE,
-        );
-        for (out_bit, leaves) in av_fold.iter().enumerate() {
-            add_linear(
-                &mut terms,
-                mac_batch_tree_count_index(half, out_bit),
-                input_offset + MAC_HALF_AP_BITS_START + out_bit,
-                Fp::ONE,
-            );
-            for (x_bit, present) in leaves.iter().copied().enumerate() {
-                if present {
-                    add_linear(
-                        &mut terms,
-                        mac_batch_tree_count_index(half, out_bit),
-                        input_offset + MAC_HALF_X_BITS_START + x_bit,
-                        Fp::ONE,
-                    );
-                }
-            }
-        }
-        for bit in 0..GF128_BITS {
-            for q_bit in 0..MAC_HALF_PARITY_Q_BITS {
-                add_linear(
-                    &mut terms,
-                    mac_batch_tree_qsum_index(half, bit),
-                    b_input_offset + mac_half_group_b_q_bit_index(bit, q_bit),
-                    Fp::from_u64(1u64 << q_bit),
-                );
-            }
-        }
-        let mut local = mac_batch_tree_local_start(half);
-        for bit in 0..GF128_BITS {
-            add_bool_constraint(
-                &mut terms,
-                local,
-                input_offset + MAC_HALF_X_BITS_START + bit,
-            );
-            local += 1;
-            add_bool_constraint(
-                &mut terms,
-                local,
-                input_offset + MAC_HALF_AP_BITS_START + bit,
-            );
-            local += 1;
-            for q_bit in 0..MAC_HALF_PARITY_Q_BITS {
-                add_bool_constraint(
-                    &mut terms,
-                    local,
-                    b_input_offset + mac_half_group_b_q_bit_index(bit, q_bit),
-                );
-                local += 1;
-            }
-        }
-        debug_assert_eq!(
-            local,
-            mac_batch_tree_local_start(half) + MAC_HALF_BOOL_CONSTRAINTS
-        );
-    }
-    let mut canonical = 0usize;
-    for value in 0..MAC_BATCH_CANONICAL_VALUE_COUNT {
-        for bit in 0..MAC_BATCH_CANONICAL_BITS {
-            add_bool_constraint(
-                &mut terms,
-                mac_batch_tree_canonical_start() + canonical,
-                mac_batch_canonical_slack_bit_index(value, bit),
-            );
-            canonical += 1;
-        }
-        for bit in 0..MAC_BATCH_CANONICAL_CARRIES {
-            add_bool_constraint(
-                &mut terms,
-                mac_batch_tree_canonical_start() + canonical,
-                mac_batch_canonical_carry_index(value, bit),
-            );
-            canonical += 1;
-        }
-        for bit in [0, MAC_BATCH_CANONICAL_BITS] {
-            add_linear(
-                &mut terms,
-                mac_batch_tree_canonical_start() + canonical,
-                mac_batch_canonical_carry_index(value, bit),
-                Fp::ONE,
-            );
-            canonical += 1;
-        }
-        for bit in 0..MAC_BATCH_CANONICAL_BITS {
-            let out = mac_batch_tree_canonical_start() + canonical;
-            add_linear(
-                &mut terms,
-                out,
-                mac_batch_canonical_value_bit_index(value, bit),
-                Fp::ONE,
-            );
-            add_linear(
-                &mut terms,
-                out,
-                mac_batch_canonical_slack_bit_index(value, bit),
-                Fp::ONE,
-            );
-            add_linear(
-                &mut terms,
-                out,
-                mac_batch_canonical_carry_index(value, bit),
-                Fp::ONE,
-            );
-            add_linear(
-                &mut terms,
-                out,
-                mac_batch_canonical_carry_index(value, bit + 1),
-                -Fp::from_u64(2),
-            );
-            if scalar_bit(&P256_FIELD_MODULUS_MINUS_ONE, bit) {
-                add_constant(&mut terms, out, -Fp::ONE);
-            }
-            canonical += 1;
-        }
-    }
-    debug_assert_eq!(canonical, MAC_BATCH_CANONICAL_CONSTRAINTS);
-    debug_assert!(
-        mac_batch_tree_canonical_start() + canonical <= 1usize << MAC_BATCH_TREE_LOG_SIZE
-    );
-
-    Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_INPUT_LOG_SIZE, terms)
-}
-
 fn mac_half_parity_layer(
     tag_bits: &[bool; GF128_BITS],
     local_constraints: usize,
@@ -3775,57 +3858,6 @@ fn mac_half_parity_layer(
     Layer::new(MAC_HALF_TREE_LOG_SIZE, MAC_HALF_TREE_LOG_SIZE, terms)
 }
 
-fn mac_batch_parity_layer(
-    tag_bits: &[[bool; GF128_BITS]; MDOC_P4B_MAC_HALF_COUNT],
-    local_constraints: usize,
-) -> Result<Layer, CircuitError> {
-    let mut terms = Vec::new();
-    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
-        add_linear(
-            &mut terms,
-            mac_batch_tree_const_index(half),
-            mac_batch_tree_const_index(half),
-            Fp::ONE,
-        );
-        for bit in 0..GF128_BITS {
-            let tag_pin = mac_batch_tree_local_start(half) + MAC_HALF_BOOL_CONSTRAINTS + bit;
-            add_linear(
-                &mut terms,
-                tag_pin,
-                mac_batch_tree_count_index(half, bit),
-                Fp::ONE,
-            );
-            add_linear(
-                &mut terms,
-                tag_pin,
-                mac_batch_tree_qsum_index(half, bit),
-                -Fp::from_u64(2),
-            );
-            if tag_bits[half][bit] {
-                add_constant(&mut terms, tag_pin, -Fp::ONE);
-            }
-        }
-        for index in 0..local_constraints {
-            add_linear(
-                &mut terms,
-                mac_batch_tree_local_start(half) + index,
-                mac_batch_tree_local_start(half) + index,
-                Fp::ONE,
-            );
-        }
-    }
-    for index in 0..MAC_BATCH_CANONICAL_CONSTRAINTS {
-        add_linear(
-            &mut terms,
-            mac_batch_tree_canonical_start() + index,
-            mac_batch_tree_canonical_start() + index,
-            Fp::ONE,
-        );
-    }
-
-    Layer::new(MAC_BATCH_TREE_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
-}
-
 fn mac_half_final_layer(local_constraints: usize) -> Result<Layer, CircuitError> {
     let mut terms = Vec::with_capacity(local_constraints);
     for index in 0..local_constraints {
@@ -3840,41 +3872,8 @@ fn mac_half_final_layer(local_constraints: usize) -> Result<Layer, CircuitError>
     Layer::new(MAC_HALF_INPUT_LOG_SIZE, MAC_HALF_TREE_LOG_SIZE, terms)
 }
 
-fn mac_batch_final_layer(local_constraints: usize) -> Result<Layer, CircuitError> {
-    let mut terms = Vec::with_capacity(MDOC_P4B_MAC_HALF_COUNT * local_constraints);
-    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
-        let output_offset = half * MAC_BATCH_OUTPUT_STRIDE;
-        for index in 0..local_constraints {
-            add_linear(
-                &mut terms,
-                output_offset + index,
-                mac_batch_tree_local_start(half) + index,
-                Fp::ONE,
-            );
-        }
-    }
-    for index in 0..MAC_BATCH_CANONICAL_CONSTRAINTS {
-        add_linear(
-            &mut terms,
-            mac_batch_output_canonical_start() + index,
-            mac_batch_tree_canonical_start() + index,
-            Fp::ONE,
-        );
-    }
-    debug_assert!(
-        mac_batch_output_canonical_start() + MAC_BATCH_CANONICAL_CONSTRAINTS
-            <= 1usize << MAC_BATCH_INPUT_LOG_SIZE
-    );
-
-    Layer::new(MAC_BATCH_INPUT_LOG_SIZE, MAC_BATCH_TREE_LOG_SIZE, terms)
-}
-
 fn mac_half_local_constraint_count() -> usize {
     MAC_HALF_LOCAL_CONSTRAINTS
-}
-
-const fn mac_half_tree_width() -> usize {
-    1 + GF128_BITS + GF128_BITS + MAC_HALF_LOCAL_CONSTRAINTS
 }
 
 fn mac_half_q_bit_index(bit: usize, q_bit: usize) -> usize {
@@ -3921,10 +3920,6 @@ fn mac_batch_half_group_b_input_offset(half: usize) -> usize {
     half * MAC_BATCH_HALF_GROUP_B_INPUT_STRIDE
 }
 
-fn mac_batch_half_group_b_full_input_offset(half: usize) -> usize {
-    MAC_BATCH_GROUP_B_INPUT_START + mac_batch_half_group_b_input_offset(half)
-}
-
 fn mac_batch_canonical_slack_bit_index(value: usize, bit: usize) -> usize {
     debug_assert!(value < MAC_BATCH_CANONICAL_VALUE_COUNT);
     debug_assert!(bit < MAC_BATCH_CANONICAL_BITS);
@@ -3942,35 +3937,6 @@ fn mac_batch_canonical_value_bit_index(value: usize, bit: usize) -> usize {
     debug_assert!(bit < MAC_BATCH_CANONICAL_BITS);
     let half = MAC_BATCH_CANONICAL_FIRST_HALF + 2 * value + bit / GF128_BITS;
     mac_batch_half_group_a_input_offset(half) + MAC_HALF_X_BITS_START + bit % GF128_BITS
-}
-
-fn mac_batch_tree_half_start(half: usize) -> usize {
-    debug_assert!(half < MDOC_P4B_MAC_HALF_COUNT);
-    half * MAC_BATCH_TREE_HALF_WIDTH
-}
-
-fn mac_batch_tree_canonical_start() -> usize {
-    MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_TREE_HALF_WIDTH
-}
-
-fn mac_batch_output_canonical_start() -> usize {
-    MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_OUTPUT_STRIDE
-}
-
-fn mac_batch_tree_const_index(half: usize) -> usize {
-    mac_batch_tree_half_start(half)
-}
-
-fn mac_batch_tree_count_index(half: usize, bit: usize) -> usize {
-    mac_batch_tree_half_start(half) + mac_half_tree_count_index(bit)
-}
-
-fn mac_batch_tree_qsum_index(half: usize, bit: usize) -> usize {
-    mac_batch_tree_half_start(half) + mac_half_tree_qsum_index(bit)
-}
-
-fn mac_batch_tree_local_start(half: usize) -> usize {
-    mac_batch_tree_half_start(half) + mac_half_tree_local_start()
 }
 
 fn monomial_reduction_bits(power: usize) -> Vec<usize> {
@@ -6202,18 +6168,13 @@ mod tests {
 
         let key_shares = p4b_microbench_key_shares();
         let mac_values = mdoc_p4b_mac_values(&inputs[0], &inputs[1], &inputs[2]);
-        let zero_tags = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
-        instances.push(MdocP4bProverInstance {
-            label: MDOC_P4B_MAC_BATCH_LABEL,
-            role: MdocP4bCircuitRole::MacBatch,
-            circuit: build_mac_batch_circuit(&[0; 16], &zero_tags).unwrap(),
-            input: mac_batch_group_a_input(&key_shares, &mac_values).unwrap(),
-        });
+        instances.extend(mdoc_p4b_mac_half_prover_instances(&key_shares, &mac_values).unwrap());
         let (committed, layouts, _) = mdoc_p4b_committed_values(&instances);
+        let zero_tags = vec![[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
         let verifier_instances = mdoc_p4b_verifier_instances(&[0; 16], &zero_tags).unwrap();
         let (expected_layouts, expected_len) =
             mdoc_p4b_verifier_bundle_pad_layouts(&verifier_instances, 0);
-        assert_eq!(committed.len(), 53_515);
+        assert_eq!(committed.len(), 54_514);
         assert_eq!(committed.len(), expected_len);
         assert_eq!(layouts.len(), expected_layouts.len());
         for ((layout, expected), instance) in layouts.iter().zip(&expected_layouts).zip(&instances)
@@ -6227,7 +6188,7 @@ mod tests {
                 &instance.input[..layout.input_len],
             );
             assert_prefix_mle_matches_full_zero_padded_input(&instance.input, layout.input_len);
-            if instance.role != MdocP4bCircuitRole::MacBatch {
+            if !matches!(instance.role, MdocP4bCircuitRole::MacHalf(_)) {
                 let expected_layers = instance
                     .circuit
                     .evaluate_input(instance.input.clone())
@@ -6417,15 +6378,17 @@ mod tests {
                 .len(),
             1usize << MAC_BATCH_GROUP_B_INPUT_LOG_SIZE
         );
-        let circuit = build_mac_batch_circuit(&av, &tags).unwrap();
-        assert_eq!(
-            circuit.layers().first().unwrap().out_log_size(),
-            MAC_BATCH_INPUT_LOG_SIZE
-        );
-        assert_eq!(
-            circuit.layers().last().unwrap().next_log_size(),
-            MAC_BATCH_INPUT_LOG_SIZE
-        );
+        for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+            let circuit = build_mac_half_circuit(&av, &tags[half]).unwrap();
+            assert_eq!(
+                circuit.layers().first().unwrap().out_log_size(),
+                MAC_HALF_INPUT_LOG_SIZE
+            );
+            assert_eq!(
+                circuit.layers().last().unwrap().next_log_size(),
+                MAC_HALF_INPUT_LOG_SIZE
+            );
+        }
         assert_eq!([values[6], values[7]], gf128_halves_from_be32(revocation.z));
     }
 
@@ -6448,7 +6411,8 @@ mod tests {
         assert_prefix_mle_matches_full_zero_padded_input(&group_a, MAC_BATCH_GROUP_A_USED_INPUTS);
         assert_prefix_mle_matches_full_zero_padded_input(&group_b, MAC_BATCH_GROUP_B_USED_INPUTS);
 
-        let circuit = build_mac_batch_circuit(&av, &tags).unwrap();
+        let half = 3usize;
+        let circuit = build_mac_half_circuit(&av, &tags[half]).unwrap();
         let input_indices = circuit
             .layers()
             .last()
@@ -6458,20 +6422,20 @@ mod tests {
             .flat_map(|term| [term.l as usize, term.r as usize])
             .collect::<Vec<_>>();
         assert!(input_indices.iter().all(|&index| {
-            index < MAC_BATCH_GROUP_A_USED_INPUTS
-                || (MAC_BATCH_GROUP_B_INPUT_START
-                    ..MAC_BATCH_GROUP_B_INPUT_START + MAC_BATCH_GROUP_B_USED_INPUTS)
+            index < MAC_HALF_GROUP_A_USED_INPUTS
+                || (MAC_HALF_GROUP_B_INPUT_START
+                    ..MAC_HALF_GROUP_B_INPUT_START + MAC_HALF_GROUP_B_USED_INPUTS)
                     .contains(&index)
         }));
-        assert!(input_indices.contains(&(MAC_BATCH_GROUP_A_USED_INPUTS - 1)));
+        assert!(input_indices.contains(&(MAC_HALF_GROUP_A_USED_INPUTS - 1)));
         assert!(input_indices
-            .contains(&(MAC_BATCH_GROUP_B_INPUT_START + MAC_BATCH_GROUP_B_USED_INPUTS - 1)));
-        let input = mac_batch_input_with_av(&key_shares, &av, &values, &tags).unwrap();
+            .contains(&(MAC_HALF_GROUP_B_INPUT_START + MAC_HALF_GROUP_B_USED_INPUTS - 1)));
+        let input = mac_half_input_with_av(&key_shares.0[half], &av, &values[half]).unwrap();
         let expected = circuit.evaluate_input(input.clone()).unwrap();
         let mut suffix_mutated = input;
-        suffix_mutated[MAC_BATCH_GROUP_A_USED_INPUTS..MAC_BATCH_GROUP_B_INPUT_START]
+        suffix_mutated[MAC_HALF_GROUP_A_USED_INPUTS..MAC_HALF_GROUP_B_INPUT_START]
             .fill(Fp::from_u64(7));
-        suffix_mutated[MAC_BATCH_GROUP_B_INPUT_START + MAC_BATCH_GROUP_B_USED_INPUTS..]
+        suffix_mutated[MAC_HALF_GROUP_B_INPUT_START + MAC_HALF_GROUP_B_USED_INPUTS..]
             .fill(Fp::from_u64(11));
         let suffix_mutated = circuit.evaluate_input(suffix_mutated).unwrap();
         assert_eq!(
@@ -6491,23 +6455,35 @@ mod tests {
         let key_shares = p4b_microbench_key_shares();
         let mut mac_values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
         [mac_values[0], mac_values[1]] = gf128_halves_from_be32(digest);
-        let mac_input = mac_batch_group_a_input(&key_shares, &mac_values).expect("MAC input");
+        let half_inputs = [
+            mac_half_group_a_input(&key_shares.0[0], &mac_values[0]).expect("low half input"),
+            mac_half_group_a_input(&key_shares.0[1], &mac_values[1]).expect("high half input"),
+        ];
         let c3_layout = BundleCircuitLayout {
             input_offset: 0,
             input_len: c3_input.len(),
             pad_offset: c3_input.len(),
             pad_len: 0,
         };
-        let mac_layout = BundleCircuitLayout {
-            input_offset: c3_input.len(),
-            input_len: mac_input.len(),
-            pad_offset: c3_input.len() + mac_input.len(),
-            pad_len: 0,
-        };
+        let half_layouts = [
+            BundleCircuitLayout {
+                input_offset: c3_input.len(),
+                input_len: half_inputs[0].len(),
+                pad_offset: c3_input.len() + half_inputs[0].len(),
+                pad_len: 0,
+            },
+            BundleCircuitLayout {
+                input_offset: c3_input.len() + half_inputs[0].len(),
+                input_len: half_inputs[1].len(),
+                pad_offset: c3_input.len() + half_inputs[0].len() + half_inputs[1].len(),
+                pad_len: 0,
+            },
+        ];
         let mut committed = c3_input;
-        committed.extend(mac_input);
+        committed.extend_from_slice(&half_inputs[0]);
+        committed.extend_from_slice(&half_inputs[1]);
         let mut claims = Vec::new();
-        add_mac_digest_binding(&mut claims, &c3_layout, &mac_layout, 0, 1);
+        add_mac_digest_binding(&mut claims, &c3_layout, &half_layouts[0], &half_layouts[1]);
         assert_eq!(claims.len(), 2);
         let evaluate = |claim: &LigeroLinearClaim, values: &[Fp]| {
             claim.terms.iter().fold(Fp::ZERO, |sum, term| {
@@ -6519,12 +6495,8 @@ mod tests {
             .iter()
             .all(|claim| evaluate(claim, &committed) == claim.value));
 
-        let mac_low = mac_layout.input_offset
-            + mac_batch_half_group_a_input_offset(0)
-            + MAC_HALF_X_BITS_START;
-        let mac_high = mac_layout.input_offset
-            + mac_batch_half_group_a_input_offset(1)
-            + MAC_HALF_X_BITS_START;
+        let mac_low = half_layouts[0].input_offset + MAC_HALF_X_BITS_START;
+        let mac_high = half_layouts[1].input_offset + MAC_HALF_X_BITS_START;
         committed[mac_low] = Fp::ONE - committed[mac_low];
         assert_ne!(evaluate(&claims[0], &committed), claims[0].value);
         assert_eq!(evaluate(&claims[1], &committed), claims[1].value);
@@ -6556,7 +6528,7 @@ mod tests {
         for (half, replacement) in one_halves.into_iter().enumerate() {
             let replacement_input =
                 mac_half_group_a_input(&key_shares.0[half], &replacement).unwrap();
-            let offset = mac_layout.input_offset + mac_batch_half_group_a_input_offset(half);
+            let offset = half_layouts[half].input_offset;
             committed[offset..offset + replacement_input.len()].copy_from_slice(&replacement_input);
         }
         assert!(
@@ -6568,9 +6540,8 @@ mod tests {
     }
 
     #[test]
-    fn mac_batch_rejects_base_field_alias_bits() {
+    fn mac_split_canonicality_claims_reject_base_field_alias_bits() {
         let key_shares = p4b_microbench_key_shares();
-        let av = [0x5au8; 16];
         let zero_values = [[0u8; 16]; MDOC_P4B_MAC_HALF_COUNT];
         let mut alias_values = zero_values;
         let alias = gf128_halves_from_be32(be_from_words(&P256_FIELD_MODULUS));
@@ -6586,31 +6557,454 @@ mod tests {
             "the honest input builder must reject the non-canonical bytes"
         );
 
-        let mut group_a =
+        // Mirror the bundle layout: the device C2 block, then the eight half
+        // group_a blocks at stride 512, then the canonicality sub-instance's
+        // committed input.
+        let c2_layout = BundleCircuitLayout {
+            input_offset: 0,
+            input_len: 4,
+            pad_offset: 4,
+            pad_len: 0,
+        };
+        let mac_base = c2_layout.input_len;
+        let mac_layouts: Vec<BundleCircuitLayout> = (0..MDOC_P4B_MAC_HALF_COUNT)
+            .map(|half| BundleCircuitLayout {
+                input_offset: mac_base + half * MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+                input_len: MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+                pad_offset: 0,
+                pad_len: 0,
+            })
+            .collect();
+        let canonical_layout = BundleCircuitLayout {
+            input_offset: mac_base + MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+            input_len: MAC_CANONICAL_USED_INPUTS,
+            pad_offset: 0,
+            pad_len: 0,
+        };
+        let group_a =
             mac_batch_group_a_input(&key_shares, &zero_values).expect("zero values are canonical");
+        let mut committed = vec![Fp::ONE, Fp::ZERO, Fp::ZERO, Fp::ZERO];
+        committed.extend_from_slice(
+            &group_a[..MDOC_P4B_MAC_HALF_COUNT * MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE],
+        );
+        committed.push(Fp::ONE);
+        committed.extend_from_slice(
+            &group_a[MAC_BATCH_CANONICAL_SLACK_BITS_START..MAC_BATCH_GROUP_A_USED_INPUTS],
+        );
+        let evaluate = |claim: &LigeroLinearClaim, values: &[Fp]| {
+            claim.terms.iter().fold(Fp::ZERO, |sum, term| {
+                let mle = Mle::new(values[term.offset..term.offset + term.len].to_vec());
+                sum + term.coefficient * mle.eval_at(&term.point).unwrap()
+            })
+        };
+
+        let mut claims = Vec::new();
+        add_mac_field_binding(
+            &mut claims,
+            &c2_layout,
+            C2_QY_INDEX as usize,
+            &mac_layouts[4],
+            &mac_layouts[5],
+        );
+        add_mac_canonicality_claims(&mut claims, &mac_layouts, &canonical_layout);
+        assert!(
+            claims
+                .iter()
+                .all(|claim| evaluate(claim, &committed) == claim.value),
+            "the honest zero-coordinate witness must satisfy every binding claim"
+        );
+
+        let mut aliased = committed.clone();
         for half in 4..6 {
-            let offset = mac_batch_half_group_a_input_offset(half);
             let alias_half =
                 mac_half_group_a_input(&key_shares.0[half], &alias_values[half]).unwrap();
-            group_a[offset..offset + alias_half.len()].copy_from_slice(&alias_half);
+            let offset = mac_layouts[half].input_offset;
+            aliased[offset..offset + alias_half.len()].copy_from_slice(&alias_half);
         }
-        let tags: [Gf128; MDOC_P4B_MAC_HALF_COUNT] =
-            std::array::from_fn(|half| gf128_tag(&key_shares.0[half], &av, &alias_values[half]));
-        let group_b = mac_batch_group_b_input(&key_shares, &av, &alias_values, &tags).unwrap();
-        let mut input = vec![Fp::ZERO; 1usize << MAC_BATCH_INPUT_LOG_SIZE];
-        input[..group_a.len()].copy_from_slice(&group_a);
-        input[MAC_BATCH_GROUP_B_INPUT_START..MAC_BATCH_GROUP_B_INPUT_START + group_b.len()]
-            .copy_from_slice(&group_b);
-
-        let circuit = build_mac_batch_circuit(&av, &tags).expect("MAC batch circuit builds");
-        let layers = circuit
-            .evaluate_input(input)
-            .expect("input has circuit width");
+        assert_eq!(
+            evaluate(&claims[0], &aliased),
+            claims[0].value,
+            "the whole-field binding still holds: p matches zero modulo p"
+        );
         assert!(
-            !circuit
-                .is_satisfied(&layers)
-                .expect("circuit shape is valid"),
-            "the in-circuit p-bound must reject bits that only match modulo p"
+            claims[1..]
+                .iter()
+                .any(|claim| evaluate(claim, &aliased) != claim.value),
+            "the canonicality claims must reject bits that only match modulo p"
+        );
+    }
+
+    #[test]
+    fn mac_canonical_circuit_accepts_honest_and_rejects_bit_and_pin_tampering() {
+        let key_shares = p4b_microbench_key_shares();
+        let issuer = p4b_microbench_input(19);
+        let device = p4b_microbench_input(23);
+        let revocation = p4b_microbench_input(29);
+        let values = mdoc_p4b_mac_values(&issuer, &device, &revocation);
+        let instances = mdoc_p4b_mac_half_prover_instances(&key_shares, &values).unwrap();
+        let canonical = instances
+            .iter()
+            .find(|instance| instance.role == MdocP4bCircuitRole::MacCanonicality)
+            .expect("canonicality instance is built");
+        let circuit = build_mac_canonical_circuit().unwrap();
+        let is_satisfied = |input: &[Fp]| {
+            let layers = circuit.evaluate_input(input.to_vec()).unwrap();
+            circuit.is_satisfied(&layers).unwrap()
+        };
+        assert!(
+            is_satisfied(&canonical.input),
+            "the honest canonicality witness must satisfy the sub-circuit"
+        );
+
+        let mut non_boolean_slack = canonical.input.clone();
+        non_boolean_slack[mac_canonical_slack_index(1, 7)] = Fp::from_u64(2);
+        assert!(
+            !is_satisfied(&non_boolean_slack),
+            "a non-boolean slack bit must fail booleanity"
+        );
+
+        let mut non_boolean = canonical.input.clone();
+        non_boolean[mac_canonical_carry_index(0, 3)] = Fp::from_u64(2);
+        assert!(
+            !is_satisfied(&non_boolean),
+            "a non-boolean carry must fail booleanity"
+        );
+
+        let mut bad_pin = canonical.input.clone();
+        bad_pin[mac_canonical_carry_index(0, 0)] = Fp::ONE;
+        assert!(
+            !is_satisfied(&bad_pin),
+            "the zero initial-carry pin must reject a set carry"
+        );
+
+        let mut bad_const = canonical.input.clone();
+        bad_const[MAC_CANONICAL_CONST_ONE_INDEX] = Fp::ZERO;
+        assert!(
+            !is_satisfied(&bad_const),
+            "the const-one wire anchors every linear pin"
+        );
+    }
+
+    /// Prove one MAC half and return the verification, the committed bytes the
+    /// claims point at, and the layout used to build the claims.
+    fn mac_half_split_fixture(
+        half: usize,
+    ) -> (
+        Vec<Fp>,
+        BundleCircuitLayout,
+        usize,
+        crate::sumcheck::CircuitVerification,
+    ) {
+        let issuer = p4b_microbench_input(19);
+        let device = p4b_microbench_input(23);
+        let revocation = p4b_microbench_input(29);
+        let key_shares = p4b_microbench_key_shares();
+        let av = [0x5au8; 16];
+        let root = [0xabu8; 32];
+        let seed = [0x42u8; 32];
+        let values = mdoc_p4b_mac_values(&issuer, &device, &revocation);
+        let tags: Vec<Gf128> = key_shares
+            .0
+            .iter()
+            .zip(&values)
+            .map(|(ap, x)| gf128_tag(ap, &av, x))
+            .collect();
+        let projections = [
+            EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy),
+            EcdsaPublicProjection::message_hash_only(device.z),
+            EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy),
+        ];
+        let circuit = build_mac_half_circuit(&av, &tags[half]).unwrap();
+        let input = mac_half_input_with_av(&key_shares.0[half], &av, &values[half]).unwrap();
+        let layers = circuit.evaluate_input(input).unwrap();
+        let pads = CircuitPads::fresh(&circuit);
+        let mut channel = mdoc_p4b_instance_channel(
+            seed,
+            root,
+            MDOC_P4B_MAC_HALF_LABELS[half],
+            MdocP4bCircuitRole::MacHalf(half),
+            &projections,
+            &av,
+            &tags,
+        );
+        let (_proof, verification) = prove_evaluated_circuit_sorted_sparse_with_verification(
+            &circuit,
+            &layers,
+            &pads,
+            root,
+            &mut channel,
+        )
+        .unwrap();
+
+        let group_a = mac_batch_group_a_input(&key_shares, &values).unwrap();
+        let group_b = mac_batch_group_b_input(&key_shares, &av, &values, &tags).unwrap();
+        let block_start = mac_batch_half_group_a_input_offset(half);
+        let layout_a = BundleCircuitLayout {
+            input_offset: 0,
+            input_len: MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+            pad_offset: MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+            pad_len: pads.values().len(),
+        };
+        let mut committed =
+            group_a[block_start..block_start + MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE].to_vec();
+        committed.extend_from_slice(pads.values());
+        let group_b_offset = committed.len();
+        committed.extend_from_slice(&group_b[..MAC_BATCH_GROUP_B_USED_INPUTS]);
+        (committed, layout_a, group_b_offset, verification)
+    }
+
+    fn evaluate_linear_claim(claim: &LigeroLinearClaim, values: &[Fp]) -> Fp {
+        claim.terms.iter().fold(Fp::ZERO, |sum, term| {
+            let mle = Mle::new(values[term.offset..term.offset + term.len].to_vec());
+            sum + term.coefficient * mle.eval_at(&term.point).unwrap()
+        })
+    }
+
+    #[test]
+    fn mac_half_split_claims_match_the_committed_slices() {
+        for half in [0usize, 3, MDOC_P4B_MAC_HALF_COUNT - 1] {
+            let (committed, layout_a, group_b_offset, verification) = mac_half_split_fixture(half);
+            let mut claims = Vec::new();
+            add_mac_half_split_circuit_verification_claims(
+                &mut claims,
+                &layout_a,
+                group_b_offset,
+                half,
+                &verification,
+            )
+            .unwrap();
+            assert!(
+                claims
+                    .iter()
+                    .all(|claim| evaluate_linear_claim(claim, &committed) == claim.value),
+                "half {half}: every sumcheck claim must hold at its committed positions"
+            );
+        }
+    }
+
+    #[test]
+    fn mac_half_split_claims_reject_a_wrong_group_b_position() {
+        let half = 2usize;
+        let wrong_half = 5usize;
+        let (committed, layout_a, group_b_offset, verification) = mac_half_split_fixture(half);
+        let mut claims = Vec::new();
+        add_mac_half_split_circuit_verification_claims(
+            &mut claims,
+            &layout_a,
+            group_b_offset,
+            wrong_half,
+            &verification,
+        )
+        .unwrap();
+        let input_claim = claims.last().expect("input claim is pushed last");
+        assert_ne!(
+            evaluate_linear_claim(input_claim, &committed),
+            input_claim.value,
+            "a sub-instance claim mapped to another half's group_b slice must not hold"
+        );
+    }
+
+    #[test]
+    fn mac_half_split_claims_reject_a_wrong_group_a_position() {
+        let half = 6usize;
+        let (committed, layout_a, group_b_offset, verification) = mac_half_split_fixture(half);
+        // Map the group_a term one block too high: it then covers the pads
+        // region instead of the proven half's committed block.
+        let wrong_layout = BundleCircuitLayout {
+            input_offset: layout_a.input_offset + MAC_BATCH_HALF_GROUP_A_INPUT_STRIDE,
+            ..layout_a
+        };
+        let mut claims = Vec::new();
+        add_mac_half_split_circuit_verification_claims(
+            &mut claims,
+            &wrong_layout,
+            group_b_offset,
+            half,
+            &verification,
+        )
+        .unwrap();
+        let input_claim = claims.last().expect("input claim is pushed last");
+        assert_ne!(
+            evaluate_linear_claim(input_claim, &committed),
+            input_claim.value,
+            "a sub-instance claim mapped to the wrong group_a position must not hold"
+        );
+    }
+
+    #[test]
+    fn mac_half_channels_are_independent_and_bind_root_av_tag_and_index() {
+        let issuer = p4b_microbench_input(19);
+        let device = p4b_microbench_input(23);
+        let revocation = p4b_microbench_input(29);
+        let projections = [
+            EcdsaPublicProjection::issuer_key_only(issuer.qx, issuer.qy),
+            EcdsaPublicProjection::message_hash_only(device.z),
+            EcdsaPublicProjection::public_key_only(revocation.qx, revocation.qy),
+        ];
+        let av = [0x5au8; 16];
+        let root = [0xabu8; 32];
+        let seed = [0x42u8; 32];
+        let tags: Vec<Gf128> = (0..MDOC_P4B_MAC_HALF_COUNT)
+            .map(|half| [half as u8 + 1; 16])
+            .collect();
+        let channel = |half: usize, tags: &[Gf128], root: [u8; 32], av: Gf128| {
+            mdoc_p4b_instance_channel(
+                seed,
+                root,
+                MDOC_P4B_MAC_HALF_LABELS[half],
+                MdocP4bCircuitRole::MacHalf(half),
+                &projections,
+                &av,
+                tags,
+            )
+        };
+        let draws: Vec<Fp> = (0..MDOC_P4B_MAC_HALF_COUNT)
+            .map(|half| channel(half, &tags, root, av).draw_fp())
+            .collect();
+        for left in 0..MDOC_P4B_MAC_HALF_COUNT {
+            for right in left + 1..MDOC_P4B_MAC_HALF_COUNT {
+                assert_ne!(
+                    draws[left], draws[right],
+                    "half channels {left} and {right} must be independent"
+                );
+            }
+        }
+        let mut other_tags = tags.clone();
+        other_tags[3][0] ^= 1;
+        assert_ne!(
+            channel(3, &tags, root, av).draw_fp(),
+            channel(3, &other_tags, root, av).draw_fp(),
+            "a half channel must bind its own tag"
+        );
+        assert_eq!(
+            channel(4, &tags, root, av).draw_fp(),
+            channel(4, &other_tags, root, av).draw_fp(),
+            "a half channel must not depend on another half's tag"
+        );
+        assert_ne!(
+            channel(3, &tags, root, av).draw_fp(),
+            channel(3, &tags, [0xcdu8; 32], av).draw_fp(),
+            "a half channel must bind the shared commitment root"
+        );
+        assert_ne!(
+            channel(3, &tags, root, av).draw_fp(),
+            channel(3, &tags, root, [0xefu8; 16]).draw_fp(),
+            "a half channel must bind the shared MAC challenge"
+        );
+    }
+
+    #[test]
+    #[ignore = "microbench: P4b prove phase and per-instance sumcheck breakdown"]
+    fn p4b_prove_phase_breakdown() {
+        let inputs = p4b_test_inputs();
+        let validated = inputs.map(|input| ValidatedWitness::generate(input).unwrap());
+        let projections =
+            validated_mdoc_p4b_projections(&validated[0], &validated[1], &validated[2]);
+        for iteration in 0..3 {
+            let (_bundle, profile) = prove_mdoc_p4b_circuit_bundle_profiled(
+                &validated[0].input,
+                &projections[0],
+                &validated[0].witness,
+                &validated[1].input,
+                &projections[1],
+                &validated[1].witness,
+                (&validated[2].input, &projections[2], &validated[2].witness),
+                &p4b_microbench_key_shares(),
+                [9; 32],
+            )
+            .unwrap();
+            let mut by_instance = profile
+                .sumcheck_by_instance
+                .iter()
+                .map(|timing| {
+                    format!(
+                        "{}/{}={:.1}ms",
+                        timing.role,
+                        timing.label,
+                        timing.elapsed.as_secs_f64() * 1_000.0
+                    )
+                })
+                .collect::<Vec<_>>();
+            by_instance.sort();
+            eprintln!(
+                "iter={iteration} circuit_build={:.1} row_encode={:.1} merkle={:.1} proximity={:.1} sumcheck={:.1} claim_batch={:.1} openings={:.1}",
+                profile.circuit_build.as_secs_f64() * 1_000.0,
+                profile.ligero_row_encode.as_secs_f64() * 1_000.0,
+                profile.ligero_merkle_build.as_secs_f64() * 1_000.0,
+                profile.ligero_proximity_claim.as_secs_f64() * 1_000.0,
+                profile.sumcheck.as_secs_f64() * 1_000.0,
+                profile.claim_batch.as_secs_f64() * 1_000.0,
+                profile.ligero_openings.as_secs_f64() * 1_000.0,
+            );
+            eprintln!("instances: {}", by_instance.join(" "));
+        }
+    }
+
+    #[test]
+    #[ignore = "release gate: MAC split rejects swapped half instances and tags"]
+    fn p4b_mac_split_rejects_swapped_half_entries_and_tags() {
+        let inputs = p4b_test_inputs();
+        let validated = inputs.map(|input| ValidatedWitness::generate(input).unwrap());
+        let projections =
+            validated_mdoc_p4b_projections(&validated[0], &validated[1], &validated[2]);
+        let bundle = prove_mdoc_p4b_circuit_bundle_from_validated(
+            &validated[0],
+            &validated[1],
+            &validated[2],
+            &p4b_microbench_key_shares(),
+            [9; 32],
+        )
+        .unwrap();
+        let mac_base = bundle.entries.len() - MDOC_P4B_MAC_HALF_COUNT;
+        verify_mdoc_p4b_circuit_bundle(
+            &projections[0],
+            &projections[1],
+            &projections[2],
+            &bundle,
+            [9; 32],
+        )
+        .unwrap();
+
+        let mut swapped = bundle.clone();
+        swapped.entries.swap(mac_base, mac_base + 1);
+        assert!(
+            verify_mdoc_p4b_circuit_bundle(
+                &projections[0],
+                &projections[1],
+                &projections[2],
+                &swapped,
+                [9; 32],
+            )
+            .is_err(),
+            "a proof carrying another half's sub-instance must be rejected"
+        );
+
+        let mut rotated = bundle.clone();
+        rotated.entries[mac_base..mac_base + MDOC_P4B_MAC_HALF_COUNT].rotate_left(1);
+        assert!(
+            verify_mdoc_p4b_circuit_bundle(
+                &projections[0],
+                &projections[1],
+                &projections[2],
+                &rotated,
+                [9; 32],
+            )
+            .is_err(),
+            "a rotated half merge order must be rejected"
+        );
+
+        let mut swapped_tags = bundle.clone();
+        swapped_tags.mac_tags.swap(0, 1);
+        assert!(
+            verify_mdoc_p4b_circuit_bundle(
+                &projections[0],
+                &projections[1],
+                &projections[2],
+                &swapped_tags,
+                [9; 32],
+            )
+            .is_err(),
+            "swapped MAC tags mis-bind every half circuit and channel"
         );
     }
 
@@ -7210,9 +7604,10 @@ mod tests {
         );
         assert!(dense_calls > 0, "dense verifier must encode Circle rows");
         // The structured evaluator factors multi-row claims into shared column
-        // templates, so its encode savings scale with rows-per-claim. At the
-        // doubled product row length (512) each claim spans half as many rows,
-        // which narrows — but must not eliminate — the structured-path margin.
+        // templates, so its encode savings scale with rows-per-claim. The MAC
+        // split leaves only the ECDSA input claims spanning four or more rows
+        // at row_len 512 (the half and canonicality claims stay dense), which
+        // narrows — but must not eliminate — the structured-path margin.
         assert!(
             structured_calls < dense_calls,
             "structured evaluator must cut Circle row encodes (dense={dense_calls}, structured={structured_calls})"
@@ -7471,8 +7866,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "microbench: isolated P4b MAC batch sumcheck prove/verify timing"]
-    fn mdoc_p4b_mac_batch_sumcheck_microbench() {
+    #[ignore = "microbench: isolated P4b MAC half sumcheck prove/verify timing"]
+    fn mdoc_p4b_mac_half_sumcheck_microbench() {
         let issuer = p4b_microbench_input(11);
         let device = p4b_microbench_input(29);
         let revocation = p4b_microbench_input(31);
@@ -7492,8 +7887,9 @@ mod tests {
             .zip(mac_values.iter())
             .map(|(ap, x)| gf128_tag(ap, &av, x))
             .collect::<Vec<_>>();
-        let circuit = build_mac_batch_circuit(&av, &mac_tags).unwrap();
-        let input = mac_batch_input_with_av(&key_shares, &av, &mac_values, &mac_tags).unwrap();
+        let half = 5usize;
+        let circuit = build_mac_half_circuit(&av, &mac_tags[half]).unwrap();
+        let input = mac_half_input_with_av(&key_shares.0[half], &av, &mac_values[half]).unwrap();
         let layers = circuit.evaluate_input(input).unwrap();
         let pads = CircuitPads::fresh(&circuit);
         assert!(circuit.is_satisfied(&layers).unwrap());
@@ -7501,8 +7897,8 @@ mod tests {
         let mut generic_channel = mdoc_p4b_instance_channel(
             transcript_seed,
             root,
-            MDOC_P4B_MAC_BATCH_LABEL,
-            MdocP4bCircuitRole::MacBatch,
+            MDOC_P4B_MAC_HALF_LABELS[half],
+            MdocP4bCircuitRole::MacHalf(half),
             &projections,
             &av,
             &mac_tags,
@@ -7515,8 +7911,8 @@ mod tests {
         let mut sparse_channel = mdoc_p4b_instance_channel(
             transcript_seed,
             root,
-            MDOC_P4B_MAC_BATCH_LABEL,
-            MdocP4bCircuitRole::MacBatch,
+            MDOC_P4B_MAC_HALF_LABELS[half],
+            MdocP4bCircuitRole::MacHalf(half),
             &projections,
             &av,
             &mac_tags,
@@ -7540,8 +7936,8 @@ mod tests {
         let mut verify_channel = mdoc_p4b_instance_channel(
             transcript_seed,
             root,
-            MDOC_P4B_MAC_BATCH_LABEL,
-            MdocP4bCircuitRole::MacBatch,
+            MDOC_P4B_MAC_HALF_LABELS[half],
+            MdocP4bCircuitRole::MacHalf(half),
             &projections,
             &av,
             &mac_tags,
@@ -7554,8 +7950,8 @@ mod tests {
         let mut generic_verify_channel = mdoc_p4b_instance_channel(
             transcript_seed,
             root,
-            MDOC_P4B_MAC_BATCH_LABEL,
-            MdocP4bCircuitRole::MacBatch,
+            MDOC_P4B_MAC_HALF_LABELS[half],
+            MdocP4bCircuitRole::MacHalf(half),
             &projections,
             &av,
             &mac_tags,
@@ -7575,7 +7971,7 @@ mod tests {
             .map(|layer| layer.terms)
             .sum::<usize>();
         eprintln!(
-            "mdoc_p4b_mac_batch_sumcheck_microbench generic_prove_ms={} sparse_prove_ms={} sparse_verify_ms={} prove_terms={} verify_terms={}",
+            "mdoc_p4b_mac_half_sumcheck_microbench generic_prove_ms={} sparse_prove_ms={} sparse_verify_ms={} prove_terms={} verify_terms={}",
             generic_prove.as_millis(),
             sparse_prove.as_millis(),
             sparse_verify.as_millis(),

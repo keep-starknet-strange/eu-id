@@ -1098,10 +1098,12 @@ pub(crate) fn verify_authenticated_split_claim_blind_check(
 }
 
 // Factoring pays off once a claim term spans enough physical rows that the
-// shared shifted-column templates beat a dense per-cell scatter. With the
-// product row_len of 512, two rows already cover 1024 cells, so the threshold
-// is lower than it was at row_len 256.
-const STRUCTURED_CLAIM_MIN_ROWS: usize = 2;
+// shared shifted-column templates beat a dense per-cell scatter. A term
+// spanning two or three rows factors into as many templates, which only wins
+// when another claim reuses the same shifted template; four or more rows
+// always deduplicate within the term itself, so factoring strictly wins
+// there.
+const STRUCTURED_CLAIM_MIN_ROWS: usize = 4;
 
 struct ClaimWeightTemplate {
     values: Vec<Fp>,

@@ -27,7 +27,7 @@ use p256::AffinePoint;
 use sha2::{Digest as _, Sha256};
 
 const TEST_SEED: [u8; 32] = [9u8; 32];
-const PREFIX_GROUP_A_OPENING_ROWS: usize = 112;
+const PREFIX_GROUP_A_OPENING_ROWS: usize = 114;
 const PREFIX_GROUP_B_OPENING_ROWS: usize = 18;
 const LEGACY_FULL_GROUP_A_OPENING_ROWS: usize = 285;
 const LEGACY_FULL_GROUP_B_OPENING_ROWS: usize = 36;
@@ -1319,7 +1319,7 @@ fn mdoc_p4b_bundle_rejects_spliced_mac_batch_entry() {
     )
     .unwrap();
 
-    assert_eq!(bundle.entries.len(), 22);
+    assert_eq!(bundle.entries.len(), 30);
     verify_mdoc_p4b_circuit_bundle(
         &issuer_public,
         &device_public,
@@ -1375,7 +1375,11 @@ fn mdoc_p4b_bundle_with_mandatory_revocation_verifies_and_fails_closed() {
     )
     .unwrap();
 
-    assert_eq!(bundle.entries.len(), 22, "three ECDSA sets plus MAC batch");
+    assert_eq!(
+        bundle.entries.len(),
+        30,
+        "three ECDSA sets plus eight MAC halves and the canonicality sub-instance"
+    );
     verify_mdoc_p4b_circuit_bundle(
         &issuer_public,
         &device_public,
@@ -1695,11 +1699,15 @@ fn mdoc_p4b_entry_labels(entries: usize) -> Vec<String> {
                 .map(move |family| format!("{role}/{}", String::from_utf8_lossy(family)))
         })
         .collect::<Vec<_>>();
-    labels.push("mac_batch".to_string());
+    for half in 0..MDOC_P4B_MAC_HALF_COUNT {
+        labels.push(format!("mac_half_{half}"));
+    }
+    labels.push("mac_canonicality".to_string());
     assert_eq!(
         labels.len(),
         entries,
-        "P4b proves the implemented circuit families once per ECDSA role plus one MAC batch",
+        "P4b proves the implemented circuit families once per ECDSA role plus eight MAC halves \
+         and the MAC canonicality sub-instance",
     );
     labels
 }
