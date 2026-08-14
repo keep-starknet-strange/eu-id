@@ -1,13 +1,14 @@
 //! AIR for the hinted mod-p multiplication (see the module docs in [`super`]
 //! for the three carry identities and the integer-lifting bounds worksheet).
 //!
-//! One row per mul. The three identities are enforced as UNGATED degree-≤2
-//! extension-field constraints whose coefficients are powers of a challenge
-//! `z` drawn from the channel AFTER the base trace is committed (same
-//! transcript position as the LogUp relations). All-zero padding rows satisfy
-//! the identities trivially, so no gating (and no padding witnesses) are
-//! needed. Every committed limb is range-checked: Range13 for 13-bit limbs,
-//! a `[−12, 12]` signed table for the carry high parts.
+//! Each multiplication uses one row.
+//! Three ungated extension-field constraints prove the carry identities.
+//! Their coefficients are powers of channel challenge `z`.
+//! The channel draws `z` after the base-trace commitment.
+//! Zero padding rows satisfy the identities without a gate.
+//!
+//! Range13 checks all 13-bit limbs.
+//! A signed table checks carry high parts in `[−12, 12]`.
 
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
@@ -42,7 +43,7 @@ use super::witness::{HINTED_MUL_C_COEFFS, HINTED_MUL_H_COEFFS, HINTED_MUL_Q_LIMB
 pub const HINTED_MUL_H_HI_EQUATION: &str = "hinted_mul_h_hi";
 pub const HINTED_MUL_H_HI_TABLE_LOG_SIZE: u32 = 5;
 
-// ---- Phase 2 offset unions (masks walk coset order; a source referencing
+// ---- Formula offset unions (masks walk coset order, a source referencing
 // group mul `j` at silo row `k` lives at offset `j − k`). Offset index 0 is
 // always `0` (the current cell). Verified from the spec table numerically. ----
 const A_OFFS_N: usize = 9;
@@ -110,7 +111,7 @@ pub struct HintedMulEval {
     pub mul_result: ProjectiveRcbMulResultRelation,
     /// EC-op header link consumed on proj group header rows.
     pub header: super::EcOpHeaderRelation,
-    /// Phase-2 signed-carry table (projective bound) for the formula carries.
+    /// Signed-carry table for the projective formula carries.
     pub signed_formula: RangeCheckRelation,
 }
 
@@ -132,12 +133,10 @@ impl FrameworkEval for HintedMulEval {
         // as it is read, which keeps the logup emission order identical to the
         // column order (the interaction generator mirrors exactly this).
         //
-        // Phase 2: the `a`, `b`, RESULT, `op`, and `output_inf` columns are read
-        // with `next_interaction_mask` at the offset unions the formula spec
-        // needs (a source referencing group mul `j` lives on the row `j`, i.e.
-        // offset `j − k`). Offset index 0 is always `0` (the current cell) and
-        // feeds every existing use (range check, provides, header, carry
-        // identities). q/m/h columns and lhs_inf/rhs_inf keep single-offset reads.
+        // Read formula sources at their row-relative offsets.
+        // A source for multiplication `j` is on row `j`.
+        // Offset zero supplies the current values for all existing uses.
+        // Quotient, carry, and input-infinity columns use one offset.
         let read_range13 = |eval: &mut E, count: usize| -> Vec<E::F> {
             (0..count)
                 .map(|_| {
@@ -148,7 +147,7 @@ impl FrameworkEval for HintedMulEval {
                 .collect()
         };
         // Masked family reads: each column yields its masks at the family's
-        // offset union; offset 0 is range-checked (active-gated) as the current
+        // offset union. Offset 0 is range-checked (active-gated) as the current
         // value. Returns per-limb offset arrays.
         let a_masks: Vec<[E::F; A_OFFS_N]> = (0..N_LIMBS)
             .map(|_| {
@@ -197,10 +196,11 @@ impl FrameworkEval for HintedMulEval {
             groups.push((q, value, h_lo, h_hi));
         }
 
-        // Header flags in column order (op, output_inf, lhs_inf, rhs_inf),
-        // appended after the witness block. `op` and `output_inf` are read at
-        // their offset unions (op@−k for k=0..14; output_inf@−13/−14);
-        // lhs_inf/rhs_inf single-offset. No range check — boolean/header-gated.
+        // Append header flags after the witness block.
+        // The column order is `op`, `output_inf`, `lhs_inf`, and `rhs_inf`.
+        // Read `op` at offsets from 0 through -14.
+        // Read `output_inf` at offsets -13 and -14.
+        // The header constraints gate the Boolean flags.
         let op_masks = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, OP_OFFS);
         let oinf_masks = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, OINF_OFFS);
         let lhs_inf = eval.next_trace_mask();
@@ -212,12 +212,10 @@ impl FrameworkEval for HintedMulEval {
             rhs_inf.clone(),
         ];
         let one_ef = E::F::from(M31::from_u32_unchecked(1));
-        // Read all 15 `is_proj_mul_k` one-hots (P1 fixes the preprocessed ids
-        // once; only `is_proj_mul_0` gates constraints/relations here — P2 uses
-        // the rest for per-mul_index formula gating). Every declared
-        // preprocessed column MUST be read by the component, so each is
-        // boolean-constrained (deg 2, trivially satisfied by the one-hot
-        // schedule and by all-zero padding).
+        // Read all 15 `is_proj_mul_k` one-hot selectors.
+        // `is_proj_mul_0` gates the header relations.
+        // The other selectors gate formulas for each multiplication index.
+        // Boolean constraints cover each declared preprocessed column.
         let is_proj: Vec<E::F> = (0..HINTED_MUL_PROJ_MUL_COLUMNS)
             .map(|k| eval.get_preprocessed_column(self.schedule_proj_mul_id(k)))
             .collect();
@@ -232,14 +230,10 @@ impl FrameworkEval for HintedMulEval {
             eval.add_constraint((one_ef.clone() - is_proj_0.clone()) * flag.clone());
         }
 
-        // PROVIDE (yield) the mul's operand/result limbs under the silo's
-        // external relation. Per-slot provide masks (Phase 3): the two
-        // projective-source consumers now consume ONLY 6 narrow slots per proj
-        // group — (mul 0/1, LHS+RHS) and (mul 13/14, LHS) — while final_add and
-        // public_key_curve (the non-proj source ranges) still consume every
-        // slot. `wide = active − Σ_k is_proj_k` is 1 exactly on active non-proj
-        // rows (the one-hots partition active proj rows), so the per-role
-        // numerators mirror the consumption union exactly:
+        // Provide only the operand and result limbs that consumers use.
+        // Projective consumers use six narrow slots in each group.
+        // Final-add and public-key consumers use every slot in their source ranges.
+        // The role numerators are:
         //   LHS:    wide + is_proj_{0,1,13,14}  = active − Σ_{k=2..12} is_proj_k
         //   RHS:    wide + is_proj_{0,1}        = active − Σ_{k=2..14} is_proj_k
         //   RESULT: wide                        = active − Σ_{k=0..14} is_proj_k
@@ -281,7 +275,8 @@ impl FrameworkEval for HintedMulEval {
             ],
         ));
 
-        // The three carry identities at z (ungated; degree ≤ 2).
+        // Apply three ungated carry identities at `z`.
+        // Their degree is at most two.
         let at_z = |limbs: &[E::F], shift: usize| -> E::EF {
             let mut acc = E::EF::from(SecureField::from(M31::from_u32_unchecked(0)));
             for (i, limb) in limbs.iter().enumerate() {
@@ -327,7 +322,7 @@ impl FrameworkEval for HintedMulEval {
                 - z_minus_beta * h_at_z(h3_lo, h3_hi),
         );
 
-        // ---- Phase 2: per-mul_index EC-formula binding ----
+        // Bind the EC formula for each multiplication index.
         self.evaluate_formula(
             &mut eval,
             &active,
@@ -398,7 +393,7 @@ impl HintedMulEval {
 
         // Read new columns in layout order (out_val, slot0 q+carries, slot1
         // q+carries). Range/signed checks emit AFTER the header consume (matching
-        // the interaction descriptor order). q columns are NOT range-checked.
+        // the interaction descriptor order). The q columns have no range checks.
         let out_val: [E::F; N_LIMBS] = core::array::from_fn(|_| {
             let m = eval.next_trace_mask();
             add_range_check(eval, &self.range13, active.clone(), m.clone());
@@ -527,14 +522,15 @@ impl HintedMulEval {
         let is_proj_13 = is_proj[13].clone();
         let oinf_13 = oinf_masks[offs_index(&OINF_OFFS, -13)].clone();
         let r13: [E::F; N_LIMBS] = core::array::from_fn(|i| r_masks[i][0].clone());
-        // r_masks holds RESULT limbs at offset 0 = R(mul_index) of THIS row; on
+        // r_masks holds RESULT limbs at offset 0 = R(mul_index) of THIS row. On
         // row 13 that is R(13). The affine binding uses R(13)@0 (this row's
         // result) which under is_proj_13 is exactly R13.
         let finite_13 = is_proj_13.clone() * (one_ef.clone() - oinf_13.clone());
         for i in 0..N_LIMBS {
             eval.add_constraint(finite_13.clone() * (r13[i].clone() - out_val[i].clone()));
         }
-        // row 13: is_proj_13·output_inf@−13·b@0 per limb (inf ⇒ z3 = 0; z3 = b(M13)).
+        // Row 13 constrains `is_proj_13 · output_inf@−13 · b@0` per limb.
+        // Infinity makes `z3` zero, and `z3 = b(M13)`.
         let inf_13 = is_proj_13 * oinf_13;
         for i in 0..N_LIMBS {
             eval.add_constraint(inf_13.clone() * b_masks[i][0].clone());
@@ -864,7 +860,7 @@ mod tests {
                 let mut a = [0u32; N_LIMBS];
                 let mut b = [0u32; N_LIMBS];
                 // Spread bits across limbs so convolutions and carries are
-                // exercised; keep limbs 13-bit.
+                // exercised. Keep limbs 13-bit.
                 for k in 0..N_LIMBS {
                     a[k] = ((i as u32 + 1) * 2741 + 97 * k as u32) % 8192;
                     b[k] = ((i as u32 + 3) * 4099 + 53 * k as u32) % 8192;
@@ -900,7 +896,7 @@ mod tests {
     }
 
     /// Trace-domain constraint check of the check component alone (honest
-    /// completeness at an arbitrary z; honest traces satisfy the identities
+    /// completeness at an arbitrary z. Honest traces satisfy the identities
     /// at EVERY z).
     #[test]
     fn hinted_mul_honest_trace_satisfies_constraints() {
@@ -965,15 +961,15 @@ mod tests {
         );
     }
 
-    /// Full standalone PCS prove + verify. This is also the dedicated stwo
-    /// degree test: the slice's own bound (`log_size + 1` with paired logup,
-    /// i.e. degree-3 logup columns) must survive real OODS/FRI.
+    /// Confirms a complete standalone PCS proof and verification.
+    ///
+    /// This test also checks the component degree bound with OODS and FRI.
     #[test]
     fn hinted_mul_slice_proves_and_verifies() {
         run_slice(None).expect("honest hinted-mul slice proves and verifies");
     }
 
-    /// Forged result limb: identities are violated at the drawn z; the prover
+    /// Forged result limb: identities are violated at the drawn z. The prover
     /// must fail (constraints unsatisfied).
     #[test]
     fn hinted_mul_slice_rejects_forged_result_limb() {
@@ -1006,9 +1002,9 @@ mod tests {
 
     type Mutation = Box<dyn Fn(&mut HintedMulTraceClaim)>;
 
-    /// Build a proj-scope claim from the shared sample EC trace (Double +
-    /// finite MixedAdd + infinity-operand no-op) — the formula constraints are
-    /// LIVE on these rows.
+    /// Build a projection-scope claim from the shared sample EC trace.
+    /// The trace contains Double, finite MixedAdd, and an infinity-operand no-op.
+    /// The formula constraints run on these rows.
     fn sample_proj_claim() -> HintedMulTraceClaim {
         let trace = super::super::formula_bind::sample_projective_trace();
         let rcb =
@@ -1092,7 +1088,7 @@ mod tests {
             fri_config: FriConfig::new(5, 2, 16, 1),
             lifting_log_size: None,
         };
-        // Range13's provider table at log13 usually dominates; the Phase-2
+        // Range13's provider table at log13 usually dominates. The Phase-2
         // formula signed table (projective bound) may be larger, so take the max.
         let max_bound = (RANGE13_BITS + 1)
             .max(crate::projective_air::projective_rcb_signed_carry_log_size() + 1);
@@ -1166,15 +1162,14 @@ mod tests {
             );
 
         // The check's range/signed consumers must balance against the three
-        // providers; the mul-result provides have no consumer in this
+        // providers. The mul-result provides have no consumer in this
         // standalone slice and are excluded (mirrors the projective harness).
         let mul_result_provider =
             crate::components::hinted_mul::trace::hinted_mul_result_provider_sum(
                 &claim, &relations,
             );
-        // The header consume (+is_proj_0) has no provider in this slice (the
-        // projective-source consumers, out of scope here, provide it), so it is
-        // excluded from the balance exactly like the mul-result provides.
+        // This slice has no provider for the header consume.
+        // Exclude that term from the standalone balance.
         let header_consume =
             crate::components::hinted_mul::trace::hinted_mul_header_consume_sum(&claim, &relations);
         let balance = interaction_claim.claimed_sum - mul_result_provider - header_consume
@@ -1218,11 +1213,9 @@ mod tests {
         )
         .map_err(|error| format!("prove failed: {error}"))?;
 
-        // Verify with a fresh transcript mirroring the same draw order.
-        // F-ROOT note: the tree-0 root below is absorbed unpinned, which is fine
-        // ONLY because this is a #[cfg(test)] prove-then-verify self-check over a
-        // locally-built proof — never a production verifier. Production paths pin
-        // the root (air_core::verify_with_expected_preprocessed_root).
+        // Verify with a new transcript and the same draw order.
+        // This local test does not pin the tree-0 root.
+        // Production verification must pin this root.
         let mut channel = Blake2sChannel::default();
         let commitment_scheme_verifier =
             &mut stwo::core::pcs::CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);

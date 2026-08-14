@@ -260,7 +260,7 @@ mod tests {
         let b = U256::from_le_u64s(&[0xCAFE_BABE, 0, 0, 0]);
         let p = U256::from_le_u64s(&P256_MODULUS);
         let w = mul_mod_witness(&a, &b, &p);
-        // Result should be (0xDEADBEEF * 0xCAFEBABE) mod p
+        // The expected result is (0xDEADBEEF * 0xCAFEBABE) mod p.
         let expected = (0xDEAD_BEEFu128 * 0xCAFE_BABEu128) % P256_MODULUS[0] as u128;
         let result = w.result.to_u256().to_le_u64s();
         assert_eq!(result[0], expected as u64);

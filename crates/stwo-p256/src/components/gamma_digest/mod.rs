@@ -1,21 +1,19 @@
 //! γ-digest reshape gadget: one LogUp provide per wide row instead of one
 //! fraction per range-checked value.
 //!
-//! Design + soundness worksheet: `docs/gamma-digest-design.md`. In short: a
-//! wide consumer row's fixed list of range-checked values `v_0..v_{L-1}` is
-//! bound into a single QM31 digest `D = Σ v_i · γ^{P−1−i}` (`P` = the
-//! lane-padded length, γ channel-drawn AFTER the base commit), yielded as one
-//! `GammaDigest` tuple `(tag, row_index, d0..d3)`. A tall expander component
-//! re-commits the same values K per row, recomputes the digest with a running
-//! accumulator `acc = acc_prev·γ^K + Σ_j v_j·γ^{K−1−j}` (group resets via
-//! preprocessed start flags), consumes the digest tuple at each preprocessed
-//! group end, and emits the K range-check uses per row that the wide row no
-//! longer pays for.
+//! A wide row combines its range-checked values into one QM31 digest.
+//! The formula is `D = Σ v_i · γ^{P−1−i}`.
+//! Here, `P` is the lane-padded length.
+//! The channel draws `γ` after the base-trace commitment.
+//! The wide row provides `(tag, row_index, d0..d3)`.
+//! A tall component commits the same values in groups of K.
 //!
-//! The digest coordinates on the wide side are degree-1 M31-linear
-//! combinations of base columns (the coordinates of `γ^i·v` are `coord_j(γ^i)
-//! · v`), so adoption adds NO wide columns and NO wide constraints — only the
-//! single relation entry.
+//! It recomputes the digest with a running accumulator.
+//! At each group end, it consumes the digest and emits the range-check uses.
+//!
+//! Each wide-side digest coordinate is an M31-linear combination of base columns.
+//! Thus, the wide side adds no columns or constraints.
+//! It adds only one relation entry.
 
 use core::array;
 use serde::{Deserialize, Serialize};
@@ -34,9 +32,9 @@ use stwo_constraint_framework::{
 use crate::range_checks::{write_batched_logup_columns, RangeCheckRelation};
 use crate::scalar::scalar_mod_mul::columns::{m31_column_eval, padded_log_size, M31ColumnEval};
 
-/// Values per tall-expander row (`K` in the design doc). 8 keeps the tall
-/// instances small (group of L values → ceil(L/8) rows) while the batched
-/// logup stays at 5 QM31 columns (K range uses + 1 digest use, batch 2).
+/// Number of values in each tall-expander row.
+///
+/// Eight values keep the instances small and the batched LogUp at five QM31 columns.
 pub const GAMMA_DIGEST_LANES: usize = 8;
 
 /// `(tag, row_index, d0, d1, d2, d3)`.
@@ -44,7 +42,7 @@ pub const GAMMA_DIGEST_RELATION_ARITY: usize = 2 + SECURE_EXTENSION_DEGREE;
 
 relation!(GammaDigestRelation, GAMMA_DIGEST_RELATION_ARITY);
 
-// Tags are globally unique per (adopted component, table kind); they keep
+// Tags are globally unique per (adopted component, table kind). They keep
 // digest tuples from ever colliding across instances.
 pub const GAMMA_TAG_FAKE_GLV_RANGE13: u32 = 1;
 pub const GAMMA_TAG_FAKE_GLV_SIGNED: u32 = 2;
@@ -58,7 +56,7 @@ pub const GAMMA_TAG_PKC_SIGNED: u32 = 8;
 /// The post-base-commit digest challenge: γ and its powers up to the largest
 /// lane-padded value-list length any adopted component uses. Drawn at the
 /// same transcript position as the LogUp relations (mirrors
-/// [`crate::components::hinted_mul::HintedMulChallenge`]).
+/// [`crate::components::hinted_mul::air::HintedMulChallenge`]).
 #[derive(Clone, Debug)]
 pub struct GammaChallenge {
     pub gamma: SecureField,
@@ -95,7 +93,7 @@ pub const fn gamma_padded_values(values_len: usize) -> usize {
 }
 
 /// Eval-side: yield (−presence) the digest tuple for one wide row. `values`
-/// is the row's fixed use-column list in digest order; missing tail lanes are
+/// is the row's fixed use-column list in digest order. Missing tail lanes are
 /// implicit zeros. The digest coordinates are built as degree-1 expressions of
 /// the value columns, so this adds one relation entry and nothing else.
 #[allow(clippy::too_many_arguments)]
@@ -110,7 +108,7 @@ pub fn yield_gamma_digest<E: EvalAtRow>(
     values: &[E::F],
 ) {
     let padded = gamma_padded_values(values.len());
-    // The lane-padding tail holds `pad_value` on the tall side; its digest
+    // The lane-padding tail holds `pad_value` on the tall side. Its digest
     // contribution `pad·(γ^0 + … + γ^(P−L−1))` is a constant.
     let pad_sum = pad_tail_sum(challenge, values.len()) * SecureField::from(pad_value);
     let pad_coords = pad_sum.to_m31_array();
@@ -243,7 +241,7 @@ impl GammaTallInstance {
     }
 
     /// Lane value at (coset row, lane): group `r / G`, in-group row `r % G`.
-    /// Scheduled groups pad their tail lanes with `pad_value`; rows past the
+    /// Scheduled groups pad their tail lanes with `pad_value`. Rows past the
     /// schedule are all-zero.
     fn lane_value(&self, coset_row: usize, lane: usize) -> M31 {
         let g = self.layout.rows_per_group();
@@ -311,7 +309,7 @@ pub fn gen_gamma_tall_preprocessed_trace(layout: &GammaTallLayout) -> Vec<M31Col
         .collect()
 }
 
-/// Base trace: the K lane columns (coset order; padding rows are zero).
+/// Base trace: the K lane columns (coset order, padding rows are zero).
 pub fn gen_gamma_tall_base_trace(instance: &GammaTallInstance) -> Vec<M31ColumnEval> {
     let log_size = instance.layout.log_size();
     let rows = 1usize << log_size;
@@ -325,9 +323,10 @@ pub fn gen_gamma_tall_base_trace(instance: &GammaTallInstance) -> Vec<M31ColumnE
         .collect()
 }
 
-/// Per active row (contiguous coset rows from 0, flagged by base column 0),
-/// the values at the given base columns — a component's digest groups, keyed
-/// by the preprocessed row index.
+/// Collects digest-group values from the specified base columns.
+///
+/// Base column zero marks contiguous active rows.
+/// The preprocessed row index keys each group.
 pub fn gamma_collect_group_values(base: &[M31ColumnEval], columns: &[usize]) -> Vec<Vec<M31>> {
     let log_size = base[0].domain.log_size();
     let rows = 1usize << log_size;
@@ -385,7 +384,7 @@ pub fn gamma_tall_preprocessed_column(
 pub type GammaTallComponent = FrameworkComponent<GammaTallEval>;
 
 /// The tall expander AIR. Interaction layout: 4 accumulator coordinate
-/// columns FIRST (read with `[-1, 0]` masks), then the batched logup columns.
+/// columns first (read with `[-1, 0]` masks), then the batched LogUp columns.
 #[derive(Clone)]
 pub struct GammaTallEval {
     pub layout: GammaTallLayout,
@@ -588,9 +587,9 @@ pub fn gen_gamma_tall_interaction_trace(
     (trace, GammaTallInteractionClaim { claimed_sum })
 }
 
-/// Tall-side digest use sum, recomputed from the instance and relation for
-/// debug/audit callers that need the semantic split without storing it in the
-/// production interaction claim.
+/// Recomputes the tall-side digest consumer sum.
+///
+/// Debug and audit code can use this value without production metadata.
 pub fn gamma_digest_use_sum(
     instance: &GammaTallInstance,
     challenge: &GammaChallenge,
@@ -599,9 +598,9 @@ pub fn gamma_digest_use_sum(
     -gamma_digest_yield_sum(instance, challenge, digest_relation)
 }
 
-/// Tall-side range use sum, recomputed from the instance and relation for
-/// debug/audit callers that need the semantic split without storing it in the
-/// production interaction claim.
+/// Recomputes the tall-side range consumer sum.
+///
+/// Debug and audit code can use this value without production metadata.
 pub fn gamma_range_use_sum(
     instance: &GammaTallInstance,
     range_relation: &RangeCheckRelation,
@@ -619,7 +618,7 @@ pub fn gamma_range_use_sum(
 }
 
 /// Gen-side yield sum of the wide rows feeding one tall instance. Adopting
-/// components fold these fractions into their own logup; this helper computes
+/// components fold these fractions into their own logup. This helper computes
 /// the analytic sum for balance accounting and tests.
 pub fn gamma_digest_yield_sum(
     instance: &GammaTallInstance,
@@ -690,9 +689,9 @@ mod tests {
         )
     }
 
-    /// The wide-side coordinate trick: each digest coordinate is an M31-linear
-    /// combination of the values (QM31 · M31 is coordinate-wise), so the
-    /// eval-side degree-1 expressions reproduce the gen-side digest exactly.
+    /// Confirms that wide-side digest coordinates are M31-linear.
+    ///
+    /// Degree-1 constraint expressions must reproduce the generated digest.
     #[test]
     fn gamma_digest_coordinates_are_m31_linear() {
         let challenge = test_challenge();

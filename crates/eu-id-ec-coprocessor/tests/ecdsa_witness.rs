@@ -4,7 +4,6 @@ use eu_id_ec_coprocessor::ecdsa::{
 };
 use eu_id_ec_coprocessor::Fp;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::point::Double;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use p256::{AffinePoint, ProjectivePoint, Scalar};
 use sha2::{Digest as _, Sha256};
@@ -75,13 +74,6 @@ fn affine_coords(point: ProjectivePoint) -> (Fp, Fp) {
     )
 }
 
-fn double_256(mut point: ProjectivePoint) -> ProjectivePoint {
-    for _ in 0..256 {
-        point = point.double();
-    }
-    point
-}
-
 #[test]
 fn generated_witness_has_frozen_length() {
     let witness = generate_witness(&valid_input()).unwrap();
@@ -116,10 +108,6 @@ fn invalid_scalar_and_coordinate_inputs_are_rejected() {
     assert!(generate_witness(&input).is_err(), "s=0 must reject");
 
     let mut input = valid_input();
-    input.z = N_BE;
-    assert!(generate_witness(&input).is_err(), "z=n must reject");
-
-    let mut input = valid_input();
     input.r = N_BE;
     assert!(generate_witness(&input).is_err(), "r=n must reject");
 
@@ -141,7 +129,7 @@ fn invalid_scalar_and_coordinate_inputs_are_rejected() {
 }
 
 #[test]
-fn scalar_setup_hints_fill_frozen_slots_deterministically() {
+fn scalar_setup_outputs_fill_frozen_slots_deterministically() {
     let first = generate_witness(&valid_input()).unwrap();
     let second = generate_witness(&valid_input()).unwrap();
     assert_eq!(
@@ -149,13 +137,9 @@ fn scalar_setup_hints_fill_frozen_slots_deterministically() {
         "same input must produce byte-identical witness"
     );
 
-    let sinv = &first.values[layout_range(LayoutSlot::ScalarInverses)];
     let us = &first.values[layout_range(LayoutSlot::UScalars)];
-    let qs = &first.values[layout_range(LayoutSlot::ModNQuotients)];
 
-    assert_eq!(sinv, &[Fp::ONE]);
     assert_eq!(us, &[Fp::from_u64(42), Fp::from_u64(77)]);
-    assert_eq!(qs, &[Fp::ZERO, Fp::ZERO, Fp::ZERO]);
 }
 
 #[test]
@@ -189,13 +173,8 @@ fn ladder_accumulator_slots_end_at_scalar_mul_outputs() {
 
     let expected_u1 = ProjectivePoint::GENERATOR * Scalar::from(42u64);
     let expected_u2 = ProjectivePoint::GENERATOR * Scalar::from(77u64);
-    let d = double_256(ProjectivePoint::GENERATOR);
-    let expected_u1_raw = d + expected_u1;
-    let expected_u2_raw = d + expected_u2;
     let (expected_u1_x, expected_u1_y) = affine_coords(expected_u1);
     let (expected_u2_x, expected_u2_y) = affine_coords(expected_u2);
-    let (expected_u1_raw_x, expected_u1_raw_y) = affine_coords(expected_u1_raw);
-    let (expected_u2_raw_x, expected_u2_raw_y) = affine_coords(expected_u2_raw);
     let u1_acc = &first.values[layout_range(LayoutSlot::U1GAccumulators)];
     let u2_acc = &first.values[layout_range(LayoutSlot::U2QAccumulators)];
     let corrected = &first.values[layout_range(LayoutSlot::CorrectedEndpoints)];
@@ -208,15 +187,10 @@ fn ladder_accumulator_slots_end_at_scalar_mul_outputs() {
         u2_acc.iter().any(|value| *value != Fp::ZERO),
         "u2Q transcript is populated"
     );
-    assert_eq!(u1_acc[510], expected_u1_raw_x);
-    assert_eq!(u1_acc[511], expected_u1_raw_y);
-    assert_eq!(u2_acc[510], expected_u2_raw_x);
-    assert_eq!(u2_acc[511], expected_u2_raw_y);
-    assert_ne!(
-        (u1_acc[510], u1_acc[511]),
-        (expected_u1_x, expected_u1_y),
-        "raw accumulator keeps the blinded 2^256*B offset"
-    );
+    assert_eq!(u1_acc[510], expected_u1_x);
+    assert_eq!(u1_acc[511], expected_u1_y);
+    assert_eq!(u2_acc[510], expected_u2_x);
+    assert_eq!(u2_acc[511], expected_u2_y);
     assert_eq!(corrected[0], expected_u1_x, "S1.x corrected endpoint");
     assert_eq!(corrected[1], expected_u1_y, "S1.y corrected endpoint");
     assert_eq!(corrected[2], expected_u2_x, "S2.x corrected endpoint");
@@ -229,13 +203,6 @@ fn witness_checker_accepts_honest_witness_and_rejects_scalar_mutations() {
     let mut witness = generate_witness(&input).unwrap();
     verify_witness(&input, &witness).unwrap();
 
-    witness.values[layout_range(LayoutSlot::ScalarInverses).start] = Fp::from_u64(2);
-    assert!(
-        verify_witness(&input, &witness).is_err(),
-        "bad sinv must reject"
-    );
-
-    let mut witness = generate_witness(&input).unwrap();
     witness.values[layout_range(LayoutSlot::UScalars).start] = Fp::from_u64(43);
     assert!(
         verify_witness(&input, &witness).is_err(),
@@ -276,7 +243,7 @@ fn witness_checker_accepts_honest_witness_and_rejects_scalar_mutations() {
 }
 
 #[test]
-fn witness_checker_rejects_final_check_and_infinity_mutations() {
+fn witness_checker_rejects_final_check_mutations() {
     let input = signed_input();
     let mut witness = generate_witness(&input).unwrap();
 
@@ -291,13 +258,6 @@ fn witness_checker_rejects_final_check_and_infinity_mutations() {
     assert!(
         verify_witness(&input, &witness).is_err(),
         "bad r' must reject"
-    );
-
-    let mut witness = generate_witness(&input).unwrap();
-    witness.values[layout_range(LayoutSlot::InfinityFlags).start] = Fp::ONE;
-    assert!(
-        verify_witness(&input, &witness).is_err(),
-        "infinity flag must reject"
     );
 }
 

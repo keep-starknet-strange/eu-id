@@ -1,30 +1,22 @@
-//! Phase 2: per-field-mul EC-formula binding for the hinted-mul silo.
+//! Binds EC formulas to hinted multiplication rows.
 //!
-//! The silo proves the 15 field products `R_k = lhs_k · rhs_k (mod p)` of each
-//! projective EC op (`k = 0..14`), but the products' *operands* and the output
-//! combination were bound OUTSIDE the silo (on the two projective-source
-//! consumers, via `double_formula` / `mixed_add_formula`). Phase 2 moves that
-//! binding INTO the silo so a single per-`mul_index` spec table — interpreted
-//! both symbolically (AIR) and concretely (witness solver) — pins every operand
-//! and the projective output on the silo rows themselves.
+//! Each projective EC operation has 15 field products.
+//! The silo proves `R_k = lhs_k · rhs_k (mod p)` for `k = 0..14`.
+//! One specification table binds all operands and projective outputs.
+//! The AIR and witness solver use the same table.
 //!
 //! # Spec table (single source of truth)
 //!
-//! [`FORMULA_SPEC`] transcribes the authoritative "Normalized per-k table" from
-//! `tasks/rotation-impl-plan.md`. Each entry describes silo row `k` of a proj
-//! group (15 contiguous rows, `mul_index` ascending). The AIR reads operand /
-//! result / constant sources at the row-relative offsets the table implies (a
-//! source referencing group mul `j` lives on the row `j`, i.e. offset `j − k`);
-//! the solver reads group mul `j`'s concrete limbs. Slot assignment is FIXED:
-//! `slot 0` targets the row's `a` operand (or `out_val` on `k = 13/14`), `slot 1`
-//! targets the row's `b` operand. Where one EC-op kind combo-reduces a side and
-//! the other only needs equality, the equality is expressed as a DEGENERATE
-//! reduction (combo `= [(1, src)]`, carries solve to ~0) through the same slot —
-//! sound because operands only matter mod p as silo product factors.
+//! `FORMULA_SPEC` is the normalized table for each multiplication index.
+//! Each entry describes one of 15 contiguous silo rows.
+//! The AIR reads sources at the specified row-relative offsets.
+//! The solver reads the concrete limbs from the same source rows.
+//! Slot 0 targets operand `a`, or `out_val` on rows 13 and 14.
 //!
-//! The reduction machinery ([`add_combo_reduction`], [`solve_combo_reduction`],
-//! …) lives here (moved from `fake_glv/ec_source/double_formula.rs`, which now
-//! re-exports it so the Phase-3-doomed consumers keep compiling).
+//! Slot 1 targets operand `b`.
+//! A degenerate reduction represents equality when only one operation needs a reduction.
+//!
+//! This module also provides the shared reduction functions.
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
@@ -91,7 +83,7 @@ pub(crate) fn signed_coeff_mul<E: EvalAtRow>(coeff: i64, limb: E::F) -> E::F {
 /// plus `gate·last_carry`. Degree ≤ 3 (`gate(1)·[op(1)·linear(1)]`).
 ///
 /// `op_expr` is the group header's `op` flag read at offset `−k` (1 = Double).
-/// Either term list may be empty (that kind imposes no reduction here); the mux
+/// Either term list may be empty (that kind imposes no reduction here). The mux
 /// still zeroes the absent side.
 pub(crate) fn add_muxed_combo_reduction<E: EvalAtRow>(
     eval: &mut E,
@@ -130,10 +122,11 @@ pub(crate) fn add_muxed_combo_reduction<E: EvalAtRow>(
     eval.add_constraint(gate.clone() * witness.carries[N_LIMBS - 1].clone());
 }
 
-/// Muxed pure equality: `gate·(op·(x − srcD) + (1−op)·(x − srcM))` per limb,
-/// where `srcD`/`srcM` are optional (a kind that imposes no equality here passes
-/// `None`, and its half of the mux is dropped — gate by that kind only). Degree
-/// ≤ 3 (`gate(1)·op(1)·linear(1)`).
+/// Adds a multiplexed equality constraint for each limb.
+///
+/// The constraint is `gate·(op·(x − srcD) + (1−op)·(x − srcM))`.
+/// An absent source removes that half of the multiplexed constraint.
+/// The maximum degree is 3.
 pub(crate) fn add_muxed_equality<E: EvalAtRow>(
     eval: &mut E,
     gate: &E::F,
@@ -219,7 +212,7 @@ pub(crate) fn try_combo_carries(
 // ===========================================================================
 
 /// A source of limbs referenced by the formula spec. `A/B/R(j)` name group mul
-/// `j`'s lhs/rhs/result columns; the AIR reads them at offset `j − k`, the
+/// `j`'s lhs/rhs/result columns. The AIR reads them at offset `j − k`, the
 /// solver reads mul `j`'s concrete limbs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Src {
@@ -273,7 +266,7 @@ pub(crate) struct Reduction {
 /// (gate by the present kind only).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Equality {
-    /// `true` ⇒ constrain the row's `a` operand; `false` ⇒ the `b` operand.
+    /// `true` ⇒ constrain the row's `a` operand. `false` ⇒ the `b` operand.
     pub is_a: bool,
     pub double: Option<Src>,
     pub mixed: Option<Src>,
@@ -287,7 +280,7 @@ pub(crate) struct FormulaSpec {
     pub eqs: &'static [Equality],
 }
 
-// --- Reduction combo term lists (static; referenced by the spec below) ---
+// --- Reduction combo term lists (static, referenced by the spec below) ---
 // Double combos.
 const D_ONE: [SpecTerm; 1] = [t(1, Src::One)];
 const D_M6L: [SpecTerm; 3] = [t(1, Src::R(1)), t(-3, Src::R(5)), t(6, Src::R(4))];
@@ -367,7 +360,7 @@ pub(crate) const FORMULA_SPEC: [FormulaSpec; FORMULA_ROWS] = [
         }),
         eqs: &[],
     },
-    // k=3: a eq (D: A(0) | M: B(1)); b eq (D: A(1) | M: one).
+    // k=3: a eq (D: A(0) | M: B(1)). B eq (D: A(1) | M: one).
     FormulaSpec {
         slot0: None,
         slot1: None,
@@ -384,7 +377,7 @@ pub(crate) const FORMULA_SPEC: [FormulaSpec; FORMULA_ROWS] = [
             },
         ],
     },
-    // k=4: a eq (D: A(0) | M: B(0)); b eq one (both).
+    // k=4: a eq (D: A(0) | M: B(0)). B eq one (both).
     FormulaSpec {
         slot0: None,
         slot1: None,
@@ -401,7 +394,7 @@ pub(crate) const FORMULA_SPEC: [FormulaSpec; FORMULA_ROWS] = [
             },
         ],
     },
-    // k=5: a eq bC (both); b eq (D: R(2) | M: one).
+    // k=5: a eq bC (both). B eq (D: R(2) | M: one).
     FormulaSpec {
         slot0: None,
         slot1: None,
@@ -561,7 +554,7 @@ pub(crate) fn spec_slot_count() -> (usize, usize) {
 
 /// Per-silo-row formula witness cells: the two reduction slots' `(q, carries)`
 /// and the `out_val` limbs (nonzero only on rows 13/14). Every active proj row
-/// carries this; unused slots hold `(0, [0; N])` (encoded as zero on write) so
+/// carries this. Unused slots hold `(0, [0; N])` (encoded as zero on write) so
 /// the signed-table lookup passes.
 #[derive(Clone, Debug)]
 pub struct FormulaRowCells {
@@ -733,10 +726,10 @@ mod tests {
     use super::*;
     use crate::projective::ProjectiveEcOp;
 
-    /// Cross-check the spec table against honestly generated Double and MixedAdd
-    /// group witnesses: every reduction solves, and every pure equality holds
-    /// limb-exact for the honest witness (honest operands are canonical, so the
-    /// pinned side equals its source limb-for-limb).
+    /// Confirms the specification table against valid Double and MixedAdd witnesses.
+    ///
+    /// Each reduction must solve.
+    /// Each pure equality must hold for all limbs.
     #[test]
     fn spec_table_matches_honest_group_witness() {
         let trace = sample_projective_trace();

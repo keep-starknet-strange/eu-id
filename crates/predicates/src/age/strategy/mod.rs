@@ -1,19 +1,7 @@
-pub mod bit_decomposition;
 pub mod range_check;
-
-/// Helper enum for selecting an age-check strategy. Used inside the crate (e.g.
-/// by the demo CLI and benches) to represent a choice; external callers pick a
-/// strategy by calling [`range_check::AgeRangeCheck`] or
-/// [`bit_decomposition::AgeBitDecomposition`] directly.
-#[derive(Clone, Copy)]
-pub enum AgeCheckStrategy {
-    BitDecomposition,
-    RangeCheck,
-}
 
 #[cfg(test)]
 mod tests {
-    use super::bit_decomposition::AgeBitDecomposition;
     use super::range_check::AgeRangeCheck;
     use crate::age::types::{AgeBounds, Date, DateOfBirth, Error, PublicInput};
     use crate::AgeInputError;
@@ -145,7 +133,7 @@ mod tests {
 
                 #[test]
                 fn proves_and_verifies_feb29_in_leap_year() {
-                    // Feb 29 is valid in a leap year; this also exercises the leap-year branch
+                    // Feb 29 is valid in a leap year. This also exercises the leap-year branch
                     // of the calendar lookup
                     let predicate = validating_predicate();
                     let proof = predicate.prove(&setup_today(18), &dob(2000, 2, 29)).unwrap();
@@ -229,12 +217,5 @@ mod tests {
         AgeRangeCheck,
         AgeRangeCheck::new(PcsConfig::default()),
         AgeRangeCheck::new_with_input_validation(PcsConfig::default(), false)
-    );
-
-    age_predicate_tests!(
-        bit_decomposition,
-        AgeBitDecomposition,
-        AgeBitDecomposition::new(PcsConfig::default()),
-        AgeBitDecomposition::new_with_input_validation(PcsConfig::default(), false)
     );
 }

@@ -1,17 +1,17 @@
 //! Product EUID PID mdoc proof path.
 //!
-//! This module parses the constrained ISO/IEC 18013-5 PID profile, prepares the
-//! mdoc statement/witness, and proves issuer signature, ISO device
-//! authentication, MSO digest membership, validity, device-key origin, and the
-//! age/nationality predicates in one verifier-facing proof. The legacy nonce
-//! module is not part of this path; the device-auth signature binds freshness.
+//! This module parses the constrained ISO/IEC 18013-5 PID profile.
+//! It prepares the mdoc statement and witness.
+//! One proof covers the signatures, digest membership, validity, device key, age, and nationality.
+//! The device authentication signature binds freshness.
+//!
+//! In this module, “private” identifies a logical witness value, not a public input.
+//! It does not claim proof confidentiality.
+//! The current composed proof is transparent and is not zero-knowledge.
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::collections::{HashMap, HashSet};
 
-use air_core::relations::{
-    field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
-};
+use air_core::relations::{FieldBytesRelation, SharedFieldRelation};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
@@ -22,7 +22,6 @@ use p256::pkcs8::DecodePublicKey;
 use p256::EncodedPoint;
 use predicates::nat::NationalityPredicate;
 use predicates::{AgeRangeCheck, DateOfBirth, PredicateProver, PredicateVerifier};
-#[cfg(feature = "ec-coprocessor")]
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -34,7 +33,7 @@ use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleHasher;
-#[cfg(feature = "ec-coprocessor")]
+
 use stwo::core::verifier::VerificationError;
 use stwo::core::{
     air::Component,
@@ -53,93 +52,251 @@ use stwo_constraint_framework::{
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
 };
-#[cfg(not(feature = "ec-coprocessor"))]
-use stwo_p256::components::digest_bind::module::{
-    DigestBindInteractionClaim, DigestBindProver, DigestBindVerifier,
-};
-#[cfg(not(feature = "ec-coprocessor"))]
-use stwo_p256::components::digest_bind::SharedScalarZRelation;
-#[cfg(not(feature = "ec-coprocessor"))]
-use stwo_p256::public_inputs::PublicEcdsaInstance;
-use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
-use stwo_p256::{proof::air::P256Prover, proof::P256ProofDraft};
-#[cfg(not(feature = "ec-coprocessor"))]
-use stwo_p256::{
-    proof::air::P256Verifier,
-    proof::{P256CurrentAirInteractionClaim, P256CurrentAirProofClaim},
-};
-use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
-use stwo_sha256::field_exposure::FieldExposure;
-use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
-use stwo_sha256::relations::SharedShaTableRelations;
-use stwo_sha256::shared_tables::{
-    ShaTableMultiplicities, ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier,
-};
-use stwo_sha256::trace::min_log_size;
-use stwo_sha256::witness::compute_sha256_witness;
 
-use crate::claimed_sum_blinder::{
-    add_blinder_relation_entry, blinder_counter_interaction, random_qm31, ClaimedSumBlinderEval,
-    ClaimedSumBlinderRelation,
+use stwo_p256::types::{AffinePoint, EcdsaVerifyInput, Signature, U256};
+
+use stwo_sha256::air::{Sha256Prover, Sha256Verifier};
+use stwo_sha256::interaction::InteractionClaim as Sha256InteractionClaim;
+use stwo_sha256::relations::{
+    PackedShaDigestRelation, SharedPackedShaDigestRelation, SharedShaTableRelations,
+    PACKED_SHA_STREAM_FIELD_BASE,
 };
-use crate::generator::{Policy, SHA_GROUP_WIDTH};
-#[cfg(feature = "ec-coprocessor")]
+use stwo_sha256::shared_tables::{ShaTablesInteractionClaim, ShaTablesProver, ShaTablesVerifier};
+use stwo_sha256::witness::compute_packed_sha256_witness;
+
+use crate::mdoc_cbor_stream::{
+    MdocCborInputMode, MdocCborStream, MdocCborStreamInteractionClaim, MdocCborWitness,
+};
+
 use crate::mdoc_mac::{
     MdocMacBind, MdocMacInteractionClaim, MdocP4bMacPublic, MdocP4bMacSharedState,
 };
-use crate::mdoc_validity::{
-    mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim, MdocValidityRow,
+use crate::mdoc_scope::{
+    MdocScope, MdocScopeHandles, MdocScopeInteractionClaim, MdocScopeItem, MdocScopeMode,
+    MdocScopeParserInput, MdocScopeProofMetadata, MdocScopeStatement, MDOC_SCOPE_MAX_DIGEST_ID,
+    MDOC_SCOPE_MAX_ITEMS, MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID, NORMALIZED_MSO_STREAM_ID,
 };
-use crate::mdoc_window_bind::{
-    MdocFieldSource, MdocWindowBind, MdocWindowBindInteractionClaim, MdocWindowBindRow,
+use crate::mdoc_validity::{mdoc_validity_rows, MdocValidityBind, MdocValidityInteractionClaim};
+use crate::product_profile::{
+    Policy, PRODUCT_BIRTH_DATE_ELEMENT, PRODUCT_DOCTYPE, PRODUCT_FIXED_PACKED_SHA_MESSAGES,
+    PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES, PRODUCT_ITEM_CBOR_LOG_SIZE,
+    PRODUCT_MAX_ATTRIBUTES, PRODUCT_MAX_CBOR_LOG_SIZE, PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES,
+    PRODUCT_MAX_MSO_PAYLOAD_BYTES, PRODUCT_MAX_PACKED_SHA_MESSAGES,
+    PRODUCT_MAX_SELECTED_ITEM_BYTES, PRODUCT_NAMESPACE, PRODUCT_NATIONALITY_ELEMENT,
+    PRODUCT_TS13_REVOCATION_MESSAGE_BYTES,
 };
-#[cfg(feature = "ec-coprocessor")]
-use crate::public_digest_bind::{PublicDigestBind, PublicDigestBindInteractionClaim};
-use crate::Error;
+use crate::ts13::ts13_revocation_message_bytes;
 
-/// Legacy profile: `elementValue` packed as a fixed-width CBOR `bstr`.
-const MDOC_PROFILE_VERSION_V1: &str = "1.0";
-/// Profile v2: canonical (RFC 8949 core deterministic) CBOR, text-form values.
-const MDOC_PROFILE_VERSION_V2: &str = "2.0";
-/// The profile the demo fixture emits and the parser advertises by default.
-const MDOC_PROFILE_VERSION: &str = MDOC_PROFILE_VERSION_V2;
-const PID_DOCTYPE: &str = "eu.europa.ec.eudi.pid.1";
-const PID_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
+use crate::Error;
+use air_core::claim_mask::{
+    add_claim_mask_fraction, ClaimMaskChallengeModule, ClaimMaskRing, ClaimMaskTrace,
+    SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS,
+};
+
+/// Current product profile: deterministic CBOR with text-form values.
+const MDOC_PROFILE_VERSION: &str = "2.0";
+const PRODUCT_SEMANTICS_ERROR: &str =
+    "product profile requires 1..=2 mdoc 2.0 text-date/alpha-2 predicate attributes";
+const DEMO_REQUEST_BINDING: [u8; 32] = [0x51; 32];
+const DEMO_VERIFICATION_TIME_EPOCH_SECONDS: u64 = 1_783_080_000;
 const ES256_PROTECTED_HEADER: &[u8] = &[0xA1, 0x01, 0x26];
 const CBOR_TAG_ENCODED_CBOR: u64 = 24;
 const CBOR_TAG_FULL_DATE: u64 = 1004;
-const MDOC_ATTRIBUTE_ELEMENT_ID_BASE: u32 = 16;
-const MDOC_ATTRIBUTE_VALUE_BASE: u32 = 20;
-const MDOC_ATTRIBUTE_DIGEST_BASE: u32 = 24;
-const MDOC_ATTRIBUTE_DIGEST_ANCHOR_BASE: u32 = 28;
-const MDOC_ATTRIBUTE_VALUE_HEAD_BASE: u32 = 32;
-const MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE: u32 = 36;
-const MDOC_MSO_PAYLOAD_FIELD_ID: u32 = 40;
+pub(crate) const MDOC_MSO_PAYLOAD_FIELD_ID: u32 = MDOC_SCOPE_MSO_PAYLOAD_FIELD_ID;
 const MDOC_REVOCATION_MESSAGE_FIELD_ID: u32 = 41;
-const TS13_REVOCATION_MESSAGE_LEN: usize = 20;
+const PRODUCT_SESSION_TRANSCRIPT_BYTES: usize = 56;
+const PACKED_SHA_ISSUER_SLOT: u32 = 0;
+const PACKED_SHA_MSO_SLOT: u32 = 1;
+const PACKED_SHA_REVOCATION_SLOT: u32 = 2;
+const PACKED_SHA_ITEM_SLOT_BASE: u32 = 3;
+const DEMO_PRIVATE_RANDOM_CANARY: [u8; 32] = [
+    0x9f, 0x4a, 0x7c, 0x1d, 0x2e, 0x8b, 0x63, 0x50, 0xa6, 0xd9, 0x41, 0x73, 0xbc, 0x05, 0x28, 0xee,
+    0x4d, 0x7a, 0x91, 0x63, 0xf0, 0xc2, 0xb8, 0x5e, 0x11, 0x74, 0xda, 0xc9, 0x6e, 0x3f, 0x70, 0x2b,
+];
+
+fn take_claim_masks(
+    ring: &mut ClaimMaskRing,
+    log_sizes: &[u32],
+) -> Result<Vec<ClaimMaskTrace>, air_core::claim_mask::ClaimMaskError> {
+    log_sizes
+        .iter()
+        .map(|&log_size| ring.take(log_size))
+        .collect()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
+    /// Domain-separated hash of the verifier's complete product request.
+    ///
+    /// The SDK computes this from its canonical public-statement encoding.
+    /// Product proving requires an exact nonzero value.
+    pub request_binding: [u8; 32],
     pub doctype: String,
     pub namespace: String,
     pub attributes: Vec<MdocRequestedAttribute>,
-    pub birth_date_element: String,
-    pub nationality_element: String,
     pub session_transcript: Vec<u8>,
-    pub trusted_issuer_certificates: Vec<Vec<u8>>,
-    pub trusted_issuer_public_keys: Vec<AffinePoint>,
-    pub device_authentication_profile: MdocDeviceAuthenticationProfile,
+    /// Exact verifier-authoritative issuer leaf key for a product request.
+    pub required_issuer_public_key: AffinePoint,
+    /// Verifier time in whole UTC seconds since 1970-01-01T00:00:00Z.
+    pub verification_time_epoch_seconds: u64,
+    /// Mandatory sorted-pair revocation data for the product request.
+    pub revocation: MdocRevocationRequest,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MdocDeviceAuthenticationProfile {
-    Iso180135,
-    LongfellowLegacy,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MdocRevocationRequest {
+    pub public_inputs: MdocRevocationPublicInputs,
+    pub id_lo: u64,
+    pub id_hi: u64,
+    pub signature: Signature,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MdocTimestamp {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+impl MdocTimestamp {
+    pub(crate) fn text_bytes(self) -> [u8; 20] {
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+            self.year, self.month, self.day, self.hour, self.minute, self.second
+        )
+        .as_bytes()
+        .try_into()
+        .expect("formatted tdate has YYYY-MM-DDThh:mm:ssZ length")
+    }
+}
+
+pub(crate) const fn is_gregorian_leap_year(year: u16) -> bool {
+    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+}
+
+pub(crate) const fn gregorian_days_in_month(year: u16, month: u8) -> Option<u8> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if is_gregorian_leap_year(year) => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
+}
+
+pub(crate) const fn is_gregorian_date(year: u16, month: u8, day: u8) -> bool {
+    match gregorian_days_in_month(year, month) {
+        Some(max_day) => day >= 1 && day <= max_day,
+        None => false,
+    }
+}
+
+pub fn utc_timestamp_from_epoch_seconds(seconds: u64) -> Result<MdocTimestamp, MdocError> {
+    const MAX_SUPPORTED_EPOCH_SECONDS: u64 = 253_402_300_799;
+    if seconds > MAX_SUPPORTED_EPOCH_SECONDS {
+        return Err(MdocError::InvalidVerificationTime);
+    }
+    let epoch_day =
+        i64::try_from(seconds / 86_400).map_err(|_| MdocError::InvalidVerificationTime)?;
+    let seconds_of_day = seconds % 86_400;
+    let z = epoch_day + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = year + i64::from(month <= 2);
+    Ok(MdocTimestamp {
+        year: u16::try_from(year).map_err(|_| MdocError::InvalidVerificationTime)?,
+        month: month as u8,
+        day: day as u8,
+        hour: (seconds_of_day / 3_600) as u8,
+        minute: ((seconds_of_day % 3_600) / 60) as u8,
+        second: (seconds_of_day % 60) as u8,
+    })
+}
+
+fn strict_verification_timestamp(seconds: u64) -> Result<MdocTimestamp, MdocError> {
+    if seconds == 0
+        || seconds
+            .checked_add(1)
+            .and_then(|next| utc_timestamp_from_epoch_seconds(next).ok())
+            .is_none()
+    {
+        return Err(MdocError::InvalidVerificationTime);
+    }
+    utc_timestamp_from_epoch_seconds(seconds)
+}
+
+fn validate_product_policy(
+    policy: &Policy,
+    verification_time_epoch_seconds: u64,
+) -> Result<(), MdocError> {
+    if policy.accepted_nationalities.is_empty()
+        || policy
+            .accepted_nationalities
+            .iter()
+            .any(|code| !crate::is_assigned_iso_alpha2(*code))
+        || policy
+            .accepted_nationalities
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(MdocError::InvalidNationality(
+            "accepted policy must be a nonempty, sorted, unique set of assigned ISO alpha-2 codes"
+                .to_string(),
+        ));
+    }
+
+    let verification_date = strict_verification_timestamp(verification_time_epoch_seconds)?;
+    if policy.current_date.year != u32::from(verification_date.year)
+        || policy.current_date.month != u32::from(verification_date.month)
+        || policy.current_date.day != u32::from(verification_date.day)
+    {
+        return Err(MdocError::InvalidVerificationTime);
+    }
+    Ok(())
+}
+
+pub fn p256_affine_point_from_coordinates(x: &[u8], y: &[u8]) -> Option<AffinePoint> {
+    let x: [u8; 32] = x.try_into().ok()?;
+    let y: [u8; 32] = y.try_into().ok()?;
+    let point = AffinePoint {
+        x: U256(x),
+        y: U256(y),
+    };
+    let encoded = EncodedPoint::from_affine_coordinates((&x).into(), (&y).into(), false);
+    VerifyingKey::from_encoded_point(&encoded)
+        .ok()
+        .map(|_| point)
+}
+
+pub fn p256_signature_from_scalars(r: &[u8], s: &[u8]) -> Option<Signature> {
+    let r: [u8; 32] = r.try_into().ok()?;
+    let s: [u8; 32] = s.try_into().ok()?;
+    let mut compact = [0u8; 64];
+    compact[..32].copy_from_slice(&r);
+    compact[32..].copy_from_slice(&s);
+    P256Signature::from_slice(&compact).ok()?;
+    Some(Signature {
+        r: U256(r),
+        s: U256(s),
+    })
+}
+
+/// Constructs the P-256 digest value used by the public mdoc statement.
+pub fn p256_digest(bytes: [u8; 32]) -> U256 {
+    U256(bytes)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MdocDisclosureMode {
-    ValueEquality(Vec<u8>),
     AgeOver,
     Alpha2Set,
 }
@@ -160,55 +317,8 @@ pub struct ExtractedMdocAttribute {
     pub value: Vec<u8>,
 }
 
-impl MdocPidRequest {
-    pub fn eudi_pid(session_transcript: Vec<u8>) -> Self {
-        Self {
-            doctype: PID_DOCTYPE.to_string(),
-            namespace: PID_NAMESPACE.to_string(),
-            attributes: vec![
-                MdocRequestedAttribute {
-                    element_identifier: "birth_date".to_string(),
-                    mode: MdocDisclosureMode::AgeOver,
-                },
-                MdocRequestedAttribute {
-                    element_identifier: "nationality".to_string(),
-                    mode: MdocDisclosureMode::Alpha2Set,
-                },
-            ],
-            birth_date_element: "birth_date".to_string(),
-            nationality_element: "nationality".to_string(),
-            session_transcript,
-            trusted_issuer_certificates: Vec::new(),
-            trusted_issuer_public_keys: Vec::new(),
-            device_authentication_profile: MdocDeviceAuthenticationProfile::Iso180135,
-        }
-    }
-
-    pub fn with_trusted_issuer_certificates(mut self, certificates: Vec<Vec<u8>>) -> Self {
-        self.trusted_issuer_certificates = certificates;
-        self
-    }
-
-    pub fn with_trusted_issuer_public_keys(mut self, public_keys: Vec<AffinePoint>) -> Self {
-        self.trusted_issuer_public_keys = public_keys;
-        self
-    }
-
-    pub fn with_device_authentication_profile(
-        mut self,
-        profile: MdocDeviceAuthenticationProfile,
-    ) -> Self {
-        self.device_authentication_profile = profile;
-        self
-    }
-
-    pub fn disclosed_attributes(&self) -> Vec<MdocRequestedAttribute> {
-        self.attributes.clone()
-    }
-}
-
 fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Result<(), MdocError> {
-    if !(1..=crate::mdoc_window_bind::MDOC_MAX_DISCLOSED_ATTRIBUTES).contains(&attributes.len()) {
+    if !(1..=MDOC_SCOPE_MAX_ITEMS).contains(&attributes.len()) {
         return Err(MdocError::InvalidAttributeCount {
             count: attributes.len(),
         });
@@ -217,20 +327,6 @@ fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Resul
     let mut alpha2_seen = false;
     for attribute in attributes {
         match &attribute.mode {
-            MdocDisclosureMode::ValueEquality(bytes) => {
-                if bytes.len() > 32 {
-                    return Err(MdocError::ValueEqualityTooLong {
-                        element: attribute.element_identifier.clone(),
-                        len: bytes.len(),
-                    });
-                }
-                if attribute.element_identifier.len() > 32 {
-                    return Err(MdocError::ElementIdentifierTooLong {
-                        element: attribute.element_identifier.clone(),
-                        len: attribute.element_identifier.len(),
-                    });
-                }
-            }
             MdocDisclosureMode::AgeOver => {
                 if attribute.element_identifier.len() > 32 {
                     return Err(MdocError::ElementIdentifierTooLong {
@@ -258,89 +354,161 @@ fn validate_requested_attributes(attributes: &[MdocRequestedAttribute]) -> Resul
     Ok(())
 }
 
+pub(crate) fn validate_product_requested_attributes(
+    attributes: &[MdocRequestedAttribute],
+) -> Result<(), MdocError> {
+    if !(1..=PRODUCT_MAX_ATTRIBUTES).contains(&attributes.len()) {
+        return Err(MdocError::InvalidAttributeCount {
+            count: attributes.len(),
+        });
+    }
+    validate_requested_attributes(attributes)?;
+    let current_layout = match attributes {
+        [attribute] => match &attribute.mode {
+            MdocDisclosureMode::AgeOver => {
+                attribute.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
+            }
+            MdocDisclosureMode::Alpha2Set => {
+                attribute.element_identifier == PRODUCT_NATIONALITY_ELEMENT
+            }
+        },
+        [birth_date, nationality] => {
+            birth_date.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
+                && matches!(birth_date.mode, MdocDisclosureMode::AgeOver)
+                && nationality.element_identifier == PRODUCT_NATIONALITY_ELEMENT
+                && matches!(nationality.mode, MdocDisclosureMode::Alpha2Set)
+        }
+        _ => false,
+    };
+    if !current_layout {
+        return Err(MdocError::UnsupportedProductAttributeLayout);
+    }
+    Ok(())
+}
+
+fn validate_product_sha_input_sizes(
+    mso: &[u8],
+    issuer: &[u8],
+    selected_items: &[&[u8]],
+) -> Result<(), MdocError> {
+    if mso.len() > PRODUCT_MAX_MSO_PAYLOAD_BYTES {
+        return Err(MdocError::InputTooLarge {
+            input: "MSO payload",
+            actual: mso.len(),
+            maximum: PRODUCT_MAX_MSO_PAYLOAD_BYTES,
+        });
+    }
+    let issuer_maximum = mso
+        .len()
+        .checked_add(PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES)
+        .ok_or(MdocError::InputTooLarge {
+            input: "MSO payload",
+            actual: mso.len(),
+            maximum: usize::MAX - PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES,
+        })?;
+    if issuer.len() > issuer_maximum {
+        return Err(MdocError::InputTooLarge {
+            input: "issuer Sig_structure",
+            actual: issuer.len(),
+            maximum: issuer_maximum,
+        });
+    }
+    for &item in selected_items {
+        if item.len() > PRODUCT_MAX_SELECTED_ITEM_BYTES {
+            return Err(MdocError::InputTooLarge {
+                input: "selected IssuerSignedItem",
+                actual: item.len(),
+                maximum: PRODUCT_MAX_SELECTED_ITEM_BYTES,
+            });
+        }
+    }
+    let invalid_count = MdocError::InvalidAttributeCount {
+        count: selected_items.len(),
+    };
+    let message_count = PRODUCT_FIXED_PACKED_SHA_MESSAGES
+        .checked_add(selected_items.len())
+        .ok_or_else(|| invalid_count.clone())?;
+    if selected_items.len() > PRODUCT_MAX_ATTRIBUTES
+        || message_count > PRODUCT_MAX_PACKED_SHA_MESSAGES
+    {
+        return Err(invalid_count);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_product_mdoc_request(request: &MdocPidRequest) -> Result<(), MdocError> {
+    if request.doctype != PRODUCT_DOCTYPE {
+        return Err(MdocError::ProductDoctypeMismatch);
+    }
+    if request.namespace != PRODUCT_NAMESPACE {
+        return Err(MdocError::ProductNamespaceMismatch);
+    }
+    strict_verification_timestamp(request.verification_time_epoch_seconds)?;
+    validate_product_requested_attributes(&request.attributes)?;
+    validate_product_session_transcript_cbor(&request.session_transcript)
+}
+
 #[derive(Clone, Debug)]
 pub struct ExtractedPidMdoc {
+    pub request_binding: [u8; 32],
     pub doctype: String,
     pub namespace: String,
     pub attributes: Vec<MdocRequestedAttribute>,
     pub extracted_attributes: Vec<ExtractedMdocAttribute>,
-    pub birth_date: String,
-    pub nationalities: Vec<u32>,
     pub birth_date_bytes: [u8; 4],
-    pub nationality_bytes: [u8; 2],
     pub birth_date_binding: MdocBirthDateBinding,
     pub nationality_binding: MdocNationalityBinding,
     pub birth_date_value_offset: usize,
     pub nationality_value_offset: usize,
-    pub signed_at: (u16, u8, u8),
-    pub valid_from: (u16, u8, u8),
-    pub valid_until: (u16, u8, u8),
-    pub digest_ids: HashMap<String, u32>,
+    /// Every nationality disclosed by the holder. The AIR consumes the
+    /// complete signed array and proves `any(is_acceptable)`.
+    pub nationality_candidates: Vec<ParsedNationalityValue>,
+    pub valid_from_timestamp: MdocTimestamp,
+    pub valid_until_timestamp: MdocTimestamp,
     pub birth_date_item: Vec<u8>,
     pub nationality_item: Vec<u8>,
     pub mso: Vec<u8>,
-    pub issuer_key: AffinePoint,
     pub device_key: AffinePoint,
-    pub issuer_signature: Signature,
-    pub device_signature: Signature,
     pub issuer_sig_structure: Vec<u8>,
-    pub device_sig_structure: Vec<u8>,
     pub issuer_ecdsa_input: EcdsaVerifyInput,
     pub device_ecdsa_input: EcdsaVerifyInput,
+    pub revocation: MdocRevocationRequest,
 }
 
-/// How the `birth_date` element value is encoded in the item preimage. The
-/// window bytes exposed to the age predicate differ per encoding: `Packed`
-/// exposes the 4 raw big-endian date bytes; `Text` exposes the 10 ASCII bytes
-/// of the canonical `YYYY-MM-DD` tstr (profile v2).
+/// Canonical `YYYY-MM-DD` bytes bound from the tagged `birth_date` value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MdocBirthDateBinding {
-    Packed([u8; 4]),
-    Text([u8; 10]),
-}
+pub struct MdocBirthDateBinding(pub [u8; 10]);
 
 impl MdocBirthDateBinding {
     fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Packed(bytes) => bytes,
-            Self::Text(bytes) => bytes,
-        }
+        &self.0
     }
 }
 
-/// How the `nationality` element value is encoded in the item preimage.
-/// `Numeric` exposes the 2 raw big-endian country-code bytes; `Alpha2` exposes
-/// the 2 ASCII bytes of the ISO 3166-1 alpha-2 code (profile v2).
+/// Canonical alpha-2 bytes bound from a signed nationality array entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MdocNationalityBinding {
-    Numeric([u8; 2]),
-    Alpha2([u8; 2]),
-}
+pub struct MdocNationalityBinding(pub [u8; 2]);
 
 impl MdocNationalityBinding {
     fn as_bytes(&self) -> &[u8] {
-        match self {
-            Self::Numeric(bytes) | Self::Alpha2(bytes) => bytes,
-        }
-    }
-
-    fn code(&self) -> u32 {
-        match self {
-            Self::Numeric(bytes) | Self::Alpha2(bytes) => u32::from(u16::from_be_bytes(*bytes)),
-        }
+        &self.0
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MdocError {
     Cbor(String),
+    NonCanonicalSessionTranscript,
     MissingField(&'static str),
     WrongType(&'static str),
     DoctypeMismatch,
     NamespaceMissing,
     ElementMissing(String),
     UnsupportedDigestAlgorithm(String),
-    ItemDigestMismatch { element: String, digest_id: u32 },
+    ItemDigestMismatch {
+        element: String,
+        digest_id: u32,
+    },
     DeviceAuthPayloadMismatch,
     InvalidCoseKey(&'static str),
     InvalidCoseSign1(&'static str),
@@ -353,12 +521,29 @@ pub enum MdocError {
     InvalidTdate(&'static str),
     CredentialNotYetValid,
     CredentialExpired,
-    SaltTooShort { len: usize },
-    InvalidAttributeCount { count: usize },
+    InvalidVerificationTime,
+    SaltTooShort {
+        len: usize,
+    },
+    InvalidAttributeCount {
+        count: usize,
+    },
     DuplicatePredicateMode(&'static str),
-    ValueEqualityTooLong { element: String, len: usize },
-    ElementIdentifierTooLong { element: String, len: usize },
-    ValueEqualityMismatch { element: String },
+    ElementIdentifierTooLong {
+        element: String,
+        len: usize,
+    },
+    UnsupportedProductAttributeLayout,
+    ProductDoctypeMismatch,
+    ProductNamespaceMismatch,
+    UnsupportedDeviceAuthenticationProfile,
+    RevocationRequestMismatch(&'static str),
+    InvalidProductDocumentShape(&'static str),
+    InputTooLarge {
+        input: &'static str,
+        actual: usize,
+        maximum: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -369,87 +554,46 @@ pub struct DemoMdocCircuitFixture {
     pub statement: MdocCircuitStatement,
 }
 
-pub struct MdocModuleShape {
-    pub name: &'static str,
-    pub layout: TreeLayout,
-    /// TRUE per-component committed shape, when the module aggregates multiple
-    /// distinct producer tables under one [`TreeLayout`] (today: only the
-    /// shared-SHA table module). Empty for single-component modules, whose
-    /// `layout` buckets already identify the component 1:1.
-    pub components: Vec<stwo_sha256::shared_tables::ShaTableComponentShape>,
-}
-
-impl MdocModuleShape {
-    /// Single-component module: its `layout` buckets identify the component 1:1.
-    fn single(name: &'static str, layout: TreeLayout) -> Self {
-        Self {
-            name,
-            layout,
-            components: Vec::new(),
-        }
-    }
-
-    /// Multi-component module carrying TRUE per-producer shapes.
-    fn with_components(
-        name: &'static str,
-        layout: TreeLayout,
-        components: Vec<stwo_sha256::shared_tables::ShaTableComponentShape>,
-    ) -> Self {
-        Self {
-            name,
-            layout,
-            components,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MdocShaSizingWaste {
-    pub name: &'static str,
-    pub natural_log: u32,
-    pub shared_log: u32,
-    pub wasted_cells: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MdocSizingWaste {
-    pub sha: Vec<MdocShaSizingWaste>,
-    pub sha_wasted_cells: u64,
-    pub p256_namespaced_identical_preprocessed_cells: u64,
-}
-
-impl MdocSizingWaste {
-    pub fn combined_wasted_cells(&self) -> u64 {
-        self.sha_wasted_cells + self.p256_namespaced_identical_preprocessed_cells
-    }
-}
-
-/// Deterministic EUID mdoc profile-v2 fixture used by benches and SDK tests.
+/// Deterministic current-product fixture used by SDK tests and probes.
 pub fn demo_mdoc_circuit_fixture() -> DemoMdocCircuitFixture {
-    let request = MdocPidRequest::eudi_pid(openid4vp_session_transcript(b"session-transcript-123"));
-    demo_mdoc_circuit_fixture_for_request(request)
+    demo_mdoc_circuit_fixture_with_attributes(vec![
+        MdocRequestedAttribute {
+            element_identifier: PRODUCT_BIRTH_DATE_ELEMENT.to_string(),
+            mode: MdocDisclosureMode::AgeOver,
+        },
+        MdocRequestedAttribute {
+            element_identifier: PRODUCT_NATIONALITY_ELEMENT.to_string(),
+            mode: MdocDisclosureMode::Alpha2Set,
+        },
+    ])
 }
 
-pub fn demo_mdoc_circuit_fixture_with_attributes(
+fn demo_mdoc_circuit_fixture_with_attributes(
     attributes: Vec<MdocRequestedAttribute>,
 ) -> DemoMdocCircuitFixture {
     let session_transcript = openid4vp_session_transcript(b"session-transcript-123");
-    let mut request = MdocPidRequest::eudi_pid(session_transcript);
-    request.attributes = attributes;
-    demo_mdoc_circuit_fixture_for_request(request)
-}
-
-fn demo_mdoc_circuit_fixture_for_request(request: MdocPidRequest) -> DemoMdocCircuitFixture {
-    let session_transcript = request.session_transcript.clone();
-    let include_extra_items = request.attributes.iter().any(|attribute| {
-        matches!(
-            attribute.element_identifier.as_str(),
-            "family_name" | "age_over_18"
-        )
-    });
-    let document = demo_mdoc_document(&session_transcript, include_extra_items);
-    let extracted = extract_pid_mdoc(&document, &request).expect("demo mdoc extracts");
-    let statement = MdocCircuitStatement::from_extracted(
+    validate_product_requested_attributes(&attributes).expect("current demo attribute scope");
+    let demo_document = demo_mdoc_document(&session_transcript);
+    let (revocation_statement, revocation_witness) =
+        crate::ts13::demo_ts13_revocation_inputs(&demo_document.mso_payload);
+    let request = MdocPidRequest {
+        request_binding: DEMO_REQUEST_BINDING,
+        doctype: PRODUCT_DOCTYPE.to_string(),
+        namespace: PRODUCT_NAMESPACE.to_string(),
+        attributes,
+        session_transcript,
+        required_issuer_public_key: demo_document.issuer_key.clone(),
+        verification_time_epoch_seconds: DEMO_VERIFICATION_TIME_EPOCH_SECONDS,
+        revocation: MdocRevocationRequest {
+            public_inputs: (&revocation_statement).into(),
+            id_lo: revocation_witness.id_lo,
+            id_hi: revocation_witness.id_hi,
+            signature: revocation_witness.signature,
+        },
+    };
+    let extracted = extract_product_pid_mdoc(&demo_document.bytes, &request)
+        .expect("current demo mdoc extracts");
+    let statement = MdocCircuitStatement::from_extracted_at(
         &extracted,
         Policy {
             current_date: predicates::Date {
@@ -458,253 +602,35 @@ fn demo_mdoc_circuit_fixture_for_request(request: MdocPidRequest) -> DemoMdocCir
                 day: 3,
             },
             min_age_years: 18,
-            accepted_nationalities: vec![276, 250],
-            accepted_nationalities_alpha2: vec![*b"DE", *b"FR"],
+            accepted_nationalities: vec![*b"DE", *b"FR"],
         },
+        DEMO_VERIFICATION_TIME_EPOCH_SECONDS,
     )
     .expect("demo mdoc statement builds");
     DemoMdocCircuitFixture {
-        document,
+        document: demo_document.bytes,
         request,
         extracted,
         statement,
     }
 }
 
-pub fn demo_mdoc_module_shapes() -> Result<Vec<MdocModuleShape>, Error> {
-    let fixture = demo_mdoc_circuit_fixture();
-    let extracted = &fixture.extracted;
-    let statement = &fixture.statement;
-
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_draft = single_p256_draft(statement.issuer_input.clone())?;
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_draft = single_p256_draft(statement.device_input.clone())?;
-    let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
-    let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let attribute_items: Vec<_> = extracted
-        .extracted_attributes
-        .iter()
-        .map(|attribute| attribute.item.as_slice())
-        .collect();
-    let attribute_sha_params: Vec<_> = attribute_items
-        .iter()
-        .map(|item| sha_params(item))
-        .collect();
-    let shared_sha_log = std::iter::once(issuer_sha_log)
-        .chain(std::iter::once(device_sha_log))
-        .chain(attribute_sha_params.iter().map(|(_, log)| *log))
-        .max()
-        .expect("sha log list is non-empty");
-    let issuer_digest = SharedDigestRelation::new();
-    let device_digest = SharedDigestRelation::new();
-    let attribute_digests: Vec<_> = (0..attribute_sha_params.len())
-        .map(|_| SharedDigestRelation::new())
-        .collect();
-    let issuer_field = SharedFieldRelation::new();
-    let attribute_fields: Vec<_> = (0..attribute_sha_params.len())
-        .map(|_| SharedFieldRelation::new())
-        .collect();
-    let sha_table_relations = SharedShaTableRelations::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_scalar_z = SharedScalarZRelation::new();
-
-    let issuer_exposure = issuer_mso_exposure(statement);
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(|index| attribute_exposure(statement, index))
-        .collect();
-
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_p256 = P256Prover::new(&issuer_draft)
-        .map_err(Error::P256Prepare)?
-        .with_z_binding(issuer_scalar_z.clone());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_p256 = P256Prover::new(&device_draft)
-        .map_err(Error::P256Prepare)?
-        .with_preprocessed_namespace("mdoc/device")
-        .with_z_binding(device_scalar_z.clone());
-    let mut sha_consumers = vec![
-        (&issuer_sha_witness, issuer_exposure.clone()),
-        (&device_sha_witness, FieldExposure::empty()),
-    ];
-    for ((witness, _), exposure) in attribute_sha_params.iter().zip(attribute_exposures.iter()) {
-        sha_consumers.push((witness, exposure.clone()));
-    }
-    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
-    let sha_tables = ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
-    let issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(issuer_digest.clone())
-        .with_field_handle(issuer_exposure.clone(), issuer_field.clone());
-    let device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(device_digest.clone());
-    let attribute_sha: Vec<_> = attribute_sha_params
-        .iter()
-        .zip(attribute_exposures.iter())
-        .zip(attribute_digests.iter())
-        .zip(attribute_fields.iter())
-        .map(
-            |((((witness, _), exposure), digest_handle), field_handle)| {
-                Sha256Prover::new(witness, shared_sha_log, SHA_GROUP_WIDTH)
-                    .with_shared_tables(sha_table_relations.clone())
-                    .with_digest_handle(digest_handle.clone())
-                    .with_field_handle(exposure.clone(), field_handle.clone())
-            },
-        )
-        .collect();
-
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_bridge_log = crate::bridge_log_size(issuer_bridge_rows.len());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_bridge = DigestBindProver::new(
-        issuer_bridge_rows,
-        issuer_bridge_log,
-        issuer_scalar_z,
-        issuer_digest.clone(),
-    );
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge_rows = crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge_log = crate::bridge_log_size(device_bridge_rows.len());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge = DigestBindProver::new(
-        device_bridge_rows,
-        device_bridge_log,
-        device_scalar_z,
-        device_digest.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let device_public_digest_bind =
-        PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
-    let mdoc_window_bind = MdocWindowBind::new_for_attributes(
-        mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        issuer_field.clone(),
-        attribute_fields.clone(),
-        attribute_digests.clone(),
-    );
-    let mdoc_validity = MdocValidityBind::new(
-        statement.policy.current_date,
-        mdoc_validity_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        issuer_field.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let mac_key_shares = random_mdoc_p4b_mac_key_shares();
-    #[cfg(feature = "ec-coprocessor")]
-    let mac_state = MdocP4bMacSharedState::default();
-    #[cfg(feature = "ec-coprocessor")]
-    let mdoc_mac = MdocMacBind::prover(
-        &mac_key_shares,
-        mdoc_p4b_mac_values(statement),
-        mac_state.clone(),
-        issuer_digest.clone(),
-        issuer_field.clone(),
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor = MdocCoprocessorBindingProver::new(
-        statement.issuer_input.clone(),
-        statement.device_input.clone(),
-        None,
-        mac_key_shares,
-        mac_state,
-    )?;
-
-    let age_public = statement.policy.age_public_input();
-    let nat_public = nat_public_input_for(statement);
-    let age_dob = DateOfBirth(predicates::Date {
-        year: u32::from(u16::from_be_bytes([
-            extracted.birth_date_bytes[0],
-            extracted.birth_date_bytes[1],
-        ])),
-        month: u32::from(extracted.birth_date_bytes[2]),
-        day: u32::from(extracted.birth_date_bytes[3]),
-    });
-    let nat_private = predicates::NatPrivateInput {
-        nationalities: vec![statement.nationality_binding.code()],
-    };
-    let age = AgeRangeCheck::new(PcsConfig::default())
-        .prover(&age_public, &age_dob)
-        .map_err(Error::AgePrepare)?;
-    let age_field = attribute_fields[statement
-        .age_attribute_index
-        .expect("demo mdoc carries an AgeOver attribute")]
-    .clone();
-    let age = match statement.birth_date_binding {
-        MdocBirthDateBinding::Packed(_) => age.with_dob_binding(age_field),
-        MdocBirthDateBinding::Text(_) => age.with_text_dob_binding(age_field),
-    };
-    let nat = NationalityPredicate::new(PcsConfig::default())
-        .prover(&nat_public, &nat_private)
-        .map_err(Error::NatPrepare)?
-        .with_nat_binding(
-            attribute_fields[statement
-                .nationality_attribute_index
-                .expect("demo mdoc carries an Alpha2Set attribute")]
-            .clone(),
-        );
-
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let shapes = vec![
-        MdocModuleShape::with_components(
-            "mdoc_sha_tables",
-            sha_tables.layout(),
-            sha_tables.component_shapes(),
-        ),
-        MdocModuleShape::single("mdoc_issuer_p256", issuer_p256.layout()),
-        MdocModuleShape::single("mdoc_issuer_sha", issuer_sha.layout()),
-        MdocModuleShape::single("mdoc_issuer_bridge", issuer_bridge.layout()),
-        MdocModuleShape::single("mdoc_device_p256", device_p256.layout()),
-        MdocModuleShape::single("mdoc_device_sha", device_sha.layout()),
-        MdocModuleShape::single("mdoc_device_bridge", device_bridge.layout()),
-        MdocModuleShape::single("mdoc_birth_sha", attribute_sha[0].layout()),
-        MdocModuleShape::single("mdoc_nat_sha", attribute_sha[1].layout()),
-        MdocModuleShape::single("mdoc_window_bind", mdoc_window_bind.layout()),
-        MdocModuleShape::single("mdoc_validity", mdoc_validity.layout()),
-        MdocModuleShape::single("mdoc_age", age.layout()),
-        MdocModuleShape::single("mdoc_nat", nat.layout()),
-    ];
-    #[cfg(feature = "ec-coprocessor")]
-    let shapes = vec![
-        MdocModuleShape::with_components(
-            "mdoc_sha_tables",
-            sha_tables.layout(),
-            sha_tables.component_shapes(),
-        ),
-        MdocModuleShape::single("mdoc_issuer_sha", issuer_sha.layout()),
-        MdocModuleShape::single("mdoc_device_sha", device_sha.layout()),
-        MdocModuleShape::single(
-            "mdoc_device_public_digest_bind",
-            device_public_digest_bind.layout(),
-        ),
-        MdocModuleShape::single("mdoc_birth_sha", attribute_sha[0].layout()),
-        MdocModuleShape::single("mdoc_nat_sha", attribute_sha[1].layout()),
-        MdocModuleShape::single("mdoc_window_bind", mdoc_window_bind.layout()),
-        MdocModuleShape::single("mdoc_validity", mdoc_validity.layout()),
-        MdocModuleShape::single("mdoc_age", age.layout()),
-        MdocModuleShape::single("mdoc_nat", nat.layout()),
-        MdocModuleShape::single("mdoc_coprocessor", coprocessor.layout()),
-        MdocModuleShape::single("mdoc_mac", mdoc_mac.layout()),
-    ];
-    Ok(shapes)
-}
-
-pub fn demo_mdoc_sizing_waste() -> Result<MdocSizingWaste, Error> {
-    let fixture = demo_mdoc_circuit_fixture();
-    mdoc_sizing_waste(&fixture.extracted, &fixture.statement)
-}
-
-pub fn extract_pid_mdoc(
+/// Extracts the fail-closed current product specialization.
+pub(crate) fn extract_product_pid_mdoc(
     document: &[u8],
     request: &MdocPidRequest,
 ) -> Result<ExtractedPidMdoc, MdocError> {
-    let requested_attributes = request.disclosed_attributes();
-    validate_requested_attributes(&requested_attributes)?;
+    validate_product_mdoc_request(request)?;
+    extract_product_pid_mdoc_inner(document, request)
+}
+
+fn extract_product_pid_mdoc_inner(
+    document: &[u8],
+    request: &MdocPidRequest,
+) -> Result<ExtractedPidMdoc, MdocError> {
+    let requested_attributes = &request.attributes;
     let doc = decode_value(document)?;
-    let doc_map = document_map(&doc)?;
+    let doc_map = current_product_document_map(&doc, request)?;
     let doctype = text_field(doc_map, "docType")?.to_string();
     if doctype != request.doctype {
         return Err(MdocError::DoctypeMismatch);
@@ -712,10 +638,12 @@ pub fn extract_pid_mdoc(
 
     let issuer_signed = map_field(doc_map, "issuerSigned")?;
     let issuer_auth = parse_cose_sign1(value_field(issuer_signed, "issuerAuth")?)?;
-    let issuer_key = issuer_key_from_unprotected(
-        expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?,
-        request,
-    )?;
+    let issuer_unprotected = expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?;
+    validate_current_product_mso_payload(&issuer_auth.payload)?;
+    let issuer_key = current_product_issuer_key_from_unprotected(issuer_unprotected, request)?;
+    if request.required_issuer_public_key != issuer_key {
+        return Err(MdocError::UntrustedIssuerCertificate);
+    }
     verify_signature(
         &issuer_key,
         &issuer_auth.sig_structure,
@@ -724,7 +652,7 @@ pub fn extract_pid_mdoc(
     )?;
 
     let mso = parse_mso(&issuer_auth.payload, &request.namespace)?;
-    if !is_supported_mdoc_profile_version(&mso.version) {
+    if mso.version != MDOC_PROFILE_VERSION {
         return Err(MdocError::UnsupportedMsoVersion(mso.version));
     }
     if mso.doc_type != request.doctype {
@@ -733,9 +661,10 @@ pub fn extract_pid_mdoc(
     let device_key = mso.device_key;
 
     let namespace_items = namespace_items(issuer_signed, &request.namespace)?;
+    validate_current_product_selected_items(namespace_items, requested_attributes)?;
     let mut extracted_attributes = Vec::with_capacity(requested_attributes.len());
-    for attribute in &requested_attributes {
-        let item = find_item(namespace_items, &attribute.element_identifier, &mso.version)?
+    for attribute in requested_attributes {
+        let item = find_item(namespace_items, &attribute.element_identifier)?
             .ok_or_else(|| MdocError::ElementMissing(attribute.element_identifier.clone()))?;
         validate_item_digest(
             &mso.value_digests,
@@ -748,13 +677,6 @@ pub fn extract_pid_mdoc(
                 MdocError::UnsupportedCircuitValue("attribute elementIdentifier offset"),
             )?;
         let value = encode_value(item.value.clone());
-        if let MdocDisclosureMode::ValueEquality(expected) = &attribute.mode {
-            if &value != expected {
-                return Err(MdocError::ValueEqualityMismatch {
-                    element: attribute.element_identifier.clone(),
-                });
-            }
-        }
         let value_offset = find_subslice(&item.bytes, &value)
             .ok_or(MdocError::UnsupportedCircuitValue("attribute value offset"))?;
         extracted_attributes.push(ExtractedMdocAttribute {
@@ -766,6 +688,15 @@ pub fn extract_pid_mdoc(
             value,
         });
     }
+    let selected_items: Vec<&[u8]> = extracted_attributes
+        .iter()
+        .map(|attribute| attribute.item.as_slice())
+        .collect();
+    validate_product_sha_input_sizes(
+        &issuer_auth.payload,
+        &issuer_auth.sig_structure,
+        &selected_items,
+    )?;
     let birth_date_element = requested_attributes.iter().find_map(|attribute| {
         matches!(attribute.mode, MdocDisclosureMode::AgeOver)
             .then_some(attribute.element_identifier.as_str())
@@ -776,7 +707,7 @@ pub fn extract_pid_mdoc(
     });
     let birth_date_item = if let Some(element) = birth_date_element {
         Some(
-            find_item(namespace_items, element, &mso.version)?
+            find_item(namespace_items, element)?
                 .ok_or_else(|| MdocError::ElementMissing(element.to_string()))?,
         )
     } else {
@@ -784,7 +715,7 @@ pub fn extract_pid_mdoc(
     };
     let nationality_item = if let Some(element) = nationality_element {
         Some(
-            find_item(namespace_items, element, &mso.version)?
+            find_item(namespace_items, element)?
                 .ok_or_else(|| MdocError::ElementMissing(element.to_string()))?,
         )
     } else {
@@ -802,7 +733,7 @@ pub fn extract_pid_mdoc(
     } else {
         ParsedBirthDateValue::default()
     };
-    let parsed_nat = if let Some(item) = &nationality_item {
+    let nationality_candidates = if let Some(item) = &nationality_item {
         validate_item_digest(
             &mso.value_digests,
             nationality_element.expect("Alpha2Set element is present"),
@@ -811,16 +742,20 @@ pub fn extract_pid_mdoc(
         )?;
         parse_nationality_value(item)?
     } else {
-        ParsedNationalityValue::default()
+        Vec::new()
     };
+    let parsed_nat = nationality_candidates.first().cloned().unwrap_or_default();
 
     let device_signed = map_field(doc_map, "deviceSigned")?;
     let device_auth = map_field(device_signed, "deviceAuth")?;
-    let expected_device_payload = expected_device_authentication_bytes(request)?;
-    let device_signature = parse_cose_sign1_with_detached_payload(
-        value_field(device_auth, "deviceSignature")?,
-        &expected_device_payload,
+    let expected_device_payload = expected_current_device_authentication_bytes(
+        request,
+        value_field(device_signed, "nameSpaces")?,
     )?;
+    let device_signature_value = value_field(device_auth, "deviceSignature")?;
+    validate_current_product_device_signature_cose(device_signature_value)?;
+    let device_signature =
+        parse_cose_sign1_with_detached_payload(device_signature_value, &expected_device_payload)?;
     if device_signature.payload != expected_device_payload {
         return Err(MdocError::DeviceAuthPayloadMismatch);
     }
@@ -830,20 +765,6 @@ pub fn extract_pid_mdoc(
         &device_signature.signature_bytes,
         "deviceSignature",
     )?;
-
-    let mut digest_ids = HashMap::new();
-    for attribute in &extracted_attributes {
-        digest_ids.insert(
-            attribute.request.element_identifier.clone(),
-            attribute.digest_id,
-        );
-    }
-    if let (Some(element), Some(item)) = (birth_date_element, &birth_date_item) {
-        digest_ids.insert(element.to_string(), item.digest_id);
-    }
-    if let (Some(element), Some(item)) = (nationality_element, &nationality_item) {
-        digest_ids.insert(element.to_string(), item.digest_id);
-    }
 
     let issuer_signature = signature_from_compact(&issuer_auth.signature_bytes)?;
     let device_signature_value = signature_from_compact(&device_signature.signature_bytes)?;
@@ -859,56 +780,142 @@ pub fn extract_pid_mdoc(
     );
 
     Ok(ExtractedPidMdoc {
+        request_binding: request.request_binding,
         doctype,
         namespace: request.namespace.clone(),
-        attributes: requested_attributes,
+        attributes: request.attributes.clone(),
         extracted_attributes,
-        birth_date: parsed_birth.display,
-        nationalities: vec![parsed_nat.numeric],
         birth_date_bytes: parsed_birth.bytes,
-        nationality_bytes: parsed_nat.bytes,
         birth_date_binding: parsed_birth.binding,
         nationality_binding: parsed_nat.binding,
         birth_date_value_offset: parsed_birth.offset,
         nationality_value_offset: parsed_nat.offset,
-        signed_at: mso.signed_at,
-        valid_from: mso.valid_from,
-        valid_until: mso.valid_until,
-        digest_ids,
+        nationality_candidates,
+        valid_from_timestamp: mso.valid_from,
+        valid_until_timestamp: mso.valid_until,
         birth_date_item: birth_date_item.map(|item| item.bytes).unwrap_or_default(),
         nationality_item: nationality_item.map(|item| item.bytes).unwrap_or_default(),
         mso: issuer_auth.payload,
-        issuer_key,
         device_key,
-        issuer_signature,
-        device_signature: device_signature_value,
         issuer_sig_structure: issuer_auth.sig_structure,
-        device_sig_structure: device_signature.sig_structure,
         issuer_ecdsa_input,
         device_ecdsa_input,
+        revocation: request.revocation.clone(),
     })
 }
 
-fn document_map(value: &Value) -> Result<&[(Value, Value)], MdocError> {
-    let map = expect_map(value, "document")?;
-    if value_field(map, "docType").is_ok() {
-        return Ok(map);
+fn current_product_document_map<'a>(
+    value: &'a Value,
+    request: &MdocPidRequest,
+) -> Result<&'a [(Value, Value)], MdocError> {
+    let document = expect_map(value, "product document")?;
+    require_exact_text_fields(
+        document,
+        "product document keys",
+        &["docType", "issuerSigned", "deviceSigned"],
+    )?;
+
+    let issuer_signed = map_field(document, "issuerSigned")?;
+    require_exact_text_fields(
+        issuer_signed,
+        "issuerSigned keys",
+        &["nameSpaces", "issuerAuth"],
+    )?;
+    let namespaces = map_field(issuer_signed, "nameSpaces")?;
+    require_single_text_field(
+        namespaces,
+        &request.namespace,
+        "issuerSigned.nameSpaces must contain exactly one PID namespace",
+    )?;
+
+    let device_signed = map_field(document, "deviceSigned")?;
+    require_exact_text_fields(
+        device_signed,
+        "deviceSigned keys",
+        &["nameSpaces", "deviceAuth"],
+    )?;
+    let device_auth = map_field(device_signed, "deviceAuth")?;
+    require_exact_text_fields(device_auth, "deviceAuth keys", &["deviceSignature"])?;
+    Ok(document)
+}
+
+fn require_single_text_field(
+    map: &[(Value, Value)],
+    expected: &str,
+    label: &'static str,
+) -> Result<(), MdocError> {
+    if map.len() == 1 && map[0].0 == Value::Text(expected.to_string()) {
+        Ok(())
+    } else {
+        Err(MdocError::InvalidProductDocumentShape(label))
     }
-    if let Ok(status) = value_field(map, "status") {
-        if value_i128(status)? != 0 {
-            return Err(MdocError::WrongType("DeviceResponse.status"));
+}
+
+fn require_exact_text_fields(
+    map: &[(Value, Value)],
+    label: &'static str,
+    expected: &[&str],
+) -> Result<(), MdocError> {
+    if map.len() != expected.len() {
+        return Err(MdocError::InvalidProductDocumentShape(label));
+    }
+    let mut seen = vec![false; expected.len()];
+    for (key, _) in map {
+        let Value::Text(key) = key else {
+            return Err(MdocError::InvalidProductDocumentShape(label));
+        };
+        let Some(index) = expected.iter().position(|expected| key == expected) else {
+            return Err(MdocError::InvalidProductDocumentShape(label));
+        };
+        if std::mem::replace(&mut seen[index], true) {
+            return Err(MdocError::InvalidProductDocumentShape(label));
         }
     }
-    let documents = expect_array(value_field(map, "documents")?, "DeviceResponse.documents")?;
-    let first_document = documents
-        .first()
-        .ok_or(MdocError::MissingField("documents"))?;
-    expect_map(first_document, "DeviceResponse.documents[0]")
+    if seen.into_iter().all(|present| present) {
+        Ok(())
+    } else {
+        Err(MdocError::InvalidProductDocumentShape(label))
+    }
+}
+
+fn require_unique_digest_ids(map: &[(Value, Value)], label: &'static str) -> Result<(), MdocError> {
+    let mut seen = HashSet::with_capacity(map.len());
+    for (key, _) in map {
+        let id = expect_u32(key, "digestID")?;
+        if id > MDOC_SCOPE_MAX_DIGEST_ID || !seen.insert(id) {
+            return Err(MdocError::InvalidProductDocumentShape(label));
+        }
+    }
+    Ok(())
+}
+
+fn require_current_product_cose_key_fields(map: &[(Value, Value)]) -> Result<(), MdocError> {
+    let mut seen = Vec::with_capacity(map.len());
+    for (key, _) in map {
+        let label = value_i128(key)
+            .map_err(|_| MdocError::InvalidProductDocumentShape("deviceKey COSE_Key labels"))?;
+        if !matches!(label, 1 | 3 | -1 | -2 | -3) || seen.contains(&label) {
+            return Err(MdocError::InvalidProductDocumentShape(
+                "deviceKey COSE_Key labels",
+            ));
+        }
+        seen.push(label);
+    }
+    if [1, -1, -2, -3]
+        .into_iter()
+        .all(|required| seen.contains(&required))
+        && matches!(map.len(), 4 | 5)
+    {
+        Ok(())
+    } else {
+        Err(MdocError::InvalidProductDocumentShape(
+            "deviceKey COSE_Key labels",
+        ))
+    }
 }
 
 #[derive(Clone)]
 struct ParsedBirthDateValue {
-    display: String,
     bytes: [u8; 4],
     binding: MdocBirthDateBinding,
     offset: usize,
@@ -917,18 +924,15 @@ struct ParsedBirthDateValue {
 impl Default for ParsedBirthDateValue {
     fn default() -> Self {
         Self {
-            display: String::new(),
             bytes: [0; 4],
-            binding: MdocBirthDateBinding::Text(*b"0000-00-00"),
+            binding: MdocBirthDateBinding(*b"0000-00-00"),
             offset: 0,
         }
     }
 }
 
-#[derive(Clone)]
-struct ParsedNationalityValue {
-    numeric: u32,
-    bytes: [u8; 2],
+#[derive(Clone, Debug)]
+pub struct ParsedNationalityValue {
     binding: MdocNationalityBinding,
     offset: usize,
 }
@@ -936,10 +940,16 @@ struct ParsedNationalityValue {
 impl Default for ParsedNationalityValue {
     fn default() -> Self {
         Self {
-            numeric: 0,
-            bytes: [0; 2],
-            binding: MdocNationalityBinding::Alpha2([0; 2]),
+            binding: MdocNationalityBinding([0; 2]),
             offset: 0,
+        }
+    }
+}
+
+impl ParsedNationalityValue {
+    fn predicate_code(&self) -> u32 {
+        match self.binding {
+            MdocNationalityBinding(alpha2) => u32::from(u16::from_be_bytes(alpha2)),
         }
     }
 }
@@ -957,9 +967,8 @@ struct ParsedMso {
     doc_type: String,
     value_digests: HashMap<u32, [u8; 32]>,
     device_key: AffinePoint,
-    signed_at: (u16, u8, u8),
-    valid_from: (u16, u8, u8),
-    valid_until: (u16, u8, u8),
+    valid_from: MdocTimestamp,
+    valid_until: MdocTimestamp,
 }
 
 #[derive(Clone)]
@@ -972,28 +981,9 @@ struct ParsedItem {
 
 fn parse_birth_date_value(item: &ParsedItem) -> Result<ParsedBirthDateValue, MdocError> {
     match &item.value {
-        Value::Text(text) => parse_birth_date_text_value(item, text),
         Value::Tag(CBOR_TAG_FULL_DATE, inner) => {
             let text = expect_text(inner, "birth_date elementValue")?;
             parse_birth_date_text_value(item, text)
-        }
-        Value::Bytes(bytes) => {
-            let raw: [u8; 4] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| MdocError::UnsupportedCircuitValue("birth_date binary length"))?;
-            let year = u16::from_be_bytes([raw[0], raw[1]]);
-            let month = raw[2];
-            let day = raw[3];
-            let offset = find_subslice(&item.bytes, &raw).ok_or(
-                MdocError::UnsupportedCircuitValue("birth_date binary offset"),
-            )?;
-            Ok(ParsedBirthDateValue {
-                display: format!("{year:04}-{month:02}-{day:02}"),
-                bytes: raw,
-                binding: MdocBirthDateBinding::Packed(raw),
-                offset,
-            })
         }
         _ => Err(MdocError::WrongType("birth_date elementValue")),
     }
@@ -1008,9 +998,8 @@ fn parse_birth_date_text_value(
     let offset = find_subslice(&item.bytes, value_bytes)
         .ok_or(MdocError::UnsupportedCircuitValue("birth_date text offset"))?;
     Ok(ParsedBirthDateValue {
-        display: text.to_string(),
         bytes: [(year >> 8) as u8, (year & 0xFF) as u8, month, day],
-        binding: MdocBirthDateBinding::Text(
+        binding: MdocBirthDateBinding(
             value_bytes
                 .try_into()
                 .map_err(|_| MdocError::UnsupportedCircuitValue("birth_date text length"))?,
@@ -1019,38 +1008,36 @@ fn parse_birth_date_text_value(
     })
 }
 
-fn parse_nationality_value(item: &ParsedItem) -> Result<ParsedNationalityValue, MdocError> {
-    match &item.value {
+fn parse_nationality_value(item: &ParsedItem) -> Result<Vec<ParsedNationalityValue>, MdocError> {
+    let values = match &item.value {
+        Value::Array(entries) if !entries.is_empty() => entries,
+        Value::Array(_) => return Err(MdocError::WrongType("nationality elementValue")),
+        _ => return Err(MdocError::WrongType("nationality elementValue")),
+    };
+    values
+        .iter()
+        .map(|value| parse_one_nationality(item, value))
+        .collect()
+}
+
+fn parse_one_nationality(
+    item: &ParsedItem,
+    value: &Value,
+) -> Result<ParsedNationalityValue, MdocError> {
+    match value {
         Value::Text(alpha2) => {
-            let numeric = numeric_country(alpha2)?;
-            let bytes = [(numeric >> 8) as u8, (numeric & 0xFF) as u8];
+            let bytes: [u8; 2] = alpha2
+                .as_bytes()
+                .try_into()
+                .map_err(|_| MdocError::InvalidNationality(alpha2.clone()))?;
+            if !predicates::is_valid_signed_alpha2(predicates::pack_alpha2(bytes)) {
+                return Err(MdocError::InvalidNationality(alpha2.clone()));
+            }
             let offset = find_subslice(&item.bytes, alpha2.as_bytes()).ok_or(
                 MdocError::UnsupportedCircuitValue("nationality text offset"),
             )?;
             Ok(ParsedNationalityValue {
-                numeric,
-                bytes,
-                binding: MdocNationalityBinding::Alpha2(
-                    alpha2.as_bytes().try_into().map_err(|_| {
-                        MdocError::UnsupportedCircuitValue("nationality text length")
-                    })?,
-                ),
-                offset,
-            })
-        }
-        Value::Bytes(bytes) => {
-            let raw: [u8; 2] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| MdocError::UnsupportedCircuitValue("nationality binary length"))?;
-            let numeric = u16::from_be_bytes(raw) as u32;
-            let offset = find_subslice(&item.bytes, &raw).ok_or(
-                MdocError::UnsupportedCircuitValue("nationality binary offset"),
-            )?;
-            Ok(ParsedNationalityValue {
-                numeric,
-                bytes: raw,
-                binding: MdocNationalityBinding::Numeric(raw),
+                binding: MdocNationalityBinding(bytes),
                 offset,
             })
         }
@@ -1091,22 +1078,15 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|candidate| candidate == needle)
 }
 
-fn full_date_text_bytes(date: (u16, u8, u8)) -> [u8; 10] {
-    format!("{:04}-{:02}-{:02}", date.0, date.1, date.2)
-        .as_bytes()
-        .try_into()
-        .expect("formatted full-date has YYYY-MM-DD length")
-}
-
 fn labeled_tdate_date_offset(
     mso: &[u8],
     label: &[u8],
-    date: (u16, u8, u8),
+    timestamp: MdocTimestamp,
     error: &'static str,
 ) -> Result<usize, MdocError> {
     let label_offset =
         find_subslice(mso, label).ok_or(MdocError::UnsupportedCircuitValue(error))?;
-    let date_bytes = full_date_text_bytes(date);
+    let date_bytes = timestamp.text_bytes();
     let search_start = label_offset + label.len();
     let relative = find_subslice(&mso[search_start..], &date_bytes)
         .ok_or(MdocError::UnsupportedCircuitValue(error))?;
@@ -1156,208 +1136,130 @@ fn anchor_before_offset(
     Ok(anchor_offset)
 }
 
-/// Field exposure over the `birth_date` item preimage: the value window
-/// (consumed by the age predicate) plus the `elementIdentifier` window (D1,
-/// consumed by the MSO window-bind component). The window length tracks the
-/// binding form (4 raw bytes for v1 packed, 10 ASCII bytes for v2 text), and the
-/// multi-block constructor tolerates a window straddling a SHA-256 block
-/// boundary.
-fn birth_date_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    let Some(index) = statement.age_attribute_index else {
-        return FieldExposure::empty();
+fn mdoc_scope_statement(statement: &MdocCircuitStatement) -> MdocScopeStatement {
+    MdocScopeStatement {
+        request_binding: statement.request_binding,
+        doc_type: statement.doctype.as_bytes().to_vec(),
+        namespace: statement.namespace.as_bytes().to_vec(),
+        items: statement
+            .attributes
+            .iter()
+            .map(|attribute| MdocScopeItem {
+                element_identifier: attribute.element_identifier.as_bytes().to_vec(),
+                mode: match attribute.mode {
+                    MdocDisclosureMode::AgeOver => MdocScopeMode::AgeOver,
+                    MdocDisclosureMode::Alpha2Set => MdocScopeMode::Alpha2Set,
+                },
+            })
+            .collect(),
+    }
+}
+
+fn mdoc_scope_parser_count(attribute_count: usize) -> Option<usize> {
+    attribute_count.checked_mul(2)?.checked_add(3)
+}
+
+fn product_parser_max_message_len(input: &MdocScopeParserInput) -> Option<u32> {
+    let bytes = match input {
+        MdocScopeParserInput::ShaIssuer => PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES,
+        MdocScopeParserInput::ShaItem(_) => PRODUCT_MAX_SELECTED_ITEM_BYTES,
+        MdocScopeParserInput::Raw(_) => return None,
     };
-    attribute_exposure(statement, index)
+    Some(u32::try_from(bytes).expect("product parser byte bound fits u32"))
 }
 
-/// Field exposure over the `nationality` item preimage: the value window
-/// (2 bytes) plus the `elementIdentifier` window (D1).
-fn nationality_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    let Some(index) = statement.nationality_attribute_index else {
-        return FieldExposure::empty();
-    };
-    attribute_exposure(statement, index)
+const fn product_parser_log_size(slot: usize) -> u32 {
+    if slot < 3 {
+        PRODUCT_MAX_CBOR_LOG_SIZE
+    } else {
+        PRODUCT_ITEM_CBOR_LOG_SIZE
+    }
 }
 
-fn attribute_exposure(statement: &MdocCircuitStatement, index: usize) -> FieldExposure {
-    let attribute = &statement.attributes[index];
-    let mut windows = vec![(
-        MdocStatementAttribute::element_field_id(index),
-        attribute.element_identifier_offset,
-        attribute.element_identifier.len(),
-    )];
-    windows.push((
-        MdocStatementAttribute::element_anchor_field_id(index),
-        attribute.element_identifier_anchor_offset,
-        attribute.element_identifier_anchor.len(),
-    ));
-    match &attribute.mode {
-        MdocDisclosureMode::AgeOver => windows.push((
-            field_id::DOB,
-            statement.birth_date_value_offset,
-            statement.birth_date_binding.as_bytes().len(),
-        )),
-        MdocDisclosureMode::Alpha2Set => windows.push((
-            field_id::NATIONALITY,
-            statement.nationality_value_offset,
-            statement.nationality_binding.as_bytes().len(),
-        )),
-        MdocDisclosureMode::ValueEquality(_) => windows.push((
-            MdocStatementAttribute::value_field_id(index),
-            attribute.value_offset,
-            attribute.value.len(),
-        )),
-    }
-    if matches!(attribute.mode, MdocDisclosureMode::ValueEquality(_)) {
-        windows.push((
-            MdocStatementAttribute::value_head_field_id(index),
-            attribute.value_offset,
-            attribute.value_head.len(),
-        ));
-    }
-    FieldExposure::from_preimage_windows_multi(&windows)
-}
-
-/// Field exposure over the issuer `Sig_structure` preimage: the two 32-byte
-/// `valueDigests` windows (D2) and the two 32-byte deviceKey coordinate windows
-/// (D3), all consumed by the MSO window-bind component.
-fn issuer_mso_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    let mut windows: Vec<_> = statement
-        .attributes
-        .iter()
-        .enumerate()
-        .map(|(index, attribute)| {
-            (
-                MdocStatementAttribute::digest_field_id(index),
-                attribute.mso_digest_offset,
-                32,
-            )
-        })
-        .collect();
-    windows.extend([
-        (
-            field_id::MDOC_DEVICE_KEY_X,
-            statement.mso_device_key_x_offset,
-            32,
-        ),
-        (
-            field_id::MDOC_DEVICE_KEY_Y,
-            statement.mso_device_key_y_offset,
-            32,
-        ),
-        (
-            field_id::MDOC_VALID_FROM,
-            statement.mso_valid_from_date_offset,
-            10,
-        ),
-        (
-            field_id::MDOC_VALID_UNTIL,
-            statement.mso_valid_until_date_offset,
-            10,
-        ),
-    ]);
-    if statement.ts13_revocation_range.is_some() {
-        windows.push((
-            MDOC_MSO_PAYLOAD_FIELD_ID,
-            statement.mso_payload_offset,
-            statement.mso_payload_len,
-        ));
-    }
-    windows.extend(
+fn current_product_circuit_semantics(statement: &MdocCircuitStatement) -> bool {
+    let mut age_indices =
         statement
             .attributes
             .iter()
             .enumerate()
-            .map(|(index, attribute)| {
-                (
-                    MdocStatementAttribute::digest_anchor_field_id(index),
-                    attribute.mso_digest_anchor_offset,
-                    attribute.mso_digest_anchor.len(),
-                )
-            }),
-    );
-    windows.extend([
-        (
-            field_id::MDOC_DEVICE_KEY_X_ANCHOR,
-            statement.mso_device_key_x_anchor_offset,
-            statement.mso_device_key_x_anchor.len(),
-        ),
-        (
-            field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
-            statement.mso_device_key_y_anchor_offset,
-            statement.mso_device_key_y_anchor.len(),
-        ),
-        (
-            field_id::MDOC_VALID_FROM_ANCHOR,
-            statement.mso_valid_from_anchor_offset,
-            statement.mso_valid_from_anchor.len(),
-        ),
-        (
-            field_id::MDOC_VALID_UNTIL_ANCHOR,
-            statement.mso_valid_until_anchor_offset,
-            statement.mso_valid_until_anchor.len(),
-        ),
-    ]);
-    FieldExposure::from_preimage_windows_multi(&windows)
-}
+            .filter_map(|(index, attribute)| {
+                matches!(attribute.mode, MdocDisclosureMode::AgeOver).then_some(index)
+            });
+    let expected_age_index = age_indices.next();
+    let unique_age = age_indices.next().is_none();
+    let mut nationality_indices =
+        statement
+            .attributes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, attribute)| {
+                matches!(attribute.mode, MdocDisclosureMode::Alpha2Set).then_some(index)
+            });
+    let expected_nationality_index = nationality_indices.next();
+    let unique_nationality = nationality_indices.next().is_none();
 
-fn mso_payload_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    if statement.ts13_revocation_range.is_none() {
-        return FieldExposure::empty();
-    }
-    FieldExposure::from_preimage_windows_multi(&[(
-        MDOC_MSO_PAYLOAD_FIELD_ID,
-        0,
-        statement.mso_payload_len,
-    )])
-}
-
-fn ts13_revocation_message_bytes(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
-    let mut bytes = [0u8; TS13_REVOCATION_MESSAGE_LEN];
-    bytes[..8].copy_from_slice(&id_lo.to_le_bytes());
-    bytes[8..16].copy_from_slice(&id_hi.to_le_bytes());
-    bytes[16..].copy_from_slice(&epoch.to_le_bytes());
-    bytes
-}
-
-fn ts13_revocation_message_exposure(statement: &MdocCircuitStatement) -> FieldExposure {
-    if statement.ts13_revocation_signature.is_none() {
-        return FieldExposure::empty();
-    }
-    FieldExposure::from_preimage_windows_multi(&[(
-        MDOC_REVOCATION_MESSAGE_FIELD_ID,
-        0,
-        TS13_REVOCATION_MESSAGE_LEN,
-    )])
-}
-
-fn ts13_revocation_p256_input(
-    statement: &MdocCircuitStatement,
-) -> Result<Option<EcdsaVerifyInput>, Error> {
-    let Some(signature) = statement.ts13_revocation_signature.clone() else {
-        return Ok(None);
+    let current_attribute_layout = match statement.attributes.as_slice() {
+        [attribute] => match &attribute.mode {
+            MdocDisclosureMode::AgeOver => {
+                attribute.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
+            }
+            MdocDisclosureMode::Alpha2Set => {
+                attribute.element_identifier == PRODUCT_NATIONALITY_ELEMENT
+            }
+        },
+        [birth_date, nationality] => {
+            birth_date.element_identifier == PRODUCT_BIRTH_DATE_ELEMENT
+                && matches!(birth_date.mode, MdocDisclosureMode::AgeOver)
+                && nationality.element_identifier == PRODUCT_NATIONALITY_ELEMENT
+                && matches!(nationality.mode, MdocDisclosureMode::Alpha2Set)
+        }
+        _ => false,
     };
-    let revocation = statement.ts13_revocation.as_ref().ok_or_else(|| {
-        Error::Prove("TS13 revocation signature requires public revocation inputs".to_string())
-    })?;
-    let range = statement.ts13_revocation_range.as_ref().ok_or_else(|| {
-        Error::Prove("TS13 revocation signature requires private range witness".to_string())
-    })?;
-    let message = ts13_revocation_message_bytes(range.id_lo, range.id_hi, revocation.epoch);
-    Ok(Some(EcdsaVerifyInput {
-        message_hash: U256(Sha256::digest(message).into()),
-        signature,
-        public_key: revocation.revocation_public_key.clone(),
-    }))
+
+    statement.request_binding != [0u8; 32]
+        && statement.doctype == PRODUCT_DOCTYPE
+        && statement.namespace == PRODUCT_NAMESPACE
+        && validate_product_policy(&statement.policy, statement.verification_time_epoch_seconds)
+            .is_ok()
+        && current_attribute_layout
+        && unique_age
+        && statement.age_attribute_index == expected_age_index
+        && unique_nationality
+        && statement.nationality_attribute_index == expected_nationality_index
 }
 
-#[cfg(feature = "ec-coprocessor")]
-fn mdoc_p4b_mac_values(statement: &MdocCircuitStatement) -> [eu_id_ec_coprocessor::mac::Gf128; 6] {
+fn current_product_public_semantics(statement: &MdocPublicStatement) -> bool {
+    statement.request_binding != [0u8; 32]
+        && statement.doctype == PRODUCT_DOCTYPE
+        && statement.namespace == PRODUCT_NAMESPACE
+        && validate_product_policy(&statement.policy, statement.verification_time_epoch_seconds)
+            .is_ok()
+        && validate_product_requested_attributes(&statement.attributes).is_ok()
+}
+
+fn ts13_revocation_p256_input(statement: &MdocCircuitStatement) -> EcdsaVerifyInput {
+    let revocation = &statement.ts13_revocation;
+    let range = &statement.ts13_revocation_range;
+    let message = ts13_revocation_message_bytes(range.id_lo, range.id_hi, revocation.epoch);
+    EcdsaVerifyInput {
+        message_hash: U256(Sha256::digest(message).into()),
+        signature: statement.ts13_revocation_signature.clone(),
+        public_key: revocation.revocation_public_key.clone(),
+    }
+}
+
+fn mdoc_p4b_mac_values(
+    statement: &MdocCircuitStatement,
+    revocation_input: &EcdsaVerifyInput,
+) -> [eu_id_ec_coprocessor::mac::Gf128; eu_id_ec_coprocessor::ecdsa::MDOC_P4B_MAC_HALF_COUNT] {
     let [issuer_z_lo, issuer_z_hi] =
         eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(statement.issuer_input.message_hash.0);
     let [device_qx_lo, device_qx_hi] =
         eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(statement.device_input.public_key.x.0);
     let [device_qy_lo, device_qy_hi] =
         eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(statement.device_input.public_key.y.0);
+    let [revocation_z_lo, revocation_z_hi] =
+        eu_id_ec_coprocessor::ecdsa::gf128_halves_from_be32(revocation_input.message_hash.0);
     [
         issuer_z_lo,
         issuer_z_hi,
@@ -1365,136 +1267,181 @@ fn mdoc_p4b_mac_values(statement: &MdocCircuitStatement) -> [eu_id_ec_coprocesso
         device_qx_hi,
         device_qy_lo,
         device_qy_hi,
+        revocation_z_lo,
+        revocation_z_hi,
     ]
 }
 
-/// Build the six window-bind rows. On the prover the digest witness bytes are
-/// read from the issuer preimage at the two digest offsets; the verifier passes
-/// `None` (the digest bytes are reconstructed through the shared LogUp
-/// relations, not asserted host-side).
-fn mdoc_window_bind_rows_from(
-    statement: &MdocCircuitStatement,
-    issuer_sig_structure: Option<&[u8]>,
-) -> Vec<MdocWindowBindRow> {
-    let mut rows = Vec::new();
-    for (index, attribute) in statement.attributes.iter().enumerate() {
-        rows.push(MdocWindowBindRow::constant(
-            MdocStatementAttribute::element_field_id(index),
-            MdocFieldSource::AttributeItem(index),
-            attribute.element_identifier.as_bytes(),
-        ));
-        rows.push(MdocWindowBindRow::constant(
-            MdocStatementAttribute::element_anchor_field_id(index),
-            MdocFieldSource::AttributeItem(index),
-            &attribute.element_identifier_anchor,
-        ));
-        if let MdocDisclosureMode::ValueEquality(_) = &attribute.mode {
-            rows.push(MdocWindowBindRow::constant(
-                MdocStatementAttribute::value_field_id(index),
-                MdocFieldSource::AttributeItem(index),
-                &attribute.value,
-            ));
-            rows.push(MdocWindowBindRow::constant(
-                MdocStatementAttribute::value_head_field_id(index),
-                MdocFieldSource::AttributeItem(index),
-                &attribute.value_head,
-            ));
-        }
-        let digest = issuer_sig_structure
-            .map(|preimage| {
-                preimage[attribute.mso_digest_offset..attribute.mso_digest_offset + 32]
-                    .try_into()
-                    .expect("attribute digest window length")
-            })
-            .unwrap_or([0u8; 32]);
-        rows.push(MdocWindowBindRow::digest(
-            MdocStatementAttribute::digest_field_id(index),
-            index,
-            digest,
-        ));
-        rows.push(MdocWindowBindRow::constant(
-            MdocStatementAttribute::digest_anchor_field_id(index),
-            MdocFieldSource::IssuerMso,
-            &attribute.mso_digest_anchor,
-        ));
-    }
-    #[cfg(not(feature = "ec-coprocessor"))]
-    rows.extend([
-        MdocWindowBindRow::constant(
-            field_id::MDOC_DEVICE_KEY_X,
-            MdocFieldSource::IssuerMso,
-            &statement.device_input.public_key.x.0,
-        ),
-        MdocWindowBindRow::constant(
-            field_id::MDOC_DEVICE_KEY_Y,
-            MdocFieldSource::IssuerMso,
-            &statement.device_input.public_key.y.0,
-        ),
-    ]);
-    rows.extend([
-        MdocWindowBindRow::constant(
-            field_id::MDOC_DEVICE_KEY_X_ANCHOR,
-            MdocFieldSource::IssuerMso,
-            &statement.mso_device_key_x_anchor,
-        ),
-        MdocWindowBindRow::constant(
-            field_id::MDOC_DEVICE_KEY_Y_ANCHOR,
-            MdocFieldSource::IssuerMso,
-            &statement.mso_device_key_y_anchor,
-        ),
-        MdocWindowBindRow::constant(
-            field_id::MDOC_VALID_FROM_ANCHOR,
-            MdocFieldSource::IssuerMso,
-            &statement.mso_valid_from_anchor,
-        ),
-        MdocWindowBindRow::constant(
-            field_id::MDOC_VALID_UNTIL_ANCHOR,
-            MdocFieldSource::IssuerMso,
-            &statement.mso_valid_until_anchor,
-        ),
-    ]);
-    rows
-}
-
-fn mdoc_validity_rows_from(
-    statement: &MdocCircuitStatement,
-    issuer_sig_structure: Option<&[u8]>,
-) -> Vec<MdocValidityRow> {
-    let dates = issuer_sig_structure.map(|preimage| {
-        let valid_from = preimage
-            [statement.mso_valid_from_date_offset..statement.mso_valid_from_date_offset + 10]
-            .try_into()
-            .expect("validFrom window length");
-        let valid_until = preimage
-            [statement.mso_valid_until_date_offset..statement.mso_valid_until_date_offset + 10]
-            .try_into()
-            .expect("validUntil window length");
-        (valid_from, valid_until)
-    });
-    let (valid_from, valid_until) = dates.unwrap_or((
-        full_date_text_bytes(statement.valid_from),
-        full_date_text_bytes(statement.valid_until),
-    ));
-    mdoc_validity_rows(valid_from, valid_until)
-}
-
-/// The nationality public input matching the statement's binding form: the
-/// alpha-2 code space for the v2 text path, the ISO-numeric space otherwise.
+/// The product nationality policy in packed ISO alpha-2 form.
 fn nat_public_input_for(statement: &MdocCircuitStatement) -> predicates::NatPublicInput {
-    match statement.nationality_binding {
-        MdocNationalityBinding::Numeric(_) => statement.policy.nat_public_input(),
-        MdocNationalityBinding::Alpha2(_) => statement.policy.nat_alpha2_public_input(),
+    statement.policy.nat_public_input()
+}
+
+/// Validates an untrusted product mdoc CBOR envelope before recursive decoding.
+///
+/// The byte-stream parser enforces the circuit's structural limits: one
+/// complete root, definite-length containers, minimal arguments, and nesting
+/// depth at most eight. Only structurally valid input reaches `ciborium`.
+pub fn validate_product_mdoc_cbor_structure(bytes: &[u8]) -> Result<(), MdocError> {
+    validate_product_cbor_structure(bytes)
+}
+
+/// Returns the issuerAuth payload from a structurally valid product document.
+///
+/// The legacy Product V1 SDK bridge uses these exact signed MSO bytes only to
+/// create its deterministic demo revocation witness. The production extractor
+/// still performs the complete document, signature, issuer, and policy checks.
+pub fn product_mso_payload(document: &[u8]) -> Result<Vec<u8>, MdocError> {
+    Ok(product_issuer_auth(document)?.payload)
+}
+
+/// Returns the exact issuerAuth x5chain carried by a product document.
+pub fn product_x5chain_certificates(document: &[u8]) -> Result<Vec<Vec<u8>>, MdocError> {
+    let issuer_auth = product_issuer_auth(document)?;
+    let unprotected = expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?;
+    if unprotected.len() != 1 || value_i128(&unprotected[0].0).ok() != Some(33) {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "issuerAuth unprotected header must contain only x5chain",
+        ));
     }
+    x5chain_certificates(&unprotected[0].1)
+        .map(|certificates| certificates.into_iter().map(<[u8]>::to_vec).collect())
+}
+
+/// Returns the P-256 leaf key carried by a product document's issuerAuth.
+///
+/// Legacy wallet adapters use this only while constructing a prover statement.
+/// Verifiers must still supply an independently trusted issuer key.
+pub fn product_issuer_public_key(document: &[u8]) -> Result<AffinePoint, MdocError> {
+    let issuer_auth = product_issuer_auth(document)?;
+    let unprotected = expect_map(&issuer_auth.unprotected, "issuerAuth.unprotected")?;
+    if unprotected.len() != 1 || value_i128(&unprotected[0].0).ok() != Some(33) {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "issuerAuth unprotected header must contain only x5chain",
+        ));
+    }
+    leaf_key_from_x5chain(&unprotected[0].1)
+}
+
+fn product_issuer_auth(document: &[u8]) -> Result<CoseSign1, MdocError> {
+    validate_product_cbor_structure(document)?;
+    let document = decode_value(document)?;
+    let document = expect_map(&document, "product document")?;
+    let issuer_signed = map_field(document, "issuerSigned")?;
+    parse_cose_sign1(value_field(issuer_signed, "issuerAuth")?)
+}
+
+/// Largest raw CBOR envelope accepted by the product structural parser.
+pub const PRODUCT_MDOC_CBOR_MAX_BYTES: usize = crate::mdoc_cbor_stream::MDOC_CBOR_MAX_ACTIVE_BYTES;
+
+fn validate_product_cbor_structure(bytes: &[u8]) -> Result<(), MdocError> {
+    MdocCborWitness::new(bytes, MdocCborInputMode::Raw)
+        .map_err(|error| MdocError::Cbor(error.to_string()))?;
+    Ok(())
 }
 
 fn decode_value(bytes: &[u8]) -> Result<Value, MdocError> {
-    ciborium::de::from_reader(bytes).map_err(|error| MdocError::Cbor(error.to_string()))
+    let mut cursor = std::io::Cursor::new(bytes);
+    let value = ciborium::de::from_reader(&mut cursor)
+        .map_err(|error| MdocError::Cbor(error.to_string()))?;
+    if cursor.position() != bytes.len() as u64 {
+        return Err(MdocError::Cbor(
+            "trailing bytes after the CBOR value".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 fn encode_value(value: Value) -> Vec<u8> {
     let mut out = Vec::new();
     ciborium::ser::into_writer(&value, &mut out).expect("CBOR serialization into Vec");
     out
+}
+
+fn canonicalize_product_cbor_value(value: Value) -> Result<Value, MdocError> {
+    match value {
+        Value::Array(values) => Ok(Value::Array(
+            values
+                .into_iter()
+                .map(canonicalize_product_cbor_value)
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Tag(tag, value) => Ok(Value::Tag(
+            tag,
+            Box::new(canonicalize_product_cbor_value(*value)?),
+        )),
+        Value::Map(entries) => {
+            let mut canonical = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = canonicalize_product_cbor_value(key)?;
+                    let value = canonicalize_product_cbor_value(value)?;
+                    let encoded_key = encode_value(key.clone());
+                    Ok((encoded_key, key, value))
+                })
+                .collect::<Result<Vec<_>, MdocError>>()?;
+            canonical.sort_by(|left, right| {
+                left.0
+                    .len()
+                    .cmp(&right.0.len())
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            if canonical.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(MdocError::NonCanonicalSessionTranscript);
+            }
+            Ok(Value::Map(
+                canonical
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            ))
+        }
+        Value::Float(_) => Err(MdocError::NonCanonicalSessionTranscript),
+        scalar => Ok(scalar),
+    }
+}
+
+/// Enforces the deterministic CBOR subset used by the EUDI product request.
+///
+/// This function requires the exact OpenID4VP SessionTranscript shape used by
+/// the product profile. It also requires preferred-length encodings, definite
+/// containers, recursive deterministic map order, and unique canonical map
+/// keys.
+/// The product profile excludes floating-point values. This is not a
+/// general-purpose RFC 8949 deterministic-encoding validator.
+pub fn validate_product_session_transcript_cbor(
+    session_transcript: &[u8],
+) -> Result<(), MdocError> {
+    if session_transcript.len() != PRODUCT_SESSION_TRANSCRIPT_BYTES {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "SessionTranscript must be exactly 56 canonical bytes",
+        ));
+    }
+    validate_product_cbor_structure(session_transcript)?;
+    let value = decode_value(session_transcript)?;
+    let Value::Array(outer) = &value else {
+        return Err(MdocError::WrongType("SessionTranscript"));
+    };
+    let [Value::Null, Value::Null, Value::Array(handover)] = outer.as_slice() else {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "SessionTranscript must be exact OpenID4VP handover",
+        ));
+    };
+    let [Value::Text(label), Value::Bytes(hash)] = handover.as_slice() else {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "OpenID4VP handover must contain label and 32-byte hash",
+        ));
+    };
+    if label != "OpenID4VPHandover" || hash.len() != 32 {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "OpenID4VP handover must contain label and 32-byte hash",
+        ));
+    }
+    let canonical = encode_value(canonicalize_product_cbor_value(value)?);
+    if canonical != session_transcript {
+        return Err(MdocError::NonCanonicalSessionTranscript);
+    }
+    Ok(())
 }
 
 fn cbor_value_head(value: &[u8]) -> Result<Vec<u8>, MdocError> {
@@ -1568,6 +1515,24 @@ fn parse_cose_sign1_with_detached_payload(
     parse_cose_sign1_inner(value, Some(detached_payload))
 }
 
+fn validate_current_product_device_signature_cose(value: &Value) -> Result<(), MdocError> {
+    let items = expect_array(value, "deviceSignature")?;
+    if items.len() != 4 {
+        return Err(MdocError::InvalidCoseSign1("expected four-element array"));
+    }
+    if !expect_map(&items[1], "deviceSignature.unprotected")?.is_empty() {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "deviceSignature unprotected header must be empty",
+        ));
+    }
+    if !matches!(items[2], Value::Null) {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "deviceSignature payload must be detached",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_cose_sign1_inner(
     value: &Value,
     detached_payload: Option<&[u8]>,
@@ -1629,19 +1594,28 @@ pub fn device_authentication_bytes(
     session_transcript: &[u8],
     doc_type: &str,
 ) -> Result<Vec<u8>, MdocError> {
+    device_authentication_bytes_with_namespaces(
+        session_transcript,
+        doc_type,
+        &canonical_empty_device_namespaces(),
+    )
+}
+
+fn device_authentication_bytes_with_namespaces(
+    session_transcript: &[u8],
+    doc_type: &str,
+    device_namespaces: &Value,
+) -> Result<Vec<u8>, MdocError> {
     let session_transcript = decode_value(session_transcript)?;
     if !matches!(session_transcript, Value::Array(_)) {
         return Err(MdocError::WrongType("SessionTranscript"));
     }
 
-    let device_namespaces = encode_value(Value::Map(Vec::new()));
-    let device_namespaces_bytes =
-        encode_value(Value::Tag(24, Box::new(Value::Bytes(device_namespaces))));
     let device_authentication = encode_value(Value::Array(vec![
         "DeviceAuthentication".into(),
         session_transcript,
         doc_type.into(),
-        Value::Bytes(device_namespaces_bytes),
+        device_namespaces.clone(),
     ]));
     Ok(encode_value(Value::Tag(
         24,
@@ -1649,40 +1623,27 @@ pub fn device_authentication_bytes(
     )))
 }
 
-fn expected_device_authentication_bytes(request: &MdocPidRequest) -> Result<Vec<u8>, MdocError> {
-    match request.device_authentication_profile {
-        MdocDeviceAuthenticationProfile::Iso180135 => {
-            device_authentication_bytes(&request.session_transcript, &request.doctype)
-        }
-        MdocDeviceAuthenticationProfile::LongfellowLegacy => {
-            longfellow_legacy_device_authentication_bytes(
-                &request.session_transcript,
-                &request.doctype,
-            )
-        }
-    }
+fn canonical_empty_device_namespaces() -> Value {
+    Value::Tag(
+        CBOR_TAG_ENCODED_CBOR,
+        Box::new(Value::Bytes(encode_value(Value::Map(Vec::new())))),
+    )
 }
 
-fn longfellow_legacy_device_authentication_bytes(
-    session_transcript: &[u8],
-    doc_type: &str,
+fn expected_current_device_authentication_bytes(
+    request: &MdocPidRequest,
+    received_device_namespaces: &Value,
 ) -> Result<Vec<u8>, MdocError> {
-    let session_transcript_value = decode_value(session_transcript)?;
-    if !matches!(session_transcript_value, Value::Array(_)) {
-        return Err(MdocError::WrongType("SessionTranscript"));
+    if received_device_namespaces != &canonical_empty_device_namespaces() {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "deviceSigned.nameSpaces must be exact canonical empty DeviceNameSpacesBytes",
+        ));
     }
-    let mut device_authentication = encode_value(Value::Array(vec!["DeviceAuthentication".into()]));
-    device_authentication[0] = 0x84;
-    device_authentication.extend_from_slice(session_transcript);
-    device_authentication.extend_from_slice(&encode_value(Value::Text(doc_type.to_string())));
-    device_authentication.extend_from_slice(&encode_value(Value::Tag(
-        24,
-        Box::new(Value::Bytes(encode_value(Value::Map(Vec::new())))),
-    )));
-    Ok(encode_value(Value::Tag(
-        24,
-        Box::new(Value::Bytes(device_authentication)),
-    )))
+    device_authentication_bytes_with_namespaces(
+        &request.session_transcript,
+        &request.doctype,
+        received_device_namespaces,
+    )
 }
 
 pub fn device_authentication_sig_structure_hash(
@@ -1693,62 +1654,68 @@ pub fn device_authentication_sig_structure_hash(
     Ok(Sha256::digest(sig_structure(ES256_PROTECTED_HEADER, &payload)).into())
 }
 
-fn demo_mdoc_document(session_transcript: &[u8], include_extra_items: bool) -> Vec<u8> {
+struct DemoMdocDocument {
+    bytes: Vec<u8>,
+    mso_payload: Vec<u8>,
+    issuer_key: AffinePoint,
+}
+
+fn demo_mdoc_document(session_transcript: &[u8]) -> DemoMdocDocument {
+    demo_mdoc_document_with_values(session_transcript, "1990-07-15", &["DE"])
+}
+
+fn demo_mdoc_document_with_values(
+    session_transcript: &[u8],
+    birth_date: &str,
+    nationalities: &[&str],
+) -> DemoMdocDocument {
     let issuer_signing_key =
         SigningKey::from_bytes((&[7u8; 32]).into()).expect("demo issuer signing key");
     let device_signing_key =
         SigningKey::from_bytes((&[11u8; 32]).into()).expect("demo device signing key");
-    let issuer_cose_key = demo_cose_key(&issuer_signing_key);
+    let issuer_certificate = demo_self_signed_certificate_der(&issuer_signing_key);
+    let issuer_key = demo_affine_point(&issuer_signing_key);
     let device_cose_key = demo_cose_key(&device_signing_key);
 
-    // Profile v2: canonical CBOR items with text-form (`tstr`) element values.
+    // Profile v2: canonical IssuerSignedItemBytes with PID Rulebook values.
     let birth_date_item = demo_issuer_signed_item(
         7,
-        "birth_date",
-        Value::Text("1990-07-15".to_string()),
-        vec![7; 16],
+        PRODUCT_BIRTH_DATE_ELEMENT,
+        Value::Tag(
+            CBOR_TAG_FULL_DATE,
+            Box::new(Value::Text(birth_date.to_string())),
+        ),
+        DEMO_PRIVATE_RANDOM_CANARY.to_vec(),
     );
-    let nationality_item =
-        demo_issuer_signed_item(9, "nationality", Value::Text("DE".to_string()), vec![9; 16]);
+    let nationality_item = demo_issuer_signed_item(
+        9,
+        PRODUCT_NATIONALITY_ELEMENT,
+        Value::Array(
+            nationalities
+                .iter()
+                .map(|value| Value::Text((*value).to_string()))
+                .collect(),
+        ),
+        vec![9; 16],
+    );
     let birth_digest: [u8; 32] = Sha256::digest(&birth_date_item).into();
     let nat_digest: [u8; 32] = Sha256::digest(&nationality_item).into();
-    let mut value_digest_entries = vec![
+    let value_digest_entries = vec![
         (Value::from(7), Value::Bytes(birth_digest.to_vec())),
         (Value::from(9), Value::Bytes(nat_digest.to_vec())),
     ];
-    let mut namespace_items = vec![
-        Value::Bytes(birth_date_item),
-        Value::Bytes(nationality_item),
+    let namespace_items = vec![
+        decode_value(&birth_date_item).expect("demo birth date item decodes"),
+        decode_value(&nationality_item).expect("demo nationality item decodes"),
     ];
-    if include_extra_items {
-        let family_name_item = demo_issuer_signed_item(
-            11,
-            "family_name",
-            Value::Text("Mustermann".to_string()),
-            vec![11; 16],
-        );
-        let age_over_18_item =
-            demo_issuer_signed_item(13, "age_over_18", Value::Bool(true), vec![13; 16]);
-        let family_name_digest: [u8; 32] = Sha256::digest(&family_name_item).into();
-        let age_over_18_digest: [u8; 32] = Sha256::digest(&age_over_18_item).into();
-        value_digest_entries.extend([
-            (Value::from(11), Value::Bytes(family_name_digest.to_vec())),
-            (Value::from(13), Value::Bytes(age_over_18_digest.to_vec())),
-        ]);
-        namespace_items.extend([
-            Value::Bytes(family_name_item),
-            Value::Bytes(age_over_18_item),
-        ]);
-    }
-
-    let mso = encode_value(Value::Map(vec![
+    let mso = canonicalize_product_cbor_value(Value::Map(vec![
         ("version".into(), MDOC_PROFILE_VERSION.into()),
-        ("docType".into(), PID_DOCTYPE.into()),
+        ("docType".into(), PRODUCT_DOCTYPE.into()),
         ("digestAlgorithm".into(), "SHA-256".into()),
         (
             "valueDigests".into(),
             Value::Map(vec![(
-                PID_NAMESPACE.into(),
+                PRODUCT_NAMESPACE.into(),
                 Value::Map(value_digest_entries),
             )]),
         ),
@@ -1764,40 +1731,60 @@ fn demo_mdoc_document(session_transcript: &[u8], include_extra_items: bool) -> V
                 ("validUntil".into(), demo_tdate("2030-01-01T00:00:00Z")),
             ]),
         ),
-    ]));
+    ]))
+    .expect("demo MSO canonicalizes");
+    let mso = encode_value(mso);
+    let mso_payload = encode_value(Value::Tag(
+        CBOR_TAG_ENCODED_CBOR,
+        Box::new(Value::Bytes(mso)),
+    ));
 
     let issuer_auth = demo_cose_sign1(
         &issuer_signing_key,
-        Value::Map(vec![("issuerKey".into(), issuer_cose_key)]),
-        &mso,
+        Value::Map(vec![(
+            Value::from(33),
+            Value::Bytes(issuer_certificate.clone()),
+        )]),
+        &mso_payload,
     );
-    let device_signature = demo_cose_sign1(
+    let device_signature = demo_cose_sign1_detached(
         &device_signing_key,
         Value::Map(Vec::new()),
-        &device_authentication_bytes(session_transcript, PID_DOCTYPE)
+        &device_authentication_bytes(session_transcript, PRODUCT_DOCTYPE)
             .expect("demo device auth payload builds"),
     );
 
-    encode_value(Value::Map(vec![
-        ("docType".into(), PID_DOCTYPE.into()),
+    let bytes = encode_value(Value::Map(vec![
+        ("docType".into(), PRODUCT_DOCTYPE.into()),
         (
             "issuerSigned".into(),
             Value::Map(vec![
                 (
                     "nameSpaces".into(),
-                    Value::Map(vec![(PID_NAMESPACE.into(), Value::Array(namespace_items))]),
+                    Value::Map(vec![(
+                        PRODUCT_NAMESPACE.into(),
+                        Value::Array(namespace_items),
+                    )]),
                 ),
                 ("issuerAuth".into(), issuer_auth),
             ]),
         ),
         (
             "deviceSigned".into(),
-            Value::Map(vec![(
-                "deviceAuth".into(),
-                Value::Map(vec![("deviceSignature".into(), device_signature)]),
-            )]),
+            Value::Map(vec![
+                ("nameSpaces".into(), canonical_empty_device_namespaces()),
+                (
+                    "deviceAuth".into(),
+                    Value::Map(vec![("deviceSignature".into(), device_signature)]),
+                ),
+            ]),
         ),
-    ]))
+    ]));
+    DemoMdocDocument {
+        bytes,
+        mso_payload,
+        issuer_key,
+    }
 }
 
 fn demo_cose_key(signing_key: &SigningKey) -> Value {
@@ -1817,6 +1804,101 @@ fn demo_cose_key(signing_key: &SigningKey) -> Value {
     ])
 }
 
+fn demo_affine_point(signing_key: &SigningKey) -> AffinePoint {
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let x: [u8; 32] = encoded.x().expect("demo key has x coordinate")[..]
+        .try_into()
+        .expect("demo x coordinate length");
+    let y: [u8; 32] = encoded.y().expect("demo key has y coordinate")[..]
+        .try_into()
+        .expect("demo y coordinate length");
+    AffinePoint {
+        x: U256(x),
+        y: U256(y),
+    }
+}
+
+fn demo_der_tlv(tag: u8, value: Vec<u8>) -> Vec<u8> {
+    let mut encoded = vec![tag];
+    if value.len() < 128 {
+        encoded.push(value.len() as u8);
+    } else {
+        let length = (value.len() as u64).to_be_bytes();
+        let first = length
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(length.len() - 1);
+        encoded.push(0x80 | u8::try_from(length.len() - first).expect("DER length byte count"));
+        encoded.extend_from_slice(&length[first..]);
+    }
+    encoded.extend(value);
+    encoded
+}
+
+fn demo_der_sequence(fields: Vec<Vec<u8>>) -> Vec<u8> {
+    demo_der_tlv(0x30, fields.concat())
+}
+
+fn demo_der_integer(value: u64) -> Vec<u8> {
+    let bytes = value.to_be_bytes();
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .unwrap_or(bytes.len() - 1);
+    let mut value = bytes[first..].to_vec();
+    if value[0] & 0x80 != 0 {
+        value.insert(0, 0);
+    }
+    demo_der_tlv(0x02, value)
+}
+
+fn demo_der_bit_string(bytes: &[u8]) -> Vec<u8> {
+    let mut value = Vec::with_capacity(bytes.len() + 1);
+    value.push(0);
+    value.extend_from_slice(bytes);
+    demo_der_tlv(0x03, value)
+}
+
+fn demo_ecdsa_sha256_algorithm_identifier() -> Vec<u8> {
+    demo_der_sequence(vec![demo_der_tlv(
+        0x06,
+        vec![0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02],
+    )])
+}
+
+fn demo_p256_subject_public_key_info(signing_key: &SigningKey) -> Vec<u8> {
+    let point = signing_key.verifying_key().to_encoded_point(false);
+    demo_der_sequence(vec![
+        demo_der_sequence(vec![
+            demo_der_tlv(0x06, vec![0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01]),
+            demo_der_tlv(0x06, vec![0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]),
+        ]),
+        demo_der_bit_string(point.as_bytes()),
+    ])
+}
+
+fn demo_self_signed_certificate_der(signing_key: &SigningKey) -> Vec<u8> {
+    let signature_algorithm = demo_ecdsa_sha256_algorithm_identifier();
+    let tbs = demo_der_sequence(vec![
+        demo_der_tlv(0xA0, demo_der_integer(2)),
+        demo_der_integer(1),
+        signature_algorithm.clone(),
+        demo_der_sequence(Vec::new()),
+        demo_der_sequence(vec![
+            demo_der_tlv(0x17, b"260101000000Z".to_vec()),
+            demo_der_tlv(0x17, b"300101000000Z".to_vec()),
+        ]),
+        demo_der_sequence(Vec::new()),
+        demo_p256_subject_public_key_info(signing_key),
+    ]);
+    let signature: P256Signature = signing_key.sign(&tbs);
+    demo_der_sequence(vec![
+        tbs,
+        signature_algorithm,
+        demo_der_bit_string(signature.to_der().as_bytes()),
+    ])
+}
+
 fn demo_issuer_signed_item(
     digest_id: u64,
     element: &str,
@@ -1825,7 +1907,7 @@ fn demo_issuer_signed_item(
 ) -> Vec<u8> {
     // Profile v2 canonical (RFC 8949 core deterministic) key order:
     // shortest-encoded-key-first ⇒ `random, digestID, elementValue,
-    // elementIdentifier` (7, 8, 12, 17 bytes of key text respectively).
+    // elementIdentifier` with key lengths 7, 8, 12, and 17 bytes.
     let item = Value::Map(vec![
         ("random".into(), Value::Bytes(random)),
         ("digestID".into(), Value::from(digest_id)),
@@ -1851,6 +1933,15 @@ fn demo_cose_sign1(signing_key: &SigningKey, unprotected: Value, payload: &[u8])
         Value::Bytes(payload.to_vec()),
         Value::Bytes(compact),
     ])
+}
+
+fn demo_cose_sign1_detached(signing_key: &SigningKey, unprotected: Value, payload: &[u8]) -> Value {
+    let mut cose = demo_cose_sign1(signing_key, unprotected, payload);
+    let Value::Array(items) = &mut cose else {
+        unreachable!("demo COSE_Sign1 is an array");
+    };
+    items[2] = Value::Null;
+    cose
 }
 
 fn parse_mso(bytes: &[u8], namespace: &str) -> Result<ParsedMso, MdocError> {
@@ -1888,7 +1979,7 @@ fn parse_mso(bytes: &[u8], namespace: &str) -> Result<ParsedMso, MdocError> {
     let device_key_info = map_field(mso, "deviceKeyInfo")?;
     let device_key = parse_cose_key(value_field(device_key_info, "deviceKey")?)?;
     let validity_info = map_field(mso, "validityInfo")?;
-    let signed_at = parse_tdate(value_field(validity_info, "signed")?, "validityInfo.signed")?;
+    parse_tdate(value_field(validity_info, "signed")?, "validityInfo.signed")?;
     let valid_from = parse_tdate(
         value_field(validity_info, "validFrom")?,
         "validityInfo.validFrom",
@@ -1903,13 +1994,84 @@ fn parse_mso(bytes: &[u8], namespace: &str) -> Result<ParsedMso, MdocError> {
         doc_type,
         value_digests: digests,
         device_key,
-        signed_at,
         valid_from,
         valid_until,
     })
 }
 
-fn parse_tdate(value: &Value, field: &'static str) -> Result<(u16, u8, u8), MdocError> {
+fn validate_current_product_mso_payload(payload: &[u8]) -> Result<(), MdocError> {
+    validate_product_cbor_structure(payload)?;
+    let Value::Tag(CBOR_TAG_ENCODED_CBOR, encoded_mso) = decode_value(payload)? else {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "issuerAuth payload must be MobileSecurityObjectBytes",
+        ));
+    };
+    let mso_bytes = expect_bytes(&encoded_mso, "MobileSecurityObjectBytes")?;
+    validate_product_cbor_structure(mso_bytes)?;
+    let mso = decode_value(mso_bytes)?;
+    let mso = expect_map(&mso, "MobileSecurityObject")?;
+    validate_current_product_mso_fields(mso)?;
+    // ISO map semantics do not impose key order. The V2 scope DFA proves the
+    // exact MSO field set, types, and uniqueness while accepting any order.
+    // The byte parser above still requires definite, preferred-length CBOR.
+    Ok(())
+}
+
+fn validate_current_product_mso_fields(mso: &[(Value, Value)]) -> Result<(), MdocError> {
+    require_exact_text_fields(
+        mso,
+        "MobileSecurityObject keys",
+        &[
+            "version",
+            "docType",
+            "digestAlgorithm",
+            "valueDigests",
+            "deviceKeyInfo",
+            "validityInfo",
+        ],
+    )?;
+
+    let value_digests = map_field(mso, "valueDigests")?;
+    require_single_text_field(
+        value_digests,
+        PRODUCT_NAMESPACE,
+        "valueDigests must contain exactly one PID namespace",
+    )?;
+    let namespace_digests = expect_map(&value_digests[0].1, "valueDigests PID namespace")?;
+    require_unique_digest_ids(namespace_digests, "duplicate valueDigests digestID")?;
+
+    let device_key_info = map_field(mso, "deviceKeyInfo")?;
+    require_exact_text_fields(device_key_info, "deviceKeyInfo keys", &["deviceKey"])?;
+    let device_key = expect_map(
+        value_field(device_key_info, "deviceKey")?,
+        "deviceKey COSE_Key",
+    )?;
+    require_current_product_cose_key_fields(device_key)?;
+
+    let validity_info = map_field(mso, "validityInfo")?;
+    match validity_info.len() {
+        3 => require_exact_text_fields(
+            validity_info,
+            "validityInfo keys",
+            &["signed", "validFrom", "validUntil"],
+        ),
+        4 => require_exact_text_fields(
+            validity_info,
+            "validityInfo keys",
+            &["signed", "validFrom", "validUntil", "expectedUpdate"],
+        ),
+        _ => Err(MdocError::InvalidProductDocumentShape("validityInfo keys")),
+    }?;
+    if validity_info.len() == 4 {
+        parse_tdate(
+            value_field(validity_info, "expectedUpdate")?,
+            "validityInfo.expectedUpdate",
+        )?;
+    }
+    Ok(())
+}
+
+fn parse_tdate(value: &Value, field: &'static str) -> Result<MdocTimestamp, MdocError> {
     let Value::Tag(0, inner) = value else {
         return Err(MdocError::InvalidTdate(field));
     };
@@ -1931,15 +2093,17 @@ fn parse_tdate(value: &Value, field: &'static str) -> Result<(u16, u8, u8), Mdoc
     let hour = parse_tdate_digits(&bytes[11..13], field)? as u8;
     let minute = parse_tdate_digits(&bytes[14..16], field)? as u8;
     let second = parse_tdate_digits(&bytes[17..19], field)? as u8;
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
+    if !is_gregorian_date(year, month, day) || hour > 23 || minute > 59 || second > 59 {
         return Err(MdocError::InvalidTdate(field));
     }
-    Ok((year, month, day))
+    Ok(MdocTimestamp {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    })
 }
 
 fn parse_tdate_digits(bytes: &[u8], field: &'static str) -> Result<u32, MdocError> {
@@ -1968,14 +2132,10 @@ fn namespace_items<'a>(
     Ok(items)
 }
 
-fn find_item(
-    items: &[Value],
-    element: &str,
-    profile_version: &str,
-) -> Result<Option<ParsedItem>, MdocError> {
+fn find_item(items: &[Value], element: &str) -> Result<Option<ParsedItem>, MdocError> {
     for item in items {
         let item_bytes = issuer_signed_item_bytes(item)?;
-        let parsed = parse_issuer_signed_item_bytes(&item_bytes, profile_version)?;
+        let parsed = parse_issuer_signed_item_bytes(&item_bytes)?;
         if parsed.element == element {
             return Ok(Some(parsed));
         }
@@ -1983,9 +2143,36 @@ fn find_item(
     Ok(None)
 }
 
+fn validate_current_product_selected_items(
+    items: &[Value],
+    requested_attributes: &[MdocRequestedAttribute],
+) -> Result<(), MdocError> {
+    let mut counts = vec![0usize; requested_attributes.len()];
+    for item in items {
+        let item_bytes = issuer_signed_item_bytes(item)?;
+        let parsed = parse_issuer_signed_item_bytes(&item_bytes)?;
+        for (index, requested) in requested_attributes.iter().enumerate() {
+            if parsed.element == requested.element_identifier {
+                if parsed.digest_id > MDOC_SCOPE_MAX_DIGEST_ID {
+                    return Err(MdocError::InvalidProductDocumentShape(
+                        "requested PID digestID exceeds product bound",
+                    ));
+                }
+                counts[index] += 1;
+            }
+        }
+    }
+    if counts.into_iter().all(|count| count == 1) {
+        Ok(())
+    } else {
+        Err(MdocError::InvalidProductDocumentShape(
+            "each requested PID element must occur exactly once",
+        ))
+    }
+}
+
 fn issuer_signed_item_bytes(item: &Value) -> Result<Vec<u8>, MdocError> {
     match item {
-        Value::Bytes(bytes) => Ok(bytes.clone()),
         Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) => {
             expect_bytes(inner, "IssuerSignedItemBytes")?;
             Ok(encode_value(item.clone()))
@@ -1994,10 +2181,7 @@ fn issuer_signed_item_bytes(item: &Value) -> Result<Vec<u8>, MdocError> {
     }
 }
 
-fn parse_issuer_signed_item_bytes(
-    bytes: &[u8],
-    profile_version: &str,
-) -> Result<ParsedItem, MdocError> {
+fn parse_issuer_signed_item_bytes(bytes: &[u8]) -> Result<ParsedItem, MdocError> {
     let value = decode_value(bytes)?;
     let Value::Tag(24, inner) = value else {
         return Err(MdocError::WrongType("IssuerSignedItemBytes tag 24"));
@@ -2005,7 +2189,7 @@ fn parse_issuer_signed_item_bytes(
     let item_bytes = expect_bytes(&inner, "IssuerSignedItemBytes")?;
     let item_value = decode_value(item_bytes)?;
     let item = expect_map(&item_value, "IssuerSignedItem")?;
-    ensure_issuer_signed_item_key_order(item, profile_version)?;
+    ensure_issuer_signed_item_key_order(item)?;
     let digest_id = u32_field(item, "digestID")?;
     let element = text_field(item, "elementIdentifier")?.to_string();
     let random_len = expect_bytes(value_field(item, "random")?, "random")?.len();
@@ -2021,13 +2205,8 @@ fn parse_issuer_signed_item_bytes(
     })
 }
 
-/// Require the four `IssuerSignedItem` keys. Profile v1 accepts legacy key
-/// ordering; profile v2 requires the RFC 8949 canonical order used by the
-/// canonical-CBOR profile.
-fn ensure_issuer_signed_item_key_order(
-    item: &[(Value, Value)],
-    profile_version: &str,
-) -> Result<(), MdocError> {
+/// Checks the four `IssuerSignedItem` keys in RFC 8949 canonical order.
+fn ensure_issuer_signed_item_key_order(item: &[(Value, Value)]) -> Result<(), MdocError> {
     const KEY_SET: [&str; 4] = ["elementValue", "digestID", "random", "elementIdentifier"];
     const V2_CANONICAL: [&str; 4] = ["random", "digestID", "elementValue", "elementIdentifier"];
     if item.len() != KEY_SET.len() {
@@ -2045,17 +2224,15 @@ fn ensure_issuer_signed_item_key_order(
             ));
         }
     }
-    if profile_version == MDOC_PROFILE_VERSION_V2 {
-        let canonical = item
-            .iter()
-            .map(|(key, _)| key)
-            .zip(V2_CANONICAL)
-            .all(|(key, expected)| key == &Value::Text(expected.to_string()));
-        if !canonical {
-            return Err(MdocError::UnsupportedCircuitValue(
-                "IssuerSignedItem canonical key order",
-            ));
-        }
+    let canonical = item
+        .iter()
+        .map(|(key, _)| key)
+        .zip(V2_CANONICAL)
+        .all(|(key, expected)| key == &Value::Text(expected.to_string()));
+    if !canonical {
+        return Err(MdocError::UnsupportedCircuitValue(
+            "IssuerSignedItem canonical key order",
+        ));
     }
     Ok(())
 }
@@ -2104,76 +2281,38 @@ fn parse_cose_key(value: &Value) -> Result<AffinePoint, MdocError> {
     })
 }
 
-fn issuer_key_from_unprotected(
+fn current_product_issuer_key_from_unprotected(
     unprotected: &[(Value, Value)],
     request: &MdocPidRequest,
 ) -> Result<AffinePoint, MdocError> {
-    if let Some(x5chain) = value_int_key(unprotected, 33) {
-        return issuer_key_from_x5chain(
-            x5chain,
-            &request.trusted_issuer_certificates,
-            &request.trusted_issuer_public_keys,
-        );
+    if unprotected.len() != 1 || value_i128(&unprotected[0].0).ok() != Some(33) {
+        return Err(MdocError::InvalidProductDocumentShape(
+            "issuerAuth unprotected header must contain only x5chain",
+        ));
     }
-    let issuer_key = parse_cose_key(value_field(unprotected, "issuerKey")?)?;
-    if !request.trusted_issuer_public_keys.is_empty()
-        && !request
-            .trusted_issuer_public_keys
-            .iter()
-            .any(|trusted| trusted == &issuer_key)
-    {
-        return Err(MdocError::UntrustedIssuerCertificate);
-    }
-    Ok(issuer_key)
+    caller_authoritative_leaf_key(&unprotected[0].1, &request.required_issuer_public_key)
 }
 
-fn issuer_key_from_x5chain(
-    value: &Value,
-    trusted_roots: &[Vec<u8>],
-    trusted_public_keys: &[AffinePoint],
+fn caller_authoritative_leaf_key(
+    x5chain: &Value,
+    required_key: &AffinePoint,
 ) -> Result<AffinePoint, MdocError> {
-    let chain = x5chain_certificates(value)?;
-    let parsed_chain = chain
-        .iter()
-        .map(|certificate| parse_x509_certificate(certificate))
-        .collect::<Result<Vec<_>, _>>()?;
-    for pair in parsed_chain.windows(2) {
-        verify_certificate_signature(&pair[0], &pair[1])?;
-    }
-    let issuer_key = affine_point_from_spki(parsed_chain[0].spki_der)?;
-    if trusted_public_keys
-        .iter()
-        .any(|trusted| trusted == &issuer_key)
-    {
-        return Ok(issuer_key);
-    }
-    let chain_anchor = chain
-        .last()
-        .ok_or(MdocError::InvalidCertificate("empty x5chain"))?;
-    let parsed_anchor = parsed_chain
-        .last()
-        .ok_or(MdocError::InvalidCertificate("empty x5chain"))?;
-    if !is_trusted_x5chain_anchor(*chain_anchor, parsed_anchor, trusted_roots)? {
+    let issuer_key = leaf_key_from_x5chain(x5chain)?;
+    if &issuer_key != required_key {
         return Err(MdocError::UntrustedIssuerCertificate);
     }
     Ok(issuer_key)
 }
 
-fn is_trusted_x5chain_anchor(
-    anchor_der: &[u8],
-    anchor: &ParsedCertificate<'_>,
-    trusted_roots: &[Vec<u8>],
-) -> Result<bool, MdocError> {
-    for trusted_root in trusted_roots {
-        if trusted_root.as_slice() == anchor_der {
-            return Ok(true);
-        }
-        let trusted_root = parse_x509_certificate(trusted_root)?;
-        if verify_certificate_signature(anchor, &trusted_root).is_ok() {
-            return Ok(true);
-        }
+fn leaf_key_from_x5chain(x5chain: &Value) -> Result<AffinePoint, MdocError> {
+    let certificates = x5chain_certificates(x5chain)?;
+    if certificates.len() != 1 {
+        return Err(MdocError::InvalidCertificate(
+            "x5chain must contain exactly one leaf certificate",
+        ));
     }
-    Ok(false)
+    let certificate = parse_x509_certificate(certificates[0])?;
+    affine_point_from_spki(certificate.spki_der)
 }
 
 fn x5chain_certificates(value: &Value) -> Result<Vec<&[u8]>, MdocError> {
@@ -2194,9 +2333,7 @@ fn x5chain_certificates(value: &Value) -> Result<Vec<&[u8]>, MdocError> {
 
 #[derive(Clone, Copy)]
 struct ParsedCertificate<'a> {
-    tbs_der: &'a [u8],
     spki_der: &'a [u8],
-    signature_der: &'a [u8],
 }
 
 #[derive(Clone, Copy)]
@@ -2224,14 +2361,10 @@ fn parse_x509_certificate(certificate: &[u8]) -> Result<ParsedCertificate<'_>, M
     if signature.tag != 0x03 || !certificate_fields.is_empty() {
         return Err(MdocError::InvalidCertificate("certificate signature"));
     }
-    let signature_der = der_bit_string_bytes(signature, "certificate.signatureValue")?;
+    der_bit_string_bytes(signature, "certificate.signatureValue")?;
 
     let spki_der = certificate_spki_der(tbs.value)?;
-    Ok(ParsedCertificate {
-        tbs_der: tbs.full,
-        spki_der,
-        signature_der,
-    })
+    Ok(ParsedCertificate { spki_der })
 }
 
 fn certificate_spki_der(tbs_certificate: &[u8]) -> Result<&[u8], MdocError> {
@@ -2304,19 +2437,6 @@ fn der_bit_string_bytes<'a>(
     Ok(&bit_string.value[1..])
 }
 
-fn verify_certificate_signature(
-    certificate: &ParsedCertificate<'_>,
-    issuer: &ParsedCertificate<'_>,
-) -> Result<(), MdocError> {
-    let issuer_key = VerifyingKey::from_public_key_der(issuer.spki_der)
-        .map_err(|_| MdocError::InvalidCertificate("issuer subjectPublicKeyInfo"))?;
-    let signature = P256Signature::from_der(certificate.signature_der)
-        .map_err(|_| MdocError::InvalidCertificate("certificate signature DER"))?;
-    issuer_key
-        .verify(certificate.tbs_der, &signature)
-        .map_err(|_| MdocError::InvalidSignature("issuer x5chain"))
-}
-
 fn affine_point_from_spki(spki_der: &[u8]) -> Result<AffinePoint, MdocError> {
     let verifying_key = VerifyingKey::from_public_key_der(spki_der)
         .map_err(|_| MdocError::InvalidCertificate("subjectPublicKeyInfo"))?;
@@ -2385,156 +2505,94 @@ fn ecdsa_input(
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct MdocCircuitStatement {
+    /// Domain-separated binding of the complete verifier-controlled request.
+    pub request_binding: [u8; 32],
+    /// Requested document type and namespace. These are public protocol scope,
+    /// not credential witness material.
+    pub doctype: String,
+    pub namespace: String,
     pub issuer_input: EcdsaVerifyInput,
     pub device_input: EcdsaVerifyInput,
-    pub ts13_revocation: Option<MdocRevocationPublicInputs>,
-    pub ts13_revocation_range: Option<MdocRevocationRangeWitness>,
-    pub ts13_revocation_signature: Option<Signature>,
+    /// Verifier-authoritative UTC time used for strict credential validity.
+    pub verification_time_epoch_seconds: u64,
+    pub ts13_revocation: MdocRevocationPublicInputs,
+    pub ts13_revocation_range: MdocRevocationRangeWitness,
+    pub ts13_revocation_signature: Signature,
     pub attributes: Vec<MdocStatementAttribute>,
     pub age_attribute_index: Option<usize>,
     pub nationality_attribute_index: Option<usize>,
-    pub birth_date_binding: MdocBirthDateBinding,
-    pub nationality_binding: MdocNationalityBinding,
-    pub birth_date_value_offset: usize,
-    pub nationality_value_offset: usize,
-    /// Offset of the `"birth_date"` `elementIdentifier` window in the birth_date
-    /// item preimage (D1).
-    pub birth_date_element_offset: usize,
-    /// Offset of the `"nationality"` `elementIdentifier` window in the
-    /// nationality item preimage (D1).
-    pub nationality_element_offset: usize,
-    /// Offset of the birth_date `valueDigests` 32-byte window in the issuer
-    /// `Sig_structure` preimage (D2).
-    pub mso_birth_date_digest_offset: usize,
-    pub mso_birth_date_digest_anchor_offset: usize,
-    pub mso_birth_date_digest_anchor: Vec<u8>,
-    /// Offset of the nationality `valueDigests` 32-byte window in the issuer
-    /// `Sig_structure` preimage (D2).
-    pub mso_nationality_digest_offset: usize,
-    pub mso_nationality_digest_anchor_offset: usize,
-    pub mso_nationality_digest_anchor: Vec<u8>,
-    /// Offset of the deviceKey x-coordinate 32-byte window in the issuer
-    /// `Sig_structure` preimage (D3).
-    pub mso_device_key_x_offset: usize,
-    pub mso_device_key_x_anchor_offset: usize,
-    pub mso_device_key_x_anchor: Vec<u8>,
-    /// Offset of the deviceKey y-coordinate 32-byte window in the issuer
-    /// `Sig_structure` preimage (D3).
-    pub mso_device_key_y_offset: usize,
-    pub mso_device_key_y_anchor_offset: usize,
-    pub mso_device_key_y_anchor: Vec<u8>,
-    pub valid_from: (u16, u8, u8),
-    pub valid_until: (u16, u8, u8),
-    /// Offset of the `validityInfo.validFrom` `YYYY-MM-DD` date window in the
-    /// issuer `Sig_structure` preimage (validity binding).
-    pub mso_valid_from_date_offset: usize,
-    pub mso_valid_from_anchor_offset: usize,
-    pub mso_valid_from_anchor: Vec<u8>,
-    /// Offset of the `validityInfo.validUntil` `YYYY-MM-DD` date window in the
-    /// issuer `Sig_structure` preimage (validity binding).
-    pub mso_valid_until_date_offset: usize,
-    pub mso_valid_until_anchor_offset: usize,
-    pub mso_valid_until_anchor: Vec<u8>,
-    /// Offset and length of the issuerAuth payload MSO bytes inside the issuer
-    /// `Sig_structure` preimage. Used by TS13 revocation id binding.
-    pub mso_payload_offset: usize,
-    pub mso_payload_len: usize,
     pub policy: Policy,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MdocPublicStatement {
+    pub request_binding: [u8; 32],
+    pub doctype: String,
+    pub namespace: String,
     pub issuer_public_key: AffinePoint,
     pub device_message_hash: U256,
-    pub ts13_revocation: Option<MdocRevocationPublicInputs>,
-    pub ts13_revocation_range_enabled: bool,
-    pub ts13_revocation_signature_enabled: bool,
-    pub attributes: Vec<MdocStatementAttribute>,
-    pub age_attribute_index: Option<usize>,
-    pub nationality_attribute_index: Option<usize>,
-    pub birth_date_binding: MdocBirthDateBinding,
-    pub nationality_binding: MdocNationalityBinding,
-    pub birth_date_value_offset: usize,
-    pub nationality_value_offset: usize,
-    pub birth_date_element_offset: usize,
-    pub nationality_element_offset: usize,
-    pub mso_birth_date_digest_offset: usize,
-    pub mso_birth_date_digest_anchor_offset: usize,
-    pub mso_birth_date_digest_anchor: Vec<u8>,
-    pub mso_nationality_digest_offset: usize,
-    pub mso_nationality_digest_anchor_offset: usize,
-    pub mso_nationality_digest_anchor: Vec<u8>,
-    pub mso_device_key_x_offset: usize,
-    pub mso_device_key_x_anchor_offset: usize,
-    pub mso_device_key_x_anchor: Vec<u8>,
-    pub mso_device_key_y_offset: usize,
-    pub mso_device_key_y_anchor_offset: usize,
-    pub mso_device_key_y_anchor: Vec<u8>,
-    pub valid_from: (u16, u8, u8),
-    pub valid_until: (u16, u8, u8),
-    pub mso_valid_from_date_offset: usize,
-    pub mso_valid_from_anchor_offset: usize,
-    pub mso_valid_from_anchor: Vec<u8>,
-    pub mso_valid_until_date_offset: usize,
-    pub mso_valid_until_anchor_offset: usize,
-    pub mso_valid_until_anchor: Vec<u8>,
-    pub mso_payload_offset: usize,
-    pub mso_payload_len: usize,
+    pub verification_time_epoch_seconds: u64,
+    pub ts13_revocation: MdocRevocationPublicInputs,
+    /// Verifier-requested private predicate scope.
+    pub attributes: Vec<MdocRequestedAttribute>,
     pub policy: Policy,
 }
 
 impl MdocPublicStatement {
     pub fn from_circuit(statement: &MdocCircuitStatement) -> Self {
         Self {
+            request_binding: statement.request_binding,
+            doctype: statement.doctype.clone(),
+            namespace: statement.namespace.clone(),
             issuer_public_key: statement.issuer_input.public_key.clone(),
             device_message_hash: statement.device_input.message_hash.clone(),
+            verification_time_epoch_seconds: statement.verification_time_epoch_seconds,
             ts13_revocation: statement.ts13_revocation.clone(),
-            ts13_revocation_range_enabled: statement.ts13_revocation_range.is_some(),
-            ts13_revocation_signature_enabled: statement.ts13_revocation_signature.is_some(),
-            attributes: statement.attributes.clone(),
-            age_attribute_index: statement.age_attribute_index,
-            nationality_attribute_index: statement.nationality_attribute_index,
-            birth_date_binding: statement.birth_date_binding,
-            nationality_binding: statement.nationality_binding,
-            birth_date_value_offset: statement.birth_date_value_offset,
-            nationality_value_offset: statement.nationality_value_offset,
-            birth_date_element_offset: statement.birth_date_element_offset,
-            nationality_element_offset: statement.nationality_element_offset,
-            mso_birth_date_digest_offset: statement.mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset: statement.mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor: statement.mso_birth_date_digest_anchor.clone(),
-            mso_nationality_digest_offset: statement.mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset: statement.mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor: statement.mso_nationality_digest_anchor.clone(),
-            mso_device_key_x_offset: statement.mso_device_key_x_offset,
-            mso_device_key_x_anchor_offset: statement.mso_device_key_x_anchor_offset,
-            mso_device_key_x_anchor: statement.mso_device_key_x_anchor.clone(),
-            mso_device_key_y_offset: statement.mso_device_key_y_offset,
-            mso_device_key_y_anchor_offset: statement.mso_device_key_y_anchor_offset,
-            mso_device_key_y_anchor: statement.mso_device_key_y_anchor.clone(),
-            valid_from: statement.valid_from,
-            valid_until: statement.valid_until,
-            mso_valid_from_date_offset: statement.mso_valid_from_date_offset,
-            mso_valid_from_anchor_offset: statement.mso_valid_from_anchor_offset,
-            mso_valid_from_anchor: statement.mso_valid_from_anchor.clone(),
-            mso_valid_until_date_offset: statement.mso_valid_until_date_offset,
-            mso_valid_until_anchor_offset: statement.mso_valid_until_anchor_offset,
-            mso_valid_until_anchor: statement.mso_valid_until_anchor.clone(),
-            mso_payload_offset: statement.mso_payload_offset,
-            mso_payload_len: statement.mso_payload_len,
+            attributes: statement
+                .attributes
+                .iter()
+                .map(|attribute| MdocRequestedAttribute {
+                    element_identifier: attribute.element_identifier.clone(),
+                    mode: attribute.mode.clone(),
+                })
+                .collect(),
             policy: statement.policy.clone(),
         }
     }
 
-    #[cfg(feature = "ec-coprocessor")]
+    fn age_attribute_index(&self) -> Option<usize> {
+        self.attributes
+            .iter()
+            .position(|attribute| matches!(attribute.mode, MdocDisclosureMode::AgeOver))
+    }
+
+    fn nationality_attribute_index(&self) -> Option<usize> {
+        self.attributes
+            .iter()
+            .position(|attribute| matches!(attribute.mode, MdocDisclosureMode::Alpha2Set))
+    }
+
     fn verifier_circuit_statement(&self) -> MdocCircuitStatement {
         let zero_sig = Signature {
             r: U256([0u8; 32]),
             s: U256([0u8; 32]),
         };
+        let age_attribute_index = self.age_attribute_index();
+        let nationality_attribute_index = self.nationality_attribute_index();
+        let attributes = self
+            .attributes
+            .iter()
+            .map(|attribute| MdocStatementAttribute {
+                element_identifier: attribute.element_identifier.clone(),
+                mode: attribute.mode.clone(),
+            })
+            .collect();
         MdocCircuitStatement {
+            request_binding: self.request_binding,
+            doctype: self.doctype.clone(),
+            namespace: self.namespace.clone(),
             issuer_input: EcdsaVerifyInput {
                 message_hash: U256([0u8; 32]),
                 signature: zero_sig.clone(),
@@ -2548,46 +2606,17 @@ impl MdocPublicStatement {
                     y: U256([0u8; 32]),
                 },
             },
+            verification_time_epoch_seconds: self.verification_time_epoch_seconds,
             ts13_revocation: self.ts13_revocation.clone(),
-            ts13_revocation_range: self.ts13_revocation_range_enabled.then_some(
-                MdocRevocationRangeWitness {
-                    id: 0,
-                    id_lo: 0,
-                    id_hi: 0,
-                },
-            ),
-            ts13_revocation_signature: self.ts13_revocation_signature_enabled.then_some(zero_sig),
-            attributes: self.attributes.clone(),
-            age_attribute_index: self.age_attribute_index,
-            nationality_attribute_index: self.nationality_attribute_index,
-            birth_date_binding: self.birth_date_binding,
-            nationality_binding: self.nationality_binding,
-            birth_date_value_offset: self.birth_date_value_offset,
-            nationality_value_offset: self.nationality_value_offset,
-            birth_date_element_offset: self.birth_date_element_offset,
-            nationality_element_offset: self.nationality_element_offset,
-            mso_birth_date_digest_offset: self.mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset: self.mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor: self.mso_birth_date_digest_anchor.clone(),
-            mso_nationality_digest_offset: self.mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset: self.mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor: self.mso_nationality_digest_anchor.clone(),
-            mso_device_key_x_offset: self.mso_device_key_x_offset,
-            mso_device_key_x_anchor_offset: self.mso_device_key_x_anchor_offset,
-            mso_device_key_x_anchor: self.mso_device_key_x_anchor.clone(),
-            mso_device_key_y_offset: self.mso_device_key_y_offset,
-            mso_device_key_y_anchor_offset: self.mso_device_key_y_anchor_offset,
-            mso_device_key_y_anchor: self.mso_device_key_y_anchor.clone(),
-            valid_from: self.valid_from,
-            valid_until: self.valid_until,
-            mso_valid_from_date_offset: self.mso_valid_from_date_offset,
-            mso_valid_from_anchor_offset: self.mso_valid_from_anchor_offset,
-            mso_valid_from_anchor: self.mso_valid_from_anchor.clone(),
-            mso_valid_until_date_offset: self.mso_valid_until_date_offset,
-            mso_valid_until_anchor_offset: self.mso_valid_until_anchor_offset,
-            mso_valid_until_anchor: self.mso_valid_until_anchor.clone(),
-            mso_payload_offset: self.mso_payload_offset,
-            mso_payload_len: self.mso_payload_len,
+            ts13_revocation_range: MdocRevocationRangeWitness {
+                id: 0,
+                id_lo: 0,
+                id_hi: 0,
+            },
+            ts13_revocation_signature: zero_sig,
+            attributes,
+            age_attribute_index,
+            nationality_attribute_index,
             policy: self.policy.clone(),
         }
     }
@@ -2610,72 +2639,26 @@ pub struct MdocRevocationRangeWitness {
 pub struct MdocStatementAttribute {
     pub element_identifier: String,
     pub mode: MdocDisclosureMode,
-    pub element_identifier_offset: usize,
-    pub element_identifier_anchor_offset: usize,
-    pub element_identifier_anchor: Vec<u8>,
-    pub value_offset: usize,
-    pub value: Vec<u8>,
-    pub value_head: Vec<u8>,
-    pub digest_id: u32,
-    pub mso_digest_offset: usize,
-    pub mso_digest_anchor_offset: usize,
-    pub mso_digest_anchor: Vec<u8>,
-}
-
-impl MdocStatementAttribute {
-    fn element_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_ELEMENT_ID_BASE + index as u32
-    }
-
-    fn value_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_VALUE_BASE + index as u32
-    }
-
-    fn digest_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_DIGEST_BASE + index as u32
-    }
-
-    fn digest_anchor_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_DIGEST_ANCHOR_BASE + index as u32
-    }
-
-    fn value_head_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_VALUE_HEAD_BASE + index as u32
-    }
-
-    fn element_anchor_field_id(index: usize) -> u32 {
-        MDOC_ATTRIBUTE_ELEMENT_ANCHOR_BASE + index as u32
-    }
 }
 
 impl MdocCircuitStatement {
-    pub fn with_ts13_revocation(mut self, revocation: MdocRevocationPublicInputs) -> Self {
-        self.ts13_revocation = Some(revocation);
-        self
-    }
-
-    pub fn with_ts13_revocation_range(mut self, range: MdocRevocationRangeWitness) -> Self {
-        self.ts13_revocation_range = Some(range);
-        self
-    }
-
-    pub fn with_ts13_revocation_signature(mut self, signature: Signature) -> Self {
-        self.ts13_revocation_signature = Some(signature);
-        self
-    }
-
-    pub fn from_extracted(extracted: &ExtractedPidMdoc, policy: Policy) -> Result<Self, MdocError> {
+    pub fn from_extracted_at(
+        extracted: &ExtractedPidMdoc,
+        policy: Policy,
+        verification_time_epoch_seconds: u64,
+    ) -> Result<Self, MdocError> {
         validate_requested_attributes(&extracted.attributes)?;
-        let current_date = policy_date_tuple(&policy)?;
-        if current_date < extracted.valid_from {
+        validate_product_policy(&policy, verification_time_epoch_seconds)?;
+        let verification_time = strict_verification_timestamp(verification_time_epoch_seconds)?;
+        if verification_time <= extracted.valid_from_timestamp {
             return Err(MdocError::CredentialNotYetValid);
         }
-        if current_date > extracted.valid_until {
+        if verification_time >= extracted.valid_until_timestamp {
             return Err(MdocError::CredentialExpired);
         }
 
         let mso = parse_mso(&extracted.mso, &extracted.namespace)?;
-        if !is_supported_mdoc_profile_version(&mso.version) {
+        if mso.version != MDOC_PROFILE_VERSION {
             return Err(MdocError::UnsupportedMsoVersion(mso.version));
         }
         if mso.doc_type != extracted.doctype {
@@ -2693,7 +2676,7 @@ impl MdocCircuitStatement {
                 MdocError::UnsupportedCircuitValue("attribute digest offset"),
             )?;
             let mso_digest_anchor = digest_anchor_bytes(attribute.digest_id);
-            let mso_digest_anchor_offset = anchor_before_offset(
+            anchor_before_offset(
                 &extracted.issuer_sig_structure,
                 mso_digest_offset,
                 &mso_digest_anchor,
@@ -2707,7 +2690,7 @@ impl MdocCircuitStatement {
             )?;
             let element_identifier_anchor =
                 element_identifier_anchor_bytes(&attribute.request.element_identifier)?;
-            let element_identifier_anchor_offset = anchor_before_offset(
+            anchor_before_offset(
                 &attribute.item,
                 attribute.element_identifier_offset,
                 &element_identifier_anchor,
@@ -2728,23 +2711,6 @@ impl MdocCircuitStatement {
             statement_attributes.push(MdocStatementAttribute {
                 element_identifier: attribute.request.element_identifier.clone(),
                 mode: attribute.request.mode.clone(),
-                element_identifier_offset: attribute.element_identifier_offset,
-                element_identifier_anchor_offset,
-                element_identifier_anchor,
-                value_offset: attribute.value_offset,
-                value: attribute.value.clone(),
-                value_head: if matches!(
-                    attribute.request.mode,
-                    MdocDisclosureMode::ValueEquality(_)
-                ) {
-                    cbor_value_head(&attribute.value)?
-                } else {
-                    Vec::new()
-                },
-                digest_id: attribute.digest_id,
-                mso_digest_offset,
-                mso_digest_anchor_offset,
-                mso_digest_anchor,
             });
         }
         let age_attribute_index = statement_attributes
@@ -2754,12 +2720,10 @@ impl MdocCircuitStatement {
             .iter()
             .position(|attribute| matches!(attribute.mode, MdocDisclosureMode::Alpha2Set));
 
-        // Phase D: locate the windows the in-circuit MSO bindings pin. The two
-        // digests and the device key are no longer public inputs; they are
-        // bound in-circuit from these prover-supplied offsets. Each offset is a
-        // hint whose *content* the window-bind component pins, and the
-        // surrounding bytes are covered by the issuer signature — so a
-        // mispointed offset must still exhibit issuer-signed bytes.
+        // Locate the windows for the MSO bindings.
+        // The circuit obtains the digests and device key from these offsets.
+        // The window binding checks the bytes at each offset.
+        // The issuer signature covers the surrounding bytes.
         if age_attribute_index.is_some() {
             ensure_value_window(
                 &extracted.birth_date_item,
@@ -2774,38 +2738,6 @@ impl MdocCircuitStatement {
                 extracted.nationality_binding.as_bytes(),
             )?;
         }
-        let (
-            birth_date_element_offset,
-            mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor,
-        ) = age_attribute_index
-            .map(|index| {
-                let attribute = &statement_attributes[index];
-                (
-                    attribute.element_identifier_offset,
-                    attribute.mso_digest_offset,
-                    attribute.mso_digest_anchor_offset,
-                    attribute.mso_digest_anchor.clone(),
-                )
-            })
-            .unwrap_or((0, 0, 0, Vec::new()));
-        let (
-            nationality_element_offset,
-            mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor,
-        ) = nationality_attribute_index
-            .map(|index| {
-                let attribute = &statement_attributes[index];
-                (
-                    attribute.element_identifier_offset,
-                    attribute.mso_digest_offset,
-                    attribute.mso_digest_anchor_offset,
-                    attribute.mso_digest_anchor.clone(),
-                )
-            })
-            .unwrap_or((0, 0, 0, Vec::new()));
         let mso_device_key_x_offset =
             find_subslice(&extracted.issuer_sig_structure, &extracted.device_key.x.0)
                 .ok_or(MdocError::UnsupportedCircuitValue("device key x offset"))?;
@@ -2818,39 +2750,39 @@ impl MdocCircuitStatement {
             + labeled_tdate_date_offset(
                 &extracted.mso,
                 b"validFrom",
-                extracted.valid_from,
+                extracted.valid_from_timestamp,
                 "validFrom date offset",
             )?;
         let mso_valid_until_date_offset = mso_payload_offset
             + labeled_tdate_date_offset(
                 &extracted.mso,
                 b"validUntil",
-                extracted.valid_until,
+                extracted.valid_until_timestamp,
                 "validUntil date offset",
             )?;
         let mso_device_key_x_anchor = vec![0x21, 0x58, 0x20];
-        let mso_device_key_x_anchor_offset = anchor_before_offset(
+        anchor_before_offset(
             &extracted.issuer_sig_structure,
             mso_device_key_x_offset,
             &mso_device_key_x_anchor,
             "device key x anchor offset",
         )?;
         let mso_device_key_y_anchor = vec![0x22, 0x58, 0x20];
-        let mso_device_key_y_anchor_offset = anchor_before_offset(
+        anchor_before_offset(
             &extracted.issuer_sig_structure,
             mso_device_key_y_offset,
             &mso_device_key_y_anchor,
             "device key y anchor offset",
         )?;
         let mso_valid_from_anchor = cbor_tdate_anchor_bytes("validFrom");
-        let mso_valid_from_anchor_offset = anchor_before_offset(
+        anchor_before_offset(
             &extracted.issuer_sig_structure,
             mso_valid_from_date_offset,
             &mso_valid_from_anchor,
             "validFrom anchor offset",
         )?;
         let mso_valid_until_anchor = cbor_tdate_anchor_bytes("validUntil");
-        let mso_valid_until_anchor_offset = anchor_before_offset(
+        anchor_before_offset(
             &extracted.issuer_sig_structure,
             mso_valid_until_date_offset,
             &mso_valid_until_anchor,
@@ -2871,66 +2803,41 @@ impl MdocCircuitStatement {
         ensure_value_window_with_message(
             &extracted.issuer_sig_structure,
             mso_valid_from_date_offset,
-            &full_date_text_bytes(extracted.valid_from),
+            &extracted.valid_from_timestamp.text_bytes(),
             "validFrom date offset",
         )?;
         ensure_value_window_with_message(
             &extracted.issuer_sig_structure,
             mso_valid_until_date_offset,
-            &full_date_text_bytes(extracted.valid_until),
+            &extracted.valid_until_timestamp.text_bytes(),
             "validUntil date offset",
         )?;
-        let mso_payload_offset = find_subslice(&extracted.issuer_sig_structure, &extracted.mso)
-            .ok_or(MdocError::UnsupportedCircuitValue("MSO payload offset"))?;
-
         Ok(Self {
+            request_binding: extracted.request_binding,
+            doctype: extracted.doctype.clone(),
+            namespace: extracted.namespace.clone(),
             issuer_input: extracted.issuer_ecdsa_input.clone(),
             device_input: extracted.device_ecdsa_input.clone(),
-            ts13_revocation: None,
-            ts13_revocation_range: None,
-            ts13_revocation_signature: None,
+            verification_time_epoch_seconds,
+            ts13_revocation: extracted.revocation.public_inputs.clone(),
+            ts13_revocation_range: MdocRevocationRangeWitness {
+                id: crate::ts13::ts13_mso_derived_revocation_id(&extracted.mso),
+                id_lo: extracted.revocation.id_lo,
+                id_hi: extracted.revocation.id_hi,
+            },
+            ts13_revocation_signature: extracted.revocation.signature.clone(),
             attributes: statement_attributes,
             age_attribute_index,
             nationality_attribute_index,
-            birth_date_binding: extracted.birth_date_binding,
-            nationality_binding: extracted.nationality_binding,
-            birth_date_value_offset: extracted.birth_date_value_offset,
-            nationality_value_offset: extracted.nationality_value_offset,
-            birth_date_element_offset,
-            nationality_element_offset,
-            mso_birth_date_digest_offset,
-            mso_birth_date_digest_anchor_offset,
-            mso_birth_date_digest_anchor,
-            mso_nationality_digest_offset,
-            mso_nationality_digest_anchor_offset,
-            mso_nationality_digest_anchor,
-            mso_device_key_x_offset,
-            mso_device_key_x_anchor_offset,
-            mso_device_key_x_anchor,
-            mso_device_key_y_offset,
-            mso_device_key_y_anchor_offset,
-            mso_device_key_y_anchor,
-            valid_from: extracted.valid_from,
-            valid_until: extracted.valid_until,
-            mso_valid_from_date_offset,
-            mso_valid_from_anchor_offset,
-            mso_valid_from_anchor,
-            mso_valid_until_date_offset,
-            mso_valid_until_anchor_offset,
-            mso_valid_until_anchor,
-            mso_payload_offset,
-            mso_payload_len: extracted.mso.len(),
             policy,
         })
     }
 }
 
-/// Assert that `item[offset..offset+expected.len()] == expected`.
+/// Checks that `item[offset..offset+expected.len()] == expected`.
 ///
-/// Profile v2 drops the v1 "window lies in the first SHA-256 block" rule: the
-/// Phase A multi-block field exposure resolves a window straddling a 64-byte
-/// block boundary, so the only host-side requirement is byte-equality at the
-/// prover-supplied offset.
+/// Multi-block field binding permits a window across a SHA-256 block boundary.
+/// The host must only check the bytes at the supplied offset.
 fn ensure_value_window(item: &[u8], offset: usize, expected: &[u8]) -> Result<(), MdocError> {
     ensure_value_window_with_message(item, offset, expected, "element value bytes at offset")
 }
@@ -2950,350 +2857,85 @@ fn ensure_value_window_with_message(
     Ok(())
 }
 
-fn policy_date_tuple(policy: &Policy) -> Result<(u16, u8, u8), MdocError> {
-    if policy.current_date.year > 9999 {
-        return Err(MdocError::InvalidTdate("policy.current_date"));
+#[cfg(test)]
+fn days_from_civil(year: i64, month: i64, day: i64) -> Result<i64, MdocError> {
+    let calendar_date = u16::try_from(year)
+        .ok()
+        .zip(u8::try_from(month).ok())
+        .zip(u8::try_from(day).ok())
+        .map(|((year, month), day)| (year, month, day));
+    if !(1970..=9999).contains(&year)
+        || !calendar_date
+            .map(|(year, month, day)| is_gregorian_date(year, month, day))
+            .unwrap_or(false)
+    {
+        return Err(MdocError::InvalidVerificationTime);
     }
-    Ok((
-        u16::try_from(policy.current_date.year)
-            .map_err(|_| MdocError::InvalidTdate("policy.current_date"))?,
-        u8::try_from(policy.current_date.month)
-            .map_err(|_| MdocError::InvalidTdate("policy.current_date"))?,
-        u8::try_from(policy.current_date.day)
-            .map_err(|_| MdocError::InvalidTdate("policy.current_date"))?,
-    ))
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Ok(era * 146_097 + day_of_era - 719_468)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MdocCircuitProof {
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
     sha_tables_interaction_claim: ShaTablesInteractionClaim,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    issuer_p256_claim: P256CurrentAirProofClaim,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    issuer_p256_interaction_claim: P256CurrentAirInteractionClaim,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    device_p256_claim: P256CurrentAirProofClaim,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    device_p256_interaction_claim: P256CurrentAirInteractionClaim,
-    #[cfg(feature = "ec-coprocessor")]
-    device_public_digest_bind_interaction_claim: PublicDigestBindInteractionClaim,
-    #[cfg(feature = "ec-coprocessor")]
-    coprocessor_bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
-    #[cfg(feature = "ec-coprocessor")]
+    packed_sha_interaction_claim: Sha256InteractionClaim,
+
+    coprocessor_bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
+
     mdoc_mac_interaction_claim: MdocMacInteractionClaim,
-    issuer_sha_log_n_rows: u32,
-    issuer_sha_interaction_claim: Sha256InteractionClaim,
-    device_sha_log_n_rows: u32,
-    device_sha_interaction_claim: Sha256InteractionClaim,
-    mso_sha_log_n_rows: Option<u32>,
-    mso_sha_interaction_claim: Option<Sha256InteractionClaim>,
-    revocation_sha_log_n_rows: Option<u32>,
-    revocation_sha_interaction_claim: Option<Sha256InteractionClaim>,
-    attribute_sha_log_n_rows: Vec<u32>,
-    attribute_sha_interaction_claims: Vec<Sha256InteractionClaim>,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    revocation_p256_claim: Option<P256CurrentAirProofClaim>,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    revocation_p256_interaction_claim: Option<P256CurrentAirInteractionClaim>,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    revocation_bridge_log_size: Option<u32>,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    revocation_bridge_interaction_claim: Option<DigestBindInteractionClaim>,
-    /// TS13 revocation ECDSA instance proven by the P4b coprocessor. The
-    /// verifier's statement carries only a zero-signature placeholder, so the
-    /// instance rides here — the same exposure the in-STARK claim had. Its key
-    /// is checked against the public revocation key and its message hash is
-    /// pinned to the committed revocation-SHA digest.
-    #[cfg(feature = "ec-coprocessor")]
-    ts13_revocation_input: Option<EcdsaVerifyInput>,
-    #[cfg(feature = "ec-coprocessor")]
-    revocation_public_digest_bind_interaction_claim: Option<PublicDigestBindInteractionClaim>,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    issuer_bridge_log_size: u32,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    issuer_bridge_interaction_claim: DigestBindInteractionClaim,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    device_bridge_log_size: u32,
-    #[cfg(not(feature = "ec-coprocessor"))]
-    device_bridge_interaction_claim: DigestBindInteractionClaim,
-    mdoc_window_bind_interaction_claim: MdocWindowBindInteractionClaim,
+    mdoc_cbor_log_sizes: Vec<u32>,
+    mdoc_cbor_interaction_claims: Vec<MdocCborStreamInteractionClaim>,
+    mso_exact_cbor_interaction_claim: MdocCborStreamInteractionClaim,
+    mdoc_scope_metadata: MdocScopeProofMetadata,
+    mdoc_scope_interaction_claim: MdocScopeInteractionClaim,
+
     mdoc_validity_interaction_claim: MdocValidityInteractionClaim,
-    mso_payload_bind_interaction_claim: Option<MdocMsoPayloadInteractionClaim>,
-    ts13_revocation_range_interaction_claim: Option<MdocRevocationRangeInteractionClaim>,
+    revocation_message_bind_interaction_claim: MdocExactShaMessageInteractionClaim,
+    ts13_revocation_range_interaction_claim: MdocRevocationRangeInteractionClaim,
     age_public: Option<predicates::PublicInput>,
     age_claimed_sums: Option<Vec<QM31>>,
     nat_public: Option<predicates::NatPublicInput>,
     nat_claimed_sums: Option<Vec<QM31>>,
-    #[cfg(feature = "ec-coprocessor")]
-    #[serde(skip)]
-    p4b_prove_profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct MdocCircuitProveProfile {
-    pub total: Duration,
-    #[cfg(feature = "ec-coprocessor")]
-    pub p4b: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct MdocCircuitVerifyProfile {
-    pub total: Duration,
-    #[cfg(feature = "ec-coprocessor")]
-    pub p4b: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile>,
+fn validate_product_fixed_shape_logs(
+    sha_log_size: u32,
+    cbor_log_sizes: impl IntoIterator<Item = u32>,
+    scope_log_size: u32,
+) -> Result<(), Error> {
+    let sha_shape_is_fixed = sha_log_size == crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
+    let cbor_log_sizes = cbor_log_sizes.into_iter().collect::<Vec<_>>();
+    let cbor_shape_is_fixed = cbor_log_sizes.len() >= 3
+        && cbor_log_sizes
+            .iter()
+            .copied()
+            .enumerate()
+            .all(|(slot, log_size)| log_size == product_parser_log_size(slot));
+    if !sha_shape_is_fixed
+        || !cbor_shape_is_fixed
+        || scope_log_size != crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE
+    {
+        return Err(Error::Verify(
+            "mdoc proof shape does not match the fixed product profile".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl MdocCircuitProof {
-    #[cfg(feature = "ec-coprocessor")]
-    pub fn p4b_prove_profile(&self) -> Option<&eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile> {
-        self.p4b_prove_profile.as_ref()
+    fn validate_product_fixed_shape(&self) -> Result<(), Error> {
+        validate_product_fixed_shape_logs(
+            crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
+            self.mdoc_cbor_log_sizes.iter().copied(),
+            self.mdoc_scope_metadata.log_size,
+        )
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MdocProofByteBreakdown {
-    pub proof_bytes: usize,
-    pub stark_proof_bytes: usize,
-    pub coprocessor_bundle_bytes: Option<usize>,
-    pub non_stark_metadata_bytes: usize,
-    pub stark: MdocStarkProofByteBreakdown,
-    pub coprocessor_bundle: Option<MdocCoprocessorBundleByteBreakdown>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MdocCoprocessorBundleByteBreakdown {
-    pub params_and_roots: usize,
-    pub proximity_openings: usize,
-    pub proximity_openings_b: usize,
-    pub proximity_claim: usize,
-    pub claim_batch: usize,
-    pub consistency_claim_values: usize,
-    pub mac_tags: usize,
-    pub entries: usize,
-    pub entry_count: usize,
-    pub opening_count: usize,
-    pub opened_column_rows: usize,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MdocStarkProofByteBreakdown {
-    pub config: usize,
-    pub commitments: usize,
-    pub sampled_values: usize,
-    pub decommitments: usize,
-    pub queried_values: usize,
-    pub proof_of_work: usize,
-    pub fri_proof: usize,
-}
-
-pub fn mdoc_proof_byte_breakdown(proof: &MdocCircuitProof) -> MdocProofByteBreakdown {
-    let stark = &proof.stark_proof.0;
-    let proof_bytes = bincode_len(proof);
-    let stark_proof_bytes = bincode_len(&proof.stark_proof);
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor_bundle_bytes = proof.coprocessor_bundle.as_ref().map(bincode_len);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let coprocessor_bundle_bytes = None;
-    let non_stark_metadata_bytes = proof_bytes
-        .saturating_sub(stark_proof_bytes)
-        .saturating_sub(coprocessor_bundle_bytes.unwrap_or(0));
-    #[cfg(feature = "ec-coprocessor")]
-    let coprocessor_bundle =
-        proof
-            .coprocessor_bundle
-            .as_ref()
-            .map(|bundle| MdocCoprocessorBundleByteBreakdown {
-                params_and_roots: bincode_len(&bundle.params)
-                    + bincode_len(&bundle.root)
-                    + bincode_len(&bundle.root_b),
-                proximity_openings: bincode_len(&bundle.proximity_openings),
-                proximity_openings_b: bincode_len(&bundle.proximity_openings_b),
-                proximity_claim: bincode_len(&bundle.proximity_claim),
-                claim_batch: bincode_len(&bundle.claim_batch),
-                consistency_claim_values: bincode_len(&bundle.consistency_claim_values),
-                mac_tags: bincode_len(&bundle.mac_tags),
-                entries: bincode_len(&bundle.entries),
-                entry_count: bundle.entries.len(),
-                opening_count: bundle.proximity_openings.len(),
-                opened_column_rows: bundle
-                    .proximity_openings
-                    .first()
-                    .map(|opening| opening.column.len())
-                    .unwrap_or(0),
-            });
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let coprocessor_bundle = None;
-
-    MdocProofByteBreakdown {
-        proof_bytes,
-        stark_proof_bytes,
-        coprocessor_bundle_bytes,
-        non_stark_metadata_bytes,
-        stark: MdocStarkProofByteBreakdown {
-            config: bincode_len(&stark.config),
-            commitments: bincode_len(&stark.commitments),
-            sampled_values: bincode_len(&stark.sampled_values),
-            decommitments: bincode_len(&stark.decommitments),
-            queried_values: bincode_len(&stark.queried_values),
-            proof_of_work: bincode_len(&stark.proof_of_work),
-            fri_proof: bincode_len(&stark.fri_proof),
-        },
-        coprocessor_bundle,
-    }
-}
-
-fn bincode_len<T: Serialize>(value: &T) -> usize {
-    bincode::serialize(value)
-        .expect("mdoc proof byte breakdown value serializes")
-        .len()
-}
-
-fn sha_params(bytes: &[u8]) -> (stwo_sha256::types::Sha256Witness, u32) {
-    let witness = compute_sha256_witness(bytes);
-    let log_n_rows = min_log_size(witness.blocks.len());
-    (witness, log_n_rows)
-}
-
-fn single_p256_draft(input: EcdsaVerifyInput) -> Result<P256ProofDraft, Error> {
-    P256ProofDraft::from_inputs_with_arbitrary_fake_glv_hints(vec![input])
-        .map_err(Error::P256Prepare)
-}
-
-fn mdoc_sizing_waste(
-    extracted: &ExtractedPidMdoc,
-    statement: &MdocCircuitStatement,
-) -> Result<MdocSizingWaste, Error> {
-    let issuer_draft = single_p256_draft(statement.issuer_input.clone())?;
-    let device_draft = single_p256_draft(statement.device_input.clone())?;
-    let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
-    let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let (birth_sha_witness, birth_sha_log) = sha_params(&extracted.birth_date_item);
-    let (nat_sha_witness, nat_sha_log) = sha_params(&extracted.nationality_item);
-    let shared_sha_log = [issuer_sha_log, device_sha_log, birth_sha_log, nat_sha_log]
-        .into_iter()
-        .max()
-        .expect("sha log list is non-empty");
-
-    let issuer_exposure = issuer_mso_exposure(statement);
-    let birth_exposure = birth_date_exposure(statement);
-    let nat_exposure = nationality_exposure(statement);
-
-    let sha = vec![
-        sha_sizing_waste(
-            "issuer",
-            &issuer_sha_witness,
-            issuer_sha_log,
-            shared_sha_log,
-            issuer_exposure,
-        ),
-        sha_sizing_waste(
-            "device",
-            &device_sha_witness,
-            device_sha_log,
-            shared_sha_log,
-            FieldExposure::empty(),
-        ),
-        sha_sizing_waste(
-            "birth_date",
-            &birth_sha_witness,
-            birth_sha_log,
-            shared_sha_log,
-            birth_exposure,
-        ),
-        sha_sizing_waste(
-            "nationality",
-            &nat_sha_witness,
-            nat_sha_log,
-            shared_sha_log,
-            nat_exposure,
-        ),
-    ];
-    let sha_wasted_cells = sha.iter().map(|row| row.wasted_cells).sum();
-
-    let mut issuer_p256 = P256Prover::new(&issuer_draft).map_err(Error::P256Prepare)?;
-    let issuer_fingerprints = issuer_p256.preprocessed_column_fingerprints();
-    let mut device_p256 = P256Prover::new(&device_draft)
-        .map_err(Error::P256Prepare)?
-        .with_preprocessed_namespace("mdoc/device");
-    let device_fingerprints = device_p256.preprocessed_column_fingerprints();
-    let p256_namespaced_identical_preprocessed_cells = device_fingerprints
-        .iter()
-        .filter(|fingerprint| fingerprint.id.id.starts_with("mdoc/device/"))
-        .filter(|device| {
-            issuer_fingerprints
-                .iter()
-                .any(|issuer| issuer.log_size == device.log_size && issuer.hash == device.hash)
-        })
-        .map(|fingerprint| 1u64 << fingerprint.log_size)
-        .sum();
-
-    Ok(MdocSizingWaste {
-        sha,
-        sha_wasted_cells,
-        p256_namespaced_identical_preprocessed_cells,
-    })
-}
-
-fn sha_sizing_waste(
-    name: &'static str,
-    witness: &stwo_sha256::types::Sha256Witness,
-    natural_log: u32,
-    shared_log: u32,
-    field_exposure: FieldExposure,
-) -> MdocShaSizingWaste {
-    let natural = Sha256Prover::new(witness, natural_log, SHA_GROUP_WIDTH)
-        .with_digest_provider()
-        .with_field_provider(field_exposure.clone())
-        .layout();
-    let shared = Sha256Prover::new(witness, shared_log, SHA_GROUP_WIDTH)
-        .with_digest_provider()
-        .with_field_provider(field_exposure)
-        .layout();
-    let natural_cells = trace_and_interaction_cells(&natural);
-    let shared_cells = trace_and_interaction_cells(&shared);
-    MdocShaSizingWaste {
-        name,
-        natural_log,
-        shared_log,
-        wasted_cells: shared_cells.saturating_sub(natural_cells),
-    }
-}
-
-fn trace_and_interaction_cells(layout: &TreeLayout) -> u64 {
-    layout
-        .trace
-        .iter()
-        .chain(&layout.interaction)
-        .map(|&log_size| 1u64 << log_size)
-        .sum()
-}
-
-#[cfg(not(feature = "ec-coprocessor"))]
-fn expected_instance(input: &EcdsaVerifyInput) -> PublicEcdsaInstance<M31> {
-    PublicEcdsaInstance::from_input(0, input)
-}
-
-#[cfg(not(feature = "ec-coprocessor"))]
-fn public_instance_key_matches(
-    instance: &PublicEcdsaInstance<M31>,
-    public_key: &AffinePoint,
-) -> bool {
-    let zero_sig = Signature {
-        r: U256([0u8; 32]),
-        s: U256([0u8; 32]),
-    };
-    let expected = PublicEcdsaInstance::from_input(
-        0,
-        &EcdsaVerifyInput {
-            message_hash: U256([0u8; 32]),
-            signature: zero_sig,
-            public_key: public_key.clone(),
-        },
-    );
-    instance.sig_id == expected.sig_id
-        && instance.pub_x == expected.pub_x
-        && instance.pub_y == expected.pub_y
 }
 
 fn ecdsa_inputs_equal(left: &EcdsaVerifyInput, right: &EcdsaVerifyInput) -> bool {
@@ -3367,113 +3009,198 @@ impl AirProver for MdocRevocationPublicBind {
     }
 }
 
-type MdocMsoPayloadColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
-type MdocMsoPayloadComponent = FrameworkComponent<MdocMsoPayloadEval>;
+type MdocExactShaMessageColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
+type MdocExactShaMessageComponent = FrameworkComponent<MdocExactShaMessageEval>;
 
-struct MdocMsoPayloadBind {
+struct MdocExactShaMessageBind {
     bytes: Option<Vec<u8>>,
     len: usize,
-    issuer_field_handle: SharedFieldRelation,
-    mso_field_handle: SharedFieldRelation,
-    blinder_relation: Option<ClaimedSumBlinderRelation>,
-    interaction_claim: Option<MdocMsoPayloadInteractionClaim>,
-    component: Option<MdocMsoPayloadComponent>,
-    blinder_component: Option<FrameworkComponent<ClaimedSumBlinderEval>>,
+    namespace: &'static str,
+    source_field_id: u32,
+    sha_field_id: u32,
+    source_multiplicity: i32,
+    draw_source_relation: bool,
+    source_field_handle: SharedFieldRelation,
+    sha_field_handle: SharedFieldRelation,
+    claim_mask_trace: Option<ClaimMaskTrace>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
+    interaction_claim: Option<MdocExactShaMessageInteractionClaim>,
+    component: Option<MdocExactShaMessageComponent>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct MdocMsoPayloadInteractionClaim {
+struct MdocExactShaMessageInteractionClaim {
     claimed_sum: QM31,
-    /// Q-015 §4b blinder pair (see `claimed_sum_blinder`).
-    blinder_v: QM31,
-    blinder_m: QM31,
-    blinder_claimed_sum: QM31,
 }
 
 #[derive(Clone)]
-struct MdocMsoPayloadEval {
+struct MdocExactShaMessageEval {
     log_size: u32,
-    issuer_field_relation: FieldBytesRelation,
-    mso_field_relation: FieldBytesRelation,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    namespace: &'static str,
+    source_field_id: u32,
+    sha_field_id: u32,
+    source_multiplicity: i32,
+    source_field_relation: FieldBytesRelation,
+    sha_field_relation: FieldBytesRelation,
+    claim_mask_beta: Option<QM31>,
 }
 
-impl MdocMsoPayloadBind {
+impl MdocExactShaMessageBind {
     fn prover(
+        namespace: &'static str,
+        source_field_id: u32,
+        sha_field_id: u32,
+        source_multiplicity: i32,
+        draw_source_relation: bool,
         bytes: Vec<u8>,
-        issuer_field_handle: SharedFieldRelation,
-        mso_field_handle: SharedFieldRelation,
+        source_field_handle: SharedFieldRelation,
+        sha_field_handle: SharedFieldRelation,
     ) -> Self {
+        assert!(matches!(source_multiplicity, -1 | 1));
         Self {
             len: bytes.len(),
             bytes: Some(bytes),
-            issuer_field_handle,
-            mso_field_handle,
-            blinder_relation: None,
+            namespace,
+            source_field_id,
+            sha_field_id,
+            source_multiplicity,
+            draw_source_relation,
+            source_field_handle,
+            sha_field_handle,
+            claim_mask_trace: None,
+            claim_mask_challenge: None,
             interaction_claim: None,
             component: None,
-            blinder_component: None,
         }
     }
 
     fn verifier(
+        namespace: &'static str,
+        source_field_id: u32,
+        sha_field_id: u32,
+        source_multiplicity: i32,
+        draw_source_relation: bool,
         len: usize,
-        issuer_field_handle: SharedFieldRelation,
-        mso_field_handle: SharedFieldRelation,
-        interaction_claim: MdocMsoPayloadInteractionClaim,
+        source_field_handle: SharedFieldRelation,
+        sha_field_handle: SharedFieldRelation,
+        interaction_claim: MdocExactShaMessageInteractionClaim,
     ) -> Self {
+        assert!(matches!(source_multiplicity, -1 | 1));
         Self {
             bytes: None,
             len,
-            issuer_field_handle,
-            mso_field_handle,
-            blinder_relation: None,
+            namespace,
+            source_field_id,
+            sha_field_id,
+            source_multiplicity,
+            draw_source_relation,
+            source_field_handle,
+            sha_field_handle,
+            claim_mask_trace: None,
+            claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             component: None,
-            blinder_component: None,
         }
     }
 
     fn log_size(&self) -> u32 {
-        mso_payload_log_size(self.len)
+        exact_sha_message_log_size(self.len)
     }
 
-    fn issuer_field_relation(&self) -> FieldBytesRelation {
-        self.issuer_field_handle.get()
+    fn source_field_relation(&self) -> FieldBytesRelation {
+        self.source_field_handle.get()
     }
 
-    fn mso_field_relation(&self) -> FieldBytesRelation {
-        self.mso_field_handle.get()
+    fn sha_field_relation(&self) -> FieldBytesRelation {
+        self.sha_field_handle.get()
     }
 
-    fn interaction_claim(&self) -> &MdocMsoPayloadInteractionClaim {
+    fn interaction_claim(&self) -> &MdocExactShaMessageInteractionClaim {
         self.interaction_claim
             .as_ref()
-            .expect("mdoc MSO payload interaction claim is set")
+            .expect("exact SHA message interaction claim is set")
+    }
+
+    fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        vec![self.log_size()]
+    }
+
+    fn with_claim_mask(
+        mut self,
+        trace: ClaimMaskTrace,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Self {
+        assert_eq!(trace.log_size(), self.log_size());
+        self.claim_mask_trace = Some(trace);
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn with_claim_mask_verifier(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge
+            .as_ref()
+            .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
     }
 }
 
-fn mso_payload_log_size(len: usize) -> u32 {
-    let rows = len.max(1).next_power_of_two();
-    rows.ilog2().max(LOG_N_LANES)
+const EXACT_SHA_MESSAGE_BLIND_ROWS: usize = 256;
+
+fn exact_sha_padded_len(len: usize) -> usize {
+    len.checked_add(9)
+        .and_then(|needed| needed.checked_add(63))
+        .map(|rounded| rounded / 64 * 64)
+        .expect("validated SHA message length does not overflow")
 }
 
-fn mso_payload_col_id(name: &str) -> PreProcessedColumnId {
+fn exact_sha_message_log_size(len: usize) -> u32 {
+    exact_sha_padded_len(len)
+        .checked_add(EXACT_SHA_MESSAGE_BLIND_ROWS)
+        .expect("validated SHA message trace length does not overflow")
+        .next_power_of_two()
+        .ilog2()
+        .max(LOG_N_LANES)
+}
+
+fn exact_sha_padding_byte(len: usize, row: usize, padded_len: usize) -> u8 {
+    debug_assert!(row >= len && row < padded_len);
+    if row == len {
+        return 0x80;
+    }
+    if row >= padded_len - 8 {
+        let bit_len = u64::try_from(len)
+            .expect("bounded message length fits u64")
+            .checked_mul(8)
+            .expect("bounded message bit length fits u64")
+            .to_be_bytes();
+        return bit_len[row - (padded_len - 8)];
+    }
+    0
+}
+
+fn exact_sha_message_col_id(namespace: &str, name: &str) -> PreProcessedColumnId {
     PreProcessedColumnId {
-        id: format!("mdoc/ts13/mso_payload/{name}"),
+        id: format!("mdoc/ts13/exact_sha_message/{namespace}/{name}"),
     }
 }
 
-fn mso_payload_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
+fn exact_sha_message_preprocessed_column_ids(namespace: &str) -> Vec<PreProcessedColumnId> {
     vec![
-        mso_payload_col_id("active"),
-        mso_payload_col_id("byte_index"),
+        exact_sha_message_col_id(namespace, "raw_active"),
+        exact_sha_message_col_id(namespace, "sha_active"),
+        exact_sha_message_col_id(namespace, "byte_index"),
+        exact_sha_message_col_id(namespace, "expected_padding"),
     ]
 }
 
-fn mso_payload_column_eval(log_size: u32, coset_values: Vec<M31>) -> MdocMsoPayloadColumnEval {
+fn exact_sha_message_column_eval(
+    log_size: u32,
+    coset_values: Vec<M31>,
+) -> MdocExactShaMessageColumnEval {
     let mut ordered = vec![M31::from_u32_unchecked(0); 1usize << log_size];
     for (coset_index, value) in coset_values.into_iter().enumerate() {
         let row = bit_reverse_index(
@@ -3488,73 +3215,103 @@ fn mso_payload_column_eval(log_size: u32, coset_values: Vec<M31>) -> MdocMsoPayl
     )
 }
 
-fn mso_payload_preprocessed_columns(len: usize) -> Vec<MdocMsoPayloadColumnEval> {
-    let log_size = mso_payload_log_size(len);
+fn exact_sha_message_preprocessed_columns(len: usize) -> Vec<MdocExactShaMessageColumnEval> {
+    let log_size = exact_sha_message_log_size(len);
     let rows = 1usize << log_size;
-    let mut active = vec![M31::from_u32_unchecked(0); rows];
+    let padded_len = exact_sha_padded_len(len);
+    let mut raw_active = vec![M31::from_u32_unchecked(0); rows];
+    let mut sha_active = vec![M31::from_u32_unchecked(0); rows];
     let mut byte_index = vec![M31::from_u32_unchecked(0); rows];
+    let mut expected_padding = vec![M31::from_u32_unchecked(0); rows];
     for row in 0..len {
-        active[row] = M31::from_u32_unchecked(1);
+        raw_active[row] = M31::from_u32_unchecked(1);
+    }
+    for row in 0..padded_len {
+        sha_active[row] = M31::from_u32_unchecked(1);
         byte_index[row] = M31::from_u32_unchecked(row as u32);
+        if row >= len {
+            expected_padding[row] =
+                M31::from_u32_unchecked(u32::from(exact_sha_padding_byte(len, row, padded_len)));
+        }
     }
     vec![
-        mso_payload_column_eval(log_size, active),
-        mso_payload_column_eval(log_size, byte_index),
+        exact_sha_message_column_eval(log_size, raw_active),
+        exact_sha_message_column_eval(log_size, sha_active),
+        exact_sha_message_column_eval(log_size, byte_index),
+        exact_sha_message_column_eval(log_size, expected_padding),
     ]
 }
 
-fn mso_payload_base_trace(bytes: &[u8]) -> Vec<MdocMsoPayloadColumnEval> {
-    let log_size = mso_payload_log_size(bytes.len());
-    let mut values = vec![M31::from_u32_unchecked(0); 1usize << log_size];
-    for (row, &byte) in bytes.iter().enumerate() {
-        values[row] = M31::from_u32_unchecked(u32::from(byte));
+fn random_exact_sha_message_m31(rng: &mut impl RngCore) -> M31 {
+    loop {
+        let value = rng.next_u32() & 0x7fff_ffff;
+        if value != 0x7fff_ffff {
+            return M31::from_u32_unchecked(value);
+        }
     }
-    vec![mso_payload_column_eval(log_size, values)]
 }
 
-fn mso_payload_interaction_trace(
+fn exact_sha_message_base_trace(bytes: &[u8]) -> Vec<MdocExactShaMessageColumnEval> {
+    let log_size = exact_sha_message_log_size(bytes.len());
+    let padded = stwo_sha256::native::pad_message(bytes);
+    let mut rng = rand::thread_rng();
+    let mut values = (0..1usize << log_size)
+        .map(|_| random_exact_sha_message_m31(&mut rng))
+        .collect::<Vec<_>>();
+    for (row, &byte) in padded.iter().enumerate() {
+        values[row] = M31::from_u32_unchecked(u32::from(byte));
+    }
+    vec![exact_sha_message_column_eval(log_size, values)]
+}
+
+fn exact_sha_message_interaction_trace(
     bytes: &[u8],
-    issuer_field_relation: &FieldBytesRelation,
-    mso_field_relation: &FieldBytesRelation,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
-) -> (Vec<MdocMsoPayloadColumnEval>, QM31) {
-    let log_size = mso_payload_log_size(bytes.len());
-    let preprocessed = mso_payload_preprocessed_columns(bytes.len());
-    let trace = mso_payload_base_trace(bytes);
+    source_field_id: u32,
+    sha_field_id: u32,
+    source_multiplicity: i32,
+    source_field_relation: &FieldBytesRelation,
+    sha_field_relation: &FieldBytesRelation,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
+) -> (Vec<MdocExactShaMessageColumnEval>, QM31) {
+    let log_size = exact_sha_message_log_size(bytes.len());
+    let preprocessed = exact_sha_message_preprocessed_columns(bytes.len());
+    let trace = exact_sha_message_base_trace(bytes);
     let n_vec_rows = 1usize << (log_size - LOG_N_LANES);
     let mut logup = LogupTraceGenerator::new(log_size);
     logup.col_from_iter((0..n_vec_rows).map(|vec_row| {
-        let active = preprocessed[0].data[vec_row];
-        let byte_index = preprocessed[1].data[vec_row];
+        let raw_active = preprocessed[0].data[vec_row];
+        let sha_active = preprocessed[1].data[vec_row];
+        let byte_index = preprocessed[2].data[vec_row];
         let value = trace[0].data[vec_row];
-        let numerator = PackedQM31::from(active);
-        let issuer_denominator: PackedQM31 = issuer_field_relation.combine(&[
-            PackedM31::broadcast(M31::from_u32_unchecked(MDOC_MSO_PAYLOAD_FIELD_ID)),
+        let source_numerator = if source_multiplicity == 1 {
+            PackedQM31::from(raw_active)
+        } else {
+            -PackedQM31::from(raw_active)
+        };
+        let sha_numerator = PackedQM31::from(sha_active);
+        let source_denominator: PackedQM31 = source_field_relation.combine(&[
+            PackedM31::broadcast(M31::from_u32_unchecked(source_field_id)),
             byte_index,
             value,
         ]);
-        let mso_denominator: PackedQM31 = mso_field_relation.combine(&[
-            PackedM31::broadcast(M31::from_u32_unchecked(MDOC_MSO_PAYLOAD_FIELD_ID)),
+        let sha_denominator: PackedQM31 = sha_field_relation.combine(&[
+            PackedM31::broadcast(M31::from_u32_unchecked(sha_field_id)),
             byte_index,
             value,
         ]);
         (
-            numerator * mso_denominator + numerator * issuer_denominator,
-            issuer_denominator * mso_denominator,
+            source_numerator * sha_denominator + sha_numerator * source_denominator,
+            source_denominator * sha_denominator,
         )
     }));
-    // Q-015 blinder `+m/(z−combine(v))` on every row, emitted LAST to match
-    // `MdocMsoPayloadEval::evaluate` (lone third entry under
-    // `finalize_logup_in_pairs`).
-    let blinder_num = PackedQM31::broadcast(blinder_m);
-    let blinder_den = crate::claimed_sum_blinder::blinder_denominator(blinder_relation, blinder_v);
-    logup.col_from_fn(|_| (blinder_num, blinder_den));
+    if let Some((mask, beta)) = claim_mask {
+        assert_eq!(mask.packed_rows(), n_vec_rows);
+        logup.col_from_fn(|vec_row| mask.packed_fraction_at(vec_row, beta));
+    }
     logup.finalize_last()
 }
 
-impl FrameworkEval for MdocMsoPayloadEval {
+impl FrameworkEval for MdocExactShaMessageEval {
     fn log_size(&self) -> u32 {
         self.log_size
     }
@@ -3564,109 +3321,133 @@ impl FrameworkEval for MdocMsoPayloadEval {
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let active = eval.get_preprocessed_column(mso_payload_col_id("active"));
-        let byte_index = eval.get_preprocessed_column(mso_payload_col_id("byte_index"));
+        let raw_active =
+            eval.get_preprocessed_column(exact_sha_message_col_id(self.namespace, "raw_active"));
+        let sha_active =
+            eval.get_preprocessed_column(exact_sha_message_col_id(self.namespace, "sha_active"));
+        let byte_index =
+            eval.get_preprocessed_column(exact_sha_message_col_id(self.namespace, "byte_index"));
+        let expected_padding = eval
+            .get_preprocessed_column(exact_sha_message_col_id(self.namespace, "expected_padding"));
         let value = eval.next_trace_mask();
         let one = m31_const::<E>(1);
-        eval.add_constraint(active.clone() * (active.clone() - one.clone()));
-        eval.add_constraint((one - active.clone()) * value.clone());
-        let field_id = m31_const::<E>(MDOC_MSO_PAYLOAD_FIELD_ID);
-        eval.add_to_relation(RelationEntry::new(
-            &self.issuer_field_relation,
-            E::EF::from(active.clone()),
-            &[field_id.clone(), byte_index.clone(), value.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.mso_field_relation,
-            E::EF::from(active),
-            &[field_id, byte_index, value],
-        ));
-        // Q-015 blinder `+m/(z−combine(v))`, ungated, emitted LAST to match
-        // the generator's column order.
-        add_blinder_relation_entry(
-            &mut eval,
-            &self.blinder_relation,
-            self.blinder_v,
-            self.blinder_m,
-            false,
+        eval.add_constraint(raw_active.clone() * (raw_active.clone() - one.clone()));
+        eval.add_constraint(sha_active.clone() * (sha_active.clone() - one));
+        eval.add_constraint(raw_active.clone() * (raw_active.clone() - sha_active.clone()));
+        eval.add_constraint(
+            (sha_active.clone() - raw_active.clone()) * (value.clone() - expected_padding),
         );
+        let source_field_id = m31_const::<E>(self.source_field_id);
+        let sha_field_id = m31_const::<E>(self.sha_field_id);
+        let source_multiplicity = if self.source_multiplicity == 1 {
+            E::EF::from(raw_active)
+        } else {
+            -E::EF::from(raw_active)
+        };
+        eval.add_to_relation(RelationEntry::new(
+            &self.source_field_relation,
+            source_multiplicity,
+            &[source_field_id.clone(), byte_index.clone(), value.clone()],
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.sha_field_relation,
+            E::EF::from(sha_active),
+            &[sha_field_id, byte_index, value],
+        ));
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
         eval.finalize_logup_in_pairs();
         eval
     }
 }
 
-impl Air for MdocMsoPayloadBind {
+impl Air for MdocExactShaMessageBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(0x5453_3133_4d53_4f50);
+        channel.mix_u64(0x5453_3133_4558_5348);
         channel.mix_u64(self.len as u64);
+        channel.mix_u64(u64::from(self.source_field_id));
+        channel.mix_u64(u64::from(self.sha_field_id));
+        channel.mix_u64(self.source_multiplicity as i64 as u64);
+        channel.mix_u64(u64::from(self.draw_source_relation));
+        channel.mix_u64(self.namespace.len() as u64);
+        for &byte in self.namespace.as_bytes() {
+            channel.mix_u64(u64::from(byte));
+        }
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
+        if self.draw_source_relation {
+            assert!(
+                !self.source_field_handle.is_set(),
+                "exact SHA source relation must be drawn exactly once"
+            );
+            self.source_field_handle
+                .set(FieldBytesRelation::draw(channel));
+        }
     }
 
     fn layout(&self) -> TreeLayout {
         TreeLayout {
-            preprocessed: vec![self.log_size(); 2],
-            trace: vec![self.log_size()],
-            // One paired column + the lone Q-015 blinder `+m` column in the
-            // main component, plus the counterpart component's column.
-            interaction: vec![self.log_size(); 3 * SECURE_EXTENSION_DEGREE],
+            preprocessed: vec![self.log_size(); 4],
+            trace: vec![
+                self.log_size();
+                1 + usize::from(self.claim_mask_challenge.is_some())
+                    * CLAIM_MASK_TRACE_COLUMNS
+            ],
+            // The two exact-message relation entries form one paired column.
+            // Enabling privacy appends a third logical fraction and one
+            // additional extension column.
+            interaction: vec![
+                self.log_size();
+                (1 + usize::from(self.claim_mask_challenge.is_some()))
+                    * SECURE_EXTENSION_DEGREE
+            ],
         }
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
-        let claim = self.interaction_claim();
-        vec![claim.claimed_sum, claim.blinder_claimed_sum]
+        vec![self.interaction_claim().claimed_sum]
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
-        mso_payload_preprocessed_column_ids()
+        exact_sha_message_preprocessed_column_ids(self.namespace)
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(exact_sha_message_preprocessed_columns(self.len))
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let claim = self.interaction_claim().clone();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc MSO payload blinder relation drawn before components");
-        self.component = Some(MdocMsoPayloadComponent::new(
+        self.component = Some(MdocExactShaMessageComponent::new(
             allocator,
-            MdocMsoPayloadEval {
+            MdocExactShaMessageEval {
                 log_size: self.log_size(),
-                issuer_field_relation: self.issuer_field_relation(),
-                mso_field_relation: self.mso_field_relation(),
-                blinder_relation: blinder_relation.clone(),
-                blinder_v: claim.blinder_v,
-                blinder_m: claim.blinder_m,
+                namespace: self.namespace,
+                source_field_id: self.source_field_id,
+                sha_field_id: self.sha_field_id,
+                source_multiplicity: self.source_multiplicity,
+                source_field_relation: self.source_field_relation(),
+                sha_field_relation: self.sha_field_relation(),
+                claim_mask_beta: self.claim_mask_beta(),
             },
             claim.claimed_sum,
-        ));
-        self.blinder_component = Some(FrameworkComponent::new(
-            allocator,
-            ClaimedSumBlinderEval {
-                log_size: self.log_size(),
-                relation: blinder_relation,
-                v: claim.blinder_v,
-                m: claim.blinder_m,
-            },
-            claim.blinder_claimed_sum,
         ));
     }
 
     fn components(&self) -> Vec<&dyn Component> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc MSO payload component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc MSO payload blinder component is built"),
-        ]
+        vec![self
+            .component
+            .as_ref()
+            .expect("exact SHA message component is built")]
     }
 }
 
-impl AirProver for MdocMsoPayloadBind {
+impl AirProver for MdocExactShaMessageBind {
     fn max_log_size(&self) -> u32 {
         self.log_size()
     }
@@ -3676,63 +3457,55 @@ impl AirProver for MdocMsoPayloadBind {
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(mso_payload_preprocessed_columns(self.len));
+        tb.extend_evals(exact_sha_message_preprocessed_columns(self.len));
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
         fingerprint_preprocessed_columns(
-            "eu_id_prover::mdoc::MdocMsoPayloadBind",
-            &mso_payload_preprocessed_column_ids(),
-            &mso_payload_preprocessed_columns(self.len),
+            "eu_id_prover::mdoc::MdocExactShaMessageBind",
+            &exact_sha_message_preprocessed_column_ids(self.namespace),
+            &exact_sha_message_preprocessed_columns(self.len),
         )
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        tb.extend_evals(mso_payload_base_trace(
-            self.bytes.as_ref().expect("mdoc MSO payload bytes are set"),
+        tb.extend_evals(exact_sha_message_base_trace(
+            self.bytes
+                .as_ref()
+                .expect("exact SHA message bytes are set"),
         ));
+        if let Some(mask) = &self.claim_mask_trace {
+            tb.extend_evals(mask.columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let blinder_v = random_qm31();
-        let blinder_m = random_qm31();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc MSO payload blinder relation drawn before interaction");
-        let (trace, claimed_sum) = mso_payload_interaction_trace(
-            self.bytes.as_ref().expect("mdoc MSO payload bytes are set"),
-            &self.issuer_field_relation(),
-            &self.mso_field_relation(),
-            &blinder_relation,
-            blinder_v,
-            blinder_m,
+        let claim_mask = self.claim_mask_trace.as_ref().zip(self.claim_mask_beta());
+        let (trace, claimed_sum) = exact_sha_message_interaction_trace(
+            self.bytes
+                .as_ref()
+                .expect("exact SHA message bytes are set"),
+            self.source_field_id,
+            self.sha_field_id,
+            self.source_multiplicity,
+            &self.source_field_relation(),
+            &self.sha_field_relation(),
+            claim_mask,
         );
         tb.extend_evals(trace);
-        let (blinder_trace, blinder_claimed_sum) =
-            blinder_counter_interaction(self.log_size(), &blinder_relation, blinder_v, blinder_m);
-        tb.extend_evals(blinder_trace);
-        self.interaction_claim = Some(MdocMsoPayloadInteractionClaim {
-            claimed_sum,
-            blinder_v,
-            blinder_m,
-            blinder_claimed_sum,
-        });
+        self.interaction_claim = Some(MdocExactShaMessageInteractionClaim { claimed_sum });
+        self.bytes.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc MSO payload component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc MSO payload blinder component is built"),
-        ]
+        vec![self
+            .component
+            .as_ref()
+            .expect("exact SHA message component is built")]
     }
 }
 
-const MDOC_REVOCATION_RANGE_LOG_SIZE: u32 = LOG_N_LANES;
+const MDOC_REVOCATION_RANGE_LOG_SIZE: u32 = 9;
 const REVOCATION_U64_BYTES: usize = 8;
 const REVOCATION_RANGE_BYTE_COLS: usize = 5 * REVOCATION_U64_BYTES;
 const REVOCATION_RANGE_BIT_COLS: usize = REVOCATION_RANGE_BYTE_COLS * 8;
@@ -3749,41 +3522,35 @@ type MdocRevocationRangeComponent = FrameworkComponent<MdocRevocationRangeEval>;
 struct MdocRevocationRangeBind {
     witness: Option<MdocRevocationRangeWitness>,
     mso_digest: Option<[u8; 32]>,
-    epoch: Option<u32>,
-    mso_digest_handle: SharedDigestRelation,
-    message_field_handle: Option<SharedFieldRelation>,
-    blinder_relation: Option<ClaimedSumBlinderRelation>,
+    epoch: u32,
+    mso_digest_handle: SharedPackedShaDigestRelation,
+    message_field_handle: SharedFieldRelation,
+    claim_mask_trace: Option<ClaimMaskTrace>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocRevocationRangeInteractionClaim>,
     component: Option<MdocRevocationRangeComponent>,
-    blinder_component: Option<FrameworkComponent<ClaimedSumBlinderEval>>,
 }
 
 #[derive(Clone)]
 struct MdocRevocationRangeEval {
-    mso_digest_relation: DigestBytesRelation,
-    message_field_relation: Option<FieldBytesRelation>,
+    mso_digest_relation: stwo_sha256::relations::PackedShaDigestRelation,
+    message_field_relation: FieldBytesRelation,
     epoch: u32,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_beta: Option<QM31>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct MdocRevocationRangeInteractionClaim {
     claimed_sum: QM31,
-    /// Q-015 §4b blinder pair (see `claimed_sum_blinder`).
-    blinder_v: QM31,
-    blinder_m: QM31,
-    blinder_claimed_sum: QM31,
 }
 
 impl MdocRevocationRangeBind {
     fn prover(
         witness: MdocRevocationRangeWitness,
         mso_digest: [u8; 32],
-        mso_digest_handle: SharedDigestRelation,
-        epoch: Option<u32>,
-        message_field_handle: Option<SharedFieldRelation>,
+        mso_digest_handle: SharedPackedShaDigestRelation,
+        epoch: u32,
+        message_field_handle: SharedFieldRelation,
     ) -> Self {
         Self {
             witness: Some(witness),
@@ -3791,17 +3558,17 @@ impl MdocRevocationRangeBind {
             epoch,
             mso_digest_handle,
             message_field_handle,
-            blinder_relation: None,
+            claim_mask_trace: None,
+            claim_mask_challenge: None,
             interaction_claim: None,
             component: None,
-            blinder_component: None,
         }
     }
 
     fn verifier(
-        mso_digest_handle: SharedDigestRelation,
-        epoch: Option<u32>,
-        message_field_handle: Option<SharedFieldRelation>,
+        mso_digest_handle: SharedPackedShaDigestRelation,
+        epoch: u32,
+        message_field_handle: SharedFieldRelation,
         interaction_claim: MdocRevocationRangeInteractionClaim,
     ) -> Self {
         Self {
@@ -3810,27 +3577,51 @@ impl MdocRevocationRangeBind {
             epoch,
             mso_digest_handle,
             message_field_handle,
-            blinder_relation: None,
+            claim_mask_trace: None,
+            claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             component: None,
-            blinder_component: None,
         }
     }
 
-    fn relation(&self) -> DigestBytesRelation {
+    fn relation(&self) -> stwo_sha256::relations::PackedShaDigestRelation {
         self.mso_digest_handle.get()
     }
 
-    fn message_relation(&self) -> Option<FieldBytesRelation> {
-        self.message_field_handle
-            .as_ref()
-            .map(|handle| handle.get())
+    fn message_relation(&self) -> FieldBytesRelation {
+        self.message_field_handle.get()
     }
 
     fn interaction_claim(&self) -> &MdocRevocationRangeInteractionClaim {
         self.interaction_claim
             .as_ref()
             .expect("mdoc revocation range interaction claim is set")
+    }
+
+    fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        vec![MDOC_REVOCATION_RANGE_LOG_SIZE]
+    }
+
+    fn with_claim_mask(
+        mut self,
+        trace: ClaimMaskTrace,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Self {
+        assert_eq!(trace.log_size(), MDOC_REVOCATION_RANGE_LOG_SIZE);
+        self.claim_mask_trace = Some(trace);
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn with_claim_mask_verifier(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge
+            .as_ref()
+            .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
     }
 }
 
@@ -3923,10 +3714,13 @@ fn revocation_range_base_trace(
     );
     debug_assert_eq!(first_row.len(), REVOCATION_RANGE_TRACE_COLS);
 
+    let mut rng = rand::thread_rng();
     first_row
         .into_iter()
         .map(|value| {
-            let mut column = vec![M31::from_u32_unchecked(0); 1 << MDOC_REVOCATION_RANGE_LOG_SIZE];
+            let mut column = (0..1usize << MDOC_REVOCATION_RANGE_LOG_SIZE)
+                .map(|_| random_exact_sha_message_m31(&mut rng))
+                .collect::<Vec<_>>();
             column[0] = M31::from_u32_unchecked(value);
             mdoc_column_eval(MDOC_REVOCATION_RANGE_LOG_SIZE, column)
         })
@@ -3936,43 +3730,40 @@ fn revocation_range_base_trace(
 fn revocation_range_interaction_trace(
     witness: &MdocRevocationRangeWitness,
     mso_digest: &[u8; 32],
-    relation: &DigestBytesRelation,
-    epoch: Option<u32>,
-    message_relation: Option<&FieldBytesRelation>,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    relation: &PackedShaDigestRelation,
+    epoch: u32,
+    message_relation: &FieldBytesRelation,
+    claim_mask: Option<(&ClaimMaskTrace, QM31)>,
 ) -> (Vec<MdocRevocationRangeColumnEval>, QM31) {
     let base = revocation_range_base_trace(witness, mso_digest);
     let active = revocation_range_active_column();
     let n_vec_rows = 1usize << (MDOC_REVOCATION_RANGE_LOG_SIZE - LOG_N_LANES);
     let digest_tail_offset =
         REVOCATION_RANGE_BYTE_COLS + REVOCATION_RANGE_BIT_COLS + REVOCATION_RANGE_CARRY_COLS;
-    // Q-015 blinder `+m/(z−combine(v))`, emitted LAST (paired with the lone
-    // message site in the TS13 branch, its own column otherwise).
-    let blinder_num = PackedQM31::broadcast(blinder_m);
-    let blinder_den = crate::claimed_sum_blinder::blinder_denominator(blinder_relation, blinder_v);
-    let mut logup = LogupTraceGenerator::new(MDOC_REVOCATION_RANGE_LOG_SIZE);
-    if let (Some(epoch), Some(message_relation)) = (epoch, message_relation) {
-        let epoch_bytes = epoch.to_le_bytes();
-        for first_lookup in (0..=TS13_REVOCATION_MESSAGE_LEN).step_by(2) {
-            logup.col_from_fn(|vec_row| {
-                let entry = |lookup: usize| {
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::new();
+    sites.push(
+        (0..n_vec_rows)
+            .map(|vec_row| {
+                let numerator = PackedQM31::from(active.data[vec_row]);
+                let mut values = vec![PackedM31::broadcast(M31::from_u32_unchecked(0)); 33];
+                values[0] = PackedM31::broadcast(M31::from_u32_unchecked(PACKED_SHA_MSO_SLOT));
+                for byte_idx in 0..REVOCATION_U64_BYTES {
+                    values[byte_idx + 1] = base[byte_idx].data[vec_row];
+                }
+                for byte_idx in REVOCATION_U64_BYTES..32 {
+                    values[byte_idx + 1] =
+                        base[digest_tail_offset + byte_idx - REVOCATION_U64_BYTES].data[vec_row];
+                }
+                (numerator, relation.combine(&values))
+            })
+            .collect(),
+    );
+    let epoch_bytes = epoch.to_le_bytes();
+    for byte_idx in 0..PRODUCT_TS13_REVOCATION_MESSAGE_BYTES {
+        sites.push(
+            (0..n_vec_rows)
+                .map(|vec_row| {
                     let numerator = PackedQM31::from(active.data[vec_row]);
-                    if lookup == 0 {
-                        let mut values = [PackedM31::broadcast(M31::from_u32_unchecked(0)); 32];
-                        for byte_idx in 0..REVOCATION_U64_BYTES {
-                            values[byte_idx] = base[byte_idx].data[vec_row];
-                        }
-                        for byte_idx in REVOCATION_U64_BYTES..32 {
-                            values[byte_idx] = base
-                                [digest_tail_offset + byte_idx - REVOCATION_U64_BYTES]
-                                .data[vec_row];
-                        }
-                        return (numerator, relation.combine(&values));
-                    }
-
-                    let byte_idx = lookup - 1;
                     let value = match byte_idx {
                         0..=7 => base[REVOCATION_U64_BYTES + byte_idx].data[vec_row],
                         8..=15 => base[2 * REVOCATION_U64_BYTES + byte_idx - 8].data[vec_row],
@@ -3988,39 +3779,37 @@ fn revocation_range_interaction_trace(
                         value,
                     ]);
                     (numerator, denominator)
-                };
-                let (left_num, left_den) = entry(first_lookup);
-                if first_lookup == TS13_REVOCATION_MESSAGE_LEN {
-                    // Pair the lone last message site with the blinder.
-                    return (
-                        left_num * blinder_den + blinder_num * left_den,
-                        left_den * blinder_den,
-                    );
-                }
-                let (right_num, right_den) = entry(first_lookup + 1);
-                (
-                    left_num * right_den + right_num * left_den,
-                    left_den * right_den,
-                )
-            });
-        }
-    } else {
-        logup.col_from_fn(|vec_row| {
-            let numerator = PackedQM31::from(active.data[vec_row]);
-            let mut values = [PackedM31::broadcast(M31::from_u32_unchecked(0)); 32];
-            for byte_idx in 0..REVOCATION_U64_BYTES {
-                values[byte_idx] = base[byte_idx].data[vec_row];
-            }
-            for byte_idx in REVOCATION_U64_BYTES..32 {
-                values[byte_idx] =
-                    base[digest_tail_offset + byte_idx - REVOCATION_U64_BYTES].data[vec_row];
-            }
-            let denominator = relation.combine(&values);
-            (numerator, denominator)
-        });
-        logup.col_from_fn(|_| (blinder_num, blinder_den));
+                })
+                .collect(),
+        );
     }
-    debug_assert_eq!(n_vec_rows, 1);
+    if let Some((mask, beta)) = claim_mask {
+        assert_eq!(mask.packed_rows(), n_vec_rows);
+        sites.push(
+            (0..n_vec_rows)
+                .map(|vec_row| mask.packed_fraction_at(vec_row, beta))
+                .collect(),
+        );
+    }
+
+    let mut logup = LogupTraceGenerator::new(MDOC_REVOCATION_RANGE_LOG_SIZE);
+    let mut site = 0;
+    while site + 1 < sites.len() {
+        let left = &sites[site];
+        let right = &sites[site + 1];
+        logup.col_from_iter((0..n_vec_rows).map(|row| {
+            let (left_num, left_den) = left[row];
+            let (right_num, right_den) = right[row];
+            (
+                left_num * right_den + right_num * left_den,
+                left_den * right_den,
+            )
+        }));
+        site += 2;
+    }
+    if site < sites.len() {
+        logup.col_from_iter((0..n_vec_rows).map(|row| sites[site][row]));
+    }
     logup.finalize_last()
 }
 
@@ -4049,16 +3838,13 @@ impl FrameworkEval for MdocRevocationRangeEval {
         let values: Vec<E::F> = (0..REVOCATION_RANGE_TRACE_COLS)
             .map(|_| eval.next_trace_mask())
             .collect();
-        for value in &values {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
-        }
 
         for byte_idx in 0..REVOCATION_RANGE_BYTE_COLS {
             let byte = values[byte_idx].clone();
             let bits = &values[REVOCATION_RANGE_BYTE_COLS + byte_idx * 8
                 ..REVOCATION_RANGE_BYTE_COLS + (byte_idx + 1) * 8];
             for bit in bits {
-                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
+                eval.add_constraint(active.clone() * bit.clone() * (bit.clone() - one.clone()));
             }
             eval.add_constraint(active.clone() * (byte - byte_from_bits::<E>(bits)));
         }
@@ -4066,7 +3852,7 @@ impl FrameworkEval for MdocRevocationRangeEval {
         let lower_carries_offset = REVOCATION_RANGE_BYTE_COLS + REVOCATION_RANGE_BIT_COLS;
         let upper_carries_offset = lower_carries_offset + REVOCATION_U64_BYTES;
         for carry in &values[lower_carries_offset..upper_carries_offset + REVOCATION_U64_BYTES] {
-            eval.add_constraint(carry.clone() * (carry.clone() - one.clone()));
+            eval.add_constraint(active.clone() * carry.clone() * (carry.clone() - one.clone()));
         }
 
         for byte_idx in 0..REVOCATION_U64_BYTES {
@@ -4105,131 +3891,99 @@ impl FrameworkEval for MdocRevocationRangeEval {
         eval.add_constraint(active.clone() * values[upper_carries_offset + 7].clone());
 
         let digest_tail_offset = upper_carries_offset + REVOCATION_U64_BYTES;
-        let mut digest_values = Vec::with_capacity(32);
-        for byte_idx in 0..REVOCATION_U64_BYTES {
-            digest_values.push(values[byte_idx].clone());
-        }
-        for byte_idx in 0..REVOCATION_RANGE_DIGEST_TAIL_COLS {
-            digest_values.push(values[digest_tail_offset + byte_idx].clone());
-        }
+        let mut digest_values = Vec::with_capacity(33);
+        digest_values.push(m31_const::<E>(PACKED_SHA_MSO_SLOT));
+        digest_values.extend((0..REVOCATION_U64_BYTES).map(|index| values[index].clone()));
+        digest_values.extend(
+            (0..REVOCATION_RANGE_DIGEST_TAIL_COLS)
+                .map(|index| values[digest_tail_offset + index].clone()),
+        );
         eval.add_to_relation(RelationEntry::new(
             &self.mso_digest_relation,
             E::EF::from(active.clone()),
             &digest_values,
         ));
-        if let Some(message_relation) = &self.message_field_relation {
-            let field_id = m31_const::<E>(MDOC_REVOCATION_MESSAGE_FIELD_ID);
-            for byte_idx in 0..TS13_REVOCATION_MESSAGE_LEN {
-                let value = match byte_idx {
-                    0..=7 => values[REVOCATION_U64_BYTES + byte_idx].clone(),
-                    8..=15 => values[2 * REVOCATION_U64_BYTES + byte_idx - 8].clone(),
-                    _ => m31_const::<E>(u32::from(self.epoch.to_le_bytes()[byte_idx - 16])),
-                };
-                eval.add_to_relation(RelationEntry::new(
-                    message_relation,
-                    E::EF::from(active.clone()),
-                    &[field_id.clone(), m31_const::<E>(byte_idx as u32), value],
-                ));
-            }
-            // Q-015 blinder `+m/(z−combine(v))`, ungated, emitted LAST to
-            // match the generator's pairing of the lone message site.
-            add_blinder_relation_entry(
-                &mut eval,
-                &self.blinder_relation,
-                self.blinder_v,
-                self.blinder_m,
-                false,
-            );
-            eval.finalize_logup_in_pairs();
-        } else {
-            add_blinder_relation_entry(
-                &mut eval,
-                &self.blinder_relation,
-                self.blinder_v,
-                self.blinder_m,
-                false,
-            );
-            eval.finalize_logup();
+        let field_id = m31_const::<E>(MDOC_REVOCATION_MESSAGE_FIELD_ID);
+        for byte_idx in 0..PRODUCT_TS13_REVOCATION_MESSAGE_BYTES {
+            let value = match byte_idx {
+                0..=7 => values[REVOCATION_U64_BYTES + byte_idx].clone(),
+                8..=15 => values[2 * REVOCATION_U64_BYTES + byte_idx - 8].clone(),
+                _ => m31_const::<E>(u32::from(self.epoch.to_le_bytes()[byte_idx - 16])),
+            };
+            eval.add_to_relation(RelationEntry::new(
+                &self.message_field_relation,
+                E::EF::from(active.clone()),
+                &[field_id.clone(), m31_const::<E>(byte_idx as u32), value],
+            ));
         }
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
+        eval.finalize_logup_in_pairs();
         eval
     }
 }
 
 impl Air for MdocRevocationRangeBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(0x5453_3133_524e_4701);
+        channel.mix_u64(0x5453_3133_524e_4702);
     }
 
-    fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
-        self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
-    }
+    fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
 
     fn layout(&self) -> TreeLayout {
         TreeLayout {
             preprocessed: vec![MDOC_REVOCATION_RANGE_LOG_SIZE],
-            trace: vec![MDOC_REVOCATION_RANGE_LOG_SIZE; REVOCATION_RANGE_TRACE_COLS],
-            // Main component columns (the Q-015 blinder site pairs with the
-            // lone message site in the TS13 branch, or gets its own column in
-            // the digest-only branch) plus the counterpart component column.
+            trace: vec![
+                MDOC_REVOCATION_RANGE_LOG_SIZE;
+                REVOCATION_RANGE_TRACE_COLS
+                    + usize::from(self.claim_mask_challenge.is_some())
+                        * CLAIM_MASK_TRACE_COLUMNS
+            ],
             interaction: vec![
                 MDOC_REVOCATION_RANGE_LOG_SIZE;
-                if self.message_field_handle.is_some() {
-                    ((2 + TS13_REVOCATION_MESSAGE_LEN).div_ceil(2) + 1) * SECURE_EXTENSION_DEGREE
-                } else {
-                    3 * SECURE_EXTENSION_DEGREE
-                }
+                (1 + PRODUCT_TS13_REVOCATION_MESSAGE_BYTES
+                    + usize::from(self.claim_mask_challenge.is_some()))
+                .div_ceil(2)
+                    * SECURE_EXTENSION_DEGREE
             ],
         }
     }
 
     fn claimed_sums(&self) -> Vec<QM31> {
-        let claim = self.interaction_claim();
-        vec![claim.claimed_sum, claim.blinder_claimed_sum]
+        vec![self.interaction_claim().claimed_sum]
     }
 
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
         vec![revocation_range_active_id()]
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(vec![revocation_range_active_column()])
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         let claim = self.interaction_claim().clone();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc revocation range blinder relation drawn before components");
         self.component = Some(MdocRevocationRangeComponent::new(
             allocator,
             MdocRevocationRangeEval {
                 mso_digest_relation: self.relation(),
                 message_field_relation: self.message_relation(),
-                epoch: self.epoch.unwrap_or(0),
-                blinder_relation: blinder_relation.clone(),
-                blinder_v: claim.blinder_v,
-                blinder_m: claim.blinder_m,
+                epoch: self.epoch,
+                claim_mask_beta: self.claim_mask_beta(),
             },
             claim.claimed_sum,
-        ));
-        self.blinder_component = Some(FrameworkComponent::new(
-            allocator,
-            ClaimedSumBlinderEval {
-                log_size: MDOC_REVOCATION_RANGE_LOG_SIZE,
-                relation: blinder_relation,
-                v: claim.blinder_v,
-                m: claim.blinder_m,
-            },
-            claim.blinder_claimed_sum,
         ));
     }
 
     fn components(&self) -> Vec<&dyn Component> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc revocation range component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc revocation range blinder component is built"),
-        ]
+        vec![self
+            .component
+            .as_ref()
+            .expect("mdoc revocation range component is built")]
     }
 }
 
@@ -4263,15 +4017,13 @@ impl AirProver for MdocRevocationRangeBind {
                 .as_ref()
                 .expect("mdoc revocation range MSO digest is set"),
         ));
+        if let Some(mask) = &self.claim_mask_trace {
+            tb.extend_evals(mask.columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        let blinder_v = random_qm31();
-        let blinder_m = random_qm31();
-        let blinder_relation = self
-            .blinder_relation
-            .clone()
-            .expect("mdoc revocation range blinder relation drawn before interaction");
+        let claim_mask = self.claim_mask_trace.as_ref().zip(self.claim_mask_beta());
         let (trace, claimed_sum) = revocation_range_interaction_trace(
             self.witness
                 .as_ref()
@@ -4281,56 +4033,37 @@ impl AirProver for MdocRevocationRangeBind {
                 .expect("mdoc revocation range MSO digest is set"),
             &self.relation(),
             self.epoch,
-            self.message_relation().as_ref(),
-            &blinder_relation,
-            blinder_v,
-            blinder_m,
+            &self.message_relation(),
+            claim_mask,
         );
         tb.extend_evals(trace);
-        let (blinder_trace, blinder_claimed_sum) = blinder_counter_interaction(
-            MDOC_REVOCATION_RANGE_LOG_SIZE,
-            &blinder_relation,
-            blinder_v,
-            blinder_m,
-        );
-        tb.extend_evals(blinder_trace);
-        self.interaction_claim = Some(MdocRevocationRangeInteractionClaim {
-            claimed_sum,
-            blinder_v,
-            blinder_m,
-            blinder_claimed_sum,
-        });
+        self.interaction_claim = Some(MdocRevocationRangeInteractionClaim { claimed_sum });
+        self.witness.take();
+        self.mso_digest.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
-        vec![
-            self.component
-                .as_ref()
-                .expect("mdoc revocation range component is built"),
-            self.blinder_component
-                .as_ref()
-                .expect("mdoc revocation range blinder component is built"),
-        ]
+        vec![self
+            .component
+            .as_ref()
+            .expect("mdoc revocation range component is built")]
     }
 }
 
-#[cfg(feature = "ec-coprocessor")]
 struct MdocCoprocessorBindingProver {
     issuer_input: EcdsaVerifyInput,
     device_input: EcdsaVerifyInput,
-    /// TS13 revocation sorted-pair signature, proven as the bundle's third
-    /// ECDSA instance set when the statement enables revocation.
-    revocation_input: Option<EcdsaVerifyInput>,
-    issuer_witness: eu_id_ec_coprocessor::ecdsa::Witness,
-    device_witness: eu_id_ec_coprocessor::ecdsa::Witness,
-    revocation_witness: Option<eu_id_ec_coprocessor::ecdsa::Witness>,
+    /// Revocation sorted-pair signature, proven as the bundle's third ECDSA
+    /// instance set.
+    revocation_input: EcdsaVerifyInput,
+    issuer_witness: Option<eu_id_ec_coprocessor::ecdsa::ValidatedWitness>,
+    device_witness: Option<eu_id_ec_coprocessor::ecdsa::ValidatedWitness>,
+    revocation_witness: Option<eu_id_ec_coprocessor::ecdsa::ValidatedWitness>,
     mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
     mac_state: MdocP4bMacSharedState,
     bundle: Option<eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle>,
-    profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bProveProfile>,
 }
 
-#[cfg(feature = "ec-coprocessor")]
 fn random_mdoc_p4b_mac_key_shares() -> eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares {
     eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares(std::array::from_fn(|_| {
         let mut share = [0u8; 16];
@@ -4339,48 +4072,37 @@ fn random_mdoc_p4b_mac_key_shares() -> eu_id_ec_coprocessor::ecdsa::MdocP4bMacKe
     }))
 }
 
-#[cfg(feature = "ec-coprocessor")]
 impl MdocCoprocessorBindingProver {
     fn new(
         issuer_input: EcdsaVerifyInput,
         device_input: EcdsaVerifyInput,
-        revocation_input: Option<EcdsaVerifyInput>,
+        revocation_input: EcdsaVerifyInput,
         mac_key_shares: eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         mac_state: MdocP4bMacSharedState,
     ) -> Result<Self, Error> {
-        let issuer_witness = crate::ec_coprocessor::generate_witness_from_stwo(&issuer_input)
-            .map_err(Error::CoprocessorWitness)?;
-        let device_witness = crate::ec_coprocessor::generate_witness_from_stwo(&device_input)
-            .map_err(Error::CoprocessorWitness)?;
-        // Generate AND check the revocation witness up front: a forged
-        // sorted-pair signature must surface as a prove-time `Err`, not as a
-        // panic when the bundle later re-runs `verify_witness`.
-        let revocation_witness = revocation_input
-            .as_ref()
-            .map(|input| {
-                let witness = crate::ec_coprocessor::generate_witness_from_stwo(input)
-                    .map_err(Error::CoprocessorWitness)?;
-                crate::ec_coprocessor::verify_witness_from_stwo(input, &witness)
-                    .map_err(Error::CoprocessorWitness)?;
-                Ok::<_, Error>(witness)
-            })
-            .transpose()?;
+        let issuer_witness =
+            crate::ec_coprocessor::generate_validated_witness_from_stwo(&issuer_input)
+                .map_err(Error::CoprocessorWitness)?;
+        let device_witness =
+            crate::ec_coprocessor::generate_validated_witness_from_stwo(&device_input)
+                .map_err(Error::CoprocessorWitness)?;
+        let revocation_witness =
+            crate::ec_coprocessor::generate_validated_witness_from_stwo(&revocation_input)
+                .map_err(Error::CoprocessorWitness)?;
         Ok(Self {
             issuer_input,
             device_input,
             revocation_input,
-            issuer_witness,
-            device_witness,
-            revocation_witness,
+            issuer_witness: Some(issuer_witness),
+            device_witness: Some(device_witness),
+            revocation_witness: Some(revocation_witness),
             mac_key_shares,
             mac_state,
             bundle: None,
-            profile: None,
         })
     }
 }
 
-#[cfg(feature = "ec-coprocessor")]
 impl Air for MdocCoprocessorBindingProver {
     fn mix_public(&self, _channel: &mut Blake2sChannel) {}
     fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
@@ -4408,7 +4130,6 @@ impl Air for MdocCoprocessorBindingProver {
     }
 }
 
-#[cfg(feature = "ec-coprocessor")]
 impl AirProver for MdocCoprocessorBindingProver {
     fn max_log_size(&self) -> u32 {
         0
@@ -4423,50 +4144,39 @@ impl AirProver for MdocCoprocessorBindingProver {
             crate::ec_coprocessor::issuer_key_projection_from_stwo(&self.issuer_input);
         let device_projection =
             crate::ec_coprocessor::message_hash_projection_from_stwo(&self.device_input);
-        // The revocation instance projects its full public input: message
-        // hash, signature, and key are all statement-recomputable at verify,
-        // and the message hash is additionally pinned to the revocation-SHA
-        // digest by `PublicDigestBind`.
-        let revocation_projection = self
-            .revocation_input
-            .as_ref()
-            .map(crate::ec_coprocessor::full_projection_from_stwo);
-        let mut tagged: Vec<(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)> = vec![
+        // Only the revocation key is public. The message hash is rejoined to
+        // the STARK-side revocation SHA through the final two private MAC
+        // values. R and s remain entirely inside the coprocessor witness.
+        let revocation_projection =
+            crate::ec_coprocessor::public_key_projection_from_stwo(&self.revocation_input);
+        let tagged: Vec<(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)> = vec![
             (b"issuer".as_slice(), &issuer_projection),
             (b"device".as_slice(), &device_projection),
+            (b"revocation".as_slice(), &revocation_projection),
         ];
-        if let Some(revocation_projection) = revocation_projection.as_ref() {
-            tagged.push((b"revocation".as_slice(), revocation_projection));
-        }
         crate::mix_coprocessor_tagged_projections(channel, &tagged)
             .expect("mdoc coprocessor public projections mix");
         let seed = crate::draw_coprocessor_seed(channel);
-        let revocation = match (
-            self.revocation_input.as_ref(),
-            revocation_projection.as_ref(),
-        ) {
-            (Some(input), Some(projection)) => Some((
-                input,
-                projection,
-                self.revocation_witness
-                    .as_ref()
-                    .expect("revocation witness exists alongside the revocation input"),
-            )),
-            _ => None,
-        };
-        let (bundle, profile) =
-            crate::ec_coprocessor::prove_mdoc_p4b_circuit_bundle_from_stwo_profiled(
-                &self.issuer_input,
-                &issuer_projection,
-                &self.issuer_witness,
-                &self.device_input,
-                &device_projection,
-                &self.device_witness,
-                revocation,
-                &self.mac_key_shares,
-                seed,
-            )
-            .expect("mdoc P4b coprocessor bundle proves MAC-bound witnesses");
+        let issuer_witness = self
+            .issuer_witness
+            .as_ref()
+            .expect("mdoc issuer witness is available");
+        let device_witness = self
+            .device_witness
+            .as_ref()
+            .expect("mdoc device witness is available");
+        let revocation_witness = self
+            .revocation_witness
+            .as_ref()
+            .expect("mdoc revocation witness is available");
+        let bundle = crate::ec_coprocessor::prove_mdoc_p4b_circuit_bundle_from_validated(
+            issuer_witness,
+            device_witness,
+            revocation_witness,
+            &self.mac_key_shares,
+            seed,
+        )
+        .expect("mdoc P4b coprocessor bundle proves MAC-bound witnesses");
         let av = crate::ec_coprocessor::mdoc_p4b_av_from_bundle(&bundle, seed);
         self.mac_state.publish(MdocP4bMacPublic {
             av,
@@ -4474,7 +4184,9 @@ impl AirProver for MdocCoprocessorBindingProver {
         });
         crate::mix_coprocessor_rejoin(channel, &bundle).expect("mdoc coprocessor rejoin mixes");
         self.bundle = Some(bundle);
-        self.profile = Some(profile);
+        self.issuer_witness.take();
+        self.device_witness.take();
+        self.revocation_witness.take();
     }
 
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
@@ -4482,19 +4194,15 @@ impl AirProver for MdocCoprocessorBindingProver {
     }
 }
 
-#[cfg(feature = "ec-coprocessor")]
 struct MdocCoprocessorBindingVerifier {
     issuer_input: EcdsaVerifyInput,
     device_input: EcdsaVerifyInput,
-    /// Statement-recomputed TS13 revocation input; `Some` iff the statement
-    /// carries the revocation signature (layout-gated before verification).
-    revocation_input: Option<EcdsaVerifyInput>,
+    /// Statement-recomputed mandatory revocation input.
+    revocation_input: EcdsaVerifyInput,
     bundle: eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
     mac_state: MdocP4bMacSharedState,
-    profile: Option<eu_id_ec_coprocessor::ecdsa::MdocP4bVerifyProfile>,
 }
 
-#[cfg(feature = "ec-coprocessor")]
 impl Air for MdocCoprocessorBindingVerifier {
     fn mix_public(&self, _channel: &mut Blake2sChannel) {}
     fn draw_relations(&mut self, _channel: &mut Blake2sChannel) {}
@@ -4529,24 +4237,20 @@ impl Air for MdocCoprocessorBindingVerifier {
             crate::ec_coprocessor::issuer_key_projection_from_stwo(&self.issuer_input);
         let device_projection =
             crate::ec_coprocessor::message_hash_projection_from_stwo(&self.device_input);
-        let revocation_projection = self
-            .revocation_input
-            .as_ref()
-            .map(crate::ec_coprocessor::full_projection_from_stwo);
-        let mut tagged: Vec<(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)> = vec![
+        let revocation_projection =
+            crate::ec_coprocessor::public_key_projection_from_stwo(&self.revocation_input);
+        let tagged: Vec<(&[u8], &eu_id_ec_coprocessor::ecdsa::EcdsaPublicProjection)> = vec![
             (b"issuer".as_slice(), &issuer_projection),
             (b"device".as_slice(), &device_projection),
+            (b"revocation".as_slice(), &revocation_projection),
         ];
-        if let Some(revocation_projection) = revocation_projection.as_ref() {
-            tagged.push((b"revocation".as_slice(), revocation_projection));
-        }
         crate::mix_coprocessor_tagged_projections(channel, &tagged)
             .map_err(VerificationError::InvalidStructure)?;
         let seed = crate::draw_coprocessor_seed(channel);
-        let profile = crate::ec_coprocessor::verify_mdoc_p4b_circuit_bundle_from_stwo_profiled(
+        crate::ec_coprocessor::verify_mdoc_p4b_circuit_bundle_from_stwo(
             &issuer_projection,
             &device_projection,
-            revocation_projection.as_ref(),
+            &revocation_projection,
             &self.bundle,
             seed,
         )
@@ -4558,328 +4262,200 @@ impl Air for MdocCoprocessorBindingVerifier {
         });
         crate::mix_coprocessor_rejoin(channel, &self.bundle)
             .map_err(VerificationError::InvalidStructure)?;
-        self.profile = Some(profile);
         Ok(())
     }
 }
 
-pub fn prove_mdoc_circuit(
+/// Runtime switch for the per-phase prove profile. Off unless
+/// `EUID_PROVE_PROFILE=1`, so the default prove path pays one env lookup.
+fn prove_profile_enabled() -> bool {
+    std::env::var_os("EUID_PROVE_PROFILE").is_some_and(|value| value == "1")
+}
+
+pub(crate) fn prove_mdoc_circuit(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
 ) -> Result<MdocCircuitProof, Error> {
+    strict_verification_timestamp(statement.verification_time_epoch_seconds)
+        .map_err(|_| Error::Prove("invalid verifier timestamp".to_string()))?;
+    if !current_product_circuit_semantics(statement) {
+        return Err(Error::Prove(PRODUCT_SEMANTICS_ERROR.to_string()));
+    }
     prove_mdoc_circuit_with_pcs_config(extracted, statement, mdoc_production_pcs_config())
 }
 
-pub fn prove_mdoc_circuit_with_pcs_config(
+fn product_sha_messages<'a>(
+    extracted: &'a ExtractedPidMdoc,
+    revocation_message: &'a [u8; PRODUCT_TS13_REVOCATION_MESSAGE_BYTES],
+) -> Result<Vec<&'a [u8]>, MdocError> {
+    let selected_items: Vec<&[u8]> = extracted
+        .extracted_attributes
+        .iter()
+        .map(|attribute| attribute.item.as_slice())
+        .collect();
+    validate_product_sha_input_sizes(
+        extracted.mso.as_slice(),
+        extracted.issuer_sig_structure.as_slice(),
+        &selected_items,
+    )?;
+
+    let mut messages = Vec::with_capacity(PRODUCT_FIXED_PACKED_SHA_MESSAGES + selected_items.len());
+    messages.push(extracted.issuer_sig_structure.as_slice());
+    messages.push(extracted.mso.as_slice());
+    messages.push(revocation_message.as_slice());
+    messages.extend(selected_items);
+    Ok(messages)
+}
+
+fn prove_mdoc_circuit_with_pcs_config(
     extracted: &ExtractedPidMdoc,
     statement: &MdocCircuitStatement,
     config: PcsConfig,
 ) -> Result<MdocCircuitProof, Error> {
-    if statement.birth_date_value_offset != extracted.birth_date_value_offset
-        || statement.nationality_value_offset != extracted.nationality_value_offset
-    {
-        return Err(Error::Prove(
-            "mdoc statement offsets do not match extracted witness".to_string(),
-        ));
-    }
     if !ecdsa_inputs_equal(&statement.issuer_input, &extracted.issuer_ecdsa_input)
         || !ecdsa_inputs_equal(&statement.device_input, &extracted.device_ecdsa_input)
     {
         return Err(Error::P256InstanceMismatch);
     }
 
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_draft = single_p256_draft(statement.issuer_input.clone())?;
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_draft = single_p256_draft(statement.device_input.clone())?;
-    let revocation_p256_input = ts13_revocation_p256_input(statement)?;
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let revocation_draft = revocation_p256_input
-        .clone()
-        .map(single_p256_draft)
-        .transpose()?;
-    // All four SHA instances share one `log_n_rows`. This is NOT the wasteful
-    // choice the phase-0b plan assumed: the bulk SHA preprocessed (σ/Σ decode,
-    // xor_8, split-pack tables — the ~6.3M-cell class) sits at the fixed
-    // `LOG_SIZE_16` and is deduped across instances regardless of trace log.
-    // Only 10 preprocessed columns (`is_first_row` + 9 round-cyclic) are sized to
-    // `log_n_rows`, and their column *ids* are log-independent while their
-    // *content* is not — so under air-core first-writer-wins tree-0 dedup all
-    // four instances must agree on the log or the content-invariant assertion
-    // fires. Sizing each instance to its own `min_log_size` would force a
-    // per-instance preprocessed namespace, duplicating the 6.3M-cell table set
-    // ~4× to save only ~0.5M padded trace/interaction cells (<1% of the circuit).
-    // Measured: shared-log waste is 529,792 cells of 79.99M (0.66%); see
-    // `mdoc_sizing_waste`. Equal sizing is the correct, cheaper choice.
-    let (issuer_sha_witness, issuer_sha_log) = sha_params(&extracted.issuer_sig_structure);
-    let (device_sha_witness, device_sha_log) = sha_params(&extracted.device_sig_structure);
-    let mso_sha_params = statement
-        .ts13_revocation_range
-        .as_ref()
-        .map(|_| sha_params(&extracted.mso));
-    let revocation_message = match (
-        &statement.ts13_revocation_signature,
-        &statement.ts13_revocation,
-        &statement.ts13_revocation_range,
-    ) {
-        (Some(_), Some(revocation), Some(range)) => Some(ts13_revocation_message_bytes(
-            range.id_lo,
-            range.id_hi,
-            revocation.epoch,
-        )),
-        _ => None,
-    };
-    let revocation_sha_params = revocation_message
-        .as_ref()
-        .map(|message| sha_params(message.as_slice()));
-    let attribute_items: Vec<_> = extracted
+    let revocation_p256_input = ts13_revocation_p256_input(statement);
+
+    // The product owns exactly one packed SHA component at the fixed profile
+    // size. Its five message slots are ordered by the contract and exclude
+    // DeviceAuthentication, whose hash is bound by the EC coprocessor path.
+    let revocation_message = ts13_revocation_message_bytes(
+        statement.ts13_revocation_range.id_lo,
+        statement.ts13_revocation_range.id_hi,
+        statement.ts13_revocation.epoch,
+    );
+    let packed_messages =
+        product_sha_messages(extracted, &revocation_message).map_err(Error::Mdoc)?;
+    let packed_sha_witness = compute_packed_sha256_witness(&packed_messages)
+        .map_err(|error| Error::Prove(format!("packed SHA witness: {error}")))?;
+    let shared_sha_log = crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
+    let packed_sha_digest = SharedPackedShaDigestRelation::new();
+    let sha_field = SharedFieldRelation::new();
+    let scope_statement = mdoc_scope_statement(statement);
+    let scope_handles = MdocScopeHandles::fresh(&scope_statement, packed_sha_digest.clone())
+        .map_err(|error| Error::Prove(format!("mdoc scope handles: {error}")))?;
+    let revocation_message_field = SharedFieldRelation::new();
+    let sha_table_relations = SharedShaTableRelations::new();
+
+    let item_outer_streams: Vec<_> = extracted
         .extracted_attributes
         .iter()
-        .map(|attribute| attribute.item.as_slice())
+        .map(|attribute| attribute.item.clone())
         .collect();
-    let attribute_sha_params: Vec<_> = attribute_items
-        .iter()
-        .map(|item| sha_params(item))
-        .collect();
-    let shared_sha_log = std::iter::once(issuer_sha_log)
-        .chain(std::iter::once(device_sha_log))
-        .chain(mso_sha_params.iter().map(|(_, log)| *log))
-        .chain(revocation_sha_params.iter().map(|(_, log)| *log))
-        .chain(attribute_sha_params.iter().map(|(_, log)| *log))
-        .max()
-        .expect("sha log list is non-empty");
-    let issuer_digest = SharedDigestRelation::new();
-    let device_digest = SharedDigestRelation::new();
-    let mso_digest = statement
-        .ts13_revocation_range
-        .as_ref()
-        .map(|_| SharedDigestRelation::new());
-    let revocation_digest = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .map(|_| SharedDigestRelation::new());
-    let attribute_digests: Vec<_> = (0..attribute_sha_params.len())
-        .map(|_| SharedDigestRelation::new())
-        .collect();
-    let issuer_field = SharedFieldRelation::new();
-    let mso_field = statement
-        .ts13_revocation_range
-        .as_ref()
-        .map(|_| SharedFieldRelation::new());
-    let revocation_message_field = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .map(|_| SharedFieldRelation::new());
-    let attribute_fields: Vec<_> = (0..attribute_sha_params.len())
-        .map(|_| SharedFieldRelation::new())
-        .collect();
-    let sha_table_relations = SharedShaTableRelations::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let revocation_scalar_z = statement
-        .ts13_revocation_signature
-        .as_ref()
-        .map(|_| SharedScalarZRelation::new());
-
-    let issuer_exposure = issuer_mso_exposure(statement);
-    let mso_exposure = mso_payload_exposure(statement);
-    let revocation_exposure = ts13_revocation_message_exposure(statement);
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(|index| attribute_exposure(statement, index))
-        .collect();
-
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut issuer_p256 = P256Prover::new(&issuer_draft)
-        .map_err(Error::P256Prepare)?
-        .with_z_binding(issuer_scalar_z.clone());
-    // The `mdoc/device` namespace is REQUIRED, not waste: the hinted-mul schedule
-    // preprocessed columns are witness-dependent (measured: 18 of 215 columns —
-    // the log-13 schedule set — differ between the issuer and device signatures).
-    // Without the namespace the device module would alias onto the issuer's
-    // schedule under air-core first-writer-wins tree-0 dedup, binding the wrong
-    // constraints. Two genuinely distinct signatures cannot share the schedule.
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut device_p256 = P256Prover::new(&device_draft)
-        .map_err(Error::P256Prepare)?
-        .with_preprocessed_namespace("mdoc/device")
-        .with_z_binding(device_scalar_z.clone());
-    let mut sha_consumers = vec![
-        (&issuer_sha_witness, issuer_exposure.clone()),
-        (&device_sha_witness, FieldExposure::empty()),
-    ];
-    if let Some((mso_sha_witness, _)) = &mso_sha_params {
-        sha_consumers.push((mso_sha_witness, mso_exposure.clone()));
+    let mut mdoc_scope = MdocScope::new(
+        scope_statement.clone(),
+        extracted.issuer_sig_structure.clone(),
+        item_outer_streams,
+        scope_handles.clone(),
+    )
+    .map_err(|error| Error::Prove(format!("mdoc semantic scope: {error}")))?;
+    mdoc_scope = mdoc_scope.with_payload_hash_binding();
+    mdoc_scope = mdoc_scope
+        .with_fixed_log_size(crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE)
+        .map_err(|error| Error::Prove(format!("fixed mdoc scope: {error}")))?;
+    let parser_stream_bytes = mdoc_scope.parser_stream_bytes().to_vec();
+    let parser_specs = scope_handles
+        .stream_specs(&scope_statement)
+        .map_err(|error| Error::Prove(format!("mdoc parser specs: {error}")))?;
+    if parser_specs.len() != parser_stream_bytes.len() {
+        return Err(Error::Prove(
+            "mdoc parser specification/witness count mismatch".to_string(),
+        ));
     }
-    if let Some((revocation_sha_witness, _)) = &revocation_sha_params {
-        sha_consumers.push((revocation_sha_witness, revocation_exposure.clone()));
-    }
-    for ((witness, _), exposure) in attribute_sha_params.iter().zip(attribute_exposures.iter()) {
-        sha_consumers.push((witness, exposure.clone()));
-    }
-    let sha_table_multiplicities = ShaTableMultiplicities::from_consumers(&sha_consumers);
-    let mut sha_tables =
-        ShaTablesProver::new(sha_table_multiplicities, sha_table_relations.clone());
-    let mut issuer_sha = Sha256Prover::new(&issuer_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(issuer_digest.clone())
-        .with_field_handle(issuer_exposure.clone(), issuer_field.clone());
-    let mut device_sha = Sha256Prover::new(&device_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-        .with_shared_tables(sha_table_relations.clone())
-        .with_digest_handle(device_digest.clone());
-    let mut mso_sha = match (&mso_sha_params, &mso_digest) {
-        (Some((mso_sha_witness, _)), Some(mso_digest)) => Some({
-            let sha = Sha256Prover::new(mso_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(mso_digest.clone());
-            if let Some(mso_field) = &mso_field {
-                sha.with_field_handle(mso_exposure.clone(), mso_field.clone())
-            } else {
-                sha
-            }
-        }),
-        _ => None,
-    };
-    let mut revocation_sha = match (&revocation_sha_params, &revocation_digest) {
-        (Some((revocation_sha_witness, _)), Some(revocation_digest)) => {
-            let sha = Sha256Prover::new(revocation_sha_witness, shared_sha_log, SHA_GROUP_WIDTH)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(revocation_digest.clone());
-            Some(
-                if let Some(revocation_message_field) = &revocation_message_field {
-                    sha.with_field_handle(
-                        revocation_exposure.clone(),
-                        revocation_message_field.clone(),
-                    )
-                } else {
-                    sha
-                },
-            )
-        }
-        _ => None,
-    };
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut revocation_p256 = revocation_draft
-        .as_ref()
-        .map(|draft| {
-            let prover = P256Prover::new(draft).map_err(Error::P256Prepare)?;
-            Ok::<_, Error>(if let Some(revocation_scalar_z) = &revocation_scalar_z {
-                prover
-                    .with_preprocessed_namespace("mdoc/ts13/revocation")
-                    .with_z_binding(revocation_scalar_z.clone())
-            } else {
-                prover.with_preprocessed_namespace("mdoc/ts13/revocation")
-            })
-        })
-        .transpose()?;
-    let mut attribute_sha = Vec::with_capacity(attribute_sha_params.len());
-    for index in 0..attribute_sha_params.len() {
-        attribute_sha.push(
-            Sha256Prover::new(
-                &attribute_sha_params[index].0,
-                shared_sha_log,
-                SHA_GROUP_WIDTH,
-            )
-            .with_shared_tables(sha_table_relations.clone())
-            .with_digest_handle(attribute_digests[index].clone())
-            .with_field_handle(
-                attribute_exposures[index].clone(),
-                attribute_fields[index].clone(),
+    let mut mdoc_cbor_streams = Vec::with_capacity(parser_specs.len());
+    for (slot, spec) in parser_specs.into_iter().enumerate() {
+        let max_message_len = product_parser_max_message_len(&spec.input);
+        let (input_handle, input_field_id) = match spec.input {
+            MdocScopeParserInput::ShaIssuer => (
+                sha_field.clone(),
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ISSUER_SLOT,
             ),
-        );
-    }
-
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_bridge_rows = crate::bridge_rows(&issuer_p256.proof_claim().public_inputs.instances);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_bridge_log = crate::bridge_log_size(issuer_bridge_rows.len());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut issuer_bridge = DigestBindProver::new(
-        issuer_bridge_rows,
-        issuer_bridge_log,
-        issuer_scalar_z,
-        issuer_digest.clone(),
-    );
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge_rows = crate::bridge_rows(&device_p256.proof_claim().public_inputs.instances);
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_bridge_log = crate::bridge_log_size(device_bridge_rows.len());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut device_bridge = DigestBindProver::new(
-        device_bridge_rows,
-        device_bridge_log,
-        device_scalar_z,
-        device_digest.clone(),
-    );
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut revocation_bridge_log_size = None;
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut revocation_bridge = match (
-        revocation_p256.as_ref(),
-        revocation_scalar_z.clone(),
-        revocation_digest.clone(),
-    ) {
-        (Some(revocation_p256), Some(revocation_scalar_z), Some(revocation_digest)) => {
-            let rows = crate::bridge_rows(&revocation_p256.proof_claim().public_inputs.instances);
-            let log = crate::bridge_log_size(rows.len());
-            revocation_bridge_log_size = Some(log);
-            Some(DigestBindProver::new(
-                rows,
-                log,
-                revocation_scalar_z,
-                revocation_digest,
-            ))
-        }
-        _ => None,
-    };
-    #[cfg(feature = "ec-coprocessor")]
-    let mut device_public_digest_bind =
-        PublicDigestBind::new(statement.device_input.message_hash.0, device_digest.clone());
-    // TS13 revocation under the coprocessor: the revocation ECDSA rides the
-    // P4b bundle as a third instance set, so the in-STARK P-256 AIR and its
-    // scalar-z bridge are gone. The signed message hash (recomputable by the
-    // verifier from the statement) is instead pinned to the committed
-    // revocation-SHA digest exactly like the device session digest above.
-    #[cfg(feature = "ec-coprocessor")]
-    let mut revocation_public_digest_bind = revocation_p256_input
-        .as_ref()
-        .zip(revocation_digest.clone())
-        .map(|(input, digest)| PublicDigestBind::new(input.message_hash.0, digest));
-    let mut mdoc_window_bind = MdocWindowBind::new_for_attributes(
-        mdoc_window_bind_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        issuer_field.clone(),
-        attribute_fields.clone(),
-        attribute_digests.clone(),
-    );
-    let mut mdoc_validity = MdocValidityBind::new(
-        statement.policy.current_date,
-        mdoc_validity_rows_from(statement, Some(&extracted.issuer_sig_structure)),
-        issuer_field.clone(),
-    );
-    let mut mso_payload_bind = statement.ts13_revocation_range.as_ref().map(|_| {
-        MdocMsoPayloadBind::prover(
-            extracted.mso.clone(),
-            issuer_field.clone(),
-            mso_field
-                .clone()
-                .expect("MSO field handle exists when revocation range is set"),
+            MdocScopeParserInput::ShaItem(index) => {
+                if index >= extracted.extracted_attributes.len() {
+                    return Err(Error::Prove(
+                        "mdoc item parser index is out of range".to_string(),
+                    ));
+                }
+                (
+                    sha_field.clone(),
+                    PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ITEM_SLOT_BASE + index as u32,
+                )
+            }
+            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id),
+        };
+        let bytes = match spec.mode {
+            MdocCborInputMode::ShaPadded => {
+                stwo_sha256::native::pad_message(&parser_stream_bytes[slot])
+            }
+            MdocCborInputMode::Raw => parser_stream_bytes[slot].clone(),
+        };
+        let parser = MdocCborStream::new_with_log_size(
+            bytes,
+            spec.mode,
+            spec.stream_id,
+            input_field_id,
+            input_handle,
+            Some(spec.parsed),
+            product_parser_log_size(slot),
+            max_message_len,
         )
-    });
-    #[cfg(feature = "ec-coprocessor")]
+        .map_err(|error| Error::Prove(format!("mdoc CBOR parser: {error}")))?;
+        mdoc_cbor_streams.push(parser);
+    }
+    let mut mso_exact_cbor = MdocCborStream::new_exact_sha(
+        stwo_sha256::native::pad_message(&extracted.mso),
+        NORMALIZED_MSO_STREAM_ID,
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+        sha_field.clone(),
+        MDOC_MSO_PAYLOAD_FIELD_ID,
+        scope_handles.payload_hash_fields.clone(),
+        None,
+        crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE,
+        u32::try_from(PRODUCT_MAX_MSO_PAYLOAD_BYTES).expect("product MSO bound fits u32"),
+    )
+    .map_err(|error| Error::Prove(format!("exact MSO CBOR/SHA binding: {error}")))?;
+
+    let mut sha_tables = ShaTablesProver::new(&packed_sha_witness, sha_table_relations.clone());
+    let mut packed_sha = Sha256Prover::new(&packed_sha_witness, shared_sha_log)
+        .map_err(|error| Error::Prove(format!("packed SHA prover: {error}")))?
+        .with_shared_tables(sha_table_relations.clone())
+        .with_digest_handle(packed_sha_digest.clone())
+        .with_field_handle(sha_field.clone());
+    let mut mdoc_validity = MdocValidityBind::new(
+        statement.verification_time_epoch_seconds,
+        mdoc_validity_rows(
+            extracted.valid_from_timestamp.text_bytes(),
+            extracted.valid_until_timestamp.text_bytes(),
+        ),
+        scope_handles.semantic_fields.clone(),
+    );
+    let mut revocation_message_bind = MdocExactShaMessageBind::prover(
+        "revocation_message",
+        MDOC_REVOCATION_MESSAGE_FIELD_ID,
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
+        -1,
+        true,
+        revocation_message.to_vec(),
+        revocation_message_field.clone(),
+        sha_field.clone(),
+    );
+
     let mac_key_shares = random_mdoc_p4b_mac_key_shares();
-    #[cfg(feature = "ec-coprocessor")]
+
     let mac_state = MdocP4bMacSharedState::default();
-    #[cfg(feature = "ec-coprocessor")]
+
     let mut mdoc_mac = MdocMacBind::prover(
         &mac_key_shares,
-        mdoc_p4b_mac_values(statement),
+        mdoc_p4b_mac_values(statement, &revocation_p256_input),
         mac_state.clone(),
-        issuer_digest.clone(),
-        issuer_field.clone(),
+        packed_sha_digest.clone(),
+        scope_handles.semantic_fields.clone(),
     );
-    #[cfg(feature = "ec-coprocessor")]
+
     let mut coprocessor = MdocCoprocessorBindingProver::new(
         statement.issuer_input.clone(),
         statement.device_input.clone(),
@@ -4899,289 +4475,275 @@ pub fn prove_mdoc_circuit_with_pcs_config(
         day: u32::from(extracted.birth_date_bytes[3]),
     });
     let nat_private = predicates::NatPrivateInput {
-        nationalities: vec![statement.nationality_binding.code()],
+        nationalities: extracted
+            .nationality_candidates
+            .iter()
+            .map(ParsedNationalityValue::predicate_code)
+            .collect(),
     };
-    let mut age = if let Some(index) = statement.age_attribute_index {
+    let mut age = if statement.age_attribute_index.is_some() {
         let age = AgeRangeCheck::new(PcsConfig::default())
             .prover(&age_public, &age_dob)
             .map_err(Error::AgePrepare)?;
-        Some(match statement.birth_date_binding {
-            MdocBirthDateBinding::Packed(_) => {
-                age.with_dob_binding(attribute_fields[index].clone())
-            }
-            MdocBirthDateBinding::Text(_) => {
-                age.with_text_dob_binding(attribute_fields[index].clone())
-            }
-        })
+        Some(age.with_text_dob_binding(scope_handles.semantic_fields.clone()))
     } else {
         None
     };
-    let mut nat = if let Some(index) = statement.nationality_attribute_index {
+    let mut nat = if statement.nationality_attribute_index.is_some() {
         Some(
             NationalityPredicate::new(PcsConfig::default())
                 .prover(&nat_public, &nat_private)
                 .map_err(Error::NatPrepare)?
-                .with_nat_binding(attribute_fields[index].clone()),
+                .with_nat_binding(scope_handles.semantic_fields.clone()),
         )
     } else {
         None
     };
-    let mut ts13_revocation_public = statement
-        .ts13_revocation
-        .clone()
-        .map(MdocRevocationPublicBind::new);
-    let mut ts13_revocation_range = statement.ts13_revocation_range.clone().map(|range| {
-        let mso_digest_bytes: [u8; 32] = Sha256::digest(&extracted.mso).into();
-        MdocRevocationRangeBind::prover(
-            range,
-            mso_digest_bytes,
-            mso_digest
-                .clone()
-                .expect("MSO digest handle exists when revocation range is set"),
-            statement
-                .ts13_revocation
-                .as_ref()
-                .map(|revocation| revocation.epoch)
-                .filter(|_| statement.ts13_revocation_signature.is_some()),
-            revocation_message_field.clone(),
-        )
-    });
+    let mut ts13_revocation_public =
+        MdocRevocationPublicBind::new(statement.ts13_revocation.clone());
+    let mso_digest_bytes: [u8; 32] = Sha256::digest(&extracted.mso).into();
+    let mut ts13_revocation_range = MdocRevocationRangeBind::prover(
+        statement.ts13_revocation_range.clone(),
+        mso_digest_bytes,
+        packed_sha_digest.clone(),
+        statement.ts13_revocation.epoch,
+        revocation_message_field.clone(),
+    );
+
+    // Every private interaction claim receives one committed mask from a
+    // single per-proof ring. The ring targets sum to zero, while the shared
+    // challenge is drawn only after every mask column has been committed.
+    let claim_mask_challenge = SharedClaimMaskChallenge::new();
+    let mut claim_mask_log_sizes = Vec::new();
+    claim_mask_log_sizes.extend(sha_tables.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(packed_sha.ordered_claim_mask_log_sizes());
+    for parser in &mdoc_cbor_streams {
+        claim_mask_log_sizes.extend(parser.ordered_claim_mask_log_sizes());
+    }
+    claim_mask_log_sizes.extend(mso_exact_cbor.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(mdoc_scope.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(mdoc_validity.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(revocation_message_bind.ordered_claim_mask_log_sizes());
+    if let Some(age) = &age {
+        claim_mask_log_sizes.extend(age.ordered_claim_mask_log_sizes());
+    }
+    if let Some(nat) = &nat {
+        claim_mask_log_sizes.extend(nat.ordered_claim_mask_log_sizes());
+    }
+    claim_mask_log_sizes.extend(ts13_revocation_range.ordered_claim_mask_log_sizes());
+
+    claim_mask_log_sizes.extend(mdoc_mac.ordered_claim_mask_log_sizes());
+
+    let mut claim_mask_ring = ClaimMaskRing::new(&claim_mask_log_sizes)
+        .map_err(|error| Error::Prove(format!("claim-mask ring: {error}")))?;
+
+    let logs = sha_tables.ordered_claim_mask_log_sizes();
+    let masks = take_claim_masks(&mut claim_mask_ring, &logs)
+        .map_err(|error| Error::Prove(format!("SHA-table claim masks: {error}")))?;
+    sha_tables = sha_tables
+        .with_claim_masks(masks, claim_mask_challenge.clone())
+        .map_err(|error| Error::Prove(format!("SHA-table claim masks: {error}")))?;
+
+    let logs = packed_sha.ordered_claim_mask_log_sizes();
+    let masks = take_claim_masks(&mut claim_mask_ring, &logs)
+        .map_err(|error| Error::Prove(format!("packed SHA claim masks: {error}")))?;
+    packed_sha = packed_sha
+        .with_claim_masks(masks, claim_mask_challenge.clone())
+        .map_err(|error| Error::Prove(format!("packed SHA claim masks: {error}")))?;
+    mdoc_cbor_streams = mdoc_cbor_streams
+        .into_iter()
+        .enumerate()
+        .map(|(index, parser)| {
+            let log_size = parser.ordered_claim_mask_log_sizes()[0];
+            let mask = claim_mask_ring.take(log_size).map_err(|error| {
+                Error::Prove(format!("mdoc parser {index} claim mask: {error}"))
+            })?;
+            Ok(parser.with_claim_mask(mask, claim_mask_challenge.clone()))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let log_size = mso_exact_cbor.ordered_claim_mask_log_sizes()[0];
+    let mask = claim_mask_ring
+        .take(log_size)
+        .map_err(|error| Error::Prove(format!("exact MSO parser claim mask: {error}")))?;
+    mso_exact_cbor = mso_exact_cbor.with_claim_mask(mask, claim_mask_challenge.clone());
+
+    let logs = mdoc_scope.ordered_claim_mask_log_sizes();
+    let masks = take_claim_masks(&mut claim_mask_ring, &logs)
+        .map_err(|error| Error::Prove(format!("mdoc scope claim masks: {error}")))?;
+    mdoc_scope = mdoc_scope.with_claim_masks(masks, claim_mask_challenge.clone());
+
+    let log_size = mdoc_validity.ordered_claim_mask_log_sizes()[0];
+    let mask = claim_mask_ring
+        .take(log_size)
+        .map_err(|error| Error::Prove(format!("mdoc validity claim mask: {error}")))?;
+    mdoc_validity = mdoc_validity.with_claim_mask(mask, claim_mask_challenge.clone());
+
+    let log_size = revocation_message_bind.ordered_claim_mask_log_sizes()[0];
+    let mask = claim_mask_ring
+        .take(log_size)
+        .map_err(|error| Error::Prove(format!("revocation message claim mask: {error}")))?;
+    revocation_message_bind =
+        revocation_message_bind.with_claim_mask(mask, claim_mask_challenge.clone());
+    age = age
+        .map(|age| {
+            let logs = age.ordered_claim_mask_log_sizes();
+            let masks = take_claim_masks(&mut claim_mask_ring, &logs)
+                .map_err(|error| Error::Prove(format!("age claim masks: {error}")))?;
+            age.with_claim_masks(masks, claim_mask_challenge.clone())
+                .map_err(|error| Error::Prove(format!("age claim masks: {error}")))
+        })
+        .transpose()?;
+    nat = nat
+        .map(|nat| {
+            let logs = nat.ordered_claim_mask_log_sizes();
+            let masks = take_claim_masks(&mut claim_mask_ring, &logs)
+                .map_err(|error| Error::Prove(format!("nationality claim masks: {error}")))?;
+            nat.with_claim_masks(masks, claim_mask_challenge.clone())
+                .map_err(|error| Error::Prove(format!("nationality claim masks: {error}")))
+        })
+        .transpose()?;
+    let log_size = ts13_revocation_range.ordered_claim_mask_log_sizes()[0];
+    let mask = claim_mask_ring
+        .take(log_size)
+        .map_err(|error| Error::Prove(format!("revocation range claim mask: {error}")))?;
+    ts13_revocation_range =
+        ts13_revocation_range.with_claim_mask(mask, claim_mask_challenge.clone());
+
+    {
+        let logs = mdoc_mac.ordered_claim_mask_log_sizes();
+        let masks = take_claim_masks(&mut claim_mask_ring, &logs)
+            .map_err(|error| Error::Prove(format!("mdoc MAC claim masks: {error}")))?;
+        mdoc_mac = mdoc_mac
+            .with_claim_masks(masks, claim_mask_challenge.clone())
+            .map_err(|error| Error::Prove(format!("mdoc MAC claim masks: {error}")))?;
+    }
+    claim_mask_ring
+        .finish()
+        .map_err(|error| Error::Prove(format!("claim-mask ring: {error}")))?;
+    let mut claim_mask_anchor =
+        ClaimMaskChallengeModule::new(claim_mask_challenge, claim_mask_log_sizes)
+            .map_err(|error| Error::Prove(format!("claim-mask anchor: {error}")))?;
 
     let stark_proof = {
-        #[cfg(not(feature = "ec-coprocessor"))]
-        let mut modules: Vec<&mut dyn AirProver> = vec![
-            &mut sha_tables,
-            &mut issuer_p256,
-            &mut issuer_sha,
-            &mut issuer_bridge,
-            &mut device_p256,
-            &mut device_sha,
-            &mut device_bridge,
-        ];
-        #[cfg(feature = "ec-coprocessor")]
-        let mut modules: Vec<&mut dyn AirProver> = vec![
-            &mut sha_tables,
-            &mut issuer_sha,
-            &mut device_sha,
-            &mut device_public_digest_bind,
-        ];
-        #[cfg(not(feature = "ec-coprocessor"))]
-        if let Some(revocation_p256) = revocation_p256.as_mut() {
-            modules.push(revocation_p256);
+        let mut modules: Vec<&mut dyn AirProver> = vec![&mut sha_tables, &mut packed_sha];
+        for parser in &mut mdoc_cbor_streams {
+            modules.push(parser);
         }
-        if let Some(mso_sha) = mso_sha.as_mut() {
-            modules.push(mso_sha);
-        }
-        if let Some(revocation_sha) = revocation_sha.as_mut() {
-            modules.push(revocation_sha);
-        }
-        #[cfg(not(feature = "ec-coprocessor"))]
-        if let Some(revocation_bridge) = revocation_bridge.as_mut() {
-            modules.push(revocation_bridge);
-        }
-        #[cfg(feature = "ec-coprocessor")]
-        if let Some(revocation_public_digest_bind) = revocation_public_digest_bind.as_mut() {
-            modules.push(revocation_public_digest_bind);
-        }
-        for sha in &mut attribute_sha {
-            modules.push(sha);
-        }
-        modules.push(&mut mdoc_window_bind);
+        modules.push(&mut mso_exact_cbor);
+        modules.push(&mut mdoc_scope);
         modules.push(&mut mdoc_validity);
-        if let Some(mso_payload_bind) = mso_payload_bind.as_mut() {
-            modules.push(mso_payload_bind);
-        }
+        modules.push(&mut revocation_message_bind);
         if let Some(age) = age.as_mut() {
             modules.push(age);
         }
         if let Some(nat) = nat.as_mut() {
             modules.push(nat);
         }
-        if let Some(revocation_public) = ts13_revocation_public.as_mut() {
-            modules.push(revocation_public);
-        }
-        if let Some(revocation_range) = ts13_revocation_range.as_mut() {
-            modules.push(revocation_range);
-        }
-        #[cfg(feature = "ec-coprocessor")]
+        modules.push(&mut ts13_revocation_public);
+        modules.push(&mut ts13_revocation_range);
+
         modules.push(&mut coprocessor);
-        #[cfg(feature = "ec-coprocessor")]
+
         modules.push(&mut mdoc_mac);
-        air_core::prove(modules.as_mut_slice(), config)
-            .map_err(|e| Error::Prove(format!("{e:?}")))?
+        modules.push(&mut claim_mask_anchor);
+        let (proof, profile) = air_core::prove_profiled(modules.as_mut_slice(), config)
+            .map_err(|e| Error::Prove(format!("{e:?}")))?;
+        if prove_profile_enabled() {
+            eprintln!("[euid-prove-profile] mdoc stark\n{profile}");
+        }
+        proof
     };
-    #[cfg(feature = "ec-coprocessor")]
+
     let coprocessor_bundle = coprocessor.bundle.take().ok_or(Error::CoprocessorMissing)?;
-    #[cfg(feature = "ec-coprocessor")]
-    let p4b_prove_profile = coprocessor.profile.take();
 
     Ok(MdocCircuitProof {
         stark_proof,
         sha_tables_interaction_claim: sha_tables.interaction_claim().clone(),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        issuer_p256_claim: issuer_p256.proof_claim().clone(),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        issuer_p256_interaction_claim: issuer_p256.interaction_claim().clone(),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        device_p256_claim: device_p256.proof_claim().clone(),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        device_p256_interaction_claim: device_p256.interaction_claim().clone(),
-        #[cfg(feature = "ec-coprocessor")]
-        device_public_digest_bind_interaction_claim: device_public_digest_bind
+        packed_sha_interaction_claim: packed_sha.interaction_claim().clone(),
+
+        coprocessor_bundle,
+
+        mdoc_mac_interaction_claim: mdoc_mac.interaction_claim().clone(),
+        mdoc_cbor_log_sizes: mdoc_cbor_streams
+            .iter()
+            .map(MdocCborStream::log_size)
+            .collect(),
+        mdoc_cbor_interaction_claims: mdoc_cbor_streams
+            .iter()
+            .map(|parser| parser.interaction_claim().clone())
+            .collect(),
+        mso_exact_cbor_interaction_claim: mso_exact_cbor.interaction_claim().clone(),
+        mdoc_scope_metadata: mdoc_scope.metadata().clone(),
+        mdoc_scope_interaction_claim: mdoc_scope.interaction_claim().clone(),
+
+        mdoc_validity_interaction_claim: mdoc_validity.interaction_claim().clone(),
+        revocation_message_bind_interaction_claim: revocation_message_bind
             .interaction_claim()
             .clone(),
-        #[cfg(feature = "ec-coprocessor")]
-        coprocessor_bundle: Some(coprocessor_bundle),
-        #[cfg(feature = "ec-coprocessor")]
-        mdoc_mac_interaction_claim: mdoc_mac.interaction_claim().clone(),
-        issuer_sha_log_n_rows: shared_sha_log,
-        issuer_sha_interaction_claim: issuer_sha.interaction_claim().clone(),
-        device_sha_log_n_rows: shared_sha_log,
-        device_sha_interaction_claim: device_sha.interaction_claim().clone(),
-        mso_sha_log_n_rows: mso_sha.as_ref().map(|_| shared_sha_log),
-        mso_sha_interaction_claim: mso_sha.as_ref().map(|sha| sha.interaction_claim().clone()),
-        revocation_sha_log_n_rows: revocation_sha.as_ref().map(|_| shared_sha_log),
-        revocation_sha_interaction_claim: revocation_sha
-            .as_ref()
-            .map(|sha| sha.interaction_claim().clone()),
-        attribute_sha_log_n_rows: vec![shared_sha_log; attribute_sha.len()],
-        attribute_sha_interaction_claims: attribute_sha
-            .iter()
-            .map(|sha| sha.interaction_claim().clone())
-            .collect(),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        revocation_p256_claim: revocation_p256
-            .as_ref()
-            .map(|p256| p256.proof_claim().clone()),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        revocation_p256_interaction_claim: revocation_p256
-            .as_ref()
-            .map(|p256| p256.interaction_claim().clone()),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        revocation_bridge_log_size,
-        #[cfg(not(feature = "ec-coprocessor"))]
-        revocation_bridge_interaction_claim: revocation_bridge
-            .as_ref()
-            .map(|bridge| bridge.interaction_claim().clone()),
-        #[cfg(feature = "ec-coprocessor")]
-        ts13_revocation_input: revocation_p256_input.clone(),
-        #[cfg(feature = "ec-coprocessor")]
-        revocation_public_digest_bind_interaction_claim: revocation_public_digest_bind
-            .as_ref()
-            .map(|bind| bind.interaction_claim().clone()),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        issuer_bridge_log_size: issuer_bridge_log,
-        #[cfg(not(feature = "ec-coprocessor"))]
-        issuer_bridge_interaction_claim: issuer_bridge.interaction_claim().clone(),
-        #[cfg(not(feature = "ec-coprocessor"))]
-        device_bridge_log_size: device_bridge_log,
-        #[cfg(not(feature = "ec-coprocessor"))]
-        device_bridge_interaction_claim: device_bridge.interaction_claim().clone(),
-        mdoc_window_bind_interaction_claim: mdoc_window_bind.interaction_claim().clone(),
-        mdoc_validity_interaction_claim: mdoc_validity.interaction_claim().clone(),
-        mso_payload_bind_interaction_claim: mso_payload_bind
-            .as_ref()
-            .map(|bind| bind.interaction_claim().clone()),
-        ts13_revocation_range_interaction_claim: ts13_revocation_range
-            .as_ref()
-            .map(|range| range.interaction_claim().clone()),
+        ts13_revocation_range_interaction_claim: ts13_revocation_range.interaction_claim().clone(),
         age_public: age.as_ref().map(|_| age_public),
-        // Q-015 §4b: no blinder pair on the age/nat predicate sums. The
-        // verifier RECOMPUTES these from the public statement (that is the
-        // public-binding fix), so a blinder term here would either break the
-        // recomputation or have to live in a verifier-recomputed public sum,
-        // which the pair rules forbid.
+        // Predicate public inputs remain statement-bound, while every private
+        // LogUp claimed sum is randomized by its committed claim-mask column.
         age_claimed_sums: age.as_ref().map(|age| age.claimed_sums()),
         nat_public: nat.as_ref().map(|_| nat_public),
         nat_claimed_sums: nat.as_ref().map(|nat| nat.claimed_sums()),
-        #[cfg(feature = "ec-coprocessor")]
-        p4b_prove_profile,
     })
 }
 
-pub fn verify_mdoc_circuit(
+#[cfg(test)]
+fn verify_mdoc_circuit(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
 ) -> Result<(), Error> {
+    if !current_product_circuit_semantics(statement) {
+        return Err(Error::Verify(PRODUCT_SEMANTICS_ERROR.to_string()));
+    }
+    proof.validate_product_fixed_shape()?;
     verify_mdoc_circuit_with_pcs_config(proof, statement, mdoc_production_pcs_config())
 }
 
-#[cfg(feature = "ec-coprocessor")]
-pub fn verify_mdoc_public_statement(
+pub fn verify_product_mdoc_public_statement(
     proof: &MdocCircuitProof,
     statement: &MdocPublicStatement,
 ) -> Result<(), Error> {
+    if !current_product_public_semantics(statement) {
+        return Err(Error::Verify(PRODUCT_SEMANTICS_ERROR.to_string()));
+    }
+    proof.validate_product_fixed_shape()?;
+    strict_verification_timestamp(statement.verification_time_epoch_seconds)
+        .map_err(|_| Error::Verify("invalid verifier timestamp".to_string()))?;
+    validate_product_requested_attributes(&statement.attributes)
+        .map_err(|error| Error::Verify(format!("invalid mdoc disclosure scope: {error:?}")))?;
     let verifier_statement = statement.verifier_circuit_statement();
     verify_mdoc_circuit_with_pcs_config(proof, &verifier_statement, mdoc_production_pcs_config())
 }
 
-pub fn verify_mdoc_circuit_with_pcs_config(
+fn verify_mdoc_circuit_with_pcs_config(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
     expected_pcs_config: PcsConfig,
 ) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled(proof, statement, expected_pcs_config).map(|_| ())
+    verify_mdoc_circuit_with_pcs_config_impl(proof, statement, expected_pcs_config, None)
 }
 
-pub fn verify_mdoc_circuit_with_preprocessed_root(
+/// `shape_sink` is instrumentation only. Verification behaviour is identical
+/// whether or not a sink is supplied; [`mdoc_proof_byte_breakdown`] passes one
+/// so the byte accounting reads the verifier's own module list instead of a
+/// copy that could drift from it.
+fn verify_mdoc_circuit_with_pcs_config_impl(
     proof: &MdocCircuitProof,
     statement: &MdocCircuitStatement,
-    expected_preprocessed_root: air_core::CommitmentRoot,
+    expected_pcs_config: PcsConfig,
+    shape_sink: Option<&mut Vec<MdocModuleShape>>,
 ) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-        proof,
-        statement,
-        mdoc_production_pcs_config(),
-        expected_preprocessed_root,
-    )
-}
+    strict_verification_timestamp(statement.verification_time_epoch_seconds)
+        .map_err(|_| Error::Verify("invalid verifier timestamp".to_string()))?;
 
-pub fn verify_mdoc_circuit_with_pcs_config_and_preprocessed_root(
-    proof: &MdocCircuitProof,
-    statement: &MdocCircuitStatement,
-    expected_pcs_config: PcsConfig,
-    expected_preprocessed_root: air_core::CommitmentRoot,
-) -> Result<(), Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled_impl(
-        proof,
-        statement,
-        expected_pcs_config,
-        Some(expected_preprocessed_root),
-    )
-    .map(|_| ())
-}
-
-pub fn verify_mdoc_circuit_with_pcs_config_profiled(
-    proof: &MdocCircuitProof,
-    statement: &MdocCircuitStatement,
-    expected_pcs_config: PcsConfig,
-) -> Result<MdocCircuitVerifyProfile, Error> {
-    verify_mdoc_circuit_with_pcs_config_profiled_impl(proof, statement, expected_pcs_config, None)
-}
-
-fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
-    proof: &MdocCircuitProof,
-    statement: &MdocCircuitStatement,
-    expected_pcs_config: PcsConfig,
-    expected_preprocessed_root: Option<air_core::CommitmentRoot>,
-) -> Result<MdocCircuitVerifyProfile, Error> {
-    let total_start = Instant::now();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    if proof.issuer_p256_claim.public_inputs.instances.as_slice()
-        != [expected_instance(&statement.issuer_input)]
-    {
-        return Err(Error::P256InstanceMismatch);
-    }
-    #[cfg(not(feature = "ec-coprocessor"))]
-    if proof.device_p256_claim.public_inputs.instances.as_slice()
-        != [expected_instance(&statement.device_input)]
-    {
-        return Err(Error::P256InstanceMismatch);
-    }
     if proof.age_public
         != statement
             .age_attribute_index
             .map(|_| statement.policy.age_public_input())
+        || proof.age_claimed_sums.is_some() != statement.age_attribute_index.is_some()
     {
         return Err(Error::AgePolicyMismatch);
     }
@@ -5189,130 +4751,30 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         != statement
             .nationality_attribute_index
             .map(|_| nat_public_input_for(statement))
+        || proof.nat_claimed_sums.is_some() != statement.nationality_attribute_index.is_some()
     {
         return Err(Error::NatPolicyMismatch);
     }
 
-    let issuer_digest = SharedDigestRelation::new();
-    let device_digest = SharedDigestRelation::new();
-    let has_revocation_range = statement.ts13_revocation_range.is_some();
-    let has_revocation_signature = statement.ts13_revocation_signature.is_some();
-    if proof.mso_sha_log_n_rows.is_some() != has_revocation_range
-        || proof.mso_sha_interaction_claim.is_some() != has_revocation_range
-        || proof.mso_payload_bind_interaction_claim.is_some() != has_revocation_range
-        || proof.ts13_revocation_range_interaction_claim.is_some() != has_revocation_range
-        || proof.revocation_sha_log_n_rows.is_some() != has_revocation_signature
-        || proof.revocation_sha_interaction_claim.is_some() != has_revocation_signature
+    let packed_sha_digest = SharedPackedShaDigestRelation::new();
+    let sha_field = SharedFieldRelation::new();
+    let revocation_message_field = SharedFieldRelation::new();
+    let attribute_count = statement.attributes.len();
+    let expected_parser_count = mdoc_scope_parser_count(attribute_count)
+        .ok_or_else(|| Error::Verify("mdoc parser count overflow".to_string()))?;
+    if proof.mdoc_cbor_log_sizes.len() != expected_parser_count
+        || proof.mdoc_cbor_interaction_claims.len() != expected_parser_count
     {
         return Err(Error::Verify(
-            "mdoc proof revocation layout mismatch".to_string(),
+            "mdoc proof carries an unsupported parser count".to_string(),
         ));
     }
-    #[cfg(not(feature = "ec-coprocessor"))]
-    if proof.revocation_p256_claim.is_some() != has_revocation_signature
-        || proof.revocation_p256_interaction_claim.is_some() != has_revocation_signature
-        || proof.revocation_bridge_log_size.is_some() != has_revocation_signature
-        || proof.revocation_bridge_interaction_claim.is_some() != has_revocation_signature
-    {
-        return Err(Error::Verify(
-            "mdoc proof revocation layout mismatch".to_string(),
-        ));
-    }
-    #[cfg(feature = "ec-coprocessor")]
-    if proof.ts13_revocation_input.is_some() != has_revocation_signature
-        || proof
-            .revocation_public_digest_bind_interaction_claim
-            .is_some()
-            != has_revocation_signature
-    {
-        return Err(Error::Verify(
-            "mdoc proof revocation layout mismatch".to_string(),
-        ));
-    }
-    let mso_digest = has_revocation_range.then(SharedDigestRelation::new);
-    let mso_field = has_revocation_range.then(SharedFieldRelation::new);
-    let revocation_digest = has_revocation_signature.then(SharedDigestRelation::new);
-    let revocation_message_field = has_revocation_signature.then(SharedFieldRelation::new);
-    let attribute_count = proof.attribute_sha_interaction_claims.len();
-    if attribute_count != proof.attribute_sha_log_n_rows.len()
-        || attribute_count != statement.attributes.len()
-    {
-        return Err(Error::Verify(
-            "mdoc proof carries an unsupported attribute count".to_string(),
-        ));
-    }
-    let attribute_digests: Vec<_> = (0..attribute_count)
-        .map(|_| SharedDigestRelation::new())
-        .collect();
-    let issuer_field = SharedFieldRelation::new();
-    let attribute_fields: Vec<_> = (0..attribute_count)
-        .map(|_| SharedFieldRelation::new())
-        .collect();
-    let sha_table_relations = SharedShaTableRelations::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let issuer_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let device_scalar_z = SharedScalarZRelation::new();
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let revocation_scalar_z = has_revocation_signature.then(SharedScalarZRelation::new);
 
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut issuer_p256 = P256Verifier::new(
-        proof.issuer_p256_claim.clone(),
-        proof.issuer_p256_interaction_claim.clone(),
-    )
-    .with_z_binding(issuer_scalar_z.clone());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut device_p256 = P256Verifier::new(
-        proof.device_p256_claim.clone(),
-        proof.device_p256_interaction_claim.clone(),
-    )
-    .with_preprocessed_namespace("mdoc/device")
-    .with_z_binding(device_scalar_z.clone());
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut revocation_p256 = match (
-        proof.revocation_p256_claim.clone(),
-        proof.revocation_p256_interaction_claim.clone(),
-        revocation_scalar_z.clone(),
-    ) {
-        (Some(claim), Some(interaction_claim), Some(revocation_scalar_z)) => {
-            let revocation = statement.ts13_revocation.as_ref().ok_or_else(|| {
-                Error::Verify(
-                    "revocation P-256 proof requires public revocation inputs".to_string(),
-                )
-            })?;
-            if claim.public_inputs.instances.len() != 1
-                || !public_instance_key_matches(
-                    &claim.public_inputs.instances[0],
-                    &revocation.revocation_public_key,
-                )
-            {
-                return Err(Error::P256InstanceMismatch);
-            }
-            Some(
-                P256Verifier::new(claim, interaction_claim)
-                    .with_preprocessed_namespace("mdoc/ts13/revocation")
-                    .with_z_binding(revocation_scalar_z),
-            )
-        }
-        _ => None,
-    };
-    // Coprocessor mode: the revocation ECDSA is the bundle's third instance
-    // set. The proof-carried instance must use the public revocation key —
-    // the message hash it claims is pinned to the committed revocation-SHA
-    // digest by `PublicDigestBind` below, and the coprocessor proves the
-    // signature equation over the projected instance.
-    #[cfg(feature = "ec-coprocessor")]
-    if let Some(carried) = proof.ts13_revocation_input.as_ref() {
-        let revocation = statement.ts13_revocation.as_ref().ok_or_else(|| {
-            Error::Verify("revocation P-256 proof requires public revocation inputs".to_string())
-        })?;
-        if carried.public_key.x.0 != revocation.revocation_public_key.x.0
-            || carried.public_key.y.0 != revocation.revocation_public_key.y.0
-        {
-            return Err(Error::P256InstanceMismatch);
-        }
-    }
+    let scope_statement = mdoc_scope_statement(statement);
+    let scope_handles = MdocScopeHandles::fresh(&scope_statement, packed_sha_digest.clone())
+        .map_err(|error| Error::Verify(format!("mdoc scope handles: {error}")))?;
+    let sha_table_relations = SharedShaTableRelations::new();
+
     if proof.stark_proof.config != expected_pcs_config {
         return Err(Error::WeakConfig {
             got: proof.stark_proof.config,
@@ -5324,172 +4786,90 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         proof.sha_tables_interaction_claim.clone(),
         sha_table_relations.clone(),
     );
-    let mut issuer_sha = Sha256Verifier::new(
-        proof.issuer_sha_log_n_rows,
-        SHA_GROUP_WIDTH,
-        proof.issuer_sha_interaction_claim.clone(),
+    let mut packed_sha = Sha256Verifier::new(
+        crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
+        proof.packed_sha_interaction_claim.clone(),
     )
     .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(issuer_digest.clone())
-    .with_field_handle(issuer_mso_exposure(statement), issuer_field.clone());
-    let mut device_sha = Sha256Verifier::new(
-        proof.device_sha_log_n_rows,
-        SHA_GROUP_WIDTH,
-        proof.device_sha_interaction_claim.clone(),
-    )
-    .with_shared_tables(sha_table_relations.clone())
-    .with_digest_handle(device_digest.clone());
-    let mut mso_sha = match (
-        proof.mso_sha_log_n_rows,
-        proof.mso_sha_interaction_claim.clone(),
-        mso_digest.clone(),
-    ) {
-        (Some(log_n_rows), Some(interaction_claim), Some(mso_digest)) => Some({
-            let sha = Sha256Verifier::new(log_n_rows, SHA_GROUP_WIDTH, interaction_claim)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(mso_digest);
-            if let Some(mso_field) = &mso_field {
-                sha.with_field_handle(mso_payload_exposure(statement), mso_field.clone())
-            } else {
-                sha
-            }
-        }),
-        _ => None,
-    };
-    let mut revocation_sha = match (
-        proof.revocation_sha_log_n_rows,
-        proof.revocation_sha_interaction_claim.clone(),
-        revocation_digest.clone(),
-    ) {
-        (Some(log_n_rows), Some(interaction_claim), Some(revocation_digest)) => {
-            let sha = Sha256Verifier::new(log_n_rows, SHA_GROUP_WIDTH, interaction_claim)
-                .with_shared_tables(sha_table_relations.clone())
-                .with_digest_handle(revocation_digest);
-            Some(
-                if let Some(revocation_message_field) = &revocation_message_field {
-                    sha.with_field_handle(
-                        ts13_revocation_message_exposure(statement),
-                        revocation_message_field.clone(),
-                    )
-                } else {
-                    sha
-                },
-            )
-        }
-        _ => None,
-    };
-
-    let attribute_exposures: Vec<_> = (0..statement.attributes.len())
-        .map(|index| attribute_exposure(statement, index))
-        .collect();
-    let mut attribute_sha = Vec::with_capacity(attribute_count);
-    for index in 0..attribute_count {
-        attribute_sha.push(
-            Sha256Verifier::new(
-                proof.attribute_sha_log_n_rows[index],
-                SHA_GROUP_WIDTH,
-                proof.attribute_sha_interaction_claims[index].clone(),
-            )
-            .with_shared_tables(sha_table_relations.clone())
-            .with_digest_handle(attribute_digests[index].clone())
-            .with_field_handle(
-                attribute_exposures[index].clone(),
-                attribute_fields[index].clone(),
+    .with_digest_handle(packed_sha_digest.clone())
+    .with_field_handle(sha_field.clone());
+    let parser_specs = scope_handles
+        .stream_specs(&scope_statement)
+        .map_err(|error| Error::Verify(format!("mdoc parser specs: {error}")))?;
+    let mut mdoc_cbor_streams = Vec::with_capacity(expected_parser_count);
+    for (index, spec) in parser_specs.into_iter().enumerate() {
+        let max_message_len = product_parser_max_message_len(&spec.input);
+        let (input_handle, input_field_id) = match spec.input {
+            MdocScopeParserInput::ShaIssuer => (
+                sha_field.clone(),
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ISSUER_SLOT,
             ),
+            MdocScopeParserInput::ShaItem(item_index) => {
+                if item_index >= attribute_count {
+                    return Err(Error::Verify(
+                        "mdoc item parser index is out of range".to_string(),
+                    ));
+                }
+                (
+                    sha_field.clone(),
+                    PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_ITEM_SLOT_BASE + item_index as u32,
+                )
+            }
+            MdocScopeParserInput::Raw(handle) => (handle, spec.stream_id),
+        };
+        mdoc_cbor_streams.push(
+            MdocCborStream::verifier(
+                spec.mode,
+                spec.stream_id,
+                input_field_id,
+                proof.mdoc_cbor_log_sizes[index],
+                input_handle,
+                Some(spec.parsed),
+                max_message_len,
+                proof.mdoc_cbor_interaction_claims[index].clone(),
+            )
+            .map_err(|error| Error::Verify(format!("mdoc CBOR parser: {error}")))?,
         );
     }
+    let mut mso_exact_cbor = MdocCborStream::verifier_exact_sha(
+        NORMALIZED_MSO_STREAM_ID,
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+        sha_field.clone(),
+        MDOC_MSO_PAYLOAD_FIELD_ID,
+        scope_handles.payload_hash_fields.clone(),
+        None,
+        crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE,
+        u32::try_from(PRODUCT_MAX_MSO_PAYLOAD_BYTES).expect("product MSO bound fits u32"),
+        proof.mso_exact_cbor_interaction_claim.clone(),
+    )
+    .map_err(|error| Error::Verify(format!("exact MSO CBOR/SHA binding: {error}")))?;
+    let mut mdoc_scope = MdocScope::verifier(
+        scope_statement,
+        proof.mdoc_scope_metadata.clone(),
+        scope_handles.clone(),
+        proof.mdoc_scope_interaction_claim.clone(),
+    )
+    .map_err(|error| Error::Verify(format!("mdoc semantic scope: {error}")))?;
+    mdoc_scope = mdoc_scope.with_payload_hash_binding();
 
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut issuer_bridge = DigestBindVerifier::new(
-        proof.issuer_bridge_log_size,
-        proof.issuer_p256_claim.public_inputs.instances.len(),
-        proof.issuer_bridge_interaction_claim.clone(),
-        issuer_scalar_z,
-        issuer_digest,
-    );
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut device_bridge = DigestBindVerifier::new(
-        proof.device_bridge_log_size,
-        proof.device_p256_claim.public_inputs.instances.len(),
-        proof.device_bridge_interaction_claim.clone(),
-        device_scalar_z,
-        device_digest,
-    );
-    #[cfg(feature = "ec-coprocessor")]
-    let mut device_public_digest_bind = PublicDigestBind::verifier(
-        statement.device_input.message_hash.0,
-        device_digest,
-        proof.device_public_digest_bind_interaction_claim.clone(),
-    );
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut revocation_bridge = match (
-        proof.revocation_bridge_log_size,
-        proof.revocation_bridge_interaction_claim.clone(),
-        revocation_scalar_z,
-        revocation_digest,
-    ) {
-        (
-            Some(log_size),
-            Some(interaction_claim),
-            Some(revocation_scalar_z),
-            Some(revocation_digest),
-        ) => Some(DigestBindVerifier::new(
-            log_size,
-            proof
-                .revocation_p256_claim
-                .as_ref()
-                .map(|claim| claim.public_inputs.instances.len())
-                .unwrap_or(0),
-            interaction_claim,
-            revocation_scalar_z,
-            revocation_digest,
-        )),
-        _ => None,
-    };
-    #[cfg(feature = "ec-coprocessor")]
-    let mut revocation_public_digest_bind = match (
-        proof.ts13_revocation_input.as_ref(),
-        proof
-            .revocation_public_digest_bind_interaction_claim
-            .clone(),
-        revocation_digest,
-    ) {
-        (Some(carried), Some(interaction_claim), Some(revocation_digest)) => {
-            Some(PublicDigestBind::verifier(
-                carried.message_hash.0,
-                revocation_digest,
-                interaction_claim,
-            ))
-        }
-        _ => None,
-    };
-    let mut mdoc_window_bind = MdocWindowBind::verifier_for_attributes(
-        mdoc_window_bind_rows_from(statement, None),
-        issuer_field.clone(),
-        attribute_fields.clone(),
-        attribute_digests.clone(),
-        proof.mdoc_window_bind_interaction_claim.clone(),
-    );
     let mut mdoc_validity = MdocValidityBind::verifier(
-        statement.policy.current_date,
-        mdoc_validity_rows_from(statement, None),
-        issuer_field.clone(),
+        statement.verification_time_epoch_seconds,
+        mdoc_validity_rows([0; 20], [0; 20]),
+        scope_handles.semantic_fields.clone(),
         proof.mdoc_validity_interaction_claim.clone(),
     );
-    let mut mso_payload_bind = has_revocation_range.then(|| {
-        MdocMsoPayloadBind::verifier(
-            statement.mso_payload_len,
-            issuer_field.clone(),
-            mso_field
-                .clone()
-                .expect("MSO field handle exists when revocation range is set"),
-            proof
-                .mso_payload_bind_interaction_claim
-                .clone()
-                .expect("MSO payload bind interaction claim exists when range is set"),
-        )
-    });
-    let mut age = if let Some(index) = statement.age_attribute_index {
+    let mut revocation_message_bind = MdocExactShaMessageBind::verifier(
+        "revocation_message",
+        MDOC_REVOCATION_MESSAGE_FIELD_ID,
+        PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
+        -1,
+        true,
+        PRODUCT_TS13_REVOCATION_MESSAGE_BYTES,
+        revocation_message_field.clone(),
+        sha_field.clone(),
+        proof.revocation_message_bind_interaction_claim.clone(),
+    );
+    let mut age = if statement.age_attribute_index.is_some() {
         let public = proof.age_public.as_ref().ok_or(Error::AgePolicyMismatch)?;
         let claimed_sums = proof
             .age_claimed_sums
@@ -5498,18 +4878,11 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
         let age = AgeRangeCheck::new(PcsConfig::default())
             .verifier(public, claimed_sums)
             .map_err(Error::AgePrepare)?;
-        Some(match statement.birth_date_binding {
-            MdocBirthDateBinding::Packed(_) => {
-                age.with_dob_binding(attribute_fields[index].clone())
-            }
-            MdocBirthDateBinding::Text(_) => {
-                age.with_text_dob_binding(attribute_fields[index].clone())
-            }
-        })
+        Some(age.with_text_dob_binding(scope_handles.semantic_fields.clone()))
     } else {
         None
     };
-    let mut nat = if let Some(index) = statement.nationality_attribute_index {
+    let mut nat = if statement.nationality_attribute_index.is_some() {
         let public = proof.nat_public.as_ref().ok_or(Error::NatPolicyMismatch)?;
         let claimed_sums = proof
             .nat_claimed_sums
@@ -5517,127 +4890,152 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
             .ok_or(Error::NatPolicyMismatch)?;
         Some(
             NationalityPredicate::new(PcsConfig::default())
-                .verifier(public, claimed_sums)
+                .verifier_for_private_prefix(public, claimed_sums)
                 .map_err(Error::NatPrepare)?
-                .with_nat_binding(attribute_fields[index].clone()),
+                .with_nat_binding(scope_handles.semantic_fields.clone()),
         )
     } else {
         None
     };
-    #[cfg(feature = "ec-coprocessor")]
+
     let mac_state = MdocP4bMacSharedState::default();
-    #[cfg(feature = "ec-coprocessor")]
+
     let mut mdoc_mac = MdocMacBind::verifier(
         mac_state.clone(),
-        issuer_digest.clone(),
-        issuer_field.clone(),
+        packed_sha_digest.clone(),
+        scope_handles.semantic_fields.clone(),
         proof.mdoc_mac_interaction_claim.clone(),
     );
-    #[cfg(feature = "ec-coprocessor")]
+
+    let revocation_coprocessor_input = EcdsaVerifyInput {
+        message_hash: U256([0; 32]),
+        signature: Signature {
+            r: U256([0; 32]),
+            s: U256([0; 32]),
+        },
+        public_key: statement.ts13_revocation.revocation_public_key.clone(),
+    };
+
     let mut coprocessor = MdocCoprocessorBindingVerifier {
         issuer_input: statement.issuer_input.clone(),
         device_input: statement.device_input.clone(),
-        revocation_input: proof.ts13_revocation_input.clone(),
-        bundle: proof
-            .coprocessor_bundle
-            .clone()
-            .ok_or(Error::CoprocessorMissing)?,
+        revocation_input: revocation_coprocessor_input,
+        bundle: proof.coprocessor_bundle.clone(),
         mac_state,
-        profile: None,
     };
-    let mut ts13_revocation_public = statement
-        .ts13_revocation
-        .clone()
-        .map(MdocRevocationPublicBind::new);
-    let mut ts13_revocation_range = statement.ts13_revocation_range.as_ref().map(|_| {
-        MdocRevocationRangeBind::verifier(
-            mso_digest
-                .clone()
-                .expect("MSO digest handle exists when revocation range is set"),
-            statement
-                .ts13_revocation
-                .as_ref()
-                .map(|revocation| revocation.epoch)
-                .filter(|_| has_revocation_signature),
-            revocation_message_field.clone(),
-            proof
-                .ts13_revocation_range_interaction_claim
-                .clone()
-                .expect("revocation range interaction claim exists when range is set"),
-        )
-    });
+    let mut ts13_revocation_public =
+        MdocRevocationPublicBind::new(statement.ts13_revocation.clone());
+    let mut ts13_revocation_range = MdocRevocationRangeBind::verifier(
+        packed_sha_digest.clone(),
+        statement.ts13_revocation.epoch,
+        revocation_message_field.clone(),
+        proof.ts13_revocation_range_interaction_claim.clone(),
+    );
 
-    #[cfg(not(feature = "ec-coprocessor"))]
-    let mut modules: Vec<&mut dyn Air> = vec![
-        &mut sha_tables,
-        &mut issuer_p256,
-        &mut issuer_sha,
-        &mut issuer_bridge,
-        &mut device_p256,
-        &mut device_sha,
-        &mut device_bridge,
-    ];
-    #[cfg(feature = "ec-coprocessor")]
-    let mut modules: Vec<&mut dyn Air> = vec![
-        &mut sha_tables,
-        &mut issuer_sha,
-        &mut device_sha,
-        &mut device_public_digest_bind,
-    ];
-    #[cfg(not(feature = "ec-coprocessor"))]
-    if let Some(revocation_p256) = revocation_p256.as_mut() {
-        modules.push(revocation_p256);
+    let claim_mask_challenge = SharedClaimMaskChallenge::new();
+    let mut claim_mask_log_sizes = Vec::new();
+    claim_mask_log_sizes.extend(sha_tables.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(packed_sha.ordered_claim_mask_log_sizes());
+    for parser in &mdoc_cbor_streams {
+        claim_mask_log_sizes.extend(parser.ordered_claim_mask_log_sizes());
     }
-    if let Some(mso_sha) = mso_sha.as_mut() {
-        modules.push(mso_sha);
+    claim_mask_log_sizes.extend(mso_exact_cbor.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(mdoc_scope.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(mdoc_validity.ordered_claim_mask_log_sizes());
+    claim_mask_log_sizes.extend(revocation_message_bind.ordered_claim_mask_log_sizes());
+    if let Some(age) = &age {
+        claim_mask_log_sizes.extend(age.ordered_claim_mask_log_sizes());
     }
-    if let Some(revocation_sha) = revocation_sha.as_mut() {
-        modules.push(revocation_sha);
+    if let Some(nat) = &nat {
+        claim_mask_log_sizes.extend(nat.ordered_claim_mask_log_sizes());
     }
-    #[cfg(not(feature = "ec-coprocessor"))]
-    if let Some(revocation_bridge) = revocation_bridge.as_mut() {
-        modules.push(revocation_bridge);
+    claim_mask_log_sizes.extend(ts13_revocation_range.ordered_claim_mask_log_sizes());
+
+    claim_mask_log_sizes.extend(mdoc_mac.ordered_claim_mask_log_sizes());
+
+    sha_tables = sha_tables.with_claim_masks(claim_mask_challenge.clone());
+    packed_sha = packed_sha.with_claim_masks(claim_mask_challenge.clone());
+    mdoc_cbor_streams = mdoc_cbor_streams
+        .into_iter()
+        .map(|parser| parser.with_claim_mask_verifier(claim_mask_challenge.clone()))
+        .collect();
+    mso_exact_cbor = mso_exact_cbor.with_claim_mask_verifier(claim_mask_challenge.clone());
+    mdoc_scope = mdoc_scope.with_claim_mask_verifier(claim_mask_challenge.clone());
+    mdoc_validity = mdoc_validity.with_claim_mask_verifier(claim_mask_challenge.clone());
+    revocation_message_bind =
+        revocation_message_bind.with_claim_mask_verifier(claim_mask_challenge.clone());
+    age = age.map(|age| age.with_claim_masks(claim_mask_challenge.clone()));
+    nat = nat.map(|nat| nat.with_claim_masks(claim_mask_challenge.clone()));
+    ts13_revocation_range =
+        ts13_revocation_range.with_claim_mask_verifier(claim_mask_challenge.clone());
+
+    {
+        mdoc_mac = mdoc_mac.with_claim_masks_verifier(claim_mask_challenge.clone());
     }
-    #[cfg(feature = "ec-coprocessor")]
-    if let Some(revocation_public_digest_bind) = revocation_public_digest_bind.as_mut() {
-        modules.push(revocation_public_digest_bind);
+    let mut claim_mask_anchor =
+        ClaimMaskChallengeModule::new(claim_mask_challenge, claim_mask_log_sizes)
+            .map_err(|error| Error::Verify(format!("claim-mask anchor: {error}")))?;
+
+    // Read before the module list borrows `age`/`nat` mutably.
+    let has_age = age.is_some();
+    let has_nationality = nat.is_some();
+
+    let mut modules: Vec<&mut dyn Air> = vec![&mut sha_tables, &mut packed_sha];
+    for parser in &mut mdoc_cbor_streams {
+        modules.push(parser);
     }
-    for sha in &mut attribute_sha {
-        modules.push(sha);
-    }
-    modules.push(&mut mdoc_window_bind);
+    modules.push(&mut mso_exact_cbor);
+    modules.push(&mut mdoc_scope);
     modules.push(&mut mdoc_validity);
-    if let Some(mso_payload_bind) = mso_payload_bind.as_mut() {
-        modules.push(mso_payload_bind);
-    }
+    modules.push(&mut revocation_message_bind);
     if let Some(age) = age.as_mut() {
         modules.push(age);
     }
     if let Some(nat) = nat.as_mut() {
         modules.push(nat);
     }
-    if let Some(revocation_public) = ts13_revocation_public.as_mut() {
-        modules.push(revocation_public);
-    }
-    if let Some(revocation_range) = ts13_revocation_range.as_mut() {
-        modules.push(revocation_range);
-    }
-    #[cfg(feature = "ec-coprocessor")]
+    modules.push(&mut ts13_revocation_public);
+    modules.push(&mut ts13_revocation_range);
+
     modules.push(&mut coprocessor);
-    #[cfg(feature = "ec-coprocessor")]
+
     modules.push(&mut mdoc_mac);
+    modules.push(&mut claim_mask_anchor);
+    if let Some(sink) = shape_sink {
+        let names = mdoc_module_names(
+            attribute_count,
+            expected_parser_count,
+            has_age,
+            has_nationality,
+        );
+        assert_eq!(
+            names.len(),
+            modules.len(),
+            "mdoc module name list drifted from the verifier module list"
+        );
+        *sink = names
+            .into_iter()
+            .zip(modules.iter())
+            .map(|(name, module)| MdocModuleShape {
+                name,
+                preprocessed_ids: module.preprocessed_column_ids(),
+                layout: module.layout(),
+                post_interaction: module.post_interaction_log_sizes(),
+            })
+            .collect();
+    }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let canonical_root = air_core::compute_canonical_preprocessed_root(
+            modules.as_mut_slice(),
+            expected_pcs_config,
+        )?;
         air_core::verify_with_expected_preprocessed_root(
             modules.as_mut_slice(),
             &proof.stark_proof,
-            expected_preprocessed_root,
+            Some(canonical_root),
         )
     })) {
-        Ok(Ok(())) => Ok(MdocCircuitVerifyProfile {
-            total: total_start.elapsed(),
-            #[cfg(feature = "ec-coprocessor")]
-            p4b: coprocessor.profile.take(),
-        }),
+        Ok(Ok(())) => Ok(()),
         Ok(Err(air_core::VerifyError::PreprocessedRootMismatch { got, expected })) => {
             Err(Error::PreprocessedRootMismatch { got, expected })
         }
@@ -5648,24 +5046,381 @@ fn verify_mdoc_circuit_with_pcs_config_profiled_impl(
     }
 }
 
-pub fn mdoc_production_pcs_config() -> PcsConfig {
-    // WO-P3 pow/query rebalance: pow_bits 20 + n_queries 54 keeps 54·2 + 20 =
-    // 128-bit security (log_blowup 2), trading ~5 FRI queries (≈135 KB of
-    // queried_values) for cheap grinding. A fold step of 3 saves another ~15 KB
-    // and ~164 ms of median prove time on the full N=1 tuple. The verifier pins
-    // this exact config (see verify_mdoc_circuit_with_pcs_config) so an
-    // old-config proof is rejected.
-    PcsConfig {
-        pow_bits: 20,
-        fri_config: FriConfig::new(1, 2, 54, 3),
-        lifting_log_size: None,
+/// One module's committed shape, captured from the verifier's own module list.
+struct MdocModuleShape {
+    name: String,
+    preprocessed_ids: Vec<PreProcessedColumnId>,
+    layout: TreeLayout,
+    post_interaction: Vec<u32>,
+}
+
+/// Module labels in the exact order the prover and verifier push them.
+///
+/// Kept beside the two module lists it names; the capture in
+/// [`verify_mdoc_circuit_with_pcs_config_impl`] asserts the lengths agree, so a
+/// module added or removed without a label here fails loudly.
+fn mdoc_module_names(
+    _attribute_count: usize,
+    parser_count: usize,
+    has_age: bool,
+    has_nationality: bool,
+) -> Vec<String> {
+    let mut names: Vec<String> = ["sha_tables", "packed_sha"]
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    names.extend((0..parser_count).map(|index| format!("mdoc_cbor_stream[{index}]")));
+    names.push("mso_exact_cbor".to_string());
+    names.push("mdoc_scope".to_string());
+    names.push("mdoc_validity".to_string());
+    names.push("revocation_message_bind".to_string());
+    if has_age {
+        names.push("age_predicate".to_string());
+    }
+    if has_nationality {
+        names.push("nationality_predicate".to_string());
+    }
+    names.push("ts13_revocation_public".to_string());
+    names.push("ts13_revocation_range".to_string());
+    names.push("coprocessor".to_string());
+    names.push("mdoc_mac".to_string());
+    names.push("claim_mask_anchor".to_string());
+    names
+}
+
+/// Bytes a single module (or one sub-component group inside it) contributes.
+///
+/// Only per-column proof data is attributable to a module. Commitment roots and
+/// Merkle/FRI decommitments are per-tree, not per-column, so they live in
+/// [`MdocProofByteBreakdown::shared`] instead of being split here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocModuleByteBreakdown {
+    /// Module label, suffixed with the column log-size when a module commits
+    /// several differently-sized sub-components. `mdoc_scope` splits this way
+    /// into its stream trace and its DFA edge table.
+    ///
+    /// Sub-components that share a log size cannot be told apart from
+    /// [`TreeLayout`] alone and are reported as one bucket — `mdoc_scope`'s
+    /// digest-id universe shares log-size 16 with its stream trace, so those
+    /// two are pooled. Splitting them further needs per-component sizes from
+    /// the module itself, not just its layout.
+    pub label: String,
+    pub oods_sampled_values: usize,
+    pub queried_values: usize,
+    pub columns: usize,
+}
+
+impl MdocModuleByteBreakdown {
+    pub fn total(&self) -> usize {
+        self.oods_sampled_values + self.queried_values
     }
 }
 
-pub fn mdoc_longfellow_parity_pcs_config() -> PcsConfig {
+/// Proof bytes that exist once for the whole proof rather than per module.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MdocSharedByteBreakdown {
+    pub pcs_config: usize,
+    pub commitment_roots: usize,
+    pub trace_decommitments: usize,
+    pub proof_of_work: usize,
+    pub fri_proof: usize,
+    /// Composition-tree OODS samples and queried values. The composition
+    /// polynomial mixes every module, so these bytes have no single owner.
+    pub composition_oods_sampled_values: usize,
+    pub composition_queried_values: usize,
+}
+
+impl MdocSharedByteBreakdown {
+    pub fn total(&self) -> usize {
+        self.pcs_config
+            + self.commitment_roots
+            + self.trace_decommitments
+            + self.proof_of_work
+            + self.fri_proof
+            + self.composition_oods_sampled_values
+            + self.composition_queried_values
+    }
+}
+
+/// Exact byte attribution for a serialized [`MdocCircuitProof`].
+///
+/// `modules`, `shared`, `coprocessor_bundle` and `framing_other` partition
+/// [`Self::proof_bytes`] exactly — see [`Self::attributed_bytes`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MdocProofByteBreakdown {
+    /// `bincode::serialize(proof).len()`: the raw bytes the SDK compresses into
+    /// the V8 transport envelope.
+    pub proof_bytes: usize,
+    pub modules: Vec<MdocModuleByteBreakdown>,
+    pub shared: MdocSharedByteBreakdown,
+    /// The EC coprocessor bundle as one opaque blob. Its internals are broken
+    /// down inside `eu-id-ec-coprocessor`, not here.
+    pub coprocessor_bundle: usize,
+    /// Bincode container framing plus the proof's non-STARK metadata fields
+    /// (per-module interaction claims, log sizes, predicate public inputs).
+    /// Derived by subtraction so nothing can go unreported.
+    pub framing_other: usize,
+}
+
+impl MdocProofByteBreakdown {
+    pub fn attributed_bytes(&self) -> usize {
+        self.modules
+            .iter()
+            .map(MdocModuleByteBreakdown::total)
+            .sum::<usize>()
+            + self.shared.total()
+            + self.coprocessor_bundle
+            + self.framing_other
+    }
+}
+
+fn bincode_len<T: Serialize>(value: &T) -> usize {
+    bincode::serialize(value)
+        .expect("mdoc proof byte breakdown value serializes")
+        .len()
+}
+
+/// Split one tree's per-column byte costs across the modules that own them.
+///
+/// `column_owners` is the tree's column list in commit order, each entry the
+/// index of the owning label. Returns the per-label totals plus the container
+/// framing that belongs to no column.
+fn attribute_tree_columns<T: Serialize>(
+    columns: &[Vec<T>],
+    column_owners: &[usize],
+    label_count: usize,
+) -> (Vec<usize>, usize) {
+    assert_eq!(
+        columns.len(),
+        column_owners.len(),
+        "committed column count does not match the module layout"
+    );
+    let mut per_label = vec![0usize; label_count];
+    for (column, &owner) in columns.iter().zip(column_owners) {
+        per_label[owner] += bincode_len(column);
+    }
+    // Every tree is a `Vec`, so it carries a length prefix of its own.
+    (per_label, bincode_len(&Vec::<Vec<T>>::new()))
+}
+
+/// Byte-exact breakdown of the V8 mdoc identity proof.
+///
+/// Runs verification to capture the committed module shape, so a proof that
+/// does not verify against `statement` returns that verification error rather
+/// than a breakdown of unvalidated bytes.
+pub fn mdoc_proof_byte_breakdown(
+    proof: &MdocCircuitProof,
+    statement: &MdocCircuitStatement,
+) -> Result<MdocProofByteBreakdown, Error> {
+    let mut shapes = Vec::new();
+    verify_mdoc_circuit_with_pcs_config_impl(
+        proof,
+        statement,
+        mdoc_production_pcs_config(),
+        Some(&mut shapes),
+    )?;
+
+    // Label modules, splitting any module that commits several differently
+    // sized sub-components into one label per contiguous same-log-size run.
+    // This is what separates `mdoc_scope`'s DFA edge table and digest-id
+    // universe from its main stream trace without hard-coding their widths.
+    let mut labels: Vec<String> = Vec::new();
+    // Per tree, the owning label index of each column in commit order.
+    let mut preprocessed_owners: Vec<usize> = Vec::new();
+    let mut trace_owners: Vec<usize> = Vec::new();
+    let mut interaction_owners: Vec<usize> = Vec::new();
+    let mut post_interaction_owners: Vec<usize> = Vec::new();
+    let mut seen_preprocessed_ids: HashSet<PreProcessedColumnId> = HashSet::new();
+
+    for shape in &shapes {
+        // One label per distinct log size this module commits, so a module's
+        // sub-components stay separable across all four trees.
+        let mut label_of_log_size: HashMap<u32, usize> = HashMap::new();
+        let mut multi_size = shape
+            .layout
+            .preprocessed
+            .iter()
+            .chain(&shape.layout.trace)
+            .chain(&shape.layout.interaction)
+            .chain(&shape.post_interaction)
+            .collect::<Vec<_>>();
+        multi_size.sort_unstable();
+        multi_size.dedup();
+        let names_by_log_size: HashMap<u32, String> = if multi_size.len() > 1 {
+            multi_size
+                .iter()
+                .map(|&&log_size| (log_size, format!("{} (log_size={log_size})", shape.name)))
+                .collect()
+        } else {
+            multi_size
+                .iter()
+                .map(|&&log_size| (log_size, shape.name.clone()))
+                .collect()
+        };
+        let mut owner_of = |log_size: u32| -> usize {
+            *label_of_log_size.entry(log_size).or_insert_with(|| {
+                labels.push(names_by_log_size[&log_size].clone());
+                labels.len() - 1
+            })
+        };
+
+        // Tree 0 is deduplicated by column id, first declaring module wins.
+        for (id, &log_size) in shape
+            .preprocessed_ids
+            .iter()
+            .zip(&shape.layout.preprocessed)
+        {
+            if seen_preprocessed_ids.insert(id.clone()) {
+                preprocessed_owners.push(owner_of(log_size));
+            }
+        }
+        for &log_size in &shape.layout.trace {
+            trace_owners.push(owner_of(log_size));
+        }
+        for &log_size in &shape.layout.interaction {
+            interaction_owners.push(owner_of(log_size));
+        }
+        for &log_size in &shape.post_interaction {
+            post_interaction_owners.push(owner_of(log_size));
+        }
+    }
+
+    let commitment_scheme_proof = &proof.stark_proof.0;
+    let sampled_values = &commitment_scheme_proof.sampled_values;
+    let queried_values = &commitment_scheme_proof.queried_values;
+
+    // Trees in commit order: preprocessed, trace, interaction, then the
+    // optional post-interaction tree, then composition. Composition is always
+    // last and belongs to no module.
+    let mut owners_by_tree = vec![preprocessed_owners, trace_owners, interaction_owners];
+    if !post_interaction_owners.is_empty() {
+        owners_by_tree.push(post_interaction_owners);
+    }
+    if sampled_values.len() != owners_by_tree.len() + 1 {
+        return Err(Error::Verify(format!(
+            "mdoc proof has {} committed trees, expected {} module trees plus composition",
+            sampled_values.len(),
+            owners_by_tree.len()
+        )));
+    }
+
+    let label_count = labels.len();
+    let mut oods_per_label = vec![0usize; label_count];
+    let mut queried_per_label = vec![0usize; label_count];
+    let mut columns_per_label = vec![0usize; label_count];
+    // Container framing: the outer `TreeVec` length prefix plus one per tree.
+    let mut oods_framing = bincode_len(&Vec::<Vec<Vec<QM31>>>::new());
+    let mut queried_framing = bincode_len(&Vec::<Vec<Vec<M31>>>::new());
+
+    for (tree, owners) in owners_by_tree.iter().enumerate() {
+        let (oods, framing) = attribute_tree_columns(&sampled_values[tree], owners, label_count);
+        oods_framing += framing;
+        let (queried, framing) = attribute_tree_columns(&queried_values[tree], owners, label_count);
+        queried_framing += framing;
+        for (label, bytes) in oods.into_iter().enumerate() {
+            oods_per_label[label] += bytes;
+        }
+        for (label, bytes) in queried.into_iter().enumerate() {
+            queried_per_label[label] += bytes;
+        }
+        for &owner in owners {
+            columns_per_label[owner] += 1;
+        }
+    }
+
+    let composition = owners_by_tree.len();
+    let composition_oods: usize = sampled_values[composition].iter().map(bincode_len).sum();
+    let composition_queried: usize = queried_values[composition].iter().map(bincode_len).sum();
+    oods_framing += bincode_len(&Vec::<Vec<QM31>>::new());
+    queried_framing += bincode_len(&Vec::<Vec<M31>>::new());
+
+    // Falsifiable: the per-column attribution plus container framing must
+    // reproduce the serialized field exactly.
+    let oods_total: usize = oods_per_label.iter().sum::<usize>() + composition_oods + oods_framing;
+    assert_eq!(
+        oods_total,
+        bincode_len(sampled_values),
+        "OODS sampled-value attribution does not reproduce the serialized field"
+    );
+    let queried_total: usize =
+        queried_per_label.iter().sum::<usize>() + composition_queried + queried_framing;
+    assert_eq!(
+        queried_total,
+        bincode_len(queried_values),
+        "queried-value attribution does not reproduce the serialized field"
+    );
+
+    let shared = MdocSharedByteBreakdown {
+        pcs_config: bincode_len(&commitment_scheme_proof.config),
+        commitment_roots: bincode_len(&commitment_scheme_proof.commitments),
+        trace_decommitments: bincode_len(&commitment_scheme_proof.decommitments),
+        proof_of_work: bincode_len(&commitment_scheme_proof.proof_of_work),
+        fri_proof: bincode_len(&commitment_scheme_proof.fri_proof),
+        composition_oods_sampled_values: composition_oods,
+        composition_queried_values: composition_queried,
+    };
+
+    // Falsifiable: a bincode struct is its fields concatenated, so the seven
+    // `CommitmentSchemeProof` fields must sum to the serialized `StarkProof`.
+    let stark_proof_bytes = bincode_len(&proof.stark_proof);
+    assert_eq!(
+        shared.pcs_config
+            + shared.commitment_roots
+            + shared.trace_decommitments
+            + shared.proof_of_work
+            + shared.fri_proof
+            + oods_total
+            + queried_total,
+        stark_proof_bytes,
+        "STARK proof field attribution does not reproduce the serialized proof"
+    );
+
+    let proof_bytes = bincode_len(proof);
+    let coprocessor_bundle = bincode_len(&proof.coprocessor_bundle);
+    let modules: Vec<MdocModuleByteBreakdown> = labels
+        .into_iter()
+        .enumerate()
+        .map(|(label, name)| MdocModuleByteBreakdown {
+            label: name,
+            oods_sampled_values: oods_per_label[label],
+            queried_values: queried_per_label[label],
+            columns: columns_per_label[label],
+        })
+        .collect();
+
+    // Everything not attributed above: bincode container framing for the
+    // sampled/queried trees plus the proof's non-STARK metadata fields.
+    let attributed = modules
+        .iter()
+        .map(MdocModuleByteBreakdown::total)
+        .sum::<usize>()
+        + shared.total()
+        + coprocessor_bundle;
+    let framing_other = proof_bytes.checked_sub(attributed).ok_or_else(|| {
+        Error::Verify(format!(
+            "mdoc proof byte attribution ({attributed}) exceeds the serialized proof ({proof_bytes})"
+        ))
+    })?;
+
+    Ok(MdocProofByteBreakdown {
+        proof_bytes,
+        modules,
+        shared,
+        coprocessor_bundle,
+        framing_other,
+    })
+}
+
+pub fn mdoc_production_pcs_config() -> PcsConfig {
+    // `20 + 84 * 2` is the configured query/PoW work-factor heuristic. It is
+    // not a theorem-level composed soundness bound for this QM31 proof; under
+    // the standard Johnson-bound correlated-agreement conjecture this is a
+    // ~104-bit FRI floor (84 queries + 20 PoW grinding bits).
+    // A fold step of three reduces the proof size.
+    // The verifier pins this exact configuration.
     PcsConfig {
-        pow_bits: 10,
-        fri_config: FriConfig::new(1, 2, 50, 2),
+        pow_bits: 20,
+        fri_config: FriConfig::new(1, 2, 84, 3),
         lifting_log_size: None,
     }
 }
@@ -5673,327 +5428,1840 @@ pub fn mdoc_longfellow_parity_pcs_config() -> PcsConfig {
 #[cfg(test)]
 mod mdoc_sha_table_tests {
     use super::*;
+    use stwo::core::fields::FieldExpOps;
 
-    #[test]
-    fn mdoc_module_shape_starts_with_shared_sha_tables() {
-        let shapes = demo_mdoc_module_shapes().expect("mdoc shapes build");
-        assert_eq!(
-            shapes.first().map(|shape| shape.name),
-            Some("mdoc_sha_tables"),
-            "the shared SHA table provider must draw relations before SHA consumers",
-        );
-        // Phase D folds the two per-digest binds into one MdocWindowBind, then
-        // adds the validity-window comparator as its own issuer-field consumer.
-        #[cfg(not(feature = "ec-coprocessor"))]
-        assert_eq!(shapes.len(), 13);
-        #[cfg(feature = "ec-coprocessor")]
-        assert_eq!(shapes.len(), 12);
-    }
-
-    #[test]
-    #[cfg(feature = "ec-coprocessor")]
-    fn mdoc_mac_shape_stays_under_q014_budget() {
-        let shapes = demo_mdoc_module_shapes().expect("mdoc shapes build");
-        let mdoc_mac = shapes
-            .iter()
-            .find(|shape| shape.name == "mdoc_mac")
-            .expect("mdoc_mac module shape");
-        let cells: u64 = mdoc_mac
-            .layout
-            .preprocessed
-            .iter()
-            .chain(&mdoc_mac.layout.trace)
-            .chain(&mdoc_mac.layout.interaction)
-            .map(|&log_size| 1u64 << log_size)
-            .sum();
-        // 332_288 pre-P4c + 4_096 for the Q-015 consumer blinder interaction
-        // column (4 base cols x 2^10 rows); the binding-side counterpart pairs
-        // into the existing 18 binding columns at no extra cost.
-        assert_eq!(
-            cells, 336_384,
-            "mdoc_mac should keep log-10 consumer rows and log-9 binding blind rows"
-        );
-        assert!(
-            cells <= 1_200_000,
-            "Q014 mdoc_mac cell budget exceeded: {cells}"
-        );
-    }
-
-    /// Q-015 §4b acceptance: proving the same witness twice must publish
-    /// DIFFERENT per-component claimed sums for every blinded module (the
-    /// split is randomized by the fresh (v, m) pair), while both proofs
-    /// verify.
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile twice"]
-    fn mdoc_zk_claimed_sum_blinder_pairs_present() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof_a =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("proof A proves");
-        let proof_b =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("proof B proves");
-        verify_mdoc_circuit(&proof_a, &fixture.statement).expect("proof A verifies");
-        verify_mdoc_circuit(&proof_b, &fixture.statement).expect("proof B verifies");
-
-        let mut checked = Vec::new();
-        let mut check = |name: &'static str, a: QM31, b: QM31| {
-            assert_ne!(
-                a, b,
-                "{name} published claimed sum is identical across same-witness proves; \
-                 the Q-015 blinder pair is not randomizing the split"
-            );
-            checked.push(name);
+    fn value_map_mut<'a>(value: &'a mut Value, label: &str) -> &'a mut Vec<(Value, Value)> {
+        let Value::Map(map) = value else {
+            panic!("{label} must be a map");
         };
-        check(
-            "mdoc_window_bind claimed_sum",
-            proof_a.mdoc_window_bind_interaction_claim.claimed_sum,
-            proof_b.mdoc_window_bind_interaction_claim.claimed_sum,
-        );
-        check(
-            "mdoc_window_bind blinder_claimed_sum",
-            proof_a
-                .mdoc_window_bind_interaction_claim
-                .blinder_claimed_sum,
-            proof_b
-                .mdoc_window_bind_interaction_claim
-                .blinder_claimed_sum,
-        );
-        check(
-            "mdoc_validity claimed_sum",
-            proof_a.mdoc_validity_interaction_claim.claimed_sum,
-            proof_b.mdoc_validity_interaction_claim.claimed_sum,
-        );
-        check(
-            "mdoc_validity blinder_claimed_sum",
-            proof_a.mdoc_validity_interaction_claim.blinder_claimed_sum,
-            proof_b.mdoc_validity_interaction_claim.blinder_claimed_sum,
-        );
-        if let (Some(a), Some(b)) = (
-            proof_a.mso_payload_bind_interaction_claim.as_ref(),
-            proof_b.mso_payload_bind_interaction_claim.as_ref(),
-        ) {
-            check("mso_payload claimed_sum", a.claimed_sum, b.claimed_sum);
-            check(
-                "mso_payload blinder_claimed_sum",
-                a.blinder_claimed_sum,
-                b.blinder_claimed_sum,
-            );
-        }
-        if let (Some(a), Some(b)) = (
-            proof_a.ts13_revocation_range_interaction_claim.as_ref(),
-            proof_b.ts13_revocation_range_interaction_claim.as_ref(),
-        ) {
-            check("revocation_range claimed_sum", a.claimed_sum, b.claimed_sum);
-            check(
-                "revocation_range blinder_claimed_sum",
-                a.blinder_claimed_sum,
-                b.blinder_claimed_sum,
-            );
-        }
-        #[cfg(feature = "ec-coprocessor")]
-        {
-            check(
-                "mdoc_mac consumer claimed_sum",
-                proof_a.mdoc_mac_interaction_claim.consumer,
-                proof_b.mdoc_mac_interaction_claim.consumer,
-            );
-            check(
-                "mdoc_mac binding claimed_sum",
-                proof_a.mdoc_mac_interaction_claim.binding,
-                proof_b.mdoc_mac_interaction_claim.binding,
-            );
-        }
-        assert!(
-            checked.len() >= 4,
-            "expected at least the window/validity pairs to be checked, got {checked:?}"
-        );
+        map
     }
 
-    /// Q-015 §4b acceptance: the global LogUp balance still verifies with the
-    /// blinder pairs active, and flipping the blinder multiplicity `m` in one
-    /// serialized member (leaving all published sums untouched, so the global
-    /// fold still cancels) must be rejected at the OODS/LogUp boundary — the
-    /// pair is bound, not a free claimed-sum term.
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn mdoc_zk_claimed_sum_blinder_balance_preserved() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement)
-            .expect("mdoc verifies with blinder pairs active");
-
-        let mut m_tamper = proof.clone();
-        m_tamper.mdoc_window_bind_interaction_claim.blinder_m +=
-            QM31::from_u32_unchecked(1, 0, 0, 0);
-        assert!(
-            verify_mdoc_circuit(&m_tamper, &fixture.statement).is_err(),
-            "flipped blinder multiplicity m unexpectedly verified",
-        );
-
-        let mut split_tamper = proof.clone();
-        let shift = QM31::from_u32_unchecked(1, 0, 0, 0);
-        split_tamper.mdoc_window_bind_interaction_claim.claimed_sum += shift;
-        split_tamper
-            .mdoc_window_bind_interaction_claim
-            .blinder_claimed_sum -= shift;
-        assert!(
-            verify_mdoc_circuit(&split_tamper, &fixture.statement).is_err(),
-            "re-splitting the published pair without re-proving unexpectedly verified",
-        );
+    fn value_array_mut<'a>(value: &'a mut Value, label: &str) -> &'a mut Vec<Value> {
+        let Value::Array(array) = value else {
+            panic!("{label} must be an array");
+        };
+        array
     }
 
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn mdoc_preprocessed_root_tamper_rejects_before_stark() {
+    fn text_value_mut<'a>(map: &'a mut [(Value, Value)], key: &str) -> &'a mut Value {
+        map.iter_mut()
+            .find_map(|(candidate, value)| {
+                (candidate == &Value::Text(key.to_string())).then_some(value)
+            })
+            .unwrap_or_else(|| panic!("missing map key {key}"))
+    }
+
+    fn issuer_auth_mut(document: &mut Value) -> &mut Vec<Value> {
+        let document = value_map_mut(document, "document");
+        let issuer_signed = value_map_mut(text_value_mut(document, "issuerSigned"), "issuerSigned");
+        value_array_mut(text_value_mut(issuer_signed, "issuerAuth"), "issuerAuth")
+    }
+
+    fn device_signed_mut(document: &mut Value) -> &mut Vec<(Value, Value)> {
+        let document = value_map_mut(document, "document");
+        value_map_mut(text_value_mut(document, "deviceSigned"), "deviceSigned")
+    }
+
+    fn product_fixture_value() -> (Value, MdocPidRequest) {
         let fixture = demo_mdoc_circuit_fixture();
-        let mut proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        let expected_preprocessed_root = proof.stark_proof.commitments[0];
-        verify_mdoc_circuit_with_preprocessed_root(
-            &proof,
-            &fixture.statement,
-            expected_preprocessed_root,
+        (
+            decode_value(&fixture.document).expect("demo document decodes"),
+            fixture.request,
         )
-        .expect("mdoc verifies before tamper");
+    }
 
-        proof.stark_proof.0.commitments[0].0[0] ^= 1;
+    fn issuer_namespaces_mut(document: &mut Value) -> &mut Vec<(Value, Value)> {
+        let document = value_map_mut(document, "document");
+        let issuer_signed = value_map_mut(text_value_mut(document, "issuerSigned"), "issuerSigned");
+        value_map_mut(
+            text_value_mut(issuer_signed, "nameSpaces"),
+            "issuerSigned.nameSpaces",
+        )
+    }
 
+    fn mutate_mso(document: &mut Value, mutate: impl FnOnce(&mut Vec<(Value, Value)>)) {
+        let issuer_auth = issuer_auth_mut(document);
+        let Value::Bytes(payload) = &issuer_auth[2] else {
+            panic!("issuerAuth payload must be bytes");
+        };
+        let Value::Tag(CBOR_TAG_ENCODED_CBOR, encoded_mso) =
+            decode_value(payload).expect("wrapped MSO decodes")
+        else {
+            panic!("fixture MSO must be wrapped");
+        };
+        let Value::Bytes(mso) = *encoded_mso else {
+            panic!("wrapped MSO must contain bytes");
+        };
+        let Value::Map(mut mso) = decode_value(&mso).expect("MSO decodes") else {
+            panic!("MSO must be a map");
+        };
+        mutate(&mut mso);
+        issuer_auth[2] = Value::Bytes(encode_value(Value::Tag(
+            CBOR_TAG_ENCODED_CBOR,
+            Box::new(Value::Bytes(encode_value(Value::Map(mso)))),
+        )));
+    }
+
+    fn resign_issuer_auth(document: &mut Value) {
+        let issuer_auth = issuer_auth_mut(document);
+        let Value::Bytes(protected) = &issuer_auth[0] else {
+            panic!("issuerAuth protected header must be bytes");
+        };
+        let Value::Bytes(payload) = &issuer_auth[2] else {
+            panic!("issuerAuth payload must be bytes");
+        };
+        let signature_input = sig_structure(protected, payload);
+        let signing_key =
+            SigningKey::from_bytes((&[7u8; 32]).into()).expect("demo issuer signing key");
+        let signature: P256Signature = signing_key.sign(&signature_input);
+        issuer_auth[3] = Value::Bytes(signature.to_bytes().to_vec());
+    }
+
+    fn mutate_selected_item(
+        document: &mut Value,
+        index: usize,
+        mutate: impl FnOnce(&mut Vec<(Value, Value)>),
+    ) {
+        let namespaces = issuer_namespaces_mut(document);
+        let items = value_array_mut(&mut namespaces[0].1, "PID namespace items");
+        let Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) = &items[index] else {
+            panic!("selected item must use tag 24");
+        };
+        let Value::Bytes(inner) = inner.as_ref() else {
+            panic!("selected item tag must contain bytes");
+        };
+        let Value::Map(mut item) = decode_value(inner).expect("selected item inner decodes") else {
+            panic!("selected item must contain a map");
+        };
+        mutate(&mut item);
+        items[index] = Value::Tag(
+            CBOR_TAG_ENCODED_CBOR,
+            Box::new(Value::Bytes(encode_value(Value::Map(item)))),
+        );
+    }
+
+    fn product_mso_mutation_error(
+        document: &Value,
+        request: &MdocPidRequest,
+        mutate: impl FnOnce(&mut Vec<(Value, Value)>),
+    ) -> MdocError {
+        let mut changed = document.clone();
+        mutate_mso(&mut changed, mutate);
+        extract_product_value(changed, request).unwrap_err()
+    }
+
+    fn extract_product_value(
+        document: Value,
+        request: &MdocPidRequest,
+    ) -> Result<ExtractedPidMdoc, MdocError> {
+        extract_product_pid_mdoc(&encode_value(document), request)
+    }
+
+    fn product_policy_on(year: u32, month: u32, day: u32) -> Policy {
+        let mut policy = demo_mdoc_circuit_fixture().statement.policy;
+        policy.current_date = predicates::Date { year, month, day };
+        policy
+    }
+
+    fn epoch_seconds(year: i64, month: i64, day: i64, seconds_of_day: u64) -> u64 {
+        u64::try_from(days_from_civil(year, month, day).expect("valid test date"))
+            .expect("test date follows the Unix epoch")
+            * 86_400
+            + seconds_of_day
+    }
+
+    fn assert_invalid_witness_rejects(
+        label: &str,
+        extracted: &ExtractedPidMdoc,
+        statement: &MdocCircuitStatement,
+    ) {
+        if let Ok(proof) = prove_mdoc_circuit(extracted, statement) {
+            assert!(
+                verify_mdoc_circuit(&proof, statement).is_err(),
+                "{label}: invalid witness produced a verifying proof"
+            );
+        }
+    }
+
+    #[test]
+    fn product_mdoc_structure_validation_precedes_recursive_decode() {
+        let valid = encode_value(Value::Map(vec![(
+            Value::Text("documents".to_string()),
+            Value::Array(Vec::new()),
+        )]));
+        validate_product_mdoc_cbor_structure(&valid).expect("bounded CBOR structure is valid");
+
+        for (label, bytes) in [
+            ("indefinite container", vec![0x9f, 0xff]),
+            ("trailing root", vec![0xf6, 0xf6]),
+            ("non-minimal argument", vec![0x18, 0x01]),
+        ] {
+            assert!(
+                matches!(
+                    validate_product_mdoc_cbor_structure(&bytes),
+                    Err(MdocError::Cbor(_))
+                ),
+                "{label} must be rejected by the structural parser"
+            );
+        }
+
+        let mut too_deep = vec![0xc0; 8];
+        too_deep.push(0xf6);
         assert!(matches!(
-            verify_mdoc_circuit_with_preprocessed_root(
-                &proof,
-                &fixture.statement,
-                expected_preprocessed_root,
-            ),
-            Err(Error::PreprocessedRootMismatch { .. })
+            validate_product_mdoc_cbor_structure(&too_deep),
+            Err(MdocError::Cbor(message)) if message.contains("nesting exceeds 8")
         ));
     }
 
     #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn shared_sha_table_provider_claim_is_bound() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let mut proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+    fn current_product_rejects_item_tag_salt_digest_and_protected_header_mutations() {
+        let (document, request) = product_fixture_value();
 
-        proof.sha_tables_interaction_claim.pairs[0].claimed_sum =
-            -proof.sha_tables_interaction_claim.pairs[0].claimed_sum;
-
-        assert!(
-            verify_mdoc_circuit(&proof, &fixture.statement).is_err(),
-            "tampered shared SHA table provider claim unexpectedly verified",
-        );
-    }
-
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn shared_sha_table_mdoc_digest_and_field_swaps_reject() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
-
-        // Phase D: the digests are bound in-circuit from the issuer MSO
-        // preimage, not carried in the statement. Swapping the two digest window
-        // offsets points each digest bind at the other's bytes, so the
-        // window↔item-SHA LogUp no longer balances.
-        let mut digest_offset_swap = fixture.statement.clone();
-        std::mem::swap(
-            &mut digest_offset_swap.mso_birth_date_digest_offset,
-            &mut digest_offset_swap.mso_nationality_digest_offset,
-        );
-        assert!(
-            verify_mdoc_circuit(&proof, &digest_offset_swap).is_err(),
-            "birth/nationality digest offset swap unexpectedly verified",
+        let mut untagged = document.clone();
+        let namespaces = issuer_namespaces_mut(&mut untagged);
+        let items = value_array_mut(&mut namespaces[0].1, "PID namespace items");
+        let Value::Tag(CBOR_TAG_ENCODED_CBOR, inner) = &items[0] else {
+            panic!("selected item must use tag 24");
+        };
+        let Value::Bytes(inner) = inner.as_ref() else {
+            panic!("selected item tag must contain bytes");
+        };
+        items[0] = decode_value(inner).expect("untagged selected item decodes");
+        assert_eq!(
+            extract_product_value(untagged, &request).unwrap_err(),
+            MdocError::WrongType("IssuerSignedItemBytes")
         );
 
-        if fixture.statement.birth_date_value_offset != fixture.statement.nationality_value_offset {
-            let mut field_exposure_swap = fixture.statement.clone();
-            std::mem::swap(
-                &mut field_exposure_swap.birth_date_value_offset,
-                &mut field_exposure_swap.nationality_value_offset,
-            );
-            assert!(
-                verify_mdoc_circuit(&proof, &field_exposure_swap).is_err(),
-                "birth/nationality field exposure swap unexpectedly verified",
-            );
-        } else {
-            let mut birth_offset_tamper = fixture.statement.clone();
-            birth_offset_tamper.birth_date_value_offset += 1;
-            assert!(
-                verify_mdoc_circuit(&proof, &birth_offset_tamper).is_err(),
-                "birth-date field exposure offset tamper unexpectedly verified",
-            );
+        let mut short_salt = document.clone();
+        mutate_selected_item(&mut short_salt, 0, |item| {
+            *text_value_mut(item, "random") = Value::Bytes(vec![7; 15]);
+        });
+        assert_eq!(
+            extract_product_value(short_salt, &request).unwrap_err(),
+            MdocError::SaltTooShort { len: 15 }
+        );
 
-            let mut nat_offset_tamper = fixture.statement.clone();
-            nat_offset_tamper.nationality_value_offset += 1;
-            assert!(
-                verify_mdoc_circuit(&proof, &nat_offset_tamper).is_err(),
-                "nationality field exposure offset tamper unexpectedly verified",
+        let mut digest_mismatch = document.clone();
+        mutate_selected_item(&mut digest_mismatch, 0, |item| {
+            *text_value_mut(item, "elementValue") = Value::Tag(
+                CBOR_TAG_FULL_DATE,
+                Box::new(Value::Text("1991-07-15".to_string())),
+            );
+        });
+        assert!(matches!(
+            extract_product_value(digest_mismatch, &request),
+            Err(MdocError::ItemDigestMismatch {
+                element,
+                digest_id: 7
+            }) if element == "birth_date"
+        ));
+
+        for target in ["issuer", "device"] {
+            let mut bad_protected = document.clone();
+            if target == "issuer" {
+                issuer_auth_mut(&mut bad_protected)[0] = Value::Bytes(Vec::new());
+            } else {
+                let device_signed = device_signed_mut(&mut bad_protected);
+                let device_auth =
+                    value_map_mut(text_value_mut(device_signed, "deviceAuth"), "deviceAuth");
+                let signature = value_array_mut(
+                    text_value_mut(device_auth, "deviceSignature"),
+                    "deviceSignature",
+                );
+                signature[0] = Value::Bytes(Vec::new());
+            }
+            assert_eq!(
+                extract_product_value(bad_protected, &request).unwrap_err(),
+                MdocError::InvalidCoseSign1("protected header must be ES256"),
+                "{target} protected-header mutation must reject"
             );
         }
     }
 
-    /// Phase D: each of the three in-circuit MSO bind surfaces (D1 element-id
-    /// pin, D2 digest membership, D3 device-key origin) rejects when its window
-    /// offset is moved off the genuine bytes.
     #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn mdoc_window_bind_offset_tampers_reject() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+    fn current_product_issuer_trust_requires_one_exact_leaf_pin() {
+        let (document, request) = product_fixture_value();
+        extract_product_value(document.clone(), &request).expect("exact leaf pin extracts");
 
-        // D1: birth_date elementIdentifier window (the exposed field bytes no
-        // longer spell "birth_date" at the shifted offset).
-        let mut d1 = fixture.statement.clone();
-        d1.birth_date_element_offset += 1;
-        assert!(
-            verify_mdoc_circuit(&proof, &d1).is_err(),
-            "D1 element-id offset tamper unexpectedly verified",
+        let mut wrong_key = request.clone();
+        let other_key = SigningKey::from_bytes((&[19u8; 32]).into()).expect("other key");
+        wrong_key.required_issuer_public_key = demo_affine_point(&other_key);
+        assert_eq!(
+            extract_product_value(document.clone(), &wrong_key).unwrap_err(),
+            MdocError::UntrustedIssuerCertificate
         );
 
-        // D2: birth_date valueDigests window in the issuer preimage.
-        let mut d2 = fixture.statement.clone();
-        d2.mso_birth_date_digest_offset += 1;
-        assert!(
-            verify_mdoc_circuit(&proof, &d2).is_err(),
-            "D2 digest-window offset tamper unexpectedly verified",
+        let mut multiple = document.clone();
+        let issuer_auth = issuer_auth_mut(&mut multiple);
+        let unprotected = value_map_mut(&mut issuer_auth[1], "issuerAuth.unprotected");
+        let certificate = unprotected[0].1.clone();
+        unprotected[0].1 = Value::Array(vec![certificate.clone(), certificate]);
+        assert_eq!(
+            extract_product_value(multiple, &request).unwrap_err(),
+            MdocError::InvalidCertificate("x5chain must contain exactly one leaf certificate")
         );
 
-        // D3: deviceKey x-coordinate window in the issuer preimage. Moving the
-        // offset breaks the byte-equality against the coprocessor's proven
-        // device public key x.
-        let mut d3 = fixture.statement.clone();
-        d3.mso_device_key_x_offset += 1;
-        assert!(
-            verify_mdoc_circuit(&proof, &d3).is_err(),
-            "D3 device-key-window offset tamper unexpectedly verified",
+        let mut direct_key = document;
+        let issuer_auth = issuer_auth_mut(&mut direct_key);
+        issuer_auth[1] = Value::Map(vec![(
+            "issuerKey".into(),
+            demo_cose_key(&SigningKey::from_bytes((&[7u8; 32]).into()).expect("demo issuer key")),
+        )]);
+        assert!(matches!(
+            extract_product_value(direct_key, &request),
+            Err(MdocError::InvalidProductDocumentShape(
+                "issuerAuth unprotected header must contain only x5chain"
+            ))
+        ));
+    }
+
+    #[test]
+    fn current_product_binds_received_empty_device_namespaces() {
+        let (document, request) = product_fixture_value();
+
+        let mut missing = document.clone();
+        device_signed_mut(&mut missing).remove(0);
+        assert!(matches!(
+            extract_product_value(missing, &request),
+            Err(MdocError::InvalidProductDocumentShape("deviceSigned keys"))
+        ));
+
+        for replacement in [
+            Value::Tag(
+                CBOR_TAG_ENCODED_CBOR,
+                Box::new(Value::Bytes(vec![0xB8, 0x00])),
+            ),
+            Value::Tag(
+                CBOR_TAG_ENCODED_CBOR,
+                Box::new(Value::Bytes(encode_value(Value::Map(vec![(
+                    "x".into(),
+                    Value::from(1),
+                )])))),
+            ),
+            Value::Bytes(vec![0xA0]),
+        ] {
+            let mut changed = document.clone();
+            let device_signed = device_signed_mut(&mut changed);
+            *text_value_mut(device_signed, "nameSpaces") = replacement;
+            assert!(matches!(
+                extract_product_value(changed, &request),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "deviceSigned.nameSpaces must be exact canonical empty DeviceNameSpacesBytes"
+                ))
+            ));
+        }
+
+        let mut bad_signature = document;
+        let device_signed = device_signed_mut(&mut bad_signature);
+        let device_auth = value_map_mut(text_value_mut(device_signed, "deviceAuth"), "deviceAuth");
+        let signature = value_array_mut(
+            text_value_mut(device_auth, "deviceSignature"),
+            "deviceSignature",
+        );
+        let Value::Bytes(signature_bytes) = &mut signature[3] else {
+            panic!("device signature must be bytes");
+        };
+        signature_bytes[0] ^= 1;
+        assert_eq!(
+            extract_product_value(bad_signature, &request).unwrap_err(),
+            MdocError::InvalidSignature("deviceSignature")
         );
 
-        // Validity: validUntil full-date window in the issuer preimage. Moving
-        // the offset breaks the in-circuit date parser/comparison against the
-        // public policy date.
-        let mut validity = fixture.statement.clone();
-        validity.mso_valid_until_date_offset += 1;
-        assert!(
-            verify_mdoc_circuit(&proof, &validity).is_err(),
-            "validity-window offset tamper unexpectedly verified",
+        for unprotected in [
+            Value::Map(vec![("extra".into(), Value::Null)]),
+            Value::Map(vec![
+                ("duplicate".into(), Value::Null),
+                ("duplicate".into(), Value::Null),
+            ]),
+        ] {
+            let mut changed = product_fixture_value().0;
+            let device_signed = device_signed_mut(&mut changed);
+            let device_auth =
+                value_map_mut(text_value_mut(device_signed, "deviceAuth"), "deviceAuth");
+            let signature = value_array_mut(
+                text_value_mut(device_auth, "deviceSignature"),
+                "deviceSignature",
+            );
+            signature[1] = unprotected;
+            assert!(matches!(
+                extract_product_value(changed, &request),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "deviceSignature unprotected header must be empty"
+                ))
+            ));
+        }
+
+        let mut embedded_payload = product_fixture_value().0;
+        let device_signed = device_signed_mut(&mut embedded_payload);
+        let device_auth = value_map_mut(text_value_mut(device_signed, "deviceAuth"), "deviceAuth");
+        let signature = value_array_mut(
+            text_value_mut(device_auth, "deviceSignature"),
+            "deviceSignature",
+        );
+        signature[2] = Value::Bytes(
+            device_authentication_bytes(&request.session_transcript, &request.doctype)
+                .expect("device authentication payload"),
+        );
+        assert!(matches!(
+            extract_product_value(embedded_payload, &request),
+            Err(MdocError::InvalidProductDocumentShape(
+                "deviceSignature payload must be detached"
+            ))
+        ));
+    }
+
+    #[test]
+    fn current_product_requires_wrapped_mso() {
+        let (mut document, request) = product_fixture_value();
+        let issuer_auth = issuer_auth_mut(&mut document);
+        let Value::Bytes(payload) = &issuer_auth[2] else {
+            panic!("issuerAuth payload must be bytes");
+        };
+        let Value::Tag(CBOR_TAG_ENCODED_CBOR, encoded_mso) =
+            decode_value(payload).expect("wrapped MSO decodes")
+        else {
+            panic!("fixture MSO must be wrapped");
+        };
+        let Value::Bytes(mso) = *encoded_mso else {
+            panic!("wrapped MSO must contain bytes");
+        };
+        issuer_auth[2] = Value::Bytes(mso);
+
+        assert!(matches!(
+            extract_product_value(document, &request),
+            Err(MdocError::InvalidProductDocumentShape(
+                "issuerAuth payload must be MobileSecurityObjectBytes"
+            ))
+        ));
+    }
+
+    #[test]
+    fn current_product_mso_accepts_iso_map_order_inside_exact_wrapper() {
+        let (mut document, _) = product_fixture_value();
+        let issuer_auth = issuer_auth_mut(&mut document);
+        let Value::Bytes(payload) = &issuer_auth[2] else {
+            panic!("issuerAuth payload must be bytes");
+        };
+        let Value::Tag(CBOR_TAG_ENCODED_CBOR, encoded_mso) =
+            decode_value(payload).expect("wrapped MSO decodes")
+        else {
+            panic!("fixture MSO must be wrapped");
+        };
+        let Value::Bytes(mso) = *encoded_mso else {
+            panic!("wrapped MSO must contain bytes");
+        };
+        let Value::Map(mut entries) = decode_value(&mso).expect("MSO decodes") else {
+            panic!("MSO must be a map");
+        };
+        entries.reverse();
+        let reordered = encode_value(Value::Tag(
+            CBOR_TAG_ENCODED_CBOR,
+            Box::new(Value::Bytes(encode_value(Value::Map(entries)))),
+        ));
+
+        validate_current_product_mso_payload(&reordered)
+            .expect("ISO map order remains valid inside exact wrapper");
+    }
+
+    #[test]
+    fn current_product_rejects_duplicate_or_ambiguous_mso_fields() {
+        let (document, request) = product_fixture_value();
+
+        let error = product_mso_mutation_error(&document, &request, |mso| {
+            let entry = mso
+                .iter()
+                .find(|(key, _)| key == &Value::Text("valueDigests".to_string()))
+                .expect("valueDigests entry")
+                .clone();
+            mso.push(entry);
+        });
+        assert_eq!(
+            error,
+            MdocError::InvalidProductDocumentShape("MobileSecurityObject keys")
+        );
+
+        let error = product_mso_mutation_error(&document, &request, |mso| {
+            let value_digests = value_map_mut(text_value_mut(mso, "valueDigests"), "valueDigests");
+            let digests = value_map_mut(&mut value_digests[0].1, "PID digests");
+            digests.push(digests[0].clone());
+        });
+        assert_eq!(
+            error,
+            MdocError::InvalidProductDocumentShape("duplicate valueDigests digestID")
+        );
+
+        let error = product_mso_mutation_error(&document, &request, |mso| {
+            let value_digests = value_map_mut(text_value_mut(mso, "valueDigests"), "valueDigests");
+            let digests = value_map_mut(&mut value_digests[0].1, "PID digests");
+            digests[0].0 = Value::from(u64::from(MDOC_SCOPE_MAX_DIGEST_ID) + 1);
+        });
+        assert_eq!(
+            error,
+            MdocError::InvalidProductDocumentShape("duplicate valueDigests digestID")
+        );
+
+        let error = product_mso_mutation_error(&document, &request, |mso| {
+            let validity = value_map_mut(text_value_mut(mso, "validityInfo"), "validityInfo");
+            validity.push(validity[0].clone());
+        });
+        assert_eq!(
+            error,
+            MdocError::InvalidProductDocumentShape("validityInfo keys")
+        );
+
+        let error = product_mso_mutation_error(&document, &request, |mso| {
+            let validity = value_map_mut(text_value_mut(mso, "validityInfo"), "validityInfo");
+            validity.push(("expectedUpdate".into(), Value::Null));
+        });
+        assert_eq!(
+            error,
+            MdocError::InvalidTdate("validityInfo.expectedUpdate")
+        );
+
+        let error = product_mso_mutation_error(&document, &request, |mso| {
+            let device_key_info =
+                value_map_mut(text_value_mut(mso, "deviceKeyInfo"), "deviceKeyInfo");
+            device_key_info.push(device_key_info[0].clone());
+        });
+        assert_eq!(
+            error,
+            MdocError::InvalidProductDocumentShape("deviceKeyInfo keys")
+        );
+
+        let error = product_mso_mutation_error(&document, &request, |mso| {
+            let device_key_info =
+                value_map_mut(text_value_mut(mso, "deviceKeyInfo"), "deviceKeyInfo");
+            let device_key =
+                value_map_mut(text_value_mut(device_key_info, "deviceKey"), "deviceKey");
+            device_key.push(device_key[0].clone());
+        });
+        assert_eq!(
+            error,
+            MdocError::InvalidProductDocumentShape("deviceKey COSE_Key labels")
         );
     }
 
     #[test]
-    #[ignore = "slow: proves product mdoc circuit profile"]
-    fn malformed_shared_sha_table_provider_claim_rejects_without_panic() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let mut proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies before tamper");
+    fn current_product_rejects_missing_or_invalid_mso_security_fields() {
+        let (document, request) = product_fixture_value();
 
-        proof.sha_tables_interaction_claim.pairs.clear();
+        let missing_validity = product_mso_mutation_error(&document, &request, |mso| {
+            mso.retain(|(key, _)| key != &Value::Text("validityInfo".to_string()));
+        });
+        assert_eq!(
+            missing_validity,
+            MdocError::InvalidProductDocumentShape("MobileSecurityObject keys")
+        );
+
+        for (label, field, value, expected) in [
+            (
+                "version",
+                "version",
+                Value::Text("1.0".to_string()),
+                MdocError::UnsupportedMsoVersion("1.0".to_string()),
+            ),
+            (
+                "docType",
+                "docType",
+                Value::Text("wrong.doctype".to_string()),
+                MdocError::DoctypeMismatch,
+            ),
+            (
+                "digest algorithm",
+                "digestAlgorithm",
+                Value::Text("SHA-384".to_string()),
+                MdocError::UnsupportedDigestAlgorithm("SHA-384".to_string()),
+            ),
+        ] {
+            let mut changed = document.clone();
+            mutate_mso(&mut changed, |mso| *text_value_mut(mso, field) = value);
+            resign_issuer_auth(&mut changed);
+            assert_eq!(
+                extract_product_value(changed, &request).unwrap_err(),
+                expected,
+                "{label} mutation must reject"
+            );
+        }
+
+        let mut malformed_validity = document;
+        mutate_mso(&mut malformed_validity, |mso| {
+            let validity = value_map_mut(text_value_mut(mso, "validityInfo"), "validityInfo");
+            *text_value_mut(validity, "validFrom") =
+                Value::Tag(0, Box::new(Value::Text("2026-02-30T00:00:00Z".to_string())));
+        });
+        resign_issuer_auth(&mut malformed_validity);
+        assert_eq!(
+            extract_product_value(malformed_validity, &request).unwrap_err(),
+            MdocError::InvalidTdate("validityInfo.validFrom")
+        );
+    }
+
+    #[test]
+    fn current_product_requires_unique_pid_namespace_and_selected_items() {
+        let (document, request) = product_fixture_value();
+
+        for insert_first in [true, false] {
+            let mut duplicate_namespace = document.clone();
+            let namespaces = issuer_namespaces_mut(&mut duplicate_namespace);
+            let entry = namespaces[0].clone();
+            if insert_first {
+                namespaces.insert(0, entry);
+            } else {
+                namespaces.push(entry);
+            }
+            assert!(matches!(
+                extract_product_value(duplicate_namespace, &request),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "issuerSigned.nameSpaces must contain exactly one PID namespace"
+                ))
+            ));
+
+            let mut duplicate_item = document.clone();
+            let namespaces = issuer_namespaces_mut(&mut duplicate_item);
+            let items = value_array_mut(&mut namespaces[0].1, "PID namespace items");
+            let item = items[0].clone();
+            if insert_first {
+                items.insert(0, item);
+            } else {
+                items.push(item);
+            }
+            assert!(matches!(
+                extract_product_value(duplicate_item, &request),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "each requested PID element must occur exactly once"
+                ))
+            ));
+        }
+
+        let mut oversized_digest_id = document;
+        mutate_selected_item(&mut oversized_digest_id, 0, |item| {
+            *text_value_mut(item, "digestID") =
+                Value::from(u64::from(MDOC_SCOPE_MAX_DIGEST_ID) + 1);
+        });
+        assert!(matches!(
+            extract_product_value(oversized_digest_id, &request),
+            Err(MdocError::InvalidProductDocumentShape(
+                "requested PID digestID exceeds product bound"
+            ))
+        ));
+    }
+
+    #[test]
+    fn current_product_rejects_duplicate_and_ambiguous_outer_fields() {
+        let (document, request) = product_fixture_value();
+
+        for insert_first in [true, false] {
+            let mut duplicate = document.clone();
+            let map = value_map_mut(&mut duplicate, "document");
+            let entry = map
+                .iter()
+                .find(|(key, _)| key == &Value::Text("docType".to_string()))
+                .expect("docType entry")
+                .clone();
+            if insert_first {
+                map.insert(0, entry);
+            } else {
+                map.push(entry);
+            }
+            assert!(matches!(
+                extract_product_value(duplicate, &request),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "product document keys"
+                ))
+            ));
+
+            let mut duplicate = document.clone();
+            let document_map = value_map_mut(&mut duplicate, "document");
+            let issuer_signed =
+                value_map_mut(text_value_mut(document_map, "issuerSigned"), "issuerSigned");
+            let entry = issuer_signed
+                .iter()
+                .find(|(key, _)| key == &Value::Text("issuerAuth".to_string()))
+                .expect("issuerAuth entry")
+                .clone();
+            if insert_first {
+                issuer_signed.insert(0, entry);
+            } else {
+                issuer_signed.push(entry);
+            }
+            assert!(matches!(
+                extract_product_value(duplicate, &request),
+                Err(MdocError::InvalidProductDocumentShape("issuerSigned keys"))
+            ));
+
+            let mut duplicate = document.clone();
+            let device_signed = device_signed_mut(&mut duplicate);
+            let entry = device_signed
+                .iter()
+                .find(|(key, _)| key == &Value::Text("deviceAuth".to_string()))
+                .expect("deviceAuth entry")
+                .clone();
+            if insert_first {
+                device_signed.insert(0, entry);
+            } else {
+                device_signed.push(entry);
+            }
+            assert!(matches!(
+                extract_product_value(duplicate, &request),
+                Err(MdocError::InvalidProductDocumentShape("deviceSigned keys"))
+            ));
+
+            let mut duplicate = document.clone();
+            let device_signed = device_signed_mut(&mut duplicate);
+            let device_auth =
+                value_map_mut(text_value_mut(device_signed, "deviceAuth"), "deviceAuth");
+            let entry = device_auth[0].clone();
+            if insert_first {
+                device_auth.insert(0, entry);
+            } else {
+                device_auth.push(entry);
+            }
+            assert!(matches!(
+                extract_product_value(duplicate, &request),
+                Err(MdocError::InvalidProductDocumentShape("deviceAuth keys"))
+            ));
+        }
+
+        for insert_first in [true, false] {
+            let mut duplicate = document.clone();
+            let issuer_auth = issuer_auth_mut(&mut duplicate);
+            let unprotected = value_map_mut(&mut issuer_auth[1], "issuerAuth.unprotected");
+            let entry = unprotected[0].clone();
+            if insert_first {
+                unprotected.insert(0, entry);
+            } else {
+                unprotected.push(entry);
+            }
+            assert!(matches!(
+                extract_product_value(duplicate, &request),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "issuerAuth unprotected header must contain only x5chain"
+                ))
+            ));
+        }
+
+        for extra_key in ["deviceMac", "unknown"] {
+            let mut ambiguous = document.clone();
+            let device_signed = device_signed_mut(&mut ambiguous);
+            let device_auth =
+                value_map_mut(text_value_mut(device_signed, "deviceAuth"), "deviceAuth");
+            device_auth.push((extra_key.into(), Value::Null));
+            assert!(matches!(
+                extract_product_value(ambiguous, &request),
+                Err(MdocError::InvalidProductDocumentShape("deviceAuth keys"))
+            ));
+        }
+    }
+
+    #[test]
+    fn product_attribute_scope_is_exact_and_canonical() {
+        let age = MdocRequestedAttribute {
+            element_identifier: "birth_date".to_string(),
+            mode: MdocDisclosureMode::AgeOver,
+        };
+        let nationality = MdocRequestedAttribute {
+            element_identifier: "nationality".to_string(),
+            mode: MdocDisclosureMode::Alpha2Set,
+        };
+        validate_product_requested_attributes(std::slice::from_ref(&age)).unwrap();
+        validate_product_requested_attributes(std::slice::from_ref(&nationality)).unwrap();
+        validate_product_requested_attributes(&[age.clone(), nationality.clone()]).unwrap();
+
+        for attributes in [
+            Vec::new(),
+            vec![nationality.clone(), age.clone()],
+            vec![MdocRequestedAttribute {
+                element_identifier: "issue_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            }],
+            vec![MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::Alpha2Set,
+            }],
+            vec![age.clone(), age.clone()],
+            vec![age.clone(), nationality.clone(), nationality],
+        ] {
+            assert!(validate_product_requested_attributes(&attributes).is_err());
+        }
+    }
+
+    #[test]
+    fn product_circuit_semantics_bind_scope_and_predicate_indices_exactly() {
+        let mut current = demo_mdoc_circuit_fixture().statement;
+        current.request_binding = [0x51; 32];
+        assert!(current_product_circuit_semantics(&current));
+
+        let mut mutations = Vec::new();
+        let mut zero_binding = current.clone();
+        zero_binding.request_binding = [0; 32];
+        mutations.push(("zero request binding", zero_binding));
+        let mut wrong_doctype = current.clone();
+        wrong_doctype.doctype.push_str(".other");
+        mutations.push(("wrong doctype", wrong_doctype));
+        let mut wrong_namespace = current.clone();
+        wrong_namespace.namespace.push_str(".other");
+        mutations.push(("wrong namespace", wrong_namespace));
+        let mut wrong_element = current.clone();
+        wrong_element.attributes[0].element_identifier = "issue_date".to_string();
+        mutations.push(("predicate on wrong element", wrong_element));
+        let mut reordered = current.clone();
+        reordered.attributes.swap(0, 1);
+        reordered.age_attribute_index = Some(1);
+        reordered.nationality_attribute_index = Some(0);
+        mutations.push(("noncanonical attribute order", reordered));
+
+        for (label, age_index, nationality_index) in [
+            ("missing age index", None, Some(1)),
+            ("age index points at nationality", Some(1), Some(1)),
+            ("age index is out of range", Some(2), Some(1)),
+            ("missing nationality index", Some(0), None),
+            ("nationality index points at age", Some(0), Some(0)),
+            ("nationality index is out of range", Some(0), Some(2)),
+        ] {
+            let mut statement = current.clone();
+            statement.age_attribute_index = age_index;
+            statement.nationality_attribute_index = nationality_index;
+            mutations.push((label, statement));
+        }
+
+        for (label, statement) in mutations {
+            assert!(
+                !current_product_circuit_semantics(&statement),
+                "{label} unexpectedly passed the product gate"
+            );
+        }
+    }
+
+    #[test]
+    fn product_public_semantics_bind_current_pid_scope() {
+        let mut circuit = demo_mdoc_circuit_fixture().statement;
+        circuit.request_binding = [0x51; 32];
+        let current = MdocPublicStatement::from_circuit(&circuit);
+        assert!(current_product_public_semantics(&current));
+
+        let day_start = u64::try_from(days_from_civil(2026, 7, 3).unwrap()).unwrap() * 86_400;
+        let mut same_day = current.clone();
+        same_day.verification_time_epoch_seconds = day_start + 17 * 3_600 + 42;
+        assert!(current_product_public_semantics(&same_day));
+
+        let mut end_of_day = current.clone();
+        end_of_day.verification_time_epoch_seconds = day_start + 86_399;
+        assert!(current_product_public_semantics(&end_of_day));
+        end_of_day.verification_time_epoch_seconds += 1;
+        assert!(!current_product_public_semantics(&end_of_day));
+
+        let mut zero_binding = current.clone();
+        zero_binding.request_binding = [0; 32];
+        assert!(!current_product_public_semantics(&zero_binding));
+
+        for accepted_nationalities in [
+            vec![*b"ZZ"],
+            vec![*b"QU"],
+            vec![*b"DE", *b"DE"],
+            vec![*b"FR", *b"DE"],
+        ] {
+            let mut invalid_policy = current.clone();
+            invalid_policy.policy.accepted_nationalities = accepted_nationalities;
+            assert!(!current_product_public_semantics(&invalid_policy));
+        }
+
+        let mut mismatched_date = current.clone();
+        mismatched_date.policy.current_date.day += 1;
+        assert!(!current_product_public_semantics(&mismatched_date));
+
+        let mut wrong_element = current;
+        wrong_element.attributes[0].element_identifier = "issue_date".to_string();
+        assert!(!current_product_public_semantics(&wrong_element));
+    }
+
+    #[test]
+    fn device_authentication_rejects_trailing_session_transcript_bytes() {
+        let mut transcript = openid4vp_session_transcript(b"request-context");
+        transcript.push(0);
+        assert!(matches!(
+            device_authentication_bytes(&transcript, PRODUCT_DOCTYPE),
+            Err(MdocError::Cbor(message)) if message.contains("trailing bytes")
+        ));
+    }
+
+    #[test]
+    fn product_cbor_canonicalizer_recurses_and_rejects_duplicate_map_keys() {
+        let nested_map = Value::Array(vec![Value::Tag(
+            1000,
+            Box::new(Value::Map(vec![
+                (Value::Text("long".to_string()), Value::from(1)),
+                (Value::Text("x".to_string()), Value::from(2)),
+            ])),
+        )]);
+        let reordered = encode_value(nested_map.clone());
+        let canonical =
+            encode_value(canonicalize_product_cbor_value(nested_map).expect("canonical map"));
+        assert_ne!(reordered, canonical, "nested map order must be normalized");
+        assert_eq!(
+            canonicalize_product_cbor_value(Value::Map(vec![
+                (Value::from(0), Value::from(1)),
+                (Value::from(0), Value::from(2)),
+            ])),
+            Err(MdocError::NonCanonicalSessionTranscript),
+            "duplicate canonical map keys must be rejected"
+        );
+    }
+
+    #[test]
+    fn product_session_transcript_requires_recursive_deterministic_cbor() {
+        let canonical = openid4vp_session_transcript(b"request-context");
+        validate_product_session_transcript_cbor(&canonical).unwrap();
+
+        for bytes in [vec![0; 55], vec![0; 57], vec![0; 16 * 1024]] {
+            assert_eq!(
+                validate_product_session_transcript_cbor(&bytes),
+                Err(MdocError::InvalidProductDocumentShape(
+                    "SessionTranscript must be exactly 56 canonical bytes",
+                ))
+            );
+        }
+
+        for (label, bytes) in [
+            ("indefinite array", vec![0x9f, 0x00, 0xff]),
+            ("non-shortest integer", vec![0x81, 0x18, 0x00]),
+        ] {
+            assert!(
+                validate_product_session_transcript_cbor(&bytes).is_err(),
+                "{label} must be rejected by the bounded structural parser"
+            );
+        }
+        assert!(
+            validate_product_session_transcript_cbor(&[0x81, 0xa2, 0x00, 0x01, 0x00, 0x02])
+                .is_err(),
+            "a map-bearing non-OpenID4VP transcript must be rejected"
+        );
+
+        for (label, bytes) in [
+            ("f16", vec![0x81, 0xf9, 0x3e, 0x00]),
+            ("f32", vec![0x81, 0xfa, 0x3f, 0xc0, 0x00, 0x00]),
+            (
+                "f64",
+                vec![0x81, 0xfb, 0x3f, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            ),
+            ("NaN", vec![0x81, 0xf9, 0x7e, 0x00]),
+        ] {
+            assert!(
+                validate_product_session_transcript_cbor(&bytes).is_err(),
+                "product SessionTranscript {label} must be rejected by the bounded structural parser"
+            );
+        }
+
+        let nested_map = Value::Array(vec![Value::Tag(
+            1000,
+            Box::new(Value::Map(vec![
+                (Value::Text("long".to_string()), Value::from(1)),
+                (Value::Text("x".to_string()), Value::from(2)),
+            ])),
+        )]);
+        let reordered = encode_value(nested_map.clone());
+        assert!(
+            validate_product_session_transcript_cbor(&reordered).is_err(),
+            "a non-OpenID4VP nested transcript must be rejected"
+        );
+        let canonical_nested =
+            encode_value(canonicalize_product_cbor_value(nested_map).expect("canonical map"));
+        assert!(
+            validate_product_session_transcript_cbor(&canonical_nested).is_err(),
+            "canonical CBOR alone is insufficient without the exact OpenID4VP shape"
+        );
+
+        for (label, value) in [
+            (
+                "short outer array",
+                Value::Array(vec![Value::Null, Value::Null]),
+            ),
+            (
+                "long outer array",
+                Value::Array(vec![Value::Null, Value::Null, Value::Null, Value::Null]),
+            ),
+            (
+                "wrong null",
+                Value::Array(vec![
+                    Value::from(0),
+                    Value::Null,
+                    Value::Array(vec!["OpenID4VPHandover".into(), Value::Bytes(vec![0; 32])]),
+                ]),
+            ),
+            (
+                "wrong second null",
+                Value::Array(vec![
+                    Value::Null,
+                    Value::from(0),
+                    Value::Array(vec!["OpenID4VPHandover".into(), Value::Bytes(vec![0; 32])]),
+                ]),
+            ),
+            (
+                "wrong handover type",
+                Value::Array(vec![Value::Null, Value::Null, Value::Null]),
+            ),
+            (
+                "short handover array",
+                Value::Array(vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Array(vec!["OpenID4VPHandover".into()]),
+                ]),
+            ),
+            (
+                "long handover array",
+                Value::Array(vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Array(vec![
+                        "OpenID4VPHandover".into(),
+                        Value::Bytes(vec![0; 32]),
+                        Value::Null,
+                    ]),
+                ]),
+            ),
+            (
+                "wrong handover label",
+                Value::Array(vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Array(vec!["OtherHandover".into(), Value::Bytes(vec![0; 32])]),
+                ]),
+            ),
+            (
+                "wrong handover hash type",
+                Value::Array(vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Array(vec!["OpenID4VPHandover".into(), Value::Text("x".into())]),
+                ]),
+            ),
+            (
+                "short handover hash",
+                Value::Array(vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Array(vec!["OpenID4VPHandover".into(), Value::Bytes(vec![0; 31])]),
+                ]),
+            ),
+            (
+                "long handover hash",
+                Value::Array(vec![
+                    Value::Null,
+                    Value::Null,
+                    Value::Array(vec!["OpenID4VPHandover".into(), Value::Bytes(vec![0; 33])]),
+                ]),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_product_session_transcript_cbor(&encode_value(value)),
+                    Err(MdocError::InvalidProductDocumentShape(_))
+                ),
+                "{label} must be rejected by the exact OpenID4VP shape gate"
+            );
+        }
+
+        let mut trailing = canonical;
+        trailing.push(0);
+        assert_eq!(
+            validate_product_session_transcript_cbor(&trailing),
+            Err(MdocError::InvalidProductDocumentShape(
+                "SessionTranscript must be exactly 56 canonical bytes",
+            ))
+        );
+
+        let mut too_deep = vec![0x81; 8];
+        too_deep.push(0xf6);
+        assert_eq!(
+            validate_product_session_transcript_cbor(&too_deep),
+            Err(MdocError::InvalidProductDocumentShape(
+                "SessionTranscript must be exactly 56 canonical bytes",
+            ))
+        );
+    }
+
+    #[test]
+    fn product_sha_input_size_boundaries_are_exact() {
+        let accepted_item = vec![0; crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES];
+        validate_product_sha_input_sizes(&[], &[], &[&accepted_item]).unwrap();
+        assert_eq!(
+            validate_product_sha_input_sizes(
+                &[],
+                &[],
+                &[&vec![
+                    0;
+                    crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES
+                        + 1
+                ]],
+            ),
+            Err(MdocError::InputTooLarge {
+                input: "selected IssuerSignedItem",
+                actual: crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES + 1,
+                maximum: crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES,
+            })
+        );
+
+        let accepted_mso = vec![0; crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES];
+        validate_product_sha_input_sizes(&accepted_mso, &[], &[]).unwrap();
+        assert_eq!(
+            validate_product_sha_input_sizes(
+                &vec![0; crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES + 1],
+                &[],
+                &[],
+            ),
+            Err(MdocError::InputTooLarge {
+                input: "MSO payload",
+                actual: crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES + 1,
+                maximum: crate::product_profile::PRODUCT_MAX_MSO_PAYLOAD_BYTES,
+            })
+        );
+
+        let accepted_issuer =
+            vec![0; crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES];
+        validate_product_sha_input_sizes(&accepted_mso, &accepted_issuer, &[]).unwrap();
+        assert_eq!(
+            validate_product_sha_input_sizes(
+                &accepted_mso,
+                &vec![0; crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES + 1],
+                &[],
+            ),
+            Err(MdocError::InputTooLarge {
+                input: "issuer Sig_structure",
+                actual: crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES + 1,
+                maximum: crate::product_profile::PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES,
+            })
+        );
+        assert_eq!(
+            validate_product_sha_input_sizes(&[], &[], &[&accepted_item, &accepted_item, &[]]),
+            Err(MdocError::InvalidAttributeCount { count: 3 })
+        );
+    }
+
+    #[test]
+    fn sig_structure_overhead_stays_within_product_bound() {
+        for payload_len in [0, 23, 24, 255, 256, 6_144] {
+            let payload = vec![0; payload_len];
+            let structure = sig_structure(ES256_PROTECTED_HEADER, &payload);
+            assert!(structure.len() - payload.len() <= 20);
+            if payload_len == 6_144 {
+                assert_eq!(structure.len() - payload.len(), 20);
+            }
+        }
+        let fixture = demo_mdoc_circuit_fixture();
+        assert!(fixture.extracted.mso.len() >= 256);
+        assert_eq!(
+            fixture.extracted.issuer_sig_structure.len() - fixture.extracted.mso.len(),
+            20
+        );
+    }
+
+    #[test]
+    fn maximum_nationality_item_fits_selected_item_profile() {
+        // The item cap bounds the disclosed nationality array to a realistic
+        // size. A real PID holds 1-3 nationalities; 32 is far beyond any real
+        // case and must still fit within the 256-byte selected-item cap. (The
+        // circuit's larger `MAX_PRESENTED_NATIONALITIES` walk capacity is not
+        // the binding constraint; the item cap is.)
+        let value = Value::Array((0..32).map(|_| Value::Text("DE".to_string())).collect());
+        let item = demo_issuer_signed_item(9, "nationality", value, vec![9; 16]);
+        assert!(item.len() <= crate::product_profile::PRODUCT_MAX_SELECTED_ITEM_BYTES);
+    }
+
+    #[test]
+    fn tdate_parser_enforces_gregorian_calendar_boundaries() {
+        let parse = |text: &str| {
+            parse_tdate(
+                &Value::Tag(0, Box::new(Value::Text(text.to_string()))),
+                "test.tdate",
+            )
+        };
+        for valid in [
+            "2000-02-29T00:00:00Z",
+            "2004-02-29T23:59:59Z",
+            "2024-04-30T00:00:00Z",
+        ] {
+            assert!(parse(valid).is_ok(), "valid tdate rejected: {valid}");
+        }
+        for invalid in [
+            "1900-02-29T00:00:00Z",
+            "2023-02-29T00:00:00Z",
+            "2024-02-30T00:00:00Z",
+            "2024-04-31T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+        ] {
+            assert_eq!(
+                parse(invalid),
+                Err(MdocError::InvalidTdate("test.tdate")),
+                "invalid tdate accepted: {invalid}"
+            );
+        }
+        assert_eq!(
+            days_from_civil(2024, 4, 31),
+            Err(MdocError::InvalidVerificationTime),
+            "public verification dates must use the same calendar rule"
+        );
+    }
+
+    #[test]
+    fn statement_uses_exact_verifier_seconds_for_validity_boundaries() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let valid_from = epoch_seconds(2026, 1, 1, 0);
+        let valid_until = epoch_seconds(2030, 1, 1, 0);
+
+        assert_eq!(
+            MdocCircuitStatement::from_extracted_at(
+                &fixture.extracted,
+                product_policy_on(2026, 1, 1),
+                valid_from,
+            )
+            .unwrap_err(),
+            MdocError::CredentialNotYetValid
+        );
+        MdocCircuitStatement::from_extracted_at(
+            &fixture.extracted,
+            product_policy_on(2026, 1, 1),
+            valid_from + 1,
+        )
+        .expect("one second after validFrom is valid");
+
+        MdocCircuitStatement::from_extracted_at(
+            &fixture.extracted,
+            product_policy_on(2029, 12, 31),
+            valid_until - 1,
+        )
+        .expect("one second before validUntil is valid");
+        assert_eq!(
+            MdocCircuitStatement::from_extracted_at(
+                &fixture.extracted,
+                product_policy_on(2030, 1, 1),
+                valid_until,
+            )
+            .unwrap_err(),
+            MdocError::CredentialExpired
+        );
+    }
+
+    #[test]
+    fn prover_rejects_invalid_verifier_timestamps_without_panicking() {
+        let fixture = demo_mdoc_circuit_fixture();
+        for timestamp in [0, 253_402_300_799, u64::MAX] {
+            let mut statement = fixture.statement.clone();
+            statement.verification_time_epoch_seconds = timestamp;
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                prove_mdoc_circuit(&fixture.extracted, &statement)
+            }));
+            assert!(result.is_ok(), "timestamp {timestamp} panicked");
+            assert!(
+                matches!(result.unwrap(), Err(Error::Prove(message)) if message == "invalid verifier timestamp"),
+                "timestamp {timestamp} must reject before evaluator construction"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "slow: proves age and validity guard-bypass witnesses"]
+    fn proof_rejects_underage_and_out_of_window_guard_bypasses() {
+        let fixture = demo_mdoc_circuit_fixture();
+
+        let mut underage = fixture.extracted.clone();
+        underage.birth_date_bytes = [0x07, 0xDA, 7, 15]; // 2010-07-15.
+        let underage_statement = MdocCircuitStatement::from_extracted_at(
+            &underage,
+            fixture.statement.policy.clone(),
+            fixture.statement.verification_time_epoch_seconds,
+        )
+        .expect("private age result remains a proof relation");
+        assert_invalid_witness_rejects("underage birth date", &underage, &underage_statement);
+
+        for (label, timestamp, policy) in [
+            (
+                "timestamp equals validFrom",
+                epoch_seconds(2026, 1, 1, 0),
+                product_policy_on(2026, 1, 1),
+            ),
+            (
+                "timestamp equals validUntil",
+                epoch_seconds(2030, 1, 1, 0),
+                product_policy_on(2030, 1, 1),
+            ),
+        ] {
+            let mut statement = fixture.statement.clone();
+            statement.verification_time_epoch_seconds = timestamp;
+            statement.policy = policy;
+            assert_invalid_witness_rejects(label, &fixture.extracted, &statement);
+        }
+    }
+
+    fn test_claim_mask(log_size: u32) -> (ClaimMaskTrace, QM31) {
+        let mut ring = ClaimMaskRing::new(&[log_size, log_size]).unwrap();
+        let mask = ring.take(log_size).unwrap();
+        let shared = SharedClaimMaskChallenge::new();
+        let mut anchor =
+            ClaimMaskChallengeModule::new(shared.clone(), vec![log_size, log_size]).unwrap();
+        let mut channel = Blake2sChannel::default();
+        anchor.mix_public(&mut channel);
+        anchor.draw_relations(&mut channel);
+        (mask, shared.require().unwrap())
+    }
+
+    fn field_lookup_sum(relation: &FieldBytesRelation, field_id: u32, bytes: &[u8]) -> QM31 {
+        bytes.iter().enumerate().fold(
+            QM31::from_u32_unchecked(0, 0, 0, 0),
+            |sum, (index, &byte)| {
+                let denominator: QM31 = relation.combine(&[
+                    M31::from_u32_unchecked(field_id),
+                    M31::from_u32_unchecked(index as u32),
+                    M31::from_u32_unchecked(u32::from(byte)),
+                ]);
+                sum + denominator.inverse()
+            },
+        )
+    }
+
+    #[test]
+    fn exact_sha_claim_mask_delta_is_beta_times_target() {
+        let bytes = b"exact private SHA message";
+        let mut channel = Blake2sChannel::default();
+        let source_relation = FieldBytesRelation::draw(&mut channel);
+        let sha_relation = FieldBytesRelation::draw(&mut channel);
+        let (mask, beta) = test_claim_mask(exact_sha_message_log_size(bytes.len()));
+        let (_, unmasked) = exact_sha_message_interaction_trace(
+            bytes,
+            MDOC_MSO_PAYLOAD_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+            1,
+            &source_relation,
+            &sha_relation,
+            None,
+        );
+        let (_, masked) = exact_sha_message_interaction_trace(
+            bytes,
+            MDOC_MSO_PAYLOAD_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+            1,
+            &source_relation,
+            &sha_relation,
+            Some((&mask, beta)),
+        );
+
+        assert_eq!(masked - unmasked, beta * mask.target_sum());
+    }
+
+    #[test]
+    fn revocation_range_claim_mask_delta_is_beta_times_target() {
+        let witness = MdocRevocationRangeWitness {
+            id: 20,
+            id_lo: 10,
+            id_hi: 30,
+        };
+        let mut mso_digest = [0x5a; 32];
+        mso_digest[..REVOCATION_U64_BYTES].copy_from_slice(&witness.id.to_le_bytes());
+        let mut channel = Blake2sChannel::default();
+        let digest_relation = PackedShaDigestRelation::draw(&mut channel);
+        let message_relation = FieldBytesRelation::draw(&mut channel);
+        let (mask, beta) = test_claim_mask(MDOC_REVOCATION_RANGE_LOG_SIZE);
+        let (_, unmasked) = revocation_range_interaction_trace(
+            &witness,
+            &mso_digest,
+            &digest_relation,
+            42,
+            &message_relation,
+            None,
+        );
+        let (_, masked) = revocation_range_interaction_trace(
+            &witness,
+            &mso_digest,
+            &digest_relation,
+            42,
+            &message_relation,
+            Some((&mask, beta)),
+        );
+
+        assert_eq!(masked - unmasked, beta * mask.target_sum());
+    }
+
+    #[test]
+    fn exact_sha_padding_covers_boundary_lengths() {
+        for (len, expected_padded_len) in [(55, 64), (56, 128), (63, 128), (64, 128)] {
+            let message = vec![0x42; len];
+            let padded = stwo_sha256::native::pad_message(&message);
+            assert_eq!(exact_sha_padded_len(len), expected_padded_len);
+            assert_eq!(padded.len(), expected_padded_len);
+            for row in len..expected_padded_len {
+                assert_eq!(
+                    exact_sha_padding_byte(len, row, expected_padded_len),
+                    padded[row],
+                    "wrong canonical SHA padding byte for len={len}, row={row}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_sha_bridge_rejects_mso_and_revocation_suffix_extensions_algebraically() {
+        let mut channel = Blake2sChannel::default();
+        let source_relation = FieldBytesRelation::draw(&mut channel);
+        let sha_relation = FieldBytesRelation::draw(&mut channel);
+        let zero = QM31::from_u32_unchecked(0, 0, 0, 0);
+
+        let mso_payload = b"\xa1\x67version\x63" as &[u8];
+        let mso_padded = stwo_sha256::native::pad_message(mso_payload);
+        let (_, mso_bridge) = exact_sha_message_interaction_trace(
+            mso_payload,
+            MDOC_MSO_PAYLOAD_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+            1,
+            &source_relation,
+            &sha_relation,
+            None,
+        );
+        let mso_total = mso_bridge
+            - field_lookup_sum(&source_relation, MDOC_MSO_PAYLOAD_FIELD_ID, mso_payload)
+            - field_lookup_sum(
+                &sha_relation,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+                &mso_padded,
+            );
+        assert_eq!(mso_total, zero);
+
+        let mut extended_mso = mso_payload.to_vec();
+        extended_mso.push(0);
+        let extended_mso_padded = stwo_sha256::native::pad_message(&extended_mso);
+        let extended_mso_total = mso_bridge
+            - field_lookup_sum(&source_relation, MDOC_MSO_PAYLOAD_FIELD_ID, mso_payload)
+            - field_lookup_sum(
+                &sha_relation,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_MSO_SLOT,
+                &extended_mso_padded,
+            );
+        assert_ne!(extended_mso_total, zero);
+
+        let revocation_message = [0x5a; PRODUCT_TS13_REVOCATION_MESSAGE_BYTES];
+        let revocation_padded = stwo_sha256::native::pad_message(&revocation_message);
+        let (_, revocation_bridge) = exact_sha_message_interaction_trace(
+            &revocation_message,
+            MDOC_REVOCATION_MESSAGE_FIELD_ID,
+            PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
+            -1,
+            &source_relation,
+            &sha_relation,
+            None,
+        );
+        let revocation_total = revocation_bridge
+            + field_lookup_sum(
+                &source_relation,
+                MDOC_REVOCATION_MESSAGE_FIELD_ID,
+                &revocation_message,
+            )
+            - field_lookup_sum(
+                &sha_relation,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
+                &revocation_padded,
+            );
+        assert_eq!(revocation_total, zero);
+
+        let mut extended_revocation = revocation_message.to_vec();
+        extended_revocation.push(0);
+        let extended_revocation_padded = stwo_sha256::native::pad_message(&extended_revocation);
+        let extended_revocation_total = revocation_bridge
+            + field_lookup_sum(
+                &source_relation,
+                MDOC_REVOCATION_MESSAGE_FIELD_ID,
+                &revocation_message,
+            )
+            - field_lookup_sum(
+                &sha_relation,
+                PACKED_SHA_STREAM_FIELD_BASE + PACKED_SHA_REVOCATION_SLOT,
+                &extended_revocation_padded,
+            );
+        assert_ne!(extended_revocation_total, zero);
+    }
+
+    #[test]
+    fn product_fixed_shape_rejects_downward_log_mutations() {
+        const SHA: u32 = crate::product_profile::PRODUCT_SHA_LOG_N_ROWS;
+        const CBOR: u32 = crate::product_profile::PRODUCT_MAX_CBOR_LOG_SIZE;
+        const ITEM_CBOR: u32 = crate::product_profile::PRODUCT_ITEM_CBOR_LOG_SIZE;
+        const SCOPE: u32 = crate::product_profile::PRODUCT_MAX_SCOPE_LOG_SIZE;
+
+        validate_product_fixed_shape_logs(SHA, [CBOR, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR], SCOPE)
+            .unwrap();
+        for (sha, cbor, scope, label) in [
+            (
+                SHA - 1,
+                [CBOR, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR],
+                SCOPE,
+                "SHA",
+            ),
+            (
+                SHA,
+                [CBOR - 1, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR],
+                SCOPE,
+                "issuer CBOR",
+            ),
+            (
+                SHA,
+                [CBOR, CBOR, CBOR, ITEM_CBOR - 1, ITEM_CBOR],
+                SCOPE,
+                "item CBOR",
+            ),
+            (
+                SHA,
+                [CBOR, CBOR, CBOR, ITEM_CBOR, ITEM_CBOR],
+                SCOPE - 1,
+                "scope",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_product_fixed_shape_logs(sha, cbor, scope),
+                    Err(Error::Verify(message))
+                        if message == "mdoc proof shape does not match the fixed product profile"
+                ),
+                "downward {label} mutation must fail the exact product-profile gate"
+            );
+        }
+    }
+
+    fn sha_claimed_sums(claim: &Sha256InteractionClaim) -> Vec<QM31> {
+        std::iter::once(claim.sha256.claimed_sum)
+            .chain(claim.range.iter().map(|component| component.claimed_sum))
+            .collect()
+    }
+
+    fn assert_all_claims_fresh(name: &str, first: &[QM31], second: &[QM31]) {
+        assert_eq!(first.len(), second.len(), "{name} claim-count drift");
+        assert!(
+            first
+                .iter()
+                .zip(second)
+                .all(|(first, second)| first != second),
+            "{name} contains a deterministic published private claim"
+        );
+    }
+
+    /// Same-witness proofs must randomize every private claimed sum while both
+    /// proofs remain valid. The mask traces and their private target sums are
+    /// committed inside the STARK. None are serialized as proof metadata.
+    #[test]
+    #[ignore = "slow: proves product mdoc circuit profile twice"]
+    fn mdoc_private_claim_masks_are_fresh_and_not_serialized() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let mut statement = fixture.statement.clone();
+        statement.request_binding = [0x51; 32];
+        let proof_a = prove_mdoc_circuit(&fixture.extracted, &statement).expect("proof A proves");
+        let proof_b = prove_mdoc_circuit(&fixture.extracted, &statement).expect("proof B proves");
+        verify_mdoc_circuit(&proof_a, &statement).expect("proof A verifies");
+        verify_mdoc_circuit(&proof_b, &statement).expect("proof B verifies");
+
+        assert_all_claims_fresh(
+            "shared SHA tables",
+            &proof_a.sha_tables_interaction_claim.claimed_sums(),
+            &proof_b.sha_tables_interaction_claim.claimed_sums(),
+        );
+        assert_all_claims_fresh(
+            "packed SHA",
+            &sha_claimed_sums(&proof_a.packed_sha_interaction_claim),
+            &sha_claimed_sums(&proof_b.packed_sha_interaction_claim),
+        );
+        for (index, (first, second)) in proof_a
+            .mdoc_cbor_interaction_claims
+            .iter()
+            .zip(&proof_b.mdoc_cbor_interaction_claims)
+            .enumerate()
+        {
+            assert_ne!(
+                first.claimed_sum, second.claimed_sum,
+                "mdoc parser {index} published a deterministic private claim"
+            );
+        }
+        assert_ne!(
+            proof_a.mdoc_scope_interaction_claim.claimed_sum,
+            proof_b.mdoc_scope_interaction_claim.claimed_sum,
+            "mdoc scope published a deterministic private claim"
+        );
+        assert_ne!(
+            proof_a.mdoc_scope_interaction_claim.item_digest_claimed_sum,
+            proof_b.mdoc_scope_interaction_claim.item_digest_claimed_sum,
+            "mdoc item-digest provider published a deterministic private claim"
+        );
+        assert_ne!(
+            proof_a.mso_exact_cbor_interaction_claim.claimed_sum,
+            proof_b.mso_exact_cbor_interaction_claim.claimed_sum,
+            "exact-MSO parser published a deterministic private claim"
+        );
+        assert_ne!(
+            proof_a.mdoc_validity_interaction_claim.claimed_sum,
+            proof_b.mdoc_validity_interaction_claim.claimed_sum,
+            "mdoc validity published a deterministic private claim"
+        );
+        assert_ne!(
+            proof_a
+                .revocation_message_bind_interaction_claim
+                .claimed_sum,
+            proof_b
+                .revocation_message_bind_interaction_claim
+                .claimed_sum,
+        );
+        assert_ne!(
+            proof_a.ts13_revocation_range_interaction_claim.claimed_sum,
+            proof_b.ts13_revocation_range_interaction_claim.claimed_sum,
+        );
+        assert_all_claims_fresh(
+            "age",
+            proof_a
+                .age_claimed_sums
+                .as_ref()
+                .expect("product age claim"),
+            proof_b
+                .age_claimed_sums
+                .as_ref()
+                .expect("product age claim"),
+        );
+        assert_all_claims_fresh(
+            "nationality",
+            proof_a
+                .nat_claimed_sums
+                .as_ref()
+                .expect("product nationality claim"),
+            proof_b
+                .nat_claimed_sums
+                .as_ref()
+                .expect("product nationality claim"),
+        );
+
+        assert_all_claims_fresh(
+            "mdoc MAC",
+            &[
+                proof_a.mdoc_mac_interaction_claim.consumer,
+                proof_a.mdoc_mac_interaction_claim.binding,
+            ],
+            &[
+                proof_b.mdoc_mac_interaction_claim.consumer,
+                proof_b.mdoc_mac_interaction_claim.binding,
+            ],
+        );
+
+        let first_bundle = &proof_a.coprocessor_bundle;
+        let second_bundle = &proof_b.coprocessor_bundle;
+        assert_eq!(first_bundle.mac_tags.len(), second_bundle.mac_tags.len());
+        assert_ne!(
+            first_bundle.mac_tags, second_bundle.mac_tags,
+            "same-witness mdoc proofs reused MAC tags"
+        );
+        for tag in &first_bundle.mac_tags {
+            assert!(
+                !second_bundle.mac_tags.contains(tag),
+                "same-witness mdoc proofs shared MAC tag {tag:?}"
+            );
+        }
+        assert_ne!(
+            first_bundle.root, second_bundle.root,
+            "same-witness mdoc proofs reused group-A Ligero root"
+        );
+        assert_ne!(
+            first_bundle.root_b, second_bundle.root_b,
+            "same-witness mdoc proofs reused group-B Ligero root"
+        );
+
+        let serialized = serde_json::to_string(&proof_a).expect("proof serializes");
+        assert!(
+            !serialized.contains("blinder") && !serialized.contains("claim_mask"),
+            "claim-mask secrets must not be serialized as proof metadata"
+        );
+        assert_ne!(
+            bincode::serialize(&proof_a).expect("proof A serializes"),
+            bincode::serialize(&proof_b).expect("proof B serializes"),
+            "same-witness product proofs must not serialize identically"
+        );
+    }
+
+    /// The byte breakdown must partition the serialized proof exactly.
+    ///
+    /// This is the accounting gate: bytes that cannot be attributed to a module
+    /// or a shared bucket have to surface in `framing_other`, never vanish. The
+    /// breakdown also asserts internally that its per-column attribution
+    /// reproduces each serialized field, so a wrong column-to-module map fails
+    /// here rather than silently mislabelling bytes.
+    #[test]
+    #[ignore = "slow: proves the product metadata and statement matrix once"]
+    fn current_product_proof_metadata_and_statement_matrix() {
+        const PROVER_STACK_SIZE: usize = 32 * 1024 * 1024;
+        std::thread::Builder::new()
+            .stack_size(PROVER_STACK_SIZE)
+            .spawn(current_product_proof_metadata_and_statement_matrix_body)
+            .expect("spawns a prover-sized thread")
+            .join()
+            .expect("product metadata matrix thread does not panic");
+    }
+
+    fn current_product_proof_metadata_and_statement_matrix_body() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies");
+        let breakdown = mdoc_proof_byte_breakdown(&proof, &fixture.statement)
+            .expect("byte breakdown for a verifying proof");
+
+        assert_eq!(
+            breakdown.proof_bytes,
+            bincode::serialize(&proof).expect("proof serializes").len(),
+            "breakdown total is not the raw serialized proof length",
+        );
+        assert_eq!(
+            breakdown.attributed_bytes(),
+            breakdown.proof_bytes,
+            "byte buckets do not partition the serialized proof",
+        );
+        assert!(
+            breakdown.coprocessor_bundle > 0,
+            "coprocessor bundle bucket is empty",
+        );
+        for module in &breakdown.modules {
+            assert!(
+                module.columns > 0,
+                "module bucket '{}' owns no committed column",
+                module.label,
+            );
+        }
+        // Modules the product profile always commits columns for. The
+        // coprocessor is absent by design: it commits no STARK column, its data
+        // is the opaque bundle asserted above.
+        for expected in ["packed_sha", "mdoc_cbor_stream[0]", "mdoc_validity"] {
+            assert!(
+                breakdown
+                    .modules
+                    .iter()
+                    .any(|module| module.label == expected),
+                "breakdown is missing module bucket '{expected}'",
+            );
+        }
+        // `mdoc_scope` commits its DFA edge table at its own log size, so scope
+        // must appear as several log-size-suffixed buckets.
+        assert!(
+            breakdown
+                .modules
+                .iter()
+                .filter(|module| module.label.starts_with("mdoc_scope"))
+                .count()
+                > 1,
+            "mdoc_scope sub-components were not separated",
+        );
+
+        for stale in [
+            PcsConfig {
+                pow_bits: 20,
+                fri_config: FriConfig::new(1, 2, 54, 2),
+                lifting_log_size: None,
+            },
+            PcsConfig {
+                pow_bits: 10,
+                fri_config: FriConfig::new(1, 2, 59, 2),
+                lifting_log_size: None,
+            },
+        ] {
+            let mut stale_proof = proof.clone();
+            stale_proof.stark_proof.0.config = stale;
+            assert!(matches!(
+                verify_mdoc_circuit_with_pcs_config(
+                    &stale_proof,
+                    &fixture.statement,
+                    mdoc_production_pcs_config(),
+                ),
+                Err(Error::WeakConfig { .. })
+            ));
+        }
+
+        let mut split_tamper = proof.clone();
+        let shift = QM31::from_u32_unchecked(1, 0, 0, 0);
+        split_tamper.mdoc_scope_interaction_claim.claimed_sum += shift;
+        split_tamper.mdoc_validity_interaction_claim.claimed_sum -= shift;
+        assert!(
+            verify_mdoc_circuit(&split_tamper, &fixture.statement).is_err(),
+            "balanced cross-component claimed-sum tamper unexpectedly verified",
+        );
+
+        let mut extra_table_claim = proof.clone();
+        extra_table_claim
+            .sha_tables_interaction_claim
+            .pairs
+            .push(extra_table_claim.sha_tables_interaction_claim.pairs[0].clone());
+        assert!(
+            verify_mdoc_circuit(&extra_table_claim, &fixture.statement).is_err(),
+            "unbound fourth shared-table claim unexpectedly verified",
+        );
+
+        let mut extra_sha_claim = proof.clone();
+        extra_sha_claim.packed_sha_interaction_claim.range.push(
+            stwo_sha256::interaction::ComponentClaim {
+                claimed_sum: QM31::from_u32_unchecked(0, 0, 0, 0),
+            },
+        );
+        assert!(
+            verify_mdoc_circuit(&extra_sha_claim, &fixture.statement).is_err(),
+            "unbound shared-SHA range claim unexpectedly verified",
+        );
+
+        let mut extra_age_claim = proof.clone();
+        extra_age_claim
+            .age_claimed_sums
+            .as_mut()
+            .expect("demo statement has age predicate")
+            .push(QM31::from_u32_unchecked(0, 0, 0, 0));
+        assert!(
+            verify_mdoc_circuit(&extra_age_claim, &fixture.statement).is_err(),
+            "unbound seventh age claim unexpectedly verified",
+        );
+
+        let mut extra_nat_claim = proof.clone();
+        extra_nat_claim
+            .nat_claimed_sums
+            .as_mut()
+            .expect("demo statement has nationality predicate")
+            .push(QM31::from_u32_unchecked(0, 0, 0, 0));
+        assert!(
+            verify_mdoc_circuit(&extra_nat_claim, &fixture.statement).is_err(),
+            "unbound third nationality claim unexpectedly verified",
+        );
+
+        let mut tampered_root = proof.clone();
+        tampered_root.stark_proof.0.commitments[0].0[0] ^= 1;
+        assert!(matches!(
+            verify_mdoc_circuit(&tampered_root, &fixture.statement),
+            Err(Error::PreprocessedRootMismatch { .. })
+        ));
+
+        let mut shared_claim = proof.clone();
+        shared_claim.sha_tables_interaction_claim.pairs[0].claimed_sum =
+            -shared_claim.sha_tables_interaction_claim.pairs[0].claimed_sum;
+        assert!(
+            verify_mdoc_circuit(&shared_claim, &fixture.statement).is_err(),
+            "tampered shared SHA table provider claim unexpectedly verified",
+        );
+
+        let mut request_binding = fixture.statement.clone();
+        request_binding.request_binding[0] ^= 1;
+        assert!(verify_mdoc_circuit(&proof, &request_binding).is_err());
+        let mut doctype = fixture.statement.clone();
+        doctype.doctype.push_str(".other");
+        assert!(verify_mdoc_circuit(&proof, &doctype).is_err());
+        let mut namespace = fixture.statement.clone();
+        namespace.namespace.push_str(".other");
+        assert!(verify_mdoc_circuit(&proof, &namespace).is_err());
+        let mut element_identifier = fixture.statement.clone();
+        element_identifier.attributes[0]
+            .element_identifier
+            .push_str("_other");
+        assert!(verify_mdoc_circuit(&proof, &element_identifier).is_err());
+        let mut mode = fixture.statement.clone();
+        mode.attributes[0].mode = MdocDisclosureMode::Alpha2Set;
+        assert!(verify_mdoc_circuit(&proof, &mode).is_err());
+
+        let mut malformed_claim = proof.clone();
+        malformed_claim.sha_tables_interaction_claim.pairs.clear();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            verify_mdoc_circuit(&proof, &fixture.statement)
+            verify_mdoc_circuit(&malformed_claim, &fixture.statement)
         }));
         assert!(
             matches!(result, Ok(Err(Error::Verify(_)))),
@@ -6002,33 +7270,74 @@ mod mdoc_sha_table_tests {
     }
 
     #[test]
-    fn mdoc_sha_witnesses_match_native_digest_for_all_four_messages() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let extracted = &fixture.extracted;
+    fn product_sha_message_order_and_terminal_digests_are_exact() {
         let cases = [
-            ("issuer", extracted.issuer_sig_structure.as_slice()),
-            ("device", extracted.device_sig_structure.as_slice()),
-            ("birth_date", extracted.birth_date_item.as_slice()),
-            ("nationality", extracted.nationality_item.as_slice()),
+            vec![MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            }],
+            vec![MdocRequestedAttribute {
+                element_identifier: "nationality".to_string(),
+                mode: MdocDisclosureMode::Alpha2Set,
+            }],
+            vec![
+                MdocRequestedAttribute {
+                    element_identifier: "birth_date".to_string(),
+                    mode: MdocDisclosureMode::AgeOver,
+                },
+                MdocRequestedAttribute {
+                    element_identifier: "nationality".to_string(),
+                    mode: MdocDisclosureMode::Alpha2Set,
+                },
+            ],
         ];
 
-        for (name, message) in cases {
-            let (witness, _log_n_rows) = sha_params(message);
-            let native: [u8; 32] = Sha256::digest(message).into();
-            assert_eq!(witness.digest.0, native, "{name} digest");
-            assert_eq!(
-                witness.digest_from_blocks().0,
-                native,
-                "{name} digest from block chain",
+        for attributes in cases {
+            let expected_message_count = if attributes.len() == 2 { 5 } else { 4 };
+            let fixture = demo_mdoc_circuit_fixture_with_attributes(attributes);
+            let revocation_message = ts13_revocation_message_bytes(
+                fixture.statement.ts13_revocation_range.id_lo,
+                fixture.statement.ts13_revocation_range.id_hi,
+                fixture.statement.ts13_revocation.epoch,
             );
+            let messages = product_sha_messages(&fixture.extracted, &revocation_message)
+                .expect("product messages fit the fixed profile");
+            let witness = compute_packed_sha256_witness(&messages).expect("packed witness");
+            let trace = stwo_sha256::trace::generate_trace(
+                &witness,
+                crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
+            );
+            let mut next_block = 0usize;
+            for (message_id, message) in messages.iter().enumerate() {
+                let block_count = stwo_sha256::native::n_blocks_for(message.len());
+                next_block += block_count;
+                let terminal_block = next_block - 1;
+                let terminal_slot = stwo_sha256::trace::Layout::round_row_slot(
+                    terminal_block,
+                    stwo_sha256::constants::N_ROUNDS - 1,
+                    crate::product_profile::PRODUCT_SHA_LOG_N_ROWS,
+                );
+                assert_eq!(
+                    trace[stwo_sha256::trace::Layout::COL_MSG_ID][terminal_slot].0,
+                    message_id as u32
+                );
+                let actual: Vec<u8> = (0..32)
+                    .map(|index| {
+                        trace[stwo_sha256::trace::Layout::digest_byte(index)][terminal_slot].0 as u8
+                    })
+                    .collect();
+                let expected = Sha256::digest(message);
+                assert_eq!(actual.as_slice(), &expected[..]);
+            }
+            assert_eq!(messages.len(), expected_message_count);
         }
     }
 }
 
-#[cfg(all(test, feature = "ec-coprocessor"))]
+#[cfg(test)]
 mod coprocessor_tests {
     use super::*;
-    use crate::{fixtures, prove_identity, Error, IssuerKey};
+    use crate::Error;
 
     #[derive(Debug, PartialEq, Eq)]
     struct TestCoprocessorDigests {
@@ -6037,12 +7346,59 @@ mod coprocessor_tests {
         post_rejoin: [u8; 32],
     }
 
-    fn verified_mdoc_proof() -> (MdocCircuitProof, MdocCircuitStatement) {
-        let fixture = demo_mdoc_circuit_fixture();
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("mdoc proves");
-        verify_mdoc_circuit(&proof, &fixture.statement).expect("mdoc verifies");
-        (proof, fixture.statement)
+    fn unlinkability_fixture(birth_date: &str, nationalities: &[&str]) -> DemoMdocCircuitFixture {
+        let attributes = vec![
+            MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            },
+            MdocRequestedAttribute {
+                element_identifier: "nationality".to_string(),
+                mode: MdocDisclosureMode::Alpha2Set,
+            },
+        ];
+        let session_transcript = openid4vp_session_transcript(b"unlinkability-session");
+        let document =
+            demo_mdoc_document_with_values(&session_transcript, birth_date, nationalities);
+        let (revocation, revocation_witness) =
+            crate::ts13::demo_ts13_revocation_inputs(&document.mso_payload);
+        let request = MdocPidRequest {
+            request_binding: DEMO_REQUEST_BINDING,
+            doctype: PRODUCT_DOCTYPE.to_string(),
+            namespace: PRODUCT_NAMESPACE.to_string(),
+            attributes,
+            session_transcript,
+            required_issuer_public_key: document.issuer_key.clone(),
+            verification_time_epoch_seconds: DEMO_VERIFICATION_TIME_EPOCH_SECONDS,
+            revocation: MdocRevocationRequest {
+                public_inputs: (&revocation).into(),
+                id_lo: revocation_witness.id_lo,
+                id_hi: revocation_witness.id_hi,
+                signature: revocation_witness.signature,
+            },
+        };
+        let extracted = extract_product_pid_mdoc(&document.bytes, &request)
+            .expect("unlinkability fixture extracts");
+        let statement = MdocCircuitStatement::from_extracted_at(
+            &extracted,
+            Policy {
+                current_date: predicates::Date {
+                    year: 2026,
+                    month: 7,
+                    day: 3,
+                },
+                min_age_years: 18,
+                accepted_nationalities: vec![*b"DE", *b"FR"],
+            },
+            DEMO_VERIFICATION_TIME_EPOCH_SECONDS,
+        )
+        .expect("unlinkability statement builds");
+        DemoMdocCircuitFixture {
+            document: document.bytes,
+            request,
+            extracted,
+            statement,
+        }
     }
 
     fn assert_verify_rejects(
@@ -6054,6 +7410,29 @@ mod coprocessor_tests {
             verify_mdoc_circuit(proof, statement).is_err(),
             "{label} unexpectedly verified"
         );
+    }
+
+    fn sign_revocation_range(statement: &mut MdocCircuitStatement, id_lo: u64, id_hi: u64) {
+        let signing_key =
+            SigningKey::from_bytes((&[23u8; 32]).into()).expect("revocation signing key");
+        let message = ts13_revocation_message_bytes(id_lo, id_hi, statement.ts13_revocation.epoch);
+        let signature: P256Signature = signing_key.sign(&message);
+        statement.ts13_revocation.revocation_public_key = demo_affine_point(&signing_key);
+        statement.ts13_revocation_range.id_lo = id_lo;
+        statement.ts13_revocation_range.id_hi = id_hi;
+        let signature_bytes: [u8; 64] = signature.to_bytes().into();
+        statement.ts13_revocation_signature =
+            signature_from_compact(&signature_bytes).expect("compact revocation signature");
+    }
+
+    fn assert_prove_or_verify_rejects(
+        label: &str,
+        extracted: &ExtractedPidMdoc,
+        statement: &MdocCircuitStatement,
+    ) {
+        if let Ok(proof) = prove_mdoc_circuit(extracted, statement) {
+            assert_verify_rejects(label, &proof, statement);
+        }
     }
 
     fn tampered_bundle(
@@ -6083,11 +7462,18 @@ mod coprocessor_tests {
         bundle: &eu_id_ec_coprocessor::ecdsa::ImplementedCircuitBundle,
     ) -> TestCoprocessorDigests {
         let mut channel = air_core::Ch::default();
-        crate::mix_coprocessor_tagged_statements(
+        let issuer_projection =
+            crate::ec_coprocessor::issuer_key_projection_from_stwo(issuer_input);
+        let device_projection =
+            crate::ec_coprocessor::message_hash_projection_from_stwo(device_input);
+        crate::mix_coprocessor_tagged_projections(
             &mut channel,
-            &[(issuer_tag, issuer_input), (device_tag, device_input)],
+            &[
+                (issuer_tag, &issuer_projection),
+                (device_tag, &device_projection),
+            ],
         )
-        .expect("mdoc tagged statements mix");
+        .expect("mdoc tagged projections mix");
         let post_statement = crate::channel_digest(&channel);
         let post_seed = crate::draw_coprocessor_seed(&mut channel);
         crate::mix_coprocessor_rejoin(&mut channel, bundle).expect("mdoc rejoin mixes");
@@ -6102,34 +7488,35 @@ mod coprocessor_tests {
     #[test]
     #[ignore = "slow: proves product mdoc circuit with coprocessor bundle"]
     fn mdoc_coprocessor_rejects_required_negative_mutations() {
-        let (proof, statement) = verified_mdoc_proof();
+        let fixture = demo_mdoc_circuit_fixture();
+        let statement = fixture.statement;
+        let proof = prove_mdoc_circuit(&fixture.extracted, &statement).expect("mdoc proves");
+        verify_mdoc_circuit(&proof, &statement).expect("mdoc verifies");
 
         let public_statement = MdocPublicStatement::from_circuit(&statement);
-        verify_mdoc_public_statement(&proof, &public_statement)
+        verify_product_mdoc_public_statement(&proof, &public_statement)
             .expect("reduced public statement verifies");
         let mut wrong_issuer_key = public_statement.clone();
         wrong_issuer_key.issuer_public_key.x.0[0] ^= 1;
         assert!(
-            verify_mdoc_public_statement(&proof, &wrong_issuer_key).is_err(),
+            verify_product_mdoc_public_statement(&proof, &wrong_issuer_key).is_err(),
             "issuer public key mutation unexpectedly verified"
         );
         let mut wrong_device_z = public_statement.clone();
         wrong_device_z.device_message_hash.0[0] ^= 1;
         assert!(
-            verify_mdoc_public_statement(&proof, &wrong_device_z).is_err(),
+            verify_product_mdoc_public_statement(&proof, &wrong_device_z).is_err(),
             "device z mutation unexpectedly verified"
         );
-
-        let mut missing_bundle = proof.clone();
-        missing_bundle.coprocessor_bundle = None;
-        assert!(matches!(
-            verify_mdoc_circuit(&missing_bundle, &statement),
-            Err(Error::CoprocessorMissing)
-        ));
+        let mut wrong_policy_date = public_statement.clone();
+        wrong_policy_date.policy.current_date.day += 1;
+        assert!(
+            verify_product_mdoc_public_statement(&proof, &wrong_policy_date).is_err(),
+            "policy date mutation unexpectedly verified"
+        );
 
         let mut tampered = proof.clone();
-        tampered.coprocessor_bundle =
-            Some(tampered_bundle(proof.coprocessor_bundle.as_ref().unwrap()));
+        tampered.coprocessor_bundle = tampered_bundle(&proof.coprocessor_bundle);
         assert_verify_rejects(
             "serialized coprocessor bundle tamper",
             &tampered,
@@ -6137,11 +7524,7 @@ mod coprocessor_tests {
         );
 
         let mut mac_tag_tamper = proof.clone();
-        let bundle = mac_tag_tamper
-            .coprocessor_bundle
-            .as_mut()
-            .expect("mdoc proof has a coprocessor bundle");
-        bundle.mac_tags[0][0] ^= 1;
+        mac_tag_tamper.coprocessor_bundle.mac_tags[0][0] ^= 1;
         assert_verify_rejects("MAC tag tamper", &mac_tag_tamper, &statement);
 
         let mut mac_claim_tamper = proof.clone();
@@ -6176,32 +7559,7 @@ mod coprocessor_tests {
         );
         assert_verify_rejects("cross-signature swap", &proof, &cross_signature);
 
-        let identity_fixture = fixtures::valid_over_18();
-        let issuer = IssuerKey::demo();
-        let nonce = fixtures::demo_nonce_statement();
-        let identity_proof = prove_identity(
-            &identity_fixture.signed.credential,
-            &issuer,
-            &identity_fixture.policy,
-            &nonce,
-        )
-        .expect("identity proves");
-        let mut replayed_identity_bundle = proof.clone();
-        replayed_identity_bundle.coprocessor_bundle =
-            Some(identity_proof.coprocessor_bundle().unwrap().clone());
-        assert_verify_rejects(
-            "identity coprocessor bundle replay",
-            &replayed_identity_bundle,
-            &statement,
-        );
-    }
-
-    #[test]
-    #[ignore = "slow: proves product mdoc circuit with coprocessor bundle"]
-    fn mdoc_coprocessor_statement_order_and_rejoin_guards_are_bound() {
-        let (proof, statement) = verified_mdoc_proof();
-        let bundle = proof.coprocessor_bundle.as_ref().unwrap();
-
+        let bundle = &proof.coprocessor_bundle;
         let canonical = mdoc_coprocessor_digests(
             b"issuer",
             &statement.issuer_input,
@@ -6227,173 +7585,418 @@ mod coprocessor_tests {
         );
         assert_ne!(canonical.post_rejoin, tampered_rejoin.post_rejoin);
 
+        let issuer_projection =
+            crate::ec_coprocessor::issuer_key_projection_from_stwo(&statement.issuer_input);
+        let device_projection =
+            crate::ec_coprocessor::message_hash_projection_from_stwo(&statement.device_input);
         let mut without_rejoin = air_core::Ch::default();
-        crate::mix_coprocessor_tagged_statements(
+        crate::mix_coprocessor_tagged_projections(
             &mut without_rejoin,
             &[
-                (b"issuer".as_slice(), &statement.issuer_input),
-                (b"device".as_slice(), &statement.device_input),
+                (b"issuer".as_slice(), &issuer_projection),
+                (b"device".as_slice(), &device_projection),
             ],
         )
-        .expect("mdoc tagged statements mix");
+        .expect("mdoc tagged projections mix");
         let _seed = crate::draw_coprocessor_seed(&mut without_rejoin);
         let without_rejoin_next = crate::draw_coprocessor_seed(&mut without_rejoin);
 
         let mut with_rejoin = air_core::Ch::default();
-        crate::mix_coprocessor_tagged_statements(
+        crate::mix_coprocessor_tagged_projections(
             &mut with_rejoin,
             &[
-                (b"issuer".as_slice(), &statement.issuer_input),
-                (b"device".as_slice(), &statement.device_input),
+                (b"issuer".as_slice(), &issuer_projection),
+                (b"device".as_slice(), &device_projection),
             ],
         )
-        .expect("mdoc tagged statements mix");
+        .expect("mdoc tagged projections mix");
         let _seed = crate::draw_coprocessor_seed(&mut with_rejoin);
         crate::mix_coprocessor_rejoin(&mut with_rejoin, bundle).expect("mdoc rejoin mixes");
         let with_rejoin_next = crate::draw_coprocessor_seed(&mut with_rejoin);
-
         assert_ne!(with_rejoin_next, without_rejoin_next);
     }
 
+    /// Distinct valid private credentials reconstruct the same caller-owned
+    /// public statement and fixed proof shape. This is the current
+    /// public-input unlinkability gate. Transparent STWO transcript-wide zero
+    /// knowledge remains future work and is not asserted here.
     #[test]
-    #[ignore = "slow: proves the same mdoc witness twice to check P4b MAC freshness"]
-    fn a_p_freshness_linkability() {
-        let fixture = demo_mdoc_circuit_fixture();
-        let first =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("first mdoc proves");
-        verify_mdoc_circuit(&first, &fixture.statement).expect("first mdoc verifies");
-        let second =
-            prove_mdoc_circuit(&fixture.extracted, &fixture.statement).expect("second mdoc proves");
-        verify_mdoc_circuit(&second, &fixture.statement).expect("second mdoc verifies");
-
-        let first_bundle = first
-            .coprocessor_bundle
-            .as_ref()
-            .expect("first proof has coprocessor bundle");
-        let second_bundle = second
-            .coprocessor_bundle
-            .as_ref()
-            .expect("second proof has coprocessor bundle");
-
-        assert_eq!(first_bundle.mac_tags.len(), second_bundle.mac_tags.len());
-        assert_ne!(
-            first_bundle.mac_tags, second_bundle.mac_tags,
-            "same-witness mdoc proofs reused MAC tags"
+    #[ignore = "slow: proves two distinct credentials for public-input unlinkability"]
+    fn distinct_credentials_share_only_the_caller_authoritative_statement() {
+        let first_fixture = unlinkability_fixture("1990-07-15", &["DE"]);
+        let second_fixture = unlinkability_fixture("1985-05-05", &["FR", "BE", "CY"]);
+        let first_public = MdocPublicStatement::from_circuit(&first_fixture.statement);
+        let second_public = MdocPublicStatement::from_circuit(&second_fixture.statement);
+        assert_eq!(
+            first_public, second_public,
+            "private credential values changed the caller-authoritative statement"
         );
-        for tag in &first_bundle.mac_tags {
+        assert_eq!(
+            bincode::serialize(&first_public).expect("first public statement serializes"),
+            bincode::serialize(&second_public).expect("second public statement serializes"),
+            "caller-authoritative statement bytes differ"
+        );
+        assert_eq!(
+            first_fixture.request.session_transcript,
+            second_fixture.request.session_transcript
+        );
+        assert_eq!(
+            first_fixture.request.required_issuer_public_key,
+            second_fixture.request.required_issuer_public_key
+        );
+        assert_eq!(
+            first_fixture.request.request_binding,
+            second_fixture.request.request_binding
+        );
+        assert_ne!(
+            first_fixture.extracted.nationality_item.len(),
+            second_fixture.extracted.nationality_item.len(),
+            "unlinkability fixtures must have different private item lengths"
+        );
+
+        let public_json =
+            serde_json::to_string(&first_public).expect("public statement serializes");
+        for canary in ["1990-07-15", "1985-05-05"] {
             assert!(
-                !second_bundle.mac_tags.contains(tag),
-                "same-witness mdoc proofs shared MAC tag {tag:?}"
+                !public_json.contains(canary),
+                "private birth-date canary leaked into the public statement"
             );
         }
+
+        let first = prove_mdoc_circuit(&first_fixture.extracted, &first_fixture.statement)
+            .expect("first distinct credential proves");
+        let second = prove_mdoc_circuit(&second_fixture.extracted, &second_fixture.statement)
+            .expect("second distinct credential proves");
+        verify_product_mdoc_public_statement(&first, &first_public)
+            .expect("first distinct credential verifies");
+        verify_product_mdoc_public_statement(&second, &second_public)
+            .expect("second distinct credential verifies");
+
+        assert_eq!(
+            first.packed_sha_interaction_claim.range.len(),
+            second.packed_sha_interaction_claim.range.len()
+        );
+        assert_eq!(first.mdoc_cbor_log_sizes, second.mdoc_cbor_log_sizes);
+        assert_eq!(
+            first.mdoc_scope_metadata.log_size,
+            second.mdoc_scope_metadata.log_size
+        );
+
+        let mut first_shapes = Vec::new();
+        let mut second_shapes = Vec::new();
+        verify_mdoc_circuit_with_pcs_config_impl(
+            &first,
+            &first_fixture.statement,
+            mdoc_production_pcs_config(),
+            Some(&mut first_shapes),
+        )
+        .expect("first shape capture verifies");
+        verify_mdoc_circuit_with_pcs_config_impl(
+            &second,
+            &second_fixture.statement,
+            mdoc_production_pcs_config(),
+            Some(&mut second_shapes),
+        )
+        .expect("second shape capture verifies");
+        let first_packed = first_shapes
+            .iter()
+            .find(|shape| shape.name == "packed_sha")
+            .expect("first packed SHA shape");
+        let second_packed = second_shapes
+            .iter()
+            .find(|shape| shape.name == "packed_sha")
+            .expect("second packed SHA shape");
+        assert_eq!(
+            first_packed.layout.preprocessed,
+            second_packed.layout.preprocessed
+        );
+        assert_eq!(first_packed.layout.trace, second_packed.layout.trace);
+        assert_eq!(
+            first_packed.layout.interaction,
+            second_packed.layout.interaction
+        );
+        assert_eq!(
+            first_packed.post_interaction,
+            second_packed.post_interaction
+        );
+        for log_sizes in [
+            &first_packed.layout.preprocessed,
+            &first_packed.layout.trace,
+            &first_packed.layout.interaction,
+            &first_packed.post_interaction,
+        ] {
+            assert!(log_sizes
+                .iter()
+                .all(|&log_size| log_size == crate::product_profile::PRODUCT_SHA_LOG_N_ROWS));
+        }
+
         assert_ne!(
-            first_bundle.root, second_bundle.root,
-            "same-witness mdoc proofs reused group-A Ligero root"
+            bincode::serialize(&first).expect("first proof serializes"),
+            bincode::serialize(&second).expect("second proof serializes"),
+            "distinct private credentials produced identical proof bytes"
         );
         assert_ne!(
-            first_bundle.root_b, second_bundle.root_b,
-            "same-witness mdoc proofs reused group-B Ligero root"
+            first.coprocessor_bundle.mac_tags, second.coprocessor_bundle.mac_tags,
+            "distinct private credentials reused P4b MAC tags"
         );
-    }
-
-    /// TS13 revocation fixture: N=1 age_over_18 value equality with a
-    /// sorted-pair revocation witness, mirroring the evidence-pack tuple.
-    fn revocation_proof() -> (MdocCircuitProof, MdocCircuitStatement) {
-        use ecdsa::signature::hazmat::PrehashSigner;
-        use p256::ecdsa::SigningKey;
-
-        let mut value_bytes = Vec::new();
-        ciborium::ser::into_writer(&Value::Bool(true), &mut value_bytes)
-            .expect("age_over_18 value encodes");
-        let fixture = demo_mdoc_circuit_fixture_with_attributes(vec![MdocRequestedAttribute {
-            element_identifier: "age_over_18".to_string(),
-            mode: MdocDisclosureMode::ValueEquality(value_bytes),
-        }]);
-        let signing_key = SigningKey::from_bytes((&[41u8; 32]).into()).expect("revocation key");
-        let encoded = signing_key.verifying_key().to_encoded_point(false);
-        let x: [u8; 32] = encoded.x().expect("x")[..].try_into().expect("x len");
-        let y: [u8; 32] = encoded.y().expect("y")[..].try_into().expect("y len");
-        let epoch = 51;
-        let id = crate::ts13::ts13_mso_derived_revocation_id(&fixture.extracted.mso);
-        let (id_lo, id_hi) = (id - 1, id + 1);
-        let message_hash = crate::ts13::ts13_revocation_message_hash(id_lo, id_hi, epoch);
-        let pair_signature: p256::ecdsa::Signature = signing_key
-            .sign_prehash(&message_hash)
-            .expect("revocation prehash signs");
-        let r: [u8; 32] = pair_signature.r().to_bytes().into();
-        let s: [u8; 32] = pair_signature.s().to_bytes().into();
-        let statement = fixture
-            .statement
-            .clone()
-            .with_ts13_revocation(MdocRevocationPublicInputs {
-                revocation_public_key: AffinePoint {
-                    x: U256(x),
-                    y: U256(y),
-                },
-                epoch,
-            })
-            .with_ts13_revocation_range(MdocRevocationRangeWitness { id, id_lo, id_hi })
-            .with_ts13_revocation_signature(Signature {
-                r: U256(r),
-                s: U256(s),
-            });
-        let proof =
-            prove_mdoc_circuit(&fixture.extracted, &statement).expect("revocation mdoc proves");
-        verify_mdoc_circuit(&proof, &statement).expect("revocation mdoc verifies");
-        (proof, statement)
     }
 
     #[test]
-    #[ignore = "slow: proves the TS13 revocation tuple and tampers the carried ECDSA instance"]
-    fn revocation_carried_instance_tampering_fails_closed() {
-        let (proof, statement) = revocation_proof();
+    fn public_statement_exposes_only_caller_authoritative_revocation_inputs() {
+        let statement = demo_mdoc_circuit_fixture().statement;
+        let public = MdocPublicStatement::from_circuit(&statement);
 
-        // Flipped message hash: the coprocessor projection and the committed
-        // revocation-SHA digest bind must both reject it.
-        let mut tampered = proof.clone();
-        let carried = tampered
-            .ts13_revocation_input
-            .as_mut()
-            .expect("revocation instance rides in the proof");
-        carried.message_hash.0[0] ^= 1;
-        assert_verify_rejects("tampered revocation message hash", &tampered, &statement);
-
-        // Flipped public key: must fail the statement key equality check.
-        let mut tampered = proof.clone();
-        let carried = tampered
-            .ts13_revocation_input
-            .as_mut()
-            .expect("revocation instance rides in the proof");
-        carried.public_key.x.0[0] ^= 1;
-        assert_verify_rejects("tampered revocation public key", &tampered, &statement);
-
-        // Flipped signature half: the bundle's projected instance no longer
-        // matches the committed rows.
-        let mut tampered = proof.clone();
-        let carried = tampered
-            .ts13_revocation_input
-            .as_mut()
-            .expect("revocation instance rides in the proof");
-        carried.signature.r.0[0] ^= 1;
-        assert_verify_rejects("tampered revocation signature", &tampered, &statement);
-
-        // Stripped instance: layout gate must reject a revocation statement
-        // whose proof carries no revocation instance.
-        let mut tampered = proof.clone();
-        tampered.ts13_revocation_input = None;
-        tampered.revocation_public_digest_bind_interaction_claim = None;
-        assert_verify_rejects("stripped revocation instance", &tampered, &statement);
+        assert_eq!(public.ts13_revocation, statement.ts13_revocation);
+        let serialized = serde_json::to_value(&public).expect("public statement serializes");
+        let object = serialized
+            .as_object()
+            .expect("public statement is an object");
+        for private_name in [
+            "ts13_revocation_range",
+            "ts13_revocation_signature",
+            "id",
+            "id_lo",
+            "id_hi",
+            "signature",
+        ] {
+            assert!(
+                !object.contains_key(private_name),
+                "private revocation field {private_name} leaked into the public statement"
+            );
+        }
     }
-}
 
-fn is_supported_mdoc_profile_version(version: &str) -> bool {
-    matches!(version, MDOC_PROFILE_VERSION_V1 | MDOC_PROFILE_VERSION_V2)
-}
+    #[test]
+    #[ignore = "slow: proves the mandatory revocation boundary and signature matrix"]
+    fn mandatory_revocation_boundary_and_signature_matrix() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let id = fixture.statement.ts13_revocation_range.id;
+        assert!(
+            (1..u64::MAX).contains(&id),
+            "demo MSO revocation id must have both adjacent boundaries"
+        );
 
-fn numeric_country(alpha2: &str) -> Result<u32, MdocError> {
-    celes::Country::from_alpha2(alpha2)
-        .map(|country| country.value as u32)
-        .map_err(|_| MdocError::InvalidNationality(alpha2.to_string()))
+        let mut sentinel = fixture.statement.clone();
+        sign_revocation_range(&mut sentinel, 0, u64::MAX);
+        let proof = prove_mdoc_circuit(&fixture.extracted, &sentinel)
+            .expect("sentinel non-revocation range proves");
+        verify_mdoc_circuit(&proof, &sentinel).expect("sentinel non-revocation range verifies");
+
+        let invalid_ranges = [
+            ("id equals lower bound", id, id + 1),
+            ("id equals upper bound", id - 1, id),
+            ("reversed bounds", id + 1, id - 1),
+            ("wrapped bounds", u64::MAX, 0),
+        ];
+        for (label, id_lo, id_hi) in invalid_ranges {
+            let mut statement = fixture.statement.clone();
+            sign_revocation_range(&mut statement, id_lo, id_hi);
+            assert_prove_or_verify_rejects(label, &fixture.extracted, &statement);
+        }
+
+        let mut wrong_derived_id = fixture.statement.clone();
+        wrong_derived_id.ts13_revocation_range.id ^= 1;
+        sign_revocation_range(
+            &mut wrong_derived_id,
+            fixture.statement.ts13_revocation_range.id_lo,
+            fixture.statement.ts13_revocation_range.id_hi,
+        );
+        assert_prove_or_verify_rejects(
+            "revocation id is not derived from the signed MSO",
+            &fixture.extracted,
+            &wrong_derived_id,
+        );
+
+        let mut wrong_mso_preimage = fixture.extracted.clone();
+        let valid_until = find_subslice(&wrong_mso_preimage.mso, b"2030-01-01T00:00:00Z")
+            .expect("demo MSO contains validUntil");
+        wrong_mso_preimage.mso[valid_until] = b'4';
+        assert_prove_or_verify_rejects(
+            "revocation MSO preimage is not the signed issuer payload",
+            &wrong_mso_preimage,
+            &fixture.statement,
+        );
+
+        let mut forged_signature = fixture.statement.clone();
+        forged_signature.ts13_revocation_signature.r.0[0] ^= 1;
+        assert!(
+            prove_mdoc_circuit(&fixture.extracted, &forged_signature).is_err(),
+            "forged revocation signature unexpectedly proved"
+        );
+
+        let honest = prove_mdoc_circuit(&fixture.extracted, &fixture.statement)
+            .expect("honest revocation proof");
+        let mut wrong_epoch = fixture.statement.clone();
+        wrong_epoch.ts13_revocation.epoch = wrong_epoch.ts13_revocation.epoch.wrapping_add(1);
+        assert_verify_rejects(
+            "caller-authoritative revocation epoch",
+            &honest,
+            &wrong_epoch,
+        );
+        let mut wrong_key = fixture.statement.clone();
+        wrong_key.ts13_revocation.revocation_public_key.x.0[0] ^= 1;
+        assert_verify_rejects("caller-authoritative revocation key", &honest, &wrong_key);
+    }
+
+    #[test]
+    #[ignore = "slow: proves the fixed product shape before downward metadata mutations"]
+    fn product_real_proof_rejects_downward_shape_mutations() {
+        let fixture = demo_mdoc_circuit_fixture();
+        let mut statement = fixture.statement.clone();
+        statement.request_binding = [0x51; 32];
+        let proof =
+            prove_mdoc_circuit(&fixture.extracted, &statement).expect("product mdoc proves");
+        verify_mdoc_circuit(&proof, &statement).expect("honest fixed-shape product proof verifies");
+
+        for (label, age_index, nationality_index) in [
+            ("missing age index", None, Some(1)),
+            ("age index points at nationality", Some(1), Some(1)),
+            ("age index is out of range", Some(2), Some(1)),
+            ("missing nationality index", Some(0), None),
+            ("nationality index points at age", Some(0), Some(0)),
+            ("nationality index is out of range", Some(0), Some(2)),
+        ] {
+            let mut tampered = statement.clone();
+            tampered.age_attribute_index = age_index;
+            tampered.nationality_attribute_index = nationality_index;
+            assert!(
+                matches!(
+                    verify_mdoc_circuit(&proof, &tampered),
+                    Err(Error::Verify(message))
+                        if message.contains("text-date/alpha-2 predicate attributes")
+                ),
+                "{label} must reject at the product semantic gate"
+            );
+        }
+
+        let mut sha = proof.clone();
+        sha.packed_sha_interaction_claim.sha256.claimed_sum += QM31::from_u32_unchecked(1, 0, 0, 0);
+        assert!(
+            verify_mdoc_circuit(&sha, &statement).is_err(),
+            "tampered product SHA interaction claim unexpectedly verified"
+        );
+
+        let mut cbor = proof.clone();
+        cbor.mdoc_cbor_log_sizes[0] -= 1;
+        assert!(
+            verify_mdoc_circuit(&cbor, &statement).is_err(),
+            "downward product CBOR log unexpectedly verified"
+        );
+
+        let mut scope = proof.clone();
+        scope.mdoc_scope_metadata.log_size -= 1;
+        assert!(
+            verify_mdoc_circuit(&scope, &statement).is_err(),
+            "downward product scope log unexpectedly verified"
+        );
+
+        let revocation_input = ts13_revocation_p256_input(&statement);
+        let encoded = bincode::serialize(&proof).expect("revocation proof serializes");
+        for (label, secret) in [
+            (
+                "revocation message hash",
+                revocation_input.message_hash.0.as_slice(),
+            ),
+            (
+                "revocation signature r",
+                revocation_input.signature.r.0.as_slice(),
+            ),
+            (
+                "revocation signature s",
+                revocation_input.signature.s.0.as_slice(),
+            ),
+        ] {
+            assert!(
+                !encoded.windows(secret.len()).any(|window| window == secret),
+                "{label} is serialized verbatim in the proof",
+            );
+        }
+
+        let mut wrong_key_statement = statement.clone();
+        wrong_key_statement
+            .ts13_revocation
+            .revocation_public_key
+            .x
+            .0[0] ^= 1;
+        assert_verify_rejects(
+            "tampered revocation public key",
+            &proof,
+            &wrong_key_statement,
+        );
+
+        let mut stripped_bundle = proof.clone();
+        stripped_bundle.coprocessor_bundle.entries.pop();
+        assert_verify_rejects("stripped revocation instance", &stripped_bundle, &statement);
+
+        let mut tampered_tag = proof.clone();
+        let tags = &mut tampered_tag.coprocessor_bundle.mac_tags;
+        tags[eu_id_ec_coprocessor::ecdsa::MDOC_P4B_MAC_HALF_COUNT - 1][0] ^= 1;
+        assert_verify_rejects("tampered revocation MAC tag", &tampered_tag, &statement);
+    }
+
+    /// A proof whose packed SHA trace carries the wrong message count for the
+    /// statement's predicate mode must never verify: an `And` proof packs five
+    /// messages, a one-predicate proof packs four, and the statement-driven
+    /// consumer set is the only thing that enforces the count (§6.3 LogUp
+    /// balance — there is no message-count field anywhere in the proof).
+    #[test]
+    #[ignore = "slow: proves both predicate modes and cross-checks the packed SHA message count"]
+    fn product_rejects_wrong_packed_sha_message_count_for_statement() {
+        let age_attributes = vec![MdocRequestedAttribute {
+            element_identifier: "birth_date".to_string(),
+            mode: MdocDisclosureMode::AgeOver,
+        }];
+        let and_attributes = vec![
+            MdocRequestedAttribute {
+                element_identifier: "birth_date".to_string(),
+                mode: MdocDisclosureMode::AgeOver,
+            },
+            MdocRequestedAttribute {
+                element_identifier: "nationality".to_string(),
+                mode: MdocDisclosureMode::Alpha2Set,
+            },
+        ];
+        let age_fixture = demo_mdoc_circuit_fixture_with_attributes(age_attributes);
+        let and_fixture = demo_mdoc_circuit_fixture_with_attributes(and_attributes);
+
+        let age_proof = prove_mdoc_circuit(&age_fixture.extracted, &age_fixture.statement)
+            .expect("honest four-message Age proof proves");
+        verify_mdoc_circuit(&age_proof, &age_fixture.statement)
+            .expect("honest four-message Age proof verifies");
+        let and_proof = prove_mdoc_circuit(&and_fixture.extracted, &and_fixture.statement)
+            .expect("honest five-message And proof proves");
+        verify_mdoc_circuit(&and_proof, &and_fixture.statement)
+            .expect("honest five-message And proof verifies");
+
+        assert!(
+            verify_mdoc_circuit(&and_proof, &age_fixture.statement).is_err(),
+            "five-message And proof verified against a four-consumer Age statement"
+        );
+        assert!(
+            verify_mdoc_circuit(&age_proof, &and_fixture.statement).is_err(),
+            "four-message Age proof verified against a five-consumer And statement"
+        );
+
+        for (label, extracted, statement) in [
+            (
+                "five-message extraction against a four-consumer statement",
+                &and_fixture.extracted,
+                &age_fixture.statement,
+            ),
+            (
+                "four-message extraction against a five-consumer statement",
+                &age_fixture.extracted,
+                &and_fixture.statement,
+            ),
+        ] {
+            if let Ok(proof) = prove_mdoc_circuit(extracted, statement) {
+                assert!(
+                    verify_mdoc_circuit(&proof, statement).is_err(),
+                    "{label} produced a verifying proof"
+                );
+            }
+        }
+    }
 }
 
 fn value_field<'a>(map: &'a [(Value, Value)], field: &'static str) -> Result<&'a Value, MdocError> {

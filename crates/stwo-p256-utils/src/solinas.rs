@@ -30,7 +30,7 @@ pub const MAX_ABS_REDUCTION_COEFFICIENT: i64 = 1 << 12;
 type TermBag = [i64; TERM_BITS];
 
 /// Number of high limb positions to fold. A 20×20 schoolbook convolution
-/// produces output limbs at positions `0..2·N_LIMBS − 1`; the top
+/// produces output limbs at positions `0..2·N_LIMBS − 1`. The top
 /// `N_LIMBS − 1 = 19` are the high positions reduced by the matrix.
 pub const HIGH_LIMB_COUNT: usize = N_LIMBS - 1;
 

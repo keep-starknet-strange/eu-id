@@ -26,23 +26,16 @@ use stwo_constraint_framework::{
     assert_constraints_on_trace, FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX,
 };
 
-/// Verify a monolithic proof bound to its OWN embedded public instances.
+/// Verifies a monolithic proof against its embedded public instances.
 ///
-/// Production relying parties must pass an independently-sourced expected
-/// statement to [`verify_current_air_monolithic`] (that caller-argument binding
-/// is what this helper deliberately short-circuits). Tests that build a proof
-/// honestly — or tamper with it before verifying — bind to whatever the proof
-/// carries, so the equality gate is a no-op and each test still exercises its
-/// intended deeper failure layer (relation imbalance, canonicality, PCS, …).
-/// The caller-binding gate itself is covered by
-/// `current_p256_monolithic_verifier_rejects_mismatched_expected_instances`.
+/// This helper lets tests reach failure layers after the caller-statement check.
+/// A separate test checks the caller-statement binding.
 fn verify_self_bound<MC: MerkleChannel>(
     proof: P256CurrentAirProof<MC::H>,
 ) -> Result<(), P256ProofError> {
     let expected = proof.claim.public_inputs.instances.clone();
-    // No preprocessed-root pin (`None`): these tests exercise deeper failure
-    // layers. The pin gate itself is covered by
-    // `current_p256_monolithic_verifier_pins_the_preprocessed_root`.
+    // These tests omit root pinning to reach later failure layers.
+    // A separate test checks root pinning.
     verify_current_air_monolithic::<MC>(proof, &expected, None)
 }
 
@@ -281,9 +274,9 @@ fn valid_real_input_with_u_scalars(u1: U256, u2: U256) -> EcdsaVerifyInput {
     }
 }
 
-/// Returns `n - delta` as a full-width 256-bit scalar — convenient for
-/// generating arbitrary scalars that live in the upper end of `[0, n)`
-/// and therefore cannot satisfy the trivial fake-GLV hint.
+/// Returns the full-width scalar `n - delta`.
+///
+/// Values near the order cannot use the trivial fake-GLV hint.
 fn scalar_near_order(delta: u64) -> U256 {
     let n = U256::from_le_u64s(&P256_ORDER);
     sub_mod_u256(&n, &U256::from_le_u64s(&[delta, 0, 0, 0]), &n)
@@ -301,12 +294,9 @@ fn sub_mod_u256(a: &U256, b: &U256, modulus: &U256) -> U256 {
         .to_u256()
 }
 
-/// Deterministic real-world ECDSA fixture from the `p256` crate. Signs
-/// a known message with a fixed signing key, runs the result through
-/// SHA-256 for the message hash, and returns an `EcdsaVerifyInput`
-/// laid out for the monolithic AIR. This exercises the production
-/// arbitrary-fake-GLV path with a signature that wasn't constructed
-/// to fit the trivial hint.
+/// Returns a deterministic P256 ECDSA fixture from a fixed key and message.
+///
+/// This fixture exercises the production fake-GLV decomposition.
 fn p256_crate_signed_input() -> EcdsaVerifyInput {
     use ::ecdsa::signature::Signer;
     use p256::ecdsa::{Signature as P256Signature, SigningKey};
@@ -607,6 +597,18 @@ fn checked_claim_from_inputs_with_hints(
         public_key_curve_slice.hinted_source_offset,
         false,
     )?;
+    let hint_points_on_curve = hint_point_curve_slices_from_table(
+        &prepared_table,
+        public_key_curve_slice.hinted_source_offset
+            + public_key_curve_slice.mul_trace.rows.len() as u32,
+    )?;
+    for hint_point in &hint_points_on_curve {
+        hinted_mul_trace.extend_from_projective_rcb(
+            &hint_point.mul_trace,
+            hint_point.hinted_source_offset,
+            false,
+        )?;
+    }
     let prepared_use_counts = PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
     let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
 
@@ -625,6 +627,7 @@ fn checked_claim_from_inputs_with_hints(
         projective_ec_trace,
         projective_rcb_air_trace,
         hinted_mul_trace,
+        hint_points_on_curve,
         final_check,
         final_add,
         prepared_use_counts,
@@ -647,7 +650,7 @@ where
 }
 
 #[test]
-#[ignore = "timing helper for WO-1.1; run explicitly with --ignored --nocapture"]
+#[ignore = "timing helper; run explicitly with --ignored --nocapture"]
 fn hint_gen_timing() {
     const RUNS: usize = 10;
 
@@ -676,16 +679,10 @@ fn hint_gen_timing() {
     );
 }
 
-/// End-to-end: prove + verify a real `p256`-crate signature through the
-/// monolithic current AIR via the production arbitrary-fake-GLV path.
+/// Proves and verifies a P256 signature through the monolithic current AIR.
 ///
-/// This is the headline soundness milestone: the `fake_glv_selector` AIR now
-/// reconstructs an ARBITRARY decomposition (`constrain_selector_from_scalar`
-/// binds both the `s1` and `s2_abs` 13-bit carry chains to the scalar relation),
-/// so a genuine non-trivial `(s1, s2_abs, s2_sign_bit)` no longer trips the
-/// selector constraints. The heavy release run is gated behind `--ignored` only
-/// for wall-clock (a full STARK prove/verify), not because it is expected to
-/// fail.
+/// The test uses production fake-GLV decomposition.
+/// Debug builds ignore the full STARK test because it is slow.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -705,11 +702,9 @@ fn current_p256_monolithic_proves_real_p256_crate_signature() {
         .expect("real p256-crate signature proof verifies");
 }
 
-/// The P256 AIR routed through the shared `air_core` orchestrator
-/// ([`super::air::prove_current_air`] / [`super::air::verify_current_air`])
-/// proves and verifies a real signature — the same statement as the monolithic
-/// path, but driven as one `air_core` module. Also checks the wrapper's
-/// caller-argument binding rejects a mismatched expected statement.
+/// Proves and verifies a real signature through the shared AIR orchestrator.
+///
+/// The test also confirms caller-statement binding.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -725,7 +720,7 @@ fn air_core_p256_proves_and_verifies_real_signature() {
         .expect("real p256-crate signature builds a proof draft");
     let proof = super::air::prove_current_air(&draft).expect("air_core P256 proof generates");
 
-    // Caller-argument binding: a mismatched expected statement is rejected.
+    // Confirm rejection for a different expected statement.
     let mut wrong = proof.claim.public_inputs.instances.clone();
     wrong[0].r = P256M31BigInt::zero();
     assert!(matches!(
@@ -733,19 +728,14 @@ fn air_core_p256_proves_and_verifies_real_signature() {
         Err(P256ProofError::PublicInstanceMismatch)
     ));
 
-    // Bound to its own statement, the proof verifies.
+    // Confirm success for the matching statement.
     let expected = proof.claim.public_inputs.instances.clone();
     super::air::verify_current_air(proof, &expected).expect("air_core P256 proof verifies");
 }
 
-/// Regression for the final_add mixed-sign-bit completeness bug. A valid ECDSA
-/// signature whose two cert scalars decompose to OPPOSITE fake-GLV sign bits
-/// (`b1 != b2`, ~50% of real signatures since `u1, u2` are independent) must
-/// prove and verify. Before the `FinalAddSignRelation` orientation fix this
-/// failed with `RelationImbalance { FinalAddOutput }`, because `final_add`
-/// bound `x(R_1 + R_2)` instead of `x(h_1 + h_2)` and those differ when the
-/// signs disagree. The fix consumes each proven `s2_sign_bit` and orients
-/// `R_2` by `d = b1 ⊕ b2`.
+/// Confirms that signatures with opposite fake-GLV sign bits prove and verify.
+///
+/// `FinalAddSignRelation` orients `R_2` from both proven sign bits.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -753,7 +743,7 @@ fn air_core_p256_proves_and_verifies_real_signature() {
 )]
 fn current_p256_monolithic_proves_mixed_sign_bit_signature() {
     use crate::scalar::fake_glv_decompose::decompose_scalar_mod_n;
-    // Find full-width u-values with DIFFERING decompose sign bits.
+    // Find full-width scalar values with different decomposition sign bits.
     let mut u_bit0: Option<U256> = None;
     let mut u_bit1: Option<U256> = None;
     let mut state: u128 = 0xdead_beef_0123_4567_89ab_cdef_fedc_ba98;
@@ -792,9 +782,9 @@ fn current_p256_monolithic_proves_mixed_sign_bit_signature() {
         .expect("mixed-bit signature proof verifies (final_add orients R_2 by d=b1^b2)");
 }
 
-/// Task 6 end-to-end: force `u1 == u2` so `R_1 = R_2` and the
-/// FinalAdd AIR's finite-doubling branch is exercised inside the
-/// monolithic proof.
+/// Exercises the finite-doubling branch in the monolithic proof.
+///
+/// Equal `u1` and `u2` values make `R_1 = R_2`.
 #[test]
 fn current_p256_monolithic_proves_arbitrary_doubling_final_add() {
     let input = valid_real_input_with_small_u_scalars(99, 99);
@@ -848,10 +838,8 @@ fn current_p256_monolithic_verifier_rejects_mutated_public_r() {
         .expect("current AIR monolithic proof proves");
     monolithic.claim.public_inputs.instances[0].r = P256M31BigInt::zero();
 
-    // O1: the verifier recomputes the public-data initial-LogUp providers from
-    // ITS instances, so a mutated `r` no longer matches the STARK-bound
-    // consumer trace and the balance fails DIRECTLY (before the STARK layer)
-    // rather than only via an incidental Fiat-Shamir / FRI divergence.
+    // A changed `r` no longer matches the committed consumer trace.
+    // The verifier rejects the relation imbalance before STARK verification.
     let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated verifier public r must reject");
 
@@ -861,12 +849,9 @@ fn current_p256_monolithic_verifier_rejects_mutated_public_r() {
     );
 }
 
-/// O1 — public-input binding: a malicious prover that commits a trace for a
-/// FAKE public key but presents the REAL key (with a matching fake provider
-/// sum) is caught because the verifier recomputes the `PublicEcdsaInstance`
-/// provider from its own instances. Simulated by mutating a presented
-/// public-key coordinate after proving: the verifier-recomputed provider then
-/// disagrees with the (STARK-bound) consumer sum.
+/// Confirms that a changed public key does not match the committed trace.
+///
+/// The verifier recomputes provider values from the presented public instances.
 #[test]
 fn current_p256_monolithic_verifier_rejects_unbound_public_key() {
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -887,11 +872,9 @@ fn current_p256_monolithic_verifier_rejects_unbound_public_key() {
     );
 }
 
-/// Caller-argument binding: `verify_current_air_monolithic` must reject a proof
-/// whose embedded public instances differ from the statement the caller asked
-/// to verify, even when the proof is internally valid. Otherwise a relying
-/// party that trusts `Ok(())` would accept a valid proof of ANY signature the
-/// prover chose. The happy path (correct expected statement) must still verify.
+/// Confirms rejection when embedded instances differ from the caller statement.
+///
+/// The matching statement remains valid.
 #[test]
 fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -902,8 +885,7 @@ fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
         .prove_current_air_monolithic::<Blake2sMerkleChannel>()
         .expect("current AIR monolithic proof proves");
 
-    // A relying party that expected a DIFFERENT signature (one bit flipped in r)
-    // must be rejected up front, before any proof work.
+    // Change one bit in the expected signature.
     let mut wrong_expected = monolithic.claim.public_inputs.instances.clone();
     let r = &mut wrong_expected[0].r;
     r.limbs_mut()[0] = M31::from_u32_unchecked(r.limbs()[0].0 ^ 1);
@@ -918,16 +900,13 @@ fn current_p256_monolithic_verifier_rejects_mismatched_expected_instances() {
         "expected PublicInstanceMismatch, got {err:?}"
     );
 
-    // The same proof verifies when the caller passes the matching statement.
+    // Confirm success for the matching statement.
     let correct_expected = monolithic.claim.public_inputs.instances.clone();
     verify_current_air_monolithic::<Blake2sMerkleChannel>(monolithic, &correct_expected, None)
         .expect("proof of exactly the caller's expected statement must verify");
 }
 
-/// The F-ROOT pin on the monolithic verifier: a caller-pinned tree-0
-/// (preprocessed) root must gate the proof BEFORE any transcript work. The
-/// honest proof verifies against the independently-derived root; a proof
-/// whose tree-0 root differs is rejected with `PreprocessedRootMismatch`.
+/// Confirms the verifier requires the expected tree-0 root before transcript processing.
 #[test]
 fn current_p256_monolithic_verifier_pins_the_preprocessed_root() {
     let draft = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -939,9 +918,7 @@ fn current_p256_monolithic_verifier_pins_the_preprocessed_root() {
         .expect("current AIR monolithic proof proves");
     let expected = monolithic.claim.public_inputs.instances.clone();
 
-    // The verifier's own derivation of the tree-0 root: rebuild the prover
-    // module from the draft (a relying party rebuilds it from its expected
-    // statement) and run exactly the prover's tree-0 commit path.
+    // Derive the expected root through the same tree-0 commitment path.
     let expected_root = crate::proof::air::current_air_preprocessed_root(&draft)
         .expect("expected preprocessed root computes");
     assert_eq!(
@@ -956,7 +933,7 @@ fn current_p256_monolithic_verifier_pins_the_preprocessed_root() {
     )
     .expect("honest proof verifies against the derived preprocessed root");
 
-    // A tampered tree-0 root must be rejected fail-closed, before the STARK.
+    // Confirm rejection for a changed tree-0 root.
     let mut tampered = monolithic;
     tampered.stark_proof.0.commitments[0].0[0] ^= 1;
     let err = verify_current_air_monolithic::<Blake2sMerkleChannel>(
@@ -971,9 +948,7 @@ fn current_p256_monolithic_verifier_pins_the_preprocessed_root() {
     );
 }
 
-/// The verifier must pin its PCS config: `stark_proof.config` is
-/// prover-supplied, so a weakened FRI/grinding setting (e.g. one query, no
-/// grind) must be rejected outright rather than inherited.
+/// Confirms the verifier rejects a proof with a weaker PCS configuration.
 #[test]
 fn current_p256_monolithic_verifier_rejects_weakened_pcs_config() {
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -994,10 +969,9 @@ fn current_p256_monolithic_verifier_rejects_weakened_pcs_config() {
     );
 }
 
-/// The verifier must reject non-canonical public-key coordinates before any
-/// proof work: the AIR's curve check works mod p, so a non-canonical
-/// representative (`x + p`, or limbs above the 13-bit base) of a valid point
-/// would otherwise pass. One honest prove, three mutation probes on clones.
+/// Confirms the verifier rejects noncanonical public-key coordinates before proof work.
+///
+/// The test covers `x = p`, `y = p + 41`, and a limb outside the 13-bit range.
 #[test]
 fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -1020,7 +994,8 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
         }
     );
 
-    // pub_y := p + 41 (a non-canonical representative of 41; p + 41 < 2^256).
+    // Set `pub_y` to the noncanonical representative `p + 41`.
+    // This value is less than `2^256`.
     let mut forged = monolithic.clone();
     forged.claim.public_inputs.instances[0].pub_y = P256M31BigInt::from_u256(&add_u256(
         &field_modulus(),
@@ -1037,7 +1012,7 @@ fn current_p256_monolithic_verifier_rejects_non_canonical_public_key() {
     );
 
     // A limb above the 13-bit base breaks the positional representation the
-    // lexicographic `< p` comparison relies on; it must be rejected outright.
+    // lexicographic `< p` comparison relies on. It must be rejected outright.
     let mut forged = monolithic;
     forged.claim.public_inputs.instances[0].pub_x.limbs_mut()[0] = M31::from_u32_unchecked(1 << 13);
     let err = verify_self_bound::<Blake2sMerkleChannel>(forged)
@@ -1087,10 +1062,8 @@ fn current_p256_monolithic_verifier_rejects_mutated_fake_glv_scalar_claim() {
 
     let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
         .expect_err("mutated fake-GLV scalar AIR claim must reject");
-    // Mutating a claim's log size perturbs the Fiat-Shamir transcript and hence
-    // the drawn relation elements, so the O1 verifier-recomputed public-input
-    // provider no longer matches the committed consumer trace: rejected at the
-    // balance layer (before the STARK layer) rather than only via FRI.
+    // A changed log size changes the transcript and relation elements.
+    // The verifier rejects the mismatch at the balance or proof layer.
     assert!(
         matches!(
             err,
@@ -1150,6 +1123,22 @@ fn current_p256_monolithic_verifier_rejects_unbalanced_prepared_point_source_sum
 }
 
 #[test]
+fn current_p256_monolithic_verifier_rejects_hint_curve_claim_count_mismatch() {
+    let draft = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
+        valid_real_input_with_small_u_scalars(7, 11),
+    ])
+    .expect("current pipeline builds");
+    let mut monolithic = draft
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect("current AIR monolithic proof proves");
+    monolithic.interaction_claim.hint_points_on_curve.pop();
+
+    let err = verify_self_bound::<Blake2sMerkleChannel>(monolithic)
+        .expect_err("hint-curve claim count mismatch must reject without panicking");
+    assert!(matches!(err, P256ProofError::ProofLayer(_)));
+}
+
+#[test]
 fn current_p256_monolithic_verifier_rejects_mutated_selector_claimed_sum() {
     use num_traits::One;
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -1200,16 +1189,11 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve() {
     ));
 }
 
-/// In-AIR public-key-on-curve binding: the monolithic STARK proves the
-/// public key lies on the curve via a dedicated curve-check component whose
-/// witnessed `(x, y)` is LogUp-bound to the public input through
-/// `PublicKeyPointRelation` (provided by scalar_setup, consumed by the
-/// curve-check). Mutating the public-input `pub_y` after the draft is built
-/// makes the scalar_setup provider emit a `pub_y'` that no longer matches
-/// the curve-check's witnessed `y`, so the regenerated prover-side
-/// `PublicKeyPoint` balance is non-zero and proving is rejected. Per
-/// lessons.md #18 the rejection oracle is the relation-balance audit
-/// (`RelationImbalance`), not `assert_constraints`.
+/// Confirms that the AIR binds the curve-check point to the public input.
+///
+/// The test replaces the curve-check witness with `2G`.
+/// It keeps the public input at `G`.
+/// The relation balance must reject the mismatch.
 #[test]
 fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
     let mut proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -1217,14 +1201,9 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
     ])
     .expect("current pipeline builds");
 
-    // Swap the curve-check witness to a *different* valid on-curve public
-    // key (2*G) while leaving scalar_setup and the public input bound to the
-    // real key (G). Everything else still balances; only the
-    // `PublicKeyPoint` binding tuple drifts: the curve check now consumes
-    // (sig_id, 2G_x, 2G_y) while scalar_setup provides (sig_id, G_x, G_y).
-    // This is exactly the soundness property the binding enforces - the
-    // curve-checked point must equal the public key - and it is caught by
-    // the relation-balance audit (lessons.md #18), not assert_constraints.
+    // Replace the curve-check witness with another valid point.
+    // Keep scalar setup and the public input bound to the original point.
+    // Only the `PublicKeyPoint` binding changes.
     let two_g = scalar_mul(&scalar(2), &generator_point()).expect("2*G is finite");
     let other_inputs = PublicEcdsaInputClaim::from_inputs(&[EcdsaVerifyInput {
         message_hash: scalar(42),
@@ -1236,9 +1215,8 @@ fn current_p256_proof_pipeline_rejects_public_key_off_curve_in_air() {
     }]);
     proof.claim.public_key_check =
         PublicKeyOnCurveClaim::from_public_inputs(&other_inputs).expect("2*G is on curve");
-    // Keep the hinted provider in lockstep with the swapped witness (its four
-    // curve-check muls now prove 2G's squares/cubes), so the ONLY drifted
-    // relation is the `PublicKeyPoint` binding itself.
+    // Rebuild the hinted provider for the changed curve-check witness.
+    // This isolates the `PublicKeyPoint` relation.
     let mut hinted =
         HintedMulTraceClaim::from_projective_rcb(&proof.claim.projective_rcb_air_trace)
             .expect("hinted trace rebuilds");
@@ -1335,12 +1313,9 @@ fn current_p256_proof_pipeline_proves_and_verifies_current_air_monolithic_proof(
         .expect("current AIR monolithic proof verifies");
 }
 
-/// Full monolithic prove/verify on the DISTINCT-finite-points branch
-/// `(u1, u2) = (7, 11)` (both `h1, h2` finite, `x1 != x2`). This exercises
-/// the final-add chord-addition identities with `both_finite = 1` through
-/// the full PCS/OODS composition (the primary gate uses the zero-`u1`
-/// branch where `both_finite = 0`), confirming the witnessed
-/// `dx_inv_result` LogUp tuple matches off-domain.
+/// Proves and verifies the final-add branch with distinct finite points.
+///
+/// This path exercises chord addition with `both_finite = 1`.
 #[test]
 fn current_p256_proof_pipeline_proves_and_verifies_monolithic_distinct_branch() {
     let proof = P256ProofDraft::from_inputs_with_trivial_fake_glv_hints(vec![
@@ -1384,14 +1359,9 @@ fn current_p256_air_constraint_diagnostic_real_p256() {
     assert_current_air_constraints(&proof);
 }
 
-/// EXPERIMENT (Phase A — feasibility probe): for ONE active cert, rebuild
-/// the prepared table and fake-GLV chain from a WRONG hint point
-/// `R' != ±u·base` (a valid curve point) while keeping `u`, the public
-/// input and the selectors (= digits of `u`) UNCHANGED. Report whether the
-/// chain's internal `final_acc == r3` gate holds for the wrong `R'`. If it
-/// FAILS, no globally consistent wrong-`R` chain exists (the windowed
-/// accumulation itself binds `R`). If it HOLDS, the accumulation does not
-/// bind `R` and the full prove/verify experiment is worth running.
+/// Checks whether the fake-GLV chain accepts an incorrect on-curve hint point.
+///
+/// A failed final accumulator check confirms that the chain binds the hint point.
 #[test]
 fn wrong_r_chain_feasibility_probe() {
     let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
@@ -1407,7 +1377,7 @@ fn wrong_r_chain_feasibility_probe() {
         let fake_glv = &claim.fake_glv_scalars.rows[cert_index];
         let selector = &claim.fake_glv_selectors.rows[cert_index];
 
-        // Sanity: reconstruct the TRUE R the production pipeline used.
+        // Reconstruct the correct point that the production pipeline used.
         let base = AffinePoint {
             x: cert.base_x.to_u256(),
             y: cert.base_y.to_u256(),
@@ -1420,14 +1390,13 @@ fn wrong_r_chain_feasibility_probe() {
             _ => panic!("bad sign bit"),
         };
 
-        // Pick a WRONG R' that is a valid curve point but != ±u·base:
-        // R' = (u+1)*base.
+        // Select a different valid curve point: `R' = (u + 1) * base`.
         let u_plus_1 = add_u256(&u, &U256::from_le_u64s(&[1, 0, 0, 0]));
         let wrong_r = scalar_mul(&u_plus_1, &base).expect("(u+1)*base finite");
         assert_ne!(wrong_r, true_r, "R' must differ from the true R");
         assert_ne!(wrong_r, negate_affine(&true_r), "R' must differ from -R");
 
-        // Rebuild table + chain from R' using the production algorithm.
+        // Rebuild the table and chain from `R'`.
         let wrong_table =
             PreparedTableCert::new_with_r_override(cert, fake_glv, selector, wrong_r.clone())
                 .expect("override table builds");
@@ -1446,7 +1415,7 @@ fn wrong_r_chain_feasibility_probe() {
             cert.cert_id.0, verify_result
         );
 
-        // Cross-check: the SAME rebuild with the TRUE R must satisfy the gate.
+        // Confirm that the same path accepts the correct point.
         let true_table =
             PreparedTableCert::new_with_r_override(cert, fake_glv, selector, true_r.clone())
                 .expect("true override table builds");
@@ -1480,11 +1449,9 @@ fn true_r_for_cert(claim: &P256ProofClaim, cert_index: usize) -> AffinePoint {
     }
 }
 
-/// FIDELITY CONTROL for the wrong-R AIR oracle: drive the *same* override
-/// build path with the TRUE `R`. If `assert_current_air_constraints`
-/// passes cleanly here, the override harness is faithful and the Phase C
-/// constraint violation is attributable to the wrong `R'`, not to the
-/// harness.
+/// Confirms that the wrong-point harness accepts the correct hint point.
+///
+/// This control isolates rejection caused by the incorrect point.
 #[test]
 fn wrong_r_harness_fidelity_true_r_air_constraints_pass() {
     let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
@@ -1494,7 +1461,7 @@ fn wrong_r_harness_fidelity_true_r_air_constraints_pass() {
 
     let rebuilt = P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, true_r.clone())
         .expect("true-R rebuild via override path assembles");
-    // The override path must reproduce the production claim exactly.
+    // Confirm that the override path reproduces the production claim.
     assert_eq!(
         rebuilt.prepared_table, base_claim.prepared_table,
         "override prepared_table with TRUE R must equal production"
@@ -1511,7 +1478,7 @@ fn wrong_r_harness_fidelity_true_r_air_constraints_pass() {
         relations,
     };
     assert_current_air_constraints(&draft);
-    eprintln!("FIDELITY: TRUE-R override path passes assert_current_air_constraints cleanly.");
+    eprintln!("The correct-point override passes the AIR constraints.");
 }
 
 fn wrong_r_for_cert(claim: &P256ProofClaim, cert_index: usize) -> AffinePoint {
@@ -1525,12 +1492,11 @@ fn wrong_r_for_cert(claim: &P256ProofClaim, cert_index: usize) -> AffinePoint {
     scalar_mul(&u_plus_1, &base).expect("(u+1)*base finite")
 }
 
-/// EXPERIMENT (Phase B — full monolithic pipeline on a wrong-`R` witness).
-/// Builds a globally consistent claim whose cert-0 prepared table + chain
-/// use `R' = (u+1)*base != ±u*base`, then drives
-/// `prove_current_air_monolithic`. Reports the exact observed outcome.
+/// Confirms that the monolithic prover rejects an incorrect hint point.
+///
+/// Certificate zero uses `R' = (u + 1) * base`.
 #[test]
-fn wrong_r_monolithic_prove_outcome() {
+fn wrong_r_monolithic_prover_rejects() {
     let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
     let base_claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
         .expect("valid claim builds");
@@ -1540,8 +1506,8 @@ fn wrong_r_monolithic_prove_outcome() {
         P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, r_prime.clone())
             .expect("wrong-R claim assembles (no native gate in override builders)");
 
-    // Build the draft manually: no draft builder exists for a wrong-R claim
-    // (the `from_inputs_*` builders run a native ECDSA gate that rejects it).
+    // Build the draft manually. No draft builder accepts a wrong-R claim.
+    // The `from_inputs_*` builders reject it through their native ECDSA gate.
     let relations = P256ProofRelations::dummy();
     let draft = P256ProofDraft {
         inputs: inputs.clone(),
@@ -1549,27 +1515,18 @@ fn wrong_r_monolithic_prove_outcome() {
         relations,
     };
 
-    // (1) Does the native pre-check inside prove reject?
-    match draft.prove_current_air_monolithic::<Blake2sMerkleChannel>() {
-        Ok(_) => eprintln!(
-            "PHASE B: prove_current_air_monolithic SUCCEEDED on wrong-R witness (UNEXPECTED — would indicate acceptance)"
-        ),
-        Err(e) => eprintln!("PHASE B: prove_current_air_monolithic REJECTED wrong-R: {e:?}"),
-    }
+    draft
+        .prove_current_air_monolithic::<Blake2sMerkleChannel>()
+        .expect_err("the monolithic prover must reject an incorrect hint point");
 }
 
-/// EXPERIMENT (Phase C — DECISIVE AIR oracle). Runs `assert_constraints`
-/// directly on the wrong-`R` trace, bypassing every native shape check.
-/// A clean return == AIR ACCEPTS (soundness gap). A panic/abort == AIR
-/// REJECTS (sound). This isolates whether the monolithic AIR *constraints*
-/// bind `R` to `u*base`, independent of native validation.
+/// Runs AIR constraints directly on an incorrect-point trace.
+///
+/// This test bypasses native shape checks.
+/// The constraint panic confirms that the AIR binds `R` to `u * base`.
 #[test]
-#[ignore = "decisive manual wrong-R AIR oracle: assert_current_air_constraints \
-            panics (clean single polynomial-constraint panic at \
-            fake_glv_chain_continuity final_acc==r3) when the AIR correctly \
-            rejects a wrong R (sound). Run with --ignored. Not auto-run to avoid \
-            the lessons.md #18 double-panic/SIGABRT risk in the shared suite."]
-fn wrong_r_air_constraints_oracle() {
+#[should_panic(expected = "constraint #")]
+fn wrong_r_air_constraints_reject() {
     let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
     let base_claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
         .expect("valid claim builds");
@@ -1585,14 +1542,40 @@ fn wrong_r_air_constraints_oracle() {
         relations,
     };
 
-    eprintln!(
-        "PHASE C: running assert_current_air_constraints on wrong-R trace; \
-         a clean PASS == AIR accepts (gap), a panic/abort == AIR rejects (sound)."
-    );
     assert_current_air_constraints(&draft);
-    eprintln!(
-        "PHASE C: assert_current_air_constraints RETURNED CLEANLY on wrong-R trace \
-         => AIR ACCEPTED the wrong R (soundness gap confirmed)."
+}
+
+/// Off-curve `R'` for `cert_index`: the true `R`'s (on-curve) `x` with `y+1`,
+/// which cannot satisfy `y^2 = x^3 + a*x + b`.
+fn off_curve_r_for_cert(claim: &P256ProofClaim, cert_index: usize) -> AffinePoint {
+    let true_r = true_r_for_cert(claim, cert_index);
+    AffinePoint {
+        x: true_r.x,
+        y: add_u256(&true_r.y, &U256::from_le_u64s(&[1, 0, 0, 0])),
+    }
+}
+
+/// Confirms that claim construction rejects an off-curve fake-GLV hint point.
+///
+/// The projective EC trace builder must report `AffineOutputMismatch`.
+#[test]
+fn off_curve_r_monolithic_pipeline_rejects() {
+    let inputs = vec![valid_real_input_with_small_u_scalars(7, 11)];
+    let base_claim = P256ProofClaim::from_inputs_with_trivial_fake_glv_hints(&inputs)
+        .expect("valid claim builds");
+    let r_off = off_curve_r_for_cert(&base_claim, 0);
+
+    let err = P256ProofClaim::from_inputs_with_wrong_r_for_cert(&inputs, 0, r_off)
+        .expect_err("off-curve R must not assemble an accepting witness");
+
+    assert!(
+        matches!(
+            err,
+            P256ProofError::ProjectiveEc(
+                crate::curve::projective::ProjectiveEcError::AffineOutputMismatch { .. }
+            )
+        ),
+        "expected off-curve R rejected by the projective EC affine-output check, got {err:?}"
     );
 }
 
@@ -1619,12 +1602,10 @@ fn add_u256(a: &U256, b: &U256) -> U256 {
     U256::from_le_u64s(&out)
 }
 
-/// Re-run the monolithic interaction-trace generation for `draft` and return
-/// the resulting interaction claim, with relations drawn from the real
-/// transcript. The per-relation LogUp balance it carries is the in-AIR
-/// rejection oracle (lessons.md #18); a tampered witness that unbalances any
-/// relation is caught by `verify_balanced` (first imbalance) or surfaced in
-/// full by `relation_audit`.
+/// Rebuilds the monolithic interaction claim from the actual transcript.
+///
+/// `verify_balanced` reports the first relation imbalance.
+/// `relation_audit` reports all relation imbalances.
 fn monolithic_interaction_claim(
     draft: &P256ProofDraft,
 ) -> (P256CurrentAirInteractionClaim, P256CurrentAirRelations) {
@@ -1692,7 +1673,7 @@ fn relation_audit_lists_all_imbalances_and_dead_links() {
         ],
         liveness: vec![("LiveOk", nonzero), ("DeadLink", zero())],
     };
-    // Reports ALL imbalances at once, not just the first.
+    // Report all imbalances, not only the first.
     assert_eq!(audit.imbalanced(), vec!["Beta", "Delta"]);
     assert_eq!(audit.first_imbalance(), Some("Beta"));
     assert!(!audit.is_balanced());
@@ -1757,8 +1738,7 @@ fn bump_limb0(value: &crate::limbs::P256M31BigInt) -> crate::limbs::P256M31BigIn
     crate::limbs::P256M31BigInt::from_limbs(limbs)
 }
 
-/// Extract an `M31ColumnEval`'s cells into a per-row `Vec<M31>` in the column's
-/// own storage order (used to forge one cell and rebuild the column).
+/// Returns an `M31ColumnEval` as row values in its storage order.
 fn column_to_values(column: &crate::scalar::scalar_mod_mul::columns::M31ColumnEval) -> Vec<M31> {
     let mut out = Vec::new();
     for packed in &column.data {
@@ -1777,37 +1757,17 @@ fn column_from_values_like(
     )
 }
 
-/// C5-2a-ii IN-AIR oracle: forging a Double-op `output_affine.x` limb on the
-/// fake-GLV projective-source consumer must make the consumer's AIR constraints
-/// UNSATISFIABLE — the affine-normalization binding `R13 == x3` (gated by
-/// `out_finite`, with the silo's `R13 = output.x · z3`) fires. This isolates the
-/// Double-formula coordinate binding: the forge is applied to the COMMITTED
-/// `output.x` column AFTER native trace generation (which would otherwise reject
-/// a wrong affine), so the rejection is the AIR constraint itself, not the
-/// native `verify()`. Pre-this-change (no Double-formula constraints) the same
-/// committed forge satisfied every consumer constraint (the EC-row self-loop
-/// cancels regardless of the output value) — i.e. the proof VERIFIED — which was
-/// the C5 hole. A clean honest control runs first.
+/// Confirms that the AIR rejects a forged x-coordinate for a doubling output.
+///
+/// The test changes the committed consumer trace after native trace generation.
+/// The relation balance must reject the change.
 #[test]
 fn current_p256_monolithic_rejects_forged_double_op_output() {
     use crate::scalar::prepared_table::PREPARED_TABLE_EC_POINT_COLUMNS;
 
-    // u1 == u2 drives the doubling ladder, so the projective EC trace contains
-    // active Double ops. The forge target is the committed Double-op
-    // `output_affine.x` (limb 0) on the fake-GLV projective-source CONSUMER.
-    //
-    // Oracle: the per-relation LogUp balance (lessons.md #18 — `verify_balanced`,
-    // not `assert_constraints`, which double-panics on a failing row via the
-    // `LogupAtRow::drop` finalize assert). The forge is applied to the COMMITTED
-    // base trace AFTER native trace generation (which would otherwise reject a
-    // wrong affine via `ProjectiveEcRow::verify`), so the rejection is the AIR's
-    // own balance, not the native check.
-    //
-    // The committed `output.x` participates in the `FakeGlvProjectiveSource`
-    // EC-row relation (consumer use vs provider yield) AND, post-C5-2, in the
-    // Double-formula `M13.lhs == output.x` operand binding — so a forged
-    // `output.x` both unbalances the EC-row relation and violates the in-AIR
-    // Double binding. Either way the proof is rejected.
+    // Equal scalars drive the ladder through active doubling operations.
+    // Forge the first x-coordinate limb in the committed consumer trace.
+    // The output participates in the EC relation and doubling formula binding.
     let op_col = 4usize;
     let output_x0_col = 5 + 2 * PREPARED_TABLE_EC_POINT_COLUMNS;
     let double_op =
@@ -1830,16 +1790,9 @@ fn current_p256_monolithic_rejects_forged_double_op_output() {
     );
 }
 
-/// C5-2b sibling of `current_p256_monolithic_rejects_forged_double_op_output`,
-/// for the MixedAdd-op coordinate formula. The distinct branch (`u1 != u2`)
-/// drives the chain's DOUBLE/DOUBLE/ADD ladder, so the projective EC trace
-/// contains active MixedAdd ops (op-code 0). The forge target is the committed
-/// MixedAdd-op `output_affine.x` (limb 0) on the fake-GLV projective-source
-/// CONSUMER.
+/// Confirms that the AIR rejects a forged x-coordinate for a mixed-add output.
 ///
-/// Oracle: the aggregate LogUp balance. The dedicated binding-isolating tests
-/// are C5-3; this is the end-to-end rejection. A clean honest control runs
-/// first.
+/// Distinct scalars drive the ladder through active mixed-add operations.
 #[test]
 fn current_p256_monolithic_rejects_forged_mixed_add_op_output() {
     use crate::scalar::prepared_table::PREPARED_TABLE_EC_POINT_COLUMNS;
@@ -1849,7 +1802,7 @@ fn current_p256_monolithic_rejects_forged_mixed_add_op_output() {
     let mixed_add_op =
         M31::from_u32_unchecked(crate::scalar::prepared_table::PREPARED_TABLE_EC_OP_MIXED_ADD);
 
-    // Distinct branch (u1 != u2) so the ladder runs real mixed-adds.
+    // Distinct scalars drive the ladder through mixed-add operations.
     let honest = forged_double_output_balance_outcome(7, 11, None);
     honest.expect("honest distinct-branch proof balances");
 
@@ -1867,13 +1820,9 @@ fn current_p256_monolithic_rejects_forged_mixed_add_op_output() {
     );
 }
 
-/// Build the monolithic interaction claim for a `u1`/`u2` doubling draft and
-/// return its `verify_balanced()` outcome. If `forge` is `Some((op_col,
-/// limb_col, double_op))`, the COMMITTED fake-GLV projective-source CONSUMER base
-/// column `limb_col` is bumped by 1 on the first active row whose op-code column
-/// `op_col` equals `double_op` — a post-trace-gen forge of a Double-op output
-/// limb that exercises the in-AIR rejection (balance) rather than the native
-/// `ProjectiveEcRow::verify`.
+/// Returns the relation-balance result for an optional trace modification.
+///
+/// When provided, `forge` changes one active output limb after trace generation.
 fn forged_double_output_balance_outcome(
     u1: u64,
     u2: u64,
@@ -1912,7 +1861,7 @@ fn forged_double_output_balance_outcome(
         .gen_current_air_base_trace(&proof_claim)
         .expect("base trace");
 
-    // Optional forge: bump one committed CONSUMER limb on the first active Double
+    // Optional change: increment one committed consumer limb on the first active Double
     // row (post-trace-gen, so native verification has already passed).
     if let Some((op_col, limb_col, double_op)) = forge {
         let consumer = &mut base.fake_glv_projective_consumer;
@@ -1934,7 +1883,7 @@ fn forged_double_output_balance_outcome(
         consumer[limb_col] = forged_col;
         // Re-flatten the forged consumer columns into the monolithic `columns`
         // so the committed trace reflects the forge. The consumer block is a
-        // contiguous slice; rebuild `base.columns` from the per-sub-graph fields
+        // contiguous slice. Rebuild `base.columns` from the per-sub-graph fields
         // is overkill, so instead recompute the interaction directly below from
         // the (forged) `base` fields the interaction generator reads.
     }
@@ -2016,10 +1965,9 @@ fn monolithic_rejects_mutated_public_r() {
     );
 }
 
-/// WO-2.5/WO-3.2 oracle: the monolith has one shared projective signed-carry
-/// provider for public-key-curve, final-add, and hinted formula consumers.
-/// Corrupting that shared multiplicity column must unbalance the aggregate
-/// LogUp sum.
+/// Confirms rejection after corruption of the shared signed-carry multiplicity.
+///
+/// Public-key curve, final-add, and hinted formula consumers share this provider.
 #[test]
 fn monolithic_rejects_corrupted_shared_projective_signed_carry_multiplicity() {
     let draft = valid_draft_for_balance(7, 11);
@@ -2050,10 +1998,9 @@ fn monolithic_rejects_corrupted_shared_projective_signed_carry_multiplicity() {
     );
 }
 
-/// WO-3.2 oracle: scalar-setup/final-check, scalar-mod-mul,
-/// public-key-curve, hinted-mul, and final-add all consume one shared range13
-/// provider. Corrupting that provider multiplicity must reject the whole
-/// monolithic proof.
+/// Confirms rejection after corruption of the shared Range13 multiplicity.
+///
+/// All active P256 components consume the same Range13 provider.
 #[test]
 fn monolithic_rejects_corrupted_shared_range13_multiplicity() {
     let draft = valid_draft_for_balance(7, 11);
@@ -2753,9 +2700,7 @@ fn current_p256_air_shape_diagnostic() {
     let components = P256CurrentAirComponents::new(
         &mut allocator,
         &claim,
-        // zero_for_claim, NOT zero(): the mod-mul component lists are zipped
-        // against the interaction claim's vectors, so a plain zero() silently
-        // drops them from the diagnostic.
+        // Use `zero_for_claim` to retain all modular multiplication vectors.
         &P256CurrentAirInteractionClaim::zero_for_claim(&claim),
         &P256CurrentAirRelations::dummy(),
     );
@@ -3067,7 +3012,7 @@ fn current_p256_per_component_shape_diagnostic() {
     let components = P256CurrentAirComponents::new(
         &mut allocator,
         &claim,
-        // zero_for_claim, NOT zero() (see the shape diagnostic).
+        // Use `zero_for_claim`, not `zero`, to retain the component shape.
         &P256CurrentAirInteractionClaim::zero_for_claim(&claim),
         &P256CurrentAirRelations::dummy(),
     );

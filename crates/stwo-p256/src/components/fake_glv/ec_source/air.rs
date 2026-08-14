@@ -51,13 +51,14 @@ pub type FakeGlvProjectiveSourceComponent = FrameworkComponent<FakeGlvProjective
 
 pub const FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY: usize = 4 + 3 * PREPARED_TABLE_EC_POINT_COLUMNS;
 /// Provider base-trace width: `active` + the EC-row relation columns. The
-/// provider (`FakeGlvPrimitiveEcRowProviderEval`) does NOT carry consumed-mul
+/// provider (`FakeGlvPrimitiveEcRowProviderEval`) does not carry multiplication-consumer
 /// columns.
 pub const FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS: usize =
     1 + FAKE_GLV_PRIMITIVE_EC_ROW_RELATION_ARITY;
-/// Consumer base-trace width: identical to the provider layout (metadata +
-/// three committed points). The old consumed-mul + formula blocks moved into
-/// the hinted_mul silo (Phase 3).
+/// Consumer base-trace width.
+///
+/// The layout contains metadata and three committed points.
+/// The hinted multiplication silo owns multiplication and formula columns.
 pub const FAKE_GLV_PROJECTIVE_SOURCE_CONSUMER_TRACE_COLUMNS: usize =
     FAKE_GLV_PRIMITIVE_EC_SOURCE_TRACE_COLUMNS;
 
@@ -67,7 +68,7 @@ const FAKE_GLV_PRIMITIVE_EC_ROW_INDEX_COLUMN: &str = "p256_fake_glv_primitive_ec
 pub struct FakeGlvProjectiveSourceProofClaim {
     pub log_size: u32,
     pub source_offset: u32,
-    /// Active EC rows (= γ-digest groups; the tall expanders' schedule).
+    /// Active EC rows equal the γ-digest groups in the tall expander schedule.
     pub rows: u32,
 }
 
@@ -297,12 +298,12 @@ impl FrameworkEval for FakeGlvPrimitiveEcRowProviderEval {
 pub struct FakeGlvProjectiveSourceEval {
     pub log_size: u32,
     pub relation: FakeGlvPrimitiveEcRowRelation,
-    /// The hinted provider's mul relation: 6 narrow per-group consumes
-    /// (M0/M1 lhs+rhs, M13/M14 lhs) bind the consumer's committed points to
-    /// the silo group's operand columns; all other operand/result binding
-    /// lives silo-side (hinted_mul formula_bind).
+    /// Hinted multiplication relation for six narrow group slots.
+    ///
+    /// These consumes bind committed points to silo operand columns.
+    /// The hinted multiplication component binds all other operands and results.
     pub mul_result: crate::projective_air::ProjectiveRcbMulResultRelation,
-    /// EC-op header link: PROVIDED (`−has_muls`) here, CONSUMED by the silo.
+    /// Provides the EC operation header link for the silo.
     pub header: crate::components::hinted_mul::EcOpHeaderRelation,
 }
 
@@ -312,10 +313,8 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Must stay at +1: the prove pipeline rejects a per-component bound of
-        // `log_size + 2` (OODS composition check fails even with degree-3
-        // constraints), so every constraint here is kept at degree <= 3 by
-        // solo LogUp batching (see FAKE_GLV_CONSUMER_LOGUP_BATCH).
+        // Keep the component bound at `log_size + 1`.
+        // Solo LogUp batches keep each constraint at degree 3 or less.
         self.log_size + 1
     }
 
@@ -378,7 +377,7 @@ impl FrameworkEval for FakeGlvProjectiveSourceEval {
 
         // Infinity-operand no-op: `lhs + ∞ = lhs` has no silo group, so pin the
         // output to the accumulator directly. `noop = (1−op)·rhs.inf` equals
-        // `active·(1−op)·rhs.inf` on every row (padding zeroing above); the
+        // `active·(1−op)·rhs.inf` on every row (padding zeroing above). The
         // copies are degree 3.
         let noop = (one.clone() - op.clone()) * rhs.inf();
         let (lhs_x, lhs_y) = (lhs.x_bigint(), lhs.y_bigint());
@@ -517,8 +516,8 @@ pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
     (trace, FakeGlvPrimitiveEcRowInteractionClaim { claimed_sum })
 }
 
-// Interaction trace for the fake-GLV projective-source CONSUMER (Phase 3
-// narrow layout). Emits, in the exact order the eval does under one
+// Interaction trace for the narrow fake-GLV projective-source consumer.
+// It emits entries in evaluator order under one
 // `finalize_logup_batched`:
 //   0. the `FakeGlvPrimitiveEcRowRelation` consume (+active),
 //   1..=6. the 6 narrow `ProjectiveRcbMulResultRelation` consumes (+gate),
@@ -526,8 +525,8 @@ pub(crate) fn gen_fake_glv_primitive_ec_source_interaction_trace(
 // where `gate = active − (1−op)·rhs.inf` (the group-existence gate).
 //
 // LogUp batch size: 1 fraction per interaction column. The op-mux consume
-// entries (M0.rhs at index 2, M1.rhs at index 4) have degree-2 tuple values;
-// pairing them with a neighbor pushes the logup constraint past degree 3,
+// entries (M0.rhs at index 2, M1.rhs at index 4) have degree-2 tuple values.
+// Pairing them with a neighbor pushes the logup constraint past degree 3,
 // which overflows the `log_size + 1` bound. `finalize_logup_batched` only
 // supports a uniform batch size, so everything goes solo.
 pub(crate) const FAKE_GLV_CONSUMER_LOGUP_BATCH: usize = 1;
@@ -538,7 +537,7 @@ pub(crate) fn fake_glv_consumer_logup_entries() -> usize {
     1 + NARROW_MUL_CONSUME_SLOTS.len() + 1
 }
 
-/// The fake-GLV consumer's narrow-consume column layout (5 metadata columns;
+/// The fake-GLV consumer's narrow-consume column layout (5 metadata columns,
 /// points start at column 5).
 fn fake_glv_narrow_mul_columns() -> NarrowMulConsumeColumns {
     NarrowMulConsumeColumns {
@@ -681,7 +680,7 @@ pub(crate) struct FakeGlvProjectiveSourceConsumerInteraction {
     pub columns: ColumnVec<M31ColumnEval>,
     pub ec_row_sum: SecureField,
     pub mul_result_sum: SecureField,
-    /// Σ of the EC-op header yields (−gate); balances against the silo's
+    /// Σ of the EC-op header yields (−gate). Balances against the silo's
     /// header consume.
     pub header_yield_sum: SecureField,
 }

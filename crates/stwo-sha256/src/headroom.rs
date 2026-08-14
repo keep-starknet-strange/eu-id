@@ -1,58 +1,34 @@
 //! M31 headroom audit for the SHA-256 mod-2³² limb-add equation families.
 //!
-//! Every mod-2³² addition in the SHA-256 AIR is constrained by two linear
-//! identities — one per 16-bit limb `(lo, hi)`:
+//! The SHA-256 AIR checks each modulo-2³² addition with two linear identities.
+//! One identity applies to each 16-bit limb `(lo, hi)`:
 //!
 //! ```text
 //! Σⱼ addendⱼ.lo +     0    − result.lo − 2¹⁶ · carry_lo = 0
 //! Σⱼ addendⱼ.hi + carry_lo − result.hi − 2¹⁶ · carry_hi = 0
 //! ```
 //!
-//! The combined polynomial expression must lie strictly inside centered M31,
-//! i.e. `|expr| < M31_CENTER_LIMIT = (2³¹ − 2) / 2 = 2³⁰ − 1`, otherwise the
-//! M31 equation could be satisfied with a non-zero integer value and the
-//! constraint would not actually pin down `result`. The validated design
-//! (§3 of `docs/research/sha256-air-design.md`) shows that even the widest add —
-//! `T1` with 5 addends — has roughly 12 bits of headroom, so for SHA-256
-//! every family fits centered M31 directly. But per the AIR-soundness
-//! convention, the assertion must come from **code**, not a paragraph in
-//! the design doc; that's what this module does, and what the fail-closed
-//! tests at the bottom guard against drift.
+//! The combined expression must lie strictly inside centered M31.
+//! It must satisfy `|expr| < M31_CENTER_LIMIT = 2³⁰ - 1`.
+//! Otherwise, a nonzero integer can equal zero in M31.
+//! The widest five-addend `T1` operation has approximately 12 headroom bits.
+//! Every SHA-256 addition family fits directly in centered M31.
 //!
-//! ## Module location
+//! This module verifies that result in code.
+//! Fail-closed tests detect a bound change.
 //!
-//! This audit lives **locally** in `stwo-sha256` for now. It deliberately
-//! mirrors the API of `stwo-p256-utils::headroom` on `origin/lucas/p256`
-//! (the analogous audit for the P-256 stream): same enum
-//! ([`HeadroomStatus`]), same record shape ([`EquationHeadroom`] /
-//! [`LimbHeadroom`]), same audit-helper pattern. Once the cross-stream
-//! interface contract is frozen, the audits migrate into a shared crate
-//! (`stwo-air-utils`, or a generalised `stwo-p256-utils`) and this module
-//! becomes a thin re-export shim.
-//!
-//! ## What's simpler than the P-256 audit
-//!
-//! - **All addend coefficients are `+1`.** SHA-256 only adds; no
-//!   subtraction, no signed coefficient mixing. The bound shape is just
-//!   `Σ addends − result − 2¹⁶ · carry` per limb.
-//! - **Carries are non-negative.** Every carry lives in `[0, k)` for a
-//!   k-addend add; the range-check table is unsigned. The P-256 stream's
-//!   `SignedCarryRange` spec is therefore overkill here — see
-//!   [`EquationHeadroom::signed_carry_bound`] for how we recycle that
-//!   field name without changing its meaning.
-//! - **Only 2 limbs.** A SHA-256 word is stored as `(lo, hi)`; the carry
-//!   chain has length 2, not 20+.
+//! SHA-256 has positive unit coefficients and unsigned carries. A carry from
+//! `k` addends is in `[0, k)`. Each SHA word has two limbs.
 
 use crate::types::{LIMB_BASE, LIMB_MAX};
 
-/// M31 modulus `p = 2³¹ − 1`. AIR field elements are reduced modulo this.
+/// M31 modulus `p = 2³¹ - 1`. AIR field arithmetic uses this modulus.
 pub const M31_MODULUS: i128 = (1i128 << 31) - 1;
 
-/// Centered-representative bound `(M31_MODULUS − 1) / 2 = 2³⁰ − 1`. Every
-/// audited equation's `|combined_expression|` must lie **strictly below**
-/// this for the M31 equation to imply the integer equation — otherwise the
-/// equation could be satisfied in M31 by a witness whose integer LHS is a
-/// non-zero multiple of `p`.
+/// Centered bound `(M31_MODULUS − 1) / 2 = 2³⁰ − 1`.
+///
+/// Each `|combined_expression|` must be strictly below this value.
+/// Then an M31 equality implies the corresponding integer equality.
 pub const M31_CENTER_LIMIT: i128 = (M31_MODULUS - 1) / 2;
 
 // ---- Per-family carry-range bounds (exclusive upper bounds / table sizes) ----
@@ -86,19 +62,13 @@ pub const RANGE_5: u32 = 5;
 /// Outcome of a single equation-family headroom check.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeadroomStatus {
-    /// `|combined_expression| < M31_CENTER_LIMIT` across every limb. The
-    /// equation fits centered M31 directly; no algebraic split is required.
+    /// Each limb has `|combined_expression| < M31_CENTER_LIMIT`. The equation
+    /// fits centered M31 without an algebraic split.
     Fits,
-    /// At least one limb's `|combined_expression|` reaches or exceeds
-    /// `M31_CENTER_LIMIT`. The equation must be split before its AIR row
-    /// type is enabled. Not expected for any SHA-256 family — appears in
-    /// P-256 for 256×256 multiplication. Retained here so the API matches
-    /// the P-256 stream's headroom audit verbatim.
+    /// At least one limb reaches `M31_CENTER_LIMIT`. Split the equation before
+    /// an AIR row can use it. No SHA-256 family has this status.
     RequiresSplit,
-    /// The audit formula for this equation is not yet derived. The AIR
-    /// must refuse to enable a row family in this state; the tests below
-    /// enforce that no SHA-256 audit reaches the prover with
-    /// `PendingFormula`.
+    /// The equation has no audit formula. The AIR must reject this status.
     PendingFormula,
 }
 
@@ -167,11 +137,9 @@ impl EquationHeadroom {
 /// - [`audit_finalization`] — the eight 2-addend finalization adds
 ///   `Hⱼ = h_inⱼ + working_varⱼ` per block.
 ///
-/// The fail-closed test `tests::every_add_family_fits_centered_m31`
-/// asserts every entry's status is `Fits`, so adding a new add shape
-/// without an audit, or a drift in the bound formula, triggers a test
-/// failure rather than silently passing — no warnings, no skipped
-/// equations.
+/// `tests::every_add_family_fits_centered_m31` requires `Fits` for each entry.
+/// The test rejects a new unaudited addition shape.
+/// It also rejects a changed bound formula.
 pub fn current_headroom_audits() -> Vec<EquationHeadroom> {
     vec![
         audit_schedule_recurrence(),
@@ -191,10 +159,11 @@ pub fn audit_schedule_recurrence() -> EquationHeadroom {
     )
 }
 
-/// 5-addend audit: `T1 = h + Σ1(e) + Ch(e,f,g) + K[t] + W[t]`. The widest
-/// add in the AIR — and therefore the family whose bound `T1` produces is
-/// the one design §3's "~12 bits of headroom" is measured against.
-/// Carries are range-checked to `[0, RANGE_5) = [0, 5)`.
+/// Five-addend audit for `T1 = h + Σ1(e) + Ch(e,f,g) + K[t] + W[t]`.
+///
+/// This is the widest addition in the AIR.
+/// Its bound gives the design headroom estimate.
+/// Range checks constrain carries to `[0, RANGE_5) = [0, 5)`.
 pub fn audit_round_t1() -> EquationHeadroom {
     audit_mod_2_32_add(
         "t1",
@@ -217,7 +186,7 @@ pub fn audit_round_short_adds() -> EquationHeadroom {
 
 /// 2-addend audit for the eight finalization adds per block:
 /// `Hⱼ⁽ᵗ⁺¹⁾ = Hⱼ⁽ᵗ⁾ + working_varⱼ` for `j ∈ [0, 8)`. Same limb shape as
-/// the round short adds; tracked separately for traceability with the
+/// the round short adds. Tracked separately for traceability with the
 /// validated design §10.3. Carries are range-checked
 /// to `[0, RANGE_2) = [0, 2)`.
 pub fn audit_finalization() -> EquationHeadroom {
@@ -230,10 +199,10 @@ pub fn audit_finalization() -> EquationHeadroom {
 
 /// Audit one mod-2³² limb-add equation family with `k = addends` addends.
 ///
-/// The per-limb constraint is `Σⱼ addendⱼ.limb + carry_in − result.limb −
-/// 2¹⁶ · carry_out = 0`, with every addend limb and the result limb in
-/// `[0, 2¹⁶)` and every carry in `[0, k)` (range-checked by the family's
-/// `Range_k` table).
+/// The limb constraint is:
+/// `Σⱼ addendⱼ.limb + carry_in − result.limb − 2¹⁶ · carry_out = 0`.
+/// Each addend and result limb is in `[0, 2¹⁶)`.
+/// The `Range_k` table constrains each carry to `[0, k)`.
 ///
 /// We use the **loose** per-limb bound
 ///
@@ -241,11 +210,9 @@ pub fn audit_finalization() -> EquationHeadroom {
 /// |combined| ≤ (k + 1) · LIMB_MAX + carry_in + LIMB_BASE · carry_out
 /// ```
 ///
-/// — the P-256 stream's `audit_direct_limb_equation` shape, instantiated
-/// for two 16-bit limbs and `+1`-only addend coefficients. The loose bound
-/// sums magnitudes (it does *not* claim cancellation between "addends
-/// are large" and "result is small"), so the audit is conservative by
-/// design — any tighter sign-aware bound is still ≤ this loose one.
+/// This is the direct-limb equation for two 16-bit limbs. All addend
+/// coefficients are `+1`. The loose bound adds magnitudes and assumes no
+/// cancellation, so it is conservative.
 fn audit_mod_2_32_add(name: &'static str, addends: usize, note: &'static str) -> EquationHeadroom {
     let limb_max = i128::from(LIMB_MAX);
     let limb_base = i128::from(LIMB_BASE);
@@ -343,7 +310,7 @@ mod tests {
     /// The per-family carry bound exposed for downstream lookup wiring
     /// matches the family's `Range_k` table size: `signed_carry_bound =
     /// k − 1`, `RANGE_k = k`. The downstream lookup wiring consumes
-    /// `RANGE_k` to size its preprocessed range-check tables; this test
+    /// `RANGE_k` to size its preprocessed range-check tables. This test
     /// pins the correspondence between the audit and those constants so
     /// they cannot drift apart silently.
     #[test]
@@ -366,9 +333,9 @@ mod tests {
         );
     }
 
-    /// Sanity: the widest family (`T1`, k = 5) has a combined-expression
-    /// bound below 2²⁰, matching the validated design's "~12 bits of
-    /// headroom" estimate in §3 of `docs/research/sha256-air-design.md`.
+    /// Confirm that the widest family has a bound below 2²⁰.
+    ///
+    /// This result matches the design headroom estimate.
     #[test]
     fn headroom_matches_design_estimate() {
         let widest = audit("t1");
@@ -388,10 +355,11 @@ mod tests {
         );
     }
 
-    /// Every audit's per-limb carry chain is internally consistent: limb
-    /// 0 starts with `carry_in = 0`, limb 1's `carry_in` equals limb 0's
-    /// `carry_out`, and `signed_carry_bound` is the maximum `carry_out`
-    /// across both limbs.
+    /// Confirm that each limb carry chain is consistent.
+    ///
+    /// Limb zero starts with `carry_in = 0`.
+    /// Limb one receives the prior `carry_out`.
+    /// `signed_carry_bound` is the maximum carry output.
     #[test]
     fn audit_per_limb_carry_chain_is_consistent() {
         for a in current_headroom_audits() {
@@ -443,8 +411,8 @@ mod tests {
 
     /// `RANGE_k` constants name the exclusive upper bound — i.e. the
     /// preprocessed table size — for each family's carry range-check.
-    /// The numeric values are documented in the constant docs above; this
-    /// test pins them against accidental edits.
+    /// The constant documentation gives the numeric values. This test detects
+    /// an accidental change.
     #[test]
     fn range_constants_are_explicit() {
         assert_eq!(RANGE_2, 2);

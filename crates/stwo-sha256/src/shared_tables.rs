@@ -1,11 +1,12 @@
 //! Shared SHA table-provider module.
 //!
 //! This module moves the message-agnostic split-pack/range table providers out
-//! of repeated SHA instances. Each SHA consumer still owns its main trace,
-//! digest relation, field exposure, and consumer-side lookups; this module owns
-//! only the fixed table preprocessed columns plus the union multiplicities that
-//! satisfy those lookups.
+//! of the packed SHA component. The SHA consumer still owns its main trace,
+//! digest relation, full-stream provider, and consumer-side lookups. This module owns
+//! only the fixed table preprocessed columns plus the packed-message union
+//! multiplicities that satisfy those lookups.
 
+use air_core::claim_mask::{ClaimMaskTrace, SharedClaimMaskChallenge};
 use air_core::{
     fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint, TreeLayout,
 };
@@ -16,6 +17,7 @@ use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{QM31, SECURE_EXTENSION_DEGREE};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
+use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::CircleEvaluation;
@@ -23,33 +25,27 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::{ComponentProver, TreeBuilder};
 use stwo_constraint_framework::TraceLocationAllocator;
 
+use crate::claim_mask::{validate_claim_masks, ShaClaimMaskConfigError};
 use crate::components::{
     shared_table_preprocessed_column_ids, RangeKind, SharedProducer, SharedProducerPairEval,
-    RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
+    RANGE_TABLES,
 };
-use crate::field_exposure::FieldExposure;
 use crate::interaction::{
-    build_interaction_columns, producer_blind_frac_column, ComponentClaim, Frac,
+    build_interaction_columns, claim_mask_fraction_column, producer_blind_frac_column,
+    ComponentClaim, Frac,
 };
-use crate::multiplicities::{
-    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
-    sum_multiplicity_vectors,
-};
+use crate::multiplicities::range_k_multiplicities;
 use crate::preprocessed::{
-    generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes, LOG_SIZE_16,
+    generate_shared_table_preprocessed_trace, shared_table_preprocessed_log_sizes,
 };
 use crate::relations::{Sha256Relations, SharedShaTableRelations};
-use crate::tables::{
-    build_round_split_pack_table, build_sigma_split_pack_table, Half16, LowerSigmaPartition,
-    RoundPartition,
-};
-use crate::types::Sha256Witness;
+use crate::types::PackedSha256Witness;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShaTablesInteractionClaim {
-    /// One claim per producer *pair* (chunk of [`PRODUCER_PAIRS`]). A chunk of
+    /// One claim per producer *pair* (chunk of `PRODUCER_PAIRS`). A chunk of
     /// two producers carries the summed fraction of both in one interaction
-    /// column; a chunk of one carries that single producer's fraction. Order
+    /// column. A chunk of one carries that single producer's fraction. Order
     /// matches `PRODUCER_PAIRS` (== component registration == interaction
     /// column order), so `claimed_sums()` lines up with the committed columns.
     pub pairs: Vec<ComponentClaim>,
@@ -61,56 +57,26 @@ impl ShaTablesInteractionClaim {
     }
 }
 
-/// The pairing of shared-table producers into co-located components. Each inner
-/// slice is one component owning one or two producers of the *same* `log_size`;
-/// a two-producer chunk pairs its fractions into a single `SecureField`
-/// interaction column (R2 fraction batching). This one list drives four sites
-/// that must stay in lockstep: interaction-column generation
-/// (`shared_table_interaction_trace`), multiplicity-column order
-/// (`shared_table_trace`), interaction/trace log-size layout, and component
-/// registration (`ShaTablesComponents`). The 9 log₂16 producers pair into
-/// 4 pairs + 1 single (range₁₆); the 3 log₂4 range tables pair into 1 pair +
-/// 1 single = 7 chunks. Under Class-D single-gated blinding each producer emits
-/// ONE fraction, so each chunk yields exactly one paired interaction column:
-/// 12 producers → 7 interaction columns (was 12 under the cancelling-pair form).
+/// The shared-table producer groups.
+///
+/// Each inner slice contains one or two producers with the same `log_size`.
+/// A two-producer group puts both fractions in one `SecureField` interaction
+/// column. This list controls the interaction columns, multiplicity columns,
+/// log-size layout, and component registration.
+///
+/// The four range tables form three groups: range₈, range₂ with range₄, and
+/// range₅. Each producer emits one Class-D fraction. Thus, the unmasked layout
+/// has one interaction column for each group. Claim masking adds one fraction
+/// to each group.
 const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
-    &[
-        SharedProducer::RoundSplit(RoundPartition::Sigma0AndMaj, Half16::Lo),
-        SharedProducer::RoundSplit(RoundPartition::Sigma0AndMaj, Half16::Hi),
-    ],
-    &[
-        SharedProducer::RoundSplit(RoundPartition::Sigma1AndCh, Half16::Lo),
-        SharedProducer::RoundSplit(RoundPartition::Sigma1AndCh, Half16::Hi),
-    ],
-    &[
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma0, Half16::Lo),
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma0, Half16::Hi),
-    ],
-    &[
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma1, Half16::Lo),
-        SharedProducer::SigmaSplit(LowerSigmaPartition::LowerSigma1, Half16::Hi),
-    ],
-    &[SharedProducer::Range(RangeKind::Range16)],
+    &[SharedProducer::Range(RangeKind::Range8)],
     &[
         SharedProducer::Range(RangeKind::Range2),
         SharedProducer::Range(RangeKind::Range4),
     ],
     &[SharedProducer::Range(RangeKind::Range5)],
 ];
-
-fn round_split_index(p: RoundPartition, h: Half16) -> usize {
-    ROUND_SPLIT_TABLES
-        .iter()
-        .position(|&(tp, th)| tp == p && th == h)
-        .expect("round split table is enumerated in ROUND_SPLIT_TABLES")
-}
-
-fn sigma_split_index(p: LowerSigmaPartition, h: Half16) -> usize {
-    SIGMA_SPLIT_TABLES
-        .iter()
-        .position(|&(tp, th)| tp == p && th == h)
-        .expect("sigma split table is enumerated in SIGMA_SPLIT_TABLES")
-}
+pub const SHA_TABLE_INTERACTION_CLAIM_COUNT: usize = PRODUCER_PAIRS.len();
 
 fn range_index(kind: RangeKind) -> usize {
     RANGE_TABLES
@@ -120,73 +86,57 @@ fn range_index(kind: RangeKind) -> usize {
 }
 
 #[derive(Clone, Debug)]
-pub struct ShaTableMultiplicities {
-    pub round_split_pack: Vec<Vec<u32>>,
-    pub sigma_split_pack: Vec<Vec<u32>>,
+pub(crate) struct ShaTableMultiplicities {
     pub range: Vec<Vec<u32>>,
 }
 
 impl ShaTableMultiplicities {
-    pub fn from_consumers(consumers: &[(&Sha256Witness, FieldExposure)]) -> Self {
+    pub(crate) fn from_packed(packed: &PackedSha256Witness) -> Self {
         assert!(
-            !consumers.is_empty(),
+            !packed.messages.is_empty(),
             "shared SHA table provider needs at least one consumer",
         );
 
-        let mut round_split_pack = Vec::with_capacity(ROUND_SPLIT_TABLES.len());
-        for &(p, h) in ROUND_SPLIT_TABLES {
-            round_split_pack.push(blind_extend(sum_multiplicity_vectors(
-                consumers
-                    .iter()
-                    .map(|(witness, _)| round_split_pack_multiplicities(witness, p, h)),
-            )));
-        }
-
-        let mut sigma_split_pack = Vec::with_capacity(SIGMA_SPLIT_TABLES.len());
-        for &(p, h) in SIGMA_SPLIT_TABLES {
-            sigma_split_pack.push(blind_extend(sum_multiplicity_vectors(
-                consumers
-                    .iter()
-                    .map(|(witness, _)| sigma_split_pack_multiplicities(witness, p, h)),
-            )));
-        }
-
         let mut range = Vec::with_capacity(RANGE_TABLES.len());
         for &kind in RANGE_TABLES {
-            range.push(blind_extend(sum_multiplicity_vectors(
-                consumers
-                    .iter()
-                    .map(|(witness, _)| range_k_multiplicities(witness, kind)),
-            )));
+            let producer = SharedProducer::Range(kind);
+            range.push(blind_extend(
+                range_k_multiplicities(packed, kind),
+                1usize << (producer.blind_log_size() - 1),
+            ));
         }
 
-        Self {
-            round_split_pack,
-            sigma_split_pack,
-            range,
-        }
+        Self { range }
     }
 }
 
-/// Class-D multiplicity blinding (Q-015 §4b / p4c Class D): double the committed
-/// domain by appending `real.len()` fresh random M31 cells over the reserved
-/// dummy-key upper half. The stored (blinded) vector is committed as the
-/// multiplicity column; the interaction fraction reads the SAME committed cells.
-/// Randomness is host CSPRNG, never transcript-derived: the mask must be secret
-/// from the verifier. The dummy cells never touch the LogUp balance because
-/// `emit_blind` gates the numerator by `(1 − is_dummy)`, forcing it to `0` on
-/// every dummy row regardless of the random multiplicity committed there.
-fn blind_extend(real: Vec<u32>) -> Vec<u32> {
+/// Add Class-D masks to one multiplicity vector.
+///
+/// First, fill the real lower half with the honest multiplicities. Next, add a
+/// dummy-key upper half of the same size. Fill this upper half with fresh M31
+/// cells from the host cryptographic random number generator. The commitment
+/// contains this complete vector, and the interaction fraction reads the same
+/// cells.
+///
+/// The mask must stay secret from the verifier. Thus, do not derive it from the
+/// transcript. On dummy rows, `emit_blind` multiplies the numerator by
+/// `(1 - is_dummy)`. The result is zero, and the random multiplicity does not
+/// affect the LogUp balance.
+fn blind_extend(mut real: Vec<u32>, real_len: usize) -> Vec<u32> {
     use rand::RngCore;
-    let real_len = real.len();
     debug_assert!(
         real_len.is_power_of_two(),
         "real table size is a power of two"
     );
+    assert!(
+        real.len() <= real_len,
+        "honest multiplicity table exceeds shared producer real region"
+    );
+    real.resize(real_len, 0);
     let mut out = real;
     out.reserve(real_len);
-    // OsRng-seeded ChaCha12 (thread_rng): one syscall per reseed instead of
-    // one per cell — this loop runs 2^16+ times per table.
+    // `thread_rng` uses ChaCha12 with an `OsRng` seed. It does not make one
+    // system call for each cell in this large loop.
     let mut rng = rand::thread_rng();
     for _ in 0..real_len {
         // Full-field-width random mask cell (M31 reduces mod 2^31 − 1).
@@ -195,57 +145,26 @@ fn blind_extend(real: Vec<u32>) -> Vec<u32> {
     out
 }
 
-/// Per-tree committed-column counts of one shared-SHA producer *component*.
-/// After R2 fraction batching a component may own two co-located producers
-/// (e.g. `sp_sigma0_lo+sp_sigma0_hi`) sharing one interaction column; the name
-/// joins the producer tags so the probe emits TRUE per-component rows instead
-/// of aggregating every producer under one `(tree, log_size)` bucket.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ShaTableComponentShape {
-    pub name: String,
-    pub log_size: u32,
-    pub preprocessed_columns: usize,
-    pub trace_columns: usize,
-    pub interaction_columns: usize,
-}
-
-/// Number of preprocessed columns each producer table reads: the row-content
-/// value columns plus the Class-D `is_dummy` selector (excludes the
-/// multiplicity trace column).
-fn producer_preprocessed_cols(producer: SharedProducer) -> usize {
-    let value_cols = match producer {
-        SharedProducer::RoundSplit(..) => 5,
-        SharedProducer::SigmaSplit(..) => 3,
-        SharedProducer::Range(..) => 1,
-    };
-    value_cols + 1 // + Class-D is_dummy selector
-}
-
-/// Stable per-producer tag, matching its preprocessed-column family.
-fn producer_name(producer: SharedProducer) -> &'static str {
-    match producer {
-        SharedProducer::RoundSplit(p, h) => round_split_component_name(p, h),
-        SharedProducer::SigmaSplit(p, h) => sigma_split_component_name(p, h),
-        SharedProducer::Range(kind) => kind.tag(),
-    }
-}
-
 pub struct ShaTablesProver {
     multiplicities: ShaTableMultiplicities,
     shared: SharedShaTableRelations,
     relations: Option<Sha256Relations>,
     interaction_claim: Option<ShaTablesInteractionClaim>,
     components: Option<ShaTablesComponents>,
+    claim_masks: Option<Vec<ClaimMaskTrace>>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
 }
 
 impl ShaTablesProver {
-    pub fn new(multiplicities: ShaTableMultiplicities, shared: SharedShaTableRelations) -> Self {
+    pub fn new(packed: &PackedSha256Witness, shared: SharedShaTableRelations) -> Self {
         Self {
-            multiplicities,
+            multiplicities: ShaTableMultiplicities::from_packed(packed),
             shared,
             relations: None,
             interaction_claim: None,
             components: None,
+            claim_masks: None,
+            claim_mask_challenge: None,
         }
     }
 
@@ -255,38 +174,34 @@ impl ShaTablesProver {
             .expect("shared SHA table interaction claim is set during proving")
     }
 
-    /// TRUE per-component committed shape, one row per component (chunk of
-    /// [`PRODUCER_PAIRS`]), in registration/commit order. Reconciles exactly to
-    /// `layout()` (Σ preprocessed / trace / interaction columns per tree). A
-    /// two-producer component pairs its fractions into ONE `SecureField`
-    /// interaction column (`SECURE_EXTENSION_DEGREE` base columns); its
-    /// preprocessed count is the sum of both producers' tables and its trace
-    /// count is 2 (one multiplicity column each).
-    pub fn component_shapes(&self) -> Vec<ShaTableComponentShape> {
+    /// Claim-bearing component log sizes in exact component/serialization
+    /// order. The caller uses this to take the corresponding slice from one
+    /// global zero-sum mask ring.
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
         PRODUCER_PAIRS
             .iter()
-            .map(|chunk| {
-                let name = chunk
-                    .iter()
-                    .map(|&p| producer_name(p))
-                    .collect::<Vec<_>>()
-                    .join("+");
-                let preprocessed_columns =
-                    chunk.iter().map(|&p| producer_preprocessed_cols(p)).sum();
-                ShaTableComponentShape {
-                    name,
-                    log_size: chunk[0].blind_log_size(),
-                    preprocessed_columns,
-                    trace_columns: chunk.len(),
-                    // Class D (single gated fraction): each producer emits ONE
-                    // gated fraction `-(1 − is_dummy)·mult`, so a 2-producer
-                    // chunk's two fractions pair into ONE interaction column and
-                    // a 1-producer chunk gets one column too — one paired column
-                    // per chunk regardless of producer count.
-                    interaction_columns: SECURE_EXTENSION_DEGREE,
-                }
-            })
+            .map(|chunk| chunk[0].blind_log_size())
             .collect()
+    }
+
+    /// Enable private claimed sums for all shared-table components.
+    pub fn with_claim_masks(
+        mut self,
+        traces: Vec<ClaimMaskTrace>,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Result<Self, ShaClaimMaskConfigError> {
+        validate_claim_masks(&self.ordered_claim_mask_log_sizes(), &traces)?;
+        self.claim_masks = Some(traces);
+        self.claim_mask_challenge = Some(challenge);
+        Ok(self)
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge.as_ref().map(|shared| {
+            shared
+                .require()
+                .expect("claim-mask challenge anchor must follow all masked SHA modules")
+        })
     }
 
     fn relations(&self) -> &Sha256Relations {
@@ -307,6 +222,7 @@ pub struct ShaTablesVerifier {
     shared: SharedShaTableRelations,
     relations: Option<Sha256Relations>,
     components: Option<ShaTablesComponents>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
 }
 
 impl ShaTablesVerifier {
@@ -319,7 +235,31 @@ impl ShaTablesVerifier {
             shared,
             relations: None,
             components: None,
+            claim_mask_challenge: None,
         }
+    }
+
+    /// Claim-bearing component log sizes in exact component/serialization
+    /// order.
+    pub fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        PRODUCER_PAIRS
+            .iter()
+            .map(|chunk| chunk[0].blind_log_size())
+            .collect()
+    }
+
+    /// Configure the verifier for a prover that masks all shared-table claims.
+    pub fn with_claim_masks(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge.as_ref().map(|shared| {
+            shared
+                .require()
+                .expect("claim-mask challenge anchor must follow all masked SHA modules")
+        })
     }
 
     fn relations(&self) -> &Sha256Relations {
@@ -338,19 +278,22 @@ impl ShaTablesVerifier {
 impl Air for ShaTablesProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(0x5348_4154_4142_4c45);
+        if self.claim_masks.is_some() {
+            channel.mix_u64(1);
+        }
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let relations = Sha256Relations::draw_sha_tables_provider(channel);
-        self.shared.set(&relations.split_pack, &relations.range);
+        self.shared.set(&relations.range);
         self.relations = Some(relations);
     }
 
     fn layout(&self) -> TreeLayout {
         TreeLayout {
             preprocessed: shared_table_preprocessed_log_sizes(),
-            trace: shared_table_trace_log_sizes(),
-            interaction: shared_table_interaction_log_sizes(),
+            trace: shared_table_trace_log_sizes(self.claim_masks.is_some()),
+            interaction: shared_table_interaction_log_sizes(self.claim_masks.is_some()),
         }
     }
 
@@ -364,11 +307,19 @@ impl Air for ShaTablesProver {
         shared_table_preprocessed_column_ids()
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generate_shared_table_preprocessed_trace().0)
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(ShaTablesComponents::new(
             allocator,
             self.interaction_claim(),
             self.relations(),
+            self.claim_mask_beta(),
         ));
     }
 
@@ -379,7 +330,11 @@ impl Air for ShaTablesProver {
 
 impl AirProver for ShaTablesProver {
     fn max_log_size(&self) -> u32 {
-        LOG_SIZE_16
+        RANGE_TABLES
+            .iter()
+            .map(|&kind| SharedProducer::Range(kind).blind_log_size())
+            .max()
+            .expect("shared SHA provider has range tables")
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
@@ -393,11 +348,19 @@ impl AirProver for ShaTablesProver {
     }
 
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        tb.extend_evals(shared_table_trace(&self.multiplicities));
+        tb.extend_evals(shared_table_trace(
+            &self.multiplicities,
+            self.claim_masks.as_deref(),
+        ));
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Blake2sMerkleChannel>) {
-        let (evals, claim) = shared_table_interaction_trace(self.relations(), &self.multiplicities);
+        let (evals, claim) = shared_table_interaction_trace(
+            self.relations(),
+            &self.multiplicities,
+            self.claim_masks.as_deref(),
+            self.claim_mask_beta(),
+        );
         tb.extend_evals(evals);
         self.interaction_claim = Some(claim);
     }
@@ -408,21 +371,35 @@ impl AirProver for ShaTablesProver {
 }
 
 impl Air for ShaTablesVerifier {
+    fn validate_structure(&self) -> Result<(), VerificationError> {
+        if self.interaction_claim.pairs.len() != SHA_TABLE_INTERACTION_CLAIM_COUNT {
+            return Err(VerificationError::InvalidStructure(format!(
+                "shared SHA table claim count is {}, expected {}",
+                self.interaction_claim.pairs.len(),
+                SHA_TABLE_INTERACTION_CLAIM_COUNT,
+            )));
+        }
+        Ok(())
+    }
+
     fn mix_public(&self, channel: &mut Blake2sChannel) {
         channel.mix_u64(0x5348_4154_4142_4c45);
+        if self.claim_mask_challenge.is_some() {
+            channel.mix_u64(1);
+        }
     }
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         let relations = Sha256Relations::draw_sha_tables_provider(channel);
-        self.shared.set(&relations.split_pack, &relations.range);
+        self.shared.set(&relations.range);
         self.relations = Some(relations);
     }
 
     fn layout(&self) -> TreeLayout {
         TreeLayout {
             preprocessed: shared_table_preprocessed_log_sizes(),
-            trace: shared_table_trace_log_sizes(),
-            interaction: shared_table_interaction_log_sizes(),
+            trace: shared_table_trace_log_sizes(self.claim_mask_challenge.is_some()),
+            interaction: shared_table_interaction_log_sizes(self.claim_mask_challenge.is_some()),
         }
     }
 
@@ -436,11 +413,19 @@ impl Air for ShaTablesVerifier {
         shared_table_preprocessed_column_ids()
     }
 
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<air_core::PreprocessedColumnEval>, stwo::core::verifier::VerificationError>
+    {
+        Ok(generate_shared_table_preprocessed_trace().0)
+    }
+
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
         self.components = Some(ShaTablesComponents::new(
             allocator,
             &self.interaction_claim,
             self.relations(),
+            self.claim_mask_beta(),
         ));
     }
 
@@ -449,49 +434,35 @@ impl Air for ShaTablesVerifier {
     }
 }
 
-/// Stable per-component name for a round-side split-pack producer, matching
-/// its preprocessed-column tag family (`sp_sigma0_lo`, …).
-fn round_split_component_name(p: RoundPartition, h: Half16) -> &'static str {
-    match (p, h) {
-        (RoundPartition::Sigma0AndMaj, Half16::Lo) => "sp_sigma0_lo",
-        (RoundPartition::Sigma0AndMaj, Half16::Hi) => "sp_sigma0_hi",
-        (RoundPartition::Sigma1AndCh, Half16::Lo) => "sp_sigma1_lo",
-        (RoundPartition::Sigma1AndCh, Half16::Hi) => "sp_sigma1_hi",
-    }
-}
-
-/// Stable per-component name for a σ-side split-pack producer.
-fn sigma_split_component_name(p: LowerSigmaPartition, h: Half16) -> &'static str {
-    match (p, h) {
-        (LowerSigmaPartition::LowerSigma0, Half16::Lo) => "sp_lsigma0_lo",
-        (LowerSigmaPartition::LowerSigma0, Half16::Hi) => "sp_lsigma0_hi",
-        (LowerSigmaPartition::LowerSigma1, Half16::Lo) => "sp_lsigma1_lo",
-        (LowerSigmaPartition::LowerSigma1, Half16::Hi) => "sp_lsigma1_hi",
-    }
-}
-
 /// One multiplicity trace column per producer, in flattened `PRODUCER_PAIRS`
 /// order (== the order the paired components read them via `next_trace_mask`).
-fn shared_table_trace_log_sizes() -> Vec<u32> {
-    PRODUCER_PAIRS
-        .iter()
-        .flat_map(|chunk| chunk.iter())
-        .map(|p| p.blind_log_size())
-        .collect()
+fn shared_table_trace_log_sizes(masked: bool) -> Vec<u32> {
+    let mut out = Vec::new();
+    for chunk in PRODUCER_PAIRS {
+        out.extend(chunk.iter().map(|producer| producer.blind_log_size()));
+        if masked {
+            out.extend(std::iter::repeat_n(
+                chunk[0].blind_log_size(),
+                air_core::claim_mask::CLAIM_MASK_TRACE_COLUMNS,
+            ));
+        }
+    }
+    out
 }
 
-/// One `SecureField` (= `SECURE_EXTENSION_DEGREE` base columns) interaction
-/// column per CHUNK, in `PRODUCER_PAIRS` order. Under Class-D single-gated
-/// blinding each producer emits ONE fraction `-(1 − is_dummy)·mult`, so a
-/// 2-producer chunk's two fractions pair into one column
-/// (`finalize_logup_in_pairs`) and a 1-producer chunk gets one column — one
-/// paired interaction column per chunk at the chunk's blinded log size.
-fn shared_table_interaction_log_sizes() -> Vec<u32> {
+/// Return the interaction log sizes in `PRODUCER_PAIRS` order.
+///
+/// Each group has one `SecureField` interaction column. A `SecureField` column
+/// contains `SECURE_EXTENSION_DEGREE` base columns. Each Class-D producer emits
+/// the fraction `-(1 - is_dummy) * mult`. `finalize_logup_in_pairs` puts two
+/// producer fractions in one column. A one-producer group also gets one column.
+/// If claim masking is active, add its fraction before the same pairing step.
+fn shared_table_interaction_log_sizes(masked: bool) -> Vec<u32> {
     let mut out = Vec::new();
     for chunk in PRODUCER_PAIRS {
         out.extend(std::iter::repeat_n(
             chunk[0].blind_log_size(),
-            SECURE_EXTENSION_DEGREE,
+            (chunk.len() + usize::from(masked)).div_ceil(2) * SECURE_EXTENSION_DEGREE,
         ));
     }
     out
@@ -511,31 +482,29 @@ fn mult_col_to_eval(
 /// component's `next_trace_mask` calls land on its own producers' columns.
 fn shared_table_trace(
     multiplicities: &ShaTableMultiplicities,
+    claim_masks: Option<&[ClaimMaskTrace]>,
 ) -> Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
-    PRODUCER_PAIRS
-        .iter()
-        .flat_map(|chunk| chunk.iter())
-        .map(|&producer| {
+    let mut out = Vec::new();
+    for (index, chunk) in PRODUCER_PAIRS.iter().enumerate() {
+        out.extend(chunk.iter().map(|&producer| {
             // Blinded multiplicity vector (real lower half + random dummy upper
             // half), committed at the doubled `blind_log_size`.
             let mults = producer_multiplicities(multiplicities, producer);
             mult_col_to_eval(mults, producer.blind_log_size())
-        })
-        .collect()
+        }));
+        if let Some(masks) = claim_masks {
+            out.extend(masks[index].columns().iter().cloned());
+        }
+    }
+    out
 }
 
 /// Borrow the stored multiplicity vector for one producer.
-fn producer_multiplicities<'a>(
-    multiplicities: &'a ShaTableMultiplicities,
+fn producer_multiplicities(
+    multiplicities: &ShaTableMultiplicities,
     producer: SharedProducer,
-) -> &'a [u32] {
+) -> &[u32] {
     match producer {
-        SharedProducer::RoundSplit(p, h) => {
-            &multiplicities.round_split_pack[round_split_index(p, h)]
-        }
-        SharedProducer::SigmaSplit(p, h) => {
-            &multiplicities.sigma_split_pack[sigma_split_index(p, h)]
-        }
         SharedProducer::Range(kind) => &multiplicities.range[range_index(kind)],
     }
 }
@@ -543,6 +512,8 @@ fn producer_multiplicities<'a>(
 fn shared_table_interaction_trace(
     relations: &Sha256Relations,
     multiplicities: &ShaTableMultiplicities,
+    claim_masks: Option<&[ClaimMaskTrace]>,
+    claim_mask_beta: Option<QM31>,
 ) -> (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     ShaTablesInteractionClaim,
@@ -554,17 +525,20 @@ fn shared_table_interaction_trace(
     // chunk's paired fraction, and one `ComponentClaim` per chunk. The chunk
     // order and the within-chunk producer order MUST match `ShaTablesComponents`
     // (registration order) and `shared_table_trace` (multiplicity write order).
-    for chunk in PRODUCER_PAIRS {
+    for (index, chunk) in PRODUCER_PAIRS.iter().enumerate() {
         let log_size = chunk[0].blind_log_size();
         // Class D (single gated fraction): each producer contributes ONE
         // fraction `-(1 − is_dummy)·mult`, matching the single `add_to_relation`
         // call `emit_blind` fires in `SharedProducer::emit_entry`.
         // `build_interaction_columns` pairs consecutive fractions, so a
-        // 2-producer chunk `[p0, p1]` pairs into one column and a 1-producer
-        // chunk gets its own column.
+        // A two-producer group `[p0, p1]` uses one column. A one-producer
+        // group gets its own column. Append the optional mask last.
         let mut fracs: Vec<Vec<Frac>> = Vec::with_capacity(chunk.len());
         for &producer in chunk.iter() {
             fracs.push(producer_frac(relations, multiplicities, producer));
+        }
+        if let (Some(masks), Some(beta)) = (claim_masks, claim_mask_beta) {
+            fracs.push(claim_mask_fraction_column(&masks[index], beta));
         }
         let (trace, sum) = build_interaction_columns(log_size, fracs, 2);
         combined.extend(trace);
@@ -574,87 +548,20 @@ fn shared_table_interaction_trace(
     (combined, ShaTablesInteractionClaim { pairs: pair_claims })
 }
 
-/// The Class-D single gated LogUp fraction of one shared-table producer over
-/// the doubled domain: real rows from the table, then reserved dummy rows with
-/// unreachable keys `≥ 2^16`. The numerator is `-(1 − is_dummy)·mult/combine(row)`
-/// — `-mult` on real rows, `0` on the dummy upper half — so the fresh random
-/// blind multiplicity there never enters the LogUp sum (see
-/// [`producer_blind_frac_column`] and `emit_blind`).
+/// Return the Class-D LogUp fraction for one shared-table producer.
+///
+/// The lower half of the domain contains real rows. The upper half contains
+/// dummy rows with keys at or above `2^16`. The numerator is
+/// `-(1 - is_dummy) * mult / combine(row)`. It equals `-mult` on real rows and
+/// zero on dummy rows. Thus, the random dummy multiplicities do not enter the
+/// LogUp sum. See [`producer_blind_frac_column`] and `emit_blind`.
 fn producer_frac(
     relations: &Sha256Relations,
     multiplicities: &ShaTableMultiplicities,
     producer: SharedProducer,
 ) -> Vec<Frac> {
-    let real_len = 1usize << producer.log_size();
+    let real_len = 1usize << (producer.blind_log_size() - 1);
     match producer {
-        SharedProducer::RoundSplit(p, h) => {
-            let i = round_split_index(p, h);
-            let mults = &multiplicities.round_split_pack[i];
-            let groups = match p {
-                RoundPartition::Sigma0AndMaj => crate::partitions::SIGMA0_GROUPS,
-                RoundPartition::Sigma1AndCh => crate::partitions::SIGMA1_GROUPS,
-            };
-            let rows = build_round_split_pack_table(&groups, p.s_mask(), h);
-            let row_iter = round_split_blind_rows(rows, real_len);
-            match (p, h) {
-                (RoundPartition::Sigma0AndMaj, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.sigma0_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (RoundPartition::Sigma0AndMaj, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.sigma0_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (RoundPartition::Sigma1AndCh, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.sigma1_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (RoundPartition::Sigma1AndCh, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.sigma1_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-            }
-        }
-        SharedProducer::SigmaSplit(p, h) => {
-            let i = sigma_split_index(p, h);
-            let mults = &multiplicities.sigma_split_pack[i];
-            let rows = build_sigma_split_pack_table(p.parts(), h);
-            let row_iter = sigma_split_blind_rows(rows, real_len);
-            match (p, h) {
-                (LowerSigmaPartition::LowerSigma0, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma0_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (LowerSigmaPartition::LowerSigma0, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma0_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (LowerSigmaPartition::LowerSigma1, Half16::Lo) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma1_lo,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-                (LowerSigmaPartition::LowerSigma1, Half16::Hi) => producer_blind_frac_column(
-                    &relations.split_pack.lower_sigma1_hi,
-                    mults,
-                    real_len,
-                    row_iter,
-                ),
-            }
-        }
         SharedProducer::Range(kind) => {
             let i = range_index(kind);
             let mults = &multiplicities.range[i];
@@ -670,70 +577,21 @@ fn producer_frac(
                 RangeKind::Range5 => {
                     producer_blind_frac_column(&relations.range.range_5, mults, real_len, row_iter)
                 }
-                RangeKind::Range16 => {
-                    producer_blind_frac_column(&relations.range.range_16, mults, real_len, row_iter)
+                RangeKind::Range8 => {
+                    producer_blind_frac_column(&relations.range.range_8, mults, real_len, row_iter)
                 }
             }
         }
     }
 }
 
-/// Reserved dummy-key base for the blinded upper half. Every honest split-pack /
-/// range consumer emits 16-bit values `< 2^16`, so a key `≥ 2^16` is unreachable
-/// and no honest use can ever land on a dummy row. `emit_blind`'s cancelling
-/// twin additionally makes every dummy row net-zero regardless of its content,
-/// so a malicious prover cannot repurpose a dummy row to provide a real key.
+/// The dummy-key base for the masked upper half.
+///
+/// Honest range consumers emit only 16-bit values below `2^16`. Thus, they
+/// cannot use a dummy key at or above `2^16`. The second `emit_blind` term makes
+/// each dummy row net zero. A malicious prover cannot use a dummy row as a real
+/// row.
 const DUMMY_KEY_BASE: u32 = 1 << 16;
-
-/// Blinded 5-cell round-split rows: real table rows, then dummy rows with
-/// unreachable key `2^16 + j` and zero groups.
-fn round_split_blind_rows(
-    rows: Vec<crate::tables::SplitPackRow>,
-    real_len: usize,
-) -> impl Iterator<Item = [BaseField; 5]> {
-    rows.into_iter()
-        .map(|r| {
-            [
-                BaseField::from(r.key),
-                BaseField::from(r.groups[0]),
-                BaseField::from(r.groups[1]),
-                BaseField::from(r.groups[2]),
-                BaseField::from(r.groups[3]),
-            ]
-        })
-        .chain((0..real_len).map(|j| {
-            [
-                BaseField::from(DUMMY_KEY_BASE + j as u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-            ]
-        }))
-}
-
-/// Blinded 3-cell σ-split rows: real table rows, then dummy rows with
-/// unreachable key `2^16 + j` and zero groups.
-fn sigma_split_blind_rows(
-    rows: Vec<crate::tables::SplitPackRow>,
-    real_len: usize,
-) -> impl Iterator<Item = [BaseField; 3]> {
-    rows.into_iter()
-        .map(|r| {
-            [
-                BaseField::from(r.key),
-                BaseField::from(r.groups[0]),
-                BaseField::from(r.groups[1]),
-            ]
-        })
-        .chain((0..real_len).map(|j| {
-            [
-                BaseField::from(DUMMY_KEY_BASE + j as u32),
-                BaseField::from(0u32),
-                BaseField::from(0u32),
-            ]
-        }))
-}
 
 /// Blinded 1-cell range rows: `[0, k)` real values then zero padding up to
 /// `real_len`, then dummy rows with unreachable value `2^16 + j`.
@@ -757,6 +615,7 @@ impl ShaTablesComponents {
         allocator: &mut TraceLocationAllocator,
         claim: &ShaTablesInteractionClaim,
         relations: &Sha256Relations,
+        claim_mask_beta: Option<QM31>,
     ) -> Self {
         let mut pairs = Vec::with_capacity(PRODUCER_PAIRS.len());
         for (chunk, chunk_claim) in PRODUCER_PAIRS.iter().zip(&claim.pairs) {
@@ -766,6 +625,7 @@ impl ShaTablesComponents {
                     log_size: chunk[0].blind_log_size(),
                     producers: chunk.to_vec(),
                     relations: relations.clone(),
+                    claim_mask_beta,
                 },
                 chunk_claim.claimed_sum,
             ));

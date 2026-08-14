@@ -12,27 +12,31 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::TreeBuilder;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
-/// Day Range Delta
-/// Constraint: range = cutoff - day + 32 * day_borrow
-/// Worst case:
-///     Cutoff: 1, day: 31 => 1 - 31 + C * day_borrow = -30 + C * day_borrow => C >= 31
-///     Field Size => 32 (power of 2)
+/// Returns the day delta range check.
+///
+/// ```text
+/// range = cutoff - day + 32 * day_borrow
+/// cutoff = 1, day = 31
+/// 1 - 31 + C * day_borrow = -30 + C * day_borrow
+/// C >= 31
+/// field size = 32
+/// ```
 pub fn day_delta_range_check() -> RangeCheck {
     RangeCheck(31)
 }
 
-/// The three delta tables are Class-D multiplicity-blinded (Q-015 §4b): their
-/// providers use [`range_check::BlindComponent`].
+/// Uses [`range_check::BlindComponent`] for each delta table.
 pub type DayDeltaTableComponent = range_check::BlindComponent;
 
-/// Month Range Delta
-/// Constraint: range = cutoff - month - day_borrow + 16 * month_borrow
-/// Worst case:
-///     Cutoff: 1, month: 12, day_borrow: 1 => 1 - 12 - day_borrow + C * month_borrow =
-///                                           -11 - 1 + C * month_borrow =
-///                                           -12 + C * month_borrow =>
-///                                            C >= 13
-///     Field Size => 16 (power of 2)
+/// Returns the month delta range check.
+///
+/// ```text
+/// range = cutoff - month - day_borrow + 16 * month_borrow
+/// cutoff = 1, month = 12, day_borrow = 1
+/// 1 - 12 - 1 + C * month_borrow = -12 + C * month_borrow
+/// C >= 13
+/// field size = 16
+/// ```
 pub fn month_delta_range_check() -> RangeCheck {
     RangeCheck(15)
 }

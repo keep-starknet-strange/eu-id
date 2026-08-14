@@ -1,8 +1,7 @@
 use core::ops::{Add, Mul, Neg, Sub};
-#[cfg(feature = "count-ops")]
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use p256::elliptic_curve::ff::PrimeField;
+use p256::elliptic_curve::rand_core::RngCore;
 use p256::{FieldBytes, FieldElement};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -11,11 +10,6 @@ const P_BE: [u8; 32] = [
     0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 ];
-
-#[cfg(feature = "count-ops")]
-static FP_MUL_COUNT: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "count-ops")]
-static FP_ADD_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Fp(FieldElement);
@@ -52,9 +46,22 @@ impl Fp {
         Self::from_bytes_be(reduced).expect("one subtraction maps 256-bit input below p")
     }
 
+    /// Samples uniformly from F_p by rejecting the tiny `2^256 - p` tail.
+    ///
+    /// Fiat-Shamir challenges use the existing reduction in
+    /// [`Self::random`]. Secret masks use this method so their distribution is
+    /// exactly uniform, as required by the committed-mask ZK argument.
+    pub fn random_uniform(rng: &mut impl RngCore) -> Self {
+        loop {
+            let mut bytes = [0u8; 32];
+            rng.fill_bytes(&mut bytes);
+            if let Some(value) = Self::from_bytes_be(bytes) {
+                return value;
+            }
+        }
+    }
+
     pub fn square(self) -> Self {
-        #[cfg(feature = "count-ops")]
-        FP_MUL_COUNT.fetch_add(1, Ordering::Relaxed);
         Self(self.0.square())
     }
 
@@ -97,22 +104,6 @@ impl Fp {
     }
 }
 
-#[cfg(feature = "count-ops")]
-pub fn reset_fp_mul_count() {
-    FP_MUL_COUNT.store(0, Ordering::Relaxed);
-    FP_ADD_COUNT.store(0, Ordering::Relaxed);
-}
-
-#[cfg(feature = "count-ops")]
-pub fn fp_mul_count() -> u64 {
-    FP_MUL_COUNT.load(Ordering::Relaxed)
-}
-
-#[cfg(feature = "count-ops")]
-pub fn fp_add_count() -> u64 {
-    FP_ADD_COUNT.load(Ordering::Relaxed)
-}
-
 impl Serialize for Fp {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.to_bytes_be().serialize(serializer)
@@ -130,8 +121,6 @@ impl Add for Fp {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        #[cfg(feature = "count-ops")]
-        FP_ADD_COUNT.fetch_add(1, Ordering::Relaxed);
         Self(self.0 + rhs.0)
     }
 }
@@ -140,8 +129,6 @@ impl Sub for Fp {
     type Output = Self;
 
     fn sub(self, rhs: Self) -> Self::Output {
-        #[cfg(feature = "count-ops")]
-        FP_ADD_COUNT.fetch_add(1, Ordering::Relaxed);
         Self(self.0 - rhs.0)
     }
 }
@@ -150,8 +137,6 @@ impl Mul for Fp {
     type Output = Self;
 
     fn mul(self, rhs: Self) -> Self::Output {
-        #[cfg(feature = "count-ops")]
-        FP_MUL_COUNT.fetch_add(1, Ordering::Relaxed);
         Self(self.0 * rhs.0)
     }
 }

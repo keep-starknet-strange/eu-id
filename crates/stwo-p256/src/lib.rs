@@ -3,6 +3,7 @@
 pub mod components;
 pub mod constants;
 pub mod curve;
+#[cfg(test)]
 pub mod debug;
 pub mod ecdsa {
     pub use crate::reference::ecdsa::*;
@@ -47,14 +48,6 @@ pub mod projective {
     pub use crate::curve::projective::*;
 }
 
-pub mod canonical_lt {
-    pub use crate::scalar::canonical_lt::*;
-}
-
-pub mod cert_bind {
-    pub use crate::scalar::cert_bind::*;
-}
-
 pub mod fake_glv_chain {
     pub use crate::scalar::fake_glv_chain::*;
 }
@@ -96,34 +89,10 @@ pub mod final_check {
 pub mod final_check_air {
     pub use crate::components::final_check::air::*;
 }
-pub mod fake_glv_scalar {
-    pub use crate::scalar::fake_glv_scalar::*;
-}
-
-pub mod fake_glv_selector {
-    pub use crate::scalar::fake_glv_selector::*;
-}
-
-pub mod fake_glv_selector_lookup {
-    pub use crate::scalar::fake_glv_selector_lookup::*;
-}
-
-pub mod fake_glv_signed_selector_operand {
-    pub use crate::scalar::fake_glv_signed_selector_operand::*;
-}
-
 pub mod prepared_point {
     pub use crate::scalar::prepared_point::*;
 }
 
 pub mod prepared_table {
     pub use crate::scalar::prepared_table::*;
-}
-
-pub mod scalar_setup_air {
-    pub use crate::scalar::setup_air::*;
-}
-
-pub mod scalar_setup_witness {
-    pub use crate::scalar::setup_witness::*;
 }

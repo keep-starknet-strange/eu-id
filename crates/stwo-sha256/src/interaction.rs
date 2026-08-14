@@ -1,34 +1,30 @@
 //! LogUp interaction-trace generator for every SHA-256 component.
 //!
-//! The main `Sha256Eval` (consumer) and the 22 producer table components
-//! (8 σ/Σ decode + 1 packed Maj/Ch + 1 `xor_8` + 8 split-and-pack + 4
-//! `Range_k`) each emit their own interaction trace. When the digest provider
-//! is exposed, `Sha256Eval` *also* yields the final-block digest on the
-//! `Sha256Digest` channel — the one provider-side term it contributes — which
-//! is why its claimed sum is non-zero on its own in that mode. Each is built by
-//! walking that component's fractions row-by-row through
-//! [`stwo_constraint_framework::LogupTraceGenerator`] — consecutive
-//! fractions share an interaction column in chunks of `batch` (matching the
-//! eval-side `eval.finalize_logup_batched(batch)`). Single-fraction producers
-//! use pairs; the fat `Sha256Eval` consumer uses [`SHA_CONSUMER_LOGUP_BATCH`].
+//! The main `Sha256Eval` consumer emits one interaction trace.
+//! Four `Range_k` table producers emit their interaction traces.
+//! An enabled digest provider also yields each final digest through the keyed
+//! `PackedShaDigest` relation.
+//! This extra yield makes the isolated SHA claim sum nonzero.
+//! [`LogupTraceGenerator`] builds each trace from row fractions.
+//! Consecutive fractions share a column in batches.
 //!
-//! **Sum-to-zero invariant.** For a valid proof, the total of every
-//! component's `claimed_sum` must be zero — every consumer "use" cancels
-//! against the producer's "yield" at the same row key. The verifier
-//! checks this implicitly through the cumulative-sum constraint inside
-//! each component plus the OODS-evaluation balance across the proof.
+//! Single-fraction producers use pairs.
+//! `Sha256Eval` uses [`SHA_CONSUMER_LOGUP_BATCH`].
+//!
+//! **Sum-to-zero invariant.**
+//! Each consumer use cancels a producer yield at the same row key.
+//! Their `claimed_sum` values total zero in a balanced composition.
+//! Component constraints and the proof OODS balance enforce this invariant.
 //!
 //! Lookup orders **must** match the order `Sha256Eval::evaluate` /
 //! `components::*::evaluate` fire `add_to_relation`. Drift between this
 //! generator and the AIR evaluator silently invalidates the proof
 //! (denominator mismatch ⇒ verifier rejects).
 //!
-//! Performance choice: this implementation uses the **scalar**
-//! `write_frac` path one row at a time. The reference `xor_8_8` example
-//! does SIMD packing for its 2¹⁶-row tables; we follow the simpler
-//! single-row path here for correctness; SIMD-packing the producers is
-//! a benchmark-driven future micro-optimisation.
+//! This implementation uses the scalar `write_frac` path one row at a time.
+//! The simple scalar path is the active implementation.
 
+use air_core::claim_mask::ClaimMaskTrace;
 use num_traits::{One, Zero};
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
@@ -42,66 +38,49 @@ use stwo::prover::poly::circle::CircleEvaluation;
 use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
-use crate::components::{
-    range_log_size, RangeKind, RANGE_TABLES, ROUND_SPLIT_TABLES, SIGMA_SPLIT_TABLES,
-};
+use crate::components::{range_log_size, RangeKind, RANGE_TABLES};
 use crate::constants::DIGEST_BYTES;
-use crate::field_exposure::{word_be_bytes, FieldExposure};
-use crate::multiplicities::{
-    range_k_multiplicities, round_split_pack_multiplicities, sigma_split_pack_multiplicities,
-};
-use crate::partitions::{
-    pack_round_groups, round_groups_half_indices, GROUPS_PER_ROUND_PARTITION, SIGMA0_GROUPS,
-    SIGMA1_GROUPS,
-};
-use crate::relations::Sha256Relations;
-use crate::tables::{
-    build_round_split_pack_table, build_sigma_split_pack_table, Half16, LowerSigmaPartition,
-    RoundPartition,
-};
-use crate::trace::{h_out_digest_bytes, Layout};
-use crate::types::Sha256Witness;
+use crate::multiplicities::range_k_multiplicities;
+use crate::relations::{Sha256Relations, PACKED_SHA_STREAM_FIELD_BASE};
+use crate::trace::{h_out_digest_bytes, word_be_bytes, Layout};
+use crate::types::PackedSha256Witness;
 
 /// Lookup sites the main `Sha256Eval` fires per **row**, **excluding** the
 /// optional digest yield. Breakdown (W=6), matching the firing order in
-/// [`write_round_row_lookups`] and `crate::constraints::Sha256Eval::evaluate`:
+/// `write_round_row_lookups` and `crate::constraints::Sha256Eval::evaluate`:
 ///
 /// ```text
-///   8 (h_in aux split-pack, t = 0 rows)
-/// +  6 (schedule family: 2 σ-input splits = 4,
-///       Range_4 carry pair = 2; t ≥ 16 rows)
-/// + 20 (round family: round split-packs = 12 — the `a`/`e` operands each have two
-///       complementary-gated sites (t ≥ 1 vs t = 0) so tuples read
-///       committed cells — plus 4 carry pairs = 8; every row)
+///   2 (schedule family: Range_4 carry pair; t ≥ 16 rows)
+/// +  8 (round family: 4 carry pairs = 8; every row)
 /// + 16 (finalization carries, t = 63 rows)
-/// + 16 (terminal `Range_16`, t = 63 rows)
-/// = 66
+/// + 32 (terminal `Range_8` digest bytes, t = 63 rows)
+/// = 58
 /// ```
 ///
+/// Committed boolean bit planes calculate Σ0, Σ1, Maj, Ch, and the σ inputs.
+/// Recomposition binds these results to the words.
+/// The lookup set contains only addition carry checks and terminal byte range
+/// checks.
+///
 /// A site that does not fire on a given row holds the neutral fraction `(0, 1)`.
-pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 66;
+pub const SHA_LOOKUPS_PER_ROW_BASE: usize = 58;
 
-/// LogUp batch size for the fat `Sha256Eval` consumer: how many per-row
-/// fractions share one interaction column. Batch-4 (vs the pair default)
-/// roughly halves the consumer's interaction-column count — fewer queried
-/// values in the proof — at the cost of a degree-≤5 batched constraint,
-/// which needs `max_constraint_log_degree_bound = log_size + 2` and the
-/// derived composition split the unlocked engine supports. The witness
-/// builder (`sha256_interaction` → `build_interaction_columns`), the
-/// eval-side `finalize_logup_batched`, and the column-count sizing in
-/// `crate::air` all read this constant so they never drift.
+/// Number of `Sha256Eval` fractions in one interaction column.
+///
+/// A batch of four reduces the consumer column count.
+/// The resulting constraint has degree five or less.
+/// It requires `max_constraint_log_degree_bound = log_size + 2`.
+/// The witness builder, evaluator, and column sizing use this constant.
 pub const SHA_CONSUMER_LOGUP_BATCH: usize = 4;
 
-/// Total lookup sites `Sha256Eval` fires per row. The digest provider adds
-/// exactly one width-32 yield site when `expose_digest` is set; the
-/// credential-field provider adds one width-3 yield per exposed window byte
-/// (all firing on `t = 15` rows, selector-gated to each byte's target block).
-/// The byte value is derived from existing W bit planes, so it adds no range
-/// lookups. Both the interaction generator here and `crate::air`'s
-/// interaction-column sizing read this so the two never drift.
+/// Total lookup sites `Sha256Eval` fires per row. The packed digest provider
+/// adds one width-33 yield site and the complete padded-message provider adds
+/// four width-3 sites, one per byte of the current input word.
 #[inline]
-pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) -> usize {
-    SHA_LOOKUPS_PER_ROW_BASE + usize::from(expose_digest) + field_exposure.n_yields()
+pub fn sha_lookups_per_row(expose_digest: bool, expose_field: bool) -> usize {
+    SHA_LOOKUPS_PER_ROW_BASE
+        + usize::from(expose_digest)
+        + usize::from(expose_field) * crate::constants::WORD_BYTES
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +89,7 @@ pub fn sha_lookups_per_row(expose_digest: bool, field_exposure: &FieldExposure) 
 
 /// One component's slot in the aggregate interaction claim. `claimed_sum`
 /// is what the verifier checks each component's interaction column
-/// cumulatively reaches; the total over every component must be zero.
+/// cumulatively reaches. The total over every component must be zero.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComponentClaim {
     pub claimed_sum: SecureField,
@@ -124,28 +103,21 @@ impl ComponentClaim {
 
 /// Aggregate of every component's claim, in proving / verifying order.
 ///
-/// Field order **must** match the order components are added to the proof
+/// Field order **must** match the component order in the proof
 /// (`crate::stark::commit_base_trace` / `crate::stark::component_provers`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub sha256: ComponentClaim,
-    pub round_split_pack: Vec<ComponentClaim>, // 4
-    pub sigma_split_pack: Vec<ComponentClaim>, // 4
-    pub range: Vec<ComponentClaim>,            // 4: Range_2, Range_4, Range_5, Range_16
+    pub range: Vec<ComponentClaim>, // 4: Range_2, Range_4, Range_5, Range_8
 }
 
 impl InteractionClaim {
-    /// Sum of every component's claimed sum. The verifier checks this is
-    /// zero — modulo cross-component LogUp wiring outside this crate
-    /// (currently none). Used as the soundness backbone.
+    /// Sum all component claim sums.
+    ///
+    /// Cross-component consumers can cancel enabled SHA provider terms.
+    /// A complete proof requires a zero global LogUp sum.
     pub fn total(&self) -> SecureField {
         let mut s = self.sha256.claimed_sum;
-        for c in &self.round_split_pack {
-            s += c.claimed_sum;
-        }
-        for c in &self.sigma_split_pack {
-            s += c.claimed_sum;
-        }
         for c in &self.range {
             s += c.claimed_sum;
         }
@@ -157,12 +129,6 @@ impl InteractionClaim {
     /// agree.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         self.sha256.mix_into(channel);
-        for c in &self.round_split_pack {
-            c.mix_into(channel);
-        }
-        for c in &self.sigma_split_pack {
-            c.mix_into(channel);
-        }
         for c in &self.range {
             c.mix_into(channel);
         }
@@ -175,8 +141,20 @@ impl InteractionClaim {
 
 /// One (numerator, denominator) at a particular row. Numerator carries
 /// the lookup's multiplicity (positive on the consumer side, negative on
-/// the producer); denominator is `combine(values) = sum α^i · v_i − z`.
+/// the producer). Denominator is `combine(values) = sum α^i · v_i − z`.
 pub(crate) type Frac = (SecureField, SecureField);
+
+pub(crate) fn claim_mask_fraction_column(trace: &ClaimMaskTrace, beta: SecureField) -> Vec<Frac> {
+    let rows = 1usize << trace.log_size();
+    (0..rows)
+        .map(|row| {
+            let mask = SecureField::from_m31_array(std::array::from_fn(|coordinate| {
+                trace.columns()[coordinate].values.as_slice()[row]
+            }));
+            (mask * beta, SecureField::one())
+        })
+        .collect()
+}
 
 /// Build one interaction trace for a component from its list of
 /// row-iterators. `lookups[k]` is the k-th lookup the component fires —
@@ -264,17 +242,14 @@ where
     out
 }
 
-/// Class-D blinded producer fraction (Q-015 §4b). Mirrors the SINGLE gated
-/// `add_to_relation` entry `crate::components::emit_blind` fires per row —
-/// numerator `-(1 − is_dummy)·mult` — over the doubled (blinded) domain.
-/// Returns one `Vec<Frac>` of length `mults.len() = 2^(L+1)`: on a real row
-/// (`idx < real_len`) the numerator is `-mult`, identical to the unblinded emit;
-/// on a dummy row (`idx ≥ real_len`, `is_dummy = 1`) the numerator is `0`, so
-/// the fresh random blind multiplicity committed there never enters the LogUp
-/// sum — yet stays in the committed multiplicity column as the mask. The caller
-/// pushes one such fraction per producer so `build_interaction_columns` pairs
-/// two producers' fractions into one interaction column (down from one column
-/// per producer in the old cancelling-pair form).
+/// Build one Class D blinded producer fraction column.
+///
+/// This mirrors the gated entry from `crate::components::emit_blind`.
+/// Its numerator is `-(1 − is_dummy)·mult`.
+/// A real row uses numerator `-mult`.
+/// A dummy row uses numerator zero.
+/// Thus, dummy multiplicities remain committed but do not enter the LogUp sum.
+/// The caller pairs two producer fractions in one interaction column.
 pub(crate) fn producer_blind_frac_column<R, const N: usize>(
     rel: &R,
     mults: &[u32],
@@ -287,7 +262,7 @@ where
     let mut out = Vec::with_capacity(mults.len());
     for (idx, (m, row)) in mults.iter().zip(rows).enumerate() {
         let denom = rel.combine(&row);
-        // Dummy rows are gated to a zero numerator; real rows yield `-mult`.
+        // Dummy rows have a zero numerator. Real rows yield `-mult`.
         let num = if idx >= real_len {
             SecureField::zero()
         } else {
@@ -298,71 +273,27 @@ where
     out
 }
 
-// (Padding helper removed — every per-table producer column is sized
-// exactly to its `log_size` by construction, and the consumer-side
-// builder pre-allocates `n_rows` per lookup with the zero-fraction
-// default.)
+// Each producer column uses its exact `log_size`.
+// The consumer builder initializes `n_rows` neutral fractions per lookup.
 
 // ---------------------------------------------------------------------------
 // Producer-side per-table interaction columns
 // ---------------------------------------------------------------------------
 
-fn round_split_pack_interaction(
-    relations: &Sha256Relations,
-    witness: &Sha256Witness,
-    p: RoundPartition,
-    h: Half16,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
-    let mults = round_split_pack_multiplicities(witness, p, h);
-    let groups = match p {
-        RoundPartition::Sigma0AndMaj => SIGMA0_GROUPS,
-        RoundPartition::Sigma1AndCh => SIGMA1_GROUPS,
-    };
-    let s_mask = p.s_mask();
-    let rows = build_round_split_pack_table(&groups, s_mask, h);
-    let log_size = crate::preprocessed::LOG_SIZE_16;
-    // 5-cell row: (key, g0, g1, g2, g3) — the four W=6 sub-groups in this half.
-    let row_iter = rows.iter().map(|r| {
-        [
-            BaseField::from(r.key),
-            BaseField::from(r.groups[0]),
-            BaseField::from(r.groups[1]),
-            BaseField::from(r.groups[2]),
-            BaseField::from(r.groups[3]),
-        ]
-    });
-    let frac = match (p, h) {
-        (RoundPartition::Sigma0AndMaj, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.sigma0_lo, &mults, row_iter)
-        }
-        (RoundPartition::Sigma0AndMaj, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.sigma0_hi, &mults, row_iter)
-        }
-        (RoundPartition::Sigma1AndCh, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.sigma1_lo, &mults, row_iter)
-        }
-        (RoundPartition::Sigma1AndCh, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.sigma1_hi, &mults, row_iter)
-        }
-    };
-    build_interaction_columns(log_size, vec![frac], 2)
-}
-
 /// Build the interaction trace for one `Range_k` producer.
 fn range_k_interaction(
     relations: &Sha256Relations,
-    witness: &Sha256Witness,
+    witness: &PackedSha256Witness,
     kind: RangeKind,
+    log_size: u32,
+    claim_mask: Option<(&ClaimMaskTrace, SecureField)>,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     SecureField,
 ) {
-    let log_size = range_log_size(kind);
-    let mults = range_k_multiplicities(witness, kind);
+    let mut mults = range_k_multiplicities(witness, kind);
     let n_rows = 1usize << log_size;
+    mults.resize(n_rows, 0);
     let k = kind.bound() as usize;
     // Producer rows are `[0, 1, …, k-1, 0, 0, …]` — leading `k` real values
     // then zero padding up to `n_rows`. The matching multiplicity for any
@@ -376,45 +307,13 @@ fn range_k_interaction(
         RangeKind::Range2 => producer_frac_column(&relations.range.range_2, &mults, row_iter),
         RangeKind::Range4 => producer_frac_column(&relations.range.range_4, &mults, row_iter),
         RangeKind::Range5 => producer_frac_column(&relations.range.range_5, &mults, row_iter),
-        RangeKind::Range16 => producer_frac_column(&relations.range.range_16, &mults, row_iter),
+        RangeKind::Range8 => producer_frac_column(&relations.range.range_8, &mults, row_iter),
     };
-    build_interaction_columns(log_size, vec![frac], 2)
-}
-
-fn sigma_split_pack_interaction(
-    relations: &Sha256Relations,
-    witness: &Sha256Witness,
-    p: LowerSigmaPartition,
-    h: Half16,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
-    let mults = sigma_split_pack_multiplicities(witness, p, h);
-    let rows = build_sigma_split_pack_table(p.parts(), h);
-    let log_size = crate::preprocessed::LOG_SIZE_16;
-    let row_iter = rows.iter().map(|r| {
-        [
-            BaseField::from(r.key),
-            BaseField::from(r.groups[0]),
-            BaseField::from(r.groups[1]),
-        ]
-    });
-    let frac = match (p, h) {
-        (LowerSigmaPartition::LowerSigma0, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.lower_sigma0_lo, &mults, row_iter)
-        }
-        (LowerSigmaPartition::LowerSigma0, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.lower_sigma0_hi, &mults, row_iter)
-        }
-        (LowerSigmaPartition::LowerSigma1, Half16::Lo) => {
-            producer_frac_column(&relations.split_pack.lower_sigma1_lo, &mults, row_iter)
-        }
-        (LowerSigmaPartition::LowerSigma1, Half16::Hi) => {
-            producer_frac_column(&relations.split_pack.lower_sigma1_hi, &mults, row_iter)
-        }
-    };
-    build_interaction_columns(log_size, vec![frac], 2)
+    let mut lookups = vec![frac];
+    if let Some((trace, beta)) = claim_mask {
+        lookups.push(claim_mask_fraction_column(trace, beta));
+    }
+    build_interaction_columns(log_size, lookups, 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -427,68 +326,80 @@ fn sigma_split_pack_interaction(
 /// fires. Each lookup produces one fraction column at log_size = the
 /// trace's log_size. Pairs share an interaction column.
 ///
-/// The cell values for each lookup come from the main trace at the row
-/// representing the block. Padding rows contribute `(0, 1)` (zero
-/// numerator, unit denominator) so they don't perturb the sum — the
-/// `enabler` column the AIR multiplies into every constraint takes care
-/// of the algebraic side.
-fn sha256_interaction(
+/// Lookup cells come from the corresponding main trace row.
+/// Padding rows contribute the neutral fraction `(0, 1)`.
+/// They do not change the sum.
+/// The AIR uses `enabler` for the matching constraint gates.
+fn sha256_lookup_fractions(
     relations: &Sha256Relations,
-    witness: &Sha256Witness,
+    witness: &PackedSha256Witness,
     log_size: u32,
     expose_digest: bool,
-    field_exposure: &FieldExposure,
-) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
-    SecureField,
-) {
+    expose_field: bool,
+) -> Vec<Vec<Frac>> {
     let n_rows = 1usize << log_size;
-    let n_blocks = witness.blocks.len();
-    // `is_last_block` matches the AIR gate `enabler · is_round_63 ·
-    // (1 − enabler_next)`: set on the final block's t = 63 row only when a
-    // padding successor exists (guaranteed by `crate::trace::min_log_size`).
-    // The field provider gates on the symmetric `is_first_block` (block 0),
-    // which needs no padding successor.
-    let has_padding = n_blocks * crate::trace::ROWS_PER_BLOCK < n_rows;
-    let last_block_idx = n_blocks.saturating_sub(1);
 
     // One fraction vector per lookup site (`lookup_idx`), each of length
-    // `n_rows`, default-filled with the neutral `(0, 1)`; real rows
+    // `n_rows`, default-filled with the neutral `(0, 1)`. Real rows
     // overwrite the sites that fire on them. See
     // [`SHA_LOOKUPS_PER_ROW_BASE`] for the per-row site breakdown.
-    let lookups_per_row = sha_lookups_per_row(expose_digest, field_exposure);
+    let lookups_per_row = sha_lookups_per_row(expose_digest, expose_field);
     let mut all_lookups: Vec<Vec<Frac>> = (0..lookups_per_row)
         .map(|_| vec![(SecureField::zero(), SecureField::one()); n_rows])
         .collect();
 
-    for (block_idx, block) in witness.blocks.iter().enumerate() {
-        let is_last_block = block_idx == last_block_idx && has_padding;
-        for t in 0..crate::constants::N_ROUNDS {
-            let slot = Layout::round_row_slot(block_idx, t, log_size);
-            let mut cursor = 0usize;
-            write_round_row_lookups(
-                &mut all_lookups,
-                &mut cursor,
-                slot,
-                block,
-                t,
-                relations,
-                expose_digest,
-                is_last_block,
-                field_exposure,
-                block_idx,
-            );
-            debug_assert_eq!(cursor, lookups_per_row, "row lookup miscount");
+    let mut global_block = 0usize;
+    for (message_idx, message) in witness.messages.iter().enumerate() {
+        for (block_idx, block) in message.blocks.iter().enumerate() {
+            let is_msg_last = block_idx + 1 == message.blocks.len();
+            for t in 0..crate::constants::N_ROUNDS {
+                let slot = Layout::round_row_slot(global_block, t, log_size);
+                let mut cursor = 0usize;
+                write_round_row_lookups(
+                    &mut all_lookups,
+                    &mut cursor,
+                    slot,
+                    block,
+                    t,
+                    relations,
+                    expose_digest,
+                    expose_field,
+                    is_msg_last,
+                    message_idx,
+                    block_idx,
+                );
+                debug_assert_eq!(cursor, lookups_per_row, "row lookup miscount");
+            }
+            global_block += 1;
         }
     }
 
-    build_interaction_columns(log_size, all_lookups, SHA_CONSUMER_LOGUP_BATCH)
+    all_lookups
+}
+
+fn sha256_interaction(
+    relations: &Sha256Relations,
+    witness: &PackedSha256Witness,
+    log_size: u32,
+    expose_digest: bool,
+    expose_field: bool,
+    claim_mask: Option<(&ClaimMaskTrace, SecureField)>,
+) -> (
+    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    SecureField,
+) {
+    let mut lookups =
+        sha256_lookup_fractions(relations, witness, log_size, expose_digest, expose_field);
+    if let Some((trace, beta)) = claim_mask {
+        lookups.push(claim_mask_fraction_column(trace, beta));
+    }
+    build_interaction_columns(log_size, lookups, SHA_CONSUMER_LOGUP_BATCH)
 }
 
 /// Write every lookup site for one `(block, round t)` row at its trace
 /// slot, in **exactly** the `Sha256Eval::evaluate` firing order. Bumps
 /// `cursor` past each site so the same site index always lands at the same
-/// fraction column across rows; sites that do not fire on this row keep
+/// fraction column across rows. Sites that do not fire on this row keep
 /// their neutral `(0, 1)` fill and the cursor skips over them.
 #[allow(clippy::too_many_arguments)]
 fn write_round_row_lookups(
@@ -499,79 +410,14 @@ fn write_round_row_lookups(
     t: usize,
     relations: &Sha256Relations,
     expose_digest: bool,
-    is_last_block: bool,
-    field_exposure: &FieldExposure,
+    expose_field: bool,
+    is_msg_last: bool,
+    message_idx: usize,
     block_idx: usize,
 ) {
-    // Per-partition lo/hi half projections (length 4 each, W=6) — the same
-    // `round_groups_half_indices` projection the constraint side keys on.
-    let (sigma0_lo_idx, sigma0_hi_idx) = round_groups_half_indices(&SIGMA0_GROUPS);
-    let (sigma1_lo_idx, sigma1_hi_idx) = round_groups_half_indices(&SIGMA1_GROUPS);
-
-    // ---- 1. h_in aux split-pack sites (4 operands × 2 halves = 8) ----
-    //
-    // Fire on t = 0 rows (multiplicity `enabler · is_round_0`). Order in
-    // Sha256Eval::evaluate: b_init, c_init, f_init, g_init.
-    if t == 0 {
-        for op_idx in 0..4 {
-            let (word, lo_rel_tag, hi_rel_tag) = match op_idx {
-                0 => (block.h_in[1].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
-                1 => (block.h_in[2].to_u32(), RelTag::Sigma0Lo, RelTag::Sigma0Hi),
-                2 => (block.h_in[5].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
-                3 => (block.h_in[6].to_u32(), RelTag::Sigma1Lo, RelTag::Sigma1Hi),
-                _ => unreachable!(),
-            };
-            let (lo_idx, hi_idx): (&[usize], &[usize]) = if op_idx < 2 {
-                (&sigma0_lo_idx, &sigma0_hi_idx)
-            } else {
-                (&sigma1_lo_idx, &sigma1_hi_idx)
-            };
-            write_round_split_pack_pair(
-                all,
-                cursor,
-                slot,
-                word,
-                relations,
-                lo_rel_tag,
-                hi_rel_tag,
-                match op_idx {
-                    0 => block.aux_split_pack.b_init.vals,
-                    1 => block.aux_split_pack.c_init.vals,
-                    2 => block.aux_split_pack.f_init.vals,
-                    3 => block.aux_split_pack.g_init.vals,
-                    _ => unreachable!(),
-                },
-                lo_idx,
-                hi_idx,
-            );
-        }
-    } else {
-        *cursor += 8;
-    }
-
-    // ---- 2. Schedule family (6 sites; t ≥ 16 rows) ----
+    // ---- 1. Schedule family: Range_4 carry pair on rows t ≥ 16 ----
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
-        write_sigma_input_split_lookups(
-            all,
-            cursor,
-            slot,
-            entry.w_t_minus_15.to_u32(),
-            &entry.lower_sigma0_input_split,
-            relations,
-            RelTag::LowerSigma0SplitLo,
-            RelTag::LowerSigma0SplitHi,
-        );
-        write_sigma_input_split_lookups(
-            all,
-            cursor,
-            slot,
-            entry.w_t_minus_2.to_u32(),
-            &entry.lower_sigma1_input_split,
-            relations,
-            RelTag::LowerSigma1SplitLo,
-            RelTag::LowerSigma1SplitHi,
-        );
         write_carry_range_pair(
             all,
             cursor,
@@ -581,110 +427,12 @@ fn write_round_row_lookups(
             entry.carries,
         );
     } else {
-        *cursor += 6;
+        *cursor += 2;
     }
 
-    // ---- 3. Round family (20 sites; every real row) ----
+    // ---- 2. Round family carry range-checks (4 pairs, every real row) ----
     let round = &block.rounds[t];
 
-    let a_grp = round.maj_ch.a_grp.vals;
-    let e_grp = round.maj_ch.e_grp.vals;
-
-    // Round split-packs (12 sites). The `a`/`e` operands have two
-    // complementary-gated sites each: the t ≥ 1 site keys the input word
-    // as the previous row's `a_new`/`e_new`, the t = 0 site keys it as
-    // `h_in[0]`/`h_in[4]` — value-wise both equal `state_in`. Exactly one
-    // of the pair fires per row.
-    let a_word = round.state_in[0].to_u32();
-    if t != 0 {
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            a_word,
-            relations,
-            RelTag::Sigma0Lo,
-            RelTag::Sigma0Hi,
-            a_grp,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-        );
-        *cursor += 2; // skip the t = 0 twin
-    } else {
-        *cursor += 2; // skip the t ≥ 1 twin
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            a_word,
-            relations,
-            RelTag::Sigma0Lo,
-            RelTag::Sigma0Hi,
-            a_grp,
-            &sigma0_lo_idx,
-            &sigma0_hi_idx,
-        );
-    }
-    let maj_word = round.maj.to_u32();
-    let maj_packed = pack_round_groups(maj_word, &SIGMA0_GROUPS);
-    write_round_split_pack_pair(
-        all,
-        cursor,
-        slot,
-        maj_word,
-        relations,
-        RelTag::Sigma0Lo,
-        RelTag::Sigma0Hi,
-        maj_packed,
-        &sigma0_lo_idx,
-        &sigma0_hi_idx,
-    );
-    let e_word = round.state_in[4].to_u32();
-    if t != 0 {
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            e_word,
-            relations,
-            RelTag::Sigma1Lo,
-            RelTag::Sigma1Hi,
-            e_grp,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-        );
-        *cursor += 2;
-    } else {
-        *cursor += 2;
-        write_round_split_pack_pair(
-            all,
-            cursor,
-            slot,
-            e_word,
-            relations,
-            RelTag::Sigma1Lo,
-            RelTag::Sigma1Hi,
-            e_grp,
-            &sigma1_lo_idx,
-            &sigma1_hi_idx,
-        );
-    }
-    let ch_word = round.ch.to_u32();
-    let ch_packed = pack_round_groups(ch_word, &SIGMA1_GROUPS);
-    write_round_split_pack_pair(
-        all,
-        cursor,
-        slot,
-        ch_word,
-        relations,
-        RelTag::Sigma1Lo,
-        RelTag::Sigma1Hi,
-        ch_packed,
-        &sigma1_lo_idx,
-        &sigma1_hi_idx,
-    );
-
-    // Carry range-checks for the four mod-2³² adds of this round.
     write_carry_range_pair(
         all,
         cursor,
@@ -718,81 +466,58 @@ fn write_round_row_lookups(
         round.a_new_carries,
     );
 
-    // ---- 4/5. Finalization carries + terminal `Range_16` (t = 63 rows) ----
+    // ---- 4/5. Finalization carries + terminal `Range_8` bytes (t = 63 rows) ----
     if t == crate::constants::N_ROUNDS - 1 {
         for c in &block.finalization_carries {
             write_carry_range_pair(all, cursor, slot, relations, RangeKind::Range2, *c);
         }
-        for h in &block.h_out {
-            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.lo);
-            write_range_check(all, cursor, slot, relations, RangeKind::Range16, h.hi);
+        for byte in h_out_digest_bytes(&block.h_out) {
+            write_range_check(all, cursor, slot, relations, RangeKind::Range8, byte);
         }
     } else {
-        *cursor += 16 + 16;
+        *cursor += 16 + DIGEST_BYTES;
     }
 
-    // ---- 6. Digest yield (provider side, final block's t = 63 row) ----
+    // ---- 6. Keyed digest yield (provider side, final block's t = 63 row) ----
     if expose_digest {
         if t == crate::constants::N_ROUNDS - 1 {
             let bytes = h_out_digest_bytes(&block.h_out);
             let values: [BaseField; DIGEST_BYTES] =
                 std::array::from_fn(|i| BaseField::from(bytes[i]));
-            let denom = relations.digest.digest.combine(&values);
-            let num = -SecureField::from(BaseField::from(u32::from(is_last_block)));
+            let mut tuple = [BaseField::zero(); 1 + DIGEST_BYTES];
+            tuple[0] = BaseField::from(message_idx as u32);
+            tuple[1..].copy_from_slice(&values);
+            let denom = relations.packed_digest.combine(&tuple);
+            let num = -SecureField::from(BaseField::from(u32::from(is_msg_last)));
             all[*cursor][slot] = (num, denom);
         }
         *cursor += 1;
     }
 
-    // ---- 7. Credential-field yields (target block t = 15 rows) ----
+    // ---- 7. Full padded-message stream (four bytes on input-word rows) ----
     //
-    // Same order as the constraint side: one width-3 yield per window byte
-    // (numerator `−selector`, selector = `block_idx == y.block_idx`).
-    if !field_exposure.is_empty() {
-        if t == 15 {
-            for y in field_exposure.yields() {
-                let selector =
-                    SecureField::from(BaseField::from(u32::from(block_idx == y.block_idx)));
-                let limb = block.schedule[y.word_idx];
-                let value = word_be_bytes(limb.lo, limb.hi)[y.byte_in_word];
+    // Every packed message gets its own field namespace. The byte index is
+    // local to that message and resets at every message boundary.
+    if expose_field {
+        if t < crate::constants::N_INPUT_WORDS {
+            let limb = block.schedule[t];
+            for byte_in_word in 0..crate::constants::WORD_BYTES {
+                let value = word_be_bytes(limb.lo, limb.hi)[byte_in_word];
+                let byte_in_block = t * crate::constants::WORD_BYTES + byte_in_word;
                 let tuple = [
-                    BaseField::from(y.field_id),
-                    BaseField::from(y.byte_index),
+                    BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + message_idx as u32),
+                    BaseField::from(
+                        (block_idx * crate::constants::BLOCK_BYTES + byte_in_block) as u32,
+                    ),
                     BaseField::from(value),
                 ];
                 let denom = relations.field.field.combine(&tuple);
-                all[*cursor][slot] = (-selector, denom);
+                all[*cursor][slot] = (-SecureField::one(), denom);
                 *cursor += 1;
             }
         } else {
-            *cursor += sha_lookups_per_row(false, field_exposure) - SHA_LOOKUPS_PER_ROW_BASE;
+            *cursor += crate::constants::WORD_BYTES;
         }
-    }
-}
-
-/// Internal tag for which split-pack relation a write targets.
-#[derive(Copy, Clone)]
-enum RelTag {
-    Sigma0Lo,
-    Sigma0Hi,
-    Sigma1Lo,
-    Sigma1Hi,
-    LowerSigma0SplitLo,
-    LowerSigma0SplitHi,
-    LowerSigma1SplitLo,
-    LowerSigma1SplitHi,
-}
-
-fn combine_with_tag(relations: &Sha256Relations, tag: RelTag, values: &[BaseField]) -> SecureField {
-    match tag {
-        RelTag::Sigma0Lo => relations.split_pack.sigma0_lo.combine(values),
-        RelTag::Sigma0Hi => relations.split_pack.sigma0_hi.combine(values),
-        RelTag::Sigma1Lo => relations.split_pack.sigma1_lo.combine(values),
-        RelTag::Sigma1Hi => relations.split_pack.sigma1_hi.combine(values),
-        RelTag::LowerSigma0SplitLo => relations.split_pack.lower_sigma0_lo.combine(values),
-        RelTag::LowerSigma0SplitHi => relations.split_pack.lower_sigma0_hi.combine(values),
-        RelTag::LowerSigma1SplitLo => relations.split_pack.lower_sigma1_lo.combine(values),
-        RelTag::LowerSigma1SplitHi => relations.split_pack.lower_sigma1_hi.combine(values),
     }
 }
 
@@ -803,7 +528,7 @@ fn combine_range(relations: &Sha256Relations, kind: RangeKind, value: u32) -> Se
         RangeKind::Range2 => relations.range.range_2.combine(&v),
         RangeKind::Range4 => relations.range.range_4.combine(&v),
         RangeKind::Range5 => relations.range.range_5.combine(&v),
-        RangeKind::Range16 => relations.range.range_16.combine(&v),
+        RangeKind::Range8 => relations.range.range_8.combine(&v),
     }
 }
 
@@ -836,87 +561,6 @@ fn write_carry_range_pair(
     write_range_check(all, cursor, slot, relations, kind, carries.hi);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn write_sigma_input_split_lookups(
-    all: &mut [Vec<Frac>],
-    cursor: &mut usize,
-    slot: usize,
-    word: u32,
-    split: &crate::types::SigmaInputSplitPackWitness,
-    relations: &Sha256Relations,
-    lo_tag: RelTag,
-    hi_tag: RelTag,
-) {
-    let word_lo = word & 0xFFFF;
-    let word_hi = (word >> 16) & 0xFFFF;
-    let lo_vals = [
-        BaseField::from(word_lo),
-        BaseField::from(split.packed_s_lo),
-        BaseField::from(split.packed_s_complement_lo),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, lo_tag, &lo_vals),
-    );
-    *cursor += 1;
-    let hi_vals = [
-        BaseField::from(word_hi),
-        BaseField::from(split.packed_s_hi),
-        BaseField::from(split.packed_s_complement_hi),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, hi_tag, &hi_vals),
-    );
-    *cursor += 1;
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_round_split_pack_pair(
-    all: &mut [Vec<Frac>],
-    cursor: &mut usize,
-    slot: usize,
-    word: u32,
-    relations: &Sha256Relations,
-    lo_tag: RelTag,
-    hi_tag: RelTag,
-    grp: [u32; GROUPS_PER_ROUND_PARTITION],
-    lo_idx: &[usize],
-    hi_idx: &[usize],
-) {
-    // Mirror `constraints::wire_round_split_pack` exactly: the lo-half tuple
-    // is `(word.lo, grp[lo_idx[0..4]])`, the hi-half `(word.hi,
-    // grp[hi_idx[0..4]])`. Any divergence here breaks the LogUp balance.
-    debug_assert_eq!(lo_idx.len(), 4);
-    debug_assert_eq!(hi_idx.len(), 4);
-    let word_lo = word & 0xFFFF;
-    let word_hi = (word >> 16) & 0xFFFF;
-    let lo_vals = [
-        BaseField::from(word_lo),
-        BaseField::from(grp[lo_idx[0]]),
-        BaseField::from(grp[lo_idx[1]]),
-        BaseField::from(grp[lo_idx[2]]),
-        BaseField::from(grp[lo_idx[3]]),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, lo_tag, &lo_vals),
-    );
-    *cursor += 1;
-    let hi_vals = [
-        BaseField::from(word_hi),
-        BaseField::from(grp[hi_idx[0]]),
-        BaseField::from(grp[hi_idx[1]]),
-        BaseField::from(grp[hi_idx[2]]),
-        BaseField::from(grp[hi_idx[3]]),
-    ];
-    all[*cursor][slot] = (
-        SecureField::one(),
-        combine_with_tag(relations, hi_tag, &hi_vals),
-    );
-    *cursor += 1;
-}
-
 // ---------------------------------------------------------------------------
 // Public: top-level interaction-trace generation
 // ---------------------------------------------------------------------------
@@ -926,13 +570,13 @@ fn write_round_split_pack_pair(
 /// Returns the per-component trees of `CircleEvaluation`s (flattened into
 /// one `Vec<Vec<…>>` in component order) plus the aggregate
 /// [`InteractionClaim`].
+#[allow(clippy::too_many_arguments)]
 pub fn generate_interaction_trace(
     relations: &Sha256Relations,
-    witness: &Sha256Witness,
+    witness: &PackedSha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
     expose_digest: bool,
-    field_exposure: &FieldExposure,
+    expose_field: bool,
 ) -> (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
@@ -941,20 +585,19 @@ pub fn generate_interaction_trace(
         relations,
         witness,
         sha256_log_size,
-        group_width,
         expose_digest,
-        field_exposure,
+        expose_field,
         true,
+        None,
     )
 }
 
 pub fn generate_consumer_interaction_trace(
     relations: &Sha256Relations,
-    witness: &Sha256Witness,
+    witness: &PackedSha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
     expose_digest: bool,
-    field_exposure: &FieldExposure,
+    expose_field: bool,
 ) -> (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
@@ -963,21 +606,47 @@ pub fn generate_consumer_interaction_trace(
         relations,
         witness,
         sha256_log_size,
-        group_width,
         expose_digest,
-        field_exposure,
+        expose_field,
         false,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn generate_interaction_trace_with_claim_masks(
+    relations: &Sha256Relations,
+    witness: &PackedSha256Witness,
+    sha256_log_size: u32,
+    expose_digest: bool,
+    expose_field: bool,
+    include_table_providers: bool,
+    claim_masks: &[ClaimMaskTrace],
+    beta: SecureField,
+) -> (
+    Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    InteractionClaim,
+) {
+    generate_interaction_trace_inner(
+        relations,
+        witness,
+        sha256_log_size,
+        expose_digest,
+        expose_field,
+        include_table_providers,
+        Some((claim_masks, beta)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn generate_interaction_trace_inner(
     relations: &Sha256Relations,
-    witness: &Sha256Witness,
+    witness: &PackedSha256Witness,
     sha256_log_size: u32,
-    group_width: u32,
     expose_digest: bool,
-    field_exposure: &FieldExposure,
+    expose_field: bool,
     include_table_providers: bool,
+    claim_masks: Option<(&[ClaimMaskTrace], SecureField)>,
 ) -> (
     Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     InteractionClaim,
@@ -985,365 +654,390 @@ fn generate_interaction_trace_inner(
     let mut combined = Vec::new();
 
     // Sha256Eval consumer first — its slot in the proof's component list.
-    // `expose_digest` adds the cross-component digest yield to this component's
-    // fractions; `field_exposure` adds one credential-field yield per exposed
-    // byte (and hence to its claimed sum).
+    // `expose_digest` adds one keyed digest yield per message. `expose_field`
+    // adds the fixed 64-byte stream yield for every packed block.
     let (sha_trace, sha_sum) = sha256_interaction(
         relations,
         witness,
         sha256_log_size,
         expose_digest,
-        field_exposure,
+        expose_field,
+        claim_masks.map(|(traces, beta)| (&traces[0], beta)),
     );
     combined.extend(sha_trace);
     let sha256 = ComponentClaim {
         claimed_sum: sha_sum,
     };
 
-    let _ = group_width;
-    // 4 round-side split-pack.
-    let mut round_split_pack = Vec::with_capacity(4);
-    if include_table_providers {
-        for &(p, h) in ROUND_SPLIT_TABLES {
-            let (t, s) = round_split_pack_interaction(relations, witness, p, h);
-            combined.extend(t);
-            round_split_pack.push(ComponentClaim { claimed_sum: s });
-        }
-    }
-    // 4 σ-side split-pack.
-    let mut sigma_split_pack = Vec::with_capacity(4);
-    if include_table_providers {
-        for &(p, h) in SIGMA_SPLIT_TABLES {
-            let (t, s) = sigma_split_pack_interaction(relations, witness, p, h);
-            combined.extend(t);
-            sigma_split_pack.push(ComponentClaim { claimed_sum: s });
-        }
-    }
-    // 4 range producers (Range_2, Range_4, Range_5, Range_16).
+    // 4 range producers (Range_2, Range_4, Range_5, Range_8).
     let mut range = Vec::with_capacity(4);
     if include_table_providers {
         for &kind in RANGE_TABLES {
-            let (t, s) = range_k_interaction(relations, witness, kind);
+            let claim_index = range.len() + 1;
+            let masked = claim_masks.map(|(traces, beta)| (&traces[claim_index], beta));
+            let log_size = if masked.is_some() {
+                range_log_size(kind).max(air_core::claim_mask::CLAIM_MASK_MIN_LOG_SIZE)
+            } else {
+                range_log_size(kind)
+            };
+            let (t, s) = range_k_interaction(relations, witness, kind, log_size, masked);
             combined.extend(t);
             range.push(ComponentClaim { claimed_sum: s });
         }
     }
 
-    let claim = InteractionClaim {
-        sha256,
-        round_split_pack,
-        sigma_split_pack,
-        range,
-    };
+    let claim = InteractionClaim { sha256, range };
     (combined, claim)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::partitions::MAX_ROUND_GROUP_BITS;
     use crate::trace::min_log_size;
-    use crate::witness::compute_sha256_witness;
+    use crate::witness::compute_packed_sha256_witness;
     use stwo::core::channel::Blake2sChannel;
 
-    /// With the digest provider **off**, the SHA module's claimed sums still
-    /// net to zero — the standalone consumer ⇄ producer balance is untouched,
-    /// so a standalone SHA proof keeps self-verifying.
-    #[test]
-    fn digest_provider_off_keeps_module_self_balanced() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &FieldExposure::empty(),
-        );
-        assert_eq!(
-            claim.total(),
-            SecureField::zero(),
-            "standalone SHA module must self-balance when the digest is not exposed",
-        );
+    fn packed(messages: &[&[u8]]) -> PackedSha256Witness {
+        compute_packed_sha256_witness(messages).expect("test messages are valid")
     }
 
-    /// With the digest provider **on**, the module yields the 32 final-block
-    /// digest bytes. Every other lookup still self-cancels, so the module's
-    /// claimed-sum total is exactly the outstanding provider term
-    /// `−1/combine(digest)`. A synthetic consumer that *requires* the same
-    /// digest tuple contributes `+1/combine(digest)` — exactly the claimed sum
-    /// of a consumer interaction column that fires `+1` on the final-block row
-    /// and `0` elsewhere — and the two cancel. This is the producer-half
-    /// balance check, at the claimed-sum level (no full proof needed).
-    #[test]
-    fn digest_provider_balances_against_synthetic_consumer() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            true,
-            &FieldExposure::empty(),
-        );
-        let module_total = claim.total();
-
-        // Synthesize the consumer term: +1 / combine(final-block digest bytes),
-        // using the same drawn relation the provider yielded against.
-        let last = witness.blocks.last().expect("at least one block");
-        let bytes = h_out_digest_bytes(&last.h_out);
-        let values: [BaseField; DIGEST_BYTES] = std::array::from_fn(|i| BaseField::from(bytes[i]));
-        let denom: SecureField = relations.digest.digest.combine(&values);
-        assert_ne!(
-            denom,
-            SecureField::zero(),
-            "digest combine must be invertible under the drawn challenges",
-        );
-        let consumer = SecureField::one() / denom;
-
-        // The yield leaves the module unbalanced on its own (the whole point:
-        // the digest term enters the global balance)...
-        assert_ne!(
-            module_total,
-            SecureField::zero(),
-            "exposing the digest must leave an outstanding provider term",
-        );
-        // ...and the synthetic consumer cancels it exactly.
-        assert_eq!(
-            module_total + consumer,
-            SecureField::zero(),
-            "digest provider must balance a consumer requiring the same bytes",
-        );
+    fn inverse<R, const N: usize>(relation: &R, tuple: &[BaseField; N]) -> SecureField
+    where
+        R: Relation<BaseField, SecureField>,
+    {
+        let denominator: SecureField = relation.combine(tuple);
+        assert_ne!(denominator, SecureField::zero());
+        SecureField::one() / denominator
     }
 
-    /// A consumer requiring a *different* digest (one bit flipped) does not
-    /// cancel the provider's yield — the balance closes only for the exact
-    /// bytes SHA computed. This is the binding's core property (a signature
-    /// over the wrong hash is rejected) exercised at the digest-provider level.
-    #[test]
-    fn digest_provider_rejects_mismatched_consumer() {
-        let witness = compute_sha256_witness(b"abc");
-        let log_size = min_log_size(witness.blocks.len());
-        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            true,
-            &FieldExposure::empty(),
-        );
-
-        let last = witness.blocks.last().unwrap();
-        let mut bytes = h_out_digest_bytes(&last.h_out);
-        bytes[0] ^= 1; // flip one bit of the first digest byte
-        let values: [BaseField; DIGEST_BYTES] = std::array::from_fn(|i| BaseField::from(bytes[i]));
-        let denom: SecureField = relations.digest.digest.combine(&values);
-        let wrong_consumer = SecureField::one() / denom;
-
-        assert_ne!(
-            claim.total() + wrong_consumer,
-            SecureField::zero(),
-            "a consumer requiring different bytes must not balance the digest yield",
-        );
+    fn digest_consumer(relations: &Sha256Relations, witness: &PackedSha256Witness) -> SecureField {
+        witness
+            .messages
+            .iter()
+            .enumerate()
+            .map(|(message_idx, message)| {
+                let bytes = h_out_digest_bytes(
+                    &message.blocks.last().expect("message has one block").h_out,
+                );
+                let mut tuple = [BaseField::zero(); 1 + DIGEST_BYTES];
+                tuple[0] = BaseField::from(message_idx as u32);
+                for (index, byte) in bytes.iter().enumerate() {
+                    tuple[index + 1] = BaseField::from(*byte);
+                }
+                inverse(&relations.packed_digest, &tuple)
+            })
+            .sum()
     }
 
-    // ---- credential-field provider ----
+    fn stream_consumer(relations: &Sha256Relations, witness: &PackedSha256Witness) -> SecureField {
+        witness
+            .messages
+            .iter()
+            .enumerate()
+            .flat_map(|(message_idx, message)| {
+                message
+                    .blocks
+                    .iter()
+                    .enumerate()
+                    .flat_map(move |(block_idx, block)| {
+                        block.schedule[..crate::constants::N_INPUT_WORDS]
+                            .iter()
+                            .flat_map(|word| word_be_bytes(word.lo, word.hi))
+                            .enumerate()
+                            .map(move |(byte_in_block, byte)| {
+                                let tuple = [
+                                    BaseField::from(
+                                        PACKED_SHA_STREAM_FIELD_BASE + message_idx as u32,
+                                    ),
+                                    BaseField::from(
+                                        (block_idx * crate::constants::BLOCK_BYTES + byte_in_block)
+                                            as u32,
+                                    ),
+                                    BaseField::from(byte),
+                                ];
+                                inverse(&relations.field.field, &tuple)
+                            })
+                    })
+            })
+            .sum()
+    }
 
-    use air_core::relations::field_id;
-
-    /// A credential-shaped 11-byte preimage (`docs/credential-format.md`):
-    /// `"EUID" | ver | year(2007) | month(3) | day(15) | nat(276=0x0114)`. The
-    /// DOB window is `c[5..9]`, the nationality window `c[9..11]`.
-    const SAMPLE_CREDENTIAL: [u8; 11] = [b'E', b'U', b'I', b'D', 1, 0x07, 0xD7, 3, 15, 0x01, 0x14];
-
-    /// Sum a synthetic consumer that *requires* each `(field_id, byte_index,
-    /// value)` tuple over the same drawn field relation the provider yielded
-    /// against: `+1 / combine(tuple)` per byte.
-    fn synthetic_field_consumer(
+    fn stream_sum_for_message(
         relations: &Sha256Relations,
-        tuples: &[(u32, u32, u32)],
+        message_idx: usize,
+        padded: &[u8],
     ) -> SecureField {
-        let mut acc = SecureField::zero();
-        for &(f, b, v) in tuples {
-            let tuple = [BaseField::from(f), BaseField::from(b), BaseField::from(v)];
-            let denom: SecureField = relations.field.field.combine(&tuple);
-            assert_ne!(denom, SecureField::zero(), "combine must be invertible");
-            acc += SecureField::one() / denom;
+        padded
+            .iter()
+            .enumerate()
+            .map(|(index, &byte)| {
+                let tuple = [
+                    BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + message_idx as u32),
+                    BaseField::from(index as u32),
+                    BaseField::from(u32::from(byte)),
+                ];
+                inverse(&relations.field.field, &tuple)
+            })
+            .sum()
+    }
+
+    fn digest_provider(relations: &Sha256Relations, witness: &PackedSha256Witness) -> SecureField {
+        -digest_consumer(relations, witness)
+    }
+
+    fn stream_provider(relations: &Sha256Relations, witness: &PackedSha256Witness) -> SecureField {
+        -stream_consumer(relations, witness)
+    }
+
+    fn packed_provider_sum(
+        relations: &Sha256Relations,
+        witness: &PackedSha256Witness,
+    ) -> SecureField {
+        digest_provider(relations, witness) + stream_provider(relations, witness)
+    }
+
+    #[test]
+    fn packed_lookup_width_is_fixed() {
+        assert_eq!(sha_lookups_per_row(false, false), 58);
+        assert_eq!(sha_lookups_per_row(true, false), 59);
+        assert_eq!(sha_lookups_per_row(false, true), 62);
+        assert_eq!(sha_lookups_per_row(true, true), 63);
+    }
+
+    #[test]
+    fn four_message_consumer_balances_without_optional_providers() {
+        let messages: [&[u8]; 4] = [b"issuer", b"mso", b"revocation", b"item"];
+        let witness = packed(&messages);
+        let log_size = min_log_size(witness.total_blocks());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, claim) = generate_interaction_trace(&relations, &witness, log_size, false, false);
+        assert_eq!(claim.total(), SecureField::zero());
+    }
+
+    #[test]
+    fn keyed_digest_and_stream_tuples_balance_all_five_messages() {
+        let messages: [&[u8]; 5] = [b"issuer", b"mso", b"revocation", b"item-0", b"item-1"];
+        let witness = packed(&messages);
+        let log_size = min_log_size(witness.total_blocks());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, claim) = generate_interaction_trace(&relations, &witness, log_size, true, true);
+        assert_eq!(
+            claim.total()
+                + digest_consumer(&relations, &witness)
+                + stream_consumer(&relations, &witness),
+            SecureField::zero(),
+        );
+    }
+
+    #[test]
+    fn keyed_digest_slot_and_stream_index_tampering_do_not_balance() {
+        let messages: [&[u8]; 5] = [b"issuer", b"mso", b"revocation", b"item-0", b"item-1"];
+        let witness = packed(&messages);
+        let log_size = min_log_size(witness.total_blocks());
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, claim) = generate_interaction_trace(&relations, &witness, log_size, true, true);
+
+        let mut wrong_digest = digest_consumer(&relations, &witness);
+        let message = &witness.messages[0];
+        let bytes = h_out_digest_bytes(&message.blocks.last().unwrap().h_out);
+        let mut honest_tuple = [BaseField::zero(); 1 + DIGEST_BYTES];
+        honest_tuple[0] = BaseField::from(0u32);
+        for (index, byte) in bytes.iter().enumerate() {
+            honest_tuple[index + 1] = BaseField::from(*byte);
         }
-        acc
-    }
-
-    /// The credential-field provider smoke test: with **only** the DOB window exposed, the
-    /// SHA module yields the four DOB bytes, and a synthetic consumer requiring
-    /// exactly `(DOB, i, c[5+i])` cancels the module's outstanding provider term.
-    /// Balancing for the credential's *actual* DOB bytes is the proof that SHA
-    /// exposed the bytes that were hashed.
-    #[test]
-    fn field_provider_dob_window_balances_against_synthetic_consumer() {
-        let c = SAMPLE_CREDENTIAL;
-        let witness = compute_sha256_witness(&c);
-        let log_size = min_log_size(witness.blocks.len());
-        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let exposure = FieldExposure::from_preimage_windows(&[(field_id::DOB, 5, 4)]);
-
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
-        let module_total = claim.total();
-
-        let dob: Vec<(u32, u32, u32)> = (0..4)
-            .map(|i| (field_id::DOB, i as u32, c[5 + i] as u32))
-            .collect();
-        let consumer = synthetic_field_consumer(&relations, &dob);
-
-        // The yield leaves the module unbalanced on its own...
+        let mut forged_tuple = honest_tuple;
+        forged_tuple[0] = BaseField::from(1u32);
+        wrong_digest -= inverse(&relations.packed_digest, &honest_tuple);
+        wrong_digest += inverse(&relations.packed_digest, &forged_tuple);
         assert_ne!(
-            module_total,
+            claim.total() + wrong_digest + stream_consumer(&relations, &witness),
             SecureField::zero(),
-            "exposing the DOB window must leave an outstanding provider term",
         );
-        // ...and the synthetic DOB consumer cancels it exactly.
-        assert_eq!(
-            module_total + consumer,
+
+        let mut wrong_stream = stream_consumer(&relations, &witness);
+        let block = &witness.messages[1].blocks[0];
+        let byte = word_be_bytes(block.schedule[0].lo, block.schedule[0].hi)[0];
+        let honest = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
+            BaseField::from(0u32),
+            BaseField::from(byte),
+        ];
+        let wrong_index = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
+            BaseField::from(witness.messages[0].padding.padded.len() as u32),
+            BaseField::from(byte),
+        ];
+        wrong_stream -= inverse(&relations.field.field, &honest);
+        wrong_stream += inverse(&relations.field.field, &wrong_index);
+        assert_ne!(
+            claim.total() + digest_consumer(&relations, &witness) + wrong_stream,
             SecureField::zero(),
-            "DOB field provider must balance a consumer requiring the same bytes",
+        );
+
+        let first_a = b"A";
+        let first_b = b"B";
+        let swap_messages: [&[u8]; 5] = [first_a, first_b, b"revocation", b"item-0", b"item-1"];
+        let swap_witness = packed(&swap_messages);
+        let mut swapped = stream_consumer(&relations, &swap_witness);
+        let tuple_a = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'A')),
+        ];
+        let tuple_b = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + 1),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'B')),
+        ];
+        let forged_a = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE + 1),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'A')),
+        ];
+        let forged_b = [
+            BaseField::from(PACKED_SHA_STREAM_FIELD_BASE),
+            BaseField::from(0u32),
+            BaseField::from(u32::from(b'B')),
+        ];
+        swapped -= inverse(&relations.field.field, &tuple_a);
+        swapped -= inverse(&relations.field.field, &tuple_b);
+        swapped += inverse(&relations.field.field, &forged_a);
+        swapped += inverse(&relations.field.field, &forged_b);
+        assert_ne!(
+            packed_provider_sum(&relations, &swap_witness)
+                + digest_consumer(&relations, &swap_witness)
+                + swapped,
+            SecureField::zero(),
         );
     }
 
-    /// Both windows exposed at once: a consumer requiring all six bytes (DOB +
-    /// nationality) balances. Confirms one shared channel carries both fields,
-    /// keyed by `field_id`.
     #[test]
-    fn field_provider_balances_full_credential_exposure() {
-        let c = SAMPLE_CREDENTIAL;
-        let witness = compute_sha256_witness(&c);
-        let log_size = min_log_size(witness.blocks.len());
-        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let exposure = FieldExposure::from_preimage_windows(&[
-            (field_id::DOB, 5, 4),
-            (field_id::NATIONALITY, 9, 2),
-        ]);
-
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
-
-        let mut tuples: Vec<(u32, u32, u32)> = (0..4)
-            .map(|i| (field_id::DOB, i as u32, c[5 + i] as u32))
-            .collect();
-        tuples.push((field_id::NATIONALITY, 0, c[9] as u32));
-        tuples.push((field_id::NATIONALITY, 1, c[10] as u32));
-        let consumer = synthetic_field_consumer(&relations, &tuples);
-
-        assert_eq!(
-            claim.total() + consumer,
-            SecureField::zero(),
-            "field provider must balance a consumer requiring every exposed byte",
-        );
-    }
-
-    /// A multi-block window is bound to its exact absolute byte offset and
-    /// big-endian word-byte order. Neither a one-byte shift nor reversing the
-    /// requested bytes can cancel the provider claim.
-    #[test]
-    fn field_provider_preserves_multi_block_shift_and_byte_order() {
-        let message: Vec<u8> = (0..150).map(|i| (i % 251) as u8).collect();
-        let witness = compute_sha256_witness(&message);
-        let log_size = min_log_size(witness.blocks.len());
-        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::DOB, 62, 6)]);
-
-        let (_, claim) = generate_interaction_trace(
-            &relations,
-            &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
-        );
-        let module_total = claim.total();
-        let tuples = |bytes: &[u8]| {
-            bytes
+    fn packed_lookup_fractions_have_exact_real_and_disabled_shapes() {
+        let messages: [&[u8]; 3] = [b"a", &[0x42; 100], b"z"];
+        let witness = packed(&messages);
+        let log_size = 9;
+        let relations = Sha256Relations::dummy();
+        let base = sha256_lookup_fractions(&relations, &witness, log_size, false, false);
+        assert_eq!(base.len(), 58);
+        let real_blocks = witness.total_blocks();
+        for (start, end, expected) in [
+            (0, 2, 2 * real_blocks * 48),
+            (2, 10, 8 * real_blocks * crate::constants::N_ROUNDS),
+            (10, 26, real_blocks * 16),
+            (26, 58, real_blocks * 32),
+        ] {
+            let actual = base[start..end]
                 .iter()
-                .enumerate()
-                .map(|(i, &byte)| (field_id::DOB, i as u32, u32::from(byte)))
-                .collect::<Vec<_>>()
-        };
+                .flat_map(|fractions| fractions.iter())
+                .filter(|(numerator, _)| !numerator.is_zero())
+                .count();
+            assert_eq!(actual, expected, "base lookup sites {start}..{end}");
+        }
+        for natural_row in real_blocks * crate::trace::ROWS_PER_BLOCK..(1usize << log_size) {
+            let slot = Layout::row_slot(natural_row, log_size);
+            for fraction in &base {
+                assert_eq!(fraction[slot], (SecureField::zero(), SecureField::one()));
+            }
+        }
 
-        let exact = synthetic_field_consumer(&relations, &tuples(&message[62..68]));
-        assert_eq!(
-            module_total + exact,
-            SecureField::zero(),
-            "virtual field bytes must equal the exact cross-block message window",
-        );
-
-        let shifted = synthetic_field_consumer(&relations, &tuples(&message[61..67]));
-        assert_ne!(
-            module_total + shifted,
-            SecureField::zero(),
-            "a one-byte-shifted window must not balance",
-        );
-
-        let mut reversed = message[62..68].to_vec();
-        reversed.reverse();
-        let reversed = synthetic_field_consumer(&relations, &tuples(&reversed));
-        assert_ne!(
-            module_total + reversed,
-            SecureField::zero(),
-            "reversing big-endian field bytes must not balance",
-        );
+        let product = sha256_lookup_fractions(&relations, &witness, log_size, true, true);
+        assert_eq!(product.len(), 63);
+        for natural_row in real_blocks * crate::trace::ROWS_PER_BLOCK..(1usize << log_size) {
+            let slot = Layout::row_slot(natural_row, log_size);
+            for fraction in &product {
+                assert_eq!(fraction[slot], (SecureField::zero(), SecureField::one()));
+            }
+        }
     }
 
-    /// A consumer requiring a *different* field byte (DOB day off by one) does
-    /// not cancel the provider's yield — the balance closes only for the exact
-    /// credential bytes SHA hashed. This is the DOB binding's core property
-    /// (proving age from a date other than the signed one is rejected) at the
-    /// credential-field provider level.
     #[test]
-    fn field_provider_rejects_mismatched_consumer() {
-        let c = SAMPLE_CREDENTIAL;
-        let witness = compute_sha256_witness(&c);
-        let log_size = min_log_size(witness.blocks.len());
+    fn missing_and_extra_packed_messages_leave_global_logup_sum() {
+        let roles: [&[u8]; 6] = [b"issuer", b"mso", &[0; 20], b"item-0", b"item-1", b"extra"];
         let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
-        let exposure = FieldExposure::from_preimage_windows(&[(field_id::DOB, 5, 4)]);
+        for (provider_count, consumer_count) in [(3usize, 4usize), (4, 5), (5, 4), (6, 5)] {
+            let provider = packed(&roles[..provider_count]);
+            let consumer = packed(&roles[..consumer_count]);
+            let sum = packed_provider_sum(&relations, &provider)
+                + digest_consumer(&relations, &consumer)
+                + stream_consumer(&relations, &consumer);
+            assert_ne!(
+                sum,
+                SecureField::zero(),
+                "{provider_count}/{consumer_count}"
+            );
+        }
+    }
 
-        let (_, claim) = generate_interaction_trace(
+    #[test]
+    fn every_role_rejects_each_malformed_padded_stream() {
+        let messages: [&[u8]; 5] = [b"A", b"B", b"C", b"D", b"E"];
+        let witness = packed(&messages);
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let honest_stream = stream_consumer(&relations, &witness);
+        let provider = packed_provider_sum(&relations, &witness);
+        let honest_digest = digest_consumer(&relations, &witness);
+        for role in 0..messages.len() {
+            let padded = witness.messages[role].padding.padded.clone();
+            let marker = padded
+                .iter()
+                .position(|&byte| byte == 0x80)
+                .expect("short fixture has marker");
+            let mutations = [
+                {
+                    let mut forged = padded.clone();
+                    forged[marker] = 0x81;
+                    forged
+                },
+                {
+                    let mut forged = padded.clone();
+                    forged[marker + 1] = 1;
+                    forged
+                },
+                {
+                    let mut forged = padded.clone();
+                    let last = forged.len() - 1;
+                    forged[last] ^= 1;
+                    forged
+                },
+                {
+                    let mut forged = padded[..padded.len() - 8].to_vec();
+                    forged.extend([0; 64]);
+                    forged.extend_from_slice(&padded[padded.len() - 8..]);
+                    forged
+                },
+            ];
+            for forged in mutations {
+                let total_stream = honest_stream
+                    - stream_sum_for_message(&relations, role, &padded)
+                    + stream_sum_for_message(&relations, role, &forged);
+                assert_ne!(
+                    provider + honest_digest + total_stream,
+                    SecureField::zero(),
+                    "role {role} malformed stream must not balance",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn range8_multiplicity_and_digest_bytes_cover_every_packed_block() {
+        let messages: [&[u8]; 4] = [b"a", &[0x42; 70], b"abc", &[0x11; 130]];
+        let witness = packed(&messages);
+        let relations = Sha256Relations::draw(&mut Blake2sChannel::default());
+        let (_, producer_sum) = range_k_interaction(
             &relations,
             &witness,
-            log_size,
-            MAX_ROUND_GROUP_BITS,
-            false,
-            &exposure,
+            RangeKind::Range8,
+            range_log_size(RangeKind::Range8),
+            None,
         );
-
-        // Require the DOB window but with the day byte tampered (15 → 16).
-        let mut dob: Vec<(u32, u32, u32)> = (0..4)
-            .map(|i| (field_id::DOB, i as u32, c[5 + i] as u32))
-            .collect();
-        dob[3].2 += 1;
-        let wrong_consumer = synthetic_field_consumer(&relations, &dob);
-
-        assert_ne!(
-            claim.total() + wrong_consumer,
-            SecureField::zero(),
-            "a consumer requiring a different DOB byte must not balance the yield",
-        );
+        let consumer_sum = witness
+            .messages
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .flat_map(|block| h_out_digest_bytes(&block.h_out))
+            .map(|byte| inverse(&relations.range.range_8, &[BaseField::from(byte)]))
+            .sum::<SecureField>();
+        assert_eq!(producer_sum + consumer_sum, SecureField::zero());
     }
 }

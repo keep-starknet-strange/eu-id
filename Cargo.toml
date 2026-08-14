@@ -17,12 +17,8 @@ version = "0.1.0"
 edition = "2021"
 
 [profile.release]
-debug = true
-
-[profile.bench]
-inherits = "release"
 lto = "fat"
-codegen-units = 1
+codegen-units = 2
 
 [workspace.dependencies]
 stwo = { git = "https://github.com/0xLucqs/stwo.git", rev = "8c9983908642f719032e7b7977f3c2081c84a2d9", features = ["prover"] }
@@ -31,9 +27,9 @@ serde = { version = "1", features = ["derive"] }
 num-traits = "0.2"
 mimalloc = "0.1"
 
-# Workspace-wide lint configuration. Every crate opts in with `[lints]
-# workspace = true`, so the whole workspace shares one clippy baseline and a
-# single place to tighten it. `make check` runs clippy with `-D warnings`,
-# which escalates every lint below to a hard error in CI.
+# Workspace lint configuration.
+# Each crate uses `[lints] workspace = true`.
+# This gives all crates one Clippy baseline.
+# `make check` uses `-D warnings` and makes each warning an error.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

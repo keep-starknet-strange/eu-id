@@ -7,22 +7,16 @@ use stwo::core::verifier::VerificationError;
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
 use stwo::prover::ProvingError;
 
-/// Code space for the accepted nationality table: ISO 3166-1 numeric codes (the
-/// POC path, mapped host-side) or the 2-byte ASCII alpha-2 codes stored as
-/// `256*b0 + b1` (the mdoc path, bound directly to the exposed window).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PublicInputKind {
-    IsoNumeric,
-    Alpha2,
-}
+/// The fixed log-9 nationality trace reserves at least 256 rows for
+/// polynomial masking, leaving at most 256 active signed array entries.
+pub const MAX_PRESENTED_NATIONALITIES: usize = 256;
 
 /// Public statement for a nationality proof.
 ///
 /// The prover proves knowledge of a private nationality that is a member of
-/// `acceptable`. The list is normalised (sorted, deduped) by [`PublicInput::new`].
+/// `acceptable`. [`PublicInput::new`] normalizes the list by sorting and removing duplicates.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicInput {
-    pub kind: PublicInputKind,
     pub acceptable: Vec<u32>,
 }
 
@@ -30,21 +24,7 @@ impl PublicInput {
     pub fn new(mut acceptable: Vec<u32>) -> Self {
         acceptable.sort_unstable();
         acceptable.dedup();
-        Self {
-            kind: PublicInputKind::IsoNumeric,
-            acceptable,
-        }
-    }
-
-    /// Accepted set over 2-byte ASCII alpha-2 codes, each encoded as
-    /// `256*b0 + b1` (`u16::from_be_bytes`).
-    pub fn new_alpha2(mut acceptable: Vec<u32>) -> Self {
-        acceptable.sort_unstable();
-        acceptable.dedup();
-        Self {
-            kind: PublicInputKind::Alpha2,
-            acceptable,
-        }
+        Self { acceptable }
     }
 
     pub fn log_size(&self) -> u32 {
@@ -53,10 +33,7 @@ impl PublicInput {
     }
 
     pub fn mix_into(&self, channel: &mut impl Channel) {
-        channel.mix_u64(match self.kind {
-            PublicInputKind::IsoNumeric => 0,
-            PublicInputKind::Alpha2 => 1,
-        });
+        channel.mix_u64(self.acceptable.len() as u64);
         for &code in &self.acceptable {
             channel.mix_u64(code as u64);
         }
@@ -72,10 +49,13 @@ pub struct PrivateInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Witness {
     pub public: PublicInput,
-    /// The single nationality code selected by the prover.
-    pub nationality: u32,
-    /// Row index of `nationality` in the sorted `acceptable` table.
-    pub nat_index: usize,
+    /// Every signed nationality, in credential array order.
+    pub nationalities: Vec<u32>,
+    /// Per-entry membership bits. Honest generation marks every accepted
+    /// entry. The AIR proves that at least one marked entry is accepted.
+    pub accepted: Vec<bool>,
+    /// Row in the sorted accepted table for every marked entry.
+    pub accepted_rows: Vec<Option<usize>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,6 +84,8 @@ pub enum InputError {
     InvalidNationalityCode(u32),
     #[error("no matching nationality found in acceptable set")]
     NoMatch,
+    #[error("nationality array length {count} exceeds the supported maximum {max}")]
+    TooManyNationalities { count: usize, max: usize },
     #[error("proof is invalid: claimed logup sums do not cancel")]
     InvalidProof,
 }

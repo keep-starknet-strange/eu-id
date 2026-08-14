@@ -3,61 +3,76 @@ name = "sdk"
 version.workspace = true
 edition.workspace = true
 
-# The EU-ID ZK SDK: the single source of truth for the prover/verifier data
-# contract. It owns the contract types, the deterministic-CBOR statement
-# encoding (`encode_statement`), and the product `prove_identity` /
-# `verify_identity` entry points backed by the full mdoc prover.
+# This crate is the source for the prover and verifier data contract.
+# It owns the contract types and the deterministic CBOR statement format.
+# It also provides the product `prove_identity` and `verify_identity` entry points.
 #
-# The mdoc PID bodies run the real STWO prover/verifier behind the UniFFI
-# surface. No Multipaz / verifier-core types leak in; callers pass the CBOR mdoc
-# bytes and verifier trust material directly.
+# The mdoc PID functions run the STWO prover and verifier through UniFFI.
+# Callers supply CBOR mdoc bytes and verifier trust data.
+# The API does not expose Multipaz or verifier-core types.
 [lib]
-# Crate/lib identifier -> output filename `libeuid_zk_sdk.so` / `.dylib`. Rust
-# lib names can't contain hyphens, so this is the underscore form of euid-zk-sdk.
+# This crate identifier determines the library file name.
+# Rust library names cannot contain hyphens.
+# The name uses underscores to match the generated library name.
 name = "euid_zk_sdk"
-# cdylib -> the `.so`/`.dylib` loaded by the Kotlin bindings on Android.
-# staticlib -> iOS static link (deferred). rlib -> lets the bundled
-# `uniffi-bindgen` bin link against this crate.
-crate-type = ["cdylib", "staticlib", "rlib"]
+# Keep the normal Cargo target to one rlib so application binaries can use
+# whole-program LTO. Packaging invokes `cargo rustc --crate-type` separately
+# for the Android/JVM cdylib and iOS staticlib.
+crate-type = ["rlib"]
 
 [features]
-# Pulls the binding generator (clap, cargo_metadata, …) into the build. Needed
-# ONLY for the `uniffi-bindgen` bin — kept off by default so the SDK cdylib
-# does not link the whole generator toolchain into the `.so`.
+# Include the binding generator dependencies.
+# Only the `uniffi-bindgen` binary needs this feature.
+# The feature is disabled by default to reduce the SDK dynamic library.
 bindgen = ["uniffi/cli"]
+# Benchmark-only Android JNI adapter around the exact UniFFI identity API.
+bench-jni = ["dep:jni", "dep:libc", "dep:memory-stats", "dep:rayon"]
+# Enable the historical Product V1 wallet bridge.
+legacy-product-v1-demo = []
+# Enable the untouched current wallet's TS13-tagged age-only call shape over
+# the P-256 product prover. This profile mints revocation evidence with an
+# embedded demo authority and must be packaged explicitly. Production builds
+# use Product V2.
+current-wallet-p256-demo = []
 
 [dependencies]
-# Production allocator — see eu-id-ffi: keeps SDK numbers on the same
-# allocator the benches measure.
+# Use the production allocator that the benchmarks measure.
 mimalloc = { workspace = true }
-# The prover's relying-party types and entry points. The §9.1 contract mapping
-# constructs `Credential` / `Policy` / `PublicStatement` / `Date` / `IssuerKey` /
-# `AffinePoint` from the UniFFI types; Phase F wires the SDK product path
-# through `prove_mdoc` / `verify_mdoc`, so this is now a proving dependency (it
-# drags the whole STWO stack into the cdylib — that footprint is 9.3's concern).
+# Expose the transitive proving-profile feature to the prescribed SDK probe
+# command without changing the production dependency graph.
+air-core = { path = "../air-core", optional = true }
+# Prover types and entry points for the product mdoc path.
+# The SDK converts UniFFI values into the prover types.
+# The SDK uses `prove_mdoc` and `verify_product_mdoc`.
+# This dependency includes the complete Stwo stack.
 eu-id-prover = { path = "../eu-id-prover" }
-uniffi = { version = "0.29" }
+uniffi = { version = "0.29", default-features = false }
 thiserror = "2.0.18"
-# Deterministic CBOR: we build an explicitly-ordered `ciborium::value::Value`
-# map, so the same bytes come out on prove and verify sides.
+# Create deterministic CBOR with an explicit map order.
+# The prover and verifier produce the same bytes.
 ciborium = "0.2.2"
-celes = "2.8.2"
-# The combined `Proof` is serde-serializable; bincode is the wire format the FFI
-# bench + `eu-id` CLI already use, so the SDK matches it for the proof envelope.
+# Serialize the sole V8 proof payload with a bounded fixed-integer format.
 serde = { workspace = true }
 bincode = "1"
-# FFI transport compression: the SDK keeps its exported byte API stable while
-# compressing the inner bincode proof payload carried in `MdocProofEnvelope`.
-zstd = "0.13"
+# Compress the proof in the version 8 transport envelope.
+zstd = { version = "0.13", default-features = false }
 sha2 = "0.10"
+# Legacy Product V1 uses ISO 3166-1 numeric country identifiers. Convert the
+# complete assigned set into Product V2's canonical alpha-2 representation.
+celes = "=2.8.2"
+jni = { version = "0.21", optional = true, default-features = false }
+libc = { version = "0.2", optional = true }
+memory-stats = { version = "1.2", optional = true, features = ["always_use_statm"] }
+rayon = { version = "1", optional = true }
 
 [[bin]]
-# Bundled binding generator. Run as:
+# Bundled binding generator.
+# Use this command:
 #   cargo run -p sdk --bin uniffi-bindgen -- generate \
 #     --library <built .so/.dylib> --language kotlin --out-dir <dir>
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
-# Only buildable with the bindgen toolchain; never compiled for the cdylib/.so.
+# Build this binary only with the binding generator toolchain.
 required-features = ["bindgen"]
 
 [lints]

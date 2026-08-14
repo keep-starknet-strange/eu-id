@@ -4,80 +4,33 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-default = ["ec-coprocessor"]
-# Forward Stwo's rayon paths to the SHA module. Cargo unifies the single `stwo`
-# dependency, so this also turns on the shared STARK prover's parallel paths for
-# the whole composition. Off by default: the honest baseline is single-threaded.
-# The combined proof is dominated by P256 trace generation, which has no rayon
-# path, so enabling this mainly speeds the SHA stage and barely moves the full
-# pipeline — the laptop benchmark quantifies the delta.
-parallel = ["stwo-sha256/parallel"]
-gkr-spike = ["air-core/gkr-spike", "stwo-sha256/gkr-spike"]
-fri-sweep = ["stwo/tracing"]
-ec-coprocessor = ["dep:eu-id-ec-coprocessor"]
+prove-profile = ["air-core/prove-profile"]
 
 [dependencies]
 air-core = { path = "../air-core" }
-eu-id-ec-coprocessor = { path = "../eu-id-ec-coprocessor", optional = true }
+eu-id-ec-coprocessor = { path = "../eu-id-ec-coprocessor" }
 stwo-p256 = { path = "../stwo-p256" }
 stwo-sha256 = { path = "../stwo-sha256" }
 predicates = { path = "../predicates" }
 stwo = { workspace = true }
-stwo-constraint-framework = { workspace = true, features = ["parallel"] }
+stwo-constraint-framework = { workspace = true }
 
-# Proof (de)serialization for the `eu-id` CLI: `prove` writes a proof file,
-# `verify` reads it back. The combined `Proof` derives serde over the per-module
-# claims (P256 / SHA / bridge claim trees made serde-serializable for this).
+# Serialize the current product proof and bind its coprocessor bundle.
 serde = { workspace = true }
 bincode = "1"
 blake2 = "0.10"
 
-# Reference oracles. These back the POC's native credential generator and its
-# end-to-end self-validation (the SPEC's "property-based testing against a
-# reference oracle" mitigation). They are reachable from the public
-# `generator`/`fixtures` API on purpose: every later binding task diffs against
-# a trusted witness rather than a guess, and integration tests in `tests/`
-# (which see only the public surface) consume the fixtures.
+# Parse and verify the current mdoc profile and build deterministic test data.
 p256 = { version = "0.13", features = ["ecdsa"] }
 rand = "0.8"
 ecdsa = { version = "0.16", features = ["signing", "verifying"] }
 sha2 = "0.10"
-rayon = "1"
 ciborium = "0.2.2"
-celes = "2.8.2"
+# Parallelize per-row witness trace generation across columns.
+rayon = "1"
 
 [dev-dependencies]
-# Laptop benchmark (`benches/identity_bench.rs`, `examples/bench_report.rs`):
-# criterion for statistical prove/verify timing; memory-stats for the peak
-# `phys_footprint` sampler — the same crate and metric the FFI / mobile harness
-# uses, so the per-stage memory numbers are directly comparable; serde_json to
-# emit the machine-readable results file.
-criterion = { version = "0.5", features = ["html_reports"] }
-memory-stats = "1.2"
 serde_json = "1"
-mimalloc = { workspace = true }
-# Proof-size byte-breakdown (§10.1, `examples/bench_report`): mirror the SDK's
-# FFI transport compressor (zstd level 12) so the recorded over-the-wire size
-# and compression ratio match the real Bluetooth payload.
-zstd = "0.13"
-tracing = "0.1"
-tracing-subscriber = "0.3"
-
-[[bench]]
-name = "identity_bench"
-harness = false
-
-[[bench]]
-name = "longfellow_equiv_bench"
-harness = false
-
-[[bench]]
-name = "mdoc_bench"
-harness = false
-
-[[example]]
-name = "fri_sweep"
-required-features = ["fri-sweep"]
 
 [lints]
 workspace = true

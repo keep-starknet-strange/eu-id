@@ -1,246 +1,204 @@
-# γ-digest reshape: one provide per row instead of one fraction per range use
+# Gamma-digest range reshape
 
-Status: APPROVED design (user: "if it's sound then go"), worksheet written before
-implementation per the AIR-writer discipline. Companion of the wide mul-result
-tuple rework and the hinted-mul provider.
+## Status
 
-## 0. Problem
+This document describes the active gamma-digest gadget in
+`crates/stwo-p256/src/components/gamma_digest`.
 
-After the hinted-mul fold campaign the monolith still spends most of its
-interaction width on **per-value range-check fractions emitted by wide
-consumer rows**. Measured (1 signature, post-pkc-fold, total 8,816 M31
-interaction columns):
+The final-add and public-key curve components use this gadget. The source
+defines the exact layouts, tags, and value order.
 
-| component | rows | M31 interaction cols | logup entries/row | of which range13+signed uses |
-|---|---|---|---|---|
-| fake_glv_projective_source | 2^8 | 1,976 | 986 | 940 |
-| prepared_table_projective_source | 2^4 | 2,100 | 986 | 940 |
-| scalar_setup | 2^4 | 1,296 | ~324 | majority |
-| final_add.check | 2^4 | 1,260 | 315 | 300 |
-| public_key_on_curve.curve_check | 2^4 | 612 | 153 | 140 |
+## Purpose
 
-A use fraction costs 4 M31 interaction columns (1 QM31 logup column,
-batch-2 halves it) **per wide row**, even though the verifier only needs
-*multiset membership of the value in a range table*. 95% of the two worst
-components is exactly this.
+A wide P-256 row can contain many values that need range checks. One LogUp
+fraction for each value gives the wide component a large interaction trace.
 
-## 1. Property spec (what must remain true)
+The gamma-digest gadget moves these range uses to a narrow, tall component.
+The wide row emits one digest tuple for each range kind.
 
-For every wide row `r` and every value `v` in its fixed use-column list
-`U = [c_0, .., c_{L-1}]` (a compile-time constant per component):
+The transformation preserves this property:
 
-> `base[r][c_i] ∈ T_kind` for the designated table `T_kind`
-> (range13 = [0, 2^13), or the signed-carry table, or range9),
-
-with the same binding strength as the current per-value LogUp use against the
-component's range relation. Nothing else about the wide component's
-constraints or other relations changes.
-
-## 2. Algorithm (redesign heuristic H2: probabilistic verification)
-
-Replace the L per-value fractions of row `r` by **one digest provide**:
-
-- Draw `γ ∈ QM31` from the channel **after the base trace commit** (the
-  digested values are committed before γ exists).
-- Wide side commits, per row and per kind, a 4-column QM31 interaction-tree
-  value `D_r` constrained (degree 1, ungated) by
-  `D_r = Σ_{i<L} base[r][c_i] · γ^i`,
-  and yields ONE tuple on a new `GammaDigest` relation:
-  `(tag, row_index, D_r.0, D_r.1, D_r.2, D_r.3)` with multiplicity
-  `−present_r` (`present_r` = preprocessed activity flag, §5.3).
-- A **tall expander component** (one instance per (component, kind)) carries
-  the same values as a base value grid of K columns per row
-  (`K = GAMMA_DIGEST_LANES`), a running QM31 accumulator
-  `acc_row = acc_prev · γ^K + Σ_{j<K} v_j · γ^{K−1−j}`
-  (reset at preprocessed group starts), uses the digest tuple
-  `(tag, row_index, acc)` with multiplicity `+end_flag` at each preprocessed
-  group end, and emits **K range fractions per tall row** against the SAME
-  range relation instance the wide component used before.
-
-The range providers' multiplicity columns are unchanged (same multiset of
-consumed values, now consumed from the tall rows).
-
-Net: L fractions/row → 1 digest fraction/row on the wide side; the tall side
-pays K fractions + 4 acc columns per ceil(L/K)-row group at a much smaller
-column count (§7).
-
-## 3. Layout manifest
-
-### Wide side (per adopted component, per kind present)
-- interaction tree: +4 M31 columns (the QM31 digest D), +1 logup fraction
-  (the digest yield) folded into the existing batched finalize.
-- base tree: unchanged.
-- preprocessed: `present` flag column (often reuses the existing row-index /
-  active schedule column; see §5.3).
-- constraints: +1 EF constraint (4 M31 constraints) `D − Σ v_i γ^i = 0`,
-  ungated, degree 1.
-
-### Tall expander instance (per (component, kind))
+```text
+each value in the fixed wide-row list belongs to its assigned range table
 ```
-log_size           = padded_log_size(ceil(L/K) · scheduled_wide_rows)
-base columns       : v_0 .. v_{K-1}                       (K columns)
-preprocessed       : tag      (constant per instance, can be folded into relation)
-                     row_id   (wide row_index this tall row belongs to)
-                     start    (1 on first row of each group)
-                     end      (1 on last row of each group)
-interaction        : acc (4 M31 = 1 QM31, custom EF column, mask [-1, 0])
-                     logup: K range-use fractions + 1 digest-use fraction,
-                            batch-2 → ceil((K+1)/2) QM31 columns
-constraints:
-  C1  acc − (1−start)·acc_prev·γ^K − Σ_j v_j·γ^{K−1−j} = 0      degree 2
-  C2  (logup batched finalize)                                   degree ≤ 3 at log+1 (batch 2 ⊕ numerator deg ≤ 1)
-row ordering: Pattern B for acc (offset −1), groups laid out contiguously
-  in coset order: group g occupies rows [g·ceil(L/K), (g+1)·ceil(L/K)).
-padding rows: all-zero values, start=end=0 ⇒ acc keeps multiplying by γ^K
-  (acc of padding = acc_last·γ^K·…, unconsumed, unconstrained boundary — fine,
-  no fraction is emitted because end=0 and range fractions get numerator
-  `present_tall` = preprocessed in-group flag).
+
+## Challenge order
+
+The channel draws `gamma` after the base-trace commitment. Thus, committed
+values cannot depend on the digest challenge.
+
+`GammaChallenge` stores `gamma` and its powers. It stores enough powers for
+the largest padded value list.
+
+## Wide-row digest
+
+For a fixed value list of length `L`, let `P` be the next multiple of eight.
+The digest is:
+
+```text
+D = sum(v[i] * gamma^(P - 1 - i))
 ```
-Initial `K = 8` (tune after measurement). With L=940: 118 tall rows per wide
-row.
 
-## 4. Relation contracts
+Tail positions contain a fixed `pad_value`. That value must belong to the
+assigned range table.
 
-### `GammaDigestRelation` (new), arity 6: `(tag, row_index, d0, d1, d2, d3)`
-| field | meaning |
+The wide-row relation tuple is:
+
+```text
+(tag, row_index, d0, d1, d2, d3)
+```
+
+The four digest coordinates are M31-linear expressions of existing base
+columns. The wide component needs no new base columns or digest constraints.
+It adds one negative relation entry with multiplicity `presence`.
+
+## Tall layout
+
+One `GammaTallInstance` serves one component and one range kind. Its static
+layout contains:
+
+- a unique tag
+- the number of wide-row groups
+- the number of values in each group
+
+Each tall row contains eight values. `GAMMA_DIGEST_LANES` fixes this width.
+
+The preprocessed columns are:
+
+- `row_id`
+- `start`
+- `end`
+- `in_group`
+
+`row_id` identifies the source wide row. `start` and `end` identify the group
+boundaries. `in_group` is one on all scheduled tall rows.
+
+The base trace has eight value columns. Extra rows after the schedule contain
+zeros.
+
+## Accumulator
+
+The interaction trace has four M31 accumulator coordinates. Together, they
+represent one QM31 value.
+
+For one tall row, the AIR checks:
+
+```text
+acc =
+    (1 - start) * acc_previous * gamma^8
+  + sum(value[j] * gamma^(7 - j))
+```
+
+This constraint has degree two. A start row removes the cyclic predecessor.
+Padding rows continue the accumulator but emit no relation entries.
+
+At a group end, `acc` equals the wide-row digest for that value sequence.
+
+## Relation signs
+
+The `GammaDigestRelation` has arity six:
+
+```text
+(tag, row_index, d0, d1, d2, d3)
+```
+
+The wide row supplies a negative digest term. The tall group end supplies the
+matching positive term.
+
+Each scheduled tall lane supplies one positive range-table use. The range
+provider supplies the matching negative term.
+
+The total LogUp balance is zero only when both conditions hold:
+
+1. The tall values have the same digest as the wide values.
+2. Each tall value belongs to its range table.
+
+## Fixed schedule
+
+The verifier reconstructs the preprocessed schedule from public component
+shape data. The schedule must not depend on witness values.
+
+Each active wide row has one digest group. Each scheduled tall lane has one
+range use. A witness gate cannot omit a scheduled check.
+
+The adopted value lists are fixed by their component layouts. Inactive formula
+cells contain valid table values, such as zero or the encoded zero carry.
+
+## Tags and row indexes
+
+Each active component and range kind has a distinct tag. The row index also
+forms part of the tuple.
+
+A digest from another component, range kind, or row cannot cancel the expected
+term unless it matches all tuple fields.
+
+## Degree bounds
+
+The wide digest coordinates have degree one in base trace values. The tall
+accumulator recurrence has degree two.
+
+Tall LogUp entries use preprocessed numerators. The implementation batches two
+fractions in each LogUp column. The component uses
+`max_constraint_log_degree_bound = log_size + 1`.
+
+## Collision bound
+
+Assume two different committed value sequences have the same digest. Their
+difference defines a nonzero polynomial in `gamma`.
+
+The maximum polynomial degree is less than the padded value count. A
+Schwartz-Zippel bound limits the collision probability by:
+
+```text
+(P - 1) / |QM31|
+```
+
+The current value lists keep this term below the design budget of `2^-114`.
+The global LogUp argument has its separate soundness bound.
+
+## Active component values
+
+The final-add component has two gamma groups:
+
+- 13-limb range values
+- signed carry values
+
+The public-key curve component also has two groups:
+
+- coordinate range values
+- signed carry values
+
+The component modules define the exact column lists. Do not duplicate those
+lists in this document.
+
+## Failure cases
+
+Verification must fail for these changes:
+
+- a changed tall value
+- two tall rows in the wrong order
+- a wrong component tag
+- a wrong row index
+- an out-of-range tall value
+- a changed group boundary in a noncanonical preprocessed trace
+
+The unit tests in `components/gamma_digest/mod.rs` cover value changes, row
+swaps, tag mismatches, honest constraints, and balance.
+
+## Security boundary
+
+The gamma digest is a probabilistic equality check over committed values. It
+does not hide those values.
+
+The gadget reduces interaction width. It does not give proof-wide zero
+knowledge or unlinkability.
+
+## Source map
+
+| Path | Purpose |
 |---|---|
-| tag | static id of (component, kind) — disjoint across all instances |
-| row_index | wide row's preprocessed index (matches tall group's preprocessed row_id) |
-| d0..d3 | QM31 digest limbs |
-
-| site | sign | multiplicity | tuple |
-|---|---|---|---|
-| wide row (adopted component) | yield (−) | `present_r` (preprocessed) | (tag, row_index, D_r) |
-| tall group end | use (+) | `end` (preprocessed) | (tag, row_id, acc) |
-
-One relation instance drawn once in the monolith, shared by all adopted
-components; tags keep tuples disjoint. Balance: per (tag, row_index), yield
-and use cancel iff `D_r == acc(group)` as QM31 values.
-
-### Range relations (existing, per component silo)
-Use side moves from the wide row (L entries, numerator gated as today) to the
-tall rows (K entries/row, numerator = preprocessed in-group flag, i.e. each
-scheduled value is consumed exactly once, unconditionally). Provider
-multiplicity columns: regenerated from the same values — tallies unchanged
-except formerly *gate-suppressed* values (inactive formula blocks) are now
-counted; those values are constrained zero / valid encodings on honest traces
-(§5.4) so the provider multiplicity gen simply tallies the tall grid.
-
-### Public data
-None of the digest machinery touches public inputs; I-4 unaffected.
-
-## 5. Soundness argument
-
-### 5.1 Binding chain
-```
-wide base values v_i  --(degree-1 constraint, γ post-commit)-->  D_r
-D_r  --(GammaDigest LogUp, tags+row_index)-->  acc(group)
-acc(group)  --(C1 recurrence over preprocessed group layout)-->  tall values v'_j
-tall values  --(range LogUp, unchanged relation)-->  range table membership
-```
-A malicious prover who wants an out-of-range wide value must either
-(a) break a LogUp balance (soundness of the existing argument, ~2^-124),
-(b) find `acc(group) == D_r` with a different value sequence: both sides are
-evaluations at γ of degree-(L−1) polynomials with coefficients fixed at
-base-commit time (wide: trace columns; tall: value-grid columns, committed in
-the SAME base tree before γ is drawn). Distinct polynomials agree at γ with
-probability ≤ (L−1)/|QM31| ≈ 940/2^124 < 2^-114 — Schwartz–Zippel, γ
-channel-drawn after the commitment that fixes both coefficient vectors, or
-(c) tamper with tags/row_index/group layout: all preprocessed (pinned by the
-preprocessed-root check at verify time), and tags are globally disjoint
-constants, so no replay of one row's digest into another row/component/kind.
-
-### 5.2 The four invariants
-- **I-1 witness uniqueness**: D is uniquely determined by the base values
-  (ungated degree-1 identity). acc is uniquely determined by start flags +
-  value grid (C1 is ungated; at start rows the acc_prev term is multiplied
-  by (1−start)=0, so the recurrence pins acc on EVERY row including group
-  starts). Tall value grid itself is the witness being proven — bound by the
-  digest equality to the wide values.
-- **I-2 logup balance**: digest yield/use signs follow the stwo convention
-  (provider −, consumer +); per-tag-and-row pairing is enforced by the tuple
-  fields. The slice/monolith balance accounting adds one
-  `GammaDigest` entry: Σ wide yields + Σ tall uses = 0.
-- **I-3 domain enforcement**: every digested value gets exactly one range
-  use on the tall side, numerator preprocessed-1 (stronger than the previous
-  witness-gated numerators: no prover-controlled gate can skip a check).
-- **I-4 public binding**: untouched.
-
-### 5.3 The preprocessed schedule (presence) requirement
-The tall group layout (start/end/in_group flags) is PREPROCESSED — it is the
-schedule ANCHOR: every scheduled group's digest is consumed unconditionally,
-so a wide row that fails to yield (or yields when unscheduled) unbalances the
-relation. The WIDE yield numerator may therefore be the witness `active`
-column (adopted components use it): honest activity must match the schedule,
-and any dishonest deviation is rejected by the anchored tall side. The set of
-scheduled rows must be witness-independent for completeness. This holds for
-the adopted components: the ladder schedule, prepared-table rows, final_add /
-curve-check / scalar_setup active rows are deterministic per signature count
-(the existing preprocessed row-index/schedule columns encode exactly this;
-the layouts derive from the claim's mixed `rows` count, from which the
-verifier rebuilds the preprocessed root).
-Witness-dependent gates (e.g. `has_muls`, formula-kind flags) do NOT gate the
-digest: all use-list columns are digested unconditionally (§5.4). If a future
-component has genuinely witness-dependent activity, it cannot adopt the
-gadget without a witness-dependent-multiplicity redesign — documented here as
-a hard precondition.
-
-### 5.4 Unconditional digestion of conditionally-used values
-Previously some use fractions had witness gates (inactive formula block ⇒ no
-fraction). The digest includes those columns unconditionally; the tall side
-range-checks them unconditionally. Honest traces hold zeros (or valid
-encodings) in inactive blocks — zero ∈ range13, zero-carry encoding ∈ signed
-table, so completeness holds; soundness only gains (formerly uncheckable
-garbage in inactive blocks is now range-bound). Provider multiplicities are
-regenerated from the unconditioned grid. Adoption checklist item per
-component: verify inactive-block padding is in-table on honest traces (it is
-for all five candidates: blocks are zero-initialized).
-
-### 5.5 Degree worksheet
-| site | expression | degree | bound |
-|---|---|---|---|
-| wide digest def | `D − Σ v_i γ^i` (γ^i constants) | 1 | log+1 ✓ |
-| wide digest yield | numerator `present` (preprocessed) | 1; batched ⊕ ≤ 3 | log+1 ✓ |
-| tall C1 | `acc − (1−start)·acc_prev·γ^K − Σ v_j γ^{K−1−j}` | 2 | log+1 ✓ |
-| tall logup | numerators preprocessed flags, batch 2 | ≤ 3 | log+1 ✓ |
-
-All within the empirically-validated ceiling (degree ≤ 3 at `log_size + 1`,
-batch ≤ 2 — see the degree-bound rule memory/commit).
-
-## 6. Adversarial test plan
-| invariant | malicious change | expected failure |
-|---|---|---|
-| value binding | flip one digested wide base limb after build (provider stays) | GammaDigest imbalance (digest ≠ acc) |
-| tall grid lie | flip one tall value-grid cell (digest matches wide) | GammaDigest imbalance OR range imbalance |
-| out-of-range smuggle | put 2^13 in a wide use column + matching tall cell | range13 imbalance (provider lacks the value) |
-| replay | swap two rows' digests (same tag) | row_index mismatch → imbalance |
-| acc reset lie | zero a start flag in a forged preprocessed tree | preprocessed root mismatch at verify |
-| gate-skip (old hole) | nonzero garbage in an inactive formula block | now range-checked: imbalance (previously unchecked!) |
-
-Plus the standing monolithic battery (e2e prove+verify, mutated-hint tests)
-must stay green.
-
-## 7. Cost model & phased adoption
-Per adopted wide component: ~L/2 QM31 logup columns removed per row-width,
-+1 fraction +4 M31 columns. Tall instance ≈ K + 4 + 4·ceil((K+1)/2) + 3
-M31 columns at log_size ≈ log2(rows·L/K).
-
-Phases (measure shape + proof size + e2e after each):
-- **A** ✅ (2026-06-11): gadget + `fake_glv_projective_source` adopted —
-  1,984 → 156 M31 interaction cols (consumer 100 at 2^8 + two talls at
-  2^13/2^14 + providers); monolith total 8,816 → 6,988; proof 4.49 → 4.06 MB;
-  e2e 1.25 s; suite 330/0.
-- **B** ✅ (2026-06-11): `prepared_table_projective_source` adopted —
-  2,108 → 280 M31 interaction cols (consumer 986 → 48 entries/row, talls at
-  2^10); monolith total 6,988 → 5,160; proof 4.06 → 3.64 MB; e2e 1.22 s;
-  suite 330/0.
-- **C1** ✅ (2026-06-11): `final_add.check` (1,268 → 124) +
-  `public_key_on_curve.curve_check` (620 → 116) adopted — both single-row, so
-  the tall layouts are constants (group_count = 1, row_index = literal 0) and
-  the instances build straight from the claims; monolith total 5,160 → 3,512;
-  proof 3.64 → 3.28 MB; e2e 1.24 s; suite 330/0.
-- **C2**: adopt `scalar_setup` (range9 kind added), `final_check`.
-- **D** (optional): consolidate per-component range relations/providers.
-
-Projected total after C: 8,816 → ~2.5–3k M31 interaction columns,
-proof ≈ 2.5–3 MB.
+| `components/gamma_digest/mod.rs` | Shared digest and tall-component logic |
+| `components/final_add/air.rs` | Final-add wide-row digest entries |
+| `components/final_add/trace.rs` | Final-add tall traces |
+| `components/public_key_curve/air.rs` | Public-key curve digest and tall traces |
+| `proof/mod.rs` | Challenge and relation order |

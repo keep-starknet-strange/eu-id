@@ -37,7 +37,7 @@ pub struct ScalarReductionDigitRelations<'a> {
 ///
 /// Carry continuity is enforced through `reduction_carry`: row `i` provides
 /// `carry_i`, and row `i + 1` consumes it as `prev_carry`. The first row fixes
-/// `prev_carry = 0`; the last row fixes `carry_39 = 0`.
+/// `prev_carry = 0`. The last row fixes `carry_39 = 0`.
 pub fn add_scalar_reduction_digit<E: EvalAtRow>(
     eval: &mut E,
     relations: ScalarReductionDigitRelations<'_>,

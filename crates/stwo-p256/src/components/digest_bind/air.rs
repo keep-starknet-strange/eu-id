@@ -1,10 +1,9 @@
 //! Constraint side of the digest-bind bridge.
 //!
-//! [`DigestBindEval`] proves, for each active signature row, that the 32
-//! big-endian digest bytes recompose the message hash `z` (consumed in limb
-//! form from `scalar_setup`), range-checks every byte and carry, and — on the
-//! combined-proof path — *requires* those 32 bytes on the shared `Sha256Digest`
-//! channel so the global balance cancels against the SHA provider's yield.
+//! [`DigestBindEval`] recomposes message hash `z` from 32 big-endian bytes.
+//! It range-checks each byte and carry.
+//! The combined proof consumes the bytes on the shared `Sha256Digest` channel.
+//! The SHA provider supplies the opposite relation term.
 
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -22,9 +21,9 @@ use super::{
 
 /// The four LogUp channels the bridge consumes, plus the cross-module digest
 /// gate. The two range channels are balanced inside this bridge module (their
-/// provider components live here); the `(sig_id, z)` channel is balanced by
-/// P256's analytic provider term ([`super::scalar_z_provider_claimed_sum`]);
-/// only the `digest` channel is truly cross-module — its provider is the SHA
+/// provider components live here). The `(sig_id, z)` channel is balanced by
+/// P256's analytic provider term ([`super::scalar_z_provider_claimed_sum`]).
+/// Only the `digest` channel is truly cross-module — its provider is the SHA
 /// module.
 #[derive(Clone, Debug)]
 pub struct DigestBindEval {
@@ -115,7 +114,7 @@ impl FrameworkEval for DigestBindEval {
             add_range_check(&mut eval, &self.range13, active.clone(), carry.clone());
         }
 
-        // Consume `(sig_id, z[20])` (+active); P256 provides the matching
+        // Consume `(sig_id, z[20])` (+active). P256 provides the matching
         // −active term analytically in its claimed sum, binding the bridge's
         // `z` limbs to the proven, public-input-bound `z`.
         let mut scalar_z_values = Vec::with_capacity(SCALAR_Z_RELATION_ARITY);
@@ -129,8 +128,8 @@ impl FrameworkEval for DigestBindEval {
 
         // Cross-module digest require: consume the 32 bytes (+active), the exact
         // counterpart of the SHA provider's −is_last_block yield over the same
-        // relation. Cancels in the global balance iff the byte strings match,
-        // i.e. iff z == SHA-256(C).
+        // relation. It cancels if and only if the byte strings match.
+        // Thus, `z = SHA-256(C)`.
         if self.expose_digest {
             eval.add_to_relation(RelationEntry::base(&self.digest, active, &bytes));
         }
@@ -142,9 +141,9 @@ impl FrameworkEval for DigestBindEval {
 
 pub type DigestBindComponent = FrameworkComponent<DigestBindEval>;
 
-/// Number of LogUp lookups the bridge emits per evaluation: 32 byte range
-/// checks + 31 carry range checks + the `(sig_id, z)` consume, plus the digest
-/// consume when `expose_digest` is set.
+/// Returns the number of bridge LogUp lookups for one evaluation.
+///
+/// The count includes byte checks, carry checks, scalar binding, and an optional digest binding.
 pub const fn digest_bind_lookups(expose_digest: bool) -> usize {
     DIGEST_BYTES + N_CARRIES + 1 + if expose_digest { 1 } else { 0 }
 }

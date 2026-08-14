@@ -1,6 +1,5 @@
 use eu_id_ec_coprocessor::sumcheck::{
-    circuit_otp_pad_values, proof_otp_pad_values, prove_circuit, prove_sum, verify_circuit,
-    verify_sum,
+    prove_circuit, prove_sum, verify_circuit, verify_sum, CircuitPads, CircuitVerification,
 };
 use eu_id_ec_coprocessor::{Circuit, CoprocessorChannel, Fp, Layer, Mle, QuadTerm};
 
@@ -89,129 +88,120 @@ fn same_seed_produces_identical_proof() {
     assert_eq!(proof_a, proof_b);
 }
 
-#[test]
-fn circuit_sumcheck_exports_input_claims_for_bl3() {
-    let (circuit, witness) = small_satisfied_circuit();
-    let commitment_root = [9u8; 32];
+fn committed_constraints_hold(
+    verification: &CircuitVerification,
+    pads: &CircuitPads,
+    input: &[Fp],
+) -> bool {
+    if verification.layer_constraints.iter().any(|constraint| {
+        let got = constraint.terms.iter().fold(Fp::ZERO, |acc, term| {
+            acc + term.coefficient * pads.values()[term.pad_offset]
+        });
+        got != constraint.value
+    }) {
+        return false;
+    }
+    let mle = Mle::new(input.to_vec());
+    let [point_0, point_1] = &verification.input_claims.points;
+    let beta = verification.input_challenge;
+    let got = mle.eval_at(point_0).unwrap() + beta * mle.eval_at(point_1).unwrap()
+        - pads.values()[verification.input_pad_offsets[0]]
+        - beta * pads.values()[verification.input_pad_offsets[1]];
+    let want = verification.input_claims.values[0] + beta * verification.input_claims.values[1];
+    got == want
+}
+
+fn prove_and_reconstruct(
+    circuit: &Circuit,
+    witness: &[Vec<Fp>],
+    pads: &CircuitPads,
+    root: [u8; 32],
+) -> (
+    eu_id_ec_coprocessor::sumcheck::CircuitSumcheckProof,
+    CircuitVerification,
+) {
     let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-
-    let proof = prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
-
-    assert_eq!(
-        proof.layers[0].rounds[0].len(),
-        2,
-        "Q-018 circuit sumcheck rounds transmit only p(0) and p(2)"
-    );
-    assert_eq!(
-        proof.layers[0].round_pads.len(),
-        proof.layers[0].rounds.len(),
-        "Q-018 commits one [dP(0), dP(2)] pair per half-round"
-    );
-    let claim_pads = proof.layers[0].claim_pads;
-    assert_eq!(
-        claim_pads[0] * claim_pads[1],
-        claim_pads[2],
-        "Q-018 claim pad triple commits dW_L*dW_R=dW_LR"
-    );
-    assert_eq!(
-        proof_otp_pad_values(&proof),
-        circuit_otp_pad_values(&circuit),
-        "proof pads must match the circuit-shaped committed pad layout"
-    );
-
+    let proof = prove_circuit(circuit, witness, pads, root, &mut prover_channel).unwrap();
     let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    let input_claims =
-        verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).unwrap();
-    let input_mle = Mle::new(witness.last().unwrap().clone());
+    let verification = verify_circuit(circuit, &proof, root, &mut verifier_channel).unwrap();
+    (proof, verification)
+}
 
-    assert_eq!(proof.input_claims, input_claims);
-    for (point, value) in input_claims.points.iter().zip(input_claims.values) {
-        assert_eq!(input_mle.eval_at(point).unwrap(), value);
+#[test]
+fn circuit_sumcheck_masks_every_private_transcript_value() {
+    let (circuit, witness) = small_satisfied_circuit();
+    let pads = CircuitPads::fresh(&circuit);
+    let (proof, verification) = prove_and_reconstruct(&circuit, &witness, &pads, [9u8; 32]);
+
+    assert_eq!(proof.layers[0].rounds[0].len(), 2);
+    assert!(committed_constraints_hold(
+        &verification,
+        &pads,
+        witness.last().unwrap()
+    ));
+
+    let encoded = bincode::serialize(&proof).unwrap();
+    for pad in pads.values() {
+        assert!(
+            !encoded
+                .windows(32)
+                .any(|window| window == pad.to_bytes_be().as_slice()),
+            "a secret pad was serialized in the sumcheck proof"
+        );
     }
 }
 
 #[test]
-fn circuit_sumcheck_recurses_to_input_claims_across_layers() {
+fn circuit_sumcheck_recurses_across_layers_under_committed_masks() {
     let (circuit, witness) = two_layer_satisfied_circuit();
-    let commitment_root = [7u8; 32];
-    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-
-    let proof = prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
-
-    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    let input_claims =
-        verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).unwrap();
-    let input_mle = Mle::new(witness.last().unwrap().clone());
+    let pads = CircuitPads::fresh(&circuit);
+    let (proof, verification) = prove_and_reconstruct(&circuit, &witness, &pads, [7u8; 32]);
 
     assert_eq!(proof.layers.len(), 2);
-    for (point, value) in input_claims.points.iter().zip(input_claims.values) {
-        assert_eq!(input_mle.eval_at(point).unwrap(), value);
-    }
+    assert_eq!(verification.layer_constraints.len(), 2);
+    assert!(committed_constraints_hold(
+        &verification,
+        &pads,
+        witness.last().unwrap()
+    ));
 }
 
 #[test]
-fn circuit_sumcheck_rejects_wrong_final_input_claim() {
+fn fresh_masks_randomize_the_same_witness_transcript() {
     let (circuit, witness) = small_satisfied_circuit();
-    let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    let mut proof =
-        prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
-    proof.input_claims.values[0] = proof.input_claims.values[0] + Fp::ONE;
-
-    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-
-    assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
+    let pads_a = CircuitPads::fresh(&circuit);
+    let pads_b = CircuitPads::fresh(&circuit);
+    let (proof_a, _) = prove_and_reconstruct(&circuit, &witness, &pads_a, [9u8; 32]);
+    let (proof_b, _) = prove_and_reconstruct(&circuit, &witness, &pads_b, [9u8; 32]);
+    assert_ne!(proof_a, proof_b);
 }
 
 #[test]
-fn circuit_sumcheck_rejects_wrong_commitment_root() {
+fn tampered_masked_round_fails_the_committed_constraints() {
     let (circuit, witness) = small_satisfied_circuit();
-    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    let proof = prove_circuit(&circuit, &witness, [9u8; 32], &mut prover_channel).unwrap();
-
-    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-
-    assert!(verify_circuit(&circuit, &proof, [8u8; 32], &mut verifier_channel).is_err());
-}
-
-#[test]
-fn circuit_sumcheck_rejects_tampered_round_polynomial() {
-    let (circuit, witness) = small_satisfied_circuit();
-    let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    let mut proof =
-        prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
+    let pads = CircuitPads::fresh(&circuit);
+    let (mut proof, _) = prove_and_reconstruct(&circuit, &witness, &pads, [9u8; 32]);
     proof.layers[0].rounds[0][1] = proof.layers[0].rounds[0][1] + Fp::ONE;
 
     let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-
-    assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
+    let verification = verify_circuit(&circuit, &proof, [9u8; 32], &mut verifier_channel).unwrap();
+    assert!(!committed_constraints_hold(
+        &verification,
+        &pads,
+        witness.last().unwrap()
+    ));
 }
 
 #[test]
-fn circuit_sumcheck_rejects_tampered_otp_round_pad() {
+fn wrong_commitment_root_fails_the_committed_constraints() {
     let (circuit, witness) = small_satisfied_circuit();
-    let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    let mut proof =
-        prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
-    proof.layers[0].round_pads[0][0] = proof.layers[0].round_pads[0][0] + Fp::ONE;
-
+    let pads = CircuitPads::fresh(&circuit);
+    let (proof, _) = prove_and_reconstruct(&circuit, &witness, &pads, [9u8; 32]);
     let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-
-    assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
-}
-
-#[test]
-fn circuit_sumcheck_rejects_tampered_otp_claim_pad_product() {
-    let (circuit, witness) = small_satisfied_circuit();
-    let commitment_root = [9u8; 32];
-    let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-    let mut proof =
-        prove_circuit(&circuit, &witness, commitment_root, &mut prover_channel).unwrap();
-    proof.layers[0].claim_pads[2] = proof.layers[0].claim_pads[2] + Fp::ONE;
-
-    let mut verifier_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
-
-    assert!(verify_circuit(&circuit, &proof, commitment_root, &mut verifier_channel).is_err());
+    let verification = verify_circuit(&circuit, &proof, [8u8; 32], &mut verifier_channel).unwrap();
+    assert!(!committed_constraints_hold(
+        &verification,
+        &pads,
+        witness.last().unwrap()
+    ));
 }

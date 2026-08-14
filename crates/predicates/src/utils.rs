@@ -1,55 +1,7 @@
 use crate::age::types::{DATE_MONTH_BASE, DATE_YEAR_BASE};
-use num_traits::{One, Zero};
+use air_core::claim_mask::{ClaimMaskError, ClaimMaskTrace};
 use stwo::core::fields::m31::{BaseField, M31};
-use stwo::core::poly::circle::CanonicCoset;
-use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::CircleEvaluation;
-use stwo::prover::poly::BitReversedOrder;
 use stwo_constraint_framework::EvalAtRow;
-
-pub(crate) fn push_repeated_column(
-    columns: &mut Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>,
-    value: u32,
-    log_size: u32,
-) {
-    let domain = CanonicCoset::new(log_size).circle_domain();
-    let column = vec![M31::from_u32_unchecked(value); 1 << log_size];
-    columns.push(CircleEvaluation::new(domain, BaseColumn::from_iter(column)));
-}
-
-pub(crate) fn push_repeated_bits(
-    columns: &mut Vec<CircleEvaluation<SimdBackend, M31, BitReversedOrder>>,
-    value: u32,
-    log_size: u32,
-    n_bits: usize,
-) {
-    for bit_index in 0..n_bits {
-        push_repeated_column(columns, (value >> bit_index) & 1, log_size);
-    }
-}
-
-pub(crate) fn read_bits<E: EvalAtRow, const N: usize>(eval: &mut E) -> [E::F; N] {
-    core::array::from_fn(|_| eval.next_trace_mask())
-}
-
-pub(crate) fn read_bits_dynamic<E: EvalAtRow>(eval: &mut E, n_bits: usize) -> Vec<E::F> {
-    (0..n_bits).map(|_| eval.next_trace_mask()).collect()
-}
-
-pub(crate) fn constrain_bits<E: EvalAtRow>(eval: &mut E, bits: &[E::F]) {
-    for bit in bits {
-        eval.add_constraint(bit.clone() * (bit.clone() - E::F::one()));
-    }
-}
-
-pub(crate) fn bit_sum<E: EvalAtRow>(bits: &[E::F]) -> E::F {
-    bits.iter()
-        .enumerate()
-        .fold(E::F::zero(), |sum, (bit_index, bit)| {
-            sum + bit.clone() * BaseField::from_u32_unchecked(1 << bit_index)
-        })
-}
 
 pub(crate) fn field_const<E: EvalAtRow>(value: u32) -> E::F {
     E::F::from(BaseField::from_u32_unchecked(value))
@@ -57,15 +9,15 @@ pub(crate) fn field_const<E: EvalAtRow>(value: u32) -> E::F {
 
 /// A fresh uniform M31 cell from the host CSPRNG.
 ///
-/// Class-C blind rows and Class-D dummy multiplicities (Q-015 p4c) fill their
+/// Class-C blind rows and Class-D dummy multiplicities fill their
 /// inactive/dummy cells with these. The randomness is drawn from the OS entropy
-/// source — NEVER from the Fiat-Shamir channel — so the mask stays secret from
+/// source, not from the Fiat-Shamir channel, so the mask stays secret from
 /// the verifier. Rejection-samples the single `2^31 − 1` value that is out of
 /// M31's `[0, 2^31 − 1)` range, giving a uniform draw over the field.
 pub(crate) fn random_m31_cell() -> M31 {
     use rand::RngCore;
     // thread_rng is a ChaCha12 CSPRNG seeded (and periodically reseeded) from
-    // the OS entropy source; it keeps the mask secret from the verifier while
+    // the OS entropy source. It keeps the mask secret from the verifier while
     // avoiding one getentropy syscall per drawn cell.
     let mut rng = rand::thread_rng();
     loop {
@@ -74,6 +26,38 @@ pub(crate) fn random_m31_cell() -> M31 {
             return M31::from_u32_unchecked(value);
         }
     }
+}
+
+/// Validate an externally allocated claim-mask slice without consuming it.
+///
+/// The global orchestrator allocates one ring in module/component order. A
+/// predicate must reject a missing, surplus, or out-of-order trace before it
+/// changes its public layout.
+pub(crate) fn validate_claim_masks(
+    masks: &[ClaimMaskTrace],
+    ordered_log_sizes: &[u32],
+) -> Result<(), ClaimMaskError> {
+    if masks.len() < ordered_log_sizes.len() {
+        return Err(ClaimMaskError::Exhausted {
+            requested_log_size: ordered_log_sizes[masks.len()],
+        });
+    }
+    if masks.len() > ordered_log_sizes.len() {
+        return Err(ClaimMaskError::NotExhausted {
+            remaining: masks.len() - ordered_log_sizes.len(),
+        });
+    }
+    for (index, (mask, &expected)) in masks.iter().zip(ordered_log_sizes).enumerate() {
+        let actual = mask.log_size();
+        if actual != expected {
+            return Err(ClaimMaskError::LogSizeOutOfOrder {
+                index,
+                expected,
+                actual,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn bits_needed(max_value: u32) -> usize {

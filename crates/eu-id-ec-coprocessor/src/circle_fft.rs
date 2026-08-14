@@ -1,4 +1,4 @@
-//! Circle-group FFT Reed–Solomon encoder over F_p256 (Q-025 protocol).
+//! Circle-group FFT Reed-Solomon encoder over F_p256.
 //!
 //! `v2(p-1) = 1`, so no multiplicative-subgroup FFT exists over the P-256
 //! base field. But `v2(p+1) = 96`, so the circle group
@@ -11,52 +11,34 @@
 //!   mirror-pair butterflies below.
 //! * Universal basis: coefficient index `j` maps to
 //!   `b_j(x, y) = y^{j_0} * prod_k pi^{k-1}(x)^{j_k}` with `pi(x) = 2x^2 - 1`.
-//!   The x-part for `m = j >> 1` has degree exactly `m`, so the prefix
-//!   `{b_0, ..., b_{d-1}}` spans a dimension-`d` space with at most `d` zeros
-//!   on the circle (Bezout with the conic): a true RS-rate code. The basis
-//!   depends only on the doubling-map tower, NOT on the domain, so
-//!   coefficients produced by an IFFT on one domain evaluate consistently on
-//!   any other.
-//! * Systematic-by-interpolation rows (Q-025): a row message is
+//!   The x-part for `m = j >> 1` has degree `m`.
+//!   Thus, the prefix `{b_0, ..., b_{d-1}}` spans a dimension-`d` space.
+//!   It has at most `d` zeros on the circle by Bezout.
+//!   The basis depends only on the doubling-map tower.
+//!   IFFT coefficients from one domain evaluate consistently on another domain.
+//! * Systematic interpolation: a row message is
 //!   `row_message_len` values on the disjoint message domain (generator of
-//!   order `2·row_message_len`; every codeword point has order `2·codeword_len`
+//!   order `2·row_message_len`. Every codeword point has order `2·codeword_len`
 //!   so the domains cannot intersect). The `data_slots` data values sit at the
 //!   fixed `data_window()` slots, the remaining slots carry random pads.
 //!   IFFT_message → coefficients → FFT_codeword → codeword.
 //! * Claim batching keeps the fixed extraction functional: sum of the batch
-//!   polynomial over the data points ([`circle_data_sum`]); per-row MLE weights
+//!   polynomial over the data points ([`circle_data_sum`]). Per-row MLE weights
 //!   become the unique `F_{data_slots}` interpolant through the data points
 //!   ([`circle_weight_coeffs`], via a precomputed `data_slots`×`data_slots`
 //!   inverse).
 //!
-//! WO-P6: the whole module is parametrized by a [`CircleGeom`] so the aspect
-//! ratios coexist — ℓ=64 (v2: 64 data / 256 message / 2048 codeword / 512
-//! product), ℓ=128 (v3: 128 / 512 / 4096 / 1024), and ℓ=256 (v4: 256 / 512 /
-//! 4096 / 1024). Every `Tables`/
-//! `DataWindow` is cached per geometry; the universal basis is shared.
+//! The product geometry uses 256 data, 512 message, 4096 codeword, and 2048 product values.
+//! It caches its `Tables` and `DataWindow`.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use rayon::prelude::*;
+
 use crate::Fp;
 
-// ℓ=64 (v2) geometry constants — kept as named anchors for the legacy params.
-pub const CIRCLE_CODEWORD_LEN: usize = 2048;
-pub const CIRCLE_ROW_MESSAGE_LEN: usize = 256;
-pub const CIRCLE_DATA_SLOTS: usize = 64;
-/// Claim-batch product domain (WO-P1): the batch polynomial
-/// `Q = blind + Σ W_r·R_r` lives in `F_322` (W ∈ F_64, R ∈ F_256, product bound
-/// 64 + 256 + 2 = 322 per the y² = 1 − x² fold), so any evaluation domain of
-/// size > 322 determines it exactly. 512 is the smallest power of two above the
-/// bound; the domain generator has exact order 1024. This is disjoint from both
-/// the message domain (order 512) and codeword domain (order 4096), but the
-/// universal basis is domain-independent, so an IFFT512 recovers the same
-/// coefficients.
-pub const CIRCLE_PRODUCT_DOMAIN_LEN: usize = 512;
-
-/// One circle-code aspect ratio. All sizes are powers of two; the product
-/// domain is derived as the smallest power of two strictly above the claim
-/// bound `data_slots + row_message_len + 2`.
+/// The circle-code geometry. All sizes are powers of two.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct CircleGeom {
     pub data_slots: usize,
@@ -77,34 +59,17 @@ impl CircleGeom {
     }
 }
 
-/// ℓ=64 geometry (v2 params).
-pub const CIRCLE_GEOM_L64: CircleGeom = CircleGeom {
-    data_slots: 64,
-    row_message_len: 256,
-    codeword_len: 2048,
-    product_domain_len: 512,
-};
-
-/// ℓ=128 geometry (v3 params, WO-P6). Claim bound 128 + 512 + 2 = 642 ⇒
-/// product domain 1024 (smallest pow2 > 642).
-pub const CIRCLE_GEOM_L128: CircleGeom = CircleGeom {
-    data_slots: 128,
-    row_message_len: 512,
-    codeword_len: 4096,
-    product_domain_len: 1024,
-};
-
-/// ℓ=256 geometry (v4 params): same message/codeword/product domains as
-/// ℓ=128, twice the data slots per row. Rows halve, so the per-column
-/// openings (the dominant proof-size slice) halve; the claim bound moves to
-/// 256 + 512 + 2 = 770, still under the same 1024 product domain, so the
-/// claim-batch FFT sizes are unchanged. The per-row value-pad budget drops to
-/// 512 − 256 = 256, which still covers the opening count (t = 176).
-pub const CIRCLE_GEOM_L256: CircleGeom = CircleGeom {
-    data_slots: 256,
-    row_message_len: 512,
-    codeword_len: 4096,
-    product_domain_len: 1024,
+/// Product geometry. The committed-mask layer proves products of two
+/// degree-1024 rows, whose circle-basis bound is `2*1024 + 2 = 2050`. Thus,
+/// the product domain is 4096, the smallest power of two strictly above that
+/// bound. The per-row value-pad budget is `1024 − 512 = 512`. The 2× aspect
+/// ratio (row_len 512 vs the prior 256) halves the opened-row count at a fixed
+/// soundness target, shrinking the proof's dominant opened-columns term.
+pub const PRODUCT_CIRCLE_GEOM: CircleGeom = CircleGeom {
+    data_slots: 512,
+    row_message_len: 1024,
+    codeword_len: 8192,
+    product_domain_len: 4096,
 };
 
 /// (p + 1) / 2^96 for the P-256 base prime: the odd cofactor of the circle
@@ -159,7 +124,7 @@ fn scalar_mul(point: CirclePoint, scalar_be: &[u8]) -> CirclePoint {
 /// Deterministically finds a circle point of exact order `2^(log_n + 1)`.
 fn generator(log_n: usize) -> CirclePoint {
     // Rational parametrization ((1 - t^2)/(1 + t^2), 2t/(1 + t^2)) hits every
-    // circle point except (-1, 0); scan small t until the 2-Sylow projection
+    // circle point except (-1, 0). Scan small t until the 2-Sylow projection
     // has full order.
     for t in 1u64..64 {
         let tf = Fp::from_u64(t);
@@ -171,7 +136,7 @@ fn generator(log_n: usize) -> CirclePoint {
             x: (Fp::ONE - t2) * inv,
             y: (tf + tf) * inv,
         };
-        // Order of `base` divides p + 1 = 2^96 * odd; kill the odd part, then
+        // Order of `base` divides p + 1 = 2^96 * odd. Kill the odd part, then
         // reduce 2^96 -> 2^(log_n + 1).
         let mut g = scalar_mul(base, &ODD_COFACTOR_BE);
         for _ in 0..(96 - log_n - 1) {
@@ -199,9 +164,9 @@ fn generator(log_n: usize) -> CirclePoint {
 
 struct Tables {
     log_n: usize,
-    /// `domain[i] = (2i + 1) * q`; closed under negation via `i <-> n - 1 - i`.
+    /// `domain[i] = (2i + 1) * q`. Closed under negation via `i <-> n - 1 - i`.
     domain: Vec<CirclePoint>,
-    /// `tw[0][k] = y(domain[k])` (k < n/2); `tw[l][k] = pi^{l-1}(x(domain[k]))`
+    /// `tw[0][k] = y(domain[k])` (k < n/2). `tw[l][k] = pi^{l-1}(x(domain[k]))`
     /// (k < 2^{log_n - 1 - l}) for l >= 1. Level `l` serves blocks of size
     /// `2^{log_n - l}`.
     tw: Vec<Vec<Fp>>,
@@ -224,12 +189,12 @@ impl Tables {
         Self::from_domain(log_n, domain)
     }
 
-    /// Builds the twiddle tower for an explicit mirror-paired domain
-    /// (`domain[n-1-i] = -domain[i]`). The recursion only uses the point set
-    /// and the doubling map, so it serves both the canonical domains
-    /// (`Tables::new`) and twin-coset sub-domains such as the data window
-    /// (`weight_window`); the FFT/IFFT roundtrip tests pin correctness per
-    /// domain.
+    /// Builds the twiddle tower for a mirror-paired domain.
+    ///
+    /// The domain satisfies `domain[n-1-i] = -domain[i]`.
+    /// The recursion uses only the point set and doubling map.
+    /// Thus, it supports canonical domains and twin-coset subdomains.
+    /// Round-trip tests check each domain.
     fn from_domain(log_n: usize, domain: Vec<CirclePoint>) -> Self {
         let n = 1usize << log_n;
         debug_assert_eq!(domain.len(), n);
@@ -260,9 +225,9 @@ impl Tables {
     }
 }
 
-/// Per-`log_n` cache of FFT tables, shared by every geometry that uses that
-/// size (e.g. the ℓ=64 product domain 512 and the ℓ=128 message domain 512
-/// coincide, so the tables are built once).
+/// Cache of FFT tables for each `log_n`.
+///
+/// Geometries with the same size share one table.
 fn tables_for(log_n: usize) -> &'static Tables {
     static CACHE: OnceLock<Mutex<HashMap<usize, &'static Tables>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -294,10 +259,11 @@ fn bit_reverse(values: &mut [Fp], log_n: usize) {
     }
 }
 
-/// Forward butterflies for one block: slots `[0, m/2)` hold the sub-FFT of the
-/// even coefficients (values of `f0` on the level grid, natural order), slots
-/// `[m/2, m)` the odd ones (`f1`). Writes `f0(u_k) +/- w_k * f1(u_k)` to slots
-/// `k` and `m-1-k` — the domain's mirror pairing (`u_{m-1-k} = -u_k`).
+/// Applies forward butterflies to one block.
+///
+/// Slots `[0, m/2)` contain the even-coefficient sub-FFT.
+/// Slots `[m/2, m)` contain the odd-coefficient sub-FFT.
+/// The function writes paired results to slots `k` and `m-1-k`.
 fn combine(block: &mut [Fp], tw: &[Fp]) {
     let m = block.len();
     let half = m / 2;
@@ -325,8 +291,9 @@ fn combine(block: &mut [Fp], tw: &[Fp]) {
     }
 }
 
-/// Exact inverse of `combine`, with the 1/2 factors deferred to the final
-/// `n_inv` scaling in `ifft`.
+/// Exact inverse of `combine`.
+///
+/// `ifft` applies the 1/2 factors during its final `n_inv` scaling.
 fn icombine(block: &mut [Fp], inv_tw: &[Fp]) {
     let m = block.len();
     let half = m / 2;
@@ -415,8 +382,9 @@ pub fn circle_ifft_codeword(
 }
 
 /// FFT `coeffs` (universal-basis, zero-padded to `product_domain_len`) onto the
-/// claim-batch product domain. `coeffs.len()` must be ≤ `product_domain_len`
-/// (WO-P1/WO-P6).
+/// claim-batch product domain.
+///
+/// `coeffs.len()` must not exceed `product_domain_len`.
 pub fn circle_product_fft(geom: CircleGeom, coeffs: &[Fp]) -> Result<Vec<Fp>, CircleRsError> {
     if coeffs.len() > geom.product_domain_len {
         return Err(CircleRsError::WrongMessageLength);
@@ -437,8 +405,79 @@ pub fn circle_product_ifft(geom: CircleGeom, mut evals: Vec<Fp>) -> Result<Vec<F
     Ok(evals)
 }
 
+/// Multiplies `factor` by the fixed data-window vanishing polynomial
+/// `Z_W = b_data_slots`.
+///
+/// The result is represented in the universal circle basis and truncated to
+/// `degree_bound`. Multiplication is performed on the disjoint product domain,
+/// where `Z_W` is non-zero at every point.
+pub fn circle_multiply_data_vanishing(
+    geom: CircleGeom,
+    factor: &[Fp],
+    degree_bound: usize,
+) -> Result<Vec<Fp>, CircleRsError> {
+    if degree_bound <= geom.data_slots
+        || degree_bound > geom.product_domain_len
+        || factor.len() > degree_bound - geom.data_slots
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    let mut zw = vec![Fp::ZERO; geom.data_slots + 1];
+    zw[geom.data_slots] = Fp::ONE;
+    let mut product = circle_product_fft(geom, factor)?;
+    let zw_values = circle_product_fft(geom, &zw)?;
+    for (value, zw_value) in product.iter_mut().zip(zw_values) {
+        *value = *value * zw_value;
+    }
+    let coefficients = circle_product_ifft(geom, product)?;
+    if coefficients[degree_bound..]
+        .iter()
+        .any(|&coefficient| coefficient != Fp::ZERO)
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    Ok(coefficients[..degree_bound].to_vec())
+}
+
+/// Divides a polynomial that vanishes on the data window by `Z_W`.
+///
+/// This quotient representation proves that the hidden quadratic response
+/// vanishes at every committed data slot without exposing any response value.
+pub fn circle_divide_data_vanishing(
+    geom: CircleGeom,
+    polynomial: &[Fp],
+    degree_bound: usize,
+) -> Result<Vec<Fp>, CircleRsError> {
+    if degree_bound <= geom.data_slots
+        || degree_bound > geom.product_domain_len
+        || polynomial.len() > degree_bound
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    let quotient_bound = degree_bound - geom.data_slots;
+    let mut zw = vec![Fp::ZERO; geom.data_slots + 1];
+    zw[geom.data_slots] = Fp::ONE;
+    let zw_values = circle_product_fft(geom, &zw)?;
+    if zw_values.contains(&Fp::ZERO) {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    let inverse_zw = Fp::batch_inverse(&zw_values);
+    let mut quotient_values = circle_product_fft(geom, polynomial)?;
+    for (value, inverse) in quotient_values.iter_mut().zip(inverse_zw) {
+        *value = *value * inverse;
+    }
+    let coefficients = circle_product_ifft(geom, quotient_values)?;
+    if coefficients[quotient_bound..]
+        .iter()
+        .any(|&coefficient| coefficient != Fp::ZERO)
+    {
+        return Err(CircleRsError::WrongMessageLength);
+    }
+    Ok(coefficients[..quotient_bound].to_vec())
+}
+
 fn evaluate_at(message_prefix: &[Fp], point: CirclePoint) -> Fp {
-    // pis[k] = pi^{k+1-1}(x) ... pis[0] = x, pis[k] = pi(pis[k-1]); basis for
+    // pis[k] = pi^{k+1-1}(x) ... pis[0] = x, pis[k] = pi(pis[k-1]). Basis for
     // index j uses y^{j_0} and pis[k]^{bit k+1 of j}.
     let pi_count = if message_prefix.len() <= 2 {
         0
@@ -483,30 +522,26 @@ pub fn circle_evaluate(
 }
 
 struct DataWindow {
-    /// FFT tables of the window domain: the CANONICAL `data_slots`-point
-    /// circle domain — disjoint from the message, codeword, and product
-    /// domains (distinct 2-Sylow orders), like those domains are from each
-    /// other. An [`ifft`] of the `data_slots` values yields the unique
-    /// `F_{data_slots}` interpolant in the domain-independent universal
-    /// basis in `O(d log d)` — this is what makes both the prover's per-row
-    /// weight interpolation and the verifier's cold path cheap.
+    /// FFT tables for the canonical `data_slots` window domain.
+    ///
+    /// Its 2-Sylow order differs from all other domain orders.
+    /// [`ifft`] returns the unique universal-basis interpolant in `O(d log d)`.
     tables: &'static Tables,
     /// The window's vanishing polynomial `Z_W = π^(log d − 1)(x)` (the single
     /// universal-basis element `b_{data_slots}`), evaluated on the message
-    /// domain. Row pads are committed as `Z_W · P` with `P` a uniform
-    /// `F_{k−d}` element, so a padded row still agrees with its data on every
-    /// window point (`Z_W` vanishes there) while the pad space keeps full
-    /// rank `k − d` (polynomial multiplication is injective) and every
-    /// codeword-domain evaluation stays masked (`Z_W ≠ 0` off the window by
-    /// the point-order argument; `zw_vanishes_on_window_only` pins both).
+    /// domain. Row pads use `Z_W · P` for uniform `P` in `F_{k−d}`.
+    /// `Z_W` vanishes on each window point.
+    /// Thus, padded rows preserve their window data.
+    /// Multiplication is injective, so the pad space keeps rank `k − d`.
+    /// `Z_W` is nonzero outside the window, so codeword evaluations stay masked.
     zw_on_message: Vec<Fp>,
     /// Per-basis window sums `basis_sums[j] = Σ_{s ∈ window} b_j(s)` for
-    /// `j < product_domain_len` (WO-F). The claim-extraction functional
-    /// [`circle_data_sum`] is `Σ_s Σ_j c_j b_j(s)`; distributing the finite-field
+    /// `j < product_domain_len`. The claim-extraction functional
+    /// [`circle_data_sum`] is `Σ_s Σ_j c_j b_j(s)`. Distributing the finite-field
     /// sum gives `Σ_j c_j · basis_sums[j]`, a single dot product instead of one
     /// full basis re-evaluation per window point. Exact field identity, so the
     /// result is byte-identical to the per-point evaluation. Sized to the product
-    /// domain (≥ the claim bound, so it covers every batch polynomial); longer
+    /// domain (≥ the claim bound, so it covers every batch polynomial). Longer
     /// inputs fall back to the per-point sum.
     basis_sums: Vec<Fp>,
 }
@@ -516,41 +551,53 @@ struct DataWindow {
 /// [`evaluate_at`] over the domain, so `Σ_j c_j·basis_sums[j]` equals
 /// `Σ_s evaluate_at(c, s)` exactly.
 fn build_basis_sums(domain: &[CirclePoint], len: usize) -> Vec<Fp> {
-    let mut sums = vec![Fp::ZERO; len];
     if len == 0 {
-        return sums;
+        return Vec::new();
     }
     let pi_count = if len <= 2 {
         0
     } else {
         usize::BITS as usize - (len - 1).leading_zeros() as usize - 1
     };
-    for &point in domain {
-        let mut pis = Vec::with_capacity(pi_count);
-        if pi_count > 0 {
-            pis.push(point.x);
-            for _ in 1..pi_count {
-                let last = *pis.last().expect("non-empty");
-                pis.push(last.square() + last.square() - Fp::ONE);
-            }
-        }
-        for (j, sum) in sums.iter_mut().enumerate() {
-            let mut basis = if j & 1 == 1 { point.y } else { Fp::ONE };
-            for (k, &pi) in pis.iter().enumerate() {
-                if (j >> (k + 1)) & 1 == 1 {
-                    basis = basis * pi;
+    // Each window point contributes an independent basis vector into `sums`, so
+    // accumulate per-task partial sums in parallel and combine them. Base-field
+    // addition is exact and associative, so the result is bit-identical to the
+    // serial accumulation — the cached table contents are unchanged.
+    let zero = || vec![Fp::ZERO; len];
+    domain
+        .par_iter()
+        .fold(zero, |mut sums, &point| {
+            let mut pis = Vec::with_capacity(pi_count);
+            if pi_count > 0 {
+                pis.push(point.x);
+                for _ in 1..pi_count {
+                    let last = *pis.last().expect("non-empty");
+                    pis.push(last.square() + last.square() - Fp::ONE);
                 }
             }
-            *sum = *sum + basis;
-        }
-    }
-    sums
+            for (j, sum) in sums.iter_mut().enumerate() {
+                let mut basis = if j & 1 == 1 { point.y } else { Fp::ONE };
+                for (k, &pi) in pis.iter().enumerate() {
+                    if (j >> (k + 1)) & 1 == 1 {
+                        basis = basis * pi;
+                    }
+                }
+                *sum = *sum + basis;
+            }
+            sums
+        })
+        .reduce(zero, |mut left, right| {
+            for (dst, src) in left.iter_mut().zip(right) {
+                *dst = *dst + src;
+            }
+            left
+        })
 }
 
 fn build_data_window(geom: CircleGeom) -> DataWindow {
-    // Setup asserts (Q-025): all four domains are pairwise disjoint because
-    // every point of a canonical domain has the exact order of its generator
-    // (odd multiples), and the four log sizes differ.
+    // Confirm that all four domains are disjoint.
+    // Each canonical point has the exact generator order.
+    // The four domains have different log sizes.
     assert_ne!(
         geom.message_log_n(),
         geom.codeword_log_n(),
@@ -573,8 +620,9 @@ fn build_data_window(geom: CircleGeom) -> DataWindow {
         "product domain must exceed the claim bound"
     );
     let tables = tables_for(window_log_n);
-    // Z_W(x) = π^(log d − 1)(x): x(2^(log d − 1)·P) is the x-coordinate of an
-    // exact-order-4 point for every window point P (order 2d), i.e. 0.
+    // Z_W(x) = π^(log d − 1)(x).
+    // Each window point P has order 2d.
+    // Thus, x(2^(log d − 1)·P) is the zero coordinate of an order-4 point.
     let zw_on_message = message_tables(geom)
         .domain
         .iter()
@@ -603,12 +651,23 @@ fn data_window(geom: CircleGeom) -> &'static DataWindow {
         .or_insert_with(|| Box::leak(Box::new(build_data_window(geom))))
 }
 
-/// Encodes one witness row: the unique `F_{data_slots}` interpolant through
-/// `(window point c, data[c])`, masked by `Z_W · P` with `P` a uniform
-/// `F_{k−d}` pad element (`k − d` draws — the per-row ZK pad budget). The row
-/// agrees with the data on every window point and every off-window
-/// evaluation is fully masked. Returns the row's `row_message_len`
-/// coefficients and its codeword.
+/// Eagerly builds and caches the data-window tables for `geom`.
+///
+/// Call this from a single-threaded context *before* parallel row encoding.
+/// Otherwise the first `circle_encode_row` inside a `par_chunks` builds the
+/// tables while every other rayon worker blocks on the cache `Mutex`, leaving
+/// the one-time build effectively single-threaded.
+pub fn warm_circle_tables(geom: CircleGeom) {
+    let _ = data_window(geom);
+}
+
+/// Encodes one masked witness row.
+///
+/// The row interpolates `(window point c, data[c])`.
+/// It adds `Z_W · P` for a uniform `F_{k−d}` pad.
+/// The row preserves all window data.
+/// The pad masks each off-window evaluation.
+/// Returns `row_message_len` coefficients and the codeword.
 pub fn circle_encode_row(
     geom: CircleGeom,
     data: &[Fp],
@@ -643,11 +702,11 @@ pub fn circle_encode_row(
     Ok((coefficients, codeword))
 }
 
-/// The fixed claim-extraction functional: the sum of the function's values
-/// over the data points (Q-025 §3).
+/// Returns the sum of the function values over the fixed data points.
 ///
-/// WO-F: `Σ_s Σ_j c_j b_j(s) = Σ_j c_j (Σ_s b_j(s))` — a dot product against the
-/// precomputed [`DataWindow::basis_sums`] instead of one full basis
+/// `Σ_s Σ_j c_j b_j(s) = Σ_j c_j (Σ_s b_j(s))`.
+/// This identity gives a dot product against the
+/// precomputed `DataWindow::basis_sums` instead of one full basis
 /// re-evaluation per window point (byte-identical, an exact finite-field
 /// identity). Inputs longer than the precomputed table fall back to the direct
 /// per-point sum.
@@ -665,12 +724,11 @@ pub fn circle_data_sum(geom: CircleGeom, message_prefix: &[Fp]) -> Fp {
     }
 }
 
-/// The unique `F_{data_slots}` interpolant through `(data point c, weights[c])`,
-/// as `data_slots` universal-basis coefficients (Q-025 §1/§2). The window is
-/// a twin-coset circle-FFT domain, so this is an `O(d log d)` IFFT — cheap
-/// enough to run per row on the prover and per weight vector on the verifier
-/// (the universal basis is domain-independent, so the recovered coefficients
-/// evaluate consistently on the codeword domain).
+/// Returns the interpolant through `(data point c, weights[c])`.
+///
+/// The result contains `data_slots` universal-basis coefficients.
+/// A twin-coset IFFT computes it in `O(d log d)`.
+/// The coefficients evaluate consistently on the codeword domain.
 pub fn circle_weight_coeffs(geom: CircleGeom, weights: &[Fp]) -> Result<Vec<Fp>, CircleRsError> {
     if weights.len() != geom.data_slots {
         return Err(CircleRsError::WrongMessageLength);
@@ -705,15 +763,12 @@ mod tests {
         (0..len).map(|_| rand_fp(state)).collect()
     }
 
-    const GEOMS: [CircleGeom; 3] = [CIRCLE_GEOM_L64, CIRCLE_GEOM_L128, CIRCLE_GEOM_L256];
+    const GEOMS: [CircleGeom; 1] = [PRODUCT_CIRCLE_GEOM];
 
-    /// Ground truth for the twin-coset window IFFT: take random
-    /// `F_{data_slots}` universal-basis coefficients, evaluate them directly
-    /// (`evaluate_at`, domain-independent) at every window point, and check
-    /// the window IFFT recovers exactly those coefficients. This pins both
-    /// the window's FFT-domain validity and the universal-basis consistency
-    /// that `circle_weight_coeffs` and the verifier's weight evaluation rely
-    /// on.
+    /// Confirms that the twin-coset IFFT recovers random basis coefficients.
+    ///
+    /// Direct evaluation supplies the window values.
+    /// This test checks the FFT domain and universal-basis consistency.
     #[test]
     fn window_ifft_matches_direct_evaluation() {
         let mut state = 0xD1CEu64;
@@ -729,9 +784,9 @@ mod tests {
         }
     }
 
-    /// `Z_W = b_{data_slots}` vanishes on every window point (so masked rows
-    /// still interpolate their data there) and on NO codeword point (so every
-    /// opened column stays masked by the pads).
+    /// Confirms that `Z_W = b_{data_slots}` vanishes only on window points.
+    ///
+    /// Thus, rows preserve window data and mask every open codeword column.
     #[test]
     fn zw_vanishes_on_window_only() {
         for geom in GEOMS {
@@ -752,6 +807,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn data_window_vanishing_quotient_roundtrips_at_quadratic_bound() {
+        let geom = PRODUCT_CIRCLE_GEOM;
+        let degree_bound = 2 * geom.row_message_len + 2;
+        let quotient_bound = degree_bound - geom.data_slots;
+        let mut state = 0x5155_4F54u64;
+        let factor = rand_row(&mut state, quotient_bound);
+
+        let product =
+            circle_multiply_data_vanishing(geom, &factor, degree_bound).expect("Z_W product");
+        assert_eq!(product.len(), degree_bound);
+        for (index, &point) in data_window(geom).tables.domain.iter().enumerate() {
+            assert_eq!(
+                evaluate_at(&product, point),
+                Fp::ZERO,
+                "Z_W product did not vanish at data slot {index}"
+            );
+        }
+        assert_eq!(
+            circle_divide_data_vanishing(geom, &product, degree_bound).expect("exact Z_W quotient"),
+            factor
+        );
+
+        let mut non_multiple = product;
+        non_multiple[0] = non_multiple[0] + Fp::ONE;
+        assert_eq!(
+            circle_divide_data_vanishing(geom, &non_multiple, degree_bound),
+            Err(CircleRsError::WrongMessageLength)
+        );
     }
 
     #[test]
@@ -804,9 +890,10 @@ mod tests {
         }
     }
 
-    /// Q-025 basis-consistency gate: message-domain IFFT coefficients must be
-    /// systematic (reproduce the data at the window) AND evaluate consistently
-    /// through the codeword-domain FFT and the direct basis evaluation.
+    /// Confirms basis consistency.
+    ///
+    /// IFFT coefficients must reproduce window data.
+    /// Codeword FFT and direct basis evaluation must agree.
     #[test]
     fn row_encode_is_systematic_at_data_window_and_basis_consistent() {
         let mut state = 21u64;
@@ -873,10 +960,9 @@ mod tests {
         }
     }
 
-    /// The product-domain FFT must agree with the codeword-domain encoding on
-    /// the shared coefficients: an IFFT_product ∘ (pointwise product on the
-    /// product domain) recovers the same F_bound coefficients as the codeword
-    /// route (basis is domain-independent, WO-P1/P6).
+    /// Confirms that product-domain and codeword-domain coefficients agree.
+    ///
+    /// The basis is domain independent.
     #[test]
     fn product_domain_matches_codeword_route() {
         let mut state = 41u64;
@@ -929,8 +1015,9 @@ mod tests {
         }
     }
 
-    /// WO-F: the `basis_sums` dot product must be byte-identical to the direct
-    /// per-window-point evaluation, and the >len fallback must agree too.
+    /// Confirms that `basis_sums` matches direct window evaluation.
+    ///
+    /// The fallback for longer inputs must also match.
     #[test]
     fn data_sum_fast_path_matches_direct_evaluation() {
         let mut state = 0x5A5Au64;
@@ -963,7 +1050,7 @@ mod tests {
 
     #[test]
     fn encode_rejects_bad_lengths() {
-        let geom = CIRCLE_GEOM_L64;
+        let geom = PRODUCT_CIRCLE_GEOM;
         assert_eq!(
             circle_encode(geom, &[], 0),
             Err(CircleRsError::EmptyMessage)
@@ -974,6 +1061,6 @@ mod tests {
         );
         assert!(circle_evaluate(geom, &[Fp::ONE], geom.codeword_len).is_err());
         assert!(circle_weight_coeffs(geom, &[Fp::ONE; 3]).is_err());
-        assert!(circle_encode_row(geom, &[Fp::ONE; 65], || Fp::ZERO).is_err());
+        assert!(circle_encode_row(geom, &vec![Fp::ONE; geom.data_slots + 1], || Fp::ZERO).is_err());
     }
 }

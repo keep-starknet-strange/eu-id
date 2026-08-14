@@ -1,6 +1,6 @@
 //! Minimal fixed-width 512-bit unsigned integer helpers for the hinted-mul
 //! witness builder (`a·b_half` reaches 2^390, beyond `U256`). Little-endian
-//! `[u64; 8]` words; every operation asserts it cannot silently overflow.
+//! `[u64; 8]` words. Every operation asserts it cannot silently overflow.
 
 /// Little-endian 512-bit unsigned integer.
 pub type U512 = [u64; 8];
@@ -8,7 +8,7 @@ pub type U512 = [u64; 8];
 pub const U512_ZERO: U512 = [0u64; 8];
 
 /// Builds a `U512` as `Σ limbs[i] · 2^(13·i)`. Limb values may exceed 13 bits
-/// (used for un-normalized limb sums like `m1 + X^10·m2`); the accumulation is
+/// (used for un-normalized limb sums like `m1 + X^10·m2`). The accumulation is
 /// exact. Panics if the value would exceed 512 bits.
 pub fn u512_from_limbs13(limbs: &[u32]) -> U512 {
     let mut out = U512_ZERO;

@@ -1,14 +1,11 @@
 import SwiftUI
 
-// eu-id mobile benchmark harness. Drives the Rust provers via the
-// eu_id_bench_identity / eu_id_bench_sha256 / eu_id_bench_p256 C ABI and shows
-// prove/verify time and peak footprint, in a tab per workload: the combined,
-// cross-bound identity proof (the headline) plus its standalone SHA-256 and
-// P-256 ECDSA components.
+// Runs the eu-id mobile benchmarks through the Rust C ABI.
+// Shows the proof time, verification time, and peak memory for each workload.
 @main
 struct EuIdBenchApp: App {
     init() {
-        // Scripted/CI path: `--autorun` runs every case once and logs, no taps.
+        // Use `--autorun` to run and log each case without user input.
         if HeadlessRunner.isEnabled {
             HeadlessRunner.runAllAndLog()
         }

@@ -1,11 +1,12 @@
+use eu_id_ec_coprocessor::circle_fft::{
+    circle_encode, circle_evaluate, circle_ifft_codeword, PRODUCT_CIRCLE_GEOM,
+};
 use eu_id_ec_coprocessor::ligero::{
-    commit_witness, v1_ligero_params, v2_ligero_params, v2_ligero_params_b,
-    verify_input_claims_from_systematic_openings_with_len, verify_openings, LigeroCode,
-    LigeroParams,
+    commit_witness, product_circle_params, verify_claim_batch, verify_openings, LigeroLinearClaim,
+    LigeroParams, LIGERO_AUXILIARY_ROW_COUNT,
 };
 use eu_id_ec_coprocessor::merkle::{commit_columns, verify_column, ColumnOpening};
-use eu_id_ec_coprocessor::rs::{is_codeword, rs_encode};
-use eu_id_ec_coprocessor::sumcheck::InputClaims;
+use eu_id_ec_coprocessor::sumcheck::CircuitPads;
 use eu_id_ec_coprocessor::{Circuit, CoprocessorChannel, Fp, Layer, Mle, QuadTerm};
 
 fn term(out: u32, l: u32, r: u32, coeff: u64) -> QuadTerm {
@@ -17,34 +18,49 @@ fn term(out: u32, l: u32, r: u32, coeff: u64) -> QuadTerm {
     }
 }
 
-#[test]
-fn rs_encoding_preserves_message_prefix() {
-    let row = (0u64..8).map(Fp::from_u64).collect::<Vec<_>>();
-    let encoded = rs_encode(&row, 16).unwrap();
-
-    assert_eq!(&encoded[..row.len()], row.as_slice());
-    assert!(is_codeword(&encoded, row.len()).unwrap());
+fn opening_indices(params: LigeroParams) -> Vec<usize> {
+    (0..params.openings)
+        .map(|index| (index * 19 + 3) % params.codeword_len)
+        .collect()
 }
 
 #[test]
-fn rs_encoding_matches_known_quadratic_values() {
+fn circle_encoding_round_trips_coefficients() {
+    let row = (0u64..8).map(Fp::from_u64).collect::<Vec<_>>();
+    let encoded = circle_encode(PRODUCT_CIRCLE_GEOM, &row, row.len()).unwrap();
+    let recovered = circle_ifft_codeword(PRODUCT_CIRCLE_GEOM, encoded).unwrap();
+
+    assert_eq!(&recovered[..row.len()], row.as_slice());
+    assert!(recovered[row.len()..]
+        .iter()
+        .all(|&value| value == Fp::ZERO));
+}
+
+#[test]
+fn circle_encoding_matches_independent_point_evaluation() {
     let row = (0u64..4)
         .map(|x| Fp::from_u64(x * x + 2 * x + 3))
         .collect::<Vec<_>>();
-    let encoded = rs_encode(&row, 8).unwrap();
+    let encoded = circle_encode(PRODUCT_CIRCLE_GEOM, &row, row.len()).unwrap();
 
-    for x in 0u64..8 {
-        assert_eq!(encoded[x as usize], Fp::from_u64(x * x + 2 * x + 3));
+    for index in [0, 1, 17, 257, 4095] {
+        assert_eq!(
+            encoded[index],
+            circle_evaluate(PRODUCT_CIRCLE_GEOM, &row, index).unwrap()
+        );
     }
 }
 
 #[test]
-fn corrupt_rs_symbol_rejects_codeword_check() {
+fn corrupt_circle_symbol_rejects_degree_bound_check() {
     let row = (10u64..18).map(Fp::from_u64).collect::<Vec<_>>();
-    let mut encoded = rs_encode(&row, 16).unwrap();
+    let mut encoded = circle_encode(PRODUCT_CIRCLE_GEOM, &row, row.len()).unwrap();
     encoded[12] = encoded[12] + Fp::ONE;
+    let recovered = circle_ifft_codeword(PRODUCT_CIRCLE_GEOM, encoded).unwrap();
 
-    assert!(!is_codeword(&encoded, row.len()).unwrap());
+    assert!(recovered[row.len()..]
+        .iter()
+        .any(|&value| value != Fp::ZERO));
 }
 
 #[test]
@@ -79,20 +95,13 @@ fn merkle_column_opening_accepts_and_corruption_rejects() {
 
 #[test]
 fn ligero_commit_open_verify_accepts_known_columns() {
-    let params = LigeroParams {
-        row_len: 4,
-        degree_bound: 7,
-        codeword_len: 16,
-        openings: 3,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+    let params = product_circle_params();
     let values = (1u64..=10).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
-    let indices = [0usize, 3, 7];
+    let indices = opening_indices(params);
     let openings = commitment.open_columns(&indices).unwrap();
-    assert_eq!(openings[0].column.len(), 5);
-    let gamma = [Fp::from_u64(2), Fp::from_u64(3), Fp::from_u64(5)];
+    assert_eq!(openings[0].column.len(), 1 + LIGERO_AUXILIARY_ROW_COUNT);
+    let gamma = [Fp::from_u64(2)];
     let claim = commitment.proximity_claim(&gamma).unwrap();
 
     assert!(verify_openings(commitment.root(), params, &openings, &claim, &gamma).unwrap());
@@ -100,17 +109,10 @@ fn ligero_commit_open_verify_accepts_known_columns() {
 
 #[test]
 fn ligero_proximity_claim_sends_message_row_not_full_codeword() {
-    let params = LigeroParams {
-        row_len: 4,
-        degree_bound: 7,
-        codeword_len: 16,
-        openings: 3,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+    let params = product_circle_params();
     let values = (1u64..=10).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
-    let gamma = [Fp::from_u64(2), Fp::from_u64(3), Fp::from_u64(5)];
+    let gamma = [Fp::from_u64(2)];
     let claim = commitment.proximity_claim(&gamma).unwrap();
 
     assert_eq!(claim.combined_row.len(), params.degree_bound);
@@ -118,18 +120,11 @@ fn ligero_proximity_claim_sends_message_row_not_full_codeword() {
 
 #[test]
 fn ligero_opening_verifier_rejects_corrupt_combined_row() {
-    let params = LigeroParams {
-        row_len: 4,
-        degree_bound: 6,
-        codeword_len: 16,
-        openings: 2,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+    let params = product_circle_params();
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
-    let openings = commitment.open_columns(&[1usize, 6]).unwrap();
-    let gamma = [Fp::from_u64(7), Fp::from_u64(11)];
+    let openings = commitment.open_columns(&opening_indices(params)).unwrap();
+    let gamma = [Fp::from_u64(7)];
     let mut claim = commitment.proximity_claim(&gamma).unwrap();
     claim.combined_row[0] = claim.combined_row[0] + Fp::ONE;
 
@@ -138,16 +133,10 @@ fn ligero_opening_verifier_rejects_corrupt_combined_row() {
 
 #[test]
 fn ligero_proximity_claim_is_masked_for_same_witness() {
-    let params = LigeroParams {
-        row_len: 4,
-        degree_bound: 7,
-        codeword_len: 16,
-        openings: 2,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+    let params = product_circle_params();
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
-    let gamma = [Fp::from_u64(7), Fp::from_u64(11)];
+    let gamma = [Fp::from_u64(7)];
+    let indices = opening_indices(params);
 
     let first = commit_witness(&values, params).unwrap();
     let second = commit_witness(&values, params).unwrap();
@@ -159,7 +148,7 @@ fn ligero_proximity_claim_is_masked_for_same_witness() {
     assert!(verify_openings(
         first.root(),
         params,
-        &first.open_columns(&[1usize, 6]).unwrap(),
+        &first.open_columns(&indices).unwrap(),
         &first_claim,
         &gamma
     )
@@ -167,7 +156,7 @@ fn ligero_proximity_claim_is_masked_for_same_witness() {
     assert!(verify_openings(
         second.root(),
         params,
-        &second.open_columns(&[1usize, 6]).unwrap(),
+        &second.open_columns(&indices).unwrap(),
         &second_claim,
         &gamma
     )
@@ -175,44 +164,37 @@ fn ligero_proximity_claim_is_masked_for_same_witness() {
 }
 
 #[test]
-fn systematic_openings_verify_bl2_input_claims_against_committed_witness() {
-    let params = LigeroParams {
-        row_len: 4,
-        degree_bound: 4,
-        codeword_len: 16,
-        openings: 0,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+fn circle_claim_batch_verifies_mle_claims_against_committed_witness() {
+    let params = product_circle_params();
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
     let commitment = commit_witness(&values, params).unwrap();
-    let openings = commitment.open_systematic_columns().unwrap();
-    let mle = Mle::new(values);
-    let claims = InputClaims {
-        points: [
-            vec![Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)],
-            vec![Fp::from_u64(11), Fp::from_u64(13), Fp::from_u64(17)],
-        ],
-        values: [
-            mle.eval_at(&[Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)])
-                .unwrap(),
-            mle.eval_at(&[Fp::from_u64(11), Fp::from_u64(13), Fp::from_u64(17)])
-                .unwrap(),
-        ],
-    };
+    let openings = commitment.open_columns(&opening_indices(params)).unwrap();
+    let mle = Mle::new(values.clone());
+    let claims = [
+        vec![Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)],
+        vec![Fp::from_u64(11), Fp::from_u64(13), Fp::from_u64(17)],
+    ]
+    .map(|point| {
+        let value = mle.eval_at(&point).unwrap();
+        LigeroLinearClaim::mle(0, values.len(), point, value)
+    });
+    let gamma = [Fp::from_u64(19), Fp::from_u64(23)];
+    let batch = commitment.claim_batch(&claims, &gamma).unwrap();
 
-    assert!(verify_input_claims_from_systematic_openings_with_len(
+    assert!(verify_claim_batch(
         commitment.root(),
         params,
+        values.len(),
         &openings,
+        &batch,
         &claims,
-        8,
+        &gamma,
     )
     .unwrap());
 }
 
 #[test]
-fn systematic_openings_accept_bl2_sumcheck_input_claims() {
+fn circle_claim_batch_does_not_treat_masked_sumcheck_claims_as_raw_witness_claims() {
     let circuit = Circuit::new(vec![Layer::new(
         1,
         2,
@@ -222,19 +204,14 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
     .unwrap();
     let input_layer = vec![Fp::ZERO, Fp::from_u64(7), Fp::ZERO, Fp::from_u64(11)];
     let witness = circuit.evaluate_input(input_layer.clone()).unwrap();
-    let params = LigeroParams {
-        row_len: 2,
-        degree_bound: 2,
-        codeword_len: 8,
-        openings: 0,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+    let params = product_circle_params();
     let commitment = commit_witness(&input_layer, params).unwrap();
+    let pads = CircuitPads::fresh(&circuit);
     let mut prover_channel = CoprocessorChannel::from_seed([0u8; 32], b"test");
     let proof = eu_id_ec_coprocessor::sumcheck::prove_circuit(
         &circuit,
         &witness,
+        &pads,
         commitment.root(),
         &mut prover_channel,
     )
@@ -248,86 +225,72 @@ fn systematic_openings_accept_bl2_sumcheck_input_claims() {
     )
     .unwrap();
 
-    assert!(verify_input_claims_from_systematic_openings_with_len(
+    let raw_mle = Mle::new(input_layer.clone());
+    assert!(
+        claims
+            .input_claims
+            .points
+            .iter()
+            .zip(claims.input_claims.values)
+            .any(|(point, masked)| raw_mle.eval_at(point).unwrap() != masked),
+        "sumcheck input claims must remain masked instead of exposing raw witness evaluations"
+    );
+    let direct_claims = claims
+        .input_claims
+        .points
+        .iter()
+        .cloned()
+        .zip(claims.input_claims.values)
+        .map(|(point, value)| LigeroLinearClaim::mle(0, input_layer.len(), point, value))
+        .collect::<Vec<_>>();
+    let gamma = [Fp::from_u64(19), Fp::from_u64(23)];
+    let batch = commitment.claim_batch(&direct_claims, &gamma).unwrap();
+    assert!(!verify_claim_batch(
         commitment.root(),
         params,
-        &commitment.open_systematic_columns().unwrap(),
-        &claims,
         input_layer.len(),
+        &commitment.open_columns(&opening_indices(params)).unwrap(),
+        &batch,
+        &direct_claims,
+        &gamma,
     )
     .unwrap());
 }
 
 #[test]
-fn systematic_openings_reject_bad_input_claim_and_corrupt_column() {
-    let params = LigeroParams {
-        row_len: 4,
-        degree_bound: 4,
-        codeword_len: 16,
-        openings: 0,
-        proximity_radius: 0,
-        code: LigeroCode::Rs,
-    };
+fn circle_claim_batch_rejects_bad_input_claim_and_corrupt_column() {
+    let params = product_circle_params();
     let values = (1u64..=8).map(Fp::from_u64).collect::<Vec<_>>();
-    let commitment = commit_witness(&values.clone(), params).unwrap();
-    let openings = commitment.open_systematic_columns().unwrap();
-    let mle = Mle::new(values);
-    let mut claims = InputClaims {
-        points: [
-            vec![Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)],
-            vec![Fp::from_u64(11), Fp::from_u64(13), Fp::from_u64(17)],
-        ],
-        values: [
-            mle.eval_at(&[Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)])
-                .unwrap(),
-            mle.eval_at(&[Fp::from_u64(11), Fp::from_u64(13), Fp::from_u64(17)])
-                .unwrap(),
-        ],
-    };
-    claims.values[0] = claims.values[0] + Fp::ONE;
-    assert!(!verify_input_claims_from_systematic_openings_with_len(
+    let commitment = commit_witness(&values, params).unwrap();
+    let mut openings = commitment.open_columns(&opening_indices(params)).unwrap();
+    let point = vec![Fp::from_u64(3), Fp::from_u64(5), Fp::from_u64(7)];
+    let value = Mle::new(values.clone()).eval_at(&point).unwrap();
+    let claims = [LigeroLinearClaim::mle(0, values.len(), point, value)];
+    let gamma = [Fp::from_u64(19)];
+    let batch = commitment.claim_batch(&claims, &gamma).unwrap();
+
+    let mut bad_claims = claims.clone();
+    bad_claims[0].value = bad_claims[0].value + Fp::ONE;
+    assert!(!verify_claim_batch(
         commitment.root(),
         params,
+        values.len(),
         &openings,
-        &claims,
-        8,
+        &batch,
+        &bad_claims,
+        &gamma,
     )
     .unwrap());
 
-    let mut corrupt_openings = openings;
-    corrupt_openings[0].column[0] = corrupt_openings[0].column[0] + Fp::ONE;
-    assert!(!verify_input_claims_from_systematic_openings_with_len(
+    openings[0].column[0] = openings[0].column[0] + Fp::ONE;
+    assert!(!verify_claim_batch(
         commitment.root(),
         params,
-        &corrupt_openings,
+        values.len(),
+        &openings,
+        &batch,
         &claims,
-        8,
+        &gamma,
     )
     .unwrap());
-}
-
-#[test]
-fn q007_v2_ligero_params_meet_zk_soundness_bounds() {
-    let legacy = v1_ligero_params();
-    assert!(legacy.validate().is_err());
-
-    let option_a = v2_ligero_params();
-    assert_eq!(option_a.row_len, 64);
-    assert_eq!(option_a.degree_bound, 234);
-    assert_eq!(option_a.codeword_len, 2048);
-    assert_eq!(option_a.openings, 170);
-    assert_eq!(option_a.proximity_radius, 875);
-    option_a.validate().unwrap();
-    assert!(option_a.degree_bound >= option_a.row_len + option_a.openings);
-    assert!(option_a.soundness_error() <= 2f64.powi(-128));
-
-    let option_b = v2_ligero_params_b();
-    assert_eq!(option_b.row_len, 64);
-    assert_eq!(option_b.degree_bound, 289);
-    assert_eq!(option_b.codeword_len, 1024);
-    assert_eq!(option_b.openings, 225);
-    assert_eq!(option_b.proximity_radius, 335);
-    option_b.validate().unwrap();
-    assert!(option_b.degree_bound >= option_b.row_len + option_b.openings);
-    assert!(option_b.soundness_error() <= 2f64.powi(-128));
 }

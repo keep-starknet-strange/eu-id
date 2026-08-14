@@ -124,6 +124,7 @@ use crate::public_inputs::{
 use crate::public_key_check::{PublicKeyOnCurveClaim, PublicKeyOnCurveError};
 use crate::public_key_curve_air::{
     gen_slice_base_trace_without_range13_and_signed_carry_provider as gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider,
+    gen_slice_interaction_trace_for_final_check_hint_without_range13_and_signed_carry_provider as gen_hint_point_on_curve_interaction_trace_without_range13_and_signed_carry_provider,
     gen_slice_interaction_trace_without_range13_and_signed_carry_provider as gen_public_key_on_curve_interaction_trace_without_range13_and_signed_carry_provider,
     gen_slice_preprocessed_trace as gen_public_key_on_curve_preprocessed_trace,
     slice_range13_uses as public_key_on_curve_range13_uses,
@@ -210,6 +211,9 @@ pub struct P256ProofClaim {
     pub projective_ec_trace: ProjectiveEcTraceClaim,
     pub projective_rcb_air_trace: ProjectiveRcbAirTraceClaim,
     pub hinted_mul_trace: HintedMulTraceClaim,
+    /// One in-AIR P-256 membership proof for each active signed fake-GLV hint
+    /// point `R`, bound to the prepared table's canonical `DoubleR` tuple.
+    pub hint_points_on_curve: Vec<PublicKeyCurveSliceClaim>,
     pub final_check: FinalEcdsaCheckClaim,
     /// In-AIR EC addition `S = R_1 + R_2` binding `r_x = x(S)`. Single signature.
     pub final_add: FinalAddClaim,
@@ -283,6 +287,18 @@ impl P256ProofClaim {
             public_key_curve_slice.hinted_source_offset,
             false,
         )?;
+        let hint_points_on_curve = hint_point_curve_slices_from_table(
+            &prepared_table,
+            public_key_curve_slice.hinted_source_offset
+                + public_key_curve_slice.mul_trace.rows.len() as u32,
+        )?;
+        for hint_point in &hint_points_on_curve {
+            hinted_mul_trace.extend_from_projective_rcb(
+                &hint_point.mul_trace,
+                hint_point.hinted_source_offset,
+                false,
+            )?;
+        }
         let prepared_use_counts =
             PreparedPointUseCountClaim::from_selector_claim(&fake_glv_selectors)?;
         let prepared_trace = prepared_table.prepared_point_trace(&prepared_use_counts)?;
@@ -302,6 +318,7 @@ impl P256ProofClaim {
             projective_ec_trace,
             projective_rcb_air_trace,
             hinted_mul_trace,
+            hint_points_on_curve,
             final_check,
             final_add,
             prepared_use_counts,
@@ -323,15 +340,11 @@ impl P256ProofClaim {
         Self::from_inputs_with_hints(inputs, hints)
     }
 
-    /// Production builder: Garaga-style fake-GLV decomposition for any
-    /// scalar in `[0, n)`. Used for all real ECDSA signatures.
+    /// Builds a proof claim for any scalar in `[0, n)`.
     ///
-    /// The AIR enforces the *general* fake-GLV constraints — `k · s2_abs ≡
-    /// ±s1 (mod n)` proved via `ScalarModMul` external limb links
-    /// (`constrain_fake_glv_scalar_general`) — so this builder produces a
-    /// witness `prove_current_air_monolithic` accepts for any signature,
-    /// including full-width `u1`/`u2`. Real `p256`-crate signatures prove and
-    /// verify end-to-end (`air_core_p256_proves_and_verifies_real_signature`).
+    /// Garaga decomposition supplies bounded fake-GLV hints.
+    /// ScalarModMul constraints prove `k · s2_abs ≡ ±s1 (mod n)`.
+    /// The resulting witness supports full-width `u1` and `u2`.
     pub fn from_inputs_with_arbitrary_fake_glv_hints(
         inputs: &[EcdsaVerifyInput],
     ) -> Result<Self, P256ProofError> {
@@ -346,16 +359,11 @@ impl P256ProofClaim {
         Self::from_inputs_with_hints(inputs, hints)
     }
 
-    /// Test-only: build a globally-shaped proof claim in which the prepared
-    /// table + fake-GLV chain for `override_cert_index` are rebuilt from an
-    /// injected hint point `R'` (`!= ±u·base`), with every R-derived artifact
-    /// (EC trace, projective trace, rcb-air trace, prepared-point trace)
-    /// cascaded consistently from `R'`. The `final_check` is taken from the
-    /// true-R build (its `r_x`/`expected_r` columns bind to the public `r`
-    /// independently of the chain), so the public-input relation still
-    /// balances. The chain's `final_acc == r3` native gate is *not* asserted
-    /// during construction — the experiment then asks whether the monolithic
-    /// AIR constraints reject this wrong-`R'` witness.
+    /// Builds a test claim with an incorrect hint point for one certificate.
+    ///
+    /// The helper rebuilds all artifacts derived from the changed point.
+    /// It keeps the valid final-check claim.
+    /// Tests use this claim to confirm rejection by the monolithic AIR.
     #[cfg(test)]
     pub(crate) fn from_inputs_with_wrong_r_for_cert(
         inputs: &[EcdsaVerifyInput],
@@ -410,6 +418,20 @@ impl P256ProofClaim {
             public_key_curve_slice.hinted_source_offset,
             false,
         )?;
+        let mut hint_points_on_curve = base.hint_points_on_curve.clone();
+        if let Some(hint_point) = hint_points_on_curve.iter_mut().find(|claim| {
+            claim.sig_id == base.cert_inputs.rows[override_cert_index].sig_id
+                && claim.cert_id == base.cert_inputs.rows[override_cert_index].cert_id
+        }) {
+            hint_point.override_point_for_test(&r_override)?;
+        }
+        for hint_point in &hint_points_on_curve {
+            hinted_mul_trace.extend_from_projective_rcb(
+                &hint_point.mul_trace,
+                hint_point.hinted_source_offset,
+                false,
+            )?;
+        }
         let prepared_trace = prepared_table.prepared_point_trace(&base.prepared_use_counts)?;
 
         Ok(Self {
@@ -427,6 +449,7 @@ impl P256ProofClaim {
             projective_ec_trace,
             projective_rcb_air_trace,
             hinted_mul_trace,
+            hint_points_on_curve,
             final_check: base.final_check,
             final_add: base.final_add,
             prepared_use_counts: base.prepared_use_counts,
@@ -461,6 +484,9 @@ impl P256ProofClaim {
             .verify_against_projective_trace(&self.projective_ec_trace)?;
 
         self.hinted_mul_trace.verify()?;
+        for hint_point in &self.hint_points_on_curve {
+            hint_point.verify()?;
+        }
         self.final_check.verify()?;
         self.prepared_use_counts.verify()?;
         self.prepared_table
@@ -503,6 +529,7 @@ pub struct P256CurrentAirProofClaim {
     pub prepared_point_range7: RangeCheckClaim,
     pub final_check: FinalCheckAirProofClaim,
     pub public_key_on_curve: PublicKeyCurveSliceProofClaim,
+    pub hint_points_on_curve: Vec<PublicKeyCurveSliceProofClaim>,
     pub hinted_mul: HintedMulProofClaim,
     pub final_add: FinalAddProofClaim,
 }
@@ -561,6 +588,11 @@ impl P256CurrentAirProofClaim {
             public_key_on_curve: PublicKeyCurveSliceProofClaim::from_claim(
                 &public_key_on_curve_slice_claim(claim).expect("verified public key lies on curve"),
             ),
+            hint_points_on_curve: claim
+                .hint_points_on_curve
+                .iter()
+                .map(PublicKeyCurveSliceProofClaim::from_claim)
+                .collect(),
             hinted_mul: HintedMulProofClaim::from_trace(&claim.hinted_mul_trace),
             final_add: FinalAddProofClaim::from_claim(&claim.final_add),
         }
@@ -585,6 +617,10 @@ impl P256CurrentAirProofClaim {
         self.prepared_point_range7.mix_into(channel);
         self.final_check.mix_into(channel);
         self.public_key_on_curve.mix_into(channel);
+        channel.mix_u64(self.hint_points_on_curve.len() as u64);
+        for hint_point in &self.hint_points_on_curve {
+            hint_point.mix_into(channel);
+        }
         self.hinted_mul.mix_into(channel);
         self.final_add.mix_into(channel);
     }
@@ -648,6 +684,9 @@ impl P256CurrentAirProofClaim {
             &mut ids,
             self.public_key_on_curve.preprocessed_column_ids(),
         );
+        for hint_point in &self.hint_points_on_curve {
+            append_unique_preprocessed_ids(&mut ids, hint_point.preprocessed_column_ids());
+        }
         append_unique_preprocessed_ids(&mut ids, self.hinted_mul.preprocessed_column_ids());
         append_unique_preprocessed_ids(&mut ids, self.final_add.preprocessed_column_ids());
         ids
@@ -766,6 +805,7 @@ pub struct P256CurrentAirInteractionClaim {
     pub final_check: FinalCheckAirInteractionClaim,
     pub range13: RangeCheckInteractionClaim,
     pub public_key_on_curve: PublicKeyCurveSliceInteractionClaim,
+    pub hint_points_on_curve: Vec<PublicKeyCurveSliceInteractionClaim>,
     pub projective_signed_carry: RangeCheckInteractionClaim,
     pub hinted_mul: HintedMulProofInteractionClaim,
     pub final_add: FinalAddInteractionClaim,
@@ -798,6 +838,7 @@ impl P256CurrentAirInteractionClaim {
                 claimed_sum: zero(),
             },
             public_key_on_curve: PublicKeyCurveSliceInteractionClaim::zero_claim(),
+            hint_points_on_curve: Vec::new(),
             projective_signed_carry: RangeCheckInteractionClaim {
                 claimed_sum: zero(),
             },
@@ -806,8 +847,14 @@ impl P256CurrentAirInteractionClaim {
         }
     }
 
-    fn zero_for_claim(_claim: &P256CurrentAirProofClaim) -> Self {
-        Self::zero()
+    fn zero_for_claim(claim: &P256CurrentAirProofClaim) -> Self {
+        let mut zero = Self::zero();
+        zero.hint_points_on_curve = claim
+            .hint_points_on_curve
+            .iter()
+            .map(|_| PublicKeyCurveSliceInteractionClaim::zero_claim())
+            .collect();
+        zero
     }
 
     fn mix_into(&self, channel: &mut impl Channel) {
@@ -830,6 +877,10 @@ impl P256CurrentAirInteractionClaim {
         self.final_check.mix_into(channel);
         self.range13.mix_into(channel);
         self.public_key_on_curve.mix_into_monolithic(channel);
+        channel.mix_u64(self.hint_points_on_curve.len() as u64);
+        for hint_point in &self.hint_points_on_curve {
+            hint_point.mix_into_monolithic(channel);
+        }
         self.projective_signed_carry.mix_into(channel);
         self.hinted_mul.mix_into(channel);
         self.final_add.mix_into(channel);
@@ -861,13 +912,18 @@ impl P256CurrentAirInteractionClaim {
             + self.final_check.claimed_sum
             + self.range13.claimed_sum
             + self.public_key_on_curve.total()
+            + self
+                .hint_points_on_curve
+                .iter()
+                .map(PublicKeyCurveSliceInteractionClaim::total)
+                .sum::<SecureField>()
             + self.projective_signed_carry.claimed_sum
             + self.hinted_mul.total()
             + self.final_add.total()
     }
 
     /// Stwo-cairo-style aggregate interaction balance. Component claims expose
-    /// their declared LogUp sums; semantic provider/consumer splits stay out of
+    /// their declared LogUp sums. Semantic provider/consumer splits stay out of
     /// production claims and are checked by AIR constraints plus this aggregate.
     fn relation_balances(
         &self,
@@ -877,11 +933,10 @@ impl P256CurrentAirInteractionClaim {
         vec![("LookupSum", self.lookup_sum(public_instances, relations))]
     }
 
-    /// Per-relation provider/consumer activity witnesses for the boundary
-    /// relations that link otherwise-independent sub-graphs. For an active
-    /// proof each entry must be NONZERO — a zero means the link emitted nothing
-    /// (the sub-graphs are unconnected), which a balance check alone cannot see
-    /// because `0 + 0 == 0` is "balanced". Names mirror [`Self::relation_balances`].
+    /// Returns activity values for cross-component boundary relations.
+    ///
+    /// Each value must be nonzero in an active proof.
+    /// A zero value means that the relation emitted no term.
     #[cfg(test)]
     fn liveness_witnesses(&self) -> Vec<(&'static str, SecureField)> {
         vec![
@@ -955,10 +1010,9 @@ impl P256CurrentAirInteractionClaim {
         ]
     }
 
-    /// Consolidated relation audit: every monolithic relation balance, plus the
-    /// liveness witnesses, in one structure that reports ALL problems at once.
-    /// A diagnostic/regression tool — the runtime `verify_balanced` path returns
-    /// the first imbalance directly.
+    /// Returns all monolithic relation and liveness problems.
+    ///
+    /// The runtime `verify_balanced` path returns only the first imbalance.
     #[cfg(test)]
     fn relation_audit(
         &self,
@@ -987,16 +1041,12 @@ impl P256CurrentAirInteractionClaim {
     }
 }
 
-/// Consolidated view of every monolithic relation balance plus the liveness
-/// witnesses for the boundary relations. A sound, fully-linked proof has
-/// `is_balanced()` true and `dead_links()` empty.
+/// Stores every monolithic relation balance and boundary liveness value.
 ///
-/// Unlike the first-imbalance error returned by `verify_balanced`, this reports
-/// ALL problems together — the relation-use accounting lesson borrowed from
-/// stwo-cairo. `dead_links` additionally catches the "internally consistent but
-/// not linked" case a pure balance check misses (`0 + 0 == 0` is "balanced").
+/// A fully linked proof has `is_balanced()` true and `dead_links()` empty.
+/// `dead_links` detects an unused link that a zero balance cannot detect.
 ///
-/// Diagnostic/regression tool (`#[cfg(test)]`); the runtime `verify_balanced`
+/// Diagnostic/regression tool (`#[cfg(test)]`). The runtime `verify_balanced`
 /// returns the first imbalance directly from `relation_balances`.
 #[cfg(test)]
 pub(crate) struct P256CurrentAirRelationAudit {
@@ -1015,8 +1065,7 @@ impl P256CurrentAirRelationAudit {
             .collect()
     }
 
-    /// First unbalanced relation in declaration order (matches the historical
-    /// `verify_balanced` error), if any.
+    /// Returns the first unbalanced relation in declaration order.
     pub(crate) fn first_imbalance(&self) -> Option<&'static str> {
         self.balances
             .iter()
@@ -1034,7 +1083,7 @@ impl P256CurrentAirRelationAudit {
     }
 
     /// Boundary relations that emitted nothing (`sum == 0`). For an active proof
-    /// each indicates an unlinked sub-graph; empty for a healthy active proof.
+    /// each indicates an unlinked sub-graph. Empty for a healthy active proof.
     pub(crate) fn dead_links(&self) -> Vec<&'static str> {
         self.liveness
             .iter()
@@ -1068,9 +1117,9 @@ struct P256CurrentAirRelations {
     prepared_point_source: PreparedPointRelation,
     range7: RangeCheckRelation,
     ecdsa_result: EcdsaResultRelation,
-    /// Forwards the pinned signed hint `R_i` from the prepared table to the
-    /// final-add sub-graph (provider: prepared-table `DoubleR` row; consumer:
-    /// `FinalAddCheckEval`).
+    /// Forwards the pinned signed hint `R_i` from the prepared table to both
+    /// final-add and its curve-membership slice. The provider yields the same
+    /// canonical tuple twice. Each consumer uses it once.
     final_check_hint: FinalCheckHintRelation,
     /// Public-key sub-graph relations. Its `point` field is the shared
     /// `(sig_id, pub_x, pub_y)` binding relation, also held by
@@ -1092,9 +1141,9 @@ struct P256CurrentAirRelations {
     /// `hint` is the same `final_check_hint` relation as above.
     final_add: FinalAddRelations,
     /// EC-op header link: silo (hinted_mul) consumes the header tuple on each
-    /// proj group header row; the projective-source consumers (fake_glv
+    /// proj group header row. The projective-source consumers (fake_glv
     /// ec_source + prepared_table) provide it. Placed OUTSIDE the
-    /// scalar_mod_mul-related fields; drawn LAST to minimize transcript churn.
+    /// scalar_mod_mul-related fields. Drawn LAST to minimize transcript churn.
     ec_op_header: EcOpHeaderRelation,
 }
 
@@ -1140,6 +1189,7 @@ impl P256CurrentAirRelations {
             final_check_hint: FinalCheckHintRelation::dummy(),
             public_key_on_curve: PublicKeyCurveSliceRelations::dummy_with_point(
                 public_key_point,
+                FinalCheckHintRelation::dummy(),
                 ProjectiveRcbMulComponentRelations::dummy().mul_result,
                 range13.clone(),
                 projective_signed_carry.clone(),
@@ -1227,6 +1277,7 @@ impl P256CurrentAirRelations {
             public_key_on_curve: PublicKeyCurveSliceRelations::draw_with_point(
                 channel,
                 public_key_point,
+                final_check_hint.clone(),
                 projective_rcb_air_relations.mul_result.clone(),
                 range13.clone(),
                 projective_signed_carry.clone(),
@@ -1259,9 +1310,7 @@ impl P256CurrentAirRelations {
     }
 }
 
-/// γ-power table size for the SHARED gamma challenge: the max over the
-/// REMAINING γ-digest users (final_add + public_key_curve) now that the two
-/// projective-source consumers' talls are gone (Phase 3).
+/// Returns the shared γ-power table size for active γ-digest users.
 fn remaining_gamma_max_padded_values() -> usize {
     final_add_gamma_max_padded_values().max(pkc_gamma_max_padded_values())
 }
@@ -1285,6 +1334,7 @@ struct P256CurrentAirComponents {
     final_check: FinalCheckAirComponents,
     range13: RangeCheckComponent,
     public_key_on_curve: PublicKeyCurveSliceComponents,
+    hint_points_on_curve: Vec<PublicKeyCurveSliceComponents>,
     projective_signed_carry: SignedCarryRangeComponent,
     hinted_mul: HintedMulSliceComponents,
     final_add: FinalAddComponents,
@@ -1318,6 +1368,11 @@ impl P256CurrentAirComponents {
         hinted_mul_preprocessed_namespace: Option<&str>,
     ) -> Self {
         let scalar_lookup_claims = LookupProviderClaims::scalar_mod_mul();
+        assert_eq!(
+            claim.hint_points_on_curve.len(),
+            interaction_claim.hint_points_on_curve.len(),
+            "hint-point curve proof/interaction claim count mismatch"
+        );
         Self {
             scalar_setup: ScalarSetupAirComponents::new_without_range13_provider(
                 allocator,
@@ -1460,6 +1515,19 @@ impl P256CurrentAirComponents {
                     &relations.public_key_on_curve,
                     true,
                 ),
+            hint_points_on_curve: claim
+                .hint_points_on_curve
+                .iter()
+                .zip(&interaction_claim.hint_points_on_curve)
+                .map(|(hint_point, interaction)| {
+                    PublicKeyCurveSliceComponents::new_for_final_check_hint_without_range13_and_signed_carry_provider(
+                        allocator,
+                        hint_point.log_sizes(),
+                        interaction,
+                        &relations.public_key_on_curve,
+                    )
+                })
+                .collect(),
             projective_signed_carry: SignedCarryRangeComponent::new(
                 allocator,
                 SignedCarryRangeEval::new(
@@ -1525,6 +1593,9 @@ impl P256CurrentAirComponents {
         components.extend(self.final_check.components());
         components.push(&self.range13 as &dyn Component);
         components.extend(self.public_key_on_curve.components());
+        for hint_point in &self.hint_points_on_curve {
+            components.extend(hint_point.components());
+        }
         components.push(&self.projective_signed_carry as &dyn Component);
         components.extend(self.hinted_mul.components());
         components.extend(self.final_add.components());
@@ -1560,6 +1631,9 @@ impl P256CurrentAirComponents {
         components.extend(self.final_check.component_provers());
         components.push(&self.range13 as &dyn ComponentProver<SimdBackend>);
         components.extend(self.public_key_on_curve.component_provers());
+        for hint_point in &self.hint_points_on_curve {
+            components.extend(hint_point.component_provers());
+        }
         components.push(&self.projective_signed_carry as &dyn ComponentProver<SimdBackend>);
         components.extend(self.hinted_mul.component_provers());
         components.extend(self.final_add.component_provers());
@@ -1596,17 +1670,11 @@ fn p256_stark_slice_low_ram_config(max_constraint_log_degree_bound: u32) -> PcsC
 }
 
 fn p256_stark_monolithic_profile_config(_max_constraint_log_degree_bound: u32) -> PcsConfig {
-    // 128-bit target: pow_bits + log_blowup * n_queries = 10 + 2*59 = 128.
-    // Matches Longfellow's 128-bit benchmark parameter (user sign-off
-    // 2026-07-03). pow_bits is cut 20 -> 10 because grinding is single-threaded
-    // on the target mobile prover: ~2^20 hashes on the critical path is too
-    // heavy, and 10 bits shaves it ~1000x; the security is made up with FRI
-    // queries instead. Proof size is ~linear in n_queries (every query opens
-    // every committed column across all modules). log_blowup is held at 2 so
-    // commitment/FFT memory is unchanged from the calibrated on-device baseline
-    // (raising it is the axis that made SHA W=7 OOM).
-    // Q-015 N=5 confirmation selected the same 128-bit security split with a
-    // cheaper FRI schedule: last-layer 1 and fold-step 2.
+    // Use a 128-bit target: `10 + 2 * 59 = 128`.
+    // Ten proof-of-work bits reduce serial work on the mobile prover.
+    // FRI queries provide the remaining security.
+    // A blowup factor of two preserves the calibrated memory profile.
+    // The last layer has size one, and each fold step has size two.
     let fri_config = FriConfig::new(1, 2, 59, 2);
     PcsConfig {
         pow_bits: 10,
@@ -1642,10 +1710,9 @@ impl P256ProofDraft {
         Self::from_claim(inputs, claim)
     }
 
-    /// Production builder: Garaga-style fake-GLV decomposition for any
-    /// scalar in `[0, n)`. See
-    /// [`P256ProofClaim::from_inputs_with_arbitrary_fake_glv_hints`] for
-    /// the AIR-readiness caveat.
+    /// Builds a proof draft for any scalar in `[0, n)`.
+    ///
+    /// See [`P256ProofClaim::from_inputs_with_arbitrary_fake_glv_hints`].
     pub fn from_inputs_with_arbitrary_fake_glv_hints(
         inputs: Vec<EcdsaVerifyInput>,
     ) -> Result<Self, P256ProofError> {
@@ -1653,12 +1720,10 @@ impl P256ProofDraft {
         Self::from_claim(inputs, claim)
     }
 
-    /// Analytic interaction claim, derived on demand from the draft's `claim`
-    /// and (dummy) `relations`. This is *not* stored on the draft: recomputing
-    /// it costs ~2.4s for a single signature, and the proving path never needs
-    /// it (it builds its own fresh interaction claim from the committed trace).
-    /// Tests and debug tooling that inspect the analytic per-relation balances
-    /// call this explicitly.
+    /// Derives the analytic interaction claim when requested.
+    ///
+    /// The draft does not store this expensive diagnostic value.
+    /// Proof generation creates a fresh interaction claim from the committed trace.
     pub fn interaction_claim(&self) -> P256ProofInteractionClaim {
         P256ProofInteractionClaim::from_claim(&self.claim, &self.relations)
     }
@@ -1676,14 +1741,10 @@ impl P256ProofDraft {
         MC: MerkleChannel,
         SimdBackend: BackendForChannel<MC>,
     {
-        // No pre-prove `verify_current_e2e()` here: it natively re-verifies the
-        // entire witness, which is fully redundant with (a) the authoritative
-        // balance check run below on the *fresh* interaction claim derived from
-        // the committed trace (`interaction_claim.verify_balanced()` after
-        // interaction-trace generation), and (b) the STARK verifier, which
-        // enforces every AIR constraint. Skipping it roughly halves single-proof
-        // wall time. `verify_current_e2e` remains a public method for
-        // tests/debug that want the native cross-check explicitly.
+        // Do not repeat native end-to-end verification before proof generation.
+        // The fresh interaction claim checks the relation balance.
+        // The STARK verifier checks all AIR constraints.
+        // Tests can call `verify_current_e2e` for an explicit native check.
         let proof_claim = P256CurrentAirProofClaim::from_claim(&self.claim);
         let ids = proof_claim.preprocessed_column_ids();
         let max_constraint_log_degree_bound = proof_claim.max_constraint_log_degree_bound(&ids);
@@ -1858,6 +1919,12 @@ impl P256ProofDraft {
         let local_columns =
             gen_public_key_on_curve_preprocessed_trace(&public_key_slice_claim, &local_ids)?;
         append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+        for hint_point in &self.claim.hint_points_on_curve {
+            let proof_claim = PublicKeyCurveSliceProofClaim::from_claim(hint_point);
+            let local_ids = proof_claim.preprocessed_column_ids();
+            let local_columns = gen_public_key_on_curve_preprocessed_trace(hint_point, &local_ids)?;
+            append_unique_preprocessed_columns(&mut ids, &mut columns, local_ids, local_columns);
+        }
 
         let local_ids = claim.hinted_mul.preprocessed_column_ids();
         let local_columns = gen_hinted_mul_slice_preprocessed_trace(&self.claim.hinted_mul_trace);
@@ -1900,6 +1967,12 @@ impl P256ProofDraft {
             gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider(
                 &public_key_slice_claim,
             )?;
+        let hint_points_on_curve = self
+            .claim
+            .hint_points_on_curve
+            .iter()
+            .map(gen_public_key_on_curve_base_trace_without_range13_and_signed_carry_provider)
+            .collect::<Result<Vec<_>, _>>()?;
         let scalar_setup_lookup_providers =
             gen_scalar_setup_air_lookup_provider_base_trace_without_range13_provider(
                 &scalar_setup,
@@ -2024,6 +2097,9 @@ impl P256ProofDraft {
         ));
         range13_uses.extend(scalar_mod_mul_range13_uses(&scalar_mod_mul_rows));
         range13_uses.extend(public_key_on_curve_range13_uses(&public_key_slice_claim));
+        for hint_point in &self.claim.hint_points_on_curve {
+            range13_uses.extend(public_key_on_curve_range13_uses(hint_point));
+        }
         range13_uses.extend(hinted_mul_range13_uses(&self.claim.hinted_mul_trace));
         range13_uses.extend(final_add_range13_uses(&self.claim.final_add));
         let range13_multiplicity =
@@ -2032,6 +2108,9 @@ impl P256ProofDraft {
             .gen_multiplicity_trace(hinted_mul_signed_uses(&self.claim.hinted_mul_trace));
         let mut projective_signed_carry_uses =
             public_key_on_curve_signed_carry_uses(&public_key_slice_claim);
+        for hint_point in &self.claim.hint_points_on_curve {
+            projective_signed_carry_uses.extend(public_key_on_curve_signed_carry_uses(hint_point));
+        }
         projective_signed_carry_uses.extend(final_add_signed_carry_uses(&self.claim.final_add)?);
         projective_signed_carry_uses.extend(
             crate::components::hinted_mul::trace::hinted_mul_formula_signed_uses(
@@ -2072,6 +2151,9 @@ impl P256ProofDraft {
         columns.extend(final_check.clone());
         columns.push(range13_multiplicity.clone());
         columns.extend(public_key_on_curve.clone());
+        for hint_point in &hint_points_on_curve {
+            columns.extend(hint_point.clone());
+        }
         columns.push(projective_signed_carry_multiplicity.clone());
         columns.extend(hinted_mul_base.clone());
         columns.push(hinted_signed_h_multiplicity.clone());
@@ -2102,6 +2184,7 @@ impl P256ProofDraft {
             final_check,
             range13_multiplicity,
             public_key_slice_claim,
+            hint_point_slice_claims: self.claim.hint_points_on_curve.clone(),
             projective_signed_carry_multiplicity,
             hinted_mul_base,
             hinted_signed_h_multiplicity,
@@ -2159,9 +2242,8 @@ impl P256ProofDraft {
                 &relations.prepared_table_canonical,
                 Some(&relations.final_check_hint),
             );
-        // Phase 3: the consumers emit their EC-row consume, the 6 narrow
-        // `ProjectiveRcbMulResultRelation` consumes, and the EC-op header
-        // yield, so they use the dedicated consumer interaction generators.
+        // Generate each dedicated projective-source consumer interaction.
+        // Each consumer emits its EC row, six multiplication uses, and header.
         let prepared_consumer = gen_prepared_table_projective_source_consumer_interaction_trace(
             &base.prepared_table_consumer,
             &relations.prepared_table,
@@ -2271,6 +2353,17 @@ impl P256ProofDraft {
                 &relations.public_key_on_curve,
                 true,
             )?;
+        let mut hint_points_on_curve_interaction = Vec::new();
+        let mut hint_points_on_curve_claim = Vec::new();
+        for hint_point in &base.hint_point_slice_claims {
+            let (columns, interaction_claim) =
+                gen_hint_point_on_curve_interaction_trace_without_range13_and_signed_carry_provider(
+                    hint_point,
+                    &relations.public_key_on_curve,
+                )?;
+            hint_points_on_curve_interaction.extend(columns);
+            hint_points_on_curve_claim.push(interaction_claim);
+        }
         let (projective_signed_carry_interaction, projective_signed_carry_claim) =
             RangeCheckInteractionClaim::gen_interaction_trace(
                 &base.projective_signed_carry_multiplicity,
@@ -2328,6 +2421,7 @@ impl P256ProofDraft {
         columns.extend(final_check_interaction);
         columns.extend(range13_interaction);
         columns.extend(public_key_on_curve_interaction);
+        columns.extend(hint_points_on_curve_interaction);
         columns.extend(projective_signed_carry_interaction);
         columns.extend(hinted_interaction);
         columns.extend(hinted_signed_h_interaction);
@@ -2406,6 +2500,7 @@ impl P256ProofDraft {
                 final_check: final_check_claim,
                 range13: range13_claim,
                 public_key_on_curve: public_key_on_curve_claim,
+                hint_points_on_curve: hint_points_on_curve_claim,
                 projective_signed_carry: projective_signed_carry_claim,
                 hinted_mul: HintedMulProofInteractionClaim {
                     claimed_sum: hinted_claim.claimed_sum,
@@ -2423,13 +2518,9 @@ impl P256ProofDraft {
         claim: P256ProofClaim,
     ) -> Result<Self, P256ProofError> {
         let relations = P256ProofRelations::dummy();
-        // The analytic interaction claim is *derived* from `claim` + `relations`
-        // (see `interaction_claim()`), and recomputing it costs ~2.4s for a
-        // single signature. The proving path computes its own fresh interaction
-        // claim from the committed trace and balance-checks that, and the STARK
-        // verifier enforces every constraint — so the draft does not eagerly
-        // compute or balance-check it at build time. Tests/debug that want the
-        // analytic per-relation balances call `interaction_claim()` explicitly.
+        // Do not compute the analytic interaction claim during draft construction.
+        // Proof generation creates and checks a fresh claim from the committed trace.
+        // Tests can call `interaction_claim` for detailed relation balances.
         Ok(Self {
             inputs,
             claim,
@@ -2488,16 +2579,16 @@ struct P256CurrentAirBaseTrace {
     final_check: ColumnVec<M31ColumnEval>,
     range13_multiplicity: M31ColumnEval,
     public_key_slice_claim: PublicKeyCurveSliceClaim,
+    hint_point_slice_claims: Vec<PublicKeyCurveSliceClaim>,
     projective_signed_carry_multiplicity: M31ColumnEval,
     hinted_mul_base: ColumnVec<M31ColumnEval>,
     hinted_signed_h_multiplicity: M31ColumnEval,
 }
 
-/// All `ScalarModMul` instances merged into a single component set, block-major
-/// in the fixed order: every scalar_setup instance first, then every fake_glv
-/// instance. Each instance keeps its own `mul_id` (now a base trace column), so
-/// the merged LogUp tuples stay keyed per instance and the external
-/// scalar_setup / fake_glv AIR providers still balance against them.
+/// Returns all scalar multiplication rows in fixed block order.
+///
+/// Scalar setup rows precede fake-GLV rows.
+/// Each instance keeps a separate `mul_id`.
 fn merged_scalar_mod_mul_rows(
     claim: &P256ProofClaim,
 ) -> Result<ScalarModMulMergedRows, P256ProofError> {
@@ -2523,19 +2614,10 @@ fn scalar_setup_mod_mul_rows(
     Ok(rows)
 }
 
-/// Per-certificate `ScalarModMul` trace rows for the fake-GLV scalar equation
-/// `k · s2_abs ≡ ±s1 (mod n)`. One row per active certificate (inactive
-/// `cert_active == 0` certs contribute no mod-mul row). Mul IDs live in a
-/// disjoint range from [`scalar_setup_mod_mul_rows`] (`FAKE_GLV_SCALAR_MUL_ID_BASE`
-/// + `2 · sig_id + cert_id`) so the two families never collide in any logup.
+/// Returns fake-GLV scalar multiplication rows for active certificates.
 ///
-/// Active half of the Task 4 wiring: the matching AIR-side provider yields
-/// (per-(role, limb) `ScalarLimbRelation` tuples gated on `cert_active`) live
-/// in `crate::scalar::fake_glv_scalar::FakeGlvScalarAirEval::evaluate`, with
-/// the trace-gen provider sum mirrored in
-/// `gen_fake_glv_scalar_air_interaction_trace`. Together they close the
-/// `FakeGlvScalarModMul` balance entry in
-/// `P256CurrentAirInteractionClaim::relation_balances`.
+/// The matching AIR provider emits the same role and limb tuples.
+/// These terms balance `FakeGlvScalarModMul`.
 fn fake_glv_scalar_mod_mul_rows(
     claim: &P256ProofClaim,
 ) -> Result<Vec<ScalarModMulTraceRows>, P256ProofError> {
@@ -2569,7 +2651,7 @@ const FAKE_GLV_SCALAR_MUL_ID_BASE: u32 = 1_000_000;
 
 /// Build the single-public-key on-curve witness for the monolithic current-AIR
 /// from the already-verified `public_key_check` claim. The monolithic proof
-/// covers exactly one signature, so the slice is built from the FIRST
+/// covers exactly one signature, so the slice uses the first
 /// public-key row (mirroring [`final_add_claim_from_final_check`]).
 fn public_key_on_curve_slice_claim(
     claim: &P256ProofClaim,
@@ -2581,10 +2663,9 @@ fn public_key_on_curve_slice_claim(
     public_key_slice_from_check(&claim.public_key_check, hinted_source_offset)
 }
 
-/// Build the (single-signature) curve-check slice claim from the FIRST
-/// public-key row: multi-signature claim *construction* stays available
-/// (`links_all_implemented_components`), while the monolithic prove path
-/// remains single-signature, exactly like `final_add_claim_from_final_check`.
+/// Builds the single-signature public-key curve slice.
+///
+/// General claim construction can still contain multiple signatures.
 fn public_key_slice_from_check(
     public_key_check: &PublicKeyOnCurveClaim,
     hinted_source_offset: u32,
@@ -2602,14 +2683,38 @@ fn public_key_slice_from_check(
         .map_err(P256ProofError::from)
 }
 
-/// Build the final-add claim `S = R_1 + R_2` from the (single-signature)
-/// `FinalEcdsaCheckClaim`. `R_i = signed_hint_point(h_i, s2_sign_bit_i)`:
-/// `R_i = -h_i` when `s2_sign_bit == 1` (Garaga negative), `R_i = +h_i` when
-/// `s2_sign_bit == 0` (Garaga positive); for the inactive (zero-`u1`)
-/// branch `h_i = ∞`, so `R_i = ∞`. Both sign choices are accepted because
-/// `x(R_1 + R_2) = x(±(h_1 + h_2))` when both signs agree, which the AIR
-/// witness builder enforces upstream (via the per-cert `s2_sign_bit`
-/// consistency in `FakeGlvScalarHint::decompose`).
+/// Build one generic curve-membership slice for every active signed fake-GLV
+/// hint point. Each slice is bound through `FinalCheckHintRelation` to the
+/// canonical prepared-table `R` used by the EC ladder and final-add.
+fn hint_point_curve_slices_from_table(
+    prepared_table: &PreparedTableClaim,
+    mut hinted_source_offset: u32,
+) -> Result<Vec<PublicKeyCurveSliceClaim>, P256ProofError> {
+    let mut claims = Vec::new();
+    for cert in &prepared_table.certs {
+        if cert.cert_active == M31::from_u32_unchecked(0) {
+            continue;
+        }
+        claims.push(PublicKeyCurveSliceClaim::from_hint_point(
+            cert.sig_id,
+            cert.cert_id,
+            &cert.r.x,
+            &cert.r.y,
+            hinted_source_offset,
+        )?);
+        hinted_source_offset += 1;
+    }
+    Ok(claims)
+}
+
+/// Build `S = R_1 + R_2` from the single-signature `FinalEcdsaCheckClaim`.
+///
+/// Define `R_i = signed_hint_point(h_i, s2_sign_bit_i)`. When the sign bit is one,
+/// `R_i = -h_i`, following Garaga's negative convention. Otherwise, `R_i = +h_i`.
+/// An inactive zero-`u1` branch has `h_i = ∞`, so `R_i = ∞`.
+/// Both common sign choices preserve `x(R_1 + R_2) = x(±(h_1 + h_2))`.
+/// The upstream witness builder enforces equal signs through
+/// `FakeGlvScalarHint::decompose`.
 fn final_add_claim_from_final_check(
     final_check: &FinalEcdsaCheckClaim,
     fake_glv_scalars: &FakeGlvScalarHintClaim,
@@ -2631,16 +2736,16 @@ fn final_add_claim_from_final_check(
             }
         }
         // Inactive cert (zero-`u1` branch): sign is irrelevant because
-        // `h_i = ∞`; conventionally treat as `bit = 1`.
+        // `h_i = ∞`. Conventionally treat as `bit = 1`.
         M31::from_u32_unchecked(1)
     };
     let b1 = bit_for(0);
     let b2 = bit_for(1);
     let (r1, r1_inf) = signed_prepared(&row.h1, b1);
     let (r2, r2_inf) = signed_prepared(&row.h2, b2);
-    // Pass the proven per-cert sign bits: `from_hints` orients `R_2` by
-    // `d = b1 ⊕ b2` so the bound x-coordinate is `x(h_1 + h_2)`, and the AIR
-    // binds `b1`/`b2` to these same values via `FinalAddSignRelation`.
+    // Pass both proven certificate sign bits.
+    // `from_hints` uses them to orient `R_2`.
+    // `FinalAddSignRelation` binds the AIR values to these bits.
     FinalAddClaim::from_hints(
         row.sig_id,
         &r1,
@@ -2708,15 +2813,11 @@ fn negate_prepared(
     }
 }
 
-/// `expected_preprocessed_root` is the F-ROOT pin: on `Some(expected)`, the
-/// proof's tree-0 (preprocessed) commitment root must equal `expected` —
-/// checked fail-closed BEFORE the root is absorbed into the transcript, so a
-/// forged preprocessed tree (range tables, hinted-mul schedules, constants)
-/// is rejected up front. Callers derive `expected` from their own trusted
-/// data (e.g. rebuild the draft from the statement and run the prover's
-/// tree-0 path — see `proof::air::current_air_preprocessed_root`), never from
-/// the proof. `None` keeps the legacy unpinned behavior for self-proving
-/// benchmarks and shape-exploratory tests only.
+/// Verifies with an optional expected tree-0 commitment root.
+///
+/// The verifier checks a supplied root before transcript processing.
+/// Callers must derive the root from trusted statement data.
+/// Use `None` only for local benchmarks and shape tests.
 pub fn verify_current_air_monolithic<MC>(
     proof: P256CurrentAirProof<MC::H>,
     expected_instances: &[PublicEcdsaInstance<M31>],
@@ -2730,8 +2831,14 @@ where
         interaction_claim,
         stark_proof,
     } = proof;
-    // F-ROOT pin: compare the prover-supplied tree-0 root against the caller's
-    // independently-derived expected root before ANY transcript work.
+    if claim.hint_points_on_curve.len() != interaction_claim.hint_points_on_curve.len() {
+        return Err(P256ProofError::ProofLayer(format!(
+            "hint-point curve proof/interaction claim count mismatch: {} != {}",
+            claim.hint_points_on_curve.len(),
+            interaction_claim.hint_points_on_curve.len(),
+        )));
+    }
+    // Compare the proof root with the trusted root before transcript processing.
     if let Some(expected) = expected_preprocessed_root {
         let got = stark_proof.commitments[0];
         if got != expected {
@@ -2741,30 +2848,21 @@ where
             });
         }
     }
-    // Caller-argument binding. The O1 fix below ties the proof to its OWN
-    // embedded `claim.public_inputs.instances` (recomputed provider sums against
-    // STARK-bound consumers), but this function returns only `Result<(), _>`: a
-    // relying party that trusts `Ok(())` would otherwise accept a valid proof of
-    // ANY signature the prover embedded, not the `(z, r, s, pub_x, pub_y)` the
-    // caller intended to verify. Compare the embedded instances against the
-    // caller's expected statement first — cheap, and fail-closed on any mismatch.
+    // Compare embedded instances with the caller statement.
+    // The proof constraints bind only the embedded statement.
+    // This check ensures that success applies to the requested signature.
     if claim.public_inputs.instances.as_slice() != expected_instances {
         return Err(P256ProofError::PublicInstanceMismatch);
     }
-    // Public-key canonicality gate. The AIR range-checks the limbs and binds
-    // them to the curve equation, but the curve check works mod p, so a
-    // non-canonical representative (`x + p`) of a valid point would otherwise
-    // verify. ECDSA public keys are defined over canonical field elements;
-    // reject non-canonical coordinates before any proof work.
+    // Reject noncanonical public-key coordinates before proof work.
+    // The modular curve equation alone could accept `x + p`.
     for (index, instance) in claim.public_inputs.instances.iter().enumerate() {
         if let Some(field) = instance.non_canonical_public_key_field() {
             return Err(P256ProofError::NonCanonicalPublicKey { index, field });
         }
     }
     let ids = claim.preprocessed_column_ids();
-    // Pin the PCS config: `stark_proof.config` is prover-supplied, and the
-    // verifier must not inherit a weakened FRI/grinding setting from it (a
-    // 1-query proof would otherwise verify at ~2-bit security).
+    // Require the configured FRI and proof-of-work security profile.
     let expected_config =
         p256_stark_monolithic_profile_config(claim.max_constraint_log_degree_bound(&ids));
     if stark_proof.config != expected_config {
@@ -2908,7 +3006,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "PreparedTableEcTrace",
         status: P256ProofComponentStatus::Implemented,
-        note: "Prepared-table EC row shape is proven inside the monolithic STARK by prepared_table_projective_source's provider/consumer pair over PreparedTableEcRowRelation; the legacy standalone slice proof is now redundant under prove_current_air_monolithic.",
+        note: "Prepared-table EC row shape is proven inside the monolithic STARK by prepared_table_projective_source's provider/consumer pair over PreparedTableEcRowRelation.",
     },
     P256ProofComponentSlot {
         name: "PreparedTableEcRows",
@@ -2943,7 +3041,7 @@ pub const P256_PROOF_COMPONENT_SLOTS: &[P256ProofComponentSlot] = &[
     P256ProofComponentSlot {
         name: "FinalEcdsaCheck",
         status: P256ProofComponentStatus::Implemented,
-        note: "r_x is now bound IN-AIR to x(u1·G + u2·Q). The prepared table forwards the canonically-pinned signed hint R_i (role-R) on FinalCheckHintRelation; the final-add sub-graph (final_add_air.rs) consumes R_1, R_2 and proves S = R_1 + R_2 in affine coordinates via the shared projective-RCB mod-p mul engine. The distinct-x branch uses (lambda·dx ≡ dy, lambda² ≡ x3 + x1 + x2, dx·dx_inv ≡ 1) and the finite-doubling branch (Task 6) uses (lambda·(2·y1) ≡ 3·x1² − 3, lambda² ≡ x3 + 2·x1); branch selectors gate the constraints so the active branch is exactly one of {distinct, double, r1_only, r2_only, inverse}, with `inverse_add` (R_final = ∞) rejected by `active · inverse_add = 0`. Since R_i = -h_i for active certs (s2_sign_bit conventions: bit=1 ⇒ s2_signed = -s2_abs), x(R_1 + R_2) = x(u1·G + u2·Q). x3 = S.x is forwarded on FinalAddOutputRelation and consumed by the final check as r_x; r_check = r_x mod n and EcdsaResultRelation then complete x(u1·G + u2·Q) mod n = r.",
+        note: "FinalCheck binds r_x to x(u1·G + u2·Q) in the AIR. Prepared-table relations pin the signed hint points and prove curve membership. FinalAdd proves the selected addition branch and provides x3. EcdsaResultRelation enforces x3 mod n = r.",
     },
     P256ProofComponentSlot {
         name: "StarkProveVerify",
@@ -2980,14 +3078,10 @@ pub enum P256ProofError {
     RelationImbalance {
         relation: &'static str,
     },
-    /// The verified proof's embedded public instances do not match the
-    /// statement the caller asked to verify. Without this check, a relying
-    /// party that trusts `Ok(())` would accept a valid proof of ANY signature
-    /// the prover chose, not the one the caller intended.
+    /// The embedded public instances do not match the caller statement.
     PublicInstanceMismatch,
     /// The proof's tree-0 (preprocessed) commitment root does not equal the
-    /// caller-supplied expected root — the F-ROOT pin
-    /// (tasks/audits/2026-07-05-backend-soundness.md). Rejected fail-closed,
+    /// caller-supplied expected root. Rejected fail-closed,
     /// BEFORE the root is absorbed into the transcript, so a forged
     /// preprocessed tree (range tables, schedules, constants) never reaches
     /// the STARK verifier. Roots are Debug-formatted strings because the

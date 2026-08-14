@@ -1,7 +1,7 @@
 //! Combines one or more proving modules into a single STARK proof.
 //!
-//! Each circuit implements [`Air`] and [`AirProver`]. A module does NOT own the
-//! channel or the commitment scheme; it only contributes columns and components
+//! Each circuit implements [`Air`] and [`AirProver`]. A module does not own the
+//! channel or the commitment scheme. It only contributes columns and components
 //! to shared commitment trees. The orchestrator functions [`prove`] and
 //! [`verify`] own the transcript and drive every module through the same four
 //! phases:
@@ -15,19 +15,20 @@
 //!
 //! ## Hash choice
 //!
-//! A single combined proof has exactly one channel and one commitment scheme,
-//! so every module must agree on one hash. That choice lives here once, behind
-//! the [`Mc`]/[`Ch`]/[`Hasher`] aliases, rather than as a generic parameter
-//! threaded through every module: genericity at the module level buys nothing
-//! when all modules in a `prove` call must use the identical channel anyway.
-//! Switching the system to a different (e.g. Stwo-friendly) hash is a one-line
-//! change to these aliases.
+//! Each combined proof uses one channel and one commitment scheme.
+//! Thus, all modules use one hash.
+//! The [`Mc`], [`Ch`], and [`Hasher`] aliases define this hash.
+//! Module-level generic parameters cannot select different hashes.
+//! Change these aliases to select another hash.
 
+pub mod claim_mask;
 pub mod relations;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::hash::{Hash, Hasher as _};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use num_traits::Zero;
 use stwo::core::air::Component;
@@ -80,7 +81,11 @@ static TWIDDLE_CACHE: OnceLock<Mutex<HashMap<u32, &'static TwiddleTree<SimdBacke
 
 fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     let cache = TWIDDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().expect("twiddle cache poisoned");
+    // A panic can poison this lock. One malformed proof must not block later
+    // proof operations. The map is consistent between operations.
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(twiddles) = cache.get(&twiddle_log_size) {
         return twiddles;
     }
@@ -212,10 +217,19 @@ pub struct TreeLayout {
     pub interaction: Vec<u32>,
 }
 
-/// What both the prover and the verifier need from a module: bind the public
-/// input, draw the module's lookup relations, declare its column layout, expose
-/// its claimed LogUp sums, and assemble its AIR components.
+/// Defines the module operations that the prover and verifier use.
+///
+/// A module binds public input, draws relations, declares its layout, exposes
+/// claimed LogUp sums, and assembles AIR components.
 pub trait Air {
+    /// Reject malformed proof-carried module metadata before it can influence
+    /// layouts, transcript mixing, or the global LogUp balance. Implementations
+    /// with variable-length serialized claims must enforce their exact
+    /// component cardinality here.
+    fn validate_structure(&self) -> Result<(), VerificationError> {
+        Ok(())
+    }
+
     /// Bind this module's public statement to the shared transcript.
     fn mix_public(&self, channel: &mut Ch);
 
@@ -228,7 +242,7 @@ pub trait Air {
 
     /// The module's claimed LogUp sums whose total enters the global balance.
     /// The orchestrator sums these across all modules and rejects unless the
-    /// total is zero. For most modules these are the per-component sums; a
+    /// total is zero. For most modules these are the per-component sums. A
     /// module whose balance also folds in public-input provider terms (P256)
     /// returns those terms here too.
     fn claimed_sums(&self) -> Vec<QM31>;
@@ -247,11 +261,37 @@ pub trait Air {
     /// single shared [`TraceLocationAllocator`] before building components.
     fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId>;
 
-    /// Build this module's AIR components against the shared allocator and stash
-    /// them. Called once, in module order, after relations are drawn and the
-    /// allocator is seeded. A module owns its components and lends them out via
-    /// [`Air::components`] / [`AirProver::prover_components`] — matching Stwo's
-    /// borrowed-component prove/verify API and avoiding any rebuild.
+    /// Reconstruct this module's trusted tree-0 columns in the same order as
+    /// [`Air::preprocessed_column_ids`]. Production verification commits these
+    /// verifier-derived values and pins the proof to that root.
+    ///
+    /// The default fails closed. A module without preprocessed columns returns
+    /// an empty vector.
+    ///
+    /// A module with preprocessed columns must override this method.
+    /// Otherwise, [`compute_canonical_preprocessed_root`] returns `Err`.
+    ///
+    /// A module with witness-dependent preprocessed columns cannot reconstruct
+    /// its tree-0 root from public data and must use an independently pinned
+    /// root or fail closed.
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<PreprocessedColumnEval>, VerificationError> {
+        if self.preprocessed_column_ids().is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VerificationError::InvalidStructure(
+                "module cannot reconstruct its preprocessed columns".into(),
+            ))
+        }
+    }
+
+    /// Build and store this module's AIR components with the shared allocator.
+    ///
+    /// Call this once in module order. Draw relations and seed the allocator
+    /// first. A module owns its components. It lends them through
+    /// [`Air::components`] and [`AirProver::prover_components`]. This matches
+    /// Stwo's borrowed-component API and avoids rebuilding components.
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator);
 
     /// Borrow the built verifier-side components, in commit order. Call only
@@ -274,7 +314,7 @@ pub trait Air {
 /// The prover-only extension: a module that holds a witness and can write its
 /// actual columns into the shared commitment trees.
 pub trait AirProver: Air {
-    /// Largest trace log-size this module uses; the orchestrator takes the max
+    /// Largest trace log-size this module uses. The orchestrator takes the max
     /// over all modules to size the FRI twiddles.
     fn max_log_size(&self) -> u32;
 
@@ -283,27 +323,36 @@ pub trait AirProver: Air {
     /// the FRI blow-up to size the precomputed twiddles (unless the config pins
     /// an explicit `lifting_log_size`).
     ///
-    /// The default — `max_log_size() + 1` — is exactly the domain a degree-2 AIR
-    /// needs, which is what the predicate and SHA modules use. A module with
-    /// higher-degree constraints (the P256 ECDSA AIR) overrides this with the
-    /// real bound computed from its components.
+    /// For a trace of size `2^n`, a degree-`d` constraint has a quotient degree
+    /// bounded by `(d - 1) * 2^n`. The default — `max_log_size() + 1` — covers
+    /// constraints through degree three. Modules with higher-degree constraints
+    /// (including SHA-256 and P-256 ECDSA) override this with the largest bound
+    /// declared by their components.
     fn max_constraint_log_degree_bound(&self) -> u32 {
         self.max_log_size() + 1
     }
 
     /// Whether the commitment scheme must retain committed polynomials in
-    /// coefficient form (`set_store_polynomials_coefficients`). Off by default;
-    /// the P256 module turns it on for its lifting path. If any module in a
+    /// coefficient form (`set_store_polynomials_coefficients`). Off by default.
+    /// The P256 module turns it on for its lifting path. If any module in a
     /// `prove` call needs it, the orchestrator enables it for the whole proof.
     fn store_polynomial_coefficients(&self) -> bool {
         false
     }
 
-    /// Phase 0 — append preprocessed columns to the shared tree.
+    /// Human-readable module label for per-stage profiling. Defaults to the
+    /// concrete type name (the default body is monomorphized per implementor, so
+    /// `type_name::<Self>()` resolves to the real type through the vtable) — no
+    /// module needs to override it.
+    fn profile_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
+    /// Appends preprocessed columns to the shared tree.
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
     /// Fingerprint preprocessed column content before tree-0 dedup. Equal
-    /// preprocessed IDs must imply equal fixed-column content; otherwise
+    /// preprocessed IDs must imply equal fixed-column content. Otherwise
     /// first-writer-wins tree assembly aliases one module's constraints to
     /// another module's table.
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
@@ -315,8 +364,9 @@ pub trait AirProver: Air {
         Vec::new()
     }
 
-    /// Phase 0 variant used when another earlier module already committed some
-    /// deterministic preprocessed columns with the same IDs.
+    /// Appends only the selected preprocessed columns.
+    ///
+    /// An earlier module can already contain deterministic columns with the same IDs.
     fn write_selected_preprocessed(
         &mut self,
         tb: &mut TreeBuilder<SimdBackend, Mc>,
@@ -330,26 +380,277 @@ pub trait AirProver: Air {
         self.write_preprocessed(tb);
     }
 
-    /// Phase 1 — append main witness + multiplicity columns to the shared tree.
+    /// Appends witness and multiplicity columns to the shared tree.
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
-    /// Phase 2 — build the interaction (LogUp) columns from the drawn relations,
-    /// append them, and stash this module's claimed sums (read back via
-    /// [`Air::claimed_sums`]).
+    /// Builds and appends interaction columns from the relation challenges.
+    ///
+    /// The method also stores this module's claimed sums for [`Air::claimed_sums`].
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, Mc>);
 
     /// Optional prover-side post-interaction transcript work, run after tree 2
-    /// is committed. Any proof messages mixed here are therefore bound to all
+    /// is committed. Any proof messages mixed here are bound to all
     /// committed GKR inputs: trace/multiplicity columns, relation randomness,
     /// claimed sums, and interaction columns.
     fn prove_post_interaction(&mut self, _channel: &mut Ch) {}
 
-    /// Optional phase 3 — append post-interaction tie-back columns.
+    /// Appends optional post-interaction tie-back columns.
     fn write_post_interaction(&mut self, _tb: &mut TreeBuilder<SimdBackend, Mc>) {}
 
     /// Borrow the built prover-side components, in commit order. Call only
     /// after [`Air::build_components`].
     fn prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>>;
+}
+
+/// The prove stages tagged for wall-time and peak-RSS attribution, in execution
+/// order. The discriminant indexes both [`PHASE_LABELS`] and the per-phase
+/// high-water marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Twiddles,
+    Tree0Write,
+    Tree0Commit,
+    Tree1Write,
+    Tree1Commit,
+    DrawRelations,
+    Tree2Write,
+    Tree2Commit,
+    PostInteraction,
+    BuildComponents,
+    EngineProve,
+}
+
+const PHASE_COUNT: usize = 11;
+
+const PHASE_LABELS: [&str; PHASE_COUNT] = [
+    "twiddles",
+    "tree0_write",
+    "tree0_commit",
+    "tree1_write",
+    "tree1_commit",
+    "draw_relations",
+    "tree2_write",
+    "tree2_commit",
+    "post_interaction",
+    "build_components",
+    "engine_prove",
+];
+
+/// Tag the phase the sampler should attribute to, then start its timer.
+fn stage_start(phase: Phase) -> Instant {
+    rss_sampler::set_phase(phase as usize);
+    Instant::now()
+}
+
+#[cfg(feature = "prove-profile")]
+mod rss_sampler {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread::{self, JoinHandle};
+    use std::time::Duration;
+
+    use super::PHASE_COUNT;
+
+    /// Environment flag that arms the sampler. Timing is always collected by
+    /// [`super::prove_profiled`]; the sampler thread only starts when this is set
+    /// to `PROFILE_ENV_ON`.
+    const PROFILE_ENV: &str = "EUID_PROVE_PROFILE";
+    const PROFILE_ENV_ON: &str = "1";
+    const TICK: Duration = Duration::from_millis(10);
+    const BYTES_PER_MIB: f64 = (1024 * 1024) as f64;
+
+    fn sampling_requested() -> bool {
+        std::env::var_os(PROFILE_ENV).is_some_and(|value| value == PROFILE_ENV_ON)
+    }
+
+    // ponytail: process-global, so two concurrent profiled proves in one process
+    // would share one phase tag and one set of peaks. Key these per prove call if
+    // concurrent profiled proves ever matter.
+    static PHASE: AtomicUsize = AtomicUsize::new(0);
+    static PEAKS: [AtomicUsize; PHASE_COUNT] = [const { AtomicUsize::new(0) }; PHASE_COUNT];
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn set_phase(phase: usize) {
+        PHASE.store(phase, Ordering::Relaxed);
+    }
+
+    /// A running sampler thread, or nothing at all when sampling is not armed.
+    pub(super) struct Sampler(Option<JoinHandle<()>>);
+
+    impl Sampler {
+        pub(super) fn start() -> Self {
+            if !sampling_requested() {
+                return Self(None);
+            }
+            for peak in &PEAKS {
+                peak.store(0, Ordering::Relaxed);
+            }
+            PHASE.store(0, Ordering::Relaxed);
+            RUNNING.store(true, Ordering::Release);
+            Self(Some(thread::spawn(|| {
+                while RUNNING.load(Ordering::Acquire) {
+                    sample();
+                    thread::sleep(TICK);
+                }
+                sample();
+            })))
+        }
+
+        /// Stop the thread and read the per-phase high-water marks, in phase
+        /// order. Empty when sampling was never armed.
+        pub(super) fn finish(mut self) -> Vec<f64> {
+            let Some(handle) = self.0.take() else {
+                return Vec::new();
+            };
+            RUNNING.store(false, Ordering::Release);
+            let _ = handle.join();
+            PEAKS
+                .iter()
+                .map(|peak| peak.load(Ordering::Relaxed) as f64 / BYTES_PER_MIB)
+                .collect()
+        }
+    }
+
+    impl Drop for Sampler {
+        fn drop(&mut self) {
+            if self.0.take().is_some() {
+                RUNNING.store(false, Ordering::Release);
+            }
+        }
+    }
+
+    fn sample() {
+        let Some(stats) = memory_stats::memory_stats() else {
+            return;
+        };
+        PEAKS[PHASE.load(Ordering::Relaxed)].fetch_max(stats.physical_mem, Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(feature = "prove-profile"))]
+mod rss_sampler {
+    pub(super) fn set_phase(_phase: usize) {}
+
+    pub(super) struct Sampler;
+
+    impl Sampler {
+        pub(super) fn start() -> Self {
+            Self
+        }
+
+        pub(super) fn finish(self) -> Vec<f64> {
+            Vec::new()
+        }
+    }
+}
+
+/// Per-module wall-time for one write phase (tree-1 trace or tree-2
+/// interaction), so trace-gen cost is attributable per module.
+#[derive(Clone, Debug, Default)]
+pub struct ModuleWriteTime {
+    /// Module position in the `prove` call's module slice.
+    pub index: usize,
+    /// Module type name (from [`AirProver::profile_name`]).
+    pub name: String,
+    /// Wall-time for this module's write in this phase, in milliseconds.
+    pub ms: f64,
+}
+
+/// Wall-time breakdown of one [`prove_profiled`] call, in milliseconds, plus the
+/// per-phase peak physical memory when the sampler is armed. `Instant`-only
+/// timestamps — near-zero overhead, always on. The stage fields (plus
+/// `post_interaction` and `build_components`) sum to `total`.
+#[derive(Clone, Debug, Default)]
+pub struct StarkProveProfile {
+    /// FRI twiddle setup (cached across calls — near-zero when warm).
+    pub twiddles: f64,
+    /// Tree-0 preprocessed write (all modules).
+    pub tree0_write: f64,
+    /// Tree-0 commit.
+    pub tree0_commit: f64,
+    /// Tree-1 trace write (all modules).
+    pub tree1_write: f64,
+    /// Tree-1 commit.
+    pub tree1_commit: f64,
+    /// Tree-2 interaction write (all modules).
+    pub tree2_write: f64,
+    /// Tree-2 commit.
+    pub tree2_commit: f64,
+    /// Relation draws (all modules).
+    pub draw_relations: f64,
+    /// Post-interaction transcript block (GKR lookup proofs, the coprocessor
+    /// p4b bundle prove, and any post-interaction tree commit).
+    pub post_interaction: f64,
+    /// Component assembly against the shared allocator.
+    pub build_components: f64,
+    /// The stwo engine `prove` call: composition + OODS + FRI + openings.
+    pub engine_prove: f64,
+    /// Total wall-time of the whole `prove_profiled` call.
+    pub total: f64,
+    /// Per-phase peak physical memory in MiB, indexed by [`Phase`] order (the
+    /// same order as [`PHASE_LABELS`]). Empty unless the crate is built with the
+    /// `prove-profile` feature and `EUID_PROVE_PROFILE=1` is set. Untagged gaps
+    /// between stages are attributed to the preceding phase.
+    pub peak_rss_mib: Vec<f64>,
+    /// Per-module tree-1 (trace) write times, in module order.
+    pub tree1_write_per_module: Vec<ModuleWriteTime>,
+    /// Per-module tree-2 (interaction) write times, in module order.
+    pub tree2_write_per_module: Vec<ModuleWriteTime>,
+}
+
+impl StarkProveProfile {
+    /// Per-phase wall-times in [`Phase`] order, for tabular rendering.
+    fn phase_ms(&self) -> [f64; PHASE_COUNT] {
+        [
+            self.twiddles,
+            self.tree0_write,
+            self.tree0_commit,
+            self.tree1_write,
+            self.tree1_commit,
+            self.draw_relations,
+            self.tree2_write,
+            self.tree2_commit,
+            self.post_interaction,
+            self.build_components,
+            self.engine_prove,
+        ]
+    }
+}
+
+impl fmt::Display for StarkProveProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{:<20} {:>10} {:>14}", "phase", "ms", "peak_rss_mib")?;
+        let phase_ms = self.phase_ms();
+        for (index, label) in PHASE_LABELS.iter().enumerate() {
+            write!(f, "{label:<20} {:>10.3} ", phase_ms[index])?;
+            match self.peak_rss_mib.get(index) {
+                Some(mib) => writeln!(f, "{mib:>14.1}")?,
+                None => writeln!(f, "{:>14}", "-")?,
+            }
+        }
+        write!(f, "{:<20} {:>10.3} ", "total", self.total)?;
+        match self.peak_rss_mib.iter().copied().max_by(f64::total_cmp) {
+            Some(mib) => writeln!(f, "{mib:>14.1}")?,
+            None => writeln!(f, "{:>14}", "-")?,
+        }
+
+        for (phase, per_module) in [
+            ("tree1_write", &self.tree1_write_per_module),
+            ("tree2_write", &self.tree2_write_per_module),
+        ] {
+            for module in per_module.iter() {
+                writeln!(
+                    f,
+                    "  {phase}[{}] {:>10.3} ms  {}",
+                    module.index, module.ms, module.name
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn ms_since(start: Instant) -> f64 {
+    start.elapsed().as_secs_f64() * 1000.0
 }
 
 /// Drive every module through the four phases against one shared channel and one
@@ -358,6 +659,18 @@ pub fn prove(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
 ) -> Result<StarkProof<Hasher>, ProvingError> {
+    prove_profiled(modules, config).map(|(proof, _profile)| proof)
+}
+
+/// Same as [`prove`], but also returns a per-phase [`StarkProveProfile`].
+pub fn prove_profiled(
+    modules: &mut [&mut dyn AirProver],
+    config: PcsConfig,
+) -> Result<(StarkProof<Hasher>, StarkProveProfile), ProvingError> {
+    let sampler = rss_sampler::Sampler::start();
+    let total_start = Instant::now();
+    let mut profile = StarkProveProfile::default();
+
     // Size the twiddles to the largest constraint-evaluation domain any module
     // needs, plus the FRI blow-up — unless the config pins an explicit lifting
     // size. With the default (degree-2) bound this is `max_log_size + 1 +
@@ -371,7 +684,9 @@ pub fn prove(
         .lifting_log_size
         .unwrap_or(max_constraint_log_degree_bound + config.fri_config.log_blowup_factor);
 
+    let stage = stage_start(Phase::Twiddles);
     let twiddles = cached_twiddles(twiddle_log_size);
+    profile.twiddles = ms_since(stage);
 
     let channel = &mut Ch::default();
     config.mix_into(channel);
@@ -391,42 +706,69 @@ pub fn prove(
         .collect();
     let (preprocessed_ids, selected_preprocessed_ids) =
         select_first_preprocessed_ids(&module_preprocessed_ids);
+    let stage = stage_start(Phase::Tree0Write);
     let mut tb = commitment_scheme.tree_builder();
     for (module, selected_ids) in modules.iter_mut().zip(&selected_preprocessed_ids) {
         module.write_selected_preprocessed(&mut tb, selected_ids);
     }
+    profile.tree0_write = ms_since(stage);
+    let stage = stage_start(Phase::Tree0Commit);
     tb.commit(channel);
+    profile.tree0_commit = ms_since(stage);
 
     for m in modules.iter() {
         m.mix_public(channel);
     }
 
     // Tree 1: every module's witness + multiplicity columns.
+    let stage = stage_start(Phase::Tree1Write);
     let mut tb = commitment_scheme.tree_builder();
-    for m in modules.iter_mut() {
+    for (index, m) in modules.iter_mut().enumerate() {
+        let m_start = Instant::now();
         m.write_trace(&mut tb);
+        profile.tree1_write_per_module.push(ModuleWriteTime {
+            index,
+            name: m.profile_name().to_string(),
+            ms: ms_since(m_start),
+        });
     }
+    profile.tree1_write = ms_since(stage);
+    let stage = stage_start(Phase::Tree1Commit);
     tb.commit(channel);
+    profile.tree1_commit = ms_since(stage);
 
+    let stage = stage_start(Phase::DrawRelations);
     for m in modules.iter_mut() {
         m.draw_relations(channel);
     }
+    profile.draw_relations = ms_since(stage);
 
     // Tree 2: every module's interaction columns. Claimed sums are mixed before
     // the commit, matching the standalone transcript order.
+    let stage = stage_start(Phase::Tree2Write);
     let mut tb = commitment_scheme.tree_builder();
-    for m in modules.iter_mut() {
+    for (index, m) in modules.iter_mut().enumerate() {
+        let m_start = Instant::now();
         m.write_interaction(&mut tb);
+        profile.tree2_write_per_module.push(ModuleWriteTime {
+            index,
+            name: m.profile_name().to_string(),
+            ms: ms_since(m_start),
+        });
     }
+    profile.tree2_write = ms_since(stage);
     for m in modules.iter() {
         m.mix_claimed_sums(channel);
     }
+    let stage = stage_start(Phase::Tree2Commit);
     tb.commit(channel);
+    profile.tree2_commit = ms_since(stage);
 
-    // Optional post-tree-2 transcript block. GKR lookup proofs live here:
-    // their inputs are already committed (trees 1/2 plus relation draws), and
-    // any MLE-eval tie-back columns are committed immediately after the GKR
-    // proof messages so the verifier replays the same Fiat-Shamir order.
+    // Optional transcript block after tree 2. GKR lookup proofs use this block.
+    // Trees 1 and 2 already commit their inputs and relation draws.
+    // MLE tie-back columns follow the GKR proof messages.
+    // The verifier uses the same Fiat-Shamir order.
+    let stage = stage_start(Phase::PostInteraction);
     for m in modules.iter_mut() {
         m.prove_post_interaction(channel);
     }
@@ -440,18 +782,27 @@ pub fn prove(
         }
         tb.commit(channel);
     }
+    profile.post_interaction = ms_since(stage);
 
-    // Build every module's components against one shared allocator seeded with
-    // unique preprocessed column ids. Repeated deterministic tables resolve to
-    // the first matching id here so the constraint framework's static allocator
-    // stays well-defined for repeated modules.
+    // Build every module's components with one shared allocator.
+    // Seed it with unique preprocessed column IDs. A repeated deterministic table
+    // resolves to the first matching ID. This keeps the static allocator defined
+    // for repeated modules.
+    let stage = stage_start(Phase::BuildComponents);
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
     for m in modules.iter_mut() {
         m.build_components(&mut allocator);
     }
     let component_refs: Vec<&dyn ComponentProver<SimdBackend>> =
         modules.iter().flat_map(|m| m.prover_components()).collect();
-    stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme)
+    profile.build_components = ms_since(stage);
+
+    let stage = stage_start(Phase::EngineProve);
+    let proof = stark_prove::<SimdBackend, Mc>(&component_refs, channel, commitment_scheme);
+    profile.engine_prove = ms_since(stage);
+    profile.total = ms_since(total_start);
+    profile.peak_rss_mib = sampler.finish();
+    Ok((proof?, profile))
 }
 
 /// Errors from [`verify_with_expected_preprocessed_root`].
@@ -477,37 +828,38 @@ impl From<VerificationError> for VerifyError {
     }
 }
 
-/// Shape key for the preprocessed-root cache: the deduplicated `(column id,
-/// log_size)` list in tree-0 commit order, plus the FRI blow-up factor (the
-/// Merkle tree commits the blown-up LDE, so the root depends on it). The full
-/// key is stored — no key hashing — so cache hits are exact by construction,
-/// with no collision surface at all (strictly stronger than hashing the list).
+/// Shape key for the preprocessed-root cache.
+///
+/// The key contains the deduplicated `(column id, log_size)` list in tree-0
+/// commit order. It also contains the FRI blowup factor.
+/// The Merkle root depends on this factor because it commits the LDE.
+/// The cache stores the full key and does not hash it.
 type PreprocessedShapeKey = (Vec<(String, u32)>, u32);
 
 static PREPROCESSED_ROOT_CACHE: OnceLock<Mutex<HashMap<PreprocessedShapeKey, CommitmentRoot>>> =
     OnceLock::new();
 
-/// Compute the expected tree-0 (preprocessed) commitment root for a module set,
-/// by running exactly the [`prove`]-side tree-0 path: dedup the preprocessed ids
-/// first-writer-wins, write the selected columns into a fresh commitment
-/// scheme, and commit. Production verifiers compute this once (from their own
-/// trusted module constructions — never from prover-supplied data) and pass it
-/// to [`verify_with_expected_preprocessed_root`].
+/// Computes the expected tree-0 commitment root for a module set.
 ///
-/// Roots are cached per shape (ordered unique `(id, log_size)` list + FRI
-/// blow-up) in a process-global map, so repeated verifies at one shape pay the
-/// rebuild once. The cache trusts that a preprocessed column id determines its
-/// content — the same invariant [`prove`] enforces via
-/// `assert_preprocessed_id_content_invariant` — so only feed this function
-/// verifier-side (trusted) module constructions.
+/// This function uses the same tree-0 path as [`prove`].
+/// It deduplicates preprocessed IDs in first-writer order.
+/// Then, it commits the selected columns with a new commitment scheme.
+/// Production verifiers use trusted module data to compute this root.
+/// They pass the result to [`verify_with_expected_preprocessed_root`].
+///
+/// A process-global map caches one root for each shape.
+/// A shape contains ordered unique `(id, log_size)` entries and the FRI blowup.
+/// The cache assumes that each preprocessed column ID determines its content.
+/// [`prove`] enforces the same invariant.
+/// Call this function only with trusted verifier modules.
 ///
 /// # Soundness
 ///
-/// This root pin is the soundness anchor for tree 0: the Blake2s Merkle root
-/// cryptographically binds the contents, order, and sizes of every preprocessed
-/// column at once. The prover-side `PreprocessedColumnFingerprint` guard uses a
-/// 64-bit `DefaultHasher` and is **NOT** a soundness pin — it is a dev-time
-/// dedup guard only. Do not downgrade this pin to that fingerprint.
+/// This root pin is the soundness anchor for tree 0.
+/// The Blake2s Merkle root binds each preprocessed column.
+/// It binds the column content, order, and size.
+/// `PreprocessedColumnFingerprint` is only a development deduplication guard.
+/// It uses a 64-bit `DefaultHasher` and is not a soundness pin.
 pub fn compute_preprocessed_root(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
@@ -561,13 +913,13 @@ pub fn compute_preprocessed_root(
 /// [`compute_preprocessed_root`] without the per-shape cache: every call
 /// rebuilds and commits tree 0.
 ///
-/// Required whenever a preprocessed column's CONTENT is not determined by its
-/// id — e.g. the legacy P256 hinted-mul schedule columns, which reuse one id
-/// across witnesses while their content follows the signature. The cached
-/// variant would return the first witness's root for every later one (a
-/// fail-closed completeness bug, not a soundness one — but a bug). Use the
-/// cached variant only where the id→content invariant of [`prove`] holds
-/// across every call in the process.
+/// Use this function when a column ID does not determine its content.
+///
+/// P256 hinted-multiplication schedule columns reuse one ID across witnesses,
+/// while their content depends on the signature. The cached function would
+/// return the first witness root for later witnesses and cause a fail-closed
+/// completeness error.
+/// Use the cached function only when the [`prove`] ID-to-content invariant holds.
 pub fn compute_preprocessed_root_uncached(
     modules: &mut [&mut dyn AirProver],
     config: PcsConfig,
@@ -598,12 +950,81 @@ pub fn compute_preprocessed_root_uncached(
     commitment_scheme.roots()[0]
 }
 
+/// Maximum preprocessed column log size for one module.
+///
+/// [`compute_canonical_preprocessed_root`] checks this limit before it allocates
+/// the twiddle table. Production modules remain well below this limit.
+/// The SHA Maj/Ch table has log size 18 at the production width.
+///
+/// Doubled range and split tables have log size 17.
+/// Typical SHA selectors have log size 15.
+/// The P256 and binding modules are smaller.
+/// This limit prevents an untrusted shape from forcing a large tree-0 rebuild.
+pub const MAX_CANONICAL_PREPROCESSED_LOG_SIZE: u32 = 25;
+
+/// Reconstruct and commit tree 0 from verifier-side canonical module data.
+/// Columns use the same first-writer-wins deduplication order as [`prove`]. No
+/// witness value or prover-supplied commitment enters this computation.
+pub fn compute_canonical_preprocessed_root(
+    modules: &mut [&mut dyn Air],
+    config: PcsConfig,
+) -> Result<CommitmentRoot, VerificationError> {
+    for module in modules.iter() {
+        module.validate_structure()?;
+    }
+    let max_preprocessed_log_size = modules
+        .iter()
+        .flat_map(|module| module.layout().preprocessed)
+        .max()
+        .unwrap_or(0);
+    // Check the limit before twiddle or LDE allocation.
+    // An untrusted module log size controls the twiddle table and each rebuilt
+    // column. An unlimited value could exhaust verifier memory.
+    if max_preprocessed_log_size > MAX_CANONICAL_PREPROCESSED_LOG_SIZE {
+        return Err(VerificationError::InvalidStructure(format!(
+            "preprocessed log size {max_preprocessed_log_size} exceeds the canonical maximum \
+             {MAX_CANONICAL_PREPROCESSED_LOG_SIZE}"
+        )));
+    }
+    let twiddles = cached_twiddles(max_preprocessed_log_size + config.fri_config.log_blowup_factor);
+    let channel = &mut Ch::default();
+    config.mix_into(channel);
+    let mut commitment_scheme = CommitmentSchemeProver::<SimdBackend, Mc>::new(config, twiddles);
+    let mut tree_builder = commitment_scheme.tree_builder();
+    let mut seen = HashSet::new();
+
+    for module in modules.iter_mut() {
+        let ids = module.preprocessed_column_ids();
+        let log_sizes = module.layout().preprocessed;
+        let columns = module.canonical_preprocessed_columns()?;
+        if ids.len() != columns.len() || ids.len() != log_sizes.len() {
+            return Err(VerificationError::InvalidStructure(
+                "canonical preprocessed ids, columns, and layout differ in length".into(),
+            ));
+        }
+        let mut selected = Vec::new();
+        for ((id, column), log_size) in ids.into_iter().zip(columns).zip(log_sizes) {
+            if column.domain.log_size() != log_size {
+                return Err(VerificationError::InvalidStructure(
+                    "canonical preprocessed column has the wrong log size".into(),
+                ));
+            }
+            if seen.insert(id) {
+                selected.push(column);
+            }
+        }
+        tree_builder.extend_evals(selected);
+    }
+    tree_builder.commit(channel);
+    Ok(commitment_scheme.roots()[0])
+}
+
 /// Re-derive the transcript for every module and verify the single STARK proof.
 ///
 /// Equivalent to [`verify_with_expected_preprocessed_root`] with `None`: the
 /// tree-0 root is absorbed from the proof without a content check. Production
-/// callers must pin the root via the pinned entry point — see the F-ROOT
-/// finding (tasks/audits/2026-07-05-backend-soundness.md).
+/// callers must independently reconstruct or pin the root via the pinned entry
+/// point.
 pub fn verify(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
@@ -618,27 +1039,27 @@ pub fn verify(
 
 /// [`verify`], with the tree-0 (preprocessed) commitment root pinned.
 ///
-/// On `Some(expected)`, the proof's `commitments[0]` must equal `expected` —
-/// checked BEFORE the root is absorbed into the transcript, so a forged
-/// preprocessed tree (range tables, schedules, constants) is rejected
-/// fail-closed with [`VerifyError::PreprocessedRootMismatch`]. Callers obtain
-/// `expected` from [`compute_preprocessed_root`] over their own trusted module
-/// constructions (or from a pinned per-profile constant generated the same
-/// way), never from the proof.
+/// With `Some(expected)`, the proof tree-0 root must equal `expected`.
+/// The function checks this value before it absorbs the root.
+/// A forged preprocessed tree causes [`VerifyError::PreprocessedRootMismatch`].
+/// Callers obtain `expected` from trusted module data or a pinned profile value.
 ///
 /// # Soundness
 ///
 /// This pin is the tree-0 soundness anchor: the Blake2s Merkle root binds the
 /// contents, order, and sizes of every preprocessed column cryptographically.
 /// The prover-side 64-bit `DefaultHasher` fingerprint guard
-/// (`PreprocessedColumnFingerprint`) is NOT a soundness pin and must never be
-/// substituted for this check. On `None`, the legacy unpinned behavior is kept
-/// for shape-exploratory tests only.
+/// (`PreprocessedColumnFingerprint`) does not provide a soundness pin.
+/// Do not substitute it for this check.
+/// Use `None` only for shape tests that do not pin tree 0.
 pub fn verify_with_expected_preprocessed_root(
     modules: &mut [&mut dyn Air],
     proof: &StarkProof<Hasher>,
     expected_preprocessed_root: Option<CommitmentRoot>,
 ) -> Result<(), VerifyError> {
+    for module in modules.iter() {
+        module.validate_structure()?;
+    }
     if let Some(expected) = expected_preprocessed_root {
         let got = proof.commitments[0];
         if got != expected {
@@ -703,8 +1124,8 @@ pub fn verify_with_expected_preprocessed_root(
         commitment_scheme.commit(proof.commitments[3], &post_interaction_sizes, channel);
     }
 
-    // Build every module's components against one shared allocator (same seeding
-    // as the prover), then collect the borrowed component refs to verify.
+    // Build every module's components with the prover's shared allocator seed.
+    // Then collect borrowed component references for verification.
     let preprocessed_ids =
         unique_preprocessed_ids(modules.iter().flat_map(|m| m.preprocessed_column_ids()));
     let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
@@ -790,8 +1211,8 @@ mod tests {
         fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
             fingerprint_preprocessed_columns(
                 self.module,
-                &[self.id.clone()],
-                &[self.column.clone()],
+                std::slice::from_ref(&self.id),
+                std::slice::from_ref(&self.column),
             )
         }
 
@@ -830,6 +1251,115 @@ mod tests {
         assert!(message.contains("second"));
     }
 
+    /// A module that only reports a preprocessed layout log-size — no columns are
+    /// ever allocated. Used to prove the shape cap fires *before*
+    /// [`compute_canonical_preprocessed_root`] tries to build a tree that large.
+    struct ShapeOnlyModule {
+        preprocessed_log_size: u32,
+    }
+
+    struct InvalidShapeModule;
+
+    impl Air for InvalidShapeModule {
+        fn validate_structure(&self) -> Result<(), VerificationError> {
+            Err(VerificationError::InvalidStructure(
+                "malformed module metadata".to_string(),
+            ))
+        }
+
+        fn mix_public(&self, _channel: &mut Ch) {}
+        fn draw_relations(&mut self, _channel: &mut Ch) {}
+        fn layout(&self) -> TreeLayout {
+            panic!("layout must not be read before structural validation")
+        }
+        fn claimed_sums(&self) -> Vec<QM31> {
+            panic!("claims must not be read before structural validation")
+        }
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            panic!("ids must not be read before structural validation")
+        }
+        fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+        fn components(&self) -> Vec<&dyn Component> {
+            Vec::new()
+        }
+    }
+
+    impl Air for ShapeOnlyModule {
+        fn mix_public(&self, _channel: &mut Ch) {}
+        fn draw_relations(&mut self, _channel: &mut Ch) {}
+        fn layout(&self) -> TreeLayout {
+            TreeLayout {
+                preprocessed: vec![self.preprocessed_log_size],
+                trace: Vec::new(),
+                interaction: Vec::new(),
+            }
+        }
+        fn claimed_sums(&self) -> Vec<QM31> {
+            Vec::new()
+        }
+        fn preprocessed_column_ids(&self) -> Vec<PreProcessedColumnId> {
+            vec![PreProcessedColumnId {
+                id: "shape_only".to_string(),
+            }]
+        }
+        fn build_components(&mut self, _allocator: &mut TraceLocationAllocator) {}
+        fn components(&self) -> Vec<&dyn Component> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn canonical_root_fails_closed_without_reconstruct_override() {
+        // Confirm that canonical verification rejects a module without a column
+        // reconstruction method. The function must return an error without panic.
+        let mut module = ShapeOnlyModule {
+            preprocessed_log_size: 4,
+        };
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], PcsConfig::default())
+            .expect_err("a module without a reconstruct override must fail closed");
+        match error {
+            VerificationError::InvalidStructure(message) => {
+                assert!(
+                    message.contains("cannot reconstruct"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InvalidStructure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_root_rejects_module_structure_before_reading_layout() {
+        let mut module = InvalidShapeModule;
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], PcsConfig::default())
+            .expect_err("malformed module metadata must reject");
+        assert!(matches!(
+            error,
+            VerificationError::InvalidStructure(message)
+                if message == "malformed module metadata"
+        ));
+    }
+
+    #[test]
+    fn canonical_root_rejects_oversized_preprocessed_shape() {
+        // Reject an oversized shape before twiddle allocation.
+        // A late check would exhaust memory.
+        let mut module = ShapeOnlyModule {
+            preprocessed_log_size: MAX_CANONICAL_PREPROCESSED_LOG_SIZE + 1,
+        };
+        let error = compute_canonical_preprocessed_root(&mut [&mut module], PcsConfig::default())
+            .expect_err("an oversized preprocessed shape must be rejected");
+        match error {
+            VerificationError::InvalidStructure(message) => {
+                assert!(
+                    message.contains("exceeds the canonical maximum"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected InvalidStructure, got {other:?}"),
+        }
+    }
+
     use stwo::prover::backend::simd::qm31::PackedQM31;
     use stwo_constraint_framework::{
         relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
@@ -843,7 +1373,7 @@ mod tests {
     /// prover that alters a table cell (and its matching trace cell) satisfies
     /// every constraint — exactly the F-ROOT attack the root pin must reject.
     /// The zero-numerator logup entry only gives the module a real interaction
-    /// column (the shared STARK requires a non-degenerate tree structure); it
+    /// column (the shared STARK requires a non-degenerate tree structure). It
     /// contributes nothing to any sum.
     #[derive(Clone)]
     struct TableEval {
@@ -1013,9 +1543,8 @@ mod tests {
         verify_with_expected_preprocessed_root(&mut [&mut a, &mut b], proof, expected_root)
     }
 
-    /// Back-compat + happy path: the unpinned `verify` and a `None` pin keep the
-    /// old behavior, and the pinned verify accepts the honest proof against the
-    /// independently recomputed root.
+    /// Confirms that unpinned and pinned verification accept an honest proof.
+    /// The pinned check uses an independently computed root.
     #[test]
     fn preprocessed_root_pin_accepts_honest_proof() {
         let (mut a, mut b) = honest_provers();

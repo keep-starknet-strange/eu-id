@@ -30,9 +30,9 @@ impl RangeCheckInteractionClaim {
     /// Build the LogUp interaction column from the multiplicity column and
     /// the column of values being looked up.
     ///
-    /// Returns the interaction trace and this provider's contribution to
-    /// the global LogUp identity — the sum of every component's
-    /// `claimed_sum` is the residue the verifier checks.
+    /// Returns the interaction trace and this provider claimed sum.
+    ///
+    /// The verifier checks the sum of all component claims.
     pub fn gen_interaction_trace(
         multiplicity: &ColumnEval,
         value: &ColumnEval,
@@ -56,14 +56,16 @@ impl RangeCheckInteractionClaim {
         (interaction_trace, Self { claimed_sum })
     }
 
-    /// Class-D blinded interaction trace (Q-015 §4b / p4c Class D). Mirrors
-    /// [`super::component::BlindRangeCheckEval`]'s SINGLE gated entry against the
+    /// Generates a Class-D blinded interaction trace.
+    ///
+    /// This trace mirrors the single gated entry from
+    /// [`super::component::BlindRangeCheckEval`] against the
     /// relation and `value`: numerator `-(1 − is_dummy) · multiplicity` over one
     /// column (`finalize_logup`).
     ///
     /// The numerator is `-m` on real rows (is_dummy = 0) and `0` on dummy rows
-    /// regardless of the random `m` committed there. The claimed sum is therefore
-    /// identical to the unblinded table's over the same real uses.
+    /// regardless of the random `m` committed there. The claimed sum is
+    /// identical to the unblinded table over the same real uses.
     pub fn gen_blind_interaction_trace(
         multiplicity: &ColumnEval,
         value: &ColumnEval,

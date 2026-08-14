@@ -2,29 +2,27 @@ name: CI
 
 # Continuous integration for the eu-id workspace.
 #
-# Build, test, and lint run on every pull request and on pushes to `main`, so
-# regressions in this multi-component cryptographic codebase are caught
-# immediately. Proof generation is slow, so the end-to-end proof test is kept
-# off the per-push path and runs on a daily schedule instead.
+# CI builds, tests, and checks every pull request and every push to `main`.
+# These jobs detect regressions in this multi-component cryptographic codebase.
+# The end-to-end proof test runs each day because proof generation is slow.
 #
-# The `lint` job runs `make check` — the exact target contributors run
-# locally — so local and CI lint results can never diverge (see the Makefile).
+# The `lint` job runs `make check`.
+# Contributors use the same target locally.
 
 on:
-  # `pull_request` covers all feature-branch work. `push` is scoped to `main`
-  # so CI re-validates the trunk after a merge without re-running every job a
-  # second time on branches that already have an open PR.
+  # `pull_request` covers all feature branch work.
+  # `push` covers `main` after a merge.
+  # This scope prevents duplicate branch jobs for an open pull request.
   push:
     branches: [main]
   pull_request:
   schedule:
-    # 06:00 UTC daily. Exercises the slow end-to-end proof test (the `e2e`
-    # job) without slowing down per-push feedback.
-    - cron: '0 6 * * *'
+    # Run the slow `e2e` job each day at 06:00 UTC.
+    # This schedule does not delay push feedback.
+    - cron: "0 6 * * *"
 
-# Cancel superseded in-progress runs for the same ref (e.g. rapid successive
-# pushes). The event name is part of the key so a push never cancels an
-# in-progress scheduled e2e run.
+# Cancel an obsolete active run for the same reference.
+# The event name prevents a push from canceling an active scheduled run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -35,13 +33,15 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 12
+  RAYON_NUM_THREADS: 12
   # Surface panic backtraces so failing tests are diagnosable from the log.
   RUST_BACKTRACE: 1
 
 jobs:
-  # clippy + rustfmt. The `-D warnings` inside `make check` fails the build on
-  # any warning; it is scoped to the workspace crates, so warnings from the
-  # stwo git dependency never break our CI.
+  # Run Clippy and rustfmt.
+  # `make check` rejects warnings except its explicit proof-oriented style allow-list.
+  # Warnings from the Stwo Git dependency do not fail this job.
   lint:
     name: Lint
     if: github.event_name != 'schedule'
@@ -53,36 +53,27 @@ jobs:
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-01-15
           components: rustfmt, clippy
 
-      # Caches ~/.cargo/registry, ~/.cargo/git (the stwo git-dependency
-      # source), and target/ (compiled artifacts, including stwo). Keyed on
-      # Cargo.lock, so the heavy stwo build is reused until a dependency bump
-      # invalidates the cache.
+      # Cache Cargo registries, Git sources, and compiled artifacts.
+      # The `Cargo.lock` key invalidates the cache after a dependency change.
       - name: Cache cargo + build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
 
       # Identical to running `make check` locally:
-      #   cargo clippy -- -D warnings && cargo fmt -- --check
+      #   cargo clippy -- -D warnings <declared style allow-list> && cargo fmt -- --check
       - name: make check
         run: make check
 
-  # cargo build + cargo test --workspace, in a single job so the heavy stwo
-  # dependency compiles once and is shared between the two steps.
+  # Run the workspace build and tests in one job.
+  # This job compiles the large Stwo dependency once.
   build-test:
     name: Build & test
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    # Serialize rayon: the stwo prover has a known lost-wakeup deadlock under
-    # multi-threaded release test runs that intermittently stalls CI to the job
-    # timeout. Single-threading is the documented workaround; the heavy proving
-    # tests are `#[ignore]`d (scheduled `e2e` job), so the non-ignored suite here
-    # stays fast.
-    env:
-      RAYON_NUM_THREADS: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -90,7 +81,7 @@ jobs:
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-01-15
 
       - name: Cache cargo + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -100,23 +91,13 @@ jobs:
       - name: make build
         run: make build
 
-      # `cargo test --workspace` covers every workspace member, so new
-      # component crates are picked up automatically once registered. Heavy
-      # proof-generation tests are marked `#[ignore]` and run in the scheduled
-      # `e2e` job rather than here.
+      # The scheduled job runs tests that have the `#[ignore]` attribute.
       - name: make test
         run: make test
 
-      # The coprocessor composition is feature-gated and default-off, so the
-      # workspace test target does not compile its transcript hooks or negatives.
-      - name: make test-ec-coprocessor
-        run: make test-ec-coprocessor
-
-  # Scheduled-only: the slow full-pipeline proof-generation tests. Runs the
-  # `#[ignore]`-marked tests in release mode (proving in debug is far too
-  # slow). This is the documented runner for the end-to-end soundness suite
-  # (`eu-id-prover/tests/e2e_soundness.rs`) and the composition/boundary tests
-  # — the happy-path bound proof plus one negative per mutation class.
+  # Run slow full pipeline proof tests only on the schedule.
+  # Run tests with the `#[ignore]` attribute in release mode.
+  # This job covers end-to-end, composition, and boundary tests.
   e2e:
     name: End-to-end proof generation
     if: github.event_name == 'schedule'
@@ -128,7 +109,7 @@ jobs:
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2025-07-14
+          toolchain: nightly-2026-01-15
 
       - name: Cache cargo + build artifacts
         uses: Swatinem/rust-cache@v2
@@ -136,19 +117,10 @@ jobs:
           cache-on-failure: true
 
       - name: Run end-to-end proof tests (release, ignored tests only)
-        run: cargo test --workspace --release -- --ignored
+        run: make test-ignored
 
-      # Scheduled feature-on ignored tests include the fork/join digest guard;
-      # this keeps the coprocessor transcript bridge exercised even while the
-      # feature remains default-off.
-      - name: Run EC coprocessor ignored tests (release)
-        run: make test-ec-coprocessor-ignored
-
-      # Smoke-test the standalone-component example so it cannot silently
-      # rot. The example documents itself as "the shortest path to running
-      # the SHA-256 prover"; without an executed-in-CI step a regression
-      # that produces a wrong digest but still compiles would slip past
-      # `make build`. Runs in the same scheduled job as the ignored tests
-      # to share the warm cache.
+      # Test the standalone component example.
+      # This test detects a wrong digest that still compiles.
+      # The scheduled job shares its warm cache with the ignored tests.
       - name: Run prove_demo example (release)
         run: cargo run --release -p stwo-sha256 --example prove_demo

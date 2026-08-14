@@ -25,11 +25,8 @@ pub const IV: [u32; 8] = [
 /// 64 rounds per block.
 pub const N_ROUNDS: usize = 64;
 
-/// 16 message-schedule input words; the remaining `64 - 16 = 48` are derived.
+/// 16 message-schedule input words. The schedule derives 48 more words.
 pub const N_INPUT_WORDS: usize = 16;
-
-/// Total schedule length per block: `W[0..63]`.
-pub const N_SCHEDULE_WORDS: usize = N_ROUNDS;
 
 /// 8 working state words `(a..h)` and 8 hash words `(H₀..H₇)`.
 pub const N_STATE_WORDS: usize = 8;
@@ -67,6 +64,5 @@ mod tests {
     fn size_constants_consistent() {
         assert_eq!(BLOCK_BYTES, N_INPUT_WORDS * WORD_BYTES);
         assert_eq!(DIGEST_BYTES, N_STATE_WORDS * WORD_BYTES);
-        assert_eq!(N_SCHEDULE_WORDS, N_ROUNDS);
     }
 }

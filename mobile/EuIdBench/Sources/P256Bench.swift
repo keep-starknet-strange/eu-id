@@ -2,15 +2,14 @@ import SwiftUI
 import CryptoKit
 import Foundation
 
-// P-256 ECDSA benchmark: prove → verify one signature on-device. Swift/CryptoKit
-// creates the keypair + signature and hands the raw (z, r, s, Qx, Qy) bytes to
-// the Rust prover, then independently re-verifies — the honest analog of the
-// SHA-256 digest cross-check. The AIR covers exactly one signature, so there is
-// no message-size axis; the two cases differ only in where the key comes from.
+// Proves and verifies one P-256 ECDSA signature on the device.
+// CryptoKit creates the key and signature.
+// The Rust prover receives the raw `z`, `r`, `s`, `Qx`, and `Qy` values.
+// CryptoKit independently verifies the signature.
 enum P256Bench {
-    // Fixed 32-byte private key → reproducible public key across runs. (ECDSA
-    // signing still draws a fresh nonce, so the signature varies; the prove
-    // workload — and thus the timing — does not.)
+    // The fixed private key gives the same public key in each run.
+    // ECDSA uses a new nonce, so each signature can be different.
+    // This difference does not change the proof workload.
     static let fixtureKeyBytes = [UInt8](repeating: 7, count: 32)
     static let message = Data("eu-id mobile p256 bench fixture".utf8)
 
@@ -27,8 +26,8 @@ enum P256Bench {
     }
 
     private static func bench(label: String, key: P256.Signing.PrivateKey?) -> BenchResult {
-        // Sign with CryptoKit (SHA-256 inside), then lay the statement out as
-        // five 32-byte big-endian field elements — exactly what the FFI reads.
+        // Use CryptoKit to sign the message.
+        // Give the FFI five 32-byte big-endian field elements.
         guard let key, let signature = try? key.signature(for: message) else {
             logBenchResult(label: label, ok: false, proveMs: 0, verifyMs: 0, peakMiB: 0, extras: [])
             return .failed(label)
@@ -44,14 +43,13 @@ enum P256Bench {
         let qy = Array(pub[32..<64])
 
         let raw = callP256(z, r, s, qx, qy, iters: 1)
-        let ok = raw.ok == 1
         let verified = raw.verified == 1
         let peakMiB = Double(raw.peak_bytes) / (1024 * 1024)
 
-        // Independent verdict from CryptoKit; the cross-check passes iff the
-        // prover's verified flag agrees with it.
+        // Check that the prover result agrees with the CryptoKit result.
         let cryptoKitValid = publicKey.isValidSignature(signature, for: message)
         let agrees = verified == cryptoKitValid
+        let ok = raw.ok == 1 && verified && agrees
 
         logBenchResult(
             label: label, ok: ok, proveMs: raw.prove_ms, verifyMs: raw.verify_ms, peakMiB: peakMiB,
@@ -75,7 +73,7 @@ enum P256Bench {
         )
     }
 
-    // Hold all five 32-byte buffers alive across the single FFI call.
+    // Keeps all five 32-byte buffers valid during the FFI call.
     private static func callP256(
         _ z: [UInt8], _ r: [UInt8], _ s: [UInt8], _ qx: [UInt8], _ qy: [UInt8], iters: UInt32
     ) -> EuIdP256Bench {
@@ -100,9 +98,9 @@ struct P256BenchView: View {
     var body: some View {
         BenchScreen(
             navigationTitle: "P-256 Bench",
-            blurb: "Proves → verifies one P-256 ECDSA signature on-device. Swift/CryptoKit "
-                + "signs and hands the raw (z, r, s, Qx, Qy) to the Rust prover, then "
-                + "re-verifies independently. Peak memory is measured inside Rust.",
+            blurb: "Proves and verifies one P-256 ECDSA signature on the device. "
+                + "CryptoKit signs the message and independently verifies the signature. "
+                + "Rust measures peak memory.",
             cases: P256Bench.cases
         )
     }

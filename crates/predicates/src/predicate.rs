@@ -21,9 +21,10 @@ pub trait PredicateProver {
 
 /// Verifying side of a predicate.
 ///
-/// Given the public input and the claimed LogUp sums carried by a proof, it
-/// validates the public statement and hands back a verifier module (which
-/// implements [`Air`]). A verifier-only binary depends on this half alone.
+/// Validates public input and claimed LogUp sums.
+///
+/// Returns a verifier module that implements [`Air`].
+/// A verifier-only binary depends only on this interface.
 pub trait PredicateVerifier {
     type PublicInput;
     type Error;

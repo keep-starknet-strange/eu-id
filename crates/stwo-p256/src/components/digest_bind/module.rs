@@ -1,27 +1,24 @@
 //! The digest-bind bridge as a self-contained [`air_core`] proving module.
 //!
-//! This wraps three components — the [`DigestBindComponent`] and the two
-//! range-check providers it consumes (bytes to `[0,256)`, carries to `[0,2^13)`)
-//! — behind one `Air`/`AirProver`, so the combined prover drives it as a sibling
-//! module alongside P256 and SHA. It draws its own range relations; it receives
-//! the two cross-module relations it consumes via shared handles:
+//! This module wraps [`DigestBindComponent`] and two range-check providers.
+//! One provider checks bytes in `[0, 256)`.
+//! The other provider checks carries in `[0, 2^13)`.
+//! The combined prover uses one `Air` and `AirProver` interface for all three components.
+//! The module receives two cross-module relations through shared handles:
 //!
 //! - `ScalarZRelation` — provided **analytically** by P256
-//!   ([`super::scalar_z_provider_claimed_sum`]); pins the bridge's `z` to the
+//!   ([`super::scalar_z_provider_claimed_sum`]). Pins the bridge's `z` to the
 //!   proven ECDSA `z`.
 //! - `Sha256Digest` (`DigestBytesRelation`) — provided by the SHA module's
-//!   final-block yield; pins the bridge's 32 bytes to `SHA-256(C)`.
+//!   final-block yield. Pins the bridge's 32 bytes to `SHA-256(C)`.
 //!
-//! The module's own claimed sum is therefore exactly
-//! `+1/combine(scalar_z) + 1/combine(digest)` (the two range channels cancel
-//! internally), which the global balance cancels against P256's and SHA's
-//! provider terms — so the combined proof verifies **iff** the signed digest,
-//! the hashed preimage's digest, and the ECDSA `z` are all the same 32 bytes.
+//! The two range channels cancel inside this module.
+//! Its remaining sum is `+1/combine(scalar_z) + 1/combine(digest)`.
+//! P256 and SHA provide the opposite terms.
+//! Thus, verification requires equal signed, preimage, and ECDSA digest bytes.
 //!
-//! The range tables are **namespaced** (`digest_bind_*`) rather than reusing the
-//! generic `p256_range{k}_value` ids, so the carry table does not alias P256's
-//! own `range13` table in the shared `TraceLocationAllocator` (interface-contract
-//! item 5).
+//! The range tables use the `digest_bind_*` namespace.
+//! Thus, they cannot overlap the generic P256 range tables.
 
 use air_core::relations::DigestBytesRelation;
 use air_core::{
@@ -67,7 +64,9 @@ fn random_m31() -> stwo::core::fields::m31::M31 {
 
 /// Bit width of the byte range table (`[0, 256)`).
 const BYTE_RANGE_BITS: u32 = 8;
-/// Bit width of the carry range table (`[0, 2^13)`; carries are `< 2^13`).
+/// Bit width of the carry range table.
+///
+/// Carries are in `[0, 2^13)`.
 const CARRY_RANGE_BITS: u32 = 13;
 
 fn byte_range_value_id() -> PreProcessedColumnId {
@@ -92,10 +91,11 @@ fn carry_range_dummy_id() -> PreProcessedColumnId {
     }
 }
 
-/// Build a Class-D blinded range provider ([`BlindRangeCheckEval`]) reading the
-/// bridge's **namespaced** value/is_dummy preprocessed ids, so the bridge's
-/// tables neither alias P256's generic `p256_range{k}_*` ids nor leak their
-/// per-key multiplicities. The committed domain is `real_bits + 1`.
+/// Builds a Class-D protected range provider.
+///
+/// The provider uses separate value and dummy identifiers for the bridge.
+/// This prevents identifier overlap and hides each key multiplicity.
+/// The committed domain is `real_bits + 1`.
 fn namespaced_blind_eval(
     relation: RangeCheckRelation,
     real_bits: u32,
@@ -172,9 +172,9 @@ fn layout(log_size: u32) -> TreeLayout {
     }
 }
 
-/// The relations the bridge module draws itself in `draw_relations`: the two
-/// range tables. (The two cross-module relations it consumes — `ScalarZ` and the
-/// digest — are read from shared handles at component-build time, not held here.)
+/// Holds the two range relations that the bridge draws.
+///
+/// Shared handles provide the scalar and digest relations during component construction.
 struct DrawnRelations {
     byte_range: RangeCheckRelation,
     carry_range: RangeCheckRelation,
@@ -266,9 +266,10 @@ pub struct DigestBindProver {
     relations: Option<DrawnRelations>,
     interaction_claim: Option<DigestBindInteractionClaim>,
     components: Option<DigestBindComponents>,
-    /// Class-D blinded multiplicity columns, generated once in `write_trace`
-    /// (random upper half sampled fresh) and reused in `write_interaction` so
-    /// the committed trace and the interaction fractions agree exactly.
+    /// Class-D protected multiplicity columns.
+    ///
+    /// `write_trace` creates these columns once.
+    /// `write_interaction` reuses them to keep the traces consistent.
     byte_mult: Option<ColumnEval>,
     carry_mult: Option<ColumnEval>,
 }
@@ -366,7 +367,7 @@ impl AirProver for DigestBindProver {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // digest_bind is degree 2; each Class-D range provider is degree 2
+        // digest_bind is degree 2. Each Class-D range provider is degree 2
         // (`is_dummy · mult`) at its blinded `log_size + 1`. The blinded carry
         // table's bound (`14 + 1`) dominates.
         (self.log_size + 1)
@@ -610,11 +611,10 @@ mod tests {
     use stwo::core::pcs::PcsConfig;
     use stwo_constraint_framework::Relation;
 
-    /// A synthetic, trace-less module that plays the role of P256 (analytic
-    /// `ScalarZ` provider) and SHA (analytic digest provider) at once: it draws
-    /// both shared relations, sets the handles, and yields `−1/combine` of each —
-    /// exactly the two terms the real provider modules contribute. Lets the
-    /// bridge module's full prove/verify path be exercised in isolation.
+    /// Provides synthetic scalar and digest relation terms without a trace.
+    ///
+    /// The module draws both shared relations and sets their handles.
+    /// It yields the same negative terms as the real P256 and SHA providers.
     struct AnalyticProviders {
         instances: Vec<PublicEcdsaInstance<M31>>,
         digest_bytes: [M31; DIGEST_BYTES],
@@ -716,10 +716,9 @@ mod tests {
         }
     }
 
-    /// The bridge module proves and verifies end-to-end against synthetic
-    /// `ScalarZ`/digest providers: a real STARK prove/verify over the shared
-    /// orchestrator, validating the layout, commit order, every constraint, and
-    /// the global balance in isolation from P256/SHA.
+    /// Confirms the complete bridge path with synthetic providers.
+    ///
+    /// The test checks the layout, commit order, constraints, and global balance.
     #[test]
     fn bridge_layout_puts_active_selector_in_preprocessed_tree() {
         let log_size = 9;
@@ -784,7 +783,7 @@ mod tests {
         }];
         let log_size = 4;
 
-        // Prover (bridge) uses the honest z; the synthetic digest provider yields
+        // Prover (bridge) uses the honest z. The synthetic digest provider yields
         // a different digest. The verifier's provider matches the prover's
         // (mismatched) one, so the only thing broken is the balance.
         let scalar_z_handle = SharedScalarZRelation::new();
@@ -821,7 +820,7 @@ mod tests {
         );
     }
 
-    // ---- Class D (Q-015 §4b / p4c) bridge range-table blinding ----
+    // Class-D bridge range-table blinding.
 
     /// The bridge's Class-D range tables commit at one log above their real
     /// width, and the reserved dummy region is exactly the upper half.
@@ -892,7 +891,7 @@ mod tests {
         };
 
         let (proof_a, claim_a, dummy_a) = prove_once();
-        let (proof_b, _claim_b, dummy_b) = prove_once();
+        let (proof_b, claim_b, dummy_b) = prove_once();
 
         assert_ne!(
             dummy_a, dummy_b,
@@ -900,7 +899,7 @@ mod tests {
         );
 
         // Both proofs verify.
-        for (proof, claim) in [(&proof_a, &claim_a)] {
+        for (proof, claim) in [(&proof_a, &claim_a), (&proof_b, &claim_b)] {
             let scalar_z_handle_v = SharedScalarZRelation::new();
             let digest_handle_v = SharedRelation::<DigestBytesRelation>::default();
             let mut provider_v = providers(
@@ -919,19 +918,6 @@ mod tests {
             let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut bridge_v];
             air_core::verify(&mut modules, proof).expect("Class-D proof verifies");
         }
-        // proof_b verifies too (guards against a per-proof state leak).
-        let scalar_z_handle_v = SharedScalarZRelation::new();
-        let digest_handle_v = SharedRelation::<DigestBytesRelation>::default();
-        let mut provider_v = providers(
-            &instance,
-            digest_bytes,
-            scalar_z_handle_v.clone(),
-            digest_handle_v.clone(),
-        );
-        let mut bridge_v =
-            DigestBindVerifier::new(log_size, 1, _claim_b, scalar_z_handle_v, digest_handle_v);
-        let mut modules: [&mut dyn Air; 2] = [&mut provider_v, &mut bridge_v];
-        air_core::verify(&mut modules, &proof_b).expect("second Class-D proof verifies");
     }
 
     /// Tampering a blinded range table's published claimed sum (the

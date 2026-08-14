@@ -173,10 +173,9 @@ fn scalar(value: u64) -> [u64; 4] {
 #[cfg(test)]
 /// Assert the complete scalar modular multiplication proof slice on trace-domain rows.
 ///
-/// This mirrors Falcon's debug harness shape: build three mock commitment trees
-/// (preprocessed, base, interaction), allocate all components against the same
-/// preprocessed-column list, print each component name, then run
-/// `assert_constraints_on_trace` component by component.
+/// Builds three mock commitment trees and checks each scalar component.
+///
+/// All components use the same preprocessed-column list.
 pub fn assert_scalar_mod_mul_constraints(rows: &ScalarModMulMergedRows) {
     let lookup_claims = LookupProviderClaims::scalar_mod_mul();
     let claim = ScalarModMulClaim::from_rows(rows);
@@ -221,9 +220,9 @@ pub fn assert_scalar_mod_mul_constraints(rows: &ScalarModMulMergedRows) {
 }
 
 #[cfg(test)]
-/// Assert the FinalEcdsaCheck AIR on trace-domain rows for a hand-built base
-/// trace (the component declares no preprocessed columns; relations are drawn
-/// from a dummy channel, mirroring the other debug harnesses).
+/// Checks FinalEcdsaCheck AIR rows for a supplied base trace.
+///
+/// A dummy channel supplies the relations.
 ///
 /// This swaps PCS/FRI for a direct trace-domain constraint check using the
 /// same interaction-trace generator and component allocation as the proof
@@ -347,12 +346,11 @@ fn p_plus(addend: u64) -> [u64; 4] {
     words
 }
 
-/// Build a single-active-row FinalEcdsaCheck base trace for the witnessed
-/// `r_x` value `v` (any `v < 2^256`). The digest-reduction witnesses
-/// (`r_check = v mod n`, `r_check < n`) are derived honestly — they exist for
-/// every `v < 2^256` — while the `r_x < p` slack/carries are supplied by the
-/// caller, because for `v >= p` no valid witness exists (that is the attack
-/// the canonical-LT must reject).
+/// Builds one active FinalEcdsaCheck row for value `v`.
+///
+/// Value `v` must be less than `2^256`.
+/// The function derives valid digest-reduction witnesses.
+/// The caller supplies the `r_x < p` slack and carries.
 #[cfg(test)]
 fn final_check_base_columns(
     v_words: &[u64; 4],
@@ -372,9 +370,7 @@ fn final_check_base_columns(
     let padding_lt_p = CanonicalLtTrace::new("padding_r_x", &[0u64; 4], "p", &P256_MODULUS)
         .expect("0 is below the P-256 field prime");
 
-    // Layout mirrors `final_check_air`: active, sig_id, r_check, r_x,
-    // r_x_ge_n, reduction carries, r_check<n slack/carries, r_x<p
-    // slack/carries.
+    // Use the same column order as `final_check_air`.
     let total_columns = 2 + 7 * N_LIMBS + 1;
     let mut columns = vec![vec![m(0); rows]; total_columns];
 
@@ -445,11 +441,9 @@ fn final_check_debug_rejects_non_canonical_r_x_plus_p() {
     // malicious prover writes zeros), so the ungated canonical-LT recurrence
     // must fail.
     //
-    // The constraint violation panics inside `evaluate` while its `LogupAtRow`
-    // is still live, and that guard's unwind-time assert turns the panic into
-    // a SIGABRT (lessons.md #18), which `#[should_panic]` cannot observe. Run
-    // the forged assert in a child process instead and require that the child
-    // dies: the parent FAILS iff the AIR accepts the forgery.
+    // The constraint failure aborts while `LogupAtRow` is live.
+    // Run the changed trace in a child process.
+    // The parent requires the child process to fail.
     if std::env::var_os("FINAL_CHECK_FORGED_ORACLE_CHILD").is_some() {
         let v = p_plus(41);
         let base = final_check_base_columns(&v, [0; N_LIMBS], [0; N_LIMBS]);

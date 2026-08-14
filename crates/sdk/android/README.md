@@ -1,9 +1,9 @@
 # eu-id-zk-sdk (Android)
 
-Packages the `sdk` Rust crate into a plug-and-play Android AAR: the UniFFI Kotlin
-bindings, the native `libeuid_zk_sdk.so` for each ABI, and the JNA runtime — all
-behind a single Maven coordinate. Consumers (wallet `:zkp-logic`, the verifier's Android
-`actual`) add one dependency line; nothing is copied or hand-wired.
+This module packages the Rust `sdk` crate as an Android AAR.
+The AAR contains UniFFI Kotlin bindings and one native library for each ABI.
+It also contains the JNA runtime.
+Consumers add one Maven dependency.
 
 ## Coordinate
 
@@ -13,26 +13,28 @@ com.kss:eu-id-zk-sdk:0.1.0          // Kotlin package: com.kss.euid.zk.sdk
 
 ## How it works
 
-No third-party Rust/Gradle plugin (the stale `rust-android-gradle` plugin can't
-run on Gradle 9). Two plain Gradle `Exec` tasks drive cargo-ndk + uniffi-bindgen
-directly:
+The build does not use a third-party Rust Gradle plugin.
+The old `rust-android-gradle` plugin cannot run on Gradle 9.
+Two Gradle tasks run `cargo-ndk` and `uniffi-bindgen`:
 
-- `cargoNdkBuild` — `cargo ndk` cross-compiles `libeuid_zk_sdk.so` per ABI into `src/main/jniLibs/`.
-- `generateUniffiBindings` — runs the bundled `uniffi-bindgen` into `src/main/kotlin/`.
+- `cargoNdkBuild` cross-compiles `libeuid_zk_sdk.so` for each ABI.
+- `generateUniffiBindings` runs the bundled `uniffi-bindgen`.
 
-`preBuild` depends on both; writing into AGP's conventional source dirs means
-they're packaged into the AAR with no source-set DSL. Runs on Gradle 9.x.
+Both tasks write below `build/generated`.
+The Android Gradle Plugin variant API owns and packages these outputs.
+The release build rejects a dirty Git worktree by default.
+Use `-PallowDirtyBuild=true` only for an explicitly labeled local build.
 
 ## Prerequisites
 
 - JDK 17+ and Android SDK (Android Studio supplies both).
 - An installed NDK matching `ndkVersion` in `build.gradle.kts` (used by both
   cargo-ndk and AGP's release strip).
-- `cargo-ndk`: `cargo install cargo-ndk`.
+- `cargo-ndk` 4.1.2: `cargo install cargo-ndk --version 4.1.2 --locked`.
 - The Android Rust targets: `rustup target add aarch64-linux-android x86_64-linux-android`.
 
-The Gradle wrapper is committed (`./gradlew`, pinned to Gradle 9.5.0), so no
-system Gradle install is needed — `./gradlew` bootstraps it.
+The repository contains a Gradle 9.5.0 wrapper.
+You do not need a system Gradle installation.
 
 ## Build & publish (to Maven Local)
 
@@ -49,16 +51,16 @@ Useful intermediate tasks:
 
 ## Test
 
-The SDK is exercised by **instrumented tests** (`src/androidTest`), which run on
-an emulator/device and load the bundled ABI `.so` — no host-arch build needed.
+**Instrumented tests** in `src/androidTest` test the SDK.
+They run on an emulator or device and load the bundled native library.
 
 ```bash
 # with an emulator/device connected:
 ./gradlew connectedAndroidTest
 ```
 
-(JVM unit tests under `src/test` are not used: they'd load the library from the
-host and so would require a separate macOS/Linux `libeuid_zk_sdk` build.)
+This project has no JVM unit tests in `src/test`.
+They would require a separate host library for macOS or Linux.
 
 ## Consume
 
@@ -75,7 +77,16 @@ dependencies { implementation("com.kss:eu-id-zk-sdk:0.1.0") }
 ```kotlin
 import com.kss.euid.zk.sdk.proveIdentity
 import com.kss.euid.zk.sdk.verifyIdentity
-// ... ZkPublicStatement, ZkMdocWitness, ZkVerifyResult, PredicateMode, NatMode, ZkException
+// ... ZkPublicStatement, ZkMdocWitness, ZkVerifyResult, PredicateMode,
+// ZkException, and the product pin functions
 ```
+
+`ZkPublicStatement` carries the verifier-authoritative P-256 issuer coordinates
+as `issuerPublicKeyX` and `issuerPublicKeyY`. It carries the canonical CBOR
+SessionTranscript as `sessionTranscript`. Nationality policies use a sorted,
+unique list of uppercase ISO 3166-1 alpha-2 strings in
+`acceptedAlpha2Countries`. The signed mdoc must contain exactly one x5chain
+leaf. Its SubjectPublicKeyInfo P-256 key must equal the verifier-authoritative
+coordinates.
 
 JNA and the native libs arrive transitively inside the AAR.

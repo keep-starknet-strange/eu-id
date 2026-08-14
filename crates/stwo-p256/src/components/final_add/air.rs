@@ -50,19 +50,15 @@ struct FinalAddCheckColumns<E: EvalAtRow> {
     dy_carries: [E::F; N_LIMBS],
     x3_q: E::F,
     x3_carries: [E::F; N_LIMBS],
-    /// Witnessed `both_finite = (1 − r1.inf)·(1 − r2.inf)` as a degree-1 gate
-    /// column (lessons.md #44 idiom). Inlining the degree-2 product makes
-    /// every gate that multiplies it degree 3, over the `log_size + 1`
-    /// (degree-2) composition budget — a latent completeness hazard that
-    /// activates once no larger component pads the global composition domain.
-    /// The defining constraint is ungated, so padding rows hold `1` (their
-    /// inf flags are forced to 0).
+    /// Witnessed degree-1 gate `both_finite = (1 − r1.inf)·(1 − r2.inf)`.
+    ///
+    /// An inline product would make dependent gates degree 3.
+    /// The ungated definition sets this value to one on padding rows.
     both_finite: E::F,
-    /// Witnessed bit splits pinning the reduction quotients to their ternary
-    /// ranges at degree ≤ 2: `q = b0 + 2·b1` with `b0, b1 ∈ {0,1}` and
-    /// `b0·b1 = 0` gives exactly `q ∈ {0, 1, 2}` (the inline ternary checks
-    /// `gate·q·(q−1)·(q−2)` are degree 4). All split constraints are ungated;
-    /// padding/off-branch rows hold all-zero quotients and bits.
+    /// Witnessed bit splits for ternary reduction quotients.
+    ///
+    /// `q = b0 + 2·b1` and `b0·b1 = 0` give `q ∈ {0, 1, 2}`.
+    /// The ungated constraints use zero values on inactive rows.
     dy_q_b0: E::F,
     dy_q_b1: E::F,
     x3_q_b0: E::F,
@@ -73,7 +69,7 @@ struct FinalAddCheckColumns<E: EvalAtRow> {
     /// `R` is ∞ and orientation is x-invariant-moot.
     b1: E::F,
     b2: E::F,
-    /// `d = b1 ⊕ b2` (witnessed boolean; defining constraint `d = b1+b2−2·b1·b2`).
+    /// `d = b1 ⊕ b2` (witnessed boolean, defining constraint `d = b1+b2−2·b1·b2`).
     sign_d: E::F,
     /// `R_2` oriented by `d`: `r2p_y ≡ (−1)^d · r2.y (mod p)`. The add runs on
     /// `(R_1, (r2.x, r2p_y))`, binding `x(R_1 + (−1)^d R_2) = x(h_1 + h_2)`.
@@ -230,7 +226,7 @@ impl FrameworkEval for FinalAddCheckEval {
         eval.add_constraint(columns.r1.inf.clone() * (one.clone() - columns.r1.inf.clone()));
         eval.add_constraint(columns.r2.inf.clone() * (one.clone() - columns.r2.inf.clone()));
         // Witnessed `both_finite = (1 − r1.inf)·(1 − r2.inf)` (ungated degree-2
-        // definition; padding rows hold 1 since their inf flags are 0). All
+        // definition. Padding rows hold 1 since their inf flags are 0). All
         // gates below use the degree-1 column so every constraint stays within
         // the log_size + 1 (degree-2) composition budget.
         eval.add_constraint(
@@ -250,34 +246,26 @@ impl FrameworkEval for FinalAddCheckEval {
         // Witnessed: double_add, inverse_add (both bool).
         // Derived: both_finite, r1_only, r2_only, distinct_add (degree 2).
         // Sum constraint: distinct_add + double_add + inverse_add + r1_only +
-        // r2_only = active. Since the boolean flags pin each in {0,1} and the
-        // infinity-derived selectors are mutually exclusive with both_finite,
-        // exactly one is 1 on an active row.
+        // r2_only = active. Boolean constraints pin every flag to {0,1}.
+        // Infinity-derived selectors are mutually exclusive with both_finite.
+        // Therefore, exactly one selector is 1 on an active row.
         //
-        // The active · inverse_add = 0 constraint makes the additive-inverse
-        // branch unprovable: an honest prover with R_1 = -R_2 cannot select
-        // any other branch (the dx/dy/x3 reductions or the slope mul would
-        // fail), so the witness is uncompletable.
+        // `active · inverse_add = 0` rejects the additive-inverse branch.
+        // The other branch constraints reject alternate selectors for these points.
         eval.add_constraint(
             columns.double_add.clone() * (one.clone() - columns.double_add.clone()),
         );
         eval.add_constraint(
             columns.inverse_add.clone() * (one.clone() - columns.inverse_add.clone()),
         );
-        // Mutual exclusion of double_add / inverse_add needs no constraint of
-        // its own: `active · inverse_add = 0` below already forces
-        // inverse_add = 0 on active rows (the former degree-3
-        // `active · double_add · inverse_add` was redundant and over the
-        // degree-2 budget).
+        // `active · inverse_add = 0` already excludes both branch flags together.
         // Reject R_final = ∞ (additive-inverse case).
         eval.add_constraint(active.clone() * columns.inverse_add.clone());
 
         // Degree-1 witnessed gate (defined above next to the inf booleans).
         let both_finite = columns.both_finite.clone();
-        // Degree-1 forms via the witnessed gate: with
-        // bf = (1 − inf1)(1 − inf2) (enforced above),
-        // inf1·(1 − inf2) = 1 − bf − inf2 and inf2·(1 − inf1) = 1 − bf − inf1
-        // hold pointwise, keeping the passthrough bindings below at degree 2.
+        // Use the witnessed gate to keep the pass-through bindings at degree 2.
+        // Here, `bf = (1 − inf1)(1 − inf2)`.
         let r1_only = one.clone() - both_finite.clone() - columns.r2.inf.clone();
         let r2_only = one.clone() - both_finite.clone() - columns.r1.inf.clone();
         // distinct_add = both_finite - double_add - inverse_add (degree 2).
@@ -290,8 +278,7 @@ impl FrameworkEval for FinalAddCheckEval {
         eval.add_constraint(columns.double_add.clone() * (one.clone() - both_finite.clone()));
         eval.add_constraint(columns.inverse_add.clone() * (one.clone() - both_finite.clone()));
 
-        // double_add means R_1 = R_2' (the ORIENTED second point), so it forces
-        // r1.x = r2.x and r1.y = r2p_y limb-wise (h-doubling, not R-doubling).
+        // `double_add` requires equal first and oriented second points.
         for i in 0..N_LIMBS {
             eval.add_constraint(
                 columns.double_add.clone()
@@ -326,7 +313,7 @@ impl FrameworkEval for FinalAddCheckEval {
         // -------- Sign-bit consumes + R_2 orientation --------
         // Bind b1,b2 to the proven per-cert s2_sign_bit (provider:
         // fake_glv_scalar). SAME gate as the hint consume, so the bit is bound
-        // exactly for active finite certs; free (harmless) on inactive certs.
+        // exactly for active finite certs. Free (harmless) on inactive certs.
         consume_sign(
             &mut eval,
             &self.sign_relation,
@@ -352,10 +339,9 @@ impl FrameworkEval for FinalAddCheckEval {
                 - (columns.b1.clone() + columns.b2.clone()
                     - (columns.b1.clone() + columns.b1.clone()) * columns.b2.clone()),
         );
-        // r2p_y ≡ (−1)^d · r2.y (mod p): passthrough when d=0, modular negation
-        // when d=1. x and inf of R_2 are reused unchanged (orientation preserves
-        // them), so the add below runs on (R_1, (r2.x, r2p_y)) and binds
-        // x(R_1 + (−1)^d R_2) = x(h_1 + h_2).
+        // `r2p_y ≡ (−1)^d · r2.y (mod p)`.
+        // The x-coordinate and infinity flag do not change under orientation.
+        // The addition binds `x(R_1 + (−1)^d R_2) = x(h_1 + h_2)`.
         let neg_d = one.clone() - columns.sign_d.clone();
         for i in 0..N_LIMBS {
             eval.add_constraint(
@@ -545,16 +531,16 @@ impl FrameworkEval for FinalAddCheckEval {
             eval.add_constraint(active.clone() * limb.clone());
         }
 
-        // -------- Quotient bounds (all degree ≤ 2; lessons.md #44) --------
+        // Quotient bounds with degree at most two.
         // The former gated ternary checks `gate·q·(q−1)·(q−2)` were degree 4,
         // over the log_size + 1 (degree-2) composition budget. Replace them
         // with ungated witnessed bit splits: `q = b0 + 2·b1`, `b0, b1` bool,
         // `b0·b1 = 0` ⟺ `q ∈ {0, 1, 2}` on EVERY row (strictly stronger than
-        // the former gated checks; padding/off-branch rows hold q = bits = 0).
+        // the former gated checks. Padding/off-branch rows hold q = bits = 0).
         let finite_finite = distinct_add.clone() + columns.double_add.clone();
-        // dx_q ∈ {0, 1} everywhere (ungated boolean; off-branch zero below).
+        // dx_q ∈ {0, 1} everywhere (ungated boolean, off-branch zero below).
         eval.add_constraint(columns.dx_q.clone() * (columns.dx_q.clone() - one.clone()));
-        // dy_q ∈ {0, 1, 2} everywhere; ∈ {0, 1} on the distinct branch.
+        // dy_q ∈ {0, 1, 2} everywhere. It is in {0, 1} on the distinct branch.
         eval.add_constraint(
             columns.dy_q.clone()
                 - columns.dy_q_b0.clone()
@@ -707,7 +693,7 @@ fn consume_hint<E: EvalAtRow>(
 }
 
 /// Consume a cert's proven `s2_sign_bit` (use, `+gate`). Bound to the
-/// `fake_glv_scalar` provider; the gate matches the hint consume.
+/// `fake_glv_scalar` provider. The gate matches the hint consume.
 fn consume_sign<E: EvalAtRow>(
     eval: &mut E,
     relation: &FinalAddSignRelation,
@@ -725,7 +711,7 @@ fn consume_sign<E: EvalAtRow>(
 }
 
 /// `r2p_y + r2_y − q·p = 0` over 13-bit limbs with signed carries, final 0.
-/// Gated by `d` (the negation branch); `q ∈ {0,1}`. Establishes
+/// Gated by `d` (the negation branch). `q ∈ {0,1}`. Establishes
 /// `r2p_y ≡ −r2_y (mod p)`, i.e. the y-coordinate of `−R_2`.
 fn add_negation_reduction<E: EvalAtRow>(
     eval: &mut E,

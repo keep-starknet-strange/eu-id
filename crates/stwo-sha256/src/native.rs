@@ -10,14 +10,17 @@
 use crate::constants::{BLOCK_BYTES, IV, K, N_INPUT_WORDS, N_ROUNDS, N_STATE_WORDS, WORD_BYTES};
 use crate::types::{Block, Digest, HashState, Schedule};
 
-/// Pad a message per FIPS 180-4 §5.1.1: append `0x80`, then enough zero
-/// bytes to land 8 bytes shy of a block boundary, then the **bit** length as
-/// a big-endian `u64`. Output length is always a multiple of `BLOCK_BYTES`.
+/// Pad a message as FIPS 180-4 §5.1.1 specifies.
+///
+/// Append `0x80`.
+/// Then append zeros until eight bytes remain in the block.
+/// Append the bit length as a big-endian `u64`.
+/// The output length is a multiple of `BLOCK_BYTES`.
 ///
 /// Examples:
 /// - `msg.len() = 0`  → one block (`0x80` + 55 zeros + 8-byte length).
 /// - `msg.len() = 55` → one block (`msg` + `0x80` + 0 zeros + length).
-/// - `msg.len() = 56` → two blocks (`0x80` doesn't fit with length in 64 B).
+/// - `msg.len() = 56` → two blocks (`0x80` does not fit with length in 64 B).
 pub fn pad_message(msg: &[u8]) -> Vec<u8> {
     let bit_len = (msg.len() as u64).checked_mul(8).expect("message too long");
     let mut out = Vec::with_capacity(msg.len() + 9 + 64);
@@ -136,16 +139,20 @@ pub fn hash(msg: &[u8]) -> Digest {
 }
 
 /// Number of blocks needed for a message of `n_bytes`.
-pub fn n_blocks_for(n_bytes: usize) -> usize {
+pub const fn n_blocks_for(n_bytes: usize) -> usize {
     // After appending 0x80 + 8 length bytes, round up to a multiple of 64.
-    let total = n_bytes + 9;
-    total.div_ceil(BLOCK_BYTES)
+    let total = n_bytes.saturating_add(9);
+    (total.saturating_add(BLOCK_BYTES - 1)) / BLOCK_BYTES
 }
 
 const _: () = {
     // Internal consistency: block/word/state sizing.
     assert!(BLOCK_BYTES == N_INPUT_WORDS * WORD_BYTES);
     assert!(N_STATE_WORDS == 8);
+    assert!(n_blocks_for(6_164) == 97);
+    assert!(n_blocks_for(6_144) == 97);
+    assert!(n_blocks_for(20) == 1);
+    assert!(n_blocks_for(1_024) == 17);
 };
 
 #[cfg(test)]
@@ -178,7 +185,7 @@ mod tests {
 
     #[test]
     fn two_block_fips_appendix_b_2_matches_sha2() {
-        // FIPS Appendix B.2 uses a 448-bit (= 56-byte) message; padding pushes
+        // FIPS Appendix B.2 uses a 448-bit (= 56-byte) message. Padding pushes
         // it into a second block.
         let msg = b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
         assert_eq!(msg.len(), 56);
@@ -228,9 +235,9 @@ mod tests {
 
     #[test]
     fn iv_round_trip_on_empty_message() {
-        // Block 0's schedule consumes the padded empty message; block 0's
-        // h_in must be IV, h_out must produce the canonical empty-string
-        // digest. Sanity check that the IV is wired through.
+        // Block 0's schedule consumes the padded empty message. Block 0's
+        // h_in must be IV. h_out must produce the canonical empty-string
+        // digest. Check that the computation carries the IV through.
         let padded = pad_message(b"");
         let blocks = parse_blocks(&padded);
         assert_eq!(blocks.len(), 1);

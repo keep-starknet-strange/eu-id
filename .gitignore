@@ -2,15 +2,16 @@
 /tasks/
 /scratchpad/
 /.claude/
+/.codex/
 
 /target
 .idea
 .DS_Store
 proof.bin
 
-# Mobile harness — generated/build artifacts (regenerate via
-# crates/eu-id-ffi/build-xcframework.sh and `xcodegen generate`).
+# Generated mobile benchmark files.
+# Create them with `build-xcframework.sh` and `xcodegen generate`.
 /crates/eu-id-ffi/EuId.xcframework
-# xcodebuild output dirs: build/ (simulator), build-device/ (on-device), etc.
+# Xcode build directories.
 /mobile/EuIdBench/build*
 /mobile/EuIdBench/EuIdBench.xcodeproj

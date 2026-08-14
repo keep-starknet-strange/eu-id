@@ -39,7 +39,7 @@ impl ScalarModMulInteractionTraces {
         relations: &ScalarModMulComponentRelations,
     ) -> (Self, ScalarModMulInteractionClaim) {
         // Padding tuples carry numerator 0, so their `mul_id` never affects the
-        // claimed sum; use 0 to mirror the merged base trace's zero padding.
+        // claimed sum. Use 0 to mirror the merged base trace's zero padding.
         let (canonical_scalars, canonical_claim) = gen_family_interaction_trace(
             super::columns::padded_log_size(rows.canonical_len()),
             rows.canonical_scalars()

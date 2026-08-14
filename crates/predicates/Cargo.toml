@@ -15,20 +15,3 @@ serde = { workspace = true }
 num-traits = { workspace = true }
 rand = "0.8"
 thiserror = "2.0.18"
-bincode = "1"
-serde_json = "1"
-strum = { version = "0.27", features = ["derive"] }
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-stwo = { workspace = true }
-serde_json = "1"
-ureq = "3"
-
-[[example]]
-name = "gen-iso-presets"
-path = "examples/gen_iso_presets.rs"
-
-[[bench]]
-name = "predicates"
-harness = false

@@ -924,7 +924,7 @@ impl PreparedAffinePoint {
     }
 
     /// All-zero point (`x = y = 0`, `inf = 0`). Used as the inert filler for the
-    /// negation aux block on rows that do not witness a negation; distinct from
+    /// negation aux block on rows that do not witness a negation. Distinct from
     /// [`Self::infinity`] (which sets `inf = 1`).
     pub const fn from_zero_limbs() -> Self {
         Self {
@@ -1364,7 +1364,7 @@ fn prepared_table_ec_rows_for_cert_with_r_override(
 }
 
 /// Test-only: build a [`PreparedTableEcTraceClaim`] where the cert at
-/// `override_cert_index` uses the injected `R'`; all other certs use the
+/// `override_cert_index` uses the injected `R'`. All other certs use the
 /// production path. Skips the cross-`verify` against the native (true-R)
 /// derivation so a wrong-`R'` trace can be assembled.
 #[cfg(test)]

@@ -1,16 +1,17 @@
-//! M31-side mdoc P4b Longfellow GF(2^128) MAC binding.
+//! M31-side mdoc P4b affine GF(2^128) MAC binding.
 //!
 //! The committed trace only carries one bit-serial row per MAC bit. The
-//! `a_v`-dependent terms live in the post-interaction tree after the shared
-//! MAC challenge is published.
+//! additive pad and value are committed before the shared `a_v` challenge.
+//! The `a_v`-dependent terms live in the post-interaction tree.
 
 use std::{cell::RefCell, rc::Rc};
 
-use air_core::relations::{
-    field_id, DigestBytesRelation, FieldBytesRelation, SharedDigestRelation, SharedFieldRelation,
+use air_core::claim_mask::{
+    add_claim_mask_fraction, ClaimMaskTrace, SharedClaimMaskChallenge, CLAIM_MASK_TRACE_COLUMNS,
 };
+use air_core::relations::{field_id, FieldBytesRelation, SharedFieldRelation};
 use air_core::{fingerprint_preprocessed_columns, Air, AirProver, PreprocessedColumnFingerprint};
-use eu_id_ec_coprocessor::mac::Gf128;
+use eu_id_ec_coprocessor::mac::{bits_to_bytes, bytes_to_bits, gf128_tag, Gf128};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use stwo::core::air::Component;
@@ -18,9 +19,6 @@ use stwo::core::channel::{Blake2sChannel, Channel};
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::QM31;
 
-use crate::claimed_sum_blinder::{
-    add_blinder_relation_entry, blinder_denominator, random_qm31, ClaimedSumBlinderRelation,
-};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::utils::{bit_reverse_index, coset_index_to_circle_domain_index};
 use stwo::prover::backend::simd::column::BaseColumn;
@@ -35,32 +33,31 @@ use stwo_constraint_framework::{
     relation, EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation,
     RelationEntry, TraceLocationAllocator,
 };
+use stwo_sha256::relations::{PackedShaDigestRelation, SharedPackedShaDigestRelation};
 
-const MACS_PER_PROOF: usize = 6;
+const MACS_PER_PROOF: usize = eu_id_ec_coprocessor::ecdsa::MDOC_P4B_MAC_HALF_COUNT;
 const HALF_BYTES: usize = 16;
 const GF_BITS: usize = 128;
 const ACTIVE_ROWS: usize = MACS_PER_PROOF * GF_BITS;
-const CONSUMER_LOG_SIZE: u32 = 10;
+// Eight bound halves occupy 1,024 active rows. Keep another 1,024 rows for
+// Class-C polynomial masking of every witness column.
+const CONSUMER_LOG_SIZE: u32 = 11;
 const CONSUMER_ROWS: usize = 1 << CONSUMER_LOG_SIZE;
 const INACTIVE_ROWS: usize = CONSUMER_ROWS - ACTIVE_ROWS;
 const BINDING_LOG_SIZE: u32 = 9;
 const CONSUMER_PREPROCESSED_COLS: usize = 3 + MACS_PER_PROOF + GF_BITS;
-const BINDING_PREPROCESSED_COLS: usize = 5;
+const BINDING_PREPROCESSED_COLS: usize = 6;
 const CONSUMER_TRACE_COLS: usize = 1 + GF_BITS;
 const POST_TRACE_COLS: usize = 2 * GF_BITS;
 const BINDING_TRACE_COLS: usize = 32;
 const INTERACTION_COLS_PER_FRACTION: usize = 4;
-// Consumer: mac_half yield + Q-015 blinder (+m) fraction, one column each
-// under `finalize_logup`.
+// Consumer: mac_half yield + optional committed claim-mask fraction.
 const CONSUMER_INTERACTION_COLS: usize = 2 * INTERACTION_COLS_PER_FRACTION;
-// Binding: 35 lookup sites + the Q-015 blinder (−2m) counterpart = 36
-// fractions, paired two-per-column under `finalize_logup_in_pairs`.
-const BINDING_INTERACTION_COLS: usize = 18 * INTERACTION_COLS_PER_FRACTION;
-const CHECK_NEW_SELECTOR_BOOLS: bool = false;
-const CHECK_S_CONSTRAINTS: bool = true;
-const CHECK_POST_COLUMN_CONSTRAINTS: bool = true;
-const CHECK_POST_CONSTRAINTS: bool = true;
-const CHECK_POST_FINAL_TAG: bool = true;
+// Binding: issuer digest + revocation digest + 32 device-key bytes + two
+// half-value sites + optional committed claim mask = 37 fractions.
+const BINDING_INTERACTION_COLS: usize = 19 * INTERACTION_COLS_PER_FRACTION;
+const ISSUER_SHA_MSG_ID: u32 = 0;
+const REVOCATION_SHA_MSG_ID: u32 = 2;
 
 type MacColumnEval = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 type ConsumerComponent = FrameworkComponent<MacConsumerEval>;
@@ -113,55 +110,30 @@ impl MdocP4bMacSharedState {
 pub(crate) struct MdocMacBind {
     rows: [MacHalfWitness; MACS_PER_PROOF],
     mac_state: Option<MdocP4bMacSharedState>,
-    issuer_digest_handle: Option<SharedDigestRelation>,
+    packed_sha_digest_handle: Option<SharedPackedShaDigestRelation>,
+    packed_sha_digest_relation: Option<PackedShaDigestRelation>,
     issuer_field_handle: Option<SharedFieldRelation>,
     av: Option<[u8; HALF_BYTES]>,
     tags: Option<[[u8; HALF_BYTES]; MACS_PER_PROOF]>,
     mac_half_relation: Option<MacHalfRelation>,
-    blinder_relation: Option<ClaimedSumBlinderRelation>,
+    claim_mask_traces: Option<[ClaimMaskTrace; 2]>,
+    claim_mask_challenge: Option<SharedClaimMaskChallenge>,
     interaction_claim: Option<MdocMacInteractionClaim>,
     consumer_decoys: Option<MacConsumerDecoyRows>,
     consumer_component: Option<ConsumerComponent>,
     binding_component: Option<BindingComponent>,
 }
 
-impl Clone for MdocMacBind {
-    fn clone(&self) -> Self {
-        Self {
-            rows: self.rows.clone(),
-            mac_state: self.mac_state.clone(),
-            issuer_digest_handle: self.issuer_digest_handle.clone(),
-            issuer_field_handle: self.issuer_field_handle.clone(),
-            tags: self.tags,
-            av: self.av,
-            mac_half_relation: None,
-            blinder_relation: None,
-            interaction_claim: self.interaction_claim.clone(),
-            consumer_decoys: self.consumer_decoys.clone(),
-            consumer_component: None,
-            binding_component: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct MdocMacInteractionClaim {
     pub(crate) consumer: QM31,
     pub(crate) binding: QM31,
-    /// Q-015 §4b blinder pair: fresh per-prove `v` (denominator seed) and `m`
-    /// (free numerator). `+m/(z−combine(v))` shifts the consumer sum, `−m/…`
-    /// shifts the binding sum, so each published number is masked by a uniform
-    /// QM31 while the global fold stays zero.
-    pub(crate) blinder_v: QM31,
-    pub(crate) blinder_m: QM31,
 }
 
 #[derive(Clone)]
 struct MacConsumerEval {
     mac_half_relation: MacHalfRelation,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_beta: Option<QM31>,
     av: [u8; HALF_BYTES],
     tags: [[u8; HALF_BYTES]; MACS_PER_PROOF],
 }
@@ -169,10 +141,8 @@ struct MacConsumerEval {
 #[derive(Clone)]
 struct MacBindingEval {
     mac_half_relation: MacHalfRelation,
-    blinder_relation: ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
-    issuer_digest_relation: DigestBytesRelation,
+    claim_mask_beta: Option<QM31>,
+    packed_sha_digest_relation: PackedShaDigestRelation,
     issuer_field_relation: FieldBytesRelation,
 }
 
@@ -181,7 +151,7 @@ impl MdocMacBind {
         mac_key_shares: &eu_id_ec_coprocessor::ecdsa::MdocP4bMacKeyShares,
         mac_values: [Gf128; MACS_PER_PROOF],
         mac_state: MdocP4bMacSharedState,
-        issuer_digest_handle: SharedDigestRelation,
+        packed_sha_digest_handle: SharedPackedShaDigestRelation,
         issuer_field_handle: SharedFieldRelation,
     ) -> Self {
         Self {
@@ -190,12 +160,14 @@ impl MdocMacBind {
                 x: mac_values[index],
             }),
             mac_state: Some(mac_state),
-            issuer_digest_handle: Some(issuer_digest_handle),
+            packed_sha_digest_handle: Some(packed_sha_digest_handle),
+            packed_sha_digest_relation: None,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
             mac_half_relation: None,
-            blinder_relation: None,
+            claim_mask_traces: None,
+            claim_mask_challenge: None,
             interaction_claim: None,
             consumer_decoys: None,
             consumer_component: None,
@@ -205,7 +177,7 @@ impl MdocMacBind {
 
     pub(crate) fn verifier(
         mac_state: MdocP4bMacSharedState,
-        issuer_digest_handle: SharedDigestRelation,
+        packed_sha_digest_handle: SharedPackedShaDigestRelation,
         issuer_field_handle: SharedFieldRelation,
         interaction_claim: MdocMacInteractionClaim,
     ) -> Self {
@@ -215,12 +187,14 @@ impl MdocMacBind {
                 x: [0; HALF_BYTES],
             }),
             mac_state: Some(mac_state),
-            issuer_digest_handle: Some(issuer_digest_handle),
+            packed_sha_digest_handle: Some(packed_sha_digest_handle),
+            packed_sha_digest_relation: None,
             issuer_field_handle: Some(issuer_field_handle),
             av: None,
             tags: None,
             mac_half_relation: None,
-            blinder_relation: None,
+            claim_mask_traces: None,
+            claim_mask_challenge: None,
             interaction_claim: Some(interaction_claim),
             consumer_decoys: None,
             consumer_component: None,
@@ -234,17 +208,11 @@ impl MdocMacBind {
             .expect("MAC half relation drawn before use")
     }
 
-    fn blinder_relation(&self) -> &ClaimedSumBlinderRelation {
-        self.blinder_relation
+    fn packed_sha_digest_relation(&self) -> PackedShaDigestRelation {
+        self.packed_sha_digest_relation
             .as_ref()
-            .expect("MAC blinder relation drawn before use")
-    }
-
-    fn issuer_digest_relation(&self) -> DigestBytesRelation {
-        self.issuer_digest_handle
-            .as_ref()
-            .expect("issuer digest handle is set")
-            .get()
+            .expect("packed SHA digest relation drawn before use")
+            .clone()
     }
 
     fn issuer_field_relation(&self) -> FieldBytesRelation {
@@ -258,6 +226,46 @@ impl MdocMacBind {
         self.interaction_claim
             .as_ref()
             .expect("mdoc MAC interaction claim is set")
+    }
+
+    pub(crate) fn ordered_claim_mask_log_sizes(&self) -> Vec<u32> {
+        vec![CONSUMER_LOG_SIZE, BINDING_LOG_SIZE]
+    }
+
+    pub(crate) fn with_claim_masks(
+        mut self,
+        traces: Vec<ClaimMaskTrace>,
+        challenge: SharedClaimMaskChallenge,
+    ) -> Result<Self, String> {
+        let traces: [ClaimMaskTrace; 2] = traces.try_into().map_err(|traces: Vec<_>| {
+            format!("mdoc MAC needs 2 claim masks, got {}", traces.len())
+        })?;
+        for (index, (trace, expected)) in traces
+            .iter()
+            .zip([CONSUMER_LOG_SIZE, BINDING_LOG_SIZE])
+            .enumerate()
+        {
+            if trace.log_size() != expected {
+                return Err(format!(
+                    "mdoc MAC claim mask {index} has log size {}, expected {expected}",
+                    trace.log_size()
+                ));
+            }
+        }
+        self.claim_mask_traces = Some(traces);
+        self.claim_mask_challenge = Some(challenge);
+        Ok(self)
+    }
+
+    pub(crate) fn with_claim_masks_verifier(mut self, challenge: SharedClaimMaskChallenge) -> Self {
+        self.claim_mask_challenge = Some(challenge);
+        self
+    }
+
+    fn claim_mask_beta(&self) -> Option<QM31> {
+        self.claim_mask_challenge
+            .as_ref()
+            .map(|shared| shared.require().expect("claim-mask anchor drawn first"))
     }
 
     fn public_from_state(
@@ -278,7 +286,7 @@ impl MdocMacBind {
 
 impl Air for MdocMacBind {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
-        channel.mix_u64(0x4d44_4f43_4d41_4303);
+        channel.mix_u64(0x4d44_4f43_4d41_4305);
         channel.mix_u64(MACS_PER_PROOF as u64);
         channel.mix_u64(GF_BITS as u64);
         channel.mix_u64(ACTIVE_ROWS as u64);
@@ -287,10 +295,31 @@ impl Air for MdocMacBind {
 
     fn draw_relations(&mut self, channel: &mut Blake2sChannel) {
         self.mac_half_relation = Some(MacHalfRelation::draw(channel));
-        self.blinder_relation = Some(ClaimedSumBlinderRelation::draw(channel));
+        self.packed_sha_digest_relation = Some(
+            self.packed_sha_digest_handle
+                .as_ref()
+                .expect("packed SHA digest handle is set")
+                .get(),
+        );
     }
 
     fn layout(&self) -> air_core::TreeLayout {
+        let mask_enabled = self.claim_mask_challenge.is_some();
+        let mut trace =
+            std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_TRACE_COLS).collect::<Vec<_>>();
+        if mask_enabled {
+            trace.extend(std::iter::repeat_n(
+                CONSUMER_LOG_SIZE,
+                CLAIM_MASK_TRACE_COLUMNS,
+            ));
+        }
+        trace.extend(std::iter::repeat_n(BINDING_LOG_SIZE, BINDING_TRACE_COLS));
+        if mask_enabled {
+            trace.extend(std::iter::repeat_n(
+                BINDING_LOG_SIZE,
+                CLAIM_MASK_TRACE_COLUMNS,
+            ));
+        }
         air_core::TreeLayout {
             preprocessed: std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_PREPROCESSED_COLS)
                 .chain(std::iter::repeat_n(
@@ -298,15 +327,24 @@ impl Air for MdocMacBind {
                     BINDING_PREPROCESSED_COLS,
                 ))
                 .collect(),
-            trace: std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_TRACE_COLS)
-                .chain(std::iter::repeat_n(BINDING_LOG_SIZE, BINDING_TRACE_COLS))
-                .collect(),
-            interaction: std::iter::repeat_n(CONSUMER_LOG_SIZE, CONSUMER_INTERACTION_COLS)
-                .chain(std::iter::repeat_n(
-                    BINDING_LOG_SIZE,
-                    BINDING_INTERACTION_COLS,
-                ))
-                .collect(),
+            trace,
+            interaction: std::iter::repeat_n(
+                CONSUMER_LOG_SIZE,
+                if mask_enabled {
+                    CONSUMER_INTERACTION_COLS
+                } else {
+                    INTERACTION_COLS_PER_FRACTION
+                },
+            )
+            .chain(std::iter::repeat_n(
+                BINDING_LOG_SIZE,
+                if mask_enabled {
+                    BINDING_INTERACTION_COLS
+                } else {
+                    18 * INTERACTION_COLS_PER_FRACTION
+                },
+            ))
+            .collect(),
         }
     }
 
@@ -323,11 +361,18 @@ impl Air for MdocMacBind {
         ids.extend((0..MACS_PER_PROOF).map(|i| mac_col_id(&format!("consumer/mac_{i}"))));
         ids.extend((0..GF_BITS).map(|i| mac_col_id(&format!("consumer/step_{i}"))));
         ids.push(mac_col_id("binding/active"));
-        ids.push(mac_col_id("binding/digest_active"));
+        ids.push(mac_col_id("binding/issuer_digest_active"));
+        ids.push(mac_col_id("binding/revocation_digest_active"));
         ids.push(mac_col_id("binding/field_active"));
         ids.push(mac_col_id("binding/field_id"));
         ids.push(mac_col_id("binding/slot"));
         ids
+    }
+
+    fn canonical_preprocessed_columns(
+        &mut self,
+    ) -> Result<Vec<MacColumnEval>, stwo::core::verifier::VerificationError> {
+        Ok(preprocessed_trace())
     }
 
     fn build_components(&mut self, allocator: &mut TraceLocationAllocator) {
@@ -337,9 +382,7 @@ impl Air for MdocMacBind {
             allocator,
             MacConsumerEval {
                 mac_half_relation: self.mac_half_relation().clone(),
-                blinder_relation: self.blinder_relation().clone(),
-                blinder_v: self.interaction_claim().blinder_v,
-                blinder_m: self.interaction_claim().blinder_m,
+                claim_mask_beta: self.claim_mask_beta(),
                 av,
                 tags,
             },
@@ -349,10 +392,8 @@ impl Air for MdocMacBind {
             allocator,
             MacBindingEval {
                 mac_half_relation: self.mac_half_relation().clone(),
-                blinder_relation: self.blinder_relation().clone(),
-                blinder_v: self.interaction_claim().blinder_v,
-                blinder_m: self.interaction_claim().blinder_m,
-                issuer_digest_relation: self.issuer_digest_relation(),
+                claim_mask_beta: self.claim_mask_beta(),
+                packed_sha_digest_relation: self.packed_sha_digest_relation(),
                 issuer_field_relation: self.issuer_field_relation(),
             },
             self.interaction_claim().binding,
@@ -371,11 +412,7 @@ impl Air for MdocMacBind {
     }
 
     fn post_interaction_log_sizes(&self) -> Vec<u32> {
-        if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
-            std::iter::repeat_n(CONSUMER_LOG_SIZE, POST_TRACE_COLS).collect()
-        } else {
-            Vec::new()
-        }
+        std::iter::repeat_n(CONSUMER_LOG_SIZE, POST_TRACE_COLS).collect()
     }
 
     fn verify_post_interaction(
@@ -416,41 +453,39 @@ impl AirProver for MdocMacBind {
     fn write_trace(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
         let decoys = MacConsumerDecoyRows::random();
         tb.extend_evals(consumer_trace(&self.rows, &decoys));
+        if let Some(masks) = &self.claim_mask_traces {
+            tb.extend_evals(masks[0].columns().to_vec());
+        }
         self.consumer_decoys = Some(decoys);
         tb.extend_evals(binding_trace(&self.rows));
+        if let Some(masks) = &self.claim_mask_traces {
+            tb.extend_evals(masks[1].columns().to_vec());
+        }
     }
 
     fn write_interaction(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
-        // Q-015 §4b blinder pair: fresh per-prove randomness. `+m/(z−v)` lands
-        // in the consumer claimed sum over 2^CONSUMER_LOG_SIZE rows, the
-        // counterpart `−2m/(z−v)` in the binding sum over 2^BINDING_LOG_SIZE
-        // rows, so the two published sums each shift by a uniform QM31 and the
-        // pair cancels exactly in the global fold.
-        let blinder_v = random_qm31();
-        let blinder_m = random_qm31();
+        let claim_mask_beta = self.claim_mask_beta();
+        let consumer_mask = self.claim_mask_traces.as_ref().map(|masks| &masks[0]);
+        let binding_mask = self.claim_mask_traces.as_ref().map(|masks| &masks[1]);
         let (consumer_trace, consumer_claim) = consumer_interaction_trace(
             &self.rows,
             self.mac_half_relation(),
-            self.blinder_relation(),
-            blinder_v,
-            blinder_m,
+            consumer_mask,
+            claim_mask_beta,
         );
         let (binding_trace, binding_claim) = binding_interaction_trace(
             &self.rows,
             self.mac_half_relation(),
-            &self.issuer_digest_relation(),
+            &self.packed_sha_digest_relation(),
             &self.issuer_field_relation(),
-            self.blinder_relation(),
-            blinder_v,
-            blinder_m,
+            binding_mask,
+            claim_mask_beta,
         );
         tb.extend_evals(consumer_trace);
         tb.extend_evals(binding_trace);
         self.interaction_claim = Some(MdocMacInteractionClaim {
             consumer: consumer_claim,
             binding: binding_claim,
-            blinder_v,
-            blinder_m,
         });
     }
 
@@ -510,16 +545,6 @@ impl FrameworkEval for MacConsumerEval {
         eval.add_constraint(last.clone() * (last.clone() - one.clone()));
         eval.add_constraint(first.clone() * (one.clone() - active.clone()));
         eval.add_constraint(last.clone() * (one.clone() - active.clone()));
-        for selector in &mac_selectors {
-            if CHECK_NEW_SELECTOR_BOOLS {
-                eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
-            }
-        }
-        for selector in &step_selectors {
-            if CHECK_NEW_SELECTOR_BOOLS {
-                eval.add_constraint(selector.clone() * (selector.clone() - one.clone()));
-            }
-        }
 
         let ap_bit = eval.next_trace_mask();
         let s_pairs = (0..GF_BITS)
@@ -527,20 +552,12 @@ impl FrameworkEval for MacConsumerEval {
                 eval.next_interaction_mask(stwo_constraint_framework::ORIGINAL_TRACE_IDX, [0, -1])
             })
             .collect::<Vec<_>>();
-        let term_bits = if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
-            (0..GF_BITS)
-                .map(|_| eval.next_interaction_mask::<1>(3, [0])[0].clone())
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
-        let post_acc_pairs = if CHECK_POST_COLUMN_CONSTRAINTS || CHECK_POST_CONSTRAINTS {
-            (0..GF_BITS)
-                .map(|_| eval.next_interaction_mask(3, [0, -1]))
-                .collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let term_bits = (0..GF_BITS)
+            .map(|_| eval.next_interaction_mask::<1>(3, [0])[0].clone())
+            .collect::<Vec<_>>();
+        let post_acc_pairs = (0..GF_BITS)
+            .map(|_| eval.next_interaction_mask(3, [0, -1]))
+            .collect::<Vec<_>>();
         let s_bits = s_pairs
             .iter()
             .map(|pair| pair[0].clone())
@@ -563,14 +580,10 @@ impl FrameworkEval for MacConsumerEval {
             eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
         }
         for bit in &post_acc_bits {
-            if CHECK_POST_COLUMN_CONSTRAINTS {
-                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-            }
+            eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
         }
         for bit in &term_bits {
-            if CHECK_POST_COLUMN_CONSTRAINTS {
-                eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
-            }
+            eval.add_constraint(bit.clone() * (bit.clone() - one.clone()));
         }
 
         let mut mac_index = m31_const::<E>(0);
@@ -589,13 +602,11 @@ impl FrameworkEval for MacConsumerEval {
             &half_values,
         ));
 
-        if CHECK_S_CONSTRAINTS {
-            for bit_index in 0..GF_BITS {
-                let expected = mul_x_bit_expr::<E>(bit_index, &s_prev_bits);
-                eval.add_constraint(
-                    (active.clone() - first.clone()) * (s_bits[bit_index].clone() - expected),
-                );
-            }
+        for bit_index in 0..GF_BITS {
+            let expected = mul_x_bit_expr::<E>(bit_index, &s_prev_bits);
+            eval.add_constraint(
+                (active.clone() - first.clone()) * (s_bits[bit_index].clone() - expected),
+            );
         }
 
         let av_bits = bytes_to_bits(&self.av);
@@ -610,40 +621,36 @@ impl FrameworkEval for MacConsumerEval {
             .iter()
             .map(bytes_to_bits)
             .collect::<Vec<[bool; GF_BITS]>>();
-        if CHECK_POST_CONSTRAINTS {
-            for bit_index in 0..GF_BITS {
-                let term = term_bits[bit_index].clone();
-                let key_bit = xor_expr::<E>(ap_bit.clone(), av_row_bit.clone());
-                eval.add_constraint(term.clone() - key_bit * s_bits[bit_index].clone());
-                eval.add_constraint(
-                    first.clone() * (post_acc_bits[bit_index].clone() - term.clone())
-                        + (active.clone() - first.clone())
-                            * (post_acc_bits[bit_index].clone()
-                                - xor_expr::<E>(post_acc_prev_bits[bit_index].clone(), term)),
-                );
-                let mut tag_bit = m31_const::<E>(0);
-                for (mac_index, selector) in mac_selectors.iter().enumerate() {
-                    if tag_bits[mac_index][bit_index] {
-                        tag_bit += selector.clone();
-                    }
-                }
-                if CHECK_POST_FINAL_TAG {
-                    eval.add_constraint(
-                        last.clone() * (post_acc_bits[bit_index].clone() - tag_bit),
-                    );
+        for bit_index in 0..GF_BITS {
+            let term = term_bits[bit_index].clone();
+            let mut expected = av_row_bit.clone() * s_bits[bit_index].clone()
+                + step_selectors[bit_index].clone() * ap_bit.clone();
+            if av_bits[bit_index] {
+                expected = expected
+                    - m31_const::<E>(2)
+                        * step_selectors[bit_index].clone()
+                        * ap_bit.clone()
+                        * s_bits[bit_index].clone();
+            }
+            eval.add_constraint(active.clone() * term.clone() - expected);
+            eval.add_constraint(
+                first.clone() * (post_acc_bits[bit_index].clone() - term.clone())
+                    + (active.clone() - first.clone())
+                        * (post_acc_bits[bit_index].clone()
+                            - xor_expr::<E>(post_acc_prev_bits[bit_index].clone(), term)),
+            );
+            let mut tag_bit = m31_const::<E>(0);
+            for (mac_index, selector) in mac_selectors.iter().enumerate() {
+                if tag_bits[mac_index][bit_index] {
+                    tag_bit += selector.clone();
                 }
             }
+            eval.add_constraint(last.clone() * (post_acc_bits[bit_index].clone() - tag_bit));
         }
 
-        // Q-015 blinder `+m/(z−combine(v))`, ungated (every row); pairs with
-        // the `−2m` counterpart in the binding component.
-        add_blinder_relation_entry(
-            &mut eval,
-            &self.blinder_relation,
-            self.blinder_v,
-            self.blinder_m,
-            false,
-        );
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
 
         eval.finalize_logup();
         eval
@@ -661,24 +668,42 @@ impl FrameworkEval for MacBindingEval {
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
         let active = eval.get_preprocessed_column(mac_col_id("binding/active"));
-        let digest_active = eval.get_preprocessed_column(mac_col_id("binding/digest_active"));
+        let issuer_digest_active =
+            eval.get_preprocessed_column(mac_col_id("binding/issuer_digest_active"));
+        let revocation_digest_active =
+            eval.get_preprocessed_column(mac_col_id("binding/revocation_digest_active"));
         let field_active = eval.get_preprocessed_column(mac_col_id("binding/field_active"));
         let field_id_col = eval.get_preprocessed_column(mac_col_id("binding/field_id"));
         let slot = eval.get_preprocessed_column(mac_col_id("binding/slot"));
         let one = m31_const::<E>(1);
 
         eval.add_constraint(active.clone() * (active.clone() - one.clone()));
-        eval.add_constraint(digest_active.clone() * (digest_active.clone() - one.clone()));
+        eval.add_constraint(
+            issuer_digest_active.clone() * (issuer_digest_active.clone() - one.clone()),
+        );
+        eval.add_constraint(
+            revocation_digest_active.clone() * (revocation_digest_active.clone() - one.clone()),
+        );
         eval.add_constraint(field_active.clone() * (field_active.clone() - one.clone()));
-        eval.add_constraint(digest_active.clone() * (one.clone() - active.clone()));
+        eval.add_constraint(issuer_digest_active.clone() * (one.clone() - active.clone()));
+        eval.add_constraint(revocation_digest_active.clone() * (one.clone() - active.clone()));
         eval.add_constraint(field_active.clone() * (one.clone() - active.clone()));
 
         let bytes = (0..32).map(|_| eval.next_trace_mask()).collect::<Vec<_>>();
 
         eval.add_to_relation(RelationEntry::new(
-            &self.issuer_digest_relation,
-            E::EF::from(digest_active.clone()),
-            &bytes,
+            &self.packed_sha_digest_relation,
+            E::EF::from(issuer_digest_active.clone()),
+            &std::iter::once(m31_const::<E>(ISSUER_SHA_MSG_ID))
+                .chain(bytes.iter().cloned())
+                .collect::<Vec<_>>(),
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.packed_sha_digest_relation,
+            E::EF::from(revocation_digest_active.clone()),
+            &std::iter::once(m31_const::<E>(REVOCATION_SHA_MSG_ID))
+                .chain(bytes.iter().cloned())
+                .collect::<Vec<_>>(),
         ));
 
         for (byte_idx, byte) in bytes.iter().enumerate() {
@@ -712,19 +737,9 @@ impl FrameworkEval for MacBindingEval {
             &hi_values,
         ));
 
-        // Q-015 blinder counterpart `−2m/(z−combine(v))`, ungated, emitted
-        // LAST to match the generator's site order (36th site pairs with the
-        // hi-half site under `finalize_logup_in_pairs`).
-        let blinder_scale = QM31::from(M31::from_u32_unchecked(
-            1 << (CONSUMER_LOG_SIZE - BINDING_LOG_SIZE),
-        ));
-        add_blinder_relation_entry(
-            &mut eval,
-            &self.blinder_relation,
-            self.blinder_v,
-            self.blinder_m * blinder_scale,
-            true,
-        );
+        if let Some(beta) = self.claim_mask_beta {
+            add_claim_mask_fraction(&mut eval, beta);
+        }
 
         eval.finalize_logup_in_pairs();
         eval
@@ -755,16 +770,17 @@ fn preprocessed_trace() -> Vec<MacColumnEval> {
 fn binding_preprocessed_trace() -> Vec<MacColumnEval> {
     let mut columns =
         vec![vec![M31::from_u32_unchecked(0); 1 << BINDING_LOG_SIZE]; BINDING_PREPROCESSED_COLS];
-    for slot in 0..3 {
+    for slot in 0..(MACS_PER_PROOF / 2) {
         columns[0][slot] = M31::from_u32_unchecked(1);
         columns[1][slot] = M31::from_u32_unchecked(u32::from(slot == 0));
-        columns[2][slot] = M31::from_u32_unchecked(u32::from(slot != 0));
-        columns[3][slot] = M31::from_u32_unchecked(match slot {
+        columns[2][slot] = M31::from_u32_unchecked(u32::from(slot == 3));
+        columns[3][slot] = M31::from_u32_unchecked(u32::from(matches!(slot, 1 | 2)));
+        columns[4][slot] = M31::from_u32_unchecked(match slot {
             1 => field_id::MDOC_DEVICE_KEY_X,
             2 => field_id::MDOC_DEVICE_KEY_Y,
             _ => 0,
         });
-        columns[4][slot] = M31::from_u32_unchecked(slot as u32);
+        columns[5][slot] = M31::from_u32_unchecked(slot as u32);
     }
     columns
         .into_iter()
@@ -772,7 +788,7 @@ fn binding_preprocessed_trace() -> Vec<MacColumnEval> {
         .collect()
 }
 
-fn binding_value_rows(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> [[u8; 32]; 3] {
+fn binding_value_rows(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> [[u8; 32]; MACS_PER_PROOF / 2] {
     std::array::from_fn(|slot| {
         let lo = rows[slot * 2].x;
         let hi = rows[slot * 2 + 1].x;
@@ -808,30 +824,54 @@ fn binding_trace(rows: &[MacHalfWitness; MACS_PER_PROOF]) -> Vec<MacColumnEval> 
 fn binding_interaction_trace(
     rows: &[MacHalfWitness; MACS_PER_PROOF],
     mac_half_relation: &MacHalfRelation,
-    issuer_digest_relation: &DigestBytesRelation,
+    packed_sha_digest_relation: &PackedShaDigestRelation,
     issuer_field_relation: &FieldBytesRelation,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_trace: Option<&ClaimMaskTrace>,
+    claim_mask_beta: Option<QM31>,
 ) -> (Vec<MacColumnEval>, QM31) {
     let preprocessed = binding_preprocessed_trace();
     let active = &preprocessed[0];
-    let digest_active = &preprocessed[1];
-    let field_active = &preprocessed[2];
-    let field_ids = &preprocessed[3];
-    let slots = &preprocessed[4];
+    let issuer_digest_active = &preprocessed[1];
+    let revocation_digest_active = &preprocessed[2];
+    let field_active = &preprocessed[3];
+    let field_ids = &preprocessed[4];
+    let slots = &preprocessed[5];
     let bytes = binding_trace(rows);
     let n_vec_rows = bytes[0].data.len();
-    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> = Vec::with_capacity(35);
+    let mut sites: Vec<Vec<(PackedQM31, PackedQM31)>> =
+        Vec::with_capacity(36 + usize::from(claim_mask_trace.is_some()));
     sites.push(
         (0..n_vec_rows)
             .map(|vec_row| {
                 let values = (0..32)
                     .map(|byte_idx| bytes[byte_idx].data[vec_row])
                     .collect::<Vec<_>>();
+                let values = std::iter::once(PackedM31::broadcast(M31::from_u32_unchecked(
+                    ISSUER_SHA_MSG_ID,
+                )))
+                .chain(values)
+                .collect::<Vec<_>>();
                 (
-                    PackedQM31::from(digest_active.data[vec_row]),
-                    issuer_digest_relation.combine(&values),
+                    PackedQM31::from(issuer_digest_active.data[vec_row]),
+                    packed_sha_digest_relation.combine(&values),
+                )
+            })
+            .collect(),
+    );
+    sites.push(
+        (0..n_vec_rows)
+            .map(|vec_row| {
+                let values = (0..32)
+                    .map(|byte_idx| bytes[byte_idx].data[vec_row])
+                    .collect::<Vec<_>>();
+                let values = std::iter::once(PackedM31::broadcast(M31::from_u32_unchecked(
+                    REVOCATION_SHA_MSG_ID,
+                )))
+                .chain(values)
+                .collect::<Vec<_>>();
+                (
+                    PackedQM31::from(revocation_digest_active.data[vec_row]),
+                    packed_sha_digest_relation.combine(&values),
                 )
             })
             .collect(),
@@ -875,15 +915,18 @@ fn binding_interaction_trace(
                 .collect(),
         );
     }
-    // Q-015 blinder counterpart `−2m/(z−combine(v))` on every binding row
-    // (2^BINDING_LOG_SIZE rows at 2m cancel 2^CONSUMER_LOG_SIZE rows at m);
-    // matched by the ungated entry in `MacBindingEval::evaluate`.
-    let blinder_scale = QM31::from(M31::from_u32_unchecked(
-        1 << (CONSUMER_LOG_SIZE - BINDING_LOG_SIZE),
-    ));
-    let blinder_numerator = -PackedQM31::broadcast(blinder_m * blinder_scale);
-    let blinder_denom = blinder_denominator(blinder_relation, blinder_v);
-    sites.push(vec![(blinder_numerator, blinder_denom); n_vec_rows]);
+    match (claim_mask_trace, claim_mask_beta) {
+        (Some(mask), Some(beta)) => {
+            assert_eq!(mask.log_size(), BINDING_LOG_SIZE);
+            sites.push(
+                (0..n_vec_rows)
+                    .map(|vec_row| mask.packed_fraction_at(vec_row, beta))
+                    .collect(),
+            );
+        }
+        (None, None) => {}
+        _ => panic!("mdoc MAC binding mask and challenge must be configured together"),
+    }
 
     let mut logup = LogupTraceGenerator::new(BINDING_LOG_SIZE);
     let mut site_idx = 0usize;
@@ -939,9 +982,8 @@ fn consumer_trace(
 fn consumer_interaction_trace(
     rows: &[MacHalfWitness; MACS_PER_PROOF],
     mac_half_relation: &MacHalfRelation,
-    blinder_relation: &ClaimedSumBlinderRelation,
-    blinder_v: QM31,
-    blinder_m: QM31,
+    claim_mask_trace: Option<&ClaimMaskTrace>,
+    claim_mask_beta: Option<QM31>,
 ) -> (Vec<MacColumnEval>, QM31) {
     let mut first_values = vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE];
     let mut mac_values = vec![M31::from_u32_unchecked(0); 1 << CONSUMER_LOG_SIZE];
@@ -972,11 +1014,16 @@ fn consumer_interaction_trace(
         let numerator = -PackedQM31::from(first_eval.data[vec_row]);
         (numerator, mac_half_relation.combine(&values))
     });
-    // Q-015 blinder `+m/(z−combine(v))` on every consumer row; matched by the
-    // ungated `add_blinder_relation_entry` in `MacConsumerEval::evaluate`.
-    let blinder_numerator = PackedQM31::broadcast(blinder_m);
-    let blinder_denominator = blinder_denominator(blinder_relation, blinder_v);
-    logup.col_from_fn(|_| (blinder_numerator, blinder_denominator));
+    match (claim_mask_trace, claim_mask_beta) {
+        (Some(mask), Some(beta)) => {
+            assert_eq!(mask.log_size(), CONSUMER_LOG_SIZE);
+            logup.col_from_iter(
+                (0..mask.packed_rows()).map(|vec_row| mask.packed_fraction_at(vec_row, beta)),
+            );
+        }
+        (None, None) => {}
+        _ => panic!("mdoc MAC consumer mask and challenge must be configured together"),
+    }
     logup.finalize_last()
 }
 
@@ -994,9 +1041,9 @@ fn post_interaction_trace(
         let mut acc = [false; GF_BITS];
         for step in 0..GF_BITS {
             let out_row = mac_index * GF_BITS + step;
-            let key_bit = ap_bits[step] ^ av_bits[step];
             for bit in 0..GF_BITS {
-                let term = key_bit && ladder[step][bit];
+                let term =
+                    affine_mac_term(ap_bits[step], av_bits[step], step, bit, ladder[step][bit]);
                 if term {
                     acc[bit] ^= true;
                 }
@@ -1004,10 +1051,7 @@ fn post_interaction_trace(
                 columns[GF_BITS + bit][out_row] = M31::from_u32_unchecked(u32::from(acc[bit]));
             }
         }
-        debug_assert_eq!(
-            bits_to_bytes(&acc),
-            gf128_mul(&xor_128(&row.ap, av), &row.x)
-        );
+        debug_assert_eq!(bits_to_bytes(&acc), gf128_tag(&row.ap, av, &row.x));
     }
     for row in ACTIVE_ROWS..CONSUMER_ROWS {
         let decoy = row - ACTIVE_ROWS;
@@ -1029,7 +1073,7 @@ fn mix_av_and_tags(
     av: &[u8; HALF_BYTES],
     tags: &[[u8; HALF_BYTES]; MACS_PER_PROOF],
 ) {
-    channel.mix_u64(0x5034_424d_4143_5447);
+    channel.mix_u64(0x5034_424d_4143_0002);
     for byte in av {
         channel.mix_u64(u64::from(*byte));
     }
@@ -1109,49 +1153,14 @@ fn random_gf_bits() -> [bool; GF_BITS] {
     bytes_to_bits(&bytes)
 }
 
-fn bytes_to_bits(bytes: &[u8; HALF_BYTES]) -> [bool; GF_BITS] {
-    let mut bits = [false; GF_BITS];
-    for (byte_index, byte) in bytes.iter().enumerate() {
-        for bit_index in 0..8 {
-            bits[byte_index * 8 + bit_index] = ((byte >> bit_index) & 1) == 1;
-        }
-    }
-    bits
-}
-
-fn bits_to_bytes(bits: &[bool; GF_BITS]) -> [u8; HALF_BYTES] {
-    let mut bytes = [0u8; HALF_BYTES];
-    for (bit_index, bit) in bits.iter().enumerate() {
-        if *bit {
-            bytes[bit_index / 8] |= 1 << (bit_index % 8);
-        }
-    }
-    bytes
-}
-
-fn xor_128(left: &[u8; HALF_BYTES], right: &[u8; HALF_BYTES]) -> [u8; HALF_BYTES] {
-    std::array::from_fn(|i| left[i] ^ right[i])
-}
-
-fn gf128_mul(left: &[u8; HALF_BYTES], right: &[u8; HALF_BYTES]) -> [u8; HALF_BYTES] {
-    let left = bytes_to_bits(left);
-    let right = bytes_to_bits(right);
-    let mut coeffs = [false; 255];
-    for i in 0..GF_BITS {
-        for j in 0..GF_BITS {
-            coeffs[i + j] ^= left[i] & right[j];
-        }
-    }
-    for high in (GF_BITS..255).rev() {
-        if coeffs[high] {
-            for offset in [0usize, 1, 2, 7] {
-                coeffs[high - GF_BITS + offset] ^= true;
-            }
-        }
-    }
-    let mut out = [false; GF_BITS];
-    out.copy_from_slice(&coeffs[..GF_BITS]);
-    bits_to_bytes(&out)
+fn affine_mac_term(
+    ap_bit: bool,
+    av_bit: bool,
+    step: usize,
+    output_bit: usize,
+    s_bit: bool,
+) -> bool {
+    (av_bit && s_bit) ^ (step == output_bit && ap_bit)
 }
 
 fn s_ladder(x: &[u8; HALF_BYTES]) -> [[bool; GF_BITS]; GF_BITS] {
@@ -1176,11 +1185,12 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
 
+    use air_core::claim_mask::{ClaimMaskChallengeModule, ClaimMaskRing};
     use stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
     use stwo::prover::backend::simd::m31::N_LANES;
     use stwo_constraint_framework::{Multiplicity, PREPROCESSED_TRACE_IDX};
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct RowEval {
         preprocessed: VecDeque<Vec<M31>>,
         original: VecDeque<Vec<M31>>,
@@ -1224,7 +1234,8 @@ mod tests {
             let mut row = Self::default();
 
             row.preprocessed.push_back(vec![zero]); // active
-            row.preprocessed.push_back(vec![zero]); // digest active
+            row.preprocessed.push_back(vec![zero]); // issuer digest active
+            row.preprocessed.push_back(vec![zero]); // revocation digest active
             row.preprocessed.push_back(vec![zero]); // field active
             row.preprocessed.push_back(vec![zero]); // field id
             row.preprocessed.push_back(vec![zero]); // slot
@@ -1243,6 +1254,63 @@ mod tests {
                 .filter(|(_, value)| *value != QM31::from_u32_unchecked(0, 0, 0, 0))
                 .collect()
         }
+    }
+
+    fn active_mac_rows(
+        witness: &MacHalfWitness,
+        av: &Gf128,
+        mac_index: usize,
+    ) -> (Vec<RowEval>, Gf128) {
+        let ap_bits = bytes_to_bits(&witness.ap);
+        let av_bits = bytes_to_bits(av);
+        let ladder = s_ladder(&witness.x);
+        let mut acc = [false; GF_BITS];
+        let mut rows = Vec::with_capacity(GF_BITS);
+
+        for step in 0..GF_BITS {
+            let previous_acc = acc;
+            let terms: [bool; GF_BITS] = std::array::from_fn(|bit| {
+                affine_mac_term(ap_bits[step], av_bits[step], step, bit, ladder[step][bit])
+            });
+            for bit in 0..GF_BITS {
+                acc[bit] ^= terms[bit];
+            }
+
+            let mut row = RowEval::default();
+            row.preprocessed.push_back(vec![m31_bit(true)]); // active
+            row.preprocessed.push_back(vec![m31_bit(step == 0)]); // first
+            row.preprocessed
+                .push_back(vec![m31_bit(step + 1 == GF_BITS)]); // last
+            for index in 0..MACS_PER_PROOF {
+                row.preprocessed
+                    .push_back(vec![m31_bit(index == mac_index)]);
+            }
+            for index in 0..GF_BITS {
+                row.preprocessed.push_back(vec![m31_bit(index == step)]);
+            }
+
+            row.original.push_back(vec![m31_bit(ap_bits[step])]);
+            for bit in 0..GF_BITS {
+                row.original.push_back(vec![
+                    m31_bit(ladder[step][bit]),
+                    m31_bit(step != 0 && ladder[step - 1][bit]),
+                ]);
+            }
+            for term in terms {
+                row.post.push_back(vec![m31_bit(term)]);
+            }
+            for bit in 0..GF_BITS {
+                row.post
+                    .push_back(vec![m31_bit(acc[bit]), m31_bit(previous_acc[bit])]);
+            }
+            rows.push(row);
+        }
+
+        (rows, bits_to_bytes(&acc))
+    }
+
+    fn m31_bit(bit: bool) -> M31 {
+        M31::from_u32_unchecked(u32::from(bit))
     }
 
     impl EvalAtRow for RowEval {
@@ -1300,9 +1368,7 @@ mod tests {
     fn mdoc_mac_consumer_decoy_slack_rows_are_not_zero_pinned() {
         let eval = MacConsumerEval {
             mac_half_relation: MacHalfRelation::dummy(),
-            blinder_relation: ClaimedSumBlinderRelation::dummy(),
-            blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
-            blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
+            claim_mask_beta: None,
             av: [0; HALF_BYTES],
             tags: [[0; HALF_BYTES]; MACS_PER_PROOF],
         };
@@ -1315,11 +1381,158 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mdoc_mac_consumer_accepts_affine_zero_and_nonzero_values() {
+        let ap = [0x5au8; HALF_BYTES];
+        let av = [0xa5u8; HALF_BYTES];
+        for x in [[0u8; HALF_BYTES], [0x3cu8; HALF_BYTES]] {
+            let witness = MacHalfWitness { ap, x };
+            let tag = gf128_tag(&ap, &av, &x);
+            let (rows, accumulated_tag) = active_mac_rows(&witness, &av, 0);
+            assert_eq!(accumulated_tag, tag);
+            if x == [0u8; HALF_BYTES] {
+                assert_eq!(tag, ap, "x=0 must publish the fresh additive pad");
+            }
+            let mut tags = [[0u8; HALF_BYTES]; MACS_PER_PROOF];
+            tags[0] = tag;
+            let evaluator = MacConsumerEval {
+                mac_half_relation: MacHalfRelation::dummy(),
+                claim_mask_beta: None,
+                av,
+                tags,
+            };
+            for (step, row) in rows.into_iter().enumerate() {
+                let evaluated = evaluator.clone().evaluate(row);
+                assert!(
+                    evaluated.nonzero_constraints().is_empty(),
+                    "honest affine MAC row {step} failed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mdoc_mac_consumer_rejects_public_and_trace_tampering() {
+        let witness = MacHalfWitness {
+            ap: [0x5au8; HALF_BYTES],
+            x: [0x3cu8; HALF_BYTES],
+        };
+        let av = [0xa5u8; HALF_BYTES];
+        let tag = gf128_tag(&witness.ap, &av, &witness.x);
+        let (honest_rows, _) = active_mac_rows(&witness, &av, 0);
+        let evaluator = |av, tag| {
+            let mut tags = [[0u8; HALF_BYTES]; MACS_PER_PROOF];
+            tags[0] = tag;
+            MacConsumerEval {
+                mac_half_relation: MacHalfRelation::dummy(),
+                claim_mask_beta: None,
+                av,
+                tags,
+            }
+        };
+
+        let mut wrong_tag = tag;
+        wrong_tag[0] ^= 1;
+        assert!(!evaluator(av, wrong_tag)
+            .evaluate(honest_rows.last().expect("last row").clone())
+            .nonzero_constraints()
+            .is_empty());
+
+        let mut wrong_av = av;
+        wrong_av[0] ^= 1;
+        assert!(honest_rows.iter().cloned().any(|row| {
+            !evaluator(wrong_av, tag)
+                .evaluate(row)
+                .nonzero_constraints()
+                .is_empty()
+        }));
+
+        let mut bad_pad = honest_rows[0].clone();
+        let ap = bad_pad.original.front_mut().expect("a_p trace bit");
+        ap[0] = M31::from_u32_unchecked(1) - ap[0];
+        assert!(!evaluator(av, tag)
+            .evaluate(bad_pad)
+            .nonzero_constraints()
+            .is_empty());
+
+        let mut bad_ladder = honest_rows[1].clone();
+        let s = bad_ladder.original.get_mut(1).expect("first s bit");
+        s[0] = M31::from_u32_unchecked(1) - s[0];
+        assert!(!evaluator(av, tag)
+            .evaluate(bad_ladder)
+            .nonzero_constraints()
+            .is_empty());
+
+        let mut bad_term = honest_rows[0].clone();
+        let term = bad_term.post.front_mut().expect("first term bit");
+        term[0] = M31::from_u32_unchecked(1) - term[0];
+        assert!(!evaluator(av, tag)
+            .evaluate(bad_term)
+            .nonzero_constraints()
+            .is_empty());
+    }
+
     fn test_rows() -> [MacHalfWitness; MACS_PER_PROOF] {
         std::array::from_fn(|_| MacHalfWitness {
             ap: [0; HALF_BYTES],
             x: [0; HALF_BYTES],
         })
+    }
+
+    fn test_claim_masks() -> (ClaimMaskTrace, ClaimMaskTrace, QM31) {
+        let log_sizes = [CONSUMER_LOG_SIZE, BINDING_LOG_SIZE];
+        let mut ring = ClaimMaskRing::new(&log_sizes).unwrap();
+        let consumer = ring.take(CONSUMER_LOG_SIZE).unwrap();
+        let binding = ring.take(BINDING_LOG_SIZE).unwrap();
+        ring.finish().unwrap();
+
+        let shared = SharedClaimMaskChallenge::new();
+        let mut anchor = ClaimMaskChallengeModule::new(shared.clone(), log_sizes).unwrap();
+        anchor.draw_relations(&mut Blake2sChannel::default());
+        let beta = shared.require().unwrap();
+        (consumer, binding, beta)
+    }
+
+    #[test]
+    fn mdoc_mac_consumer_mask_delta_matches_private_target() {
+        let rows = test_rows();
+        let mut channel = Blake2sChannel::default();
+        let relation = MacHalfRelation::draw(&mut channel);
+        let (mask, _, beta) = test_claim_masks();
+
+        let (_, unmasked) = consumer_interaction_trace(&rows, &relation, None, None);
+        let (_, masked) = consumer_interaction_trace(&rows, &relation, Some(&mask), Some(beta));
+
+        assert_eq!(masked - unmasked, beta * mask.target_sum());
+    }
+
+    #[test]
+    fn mdoc_mac_binding_mask_delta_matches_private_target() {
+        let rows = test_rows();
+        let mut channel = Blake2sChannel::default();
+        let mac_half_relation = MacHalfRelation::draw(&mut channel);
+        let packed_sha_digest_relation = PackedShaDigestRelation::draw(&mut channel);
+        let issuer_field_relation = FieldBytesRelation::draw(&mut channel);
+        let (_, mask, beta) = test_claim_masks();
+
+        let (_, unmasked) = binding_interaction_trace(
+            &rows,
+            &mac_half_relation,
+            &packed_sha_digest_relation,
+            &issuer_field_relation,
+            None,
+            None,
+        );
+        let (_, masked) = binding_interaction_trace(
+            &rows,
+            &mac_half_relation,
+            &packed_sha_digest_relation,
+            &issuer_field_relation,
+            Some(&mask),
+            Some(beta),
+        );
+
+        assert_eq!(masked - unmasked, beta * mask.target_sum());
     }
 
     fn trace_fingerprint(trace: &[MacColumnEval]) -> Vec<[M31; N_LANES]> {
@@ -1367,10 +1580,8 @@ mod tests {
     fn mdoc_mac_binding_inactive_rows_are_not_zero_pinned() {
         let eval = MacBindingEval {
             mac_half_relation: MacHalfRelation::dummy(),
-            blinder_relation: ClaimedSumBlinderRelation::dummy(),
-            blinder_v: QM31::from_u32_unchecked(1, 2, 3, 4),
-            blinder_m: QM31::from_u32_unchecked(5, 6, 7, 8),
-            issuer_digest_relation: DigestBytesRelation::dummy(),
+            claim_mask_beta: None,
+            packed_sha_digest_relation: PackedShaDigestRelation::dummy(),
             issuer_field_relation: FieldBytesRelation::dummy(),
         };
         let row = eval.evaluate(RowEval::inactive_binding_row());
@@ -1383,9 +1594,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn mdoc_mac_binding_class_a_has_256_blind_rows_and_fresh_inactive_cells() {
         assert!(
-            (1usize << BINDING_LOG_SIZE) - 3 >= 256,
+            (1usize << BINDING_LOG_SIZE) - (MACS_PER_PROOF / 2) >= 256,
             "MAC binding Class A needs at least 256 blind rows"
         );
 

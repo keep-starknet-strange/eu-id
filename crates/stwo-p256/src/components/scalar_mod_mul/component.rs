@@ -568,14 +568,10 @@ fn finish_product_chunk_dynamic<E: EvalAtRow>(
         _ => true,
     };
 
-    // C2: the chunk top digit is exactly boolean. Each side sums at most
-    // SCALAR_MOD_MUL_SPLIT_CHUNK_TERMS = 2 term products of 13-bit limbs, so
-    // product_sum ≤ 2·(2^13 − 1)² < 2^27 and an honest digits[2] ∈ {0, 1}.
-    // Without this bound a forged digits[2] wraps M31 (2^26·32 = 2^31 ≡ 1) and
-    // re-encodes product_sum as a different integer, so the digit tuples fed to
-    // the accumulator no longer represent a·b. Ungated: digit columns are zero
-    // on padding rows, and the ungated form keeps the constraint at degree 2
-    // inside the component's exact `log_size + 1` bound.
+    // The chunk top digit must be boolean.
+    // Each side contains at most two products of 13-bit limbs.
+    // Without this bound, the top digit can wrap M31.
+    // The ungated form has degree 2 and accepts zero padding rows.
     eval.add_constraint(digits[2].clone() * (digits[2].clone() - one::<E>()));
 
     let limb_base = E::F::from(M31::from_u32_unchecked(1u32 << LIMB_BITS));
@@ -863,7 +859,7 @@ mod tests {
 
         for (name, log_size, declared_bound, max_degree) in components {
             // stwo's SubDomain composition evaluates the quotient on a domain
-            // of `2^declared` points; a degree-`d` constraint's quotient has
+            // of `2^declared` points. A degree-`d` constraint's quotient has
             // degree `(d − 1) · 2^log_size`, so the bound must satisfy
             // `declared ≥ log_size + ceil(log2(d − 1))` (min +1 for the FRI
             // headroom). In particular `log_size + 1` covers d ≤ 3 — the
@@ -888,13 +884,11 @@ mod tests {
             .unwrap_or(0) as u32
     }
 
-    /// Minimal recording `EvalAtRow` for the product-chunk components: serves
-    /// preprocessed reads by column id from the fixed schedule, serves base
-    /// reads from (possibly forged) base columns, and records each polynomial
-    /// constraint's value instead of asserting it is zero. LogUp emissions are
-    /// skipped (the C2 pin is a pure polynomial constraint), so no `LogupAtRow`
-    /// is constructed and failures are observable as non-zero recorded values
-    /// rather than an uncatchable abort.
+    /// Records product-chunk polynomial constraints.
+    ///
+    /// The evaluator serves scheduled preprocessed columns and supplied base columns.
+    /// It skips LogUp emissions.
+    /// A failed constraint appears as a recorded nonzero value.
     struct RecordingChunkEvaluator<'a> {
         schedule: &'a [ScalarModMulScheduleColumn],
         base: &'a [Vec<M31>],
@@ -988,16 +982,11 @@ mod tests {
 
     const TEST_FORGERY_MUL_ID: u32 = 3;
 
-    /// C2 regression: a forged AB product-chunk top digit must be rejected.
+    /// Confirms rejection of a changed product-chunk top digit.
     ///
-    /// The attack re-encodes `product_sum` as a different integer while keeping
-    /// the decomposition constraint satisfied over M31: adding 32 to
-    /// `digits[2]` adds `2^26 · 32 = 2^31 ≡ 1 (mod M31)` to the encoded value,
-    /// compensated by subtracting 1 from `digits[0]`. Both low digits stay in
-    /// their 13-bit ranges, so before the ungated boolean top-digit constraint
-    /// this forgery satisfied every polynomial constraint of
-    /// [`AbProductChunkEval`] and fed forged digit tuples to the product-digit
-    /// accumulator (forging `a · b` in the `s·u1 ≡ z` / `s·u2 ≡ r` reductions).
+    /// The change adds 32 to `digits[2]` and subtracts one from `digits[0]`.
+    /// This preserves the M31 decomposition but changes its integer value.
+    /// The boolean top-digit constraint must reject it.
     #[test]
     fn ab_product_chunk_rejects_forged_top_digit() {
         let trace = ScalarFieldMulTrace::new(
@@ -1031,10 +1020,10 @@ mod tests {
             "honest AB chunk trace must satisfy the polynomial constraints"
         );
 
-        // Row 0 is the (coeff 0, chunk 0) chunk: product_sum = 7 · 11 = 77 with
-        // digits [77, 0, 0], so digits[0] has room for the compensating -1.
-        // The mul_id column is appended LAST, so the three digit columns are the
-        // three immediately before it.
+        // Row 0 is the (coefficient 0, chunk 0) chunk. Its product sum is
+        // 7 · 11 = 77 with digits [77, 0, 0]. Therefore, digit 0 can absorb the
+        // compensating -1. The mul_id column is last. The three preceding columns
+        // contain the digits.
         let digit0_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - 1 - SCALAR_MOD_MUL_SPLIT_CHUNK_DIGITS;
         let digit2_col = AB_PRODUCT_CHUNK_TRACE_COLUMNS - 2;
         assert_eq!(
@@ -1050,9 +1039,9 @@ mod tests {
         forged[digit0_col][0] = M31::from_u32_unchecked(76);
         forged[digit2_col][0] = M31::from_u32_unchecked(32);
 
-        // Sanity: the forged digits still satisfy the decomposition constraint
-        // over M31 (2^26 · 32 wraps to 1), proving the aliasing was live before
-        // the boolean top-digit pin.
+        // The forged digits still satisfy the M31 decomposition constraint.
+        // Specifically, 2^26 · 32 wraps to 1. This confirms that the alias existed
+        // before the Boolean top-digit constraint.
         let limb_base = M31::from_u32_unchecked(1 << LIMB_BITS);
         assert_eq!(
             forged[digit0_col][0]

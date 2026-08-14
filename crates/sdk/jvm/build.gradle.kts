@@ -1,20 +1,18 @@
-// Packages the `sdk` Rust crate into a plug-and-play **desktop/JVM** fat jar so the
-// wallet/verifier can run native unit tests on a host JVM (no emulator/device).
+// Build the Rust SDK as a host-native desktop JVM test JAR.
+// The local JAR contains only the current host's native library.
+// It is not a cross-platform release artifact.
+// The JAR lets wallet and verifier tests run without an Android target.
 //
-//   - buildNative_<platform>  builds libeuid_zk_sdk for each host target:
-//       * apple-darwin  via plain `cargo build`  (native + cross x86_64 on Apple Silicon)
-//       * linux / windows via `cargo zigbuild`   (needs `zig` + cargo-zigbuild)
-//     and lays each under JNA's classpath layout `build/nativeLibs/<jna-prefix>/`.
-//   - generateUniffiBindings  emits the identical UniFFI Kotlin bindings (from a built
-//     cdylib's embedded metadata) — same contract as the AAR, no divergence.
-//   - the jar bundles bindings (classes) + all natives (resources); JNA extracts the
-//     matching platform's lib at runtime.
-//   - maven-publish ships `com.kss:eu-id-zk-sdk-jvm:0.1.0` to ~/.m2.
+// `buildNative_<platform>` builds the current host's native library.
+// `generateUniffiBindings` creates the Kotlin bindings.
+// The JAR contains the bindings and one host-native library.
+// Maven Publish sends the test artifact only to the local Maven repository.
 //
-// Consumer (wallet :zkp-logic):  testImplementation("com.kss:eu-id-zk-sdk-jvm:0.1.0")
+// Add this dependency to a JVM consumer:
+//   testImplementation("com.kss:eu-id-zk-sdk-jvm:0.1.0")
 
 plugins {
-    kotlin("jvm") version "2.0.21"
+    kotlin("jvm") version "2.4.10"
     `maven-publish`
 }
 
@@ -22,18 +20,28 @@ group = "com.kss"
 
 repositories { mavenCentral() }
 
-// Layout, relative to this project dir (crates/sdk/jvm):
-//   ../        -> crates/sdk     (uniffi.toml)
-//   ../../..   -> Cargo workspace root (for `cargo ... -p sdk`)
+// Resolve the SDK crate and workspace from this project directory.
 val workspaceRoot = file("$projectDir/../../..")
-val crateDir = file("$projectDir/..")
 val uniffiConfig = file("$projectDir/../uniffi.toml")
+val reproducibleBuild = workspaceRoot.resolve("scripts/reproducible-build.sh")
+val allowDirtyBuild = providers.gradleProperty("allowDirtyBuild")
+    .map(String::toBoolean)
+    .getOrElse(false)
+val legacyProductV1Demo = providers.gradleProperty("legacyProductV1Demo")
+    .map(String::toBoolean)
+    .getOrElse(false)
+val currentWalletP256Demo = providers.gradleProperty("currentWalletP256Demo")
+    .map(String::toBoolean)
+    .getOrElse(false)
+val sdkFeatures = buildList {
+    if (legacyProductV1Demo) add("legacy-product-v1-demo")
+    if (currentWalletP256Demo) add("current-wallet-p256-demo")
+}
+val sdkFeatureArguments =
+    if (sdkFeatures.isEmpty()) emptyList() else listOf("--features", sdkFeatures.joinToString(","))
 
-// Single source of truth for the published version: the Cargo workspace. Crates
-// set `version.workspace = true`, so the literal lives in the root Cargo.toml
-// under [workspace.package] — the same value Rust sees as CARGO_PKG_VERSION.
-// Parse it here so the jar version can never drift from the crate; bump it once
-// in the Cargo manifest.
+// Read the published version from `[workspace.package]`.
+// This value keeps the JAR version equal to the Rust crate version.
 val cargoVersion: String = run {
     val pkgSection = workspaceRoot.resolve("Cargo.toml").readText()
         .substringAfter("[workspace.package]").substringBefore("\n[")
@@ -44,10 +52,15 @@ version = cargoVersion
 
 val generatedKotlinDir = layout.buildDirectory.dir("generated/uniffi").get().asFile
 val nativeLibsDir = layout.buildDirectory.dir("nativeLibs").get().asFile
+val cargoTargetDir = System.getenv("CARGO_TARGET_DIR")?.let { configured ->
+    File(configured).let { if (it.isAbsolute) it else workspaceRoot.resolve(configured) }
+} ?: workspaceRoot.resolve("target")
 
-// PATH that finds cargo / cargo-zigbuild / zig even when Gradle isn't launched
-// from a login shell. cargo is invoked by absolute path (Gradle resolves the
-// executable against the daemon PATH, not the task environment()).
+fun File.deleteRecursivelyOrFail() {
+    check(!exists() || deleteRecursively()) { "Failed to delete $absolutePath" }
+}
+
+// Add the common Cargo directory for Gradle processes.
 val toolBinDirs = listOf(
     "${System.getProperty("user.home")}/.cargo/bin",
     "/opt/homebrew/bin",
@@ -55,38 +68,33 @@ val toolBinDirs = listOf(
 )
 val toolPath = (toolBinDirs + (System.getenv("PATH") ?: "")).joinToString(File.pathSeparator)
 val cargoExe = toolBinDirs.map { "$it/cargo" }.firstOrNull { file(it).exists() } ?: "cargo"
+val rustWorkspaceInputs = fileTree(workspaceRoot) {
+    include(
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        ".cargo/**",
+        "artifacts/**",
+        "scripts/reproducible-build.sh",
+        "crates/*/Cargo.toml",
+        "crates/*/build.rs",
+        "crates/*/src/**",
+        "crates/*/artifacts/**",
+        "crates/*/examples/**",
+        "crates/*/tests/**",
+        "crates/*/benches/**",
+    )
+}
 
-// Rust target -> JNA classpath prefix + output lib filename. Whether zig is needed
-// is decided per-host by [needsZig] (you only need it to cross-compile), not baked
-// into the target.
+// Map each Rust target to its JNA path and library file.
 data class NativeTarget(
     val rustTarget: String,
     val jnaPrefix: String,
     val libFile: String,
-) {
-    val targetOs: String
-        get() = when {
-            rustTarget.contains("apple-darwin") -> "macos"
-            rustTarget.contains("windows") -> "windows"
-            else -> "linux"
-        }
-    val targetArch: String
-        get() = if (rustTarget.startsWith("aarch64")) "arm64" else "x86_64"
+)
 
-    /**
-     * zig is needed only to *cross*-compile: to a different OS, or (on Linux/Windows) a
-     * different arch. The host toolchain builds its own OS directly — and on macOS, clang
-     * cross-builds arm64<->x86_64 natively, so neither darwin arch needs zig there.
-     */
-    val needsZig: Boolean
-        get() = when {
-            targetOs != HOST_OS -> true
-            HOST_OS == "macos" -> false
-            else -> targetArch != HOST_ARCH
-        }
-}
-
-// Detected once. NOTE: apple-darwin targets can only be produced on a macOS host.
+// Detect the host one time.
+// A macOS host must build the Apple targets.
 val HOST_OS: String = System.getProperty("os.name").lowercase().let {
     when {
         it.contains("mac") || it.contains("darwin") -> "macos"
@@ -98,35 +106,74 @@ val HOST_ARCH: String =
     if (System.getProperty("os.arch").lowercase().let { it.contains("aarch64") || it.contains("arm64") }) "arm64"
     else "x86_64"
 
-val nativeTargets = listOf(
-    NativeTarget("aarch64-apple-darwin", "darwin-aarch64", "libeuid_zk_sdk.dylib"),
-    NativeTarget("x86_64-apple-darwin", "darwin-x86-64", "libeuid_zk_sdk.dylib"),
-    NativeTarget("x86_64-unknown-linux-gnu", "linux-x86-64", "libeuid_zk_sdk.so"),
-    NativeTarget("aarch64-unknown-linux-gnu", "linux-aarch64", "libeuid_zk_sdk.so"),
-    NativeTarget("x86_64-pc-windows-gnu", "win32-x86-64", "euid_zk_sdk.dll"),
-)
-
-val buildNativeTasks = nativeTargets.map { t ->
-    tasks.register<Exec>("buildNative_${t.jnaPrefix.replace('-', '_')}") {
-        group = "rust"
-        description = "Build ${t.rustTarget} -> ${t.jnaPrefix}/${t.libFile}"
-        workingDir = workspaceRoot
-        environment("PATH", toolPath)
-        val sub = if (t.needsZig) "zigbuild" else "build"
-        commandLine(cargoExe, sub, "--release", "-p", "sdk", "--target", t.rustTarget)
-
-        inputs.dir(crateDir.resolve("src"))
-        inputs.file(crateDir.resolve("Cargo.toml"))
-        val builtLib = workspaceRoot.resolve("target/${t.rustTarget}/release/${t.libFile}")
-        val destDir = File(nativeLibsDir, t.jnaPrefix)
-        outputs.file(File(destDir, t.libFile))
-        doLast { copy { from(builtLib); into(destDir) } }
+val hostNativeTarget = when ("$HOST_OS-$HOST_ARCH") {
+    "macos-arm64" -> NativeTarget(
+        "aarch64-apple-darwin",
+        "darwin-aarch64",
+        "libeuid_zk_sdk.dylib",
+    )
+    "macos-x86_64" -> NativeTarget(
+        "x86_64-apple-darwin",
+        "darwin-x86-64",
+        "libeuid_zk_sdk.dylib",
+    )
+    "linux-arm64" -> NativeTarget(
+        "aarch64-unknown-linux-gnu",
+        "linux-aarch64",
+        "libeuid_zk_sdk.so",
+    )
+    "linux-x86_64" -> NativeTarget(
+        "x86_64-unknown-linux-gnu",
+        "linux-x86-64",
+        "libeuid_zk_sdk.so",
+    )
+    "windows-x86_64" -> NativeTarget(
+        "x86_64-pc-windows-msvc",
+        "win32-x86-64",
+        "euid_zk_sdk.dll",
+    )
+    else -> error("Unsupported JVM native host: $HOST_OS-$HOST_ARCH")
+}
+val hostNativeTask = tasks.register<Exec>(
+    "buildNative_${hostNativeTarget.jnaPrefix.replace('-', '_')}",
+) {
+    group = "rust"
+    description = "Build ${hostNativeTarget.rustTarget} -> ${hostNativeTarget.jnaPrefix}/${hostNativeTarget.libFile}"
+    workingDir = workspaceRoot
+    environment("PATH", toolPath)
+    val dirtyArgument = if (allowDirtyBuild) listOf("--allow-dirty") else emptyList()
+    if (hostNativeTarget.rustTarget.endsWith("apple-darwin")) {
+        val targetName = hostNativeTarget.rustTarget.uppercase().replace('-', '_')
+        environment(
+            "CARGO_TARGET_${targetName}_RUSTFLAGS",
+            "-C link-arg=-Wl,-install_name,@rpath/${hostNativeTarget.libFile}",
+        )
     }
+    commandLine(
+        listOf("bash", reproducibleBuild.absolutePath) + dirtyArgument + listOf(
+            cargoExe, "rustc", "--locked", "--offline", "--release", "-p", "sdk", "--lib",
+            "--target", hostNativeTarget.rustTarget,
+        ) + sdkFeatureArguments + listOf("--crate-type", "cdylib"),
+    )
+
+    inputs.property("allowDirtyBuild", allowDirtyBuild)
+    inputs.property("legacyProductV1Demo", legacyProductV1Demo)
+    inputs.property("currentWalletP256Demo", currentWalletP256Demo)
+    inputs.files(rustWorkspaceInputs).withPathSensitivity(PathSensitivity.RELATIVE)
+    val builtLib = cargoTargetDir.resolve(
+        "${hostNativeTarget.rustTarget}/release/${hostNativeTarget.libFile}",
+    )
+    val destDir = File(nativeLibsDir, hostNativeTarget.jnaPrefix)
+    val packagedLib = File(destDir, hostNativeTarget.libFile)
+    outputs.files(builtLib, packagedLib)
+    doFirst { packagedLib.deleteRecursivelyOrFail() }
+    doLast { copy { from(builtLib); into(destDir) } }
 }
 
-// The host cdylib (darwin-aarch64) carries the UniFFI metadata bindgen introspects.
-val hostNativeTask = buildNativeTasks.first()
-val hostLib = workspaceRoot.resolve("target/aarch64-apple-darwin/release/libeuid_zk_sdk.dylib")
+// Read the UniFFI metadata from the host library.
+val hostLib = cargoTargetDir.resolve(
+    "${hostNativeTarget.rustTarget}/release/${hostNativeTarget.libFile}",
+)
 
 val generateUniffiBindings by tasks.registering(Exec::class) {
     group = "rust"
@@ -134,30 +181,46 @@ val generateUniffiBindings by tasks.registering(Exec::class) {
     dependsOn(hostNativeTask)
     workingDir = workspaceRoot
     environment("PATH", toolPath)
+    val dirtyArgument = if (allowDirtyBuild) listOf("--allow-dirty") else emptyList()
     commandLine(
-        cargoExe, "run", "-p", "sdk", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
+        listOf("bash", reproducibleBuild.absolutePath) + dirtyArgument + listOf(
+        cargoExe, "run", "--locked", "--offline", "-p", "sdk", "--features", "bindgen", "--bin", "uniffi-bindgen", "--",
         "generate",
         "--library", hostLib.absolutePath,
         "--language", "kotlin",
         "--config", uniffiConfig.absolutePath,
         "--out-dir", generatedKotlinDir.absolutePath,
+        ),
     )
-    inputs.file(uniffiConfig)
-    inputs.dir(crateDir.resolve("src"))
+    inputs.property("allowDirtyBuild", allowDirtyBuild)
+    inputs.files(rustWorkspaceInputs).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(uniffiConfig).withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file(hostLib).withPathSensitivity(PathSensitivity.NONE)
     outputs.dir(generatedKotlinDir)
+    doFirst { generatedKotlinDir.deleteRecursivelyOrFail() }
 }
 
-// Generated bindings are .kt; the Kotlin compiler picks up `java` source dirs too.
+// Add the generated Kotlin bindings and native libraries to the JAR.
 sourceSets["main"].java.srcDir(generatedKotlinDir)
 sourceSets["main"].resources.srcDir(nativeLibsDir)
 
 tasks.named("compileKotlin") { dependsOn(generateUniffiBindings) }
-tasks.named("processResources") { dependsOn(buildNativeTasks) }
+tasks.named("processResources") { dependsOn(hostNativeTask) }
+tasks.withType<Test>().configureEach {
+    systemProperty("legacyProductV1Demo", legacyProductV1Demo)
+    systemProperty("currentWalletP256Demo", currentWalletP256Demo)
+}
 
 dependencies {
-    // UniFFI's Kotlin runtime is JNA-based; `api` so consumers get it transitively.
+    // Export the JNA-based UniFFI runtime to consumers.
     api("net.java.dev.jna:jna:5.19.1")
     implementation(kotlin("stdlib"))
+    testImplementation(kotlin("test"))
+}
+
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
 
 publishing {
@@ -169,5 +232,5 @@ publishing {
             from(components["java"])
         }
     }
-    // No `repositories {}` -> publishToMavenLocal targets ~/.m2.
+    // `publishToMavenLocal` writes to the local Maven repository.
 }

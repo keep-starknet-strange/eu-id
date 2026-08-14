@@ -1,45 +1,40 @@
-//! SHA→P256 digest binding — the byte-bridge that proves the ECDSA message
-//! hash `z` (held as 20 × 13-bit little-endian limbs) is the same 32 big-endian
-//! bytes the SHA-256 module yields as its final-block digest.
+//! Binds the SHA-256 digest to the P256 ECDSA message hash.
+//!
+//! P256 stores `z` as 20 little-endian 13-bit limbs.
+//! SHA-256 yields the digest as 32 big-endian bytes.
 //!
 //! ## Why a bridge is needed
 //!
-//! The combined proof must attest "the signature is over the hash of *this*
-//! preimage", i.e. the ECDSA `z` equals `SHA-256(C)`. SHA exposes its digest as
-//! 32 **bytes** (`stwo_sha256::trace::h_out_digest_bytes`, big-endian `H0..H7`);
-//! P256 ingests `z` as 20 × 13-bit limbs. The two representations cannot be
-//! equated limb-for-limb (`gcd(8, 13) = 1`, so no limb aligns to a byte
-//! boundary). The common denominator is the **byte**: this module decomposes
-//! `z`'s limbs into the same 32 big-endian bytes and *requires* them on the
-//! shared `Sha256Digest` LogUp relation that the SHA module *provides*. The
-//! global balance then cancels iff the two byte strings are identical, i.e. iff
-//! `z == SHA-256(C)`.
+//! The combined proof must show that `z` equals `SHA-256(C)`.
+//! The 8-bit and 13-bit boundaries do not align.
+//! Thus, this module converts the P256 limbs to bytes.
+//! It consumes these bytes on the shared `Sha256Digest` LogUp relation.
+//! The SHA module provides the same relation.
+//! The global balance cancels only when both byte strings are equal.
 //!
 //! ## The recomposition (this file)
 //!
-//! Treat `z` as a 256-bit integer. Its little-endian byte `lb[k]` (`= z`'s
-//! big-endian byte `31−k`) and its limbs satisfy a single base-256 long-form
-//! identity, witnessed with one unsigned carry per byte boundary:
+//! Treat `z` as a 256-bit integer.
+//! Each byte boundary has one unsigned carry.
+//! The bytes, limbs, and carries satisfy this base-256 identity:
 //!
 //! ```text
 //! c[k] + limb_term_k = lb[k] + 256·c[k+1],   k = 0..32,   c[0] = c[32] = 0
 //! ```
 //!
-//! where `limb_term_k = z_limb[i] · 2^shift` for the unique limb `i` whose
-//! 13-bit window *starts* in byte `k` (0 where none does — 12 of the 32 byte
-//! positions are pure carry pass-through). Because `13·i / 8` is strictly
-//! increasing and never repeats a byte, **at most one limb feeds each byte**,
-//! keeping every `limb_term_k < 2^20` and every carry `< 2^13` (so all
-//! intermediate sums stay far inside M31).
+//! Here, `limb_term_k = z_limb[i] · 2^shift` for the limb that starts in byte `k`.
+//! Twelve byte positions have no starting limb.
+//! The value `13·i / 8` does not repeat a byte.
+//! Thus, at most one limb feeds each byte.
+//! Each `limb_term_k` is less than `2^20`.
+//! Each carry is less than `2^13`.
 //!
-//! Soundness of "these bytes ARE `z`'s bytes" rests on the AIR range-checking
-//! every byte to `[0, 256)` and every carry to `[0, 2^13)`: with both pinned
-//! and `c[0] = c[32] = 0`, the base-256 decomposition of the (limb-)fixed
-//! integer is unique, so the bytes equal the canonical big-endian string of
-//! `z`. The byte `[0, 256)` range-check is the consumer's responsibility per
-//! the SHA provider contract (`stwo_sha256::relations::DigestRelation`).
+//! The AIR range-checks each byte to `[0, 256)`.
+//! It also range-checks each carry to `[0, 2^13)`.
+//! With zero end carries, these checks make the base-256 decomposition unique.
+//! The consumer supplies the byte range checks required by `DigestRelation`.
 //!
-//! [`air`] holds the constraints + LogUp wiring; [`witness`] generates the
+//! [`air`] holds the constraints + LogUp wiring. [`witness`] generates the
 //! trace and interaction columns. This `mod.rs` holds the prover-independent
 //! recomposition math and its reference tests.
 
@@ -55,22 +50,20 @@ use stwo_p256_utils::constants::{LIMB_BITS, N_LIMBS};
 use crate::field::limbs::P256M31BigInt;
 use crate::public_inputs::PublicEcdsaInstance;
 
-// Internal binding relation `(sig_id, z[20])`: P256 *provides* it analytically
-// (−active, via `scalar_z_provider_claimed_sum` folded into its claimed sum),
-// this bridge *consumes* it (+active). Drawing an independent instance keeps it
-// disjoint from every other P256 channel, so the only thing that can balance the
-// bridge's consume is that analytic provider term — pinning the bridge's `z`
-// limbs to the same proven, public-input-bound `z` the ECDSA math runs over.
+// P256 provides the `(sig_id, z[20])` relation analytically.
+// This bridge consumes the relation.
+// A separate relation instance prevents overlap with other P256 channels.
+// Thus, the relation binds the bridge limbs to the proven ECDSA value.
 relation!(ScalarZRelation, SCALAR_Z_RELATION_ARITY);
 
 /// Shared handle for the `ScalarZRelation`: P256 draws it and `set`s it (the
-/// provider half lives in P256's `lookup_sum`, see [`scalar_z_provider_claimed_sum`]);
-/// the bridge module reads it back and consumes it.
+/// provider half lives in P256's `lookup_sum`, see [`scalar_z_provider_claimed_sum`]).
+/// The bridge module reads it back and consumes it.
 pub type SharedScalarZRelation = air_core::relations::SharedRelation<ScalarZRelation>;
 
-/// The `(sig_id, z[20])` tuple a `ScalarZRelation` lookup keys on, in the order
-/// both the provider (P256) and the consumer (the bridge eval) use: `sig_id`
-/// first, then the 20 `z` limbs in little-endian limb order.
+/// Returns the values for a `ScalarZRelation` lookup.
+///
+/// The order is `sig_id` followed by 20 little-endian `z` limbs.
 pub fn scalar_z_relation_values(
     instance: &PublicEcdsaInstance<M31>,
 ) -> [M31; SCALAR_Z_RELATION_ARITY] {
@@ -80,15 +73,13 @@ pub fn scalar_z_relation_values(
     values
 }
 
-/// P256's **analytic** provider term for the `z` binding — the exact analogue of
-/// `public_inputs::public_ecdsa_provider_claimed_sum`, but keyed on
-/// `(sig_id, z[20])`. It yields `Σ −1/combine(sig_id, z)` over the public
-/// instances (no trace, no component); the bridge module consumes `+1/combine`
-/// of its own committed `(sig_id, z)`, so the two cancel iff the bridge's `z`
-/// equals the public `z`. The existing public-input binding already forces the
-/// public `z` to equal the proven/committed ECDSA `z`, so this transitively pins
-/// the bridge's `z` to the signature's message hash — without touching
-/// `scalar_setup`.
+/// Returns the analytic P256 provider sum for the `z` binding.
+///
+/// The key is `(sig_id, z[20])`.
+/// The sum contains `−1/combine(sig_id, z)` for each public instance.
+/// The bridge consumes the opposite term for its committed value.
+/// The terms cancel only when the bridge and public values match.
+/// The public-input binding already binds the public value to the ECDSA proof.
 pub fn scalar_z_provider_claimed_sum(
     instances: &[PublicEcdsaInstance<M31>],
     relation: &ScalarZRelation,
@@ -103,7 +94,7 @@ pub fn scalar_z_provider_claimed_sum(
         .sum()
 }
 
-// --- Trace column layout (committed in this order; read sequentially by the
+// --- Trace column layout (committed in this order, read sequentially by the
 // eval, written in the same order by the trace generator) ---
 
 /// Per-signature id, shared with the `(sig_id, z)` binding relation.
@@ -117,22 +108,23 @@ pub const COL_CARRIES_START: usize = COL_BYTES_START + DIGEST_BYTES;
 /// Total committed columns of the bridge's main trace.
 pub const TOTAL_COLS: usize = COL_CARRIES_START + N_CARRIES;
 
-/// Number of digest bytes carried by the cross-module relation — equal to
+/// Number of digest bytes carried by the cross-module relation.
+///
+/// This value equals
 /// `stwo_sha256::constants::DIGEST_BYTES`. The 32 bytes are the big-endian
-/// serialisation of `z` (`U256` order, byte 0 = most-significant), identical to
+/// serialization of `z` (`U256` order, byte 0 = most-significant), identical to
 /// the SHA provider's `h_out_digest_bytes` layout.
 pub const DIGEST_BYTES: usize = 32;
 
 /// Committed base-256 carry columns of the recomposition. There is one boundary
-/// carry between each adjacent pair of the 32 little-endian byte positions; the
+/// carry between each adjacent pair of the 32 little-endian byte positions. The
 /// two outermost (`c[0]` before byte 0 and `c[32]` after byte 31) are the
 /// constant zero, leaving `DIGEST_BYTES − 1` committed carries `c[1..=31]`.
 pub const N_CARRIES: usize = DIGEST_BYTES - 1;
 
-/// Arity of the internal `(sig_id, z[20])` binding relation: P256 *provides* it
-/// analytically (−active, see [`scalar_z_provider_claimed_sum`]) and this bridge
-/// *consumes* it (+active), pinning the bridge's `z` limbs to the proven,
-/// public-input-bound `z`.
+/// Arity of the internal `(sig_id, z[20])` binding relation.
+///
+/// P256 provides the relation, and this bridge consumes it.
 pub const SCALAR_Z_RELATION_ARITY: usize = 1 + N_LIMBS;
 
 /// Preprocessed active selector id prefix for digest bridge rows. The concrete
@@ -140,11 +132,16 @@ pub const SCALAR_Z_RELATION_ARITY: usize = 1 + N_LIMBS;
 /// on both public shape parameters.
 pub const ACTIVE_PREPROCESSED_ID_PREFIX: &str = "digest_bind_active";
 
-/// For little-endian byte position `k` (`0` = least-significant byte of `z`),
-/// the limb index whose 13-bit window *starts* in that byte and the intra-byte
-/// bit shift. Because `gcd(8, 13) = 1` no two limbs start in the same byte, so
-/// this is single-valued; it returns `None` for the 12 pure carry-through
-/// positions. `byte_pos(i) = (LIMB_BITS·i) / 8`, `shift(i) = (LIMB_BITS·i) % 8`.
+/// Returns the limb and bit shift that start at little-endian byte `k`.
+///
+/// Byte zero is the least-significant byte of `z`.
+/// No two limbs start in the same byte because `gcd(8, 13) = 1`.
+/// The function returns `None` for the 12 carry-only positions.
+///
+/// ```text
+/// byte_pos(i) = (LIMB_BITS · i) / 8
+/// shift(i) = (LIMB_BITS · i) % 8
+/// ```
 pub fn limb_feeding_byte(k: usize) -> Option<(usize, u32)> {
     (0..N_LIMBS).find_map(|i| {
         let start = LIMB_BITS * i;
@@ -152,14 +149,12 @@ pub fn limb_feeding_byte(k: usize) -> Option<(usize, u32)> {
     })
 }
 
-/// Compute the byte-bridge witness for `z`: the 32 big-endian digest bytes
-/// (identical to `z.to_u256()` and to the SHA module's `h_out_digest_bytes`),
-/// and the 31 unsigned base-256 carries `c[1..=31]` of the recomposition
-/// documented in the module header.
+/// Computes the byte-bridge witness for `z`.
 ///
-/// The returned bytes are in **big-endian** order (`out.0[0]` most-significant),
-/// so they can be fed directly to the `Sha256Digest` relation in the same order
-/// the SHA provider uses.
+/// The witness contains 32 big-endian digest bytes and 31 unsigned base-256 carries.
+///
+/// The first returned byte is the most significant byte.
+/// This order matches the `Sha256Digest` relation.
 pub fn z_digest_byte_witness(z: &P256M31BigInt) -> ([u8; DIGEST_BYTES], [u32; N_CARRIES]) {
     let limbs = z.limbs();
     let mut le_bytes = [0u8; DIGEST_BYTES];
@@ -191,7 +186,7 @@ mod tests {
     use crate::types::U256;
 
     /// At most one limb starts in any byte, and exactly 20 byte positions are
-    /// fed (one per limb); the other 12 are pure carry pass-through.
+    /// fed (one per limb). The other 12 are pure carry pass-through.
     #[test]
     fn each_byte_is_fed_by_at_most_one_limb() {
         let mut fed = 0usize;

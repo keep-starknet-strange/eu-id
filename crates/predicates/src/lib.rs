@@ -8,35 +8,15 @@ pub(crate) mod predicate;
 pub mod types;
 pub(crate) mod utils;
 
-// Common, strategy-agnostic surface. Strategy-specific building blocks (which
-// reuse the same type names across strategies) are reached by their full path,
-// e.g. `age::strategy::range_check::lookup_elements::LookupElements`.
-// Each strategy is its own predicate; callers pick one and call it directly.
-pub use age::strategy::bit_decomposition::AgeBitDecomposition;
 pub use age::strategy::range_check::AgeRangeCheck;
 pub use age::types::{
-    AgeBitDecompositionProof, AgeBounds, AgeInputError, AgeRangeCheckProof, Date, DateOfBirth,
-    Error, PublicInput, Witness,
+    AgeBounds, AgeInputError, AgeRangeCheckProof, Date, DateOfBirth, Error, PublicInput, Witness,
+};
+pub use nat::nationalities::{
+    assigned_iso_alpha2_codes, is_assigned_iso_alpha2, is_valid_signed_alpha2, pack_alpha2,
 };
 pub use nat::types::{
     Error as NatError, InputError as NatInputError, PrivateInput as NatPrivateInput,
     Proof as NatProof, PublicInput as NatPublicInput,
 };
 pub use predicate::{PredicateProver, PredicateVerifier};
-
-use strum::IntoEnumIterator;
-
-/// Every assigned ISO-3166-1 numeric code the nationality predicate accepts, in
-/// ascending order — the same domain [`nat::NationalityPredicate`] validates an
-/// acceptable set against.
-///
-/// This is the "universal accepted set": passing it to [`NatPublicInput::new`]
-/// yields a membership table every assigned nationality is trivially in, so it
-/// neutralizes the nationality predicate (any held code passes) without
-/// depending on the private held value — which is what makes it reconstructible
-/// by a verifier that never learns the nationality.
-pub fn all_nationality_codes() -> Vec<u32> {
-    nat::nationalities::Nationality::iter()
-        .map(|n| n as u32)
-        .collect()
-}

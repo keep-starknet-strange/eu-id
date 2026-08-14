@@ -1,49 +1,29 @@
-//! FinalAdd AIR — in-AIR EC addition `S = R_1 + R_2` and `r_x = x(S)` binding.
+//! Proves final EC addition `S = R_1 + R_2` and binds `r_x = x(S)`.
 //!
-//! # What this closes
+//! # Input points
 //!
-//! `final_check_air.rs` proves `r_check = r_x mod n` and `r_check = public r`,
-//! but `r_x` was a FREE witness: nothing tied it to the proven scalar-mult
-//! outputs. This component closes that gap by proving, IN-AIR, the
-//! x-coordinate of the final ECDSA point and forwarding it to the final check.
+//! The prepared table proves one signed hint point `R_i` for each certificate.
+//! `PreparedTableCanonicalRelation` binds each point in the AIR.
+//! The relation is `R_i = (-1)^{b_i}·h_i`.
+//! Here, `h_i = u_i·base_i`.
+//! The fake-GLV decomposition proves input-dependent sign bit `b_i`.
+//! [`FinalCheckHintRelation`] provides both points to this component.
 //!
-//! # The pinned hints `R_i`
+//! # Mixed sign bits
 //!
-//! For each signature, the prepared table proves a per-cert *signed hint point*
-//! `R_i` (= the `DoubleR` row's `lhs`), which `PreparedTableCanonicalRelation`
-//! role `R` already pins in-AIR. `R_i = (-1)^{b_i}·h_i` where `h_i = u_i·base_i`
-//! and `b_i` is the per-cert fake-GLV `s2_sign_bit` from the Garaga
-//! decomposition. **`b_i` is input-dependent: both values occur for honest
-//! signatures** (the real `p256`-crate fixture decomposes both certs to
-//! `b_i = 0`, i.e. `R_i = +h_i`). The prepared table yields `R_i` on
-//! [`FinalCheckHintRelation`] keyed `(sig_id, cert_id, point)`; this component
-//! CONSUMES `R_1` (cert0 = `u1·G`) and `R_2` (cert1 = `u2·Q`).
+//! Direct addition gives the target only when `b_1 == b_2`.
+//! This component consumes both sign bits through [`FinalAddSignRelation`].
+//! It proves `d = b_1 ⊕ b_2`.
+//! It conditionally negates the second y-coordinate by `(-1)^d`.
+//! The addition then proves `x(R_1 + (-1)^d R_2) = x(h_1 + h_2)`.
 //!
-//! # Mixed sign bits: orienting `R_2` by the proven fake-GLV signs
+//! # Architecture
 //!
-//! Binding `r_x = x(R_1 + R_2)` directly would equal the ECDSA target
-//! `x(h_1 + h_2)` **only when `b_1 == b_2`** (then `R_1 + R_2 =
-//! (-1)^{b}(h_1 + h_2)` and `x` is sign-invariant). When the two certs
-//! decompose to opposite signs (`b_1 != b_2`, ~50% of real signatures since
-//! `u_1, u_2` are independent), `R_1 + R_2 = ±(h_1 - h_2)` and that bound `r_x`
-//! would be wrong. To bind the correct x-coordinate in both cases the component
-//! consumes each cert's proven `b_i` (`s2_sign_bit`) from `fake_glv_scalar`
-//! over [`FinalAddSignRelation`], witnesses `d = b_1 ⊕ b_2` (constrained
-//! `d = b_1 + b_2 − 2·b_1·b_2`), and conditionally negates `R_2`'s
-//! y-coordinate by `(-1)^d` (the `x` and infinity flags are sign-invariant)
-//! before the add — so it computes `x(R_1 + (-1)^d R_2) = x(h_1 + h_2)` for
-//! both equal and mixed signs. Regression:
-//! `current_p256_monolithic_proves_mixed_sign_bit_signature`.
-//!
-//! # Architecture (mirrors `public_key_curve_air.rs`)
-//!
-//! The two modular multiplications of the chord-addition x-coordinate formula
-//! are laid out as a single-source [`ProjectiveRcbAirTraceClaim`] carrying two
-//! [`ProjectiveRcbMulRow`]s, proven by the *exact* `projective_air` mod-`p` mul
-//! machinery (`raw_product_chunk` / `folded_contribution` / `folded_digit` /
-//! `range13` / `signed_carry`, all reused unchanged). A [`FinalAddCheckEval`]
-//! component witnesses the affine operands, consumes the mul provider tuples to
-//! bind them, and proves the same-row x-coordinate identity.
+//! [`crate::components::projective_rcb_mul::trace::ProjectiveRcbAirTraceClaim`]
+//! contains the modular multiplication rows.
+//! The component uses the existing projective mod-`p` multiplication constraints.
+//! [`FinalAddCheckEval`] binds the affine operands to the multiplication results.
+//! It then proves the same-row x-coordinate identity.
 //!
 //! | `mul_index` | computes          | result    |
 //! |-------------|-------------------|-----------|
@@ -51,44 +31,40 @@
 //! | 1           | `lambda * lambda` | `lamsq`   |
 //! | 2           | `dx * dx_inv`     | `1`/`0`   |
 //!
-//! with `dx = (x2 - x1) mod p`, and the witnessed `lambda` is the chord slope.
-//! Mul 2 binds `dx · dx_inv ≡ 1` on the both-finite branch (witnessing
-//! `dx != 0`, i.e. `x1 != x2`), so the doubling/inverse degeneracy where
-//! `lambda` would be a free witness is rejected in-AIR.
+//! Here, `dx = (x2 - x1) mod p`.
+//! Witness value `lambda` is the chord slope.
+//! Multiplication 2 proves that `dx` has an inverse on the distinct finite branch.
 //!
 //! # The x-coordinate identity (chord addition, distinct finite case)
 //!
 //! `lambda = (y2 - y1) / (x2 - x1)`, `x3 = lambda^2 - x1 - x2`. We prove:
 //! - `dx + x1 ≡ x2 (mod p)`           (defines `dx`)
 //! - `dy + y1 ≡ y2 (mod p)`           (defines `dy = (y2 - y1) mod p`)
-//! - `p1 == dy`                       (`lambda*(x2-x1) ≡ y2-y1`; both canonical)
+//! - `p1 == dy`                       (`lambda*(x2-x1) ≡ y2-y1`, both canonical)
 //! - `x3 + x1 + x2 ≡ lamsq (mod p)`   (`x3 = lambda^2 - x1 - x2`)
 //!
-//! On the **distinct-add** branch, the four chord identities are gated by
-//! `distinct_add` (which itself requires `both_finite = (1 - r1_inf)(1 - r2_inf)`).
+//! The `distinct_add` selector gates these identities.
+//! This selector also requires both points to be finite.
 //! The infinity branches use `x3 = x2` (when `R_1 = ∞`) or `x3 = x1`
-//! (when `R_2 = ∞`); the `R_1 = R_2 = ∞` case is rejected
+//! (when `R_2 = ∞`). The `R_1 = R_2 = ∞` case is rejected
 //! (`active · r1_inf · r2_inf = 0`).
 //!
 //! # Doubling (`R_1 = R_2`)
 //!
-//! When the witness commits to `double_add = 1`, the row enforces
-//! `r1.x = r2.x` and `r1.y = r2.y` (so the `x3 + x1 + x2 ≡ lamsq` reduction
-//! becomes `x3 + 2·x1 ≡ lamsq`). The `dx`/`dy`/`dx_inv` columns are
-//! repurposed to carry the tangent slope's denominator (`2·y1`), numerator
-//! (`3·x1^2 − 3`) and its inverse:
+//! When `double_add = 1`, the row requires equal input points.
+//! The `dx`, `dy`, and `dx_inv` columns hold tangent-slope values:
 //! - `dx + 0 ≡ 2·y1 (mod p)`           (`dx = denom = 2·y1`)
 //! - `dy + 3 ≡ 3·x1_sq (mod p)`        (`dy = numer = 3·x1_sq − 3`)
 //! - `p1 == dy`                        (re-used: `lambda · denom ≡ numer`)
 //! - `dx · dx_inv ≡ 1`                 (re-used: `denom != 0`, i.e. `y1 != 0`)
 //!
-//! `x1_sq = x1 · x1 mod p` is proven through a new mul `MUL_X1_SQUARED`
-//! (idle = `0·0 = 0` on non-doubling rows).
+//! `MUL_X1_SQUARED` proves `x1_sq = x1 · x1 mod p`.
+//! It proves `0·0 = 0` on other branches.
 //!
 //! # Additive-inverse (`R_1 = -R_2`)
 //!
-//! Rejected in-AIR: `active · inverse_add = 0` makes the row unprovable. The
-//! resulting EC sum would be `∞`, an invalid ECDSA result.
+//! The constraint `active · inverse_add = 0` rejects this branch.
+//! Its EC sum would be infinity, which is not a valid ECDSA result.
 //!
 //! `x3` is provided to `final_check_air` on [`FinalAddOutputRelation`] keyed
 //! `(sig_id, x3[N_LIMBS])`, which the final check consumes as its `r_x`.
@@ -172,9 +148,10 @@ impl FinalAddLogSizes {
     }
 }
 
-/// γ-digest value-list lengths for the (single-row) final-add check: 13
-/// witnessed big-ints' limbs (range13: the original 12 + the oriented `r2p_y`)
-/// and the 4·N_LIMBS reduction carries (dx, dy, x3 + the negation carries).
+/// Value-list lengths for the final-add γ-digest.
+///
+/// Range13 contains 13 witnessed large integers.
+/// The signed list contains four sets of reduction carries.
 const FINAL_ADD_GAMMA_RANGE13_VALUES: usize = 13 * stwo_p256_utils::constants::N_LIMBS;
 const FINAL_ADD_GAMMA_SIGNED_VALUES: usize = 4 * stwo_p256_utils::constants::N_LIMBS;
 

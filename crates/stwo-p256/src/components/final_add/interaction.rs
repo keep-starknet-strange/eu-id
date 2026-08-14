@@ -102,7 +102,7 @@ fn gen_final_add_interaction_trace_with_range_providers(
     let mut columns = Vec::new();
 
     // Check family (consumers + output provider). The four muls are proven by
-    // hinted-mul rows; the check consumes them via wide tuples.
+    // hinted-mul rows. The check consumes them via wide tuples.
     let (
         check_interaction,
         check_sum,
@@ -336,9 +336,8 @@ fn check_fraction_pairs(
         ROLE_RESULT,
         &dx_inv_result_value(claim),
     );
-    // Task 6 doubling: MUL_X1_SQUARED proves `r1.x · r1.x ≡ x1_sq (mod p)`,
-    // consumed by the check eval the same way as the other muls so its
-    // provider/consumer pair balances in the FinalAddInternal totals.
+    // `MUL_X1_SQUARED` proves `r1.x · r1.x ≡ x1_sq (mod p)`.
+    // The check consumes this result through the shared multiplication relation.
     consume(&mut pairs, MUL_X1_SQUARED, ROLE_LHS, &claim.r1.x);
     consume(&mut pairs, MUL_X1_SQUARED, ROLE_RHS, &claim.r1.x);
     consume(&mut pairs, MUL_X1_SQUARED, ROLE_RESULT, &claim.x1_sq);

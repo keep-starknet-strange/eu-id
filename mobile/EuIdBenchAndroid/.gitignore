@@ -1,0 +1,7 @@
+.gradle/
+.kotlin/
+build/
+local.properties
+prebuilt/
+google-services.json
+src/main/jniLibs/

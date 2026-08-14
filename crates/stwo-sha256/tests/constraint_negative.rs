@@ -1,46 +1,3 @@
-//! Constraint-layer negative tests for the SHA-256 AIR.
-//!
-//! Direct response to audit lesson **L4** (docs/research/sha256-air-design.md §11):
-//! `../sha256-air`'s suite passes *only because* every test feeds an honest
-//! trace — the broken constraints (no range checks, IV not bound) are never
-//! exercised. The eu-id component must not repeat that failure mode.
-//!
-//! Each test below builds an honest witness, generates a trace, mutates a
-//! single cell (one mutation class per test), drives the trace through
-//! `Sha256Eval::evaluate`, and asserts that **at least one constraint goes
-//! non-zero** — i.e. the AIR rejects.
-//!
-//! The driver is a custom `LinearConstraintCollector` that implements
-//! `EvalAtRow` directly against the main trace. The motivation:
-//!
-//! - `AssertEvaluator` would be the obvious fit, but it `panic!`s on the
-//!   first non-zero constraint and requires a finalized interaction trace.
-//!   Building one here would duplicate `crate::interaction`'s walk over
-//!   the entire trace; the linear collector keeps the negative-test driver
-//!   self-contained and fast.
-//! - `InfoEvaluator` only counts constraints; it doesn't actually evaluate
-//!   them against trace data.
-//!
-//! `LinearConstraintCollector` therefore mirrors `AssertEvaluator`'s
-//! `next_interaction_mask` (including the circle-domain coset bit-reverse
-//! arithmetic for the `[0, -1]` cross-row reads used by the §10.3
-//! block-chain copy constraint) but records non-zero residuals instead of
-//! panicking, and no-ops `add_to_relation`. The recorded residuals cover
-//! every linear constraint `Sha256Eval::evaluate` emits: IV binding,
-//! schedule recurrence, T1/T2/e_new/a_new adds, σ-output reassembly,
-//! O2 chunk-bind, finalization, multi-block chain, and the whole §10.4
-//! padding-role family — exactly the classes the mutations below break.
-//!
-//! **Lookup-side rejection (the complement of this file).** This driver
-//! deliberately ignores `add_to_relation` calls, so the four `Range_k`
-//! channels, the σ/Σ decode tables, the packed Maj/Ch lookup, the
-//! `xor_8` chunk-combine, and the eight split-and-pack lookups are not
-//! exercised here. End-to-end coverage of those — including a
-//! carry-out-of-range witness mutation that closes L4 from the lookup
-//! side — lives in `tests/prove_verify_round_trip.rs`
-//! (`rejects_out_of_range_carry_witness_mutation`,
-//! `verify_rejects_range_k_claimed_sum_mutations`).
-
 use num_traits::Zero;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
@@ -52,60 +9,35 @@ use stwo_constraint_framework::{
     EvalAtRow, FrameworkEval, Relation, RelationEntry, ORIGINAL_TRACE_IDX,
 };
 
-use air_core::relations::field_id;
 use stwo_sha256::components::{is_first_row_column_id, round_cyclic_column_ids};
+use stwo_sha256::constants::N_ROUNDS;
 use stwo_sha256::constraints::Sha256Eval;
-use stwo_sha256::field_exposure::FieldExposure;
 use stwo_sha256::relations::Sha256Relations;
-use stwo_sha256::trace::{generate_trace, generate_trace_with_fields, min_log_size, Layout};
-use stwo_sha256::witness::compute_sha256_witness;
+use stwo_sha256::trace::{generate_trace, Layout, ROWS_PER_BLOCK, STATE_SEED_ROWS, WORD_BIT_COLS};
+use stwo_sha256::witness::compute_packed_sha256_witness;
 
-// ---------------------------------------------------------------------------
-// Linear-constraint collecting evaluator
-// ---------------------------------------------------------------------------
-
-/// A non-zero constraint residual emitted while running `Sha256Eval::evaluate`
-/// on a (possibly mutated) trace at one row. All fields are surfaced only
-/// through `Debug` — the `dead_code` lint mis-reports them as unread.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct Residual {
-    /// The trace slot (row index) the constraint was evaluated at.
-    row: usize,
-    /// Per-row constraint counter — increments once per `add_constraint`,
-    /// so residual `(row, constraint_idx)` pairs identify the specific
-    /// algebraic identity the AIR emitted.
+    natural_row: usize,
     constraint_idx: usize,
-    /// The non-zero constraint value, lifted to `SecureField` (the AIR's
-    /// extension type). Stored for diagnostic printing.
     value: SecureField,
 }
 
-/// An `EvalAtRow` that reads from a real main trace and records any
-/// constraint whose algebraic value is not zero. See file-level docs for
-/// the rationale vs. `AssertEvaluator` / `InfoEvaluator`.
 struct LinearConstraintCollector<'a> {
-    /// Main trace; one inner `Vec` per column, indexed `[col][row]`.
     trace: &'a [Vec<BaseField>],
-    /// `log2` of the trace row count (needed for the cross-row coset math
-    /// `AssertEvaluator` uses).
     log_size: u32,
-    /// Row this evaluator is evaluating at.
-    row: usize,
-    /// Next column index for the main trace.
+    natural_row: usize,
     col_index: usize,
-    /// Per-row constraint counter, incremented on each `add_constraint`.
     constraint_idx: usize,
-    /// Non-zero residuals captured this row.
     non_zero: Vec<Residual>,
 }
 
 impl<'a> LinearConstraintCollector<'a> {
-    fn new(trace: &'a [Vec<BaseField>], log_size: u32, row: usize) -> Self {
+    fn new(trace: &'a [Vec<BaseField>], log_size: u32, natural_row: usize) -> Self {
         Self {
             trace,
             log_size,
-            row,
+            natural_row,
             col_index: 0,
             constraint_idx: 0,
             non_zero: Vec::new(),
@@ -122,81 +54,54 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         interaction: usize,
         offsets: [isize; N],
     ) -> [Self::F; N] {
-        // The SHA-256 AIR's main-trace reads land here; preprocessed-table
-        // cells are matched via `add_to_relation` (which this evaluator
-        // no-ops) and the `is_first_row` selector is served via the
-        // dedicated `get_preprocessed_column` override below. A non-
-        // `ORIGINAL_TRACE_IDX` interaction here would mean the AIR has
-        // grown a read this evaluator doesn't model — fail loudly rather
-        // than silently.
-        assert_eq!(
-            interaction, ORIGINAL_TRACE_IDX,
-            "LinearConstraintCollector only reads from the main trace",
-        );
+        assert_eq!(interaction, ORIGINAL_TRACE_IDX);
         let col_index = self.col_index;
         self.col_index += 1;
-        offsets.map(|off| {
-            if off == 0 {
-                return self.trace[col_index][self.row];
-            }
-            // Cross-row read: walk one step on the bit-reversed
-            // circle-domain coset. Mirrors `AssertEvaluator::next_interaction_mask`
-            // (constraint-framework/src/prover/assert.rs) so the values
-            // line up with what the prover sees.
-            let log_size = self.log_size;
-            let domain_size = 1isize << log_size;
-            let coset_index =
-                circle_domain_index_to_coset_index(bit_reverse_index(self.row, log_size), log_size)
-                    as isize;
-            let next_coset_index = (coset_index + off).rem_euclid(domain_size);
-            let next_index = bit_reverse_index(
-                coset_index_to_circle_domain_index(next_coset_index as usize, log_size),
-                log_size,
+        let current_slot = Layout::row_slot(self.natural_row, self.log_size);
+        let domain_size = 1isize << self.log_size;
+        let coset_index = circle_domain_index_to_coset_index(
+            bit_reverse_index(current_slot, self.log_size),
+            self.log_size,
+        ) as isize;
+        offsets.map(|offset| {
+            let next_coset_index = (coset_index + offset).rem_euclid(domain_size);
+            let next_slot = bit_reverse_index(
+                coset_index_to_circle_domain_index(next_coset_index as usize, self.log_size),
+                self.log_size,
             );
-            self.trace[col_index][next_index]
+            self.trace[col_index][next_slot]
         })
     }
 
     fn get_preprocessed_column(&mut self, column: PreProcessedColumnId) -> Self::F {
-        // Serve `is_first_row` and the round-cyclic columns directly,
-        // mirroring `crate::preprocessed`'s emission. This does **not**
-        // advance `col_index` (preprocessed columns live in a separate
-        // commitment tree from the main trace).
         if column == is_first_row_column_id() {
-            return if self.row == 0 {
-                BaseField::from(1u32)
-            } else {
-                BaseField::from(0u32)
-            };
+            return BaseField::from(u32::from(self.natural_row == 0));
         }
-        // Round-cyclic columns: functions of `t = natural_row mod 64`.
-        let natural = circle_domain_index_to_coset_index(
-            bit_reverse_index(self.row, self.log_size),
-            self.log_size,
-        );
-        let t = natural % stwo_sha256::constants::N_ROUNDS;
+        let position = self.natural_row % ROWS_PER_BLOCK;
+        let is_round = position >= STATE_SEED_ROWS;
+        let t = position.saturating_sub(STATE_SEED_ROWS);
         let cyclic = round_cyclic_column_ids();
-        let flag = |b: bool| BaseField::from(u32::from(b));
+        let flag = |value: bool| BaseField::from(u32::from(value));
         if column == cyclic[0] {
-            BaseField::from(stwo_sha256::constants::K[t] & 0xFFFF)
+            BaseField::from(u32::from(is_round) * (stwo_sha256::constants::K[t] & 0xffff))
         } else if column == cyclic[1] {
-            BaseField::from(stwo_sha256::constants::K[t] >> 16)
+            BaseField::from(u32::from(is_round) * (stwo_sha256::constants::K[t] >> 16))
         } else if column == cyclic[2] {
-            flag(t == 0)
+            flag(position == 0)
         } else if column == cyclic[3] {
-            flag(t == 1)
+            flag(is_round && t == 0)
         } else if column == cyclic[4] {
-            flag(t == 2)
+            flag(is_round && t == 15)
         } else if column == cyclic[5] {
-            flag(t == 3)
+            flag(is_round && t == stwo_sha256::constants::N_ROUNDS - 1)
         } else if column == cyclic[6] {
-            flag(t == 15)
+            flag(is_round && t >= 16)
         } else if column == cyclic[7] {
-            flag(t == stwo_sha256::constants::N_ROUNDS - 1)
+            flag(is_round)
         } else if column == cyclic[8] {
-            flag(t >= 16)
+            BaseField::from(u32::from(is_round) * t as u32)
         } else {
-            panic!("LinearConstraintCollector has no fixture for preprocessed column {column:?}");
+            panic!("unknown SHA preprocessed column {column:?}");
         }
     }
 
@@ -207,7 +112,7 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         let value = SecureField::from(constraint);
         if !value.is_zero() {
             self.non_zero.push(Residual {
-                row: self.row,
+                natural_row: self.natural_row,
                 constraint_idx: self.constraint_idx,
                 value,
             });
@@ -223,629 +128,415 @@ impl EvalAtRow for LinearConstraintCollector<'_> {
         &mut self,
         _entry: RelationEntry<'_, Self::F, Self::EF, R>,
     ) {
-        // **This collector deliberately no-ops every lookup.** It only
-        // records non-zero residuals from `add_constraint`, i.e. the
-        // *linear* identities the AIR emits — IV binding, schedule
-        // recurrence, T1/T2/e_new/a_new adds, σ-output reassembly, O2
-        // chunk-bind, finalization, multi-block chain, and the §10.4
-        // padding-role block. Every mutation class in the suite below
-        // is caught by exactly those identities.
-        //
-        // Carry range-check lookups (`Range_2`/`4`/`5` per family) and
-        // the terminal `Range_16` on `h_out` *are* wired in
-        // `crate::constraints` today, but their soundness lives in the
-        // LogUp interaction layer this evaluator does not model. The
-        // `prove_verify_round_trip` suite exercises that path end-to-end.
-        // The follow-up that migrates this driver to `AssertEvaluator`
-        // — once the assert backend's interaction-trace setup is wired
-        // in — should add a "carry-set-to-out-of-range" mutation class
-        // to close L4 on the LogUp side too.
     }
 
-    /// `Sha256Eval::evaluate` ends with `finalize_logup_batched(..)` so
-    /// that real prover/verifier evaluators batch the lookup fractions
-    /// into interaction columns. This linear-only collector does **not**
-    /// model the LogUp interaction trace, so the finalize step is a
-    /// no-op here — the recorded `non_zero` residuals stay scoped to the
-    /// linear identities `add_constraint` saw.
     fn finalize_logup_batched(&mut self, _batch_size: usize) {}
     fn finalize_logup_in_pairs(&mut self) {}
 }
 
-/// Run `Sha256Eval::evaluate` against `trace` at every row and return every
-/// non-zero residual collected. An empty return value means the AIR's
-/// linear constraint layer accepts the trace; a non-empty return means
-/// the AIR rejects.
-fn collect_constraint_residuals_with_fields(
+fn first_constraint_failure(
     trace: &[Vec<BaseField>],
     log_size: u32,
-    field_exposure: FieldExposure,
-) -> Vec<Residual> {
-    let eval = Sha256Eval {
+) -> Option<(usize, usize, SecureField)> {
+    for natural_row in 0..(1usize << log_size) {
+        let evaluator = Sha256Eval {
+            log_size,
+            relations: Sha256Relations::dummy(),
+            expose_digest: true,
+            expose_field: true,
+            claim_mask_beta: None,
+        };
+        let collector =
+            evaluator.evaluate(LinearConstraintCollector::new(trace, log_size, natural_row));
+        assert_eq!(collector.col_index, Layout::TOTAL_COLS);
+        if let Some(residual) = collector.non_zero.first() {
+            return Some((
+                residual.natural_row,
+                residual.constraint_idx,
+                residual.value,
+            ));
+        }
+    }
+    None
+}
+
+fn row_has_constraint_failure(trace: &[Vec<BaseField>], log_size: u32, natural_row: usize) -> bool {
+    let evaluator = Sha256Eval {
         log_size,
         relations: Sha256Relations::dummy(),
-        // The digest yield is a LogUp term, not a linear constraint, so it
-        // does not affect this linear-residual collector either way; keep it
-        // off to mirror the standalone (self-balancing) AIR.
-        expose_digest: false,
-        field_exposure,
+        expose_digest: true,
+        expose_field: true,
+        claim_mask_beta: None,
     };
-    let n_rows = 1usize << log_size;
-    let mut all = Vec::new();
-    for row in 0..n_rows {
-        let collector = LinearConstraintCollector::new(trace, log_size, row);
-        let collector = eval.evaluate(collector);
-        all.extend(collector.non_zero);
+    let collector =
+        evaluator.evaluate(LinearConstraintCollector::new(trace, log_size, natural_row));
+    assert_eq!(collector.col_index, Layout::TOTAL_COLS);
+    !collector.non_zero.is_empty()
+}
+
+fn assert_air_accepts(trace: &[Vec<BaseField>], log_size: u32) {
+    assert_eq!(
+        first_constraint_failure(trace, log_size),
+        None,
+        "honest packed trace must satisfy every base constraint"
+    );
+}
+
+fn assert_air_rejects(label: &str, trace: &[Vec<BaseField>], log_size: u32) {
+    let residual = first_constraint_failure(trace, log_size);
+    assert!(residual.is_some(), "{label} must produce a base residual");
+}
+
+fn set_natural(
+    trace: &mut [Vec<BaseField>],
+    column: usize,
+    natural_row: usize,
+    value: u32,
+    log_size: u32,
+) {
+    trace[column][Layout::row_slot(natural_row, log_size)] = BaseField::from(value);
+}
+
+fn add_one_natural(trace: &mut [Vec<BaseField>], column: usize, natural_row: usize, log_size: u32) {
+    let slot = Layout::row_slot(natural_row, log_size);
+    trace[column][slot] += BaseField::from(1);
+}
+
+fn flip_natural(trace: &mut [Vec<BaseField>], column: usize, natural_row: usize, log_size: u32) {
+    let slot = Layout::row_slot(natural_row, log_size);
+    trace[column][slot] = BaseField::from(1 - trace[column][slot].0);
+}
+
+fn set_seeded_state_word(
+    trace: &mut [Vec<BaseField>],
+    block: usize,
+    word: usize,
+    value: u32,
+    log_size: u32,
+) {
+    let lane = usize::from(word >= 4);
+    let position = word % 4;
+    let natural_row = block * ROWS_PER_BLOCK
+        + if position == 0 {
+            STATE_SEED_ROWS
+        } else {
+            STATE_SEED_ROWS - position
+        };
+    for bit in 0..WORD_BIT_COLS {
+        set_natural(
+            trace,
+            Layout::round_operand_bit(lane, bit),
+            natural_row,
+            (value >> bit) & 1,
+            log_size,
+        );
     }
-    all
 }
 
-fn collect_constraint_residuals(trace: &[Vec<BaseField>], log_size: u32) -> Vec<Residual> {
-    collect_constraint_residuals_with_fields(trace, log_size, FieldExposure::empty())
-}
-
-/// Honest-trace sanity: every linear constraint `Sha256Eval::evaluate`
-/// emits is zero on an unmutated single-block trace. If this fails, the
-/// negative tests below are meaningless — they'd report rejections that
-/// the honest baseline already produces.
-#[test]
-fn honest_single_block_trace_yields_no_residuals() {
-    let witness = compute_sha256_witness(b"abc");
-    let log_size = min_log_size(witness.blocks.len());
-    let trace = generate_trace(&witness, log_size);
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        residuals.is_empty(),
-        "honest abc trace produced {} non-zero residuals: {:?}",
-        residuals.len(),
-        residuals.first(),
-    );
-}
-
-/// Honest-trace sanity, multi-block: confirms the block-chain copy
-/// constraint and the multi-block padding paths are also clean on an
-/// unmutated trace before the mutation tests rely on them.
-#[test]
-fn honest_multi_block_trace_yields_no_residuals() {
-    let witness = compute_sha256_witness(&[0xABu8; 200]);
-    assert!(witness.blocks.len() >= 2, "need multi-block message");
-    let log_size = min_log_size(witness.blocks.len());
-    let trace = generate_trace(&witness, log_size);
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        residuals.is_empty(),
-        "honest multi-block trace produced {} non-zero residuals: {:?}",
-        residuals.len(),
-        residuals.first(),
-    );
-}
-
-#[test]
-fn honest_multi_block_field_exposure_trace_yields_no_residuals() {
-    let message = [0xABu8; 200];
-    let witness = compute_sha256_witness(&message);
-    assert!(witness.blocks.len() >= 2, "need multi-block message");
-    let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[
-        (field_id::DOB, 62, 4),
-        (field_id::NATIONALITY, 70, 3),
-    ]);
-    let trace = generate_trace_with_fields(&witness, log_size, &exposure);
-    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
-    assert!(
-        residuals.is_empty(),
-        "honest multi-block field trace produced {} non-zero residuals: {:?}",
-        residuals.len(),
-        residuals.first(),
-    );
-}
-
-#[test]
-fn honest_large_multi_block_field_exposure_trace_yields_no_residuals() {
-    // Opaque field tags (2, 3): the SHA producer is agnostic to their meaning.
-    // Two 32-byte windows spanning blocks 1 and 2.
-    let message = [0xABu8; 220];
-    let witness = compute_sha256_witness(&message);
-    assert!(witness.blocks.len() >= 3, "need at least three blocks");
-    let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(2, 96, 32), (3, 128, 32)]);
-    let trace = generate_trace_with_fields(&witness, log_size, &exposure);
-    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
-    assert!(
-        residuals.is_empty(),
-        "honest large multi-block field trace produced {} non-zero residuals: {:?}",
-        residuals.len(),
-        residuals.first(),
-    );
-}
-
-#[test]
-fn rejects_field_selector_on_wrong_block() {
-    let message = [0xABu8; 200];
-    let witness = compute_sha256_witness(&message);
-    assert!(witness.blocks.len() >= 2, "need multi-block message");
-    let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
-    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
-
-    assert!(
-        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    let selector_slot = exposure
-        .selector_column_slot(1)
-        .expect("nonzero-block exposure has selector columns");
-    let selector_col = Layout::field_aux_col(selector_slot);
-    let wrong_slot = Layout::round_row_slot(0, 15, log_size);
-    trace[selector_col][wrong_slot] = BaseField::from(1u32);
-
-    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a field selector enabled on the wrong SHA block",
-    );
-}
-
-#[test]
-fn rejects_field_selector_on_padding_r15_row() {
-    let message = [0xABu8; 200];
-    let witness = compute_sha256_witness(&message);
-    let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
-    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
-
-    assert!(
-        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    let selector_slot = exposure
-        .selector_column_slot(1)
-        .expect("nonzero-block exposure has selector columns");
-    let selector_col = Layout::field_aux_col(selector_slot);
-    let first_padding_r15 = witness.blocks.len() * stwo_sha256::constants::N_ROUNDS + 15;
-    assert!(
-        first_padding_r15 < 1usize << log_size,
-        "test needs a padding r15 row"
-    );
-    let padding_slot = Layout::row_slot(first_padding_r15, log_size);
-    trace[selector_col][padding_slot] = BaseField::from(1u32);
-
-    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a field selector enabled on a periodic padding r15 row",
-    );
-}
-
-#[test]
-fn rejects_virtual_field_byte_w_bit_tamper() {
-    let message: Vec<u8> = (0..150).map(|i| (i % 251) as u8).collect();
-    let witness = compute_sha256_witness(&message);
-    let log_size = min_log_size(witness.blocks.len());
-    // Offset 70 = block 1, W[1], big-endian byte 2 = W bits 8..15.
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 1)]);
-    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
-
-    assert!(
-        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    let word_row = Layout::round_row_slot(1, 1, log_size);
-    let bit_col = Layout::w_bit(8);
-    trace[bit_col][word_row] = BaseField::from(1u32) - trace[bit_col][word_row];
-
-    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject tampering with a W bit that feeds a virtual field byte",
-    );
-}
-
-#[test]
-fn rejects_frozen_field_block_counter() {
-    let message = [0xABu8; 200];
-    let witness = compute_sha256_witness(&message);
-    assert!(witness.blocks.len() >= 2, "need multi-block message");
-    let log_size = min_log_size(witness.blocks.len());
-    let exposure = FieldExposure::from_preimage_windows_multi(&[(field_id::NATIONALITY, 70, 2)]);
-    let mut trace = generate_trace_with_fields(&witness, log_size, &exposure);
-
-    assert!(
-        collect_constraint_residuals_with_fields(&trace, log_size, exposure.clone()).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    let counter_slot = exposure
-        .block_counter_column_slot()
-        .expect("nonzero-block exposure has a block counter");
-    let counter_col = Layout::field_aux_col(counter_slot);
-    for t in 0..stwo_sha256::constants::N_ROUNDS {
-        let slot = Layout::round_row_slot(1, t, log_size);
-        trace[counter_col][slot] = BaseField::from(0u32);
+fn set_block_column(
+    trace: &mut [Vec<BaseField>],
+    column: usize,
+    block: usize,
+    value: u32,
+    log_size: u32,
+) {
+    for t in 0..ROWS_PER_BLOCK {
+        set_natural(trace, column, block * ROWS_PER_BLOCK + t, value, log_size);
     }
-
-    let residuals = collect_constraint_residuals_with_fields(&trace, log_size, exposure);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a block counter that fails to increment at a SHA block boundary",
-    );
 }
 
-// ---------------------------------------------------------------------------
-// Mutation suite (one test per mutation class)
-// ---------------------------------------------------------------------------
-
-/// Mutation class: corrupt a single limb in a single row.
-///
-/// Picks the `lo` limb of `W[0]` (a schedule word, used as `W[t-16]` in the
-/// schedule recurrence at `t=16` and as the `T1` add operand at round 0)
-/// and replaces it with a value the algebra cannot satisfy. The schedule
-/// recurrence add identity `s1.lo + W[t-7].lo + s0.lo + W[t-16].lo =
-/// W[t].lo + 2¹⁶·carry_lo` and the round-0 `T1` identity both go non-zero.
-#[test]
-fn rejects_corrupted_schedule_word_limb() {
-    let witness = compute_sha256_witness(b"abc");
-    let log_size = min_log_size(witness.blocks.len());
-    let mut trace = generate_trace(&witness, log_size);
-    let slot = Layout::round_row_slot(0, 0, log_size);
-
-    // Honest baseline first — confirm the unmutated trace is clean so the
-    // post-mutation rejection is solely attributable to the mutation.
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    // Flip a single byte's worth of bits in `W[0].lo`. XOR rather than
-    // overwrite so a coincidental "the chosen value happened to already be
-    // there" no-op cannot happen.
-    let (w0_lo, _) = Layout::schedule_word();
-    let original = trace[w0_lo][slot].0;
-    trace[w0_lo][slot] = BaseField::from(original ^ 0x1234u32);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a corrupted schedule-word limb (mutated W[0].lo)",
-    );
+fn honest_fixture() -> (Vec<Vec<BaseField>>, u32) {
+    let messages: [&[u8]; 3] = [b"a", &[0x42; 100], b"z"];
+    let witness = compute_packed_sha256_witness(&messages).unwrap();
+    (generate_trace(&witness, 9), 9)
 }
 
-/// Mutation class: swap a carry value within a row.
-///
-/// At round 0, the `T1` add emits a `(carry_lo, carry_hi)` pair. Swapping
-/// these two cells inside the same row (no change to any other cell)
-/// breaks the limb-add identity unless the two values happen to coincide
-/// — and on a real message they almost never do. The assertion below
-/// guards against the rare coincidence by asserting the original values
-/// differ before swapping.
 #[test]
-fn rejects_swapped_carry_within_row() {
-    let witness = compute_sha256_witness(b"abc");
-    let log_size = min_log_size(witness.blocks.len());
-    let mut trace = generate_trace(&witness, log_size);
-    let slot = Layout::round_row_slot(0, 0, log_size);
-
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    // Round 0 `t1` carry pair lives at offsets [16, 17] of `round_col()`
-    // — see the comment block above `Layout::round_col` for the order.
-    let round_cols = Layout::round_col();
-    let carry_lo_col = round_cols[16];
-    let carry_hi_col = round_cols[17];
-    let lo = trace[carry_lo_col][slot].0;
-    let hi = trace[carry_hi_col][slot].0;
-    assert_ne!(
-        lo, hi,
-        "carry pair coincidentally equal on this message — pick a different mutation site",
-    );
-    trace[carry_lo_col][slot] = BaseField::from(hi);
-    trace[carry_hi_col][slot] = BaseField::from(lo);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a swapped within-row carry pair (round 0, T1 carry)",
-    );
+fn rejects_aliased_cells_outside_round_15_and_round_63() {
+    let (trace, log_size) = honest_fixture();
+    assert_air_accepts(&trace, log_size);
+    let natural_row = STATE_SEED_ROWS + stwo_sha256::constants::N_ROUNDS - 2;
+    for column in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
+        let mut mutated = trace.clone();
+        add_one_natural(&mut mutated, column, natural_row, log_size);
+        assert!(
+            row_has_constraint_failure(&mutated, log_size, natural_row),
+            "aliased column {column} must be zero outside t=15/t=63"
+        );
+    }
 }
 
-/// Mutation class: flip the `is_first_block` flag (set on a continuation
-/// row, unset on the first-block row).
-///
-/// Post-C1-fix, the rejection path is a single linear identity:
-/// `is_first_block − is_first_row = 0` (`constraints.rs`). The
-/// `is_first_row` preprocessed selector is `1` only at storage index 0
-/// (block 0's slot) and `0` elsewhere, so any cell-level flip on
-/// `is_first_block` immediately produces a non-zero residual at that row.
-/// The IV-binding / chain-gate consequences the pre-fix version relied on
-/// are still present — they just fire downstream of this anchor
-/// constraint.
 #[test]
-fn rejects_flipped_is_first_block_flag() {
-    let witness = compute_sha256_witness(&[0xABu8; 200]);
-    assert!(
-        witness.blocks.len() >= 2,
-        "need a continuation row to flip onto"
-    );
-    let log_size = min_log_size(witness.blocks.len());
-    let mut trace = generate_trace(&witness, log_size);
-
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    // Clear is_first_block on the actual first-block row (block 0, t = 0).
-    let first_slot = Layout::round_row_slot(0, 0, log_size);
-    assert_eq!(trace[Layout::COL_IS_FIRST_BLOCK][first_slot].0, 1);
-    trace[Layout::COL_IS_FIRST_BLOCK][first_slot] = BaseField::from(0u32);
-
-    // Set is_first_block on a continuation block's t = 0 row.
-    let later_slot = Layout::round_row_slot(1, 0, log_size);
-    assert_eq!(trace[Layout::COL_IS_FIRST_BLOCK][later_slot].0, 0);
-    trace[Layout::COL_IS_FIRST_BLOCK][later_slot] = BaseField::from(1u32);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject the flipped is_first_block flags",
-    );
+fn rejects_padding_value_in_aliased_slot_at_round_63() {
+    let (mut trace, log_size) = honest_fixture();
+    let natural_row = STATE_SEED_ROWS + stwo_sha256::constants::N_ROUNDS - 1;
+    add_one_natural(&mut trace, Layout::COL_PADDING_START, natural_row, log_size);
+    assert!(row_has_constraint_failure(&trace, log_size, natural_row));
 }
 
-/// Mutation class: scramble a σ-output column.
-///
-/// The schedule entry for `W[16]` (i.e. `j = 0`) commits `σ0(W[1])`'s
-/// `(lo, hi)` and `σ1(W[14])`'s `(lo, hi)` to the first four cells of
-/// `Layout::schedule_entry(0)`. The σ-output reassembly identity emitted
-/// by `wire_sigma_decode` (constraints.rs:1064–1080) ties each output to
-/// `o_main_s + o_main_s_complement + o2_combined`; flipping the σ0 `lo`
-/// alone without touching the decode-block intermediates breaks that
-/// identity. The matching schedule-recurrence limb-add identity also
-/// catches the mutation.
 #[test]
-fn rejects_scrambled_sigma_output() {
-    let witness = compute_sha256_witness(b"abc");
-    let log_size = min_log_size(witness.blocks.len());
-    let mut trace = generate_trace(&witness, log_size);
-    // Schedule entry j = 0 (W[16]) lives on the t = 16 row.
-    let slot = Layout::round_row_slot(0, 16, log_size);
-
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
+fn rejects_marker_flag_on_disabled_round_15() {
+    let (mut trace, log_size) = honest_fixture();
+    let disabled_t15 = 4 * ROWS_PER_BLOCK + STATE_SEED_ROWS + 15;
+    assert_eq!(
+        trace[Layout::COL_ENABLER][Layout::row_slot(disabled_t15, log_size)].0,
+        0
     );
-
-    // schedule_entry(0) layout: [σ0_lo, σ0_hi, σ1_lo, σ1_hi, carry_lo, carry_hi].
-    let s0_lo_col = Layout::schedule_entry()[0];
-    let original = trace[s0_lo_col][slot].0;
-    // XOR with 0x55AA: a 16-bit pattern that flips half the limb's bits,
-    // guaranteed to change the value (no aliasing in `[0, 2¹⁶)`).
-    let mutated = original ^ 0x55AAu32;
-    assert_ne!(original, mutated, "mutation must change the cell");
-    trace[s0_lo_col][slot] = BaseField::from(mutated);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a scrambled σ0(W[1]) output limb on the W[16] schedule entry",
-    );
-}
-
-/// Mutation class: mutate `h_in` on a continuation block (chain-break
-/// case).
-///
-/// The §10.3 block-chain copy constraint `(enabler − is_first_block) ·
-/// (h_in[block r] − h_out[block r-1]) = 0` rejects exactly this class.
-/// `chain_constraint_rejects_h_in_mutation_on_block_1` in constraints.rs
-/// already exercises this at the trace-residual level; this version
-/// drives it through `Sha256Eval::evaluate` for the L4 audit-lesson
-/// closure.
-#[test]
-fn rejects_mutated_h_in_on_continuation_block() {
-    let witness = compute_sha256_witness(&[0xABu8; 200]);
-    assert!(witness.blocks.len() >= 2, "need multi-block message");
-    let log_size = min_log_size(witness.blocks.len());
-    let mut trace = generate_trace(&witness, log_size);
-
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    // Mutate `h_in[0].lo` of block 1. Block 1 is a continuation row
-    // (is_first_block = 0), so the chain gate is `1`, and the identity
-    // `h_in[0].lo = h_out[block 0][0].lo` must hold.
-    let block_1_slot = Layout::round_row_slot(1, 0, log_size);
-    let (h_in_lo, _) = Layout::h_in_word(0);
-    let original = trace[h_in_lo][block_1_slot].0;
-    trace[h_in_lo][block_1_slot] = BaseField::from(original ^ 0xBEEFu32);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a mutated h_in[0].lo on block 1's continuation row",
-    );
-}
-
-/// Mutation class: shift the padding's `0x80` marker.
-///
-/// The padding-role witness in `b"abc"`'s sole block has the marker at
-/// byte 3 of `W[0]` (i.e. `W[0].lo = 0x6380` — `'c' = 0x63` followed by
-/// the `0x80` marker). Moving the `marker_byte_sel` one-hot to byte 0
-/// claims the marker is the MSB instead, while leaving `W[0]` unchanged
-/// — the (P.E) `marker_byte_sel[b] · (marker_word_byte[b] − 0x80) = 0`
-/// constraint then goes non-zero because `marker_word_byte[0]` is `'a' =
-/// 0x61`, not `0x80`.
-#[test]
-fn rejects_shifted_marker_byte_sel() {
-    let witness = compute_sha256_witness(b"abc");
-    let log_size = min_log_size(witness.blocks.len());
-    let mut trace = generate_trace(&witness, log_size);
-    // The padding-role family lives on the t = 15 row.
-    let slot = Layout::round_row_slot(0, 15, log_size);
-
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    // Honest: marker is at byte 3 of W[0] (the `0x80` after `'a','b','c'`).
-    assert_eq!(trace[Layout::marker_byte_sel(3)][slot].0, 1);
-    assert_eq!(trace[Layout::marker_byte_sel(0)][slot].0, 0);
-
-    // Shift the one-hot to byte 0 — claiming `0x80` is the MSB instead.
-    trace[Layout::marker_byte_sel(3)][slot] = BaseField::from(0u32);
-    trace[Layout::marker_byte_sel(0)][slot] = BaseField::from(1u32);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a shifted `0x80` marker selector",
-    );
-}
-
-/// Mutation class: C1 IV-anchor exploit — clear `is_first_block` on block 0
-/// **and** plant an attacker-chosen `h_out` on the wraparound padding row.
-///
-/// Pre-fix soundness gap (`docs/research/sha256-air-design.md` §11 L2): with
-/// `is_first_block = 0` on the real row, IV binding was vacuous. With the
-/// padding-row `h_out` cells unconstrained (Range_16/finalization both
-/// gated by `enabler`), the prover could inject any state `X` into block
-/// 0's `h_in` via the chain's `[0, -1]` mask wraparound — yielding a
-/// "digest" of `compression(X, W)` instead of `SHA-256(W) = compression(IV, W)`.
-///
-/// Post-fix rejection path: the preprocessed `is_first_row` selector is
-/// `1` at storage index 0, so the anchor constraint
-/// `is_first_block − is_first_row = 0` fails immediately when the mutator
-/// clears `is_first_block`. The mutation that *would* have completed the
-/// exploit (setting padding-row `h_out` to a chosen `X`) is preserved here
-/// to document the threat model, but the AIR rejects on the anchor before
-/// the chain ever reads the planted `h_out`.
-#[test]
-fn rejects_iv_anchor_exploit_via_padding_h_out_injection() {
-    let witness = compute_sha256_witness(b"abc");
-    // Single-block message; min_log_size = 4 (the SIMD floor) gives one
-    // real slot and 15 padding slots — exactly the layout an attacker
-    // would target. The cyclic predecessor of slot 0 wraps to slot N-1.
-    let log_size = min_log_size(witness.blocks.len()).max(4);
-    let mut trace = generate_trace(&witness, log_size);
-
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    // (1) Clear `is_first_block` on block 0's t = 0 row to disable IV binding.
-    let first_slot = Layout::round_row_slot(0, 0, log_size);
-    assert_eq!(first_slot, 0, "row (0, 0) must live at storage index 0");
-    assert_eq!(trace[Layout::COL_IS_FIRST_BLOCK][first_slot].0, 1);
-    trace[Layout::COL_IS_FIRST_BLOCK][first_slot] = BaseField::from(0u32);
-
-    // (2) Plant an attacker-chosen `h_out` on the wraparound padding row
-    //     (coset N-1 in the chain's [0, -1] mask). Any non-zero pattern
-    //     suffices to demonstrate the threat surface.
-    let n_rows = 1usize << log_size;
-    let wraparound_slot = bit_reverse_index(
-        coset_index_to_circle_domain_index(n_rows - 1, log_size),
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MARKER_BLOCK,
+        disabled_t15,
+        1,
         log_size,
     );
-    for j in 0..8usize {
-        let (lo_col, hi_col) = Layout::h_out_word(j);
-        trace[lo_col][wraparound_slot] = BaseField::from(0xCAFEu32 + j as u32);
-        trace[hi_col][wraparound_slot] = BaseField::from(0xBABEu32 + j as u32);
+    assert!(row_has_constraint_failure(&trace, log_size, disabled_t15));
+}
+
+#[test]
+fn rejects_live_padding_cells_on_disabled_round_15() {
+    let (trace, log_size) = honest_fixture();
+    let disabled_t15 = 4 * ROWS_PER_BLOCK + STATE_SEED_ROWS + 15;
+    let inert_length_cells = [
+        Layout::COL_BIT_LENGTH_W14_LO,
+        Layout::COL_BIT_LENGTH_W14_HI,
+        Layout::COL_BIT_LENGTH_W15_LO,
+        Layout::COL_BIT_LENGTH_W15_HI,
+    ];
+    for column in Layout::COL_PADDING_START..Layout::COL_PADDING_END {
+        if inert_length_cells.contains(&column) {
+            continue;
+        }
+        let mut mutated = trace.clone();
+        set_natural(&mut mutated, column, disabled_t15, 1, log_size);
+        assert!(
+            row_has_constraint_failure(&mutated, log_size, disabled_t15),
+            "live padding cell {column} must reject on a disabled t=15 row"
+        );
     }
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject the C1 IV-anchor exploit",
-    );
 }
 
-/// Mutation class: C1 block-skip exploit — set `enabler = 0` on a real
-/// continuation row to splice in a padding-row `h_out` as the next block's
-/// `h_in`.
-///
-/// Pre-fix surface: even with `is_first_block = 1` correctly anchored at
-/// block 0, a prover could disable an interior block (`enabler = 0`) so
-/// the next real block's chain reads its `h_out_prev` from a now-padding
-/// predecessor (`h_out` unconstrained). Compression at that row runs from
-/// the planted state — not an honestly chained SHA-256 state.
-///
-/// Post-fix rejection path: the contiguity constraint
-/// `(1 − is_first_row) · enabler · (1 − enabler_prev) = 0` rejects the
-/// transition from a disabled predecessor (`enabler_prev = 0`) to a real
-/// row (`enabler = 1`). Only block 0's slot is exempt (via
-/// `is_first_row = 1`).
 #[test]
-fn rejects_block_skip_via_disabled_interior_row() {
-    // Use enough blocks that we have at least three contiguous real slots
-    // — disable the middle one to create a padding-to-real transition at
-    // the third.
-    let witness = compute_sha256_witness(&[0xABu8; 200]);
-    assert!(witness.blocks.len() >= 3, "need ≥3 blocks for block-skip");
-    let log_size = min_log_size(witness.blocks.len());
-    let mut trace = generate_trace(&witness, log_size);
-
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
-    );
-
-    // Disable an interior real row — its successor then sees a disabled
-    // predecessor, tripping the contiguity anchor.
-    let interior_slot = Layout::round_row_slot(1, 0, log_size);
-    assert_eq!(trace[Layout::COL_ENABLER][interior_slot].0, 1);
-    trace[Layout::COL_ENABLER][interior_slot] = BaseField::from(0u32);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a block-skip (disabled-interior) trace",
-    );
+fn honest_packed_trace_satisfies_all_base_constraints() {
+    let (trace, log_size) = honest_fixture();
+    assert_air_accepts(&trace, log_size);
 }
 
-/// Mutation class: Mn1 padding-flag injection — set `is_marker_block = 1`
-/// on a disabled (padding) row.
-///
-/// Pre-fix: padding-role flags fired unconditionally (no `enabler` gate),
-/// so a malicious prover could mark a disabled row as a marker block.
-/// While not a direct soundness break in isolation, it interacts with C1
-/// and is undesirable defense-in-depth: disabled rows should carry no
-/// padding metadata.
-///
-/// Post-fix rejection path: the gate `(1 − enabler) · is_marker_block = 0`
-/// (Mn1) fails immediately on a disabled row with `is_marker_block ≠ 0`.
 #[test]
-fn rejects_padding_role_flag_on_disabled_row() {
-    let witness = compute_sha256_witness(b"abc");
-    let log_size = min_log_size(witness.blocks.len()).max(4);
-    let mut trace = generate_trace(&witness, log_size);
+fn five_message_active_to_decoy_boundary_satisfies_constraints() {
+    let long = [0x42; 100];
+    let messages: [&[u8]; 5] = [b"a", &long, b"z", b"q", &long];
+    let witness = compute_packed_sha256_witness(&messages).unwrap();
+    let log_size = 9;
+    let total_blocks = 7;
+    let first_disabled = total_blocks * ROWS_PER_BLOCK;
+    assert_eq!((1usize << log_size) - first_disabled, 43);
 
-    assert!(
-        collect_constraint_residuals(&trace, log_size).is_empty(),
-        "baseline should be clean before mutation",
+    let trace = generate_trace(&witness, log_size);
+    let last_active_slot = Layout::row_slot(first_disabled - 1, log_size);
+    let first_disabled_slot = Layout::row_slot(first_disabled, log_size);
+    assert_eq!(trace[Layout::COL_ENABLER][last_active_slot].0, 1);
+    assert_eq!(trace[Layout::COL_MSG_ID][last_active_slot].0, 4);
+    assert_eq!(trace[Layout::COL_MSG_BLOCK][last_active_slot].0, 1);
+    assert_eq!(trace[Layout::COL_ENABLER][first_disabled_slot].0, 0);
+    assert_eq!(trace[Layout::COL_MSG_ID][first_disabled_slot].0, 0);
+    assert_eq!(trace[Layout::COL_MSG_BLOCK][first_disabled_slot].0, 0);
+    assert_air_accepts(&trace, log_size);
+}
+
+#[test]
+fn packed_capacity_errors_are_checked() {
+    assert!(matches!(
+        compute_packed_sha256_witness(&[]),
+        Err(stwo_sha256::witness::PackedSha256Error::EmptyMessageSet)
+    ));
+    let message = vec![0u8; 16_320];
+    let witness = compute_packed_sha256_witness(&[message.as_slice()]).unwrap();
+    assert!(matches!(
+        stwo_sha256::air::Sha256Prover::new(&witness, 14),
+        Err(stwo_sha256::witness::PackedSha256Error::TraceTooSmall {
+            real_blocks: 256,
+            max_real_blocks: 244
+        })
+    ));
+}
+
+#[test]
+fn base_trace_mutations_are_rejected() {
+    let (honest, log_size) = honest_fixture();
+
+    let mut trace = honest.clone();
+    for row in 256..512 {
+        set_natural(&mut trace, Layout::COL_ENABLER, row, 1, log_size);
+    }
+    assert_air_rejects("full circle", &trace, log_size);
+
+    let mut trace = honest.clone();
+    for row in 5..512 {
+        set_natural(&mut trace, Layout::COL_ENABLER, row, 0, log_size);
+    }
+    assert_air_rejects("mid-block cutoff", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(&mut trace, Layout::COL_ENABLER, 511, 1, log_size);
+    assert_air_rejects("circle-end re-enable", &trace, log_size);
+    assert!(row_has_constraint_failure(&trace, log_size, 511));
+    assert!(row_has_constraint_failure(&trace, log_size, 0));
+
+    let mut trace = honest.clone();
+    set_natural(&mut trace, Layout::COL_MSG_START, 0, 0, log_size);
+    assert_air_rejects("cleared first start", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_MSG_START,
+        ROWS_PER_BLOCK + 1,
+        1,
+        log_size,
     );
+    assert_air_rejects("start on wrong block row", &trace, log_size);
 
-    // Pick a padding slot — the first natural row past the single block's
-    // 64 real rows.
-    let n_rows = 1usize << log_size;
-    let padding_slot =
-        bit_reverse_index(coset_index_to_circle_domain_index(64, log_size), log_size);
-    assert!(padding_slot < n_rows);
-    assert_eq!(trace[Layout::COL_ENABLER][padding_slot].0, 0);
-
-    // Plant `is_marker_block = 1` on the padding row.
-    trace[Layout::COL_IS_MARKER_BLOCK][padding_slot] = BaseField::from(1u32);
-
-    let residuals = collect_constraint_residuals(&trace, log_size);
-    assert!(
-        !residuals.is_empty(),
-        "AIR must reject a padding-role flag set on a disabled row",
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_MSG_START,
+        4 * ROWS_PER_BLOCK,
+        1,
+        log_size,
     );
+    assert_air_rejects("start while disabled", &trace, log_size);
+
+    let mut trace = honest.clone();
+    let a_bit0 = Layout::round_operand_bit(0, 0);
+    flip_natural(
+        &mut trace,
+        a_bit0,
+        ROWS_PER_BLOCK + STATE_SEED_ROWS,
+        log_size,
+    );
+    assert_air_rejects("start without IV", &trace, log_size);
+
+    let mut trace = honest.clone();
+    for word in 0..8 {
+        let value = stwo_sha256::constants::IV[word];
+        set_seeded_state_word(&mut trace, 2, word, value, log_size);
+    }
+    assert_air_rejects("IV on continuation", &trace, log_size);
+
+    let mut trace = honest.clone();
+    flip_natural(
+        &mut trace,
+        a_bit0,
+        2 * ROWS_PER_BLOCK + STATE_SEED_ROWS,
+        log_size,
+    );
+    assert_air_rejects("broken chain", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_block_column(&mut trace, Layout::COL_MSG_ID, 1, 2, log_size);
+    set_block_column(&mut trace, Layout::COL_MSG_ID, 2, 2, log_size);
+    set_block_column(&mut trace, Layout::COL_MSG_ID, 3, 3, log_size);
+    assert_air_rejects("ID skip", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_block_column(&mut trace, Layout::COL_MSG_ID, 1, 0, log_size);
+    set_block_column(&mut trace, Layout::COL_MSG_ID, 2, 0, log_size);
+    set_block_column(&mut trace, Layout::COL_MSG_ID, 3, 1, log_size);
+    assert_air_rejects("ID repeat", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_block_column(&mut trace, Layout::COL_MSG_ID, 3, 0, log_size);
+    assert_air_rejects("ID decrement", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_MSG_ID,
+        ROWS_PER_BLOCK + 17,
+        2,
+        log_size,
+    );
+    assert_air_rejects("ID mid-block", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_block_column(&mut trace, Layout::COL_MSG_BLOCK, 1, 1, log_size);
+    set_block_column(&mut trace, Layout::COL_MSG_BLOCK, 2, 2, log_size);
+    assert_air_rejects("block not reset", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_block_column(&mut trace, Layout::COL_MSG_BLOCK, 2, 2, log_size);
+    assert_air_rejects("block skipped", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_block_column(&mut trace, Layout::COL_MSG_BLOCK, 2, 0, log_size);
+    assert_air_rejects("block repeated", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_MSG_BLOCK,
+        2 * ROWS_PER_BLOCK + 17,
+        2,
+        log_size,
+    );
+    assert_air_rejects("block mid-row", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        STATE_SEED_ROWS + N_ROUNDS - 2,
+        1,
+        log_size,
+    );
+    assert_air_rejects("terminal forged", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        STATE_SEED_ROWS + N_ROUNDS - 1,
+        0,
+        log_size,
+    );
+    assert_air_rejects("terminal cleared", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        STATE_SEED_ROWS + N_ROUNDS - 1,
+        0,
+        log_size,
+    );
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        ROWS_PER_BLOCK + STATE_SEED_ROWS + N_ROUNDS - 1,
+        1,
+        log_size,
+    );
+    assert_air_rejects("terminal moved", &trace, log_size);
+
+    let mut trace = honest.clone();
+    set_natural(
+        &mut trace,
+        Layout::COL_IS_MSG_LAST,
+        4 * ROWS_PER_BLOCK + STATE_SEED_ROWS + N_ROUNDS - 1,
+        1,
+        log_size,
+    );
+    assert_air_rejects("disabled digest yield", &trace, log_size);
+
+    let mut trace = honest;
+    for t in 0..ROWS_PER_BLOCK {
+        set_natural(
+            &mut trace,
+            Layout::COL_ENABLER,
+            4 * ROWS_PER_BLOCK + t,
+            1,
+            log_size,
+        );
+    }
+    assert_air_rejects("disabled stream yield", &trace, log_size);
 }

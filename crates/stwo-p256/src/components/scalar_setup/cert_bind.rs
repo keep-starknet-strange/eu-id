@@ -37,11 +37,11 @@ pub const CERT_ID_U1_GENERATOR: u32 = 0;
 pub const CERT_ID_U2_PUBLIC_KEY: u32 = 1;
 pub const CERT_SCALAR_INPUT_RELATION_ARITY: usize = 2 + 3 * N_LIMBS + 1 + 4;
 
-/// Number of prepared-table cells that must equal the cert base point `P` per
-/// cert. cert0 (generator) has no `DoubleP`/`AddP2P` rows, so only `Base(1,2,5,6)`
-/// reference `P` (4 cells). cert1 (public key) adds `DoubleP.lhs` and `AddP2P.rhs`
-/// (6 cells). The cert-base provider yields `-count·cert_active` to balance the
-/// per-cell consumers in `PreparedTableEcRowEval`.
+/// Number of table cells bound to certificate base point `P`.
+///
+/// Generator certificate 0 uses four cells.
+/// Public-key certificate 1 uses six cells.
+/// The provider multiplicity balances the per-cell consumers.
 pub const CERT0_PREPARED_P_CELL_COUNT: u32 = 4;
 pub const CERT1_PREPARED_P_CELL_COUNT: u32 = 6;
 
@@ -178,7 +178,7 @@ pub struct CertScalarInputAirEval {
     pub scalar_setup_output: ScalarSetupOutputRelation,
     pub cert_relation: CertScalarInputRelation,
     /// Provides `CertBaseRelation` for prepared-table base pinning. `Some` in the
-    /// monolithic STARK (consumed by `PreparedTableEcRowEval`); `None` for the
+    /// monolithic STARK (consumed by `PreparedTableEcRowEval`). `None` for the
     /// standalone cert slice. Yields `-m(cert_id)·cert_active` where `m` is the
     /// number of prepared-table cells that must equal `P` (cert0: 4, cert1: 6).
     pub cert_base_relation: Option<CertBaseRelation>,

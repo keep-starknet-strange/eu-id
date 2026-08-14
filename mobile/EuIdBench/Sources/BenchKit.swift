@@ -2,24 +2,23 @@ import SwiftUI
 import Foundation
 import os
 
-// Shared benchmark UI + result model for the eu-id mobile harness. Each
-// primitive (SHA-256, P-256) supplies a list of `BenchCase`s whose `body`
-// drives the Rust C ABI and cross-checks the result; `BenchScreen` renders them
-// identically. Keeping the run/display/logging here is the "generalization":
-// adding a primitive is a new list of cases, not a new screen.
+// Contains the shared result types and views for the mobile benchmarks.
+// Each primitive supplies a list of `BenchCase` values.
+// `BenchScreen` shows each list.
 
-// Emits each result to the unified log so a host streaming the device log
-// (idevicesyslog) can capture numbers without UI scraping. Grep "EUIDBENCH".
+// Writes each result to the unified log.
+// A host can capture the results with `idevicesyslog`.
+// Search the log for `EUIDBENCH`.
 let benchLog = Logger(subsystem: "co.starkware.euid.bench", category: "bench")
 
-// How a detail row renders beneath the common prove/verify/peak rows.
+// Defines how a detail row appears below the common result rows.
 enum BenchDetailStyle {
-    case plain                 // "key: value"
-    case monospaced            // value only, small monospaced (e.g. a digest)
-    case status(ok: Bool)      // "key: value", green when ok else red
+    case plain                 // Shows `key: value`.
+    case monospaced            // Shows only the value in a small monospaced font.
+    case status(ok: Bool)      // Shows `key: value` in green or red.
 }
 
-// One algorithm-specific metric row.
+// Contains one algorithm-specific result row.
 struct BenchDetail: Identifiable {
     let id = UUID()
     let key: String
@@ -33,8 +32,7 @@ struct BenchDetail: Identifiable {
     }
 }
 
-// Result of one run, in display-ready form: common timing fields plus an
-// ordered list of per-algorithm detail rows.
+// Contains the common results and ordered detail rows for one run.
 struct BenchResult: Identifiable {
     let id = UUID()
     let label: String
@@ -49,9 +47,9 @@ struct BenchResult: Identifiable {
     }
 }
 
-// One runnable case: a label, an optional subtitle (size/source), and a body
-// that performs the blocking FFI call + cross-check. `body` runs off the main
-// thread (see `BenchScreen`), so it may block for seconds.
+// Defines one runnable case.
+// The body makes the blocking FFI call and checks the result.
+// `BenchScreen` runs the body off the main thread.
 struct BenchCase: Identifiable {
     let id = UUID()
     let label: String
@@ -65,10 +63,10 @@ struct BenchCase: Identifiable {
     }
 }
 
-// Machine-readable result line for host-side capture via idevicesyslog. NSLog
-// (not just Logger) so it reaches the classic syslog stream. The "EUIDBENCH
-// RESULT" prefix and common key=value fields are stable across primitives;
-// `extras` carries algorithm-specific machine values (e.g. digest_match=1).
+// Writes a machine-readable result to the device log.
+// `NSLog` sends the entry to the legacy syslog stream.
+// The `EUIDBENCH RESULT` prefix and common fields are stable.
+// `extras` contains algorithm-specific values.
 func logBenchResult(
     label: String,
     ok: Bool,
@@ -83,32 +81,25 @@ func logBenchResult(
     benchLog.log("RESULT label=\(label) ok=\(ok ? 1 : 0) prove_ms=\(proveMs) peak_mib=\(peakMiB)")
 }
 
-// Headless auto-run for scripted / CI testing. Launch the app with `--autorun`
-// (e.g. `xcrun simctl launch <udid> co.starkware.euid.bench --autorun`) to run
-// every case from both primitives once on a background queue, logging each as an
-// "EUIDBENCH RESULT ..." line. Bracketed by "EUIDBENCH AUTORUN start/done" so a
-// host capturing the device log knows when the sweep is complete.
+// Runs all cases when the app starts with `--autorun`.
+// The runner writes one `EUIDBENCH RESULT` record for each case.
+// The start and done records identify the complete run.
 enum HeadlessRunner {
     static var isEnabled: Bool { CommandLine.arguments.contains("--autorun") }
 
     static func runAllAndLog() {
         DispatchQueue.global(qos: .userInitiated).async {
             NSLog("EUIDBENCH AUTORUN start")
-            // Identity first — the combined proof is the headline workload.
-            for c in IdentityBench.cases { _ = c.body() }
             for c in Sha256Bench.cases { _ = c.body() }
             for c in P256Bench.cases { _ = c.body() }
             NSLog("EUIDBENCH AUTORUN done")
-            // Headless/CI mode: exit so `devicectl --console` (or simctl) returns
-            // with the full log flushed. Only reached under `--autorun`.
+            // Exit after the system flushes the complete log.
             exit(0)
         }
     }
 }
 
-// Reusable benchmark screen: a blurb, per-case run buttons + result rows, and a
-// "run all" button. The SHA-256 and P-256 tabs are each just a `BenchScreen`
-// with a different case list.
+// Shows a description, the cases, their results, and a run-all button.
 struct BenchScreen: View {
     let navigationTitle: String
     let blurb: String
@@ -186,8 +177,8 @@ struct BenchScreen: View {
         }
     }
 
-    // Kick off one case on a background queue so the UI thread stays live
-    // (the prove call can take many seconds).
+    // Run one case on a background queue.
+    // This keeps the user interface responsive during the proof.
     private func run(_ c: BenchCase) {
         running = c.id
         DispatchQueue.global(qos: .userInitiated).async {
@@ -209,30 +200,4 @@ struct BenchScreen: View {
             DispatchQueue.main.async { runningAll = false }
         }
     }
-}
-
-// Mutable reference cell used to carry a worker thread's result back to its
-// caller (the semaphore in `onLargeStack` orders the write before the read).
-private final class ResultBox<T> {
-    var value: T?
-}
-
-// Run `work` on a dedicated thread with a large stack and block until it
-// finishes. The combined STARK prover overflows the 512 KB default stack of a
-// `DispatchQueue` worker thread (an EXC_BAD_ACCESS stack-guard fault); a 32 MB
-// stack matches the headroom the laptop/main-thread prover has. The standalone
-// SHA-256 / P-256 provers fit the default stack, so only the identity bench
-// needs this. Call from a background queue (e.g. inside a `BenchCase.body`) so
-// the blocking wait does not stall the UI.
-func onLargeStack<T>(_ work: @escaping () -> T) -> T {
-    let box = ResultBox<T>()
-    let done = DispatchSemaphore(value: 0)
-    let thread = Thread {
-        box.value = work()
-        done.signal()
-    }
-    thread.stackSize = 32 * 1024 * 1024
-    thread.start()
-    done.wait()
-    return box.value!
 }
