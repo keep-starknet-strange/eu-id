@@ -65,7 +65,19 @@ const MDOC_SCOPE_NATIONALITY_SLACK_BITS: usize = 8;
 const MDOC_SCOPE_UNORDERED_MAP_DEPTH: usize = 3;
 const _: () = assert!(MAX_PRESENTED_NATIONALITIES == 1usize << MDOC_SCOPE_NATIONALITY_SLACK_BITS);
 const DIGEST_EXIT_REQUIRES_SELECTED_ITEMS: u32 = 1;
+/// Log2 of the digest-id universe (the full `u16` id space). The uniqueness
+/// argument must cover every possible digest id, so this stays at 16.
 const DIGEST_ID_UNIVERSE_LOG_SIZE: u32 = 16;
+/// Log2 of the packed uniqueness trace. Two consecutive digest ids are proven
+/// per row (`2r` and `2r+1`), halving the committed trace height — and with it
+/// the max trace log size that drives the FRI domain — while covering the same
+/// `u16` id space. The pairing is a pure layout change: the booleanity and
+/// LogUp multiplicity argument are unchanged, so soundness and the claim-mask
+/// (unlinkability) are preserved.
+const DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE: u32 = DIGEST_ID_UNIVERSE_LOG_SIZE - 1;
+const _: () = assert!(
+    (1usize << DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE) * 2 == 1usize << DIGEST_ID_UNIVERSE_LOG_SIZE
+);
 pub(crate) const ITEM_DIGEST_LOG_SIZE: u32 = 9;
 const ITEM_DIGEST_MESSAGE_ID_BASE: u32 = 3;
 const MDOC_SCOPE_TRANSCRIPT_VERSION: u64 = 5;
@@ -2210,10 +2222,15 @@ fn scope_item_digest_preprocessed_columns(item_count: usize) -> Vec<MdocScopeCol
         .collect()
 }
 
+/// Packed digest-id universe: row `r` holds the even id `2r`; the odd id
+/// `2r+1` is derived in the eval as `value + 1`. Together the rows cover the
+/// full `u16` id space at half the trace height.
 fn digest_id_universe_column() -> MdocScopeColumnEval {
     scope_column(
-        DIGEST_ID_UNIVERSE_LOG_SIZE,
-        (0..=u16::MAX).map(|value| m31(u32::from(value))).collect(),
+        DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE,
+        (0..1usize << DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE)
+            .map(|row| m31((row as u32) * 2))
+            .collect(),
     )
 }
 
@@ -2243,12 +2260,22 @@ fn scope_table_trace(table_log_size: u32, multiplicities: &[u32]) -> MdocScopeCo
     scope_column(table_log_size, values)
 }
 
-fn digest_id_uniqueness_trace(multiplicities: &[u32]) -> MdocScopeColumnEval {
+/// Packed multiplicity trace: row `r` carries the multiplicities of digest ids
+/// `2r` (low column) and `2r+1` (high column). Both are constrained boolean in
+/// the eval, so each id is used at most once across the whole `u16` universe.
+fn digest_id_uniqueness_trace(multiplicities: &[u32]) -> Vec<MdocScopeColumnEval> {
     assert_eq!(multiplicities.len(), 1usize << DIGEST_ID_UNIVERSE_LOG_SIZE);
-    scope_column(
-        DIGEST_ID_UNIVERSE_LOG_SIZE,
-        multiplicities.iter().copied().map(m31).collect(),
-    )
+    let domain = 1usize << DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE;
+    let mut lo = vec![m31(0); domain];
+    let mut hi = vec![m31(0); domain];
+    for (row, (lo_cell, hi_cell)) in lo.iter_mut().zip(hi.iter_mut()).enumerate() {
+        *lo_cell = m31(multiplicities[2 * row]);
+        *hi_cell = m31(multiplicities[2 * row + 1]);
+    }
+    vec![
+        scope_column(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE, lo),
+        scope_column(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE, hi),
+    ]
 }
 
 /// Table-side LogUp: yield `multiplicity` uses of every active edge tuple,
@@ -3465,22 +3492,34 @@ struct MdocScopeDigestIdUniverseEval {
 
 impl FrameworkEval for MdocScopeDigestIdUniverseEval {
     fn log_size(&self) -> u32 {
-        DIGEST_ID_UNIVERSE_LOG_SIZE
+        DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        DIGEST_ID_UNIVERSE_LOG_SIZE + 1
+        DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE + 1
     }
 
     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+        // Row `r` covers digest ids `2r` (preprocessed `value`) and `2r+1`
+        // (`value + 1`). Each has its own boolean multiplicity, so every id in
+        // the `u16` universe is used at most once — identical to the unpacked
+        // argument, just packed two ids per row.
         let value = eval.get_preprocessed_column(digest_id_universe_col_id());
-        let multiplicity = eval.next_trace_mask();
+        let mult_lo = eval.next_trace_mask();
+        let mult_hi = eval.next_trace_mask();
         let one = f_const::<E>(1);
-        eval.add_constraint(multiplicity.clone() * (multiplicity.clone() - one));
+        eval.add_constraint(mult_lo.clone() * (mult_lo.clone() - one.clone()));
+        eval.add_constraint(mult_hi.clone() * (mult_hi.clone() - one.clone()));
+        let value_hi = value.clone() + one;
         eval.add_to_relation(RelationEntry::new(
             &self.relation,
-            -E::EF::from(multiplicity),
+            -E::EF::from(mult_lo),
             std::slice::from_ref(&value),
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.relation,
+            -E::EF::from(mult_hi),
+            std::slice::from_ref(&value_hi),
         ));
         if let Some(beta) = self.claim_mask_beta {
             add_claim_mask_fraction(&mut eval, beta);
@@ -3491,34 +3530,32 @@ impl FrameworkEval for MdocScopeDigestIdUniverseEval {
 }
 
 fn digest_id_uniqueness_interaction_trace(
-    multiplicity: &MdocScopeColumnEval,
+    multiplicity: &[MdocScopeColumnEval],
     relation: &MdocScopeDigestIdUniquenessRelation,
     claim_mask: Option<(&ClaimMaskTrace, QM31)>,
 ) -> (Vec<MdocScopeColumnEval>, QM31) {
     let values = digest_id_universe_column();
-    let n_vec_rows = 1usize << (DIGEST_ID_UNIVERSE_LOG_SIZE - LOG_N_LANES);
-    let mut logup = LogupTraceGenerator::new(DIGEST_ID_UNIVERSE_LOG_SIZE);
-    match claim_mask {
-        Some((mask, beta)) => {
-            assert_eq!(mask.log_size(), DIGEST_ID_UNIVERSE_LOG_SIZE);
-            logup.col_from_iter((0..n_vec_rows).map(|row| {
-                let denominator: PackedQM31 = relation.combine(&[values.data[row]]);
-                let numerator = -PackedQM31::from(multiplicity.data[row]);
-                let (mask_numerator, mask_denominator) = mask.packed_fraction_at(row, beta);
-                (
-                    numerator * mask_denominator + mask_numerator * denominator,
-                    denominator * mask_denominator,
-                )
-            }));
-        }
-        None => {
-            logup.col_from_iter((0..n_vec_rows).map(|row| {
-                (
-                    -PackedQM31::from(multiplicity.data[row]),
-                    relation.combine(&[values.data[row]]),
-                )
-            }));
-        }
+    let mult_lo = &multiplicity[0];
+    let mult_hi = &multiplicity[1];
+    let n_vec_rows = 1usize << (DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE - LOG_N_LANES);
+    let one = PackedM31::broadcast(m31(1));
+    let mut logup = LogupTraceGenerator::new(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE);
+    // First interaction column: the pairwise combination of the two relation
+    // fractions (`-mult_lo/(id_lo - α)` and `-mult_hi/(id_hi - α)`), matching
+    // the eval's `finalize_logup_in_pairs` batching of the two `add_to_relation`
+    // calls.
+    logup.col_from_iter((0..n_vec_rows).map(|row| {
+        let den_lo: PackedQM31 = relation.combine(&[values.data[row]]);
+        let den_hi: PackedQM31 = relation.combine(&[values.data[row] + one]);
+        let num_lo = -PackedQM31::from(mult_lo.data[row]);
+        let num_hi = -PackedQM31::from(mult_hi.data[row]);
+        (num_lo * den_hi + num_hi * den_lo, den_lo * den_hi)
+    }));
+    // Second interaction column: the claim-mask fraction (denominator one),
+    // batched on its own by `finalize_logup_in_pairs` as the third fraction.
+    if let Some((mask, beta)) = claim_mask {
+        assert_eq!(mask.log_size(), DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE);
+        logup.col_from_iter((0..n_vec_rows).map(|row| mask.packed_fraction_at(row, beta)));
     }
     logup.finalize_last()
 }
@@ -4394,7 +4431,7 @@ impl MdocScope {
             self.metadata.log_size,
             self.table_log_size,
             ITEM_DIGEST_LOG_SIZE,
-            DIGEST_ID_UNIVERSE_LOG_SIZE,
+            DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE,
         ]
     }
 
@@ -4409,7 +4446,10 @@ impl MdocScope {
         assert_eq!(walk.log_size(), self.metadata.log_size);
         assert_eq!(table.log_size(), self.table_log_size);
         assert_eq!(item_digest.log_size(), ITEM_DIGEST_LOG_SIZE);
-        assert_eq!(digest_id_uniqueness.log_size(), DIGEST_ID_UNIVERSE_LOG_SIZE);
+        assert_eq!(
+            digest_id_uniqueness.log_size(),
+            DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE
+        );
         self.claim_mask_trace = Some(walk);
         self.table_claim_mask_trace = Some(table);
         self.item_digest_claim_mask_trace = Some(item_digest);
@@ -4455,7 +4495,9 @@ impl MdocScope {
     }
 
     fn n_digest_id_uniqueness_interaction_sites(&self) -> usize {
-        1 + usize::from(self.claim_mask_challenge.is_some())
+        // Two relation fractions (the packed low and high digest ids) plus the
+        // optional claim-mask fraction.
+        2 + usize::from(self.claim_mask_challenge.is_some())
     }
 }
 
@@ -4467,7 +4509,7 @@ impl Air for MdocScope {
         channel.mix_u64(u64::from(self.metadata.log_size));
         channel.mix_u64(u64::from(self.table_log_size));
         channel.mix_u64(u64::from(ITEM_DIGEST_LOG_SIZE));
-        channel.mix_u64(u64::from(DIGEST_ID_UNIVERSE_LOG_SIZE));
+        channel.mix_u64(u64::from(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE));
         for chunk in self.statement.request_binding.chunks_exact(8) {
             channel.mix_u64(u64::from_be_bytes(
                 chunk.try_into().expect("request-binding chunk is 8 bytes"),
@@ -4533,14 +4575,15 @@ impl Air for MdocScope {
             usize::from(self.claim_mask_challenge.is_some()) * CLAIM_MASK_TRACE_COLUMNS;
         let mut preprocessed = vec![self.table_log_size; SCOPE_PREPROCESSED_FIXED_COLS];
         preprocessed.extend(vec![ITEM_DIGEST_LOG_SIZE; self.statement.items.len()]);
-        preprocessed.push(DIGEST_ID_UNIVERSE_LOG_SIZE);
+        preprocessed.push(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE);
         let mut trace = vec![self.metadata.log_size; columns.total + mask_columns];
         trace.extend(vec![self.table_log_size; 1 + mask_columns]);
         trace.extend(vec![
             ITEM_DIGEST_LOG_SIZE;
             SCOPE_DIGEST_BYTES + mask_columns
         ]);
-        trace.extend(vec![DIGEST_ID_UNIVERSE_LOG_SIZE; 1 + mask_columns]);
+        // Two packed multiplicity columns (low/high digest id) plus the mask.
+        trace.extend(vec![DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE; 2 + mask_columns]);
         let mut interaction = vec![
             self.metadata.log_size;
             self.n_interaction_sites().div_ceil(2) * SECURE_EXTENSION_DEGREE
@@ -4556,7 +4599,7 @@ impl Air for MdocScope {
                 * SECURE_EXTENSION_DEGREE
         ]);
         interaction.extend(vec![
-            DIGEST_ID_UNIVERSE_LOG_SIZE;
+            DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE;
             self.n_digest_id_uniqueness_interaction_sites()
                 .div_ceil(2)
                 * SECURE_EXTENSION_DEGREE
@@ -4699,14 +4742,14 @@ impl AirProver for MdocScope {
             .log_size
             .max(self.table_log_size)
             .max(ITEM_DIGEST_LOG_SIZE)
-            .max(DIGEST_ID_UNIVERSE_LOG_SIZE)
+            .max(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE)
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
         scope_constraint_log_degree_bound(self.metadata.log_size, self.statement.items.len())
             .max(self.table_log_size + 1)
             .max(ITEM_DIGEST_LOG_SIZE + 1)
-            .max(DIGEST_ID_UNIVERSE_LOG_SIZE + 1)
+            .max(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE + 1)
     }
 
     fn write_preprocessed(&mut self, tb: &mut TreeBuilder<SimdBackend, air_core::Mc>) {
@@ -4779,9 +4822,9 @@ impl AirProver for MdocScope {
         if let Some(mask) = &self.item_digest_claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
-        tb.extend_evals(vec![digest_id_uniqueness_trace(
+        tb.extend_evals(digest_id_uniqueness_trace(
             &witness.digest_id_multiplicities,
-        )]);
+        ));
         if let Some(mask) = &self.digest_id_uniqueness_claim_mask_trace {
             tb.extend_evals(mask.columns().to_vec());
         }
@@ -5417,7 +5460,7 @@ mod tests {
         let mut expected_trace = vec![scope.metadata.log_size; columns.total];
         expected_trace.push(scope.table_log_size);
         expected_trace.extend(vec![ITEM_DIGEST_LOG_SIZE; SCOPE_DIGEST_BYTES]);
-        expected_trace.push(DIGEST_ID_UNIVERSE_LOG_SIZE);
+        expected_trace.extend(vec![DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE; 2]);
         assert_eq!(layout.trace, expected_trace);
     }
 
@@ -6053,7 +6096,7 @@ mod tests {
                 scope.metadata.log_size,
                 scope.table_log_size,
                 ITEM_DIGEST_LOG_SIZE,
-                DIGEST_ID_UNIVERSE_LOG_SIZE,
+                DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE,
             ]
         );
         let mut ring = ClaimMaskRing::new(&logs).unwrap();
@@ -6068,7 +6111,7 @@ mod tests {
 
         let mut expected_preprocessed = vec![scope.table_log_size; SCOPE_PREPROCESSED_FIXED_COLS];
         expected_preprocessed.extend(vec![ITEM_DIGEST_LOG_SIZE; scope.statement.items.len()]);
-        expected_preprocessed.push(DIGEST_ID_UNIVERSE_LOG_SIZE);
+        expected_preprocessed.push(DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE);
         assert_eq!(layout.preprocessed, expected_preprocessed);
 
         let mut expected_trace =
@@ -6078,7 +6121,7 @@ mod tests {
             ITEM_DIGEST_LOG_SIZE;
             SCOPE_DIGEST_BYTES + mask_columns
         ]);
-        expected_trace.extend(vec![DIGEST_ID_UNIVERSE_LOG_SIZE; 1 + mask_columns]);
+        expected_trace.extend(vec![DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE; 2 + mask_columns]);
         assert_eq!(layout.trace, expected_trace);
 
         assert_eq!(scope.n_item_digest_interaction_sites(), 67);
@@ -6097,7 +6140,7 @@ mod tests {
         ]);
         expected_interaction.extend(vec![ITEM_DIGEST_LOG_SIZE; item_interaction_columns]);
         expected_interaction.extend(vec![
-            DIGEST_ID_UNIVERSE_LOG_SIZE;
+            DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE;
             scope
                 .n_digest_id_uniqueness_interaction_sites()
                 .div_ceil(2)
@@ -6510,7 +6553,7 @@ mod tests {
                 digest_id_uniqueness_interaction_trace(&multiplicity, &relation, None);
             let trees = TreeVec::new(vec![
                 vec![digest_id_universe_column().to_cpu().values],
-                vec![multiplicity.to_cpu().values],
+                multiplicity.iter().map(|c| c.to_cpu().values).collect(),
                 interaction
                     .into_iter()
                     .map(|column| column.to_cpu().values)
@@ -6523,7 +6566,7 @@ mod tests {
             };
             assert_constraints_on_trace(
                 &trace,
-                DIGEST_ID_UNIVERSE_LOG_SIZE,
+                DIGEST_ID_UNIVERSE_TRACE_LOG_SIZE,
                 |row| {
                     let _ = eval.evaluate(row);
                 },

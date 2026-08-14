@@ -61,7 +61,11 @@ pub const PRODUCT_NAMESPACE: &str = "eu.europa.ec.eudi.pid.1";
 pub const PRODUCT_BIRTH_DATE_ELEMENT: &str = "birth_date";
 pub const PRODUCT_NATIONALITY_ELEMENT: &str = "nationality";
 pub const PRODUCT_MAX_ATTRIBUTES: usize = 2;
-pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 6 * 1024;
+// The MSO payload cap is sized for the real PID credential (~1-2 KiB of
+// value-digests plus device key and validity) with ~2x headroom, not a
+// theoretical maximum. Together with the packed digest-id universe this keeps
+// the scope walk at log14, which halves the STARK composition/FRI domain.
+pub const PRODUCT_MAX_MSO_PAYLOAD_BYTES: usize = 3584;
 pub const PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES: usize = 20;
 pub const PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES: usize =
     PRODUCT_MAX_MSO_PAYLOAD_BYTES + PRODUCT_ISSUER_SIG_STRUCTURE_MAX_OVERHEAD_BYTES;
@@ -73,16 +77,16 @@ pub const PRODUCT_MAX_PACKED_SHA_MESSAGES: usize =
     PRODUCT_FIXED_PACKED_SHA_MESSAGES + PRODUCT_MAX_ATTRIBUTES;
 pub const PRODUCT_TS13_REVOCATION_MESSAGE_BYTES: usize =
     2 * core::mem::size_of::<u64>() + core::mem::size_of::<u32>();
-pub const PRODUCT_MAX_CBOR_LOG_SIZE: u32 = 13;
+pub const PRODUCT_MAX_CBOR_LOG_SIZE: u32 = 12;
 pub const PRODUCT_ITEM_CBOR_LOG_SIZE: u32 = 11;
-pub const PRODUCT_MAX_SCOPE_LOG_SIZE: u32 = 15;
+pub const PRODUCT_MAX_SCOPE_LOG_SIZE: u32 = 14;
 pub const PRODUCT_MAX_SCOPE_ACTIVE_ROWS: usize = 2 * PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES
     + PRODUCT_MAX_MSO_PAYLOAD_BYTES
     + 2 * PRODUCT_MAX_ATTRIBUTES * PRODUCT_MAX_SELECTED_ITEM_BYTES;
 
 const _: () =
-    assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES) == 97);
-const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES) == 97);
+    assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES) == 57);
+const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES) == 57);
 const _: () =
     assert!(stwo_sha256::native::n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES) == 1);
 const _: () = assert!(stwo_sha256::native::n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES) == 17);
@@ -90,7 +94,7 @@ const PRODUCT_MAX_PACKED_SHA_BLOCKS: usize = n_blocks_for(PRODUCT_MAX_ISSUER_SIG
     + n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES)
     + n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES)
     + PRODUCT_MAX_ATTRIBUTES * n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES);
-const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS == 229);
+const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS == 149);
 const _: () = assert!(PRODUCT_MAX_PACKED_SHA_BLOCKS <= 255);
 const _: () = assert!(PRODUCT_MAX_PACKED_SHA_MESSAGES == 5);
 const _: () = assert!(PRODUCT_SHA_LOG_N_ROWS == 14);
@@ -239,14 +243,14 @@ mod tests {
 
     #[test]
     fn packed_sha_product_capacity_is_exact() {
-        assert_eq!(n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES), 97);
-        assert_eq!(n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES), 97);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_ISSUER_SIG_STRUCTURE_BYTES), 57);
+        assert_eq!(n_blocks_for(PRODUCT_MAX_MSO_PAYLOAD_BYTES), 57);
         assert_eq!(n_blocks_for(PRODUCT_TS13_REVOCATION_MESSAGE_BYTES), 1);
         assert_eq!(n_blocks_for(PRODUCT_MAX_SELECTED_ITEM_BYTES), 17);
-        assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 229);
+        assert_eq!(PRODUCT_MAX_PACKED_SHA_BLOCKS, 149);
         let max_real_blocks = ((1usize << PRODUCT_SHA_LOG_N_ROWS) - 1) / ROWS_PER_BLOCK;
         assert_eq!(max_real_blocks, 244);
-        assert_eq!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS, 15);
+        assert_eq!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS, 95);
         assert!(max_real_blocks - PRODUCT_MAX_PACKED_SHA_BLOCKS >= 1);
     }
 }
