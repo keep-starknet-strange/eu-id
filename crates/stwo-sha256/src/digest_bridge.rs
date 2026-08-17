@@ -1,4 +1,9 @@
 //! Canonical byte bridge for the final SHA-256 state.
+//!
+//! The bridge converts the 16 final-state limbs to 32 big-endian bytes on
+//! one active row. `Range_8` lookups check each byte. The digest-limbs
+//! relation binds the recomposed limbs to the main trace. The optional
+//! digest yield exposes the bytes on the `Sha256Digest` channel.
 
 use num_traits::One;
 use stwo::core::fields::m31::{BaseField, M31};
@@ -14,9 +19,13 @@ use crate::types::Sha256Witness;
 
 /// The SIMD backend's minimum 16-row domain.
 pub const DIGEST_BRIDGE_LOG_SIZE: u32 = 4;
+/// Number of base trace columns: one per digest byte.
 pub const DIGEST_BRIDGE_BASE_COLS: usize = DIGEST_BYTES;
+/// Base lookup count: one `Range_8` lookup per digest byte plus one
+/// digest-limbs bridge entry.
 pub const DIGEST_BRIDGE_LOOKUPS_BASE: usize = DIGEST_BYTES + 1;
 
+/// Total lookup count: the base lookups plus the optional digest yield.
 #[inline]
 pub const fn digest_bridge_lookups(expose_digest: bool) -> usize {
     DIGEST_BRIDGE_LOOKUPS_BASE + expose_digest as usize
@@ -35,8 +44,11 @@ const fn limb_byte_indices(index: usize) -> (usize, usize) {
 /// One active row converts the final 16-bit state limbs to canonical bytes.
 #[derive(Clone)]
 pub struct DigestBridgeEval {
+    /// LogUp relation bundle for the range and digest channels.
     pub relations: Sha256Relations,
+    /// True when the cross-component digest yield is active.
     pub expose_digest: bool,
+    /// Namespace for the consumer-side active-row selector.
     pub instance_namespace: String,
 }
 
@@ -87,6 +99,8 @@ impl FrameworkEval for DigestBridgeEval {
     }
 }
 
+/// Build the 32 single-byte columns of the bridge trace. Only row 0 is
+/// active; every other row is zero.
 pub(crate) fn generate_digest_bridge_trace(witness: &Sha256Witness) -> Vec<BaseColumn> {
     let digest = h_out_digest_bytes(
         &witness

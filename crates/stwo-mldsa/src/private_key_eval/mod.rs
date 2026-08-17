@@ -41,11 +41,17 @@ pub use t1::{
 
 /// Maximum-shape relation layout. Active counts come from `MlDsaProfile`.
 pub const COEFF_EVAL_BASE: usize = 0;
+/// Number of coefficient-polynomial evaluation slots (one per Horner group).
 pub const COEFF_EVAL_COUNT: usize = 30;
+/// First slot of the matrix-`A` evaluations.
 pub const A_EVAL_BASE: usize = COEFF_EVAL_BASE + COEFF_EVAL_COUNT;
+/// Number of matrix-`A` evaluation slots (`k · l`, maximum shape).
 pub const A_EVAL_COUNT: usize = K * L;
+/// First slot of the scaled-`t1` evaluations.
 pub const T1_EVAL_BASE: usize = A_EVAL_BASE + A_EVAL_COUNT;
+/// Number of scaled-`t1` evaluation slots (`k`, maximum shape).
 pub const T1_EVAL_COUNT: usize = K;
+/// Total evaluation slots: 30 + 30 + 6 = 66.
 pub const PRIVATE_EVAL_COUNT: usize = T1_EVAL_BASE + T1_EVAL_COUNT;
 
 const _: () = assert!(COEFF_EVAL_COUNT == crate::coeffs::layout::N_GROUPS);
@@ -56,11 +62,14 @@ const _: () = assert!(PRIVATE_EVAL_COUNT == 66);
 /// Shared relation handles from `ExpandA` and the private device-key binder.
 #[derive(Clone)]
 pub struct PrivateKeyEvalBindings {
+    /// Shared NTT-cell handle from `ExpandA`.
     pub ntt: SharedNttCellRelation,
+    /// Shared packed-`t1` cell handle from the private device-key binder.
     pub t1: SharedT1CellRelation,
 }
 
 impl PrivateKeyEvalBindings {
+    /// Bundle the two shared handles.
     pub fn new(ntt: SharedNttCellRelation, t1: SharedT1CellRelation) -> Self {
         Self { ntt, t1 }
     }
@@ -69,13 +78,18 @@ impl PrivateKeyEvalBindings {
 /// Relation instances reused by every private-key evaluation component.
 #[derive(Clone)]
 pub struct PrivateKeyEvalRelations {
+    /// NTT-cell relation (inverse-NTT stage chain).
     pub ntt: crate::binding::NttCellRelation,
+    /// Packed-`t1` cell relation.
     pub t1: crate::binding::T1CellRelation,
+    /// Claimed-evaluation relation shared with the coeffs component.
     pub eval: EvalAtRsRelation,
+    /// Proof-wide range relation.
     pub range: RangeRelation,
 }
 
 impl PrivateKeyEvalRelations {
+    /// Resolve the shared handles into relation instances.
     pub fn from_bindings(
         bindings: &PrivateKeyEvalBindings,
         eval: EvalAtRsRelation,
@@ -103,12 +117,16 @@ impl PrivateKeyEvalRelations {
 /// Prover-only decoded public-key material for private-key evaluation traces.
 #[derive(Clone)]
 pub struct PrivateKeyEvalWitness {
+    /// The verifier-selected parameter set.
     pub profile: MlDsaProfile,
+    /// The expanded matrix `Â`, row-major `k × l` NTT-domain polynomials.
     pub a_hat: Vec<NttPoly>,
+    /// The decoded public-key vector `t1`.
     pub t1: [T1Poly; K],
 }
 
 impl PrivateKeyEvalWitness {
+    /// Build the witness from the decoded verification input.
     pub fn from_input(
         profile: MlDsaProfile,
         input: &MlDsaVerifyInput,
@@ -133,15 +151,25 @@ impl PrivateKeyEvalWitness {
     }
 }
 
+/// Errors from private-key evaluation witness construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrivateKeyEvalError {
+    /// The decoded public key contains a non-canonical or non-zero-inactive
+    /// `t1` coefficient.
     InvalidPublicKey(&'static str),
+    /// The device message does not fit the fixed message capacity.
     MessageExceedsCapacity {
+        /// Actual message length in bytes.
         message_len: usize,
+        /// Fixed message capacity in bytes.
         message_capacity: usize,
     },
+    /// A `PrivateDeviceEvals` constructor received the wrong number of
+    /// evaluations.
     WrongEvalCount {
+        /// Expected evaluation count (`PRIVATE_EVAL_COUNT`).
         expected: usize,
+        /// Actual evaluation count received.
         actual: usize,
     },
 }
@@ -176,6 +204,7 @@ impl std::error::Error for PrivateKeyEvalError {}
 pub struct PrivateDeviceEvals([SecureField; PRIVATE_EVAL_COUNT]);
 
 impl PrivateDeviceEvals {
+    /// Assemble from the three fixed segments (coeffs, `A`, scaled `t1`).
     pub fn from_parts(
         coeffs: &[SecureField],
         a: &[SecureField],
@@ -195,6 +224,7 @@ impl PrivateDeviceEvals {
         Ok(Self(values))
     }
 
+    /// Build from exactly `PRIVATE_EVAL_COUNT` evaluations in proof order.
     pub fn try_from_slice(values: &[SecureField]) -> Result<Self, PrivateKeyEvalError> {
         let values: [SecureField; PRIVATE_EVAL_COUNT] =
             values
@@ -206,10 +236,12 @@ impl PrivateDeviceEvals {
         Ok(Self(values))
     }
 
+    /// The evaluations in proof order.
     pub fn as_slice(&self) -> &[SecureField] {
         &self.0
     }
 
+    /// Consume into a `Vec` in proof order.
     pub fn into_vec(self) -> Vec<SecureField> {
         self.0.into()
     }
@@ -227,18 +259,26 @@ impl PrivateDeviceEvals {
     }
 }
 
+/// LogUp claimed sums of the private-key evaluation components.
 #[derive(Clone, Debug, Default)]
 pub struct PrivateKeyEvalClaims {
+    /// Inverse-NTT claimed sums (butterfly chain and scaling/eval).
     pub ntt: NttClaims,
+    /// Packed-`t1` component claimed sum.
     pub t1: SecureField,
+    /// Fold component claimed sum.
     pub fold: SecureField,
 }
 
+/// Base-trace output of the private-key evaluation components.
 pub struct PrivateKeyBase {
+    /// The concatenated NTT and `t1` base columns.
     pub trace: Vec<crate::air_util::ColEval>,
+    /// The merged range-table uses.
     pub range_uses: RcUses,
 }
 
+/// Generate the concatenated NTT + `t1` base trace and the merged rc census.
 pub fn gen_private_key_base(witness: &PrivateKeyEvalWitness) -> PrivateKeyBase {
     let NttBase {
         mut trace,
@@ -253,14 +293,21 @@ pub fn gen_private_key_base(witness: &PrivateKeyEvalWitness) -> PrivateKeyBase {
     PrivateKeyBase { trace, range_uses }
 }
 
+/// Interaction-trace output of the private-key evaluation components.
 pub struct PrivateKeyInteraction {
+    /// The concatenated NTT and `t1` interaction columns.
     pub trace: Vec<crate::air_util::ColEval>,
+    /// The `k·l` claimed `A` evaluations (row-major).
     pub a_evals: Vec<SecureField>,
+    /// The `k` claimed scaled-`t1` evaluations.
     pub t1_evals: Vec<SecureField>,
+    /// Inverse-NTT claimed sums.
     pub ntt_claims: NttClaims,
+    /// Packed-`t1` claimed sum.
     pub t1_claim: SecureField,
 }
 
+/// Generate the NTT + `t1` interaction trace at the drawn `(r, s)`.
 pub fn gen_private_key_interaction(
     witness: &PrivateKeyEvalWitness,
     r: SecureField,
@@ -280,6 +327,7 @@ pub fn gen_private_key_interaction(
     }
 }
 
+/// Preprocessed ids of all three components (NTT, `t1`, fold), in commit order.
 pub fn preprocessed_ids(
     profile: MlDsaProfile,
 ) -> Vec<stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId> {
@@ -289,6 +337,7 @@ pub fn preprocessed_ids(
     ids
 }
 
+/// Preprocessed log sizes, matching [`preprocessed_ids`] order.
 pub fn preprocessed_log_sizes() -> Vec<u32> {
     let mut sizes = ntt_preprocessed_log_sizes();
     sizes.extend(t1_preprocessed_log_sizes());
@@ -296,6 +345,7 @@ pub fn preprocessed_log_sizes() -> Vec<u32> {
     sizes
 }
 
+/// Generate the preprocessed columns for the selected profile.
 pub fn gen_preprocessed(profile: MlDsaProfile) -> Vec<crate::air_util::ColEval> {
     let mut columns = gen_ntt_preprocessed(profile);
     columns.extend(gen_t1_preprocessed(profile));
@@ -303,18 +353,21 @@ pub fn gen_preprocessed(profile: MlDsaProfile) -> Vec<crate::air_util::ColEval> 
     columns
 }
 
+/// Base-trace column log sizes (NTT then `t1`).
 pub fn trace_layout() -> Vec<u32> {
     let mut layout = ntt_trace_layout();
     layout.extend(t1_trace_layout());
     layout
 }
 
+/// Interaction column log sizes (NTT then `t1`).
 pub fn interaction_layout() -> Vec<u32> {
     let mut layout = ntt_interaction_layout();
     layout.extend(t1_interaction_layout());
     layout
 }
 
+/// The three framework components of the private-key evaluation trace.
 pub struct PrivateKeyTraceComponents {
     ntt_butterfly: FrameworkComponent<NttButterflyEval>,
     ntt_scaling: FrameworkComponent<NttScalingEval>,
@@ -322,6 +375,7 @@ pub struct PrivateKeyTraceComponents {
 }
 
 impl PrivateKeyTraceComponents {
+    /// Build the butterfly, scaling, and `t1` components at `(r, s)`.
     pub fn new(
         allocator: &mut TraceLocationAllocator,
         profile: MlDsaProfile,
@@ -365,10 +419,12 @@ impl PrivateKeyTraceComponents {
         }
     }
 
+    /// Verifier-side component references.
     pub fn trace_components(&self) -> Vec<&dyn Component> {
         vec![&self.ntt_butterfly, &self.ntt_scaling, &self.t1]
     }
 
+    /// Prover-side component references.
     pub fn trace_prover_components(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
         vec![&self.ntt_butterfly, &self.ntt_scaling, &self.t1]
     }

@@ -46,6 +46,7 @@ pub enum TableKind {
 }
 
 impl TableKind {
+    /// All nine tables in fixed commit order.
     pub const ALL: [TableKind; 9] = [
         TableKind::Dense,
         TableKind::Conv,
@@ -66,6 +67,7 @@ impl TableKind {
         }
     }
 
+    /// Log2 of the table height (rows per table).
     pub fn log_size(&self) -> u32 {
         match self {
             TableKind::Dense => LOG_SIZE_DENSE,
@@ -204,6 +206,7 @@ impl TableMultiplicities {
         Self { per_table }
     }
 
+    /// Add another multiplicity set into this one.
     pub fn add(&mut self, other: &Self) {
         assert_eq!(self.per_table.len(), other.per_table.len());
         for (tables, other_tables) in self.per_table.iter_mut().zip(&other.per_table) {
@@ -256,17 +259,21 @@ pub fn generate_trace(
 
 // ── Interaction: one paired yield fraction column per table ──
 
+/// Per-table LogUp claimed sums, in [`TableKind::ALL`] order.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InteractionClaim {
     pub claimed_sums: Vec<SecureField>,
 }
 
 impl InteractionClaim {
+    /// Mix the claimed sums into the Fiat-Shamir channel.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&self.claimed_sums);
     }
 }
 
+/// Build the table interaction trace: one paired yield fraction column per
+/// table, in [`TableKind::ALL`] order.
 pub fn generate_interaction_trace(
     rel: &KeccakRelations,
     mult: &TableMultiplicities,
@@ -330,11 +337,13 @@ fn packed_row_denom(
 
 // ── Components (one FrameworkEval per table) ──
 
+/// A table component claim.
 #[derive(Copy, Clone, Default, Serialize, Deserialize, Debug)]
 pub struct Claim {
     pub log_size: u32,
 }
 
+/// AIR evaluator for one table component.
 #[derive(Clone)]
 pub struct Eval {
     pub log_size: u32,
@@ -389,6 +398,7 @@ impl FrameworkEval for Eval {
     }
 }
 
+/// The table component type.
 pub type Component = FrameworkComponent<Eval>;
 
 #[cfg(test)]

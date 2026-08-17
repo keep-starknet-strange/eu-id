@@ -56,10 +56,12 @@ pub fn gen_msglink_base_trace() -> Vec<ColEval> {
     vec![col_eval(MSGLINK_LOG_SIZE, enabler)]
 }
 
+/// AIR evaluator for the public-message byte producer.
 #[derive(Clone)]
 pub struct MsgLinkEval {
     /// The public message bytes that both sides construct from the public input.
     pub message: Vec<u8>,
+    /// The message-byte relation this component yields into.
     pub msglink: MsgLinkRelation,
 }
 

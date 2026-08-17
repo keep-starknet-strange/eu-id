@@ -101,9 +101,9 @@ pub struct RoundTieBack {
     pub mle_claim: SecureField,
 }
 
-/// `eq(bits(index) MSB-first over LOG_SLOTS, r_slot)` for every slot: the slot
-/// index's MOST significant bit pairs with `r_slot[0]` (stwo's `Mle` /
-/// GKR OOD convention. The first point coordinate splits the top half).
+/// `eq(bits(index) MSB-first over LOG_SLOTS, r_slot)` for every slot. The
+/// slot index's most significant bit pairs with `r_slot[0]` (stwo's `Mle` /
+/// GKR OOD convention: the first point coordinate splits the top half).
 fn eq_weights(r_slot: &[SecureField]) -> Vec<SecureField> {
     let mut ws = vec![SecureField::one()];
     for &p in r_slot {
@@ -271,6 +271,7 @@ impl RoundGkrProver {
         Self::new_batch(relations, vec![data])
     }
 
+    /// Build the batched prover over one or more carrier shards.
     pub fn new_batch(relations: &KeccakRelations, data: Vec<InteractionData>) -> Self {
         assert!(!data.is_empty(), "carrier GKR needs one shard");
         let log_sizes = data.iter().map(|shard| shard.log_size).collect();
@@ -290,10 +291,12 @@ impl RoundGkrProver {
         }
     }
 
+    /// The total claimed sum over all shards.
     pub fn claimed_sum(&self) -> SecureField {
         self.claimed_sum
     }
 
+    /// The per-shard claimed sums, in shard order.
     pub fn claimed_sums(&self) -> &[SecureField] {
         &self.claimed_sums
     }
@@ -310,6 +313,8 @@ impl RoundGkrProver {
         (blob, tie_backs.remove(0), coeff_mles.remove(0))
     }
 
+    /// Prove every shard in one batch; the batched form of
+    /// [`RoundGkrProver::prove`].
     pub fn prove_batch(
         self,
         channel: &mut impl Channel,
@@ -375,6 +380,8 @@ pub fn verify_round_gkr(
     Ok(tie_backs.remove(0))
 }
 
+/// Verify a batched carrier GKR proof; the batched form of
+/// [`verify_round_gkr`]. Returns the per-shard claimed sums and tie-backs.
 pub fn verify_round_gkr_batch(
     blob: &[u8],
     claimed_sum: SecureField,
@@ -458,11 +465,17 @@ fn validate_batch_shape(proof: &GkrBatchProof, log_sizes: &[u32]) -> Result<(), 
 pub struct RoundCoeffOracle {
     /// The carrier component's trace locations in the shared trees.
     pub locations: Vec<TreeSubspan>,
+    /// The drawn relations used to combine each lookup tuple.
     pub relations: KeccakRelations,
+    /// Log size of the carrier shard trace.
     pub log_size: u32,
+    /// The channel-drawn num+den folding challenge.
     pub delta: SecureField,
+    /// `eq(slot, r_slot)` weights for every slot index.
     pub eq_ws: Vec<SecureField>,
+    /// The shard's permutation count.
     pub n_perms: usize,
+    /// The shard's global perm-id base.
     pub perm_id_base: usize,
 }
 
@@ -472,7 +485,7 @@ impl MleCoeffColumnOracle for RoundCoeffOracle {
         _point: CirclePoint<SecureField>,
         mask: &TreeVec<ColumnVec<Vec<SecureField>>>,
     ) -> SecureField {
-        // Dummy accumulator: we only extract mask values through the walk.
+        // The accumulator is a dummy: the walk only extracts mask values.
         let mut acc = PointEvaluationAccumulator::new(SecureField::one());
         let mut eval = PointEvaluator::new(
             mask.sub_tree(&self.locations),

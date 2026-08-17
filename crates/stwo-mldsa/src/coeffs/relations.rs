@@ -8,8 +8,8 @@
 //! The digit range uses a dedicated `2^9` table with offset `+2^8`
 //! and does not use a scaled `Rc13` lookup. Carry range checks enforce
 //! `|C| ≤ 2^20` through a 13+8 split of `C + 2^20 ∈ [0,2^21)`. The z-norm
-//! check enforces `≤ γ1−β−1` through symmetric two-sided offsets. It uses
-//! `Rc13` for the low part and `Rc7` for the high part.
+//! check enforces `≤ γ1−β−1` through symmetric two-sided offsets. The z-norm
+//! check uses `Rc13` for the low part and `Rc7` for the high part.
 
 use air_core::relations::SharedRelation;
 use stwo::core::fields::qm31::SECURE_EXTENSION_DEGREE;
@@ -40,13 +40,18 @@ pub type SharedRangeRelation = SharedRelation<RangeRelation>;
 /// them.
 #[derive(Clone)]
 pub struct CoeffsRelations {
+    /// Claimed `P̂(r,s)` evaluation relation (verifier-native fold).
     pub eval: EvalAtRsRelation,
+    /// Proof-wide range-check relation.
     pub range: RangeRelation,
+    /// W-coefficient binding to decomp.
     pub wcell: WCellRelation,
+    /// Challenge-coefficient binding to sampleinball.
     pub ccell: CCellRelation,
 }
 
 impl CoeffsRelations {
+    /// Draw every relation independently (standalone testing).
     pub fn draw(channel: &mut impl stwo::core::channel::Channel) -> Self {
         Self {
             eval: EvalAtRsRelation::draw(channel),
@@ -90,6 +95,7 @@ impl CoeffsRelations {
         }
     }
 
+    /// Dummy relations for sizing tests.
     pub fn dummy() -> Self {
         Self {
             eval: EvalAtRsRelation::dummy(),

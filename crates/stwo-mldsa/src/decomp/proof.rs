@@ -63,10 +63,15 @@ use crate::balancer::{
 
 /// The public statement + prover claims of a decomp proof.
 pub struct DecompProof {
+    /// LogUp claimed sum of the decomp component.
     pub decomp_claimed_sum: SecureField,
+    /// LogUp claimed sum of the shared range table.
     pub range_claimed_sum: SecureField,
+    /// LogUp claimed sum of the test-side WCell provider.
     pub wcell_claimed_sum: SecureField,
+    /// LogUp claimed sum of the test-side HashIo consumer.
     pub hashio_claimed_sum: SecureField,
+    /// The composed STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
@@ -95,7 +100,7 @@ fn gen_all_preprocessed() -> Vec<ColEval> {
     cols
 }
 
-/// This standalone harness's own range-use census, converted to the 7-slot
+/// This standalone harness's own range-use census, converted to the 8-slot
 /// shape [`gen_range_table_multiplicities`] expects. Only Rc4/Rc13/Rc7/Rc8
 /// are ever nonzero for decomp; the rest stay at the `RcUses::new()` zero
 /// default.
@@ -137,7 +142,7 @@ impl Built {
     }
 }
 
-/// Which balancer role: yield the wcell tuples (+ provider) / consume the bytes.
+/// The `(w_bind_id, w)` tuples the test-side WCell provider yields.
 fn wcell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
     // (w_bind_id, w) for every w coefficient — the coeffs W-cell yields.
     let mut out = Vec::with_capacity(crate::constants::K * crate::constants::N);
@@ -152,6 +157,8 @@ fn wcell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
     out
 }
 
+/// The `(stream_id, byte_pos, byte)` tuples the test-side HashIo consumer
+/// requires.
 fn hashio_tuples(bytes: &[u8]) -> Vec<Vec<u32>> {
     bytes
         .iter()
@@ -160,6 +167,7 @@ fn hashio_tuples(bytes: &[u8]) -> Vec<Vec<u32>> {
         .collect()
 }
 
+/// Prover-side AIR driver for the standalone decomp harness.
 pub struct DecompProver {
     witness: MlDsaWitness,
     #[cfg(test)]
@@ -443,7 +451,7 @@ impl AirProver for DecompProver {
         );
         evals.extend(range_tr);
         self.range_claimed_sum = range_sum;
-        // wcell provider yields (−); hashio consumer consumes (+).
+        // wcell provider yields (−); hashio consumer requires (−).
         let (wtr, wsum) = gen_balancer_interaction(
             wcell_log_size(),
             &wcell_tuples(&self.witness),
@@ -514,6 +522,7 @@ impl Air for DecompVerifier {
     }
 }
 
+/// Prove the standalone decomp statement for `witness`.
 pub fn prove_decomp(witness: MlDsaWitness, config: PcsConfig) -> Result<DecompProof, ProvingError> {
     let mut prover = DecompProver {
         witness,

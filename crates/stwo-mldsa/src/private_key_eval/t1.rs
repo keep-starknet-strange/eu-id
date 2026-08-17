@@ -1,3 +1,13 @@
+//! Packed-`t1` split and scaled evaluation for private-key ML-DSA verification.
+//!
+//! The public-key encoder splits each canonical 10-bit `t1` coefficient as
+//! `coefficient = lo9 + 2^9·hi1` and yields the tuple `(poly, index, lo9, hi1)`
+//! through [`crate::binding::T1CellRelation`]. This component consumes those
+//! cells, range-checks `lo9` and the balanced base-`B` digits of the scaled
+//! value `2^d·t1`, and Horner-accumulates each polynomial at the drawn
+//! `(r, s)`. It yields `(2^d·t1_i)^(r,s)` into `EvalAtRsRelation` at slots
+//! `T1_EVAL_BASE + i`.
+
 use num_traits::{One, Zero};
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
@@ -19,10 +29,15 @@ use super::{
     gen_batched_logup, range_denominator, range_tuple, PrivateKeyEvalRelations, T1_EVAL_BASE,
 };
 
+/// Active rows: one row per `t1` coefficient of the maximum shape.
 pub const T1_ACTIVE_ROWS: usize = K * N;
+/// Trace log size (covers `K·N = 1536` active rows).
 pub const T1_LOG_SIZE: u32 = 11;
+/// Base columns: `lo9`, `hi1`, and three scaled digits.
 pub const T1_BASE_COLS: usize = 5;
+/// LogUp entries per row: one `t1` cell use, four Rc9 uses, one eval yield.
 pub const T1_LOGUP_ENTRIES: usize = 6;
+/// Interaction columns: 4 accumulator coords + batched LogUp (batch 4).
 pub const T1_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE + SECURE_EXTENSION_DEGREE * T1_LOGUP_ENTRIES.div_ceil(4);
 
@@ -70,16 +85,20 @@ fn active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
     }
 }
 
+/// Preprocessed ids for the selected profile, in commit order.
 pub fn t1_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     core::iter::once(active_id(profile))
         .chain(PRE_NAMES[1..].iter().map(|name| pre_id(name)))
         .collect()
 }
 
+/// Preprocessed log sizes, matching [`t1_preprocessed_ids`] order.
 pub fn t1_preprocessed_log_sizes() -> Vec<u32> {
     vec![T1_LOG_SIZE; PRE_NAMES.len()]
 }
 
+/// Generate the preprocessed columns (active, eval_start, eval_end, poly,
+/// index) for the selected profile.
 pub fn gen_t1_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
     let mut columns = vec![vec![m31(0); 1usize << T1_LOG_SIZE]; PRE_NAMES.len()];
     for (row, item) in schedule().iter().enumerate() {
@@ -95,10 +114,12 @@ pub fn gen_t1_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
         .collect()
 }
 
+/// Base-trace column log sizes.
 pub fn t1_trace_layout() -> Vec<u32> {
     vec![T1_LOG_SIZE; T1_BASE_COLS]
 }
 
+/// Interaction column log sizes.
 pub fn t1_interaction_layout() -> Vec<u32> {
     vec![T1_LOG_SIZE; T1_INTERACTION_COLS]
 }
@@ -111,11 +132,15 @@ fn scaled_digits(value: u32) -> [i64; 3] {
     crate::witness::balanced_digits::<3>((value as i128) << D).map(|digit| digit as i64)
 }
 
+/// Base-trace output of the `t1` component.
 pub struct T1Base {
+    /// The base columns (`lo9`, `hi1`, scaled digits).
     pub trace: Vec<ColEval>,
+    /// The range-table uses this component requires.
     pub range_uses: RcUses,
 }
 
+/// Generate the `t1` base trace and its rc census for the active polynomials.
 pub fn gen_t1_base(profile: MlDsaProfile, t1: &[T1Poly; K]) -> T1Base {
     let mut columns = vec![vec![m31(0); 1usize << T1_LOG_SIZE]; T1_BASE_COLS];
     let mut range_uses = RcUses::new();
@@ -143,11 +168,16 @@ pub fn gen_t1_base(profile: MlDsaProfile, t1: &[T1Poly; K]) -> T1Base {
     }
 }
 
+/// AIR evaluator for the packed-`t1` split and scaled evaluation.
 #[derive(Clone)]
 pub struct T1Eval {
+    /// The verifier-selected parameter set.
     pub profile: MlDsaProfile,
+    /// Drawn Horner evaluation point `r`.
     pub r: SecureField,
+    /// Drawn digit-combination point `s`.
     pub s: SecureField,
+    /// The relations this component draws on.
     pub relations: PrivateKeyEvalRelations,
 }
 
@@ -264,12 +294,17 @@ impl FrameworkEval for T1Eval {
     }
 }
 
+/// Interaction-trace output of the `t1` component.
 pub struct T1Interaction {
+    /// The interaction columns (accumulator coords, then batched LogUp).
     pub trace: Vec<ColEval>,
+    /// `evals[i]` = claimed `(2^d·t1_i)^(r,s)`.
     pub evals: Vec<SecureField>,
+    /// The component's LogUp claimed sum.
     pub claimed_sum: SecureField,
 }
 
+/// Generate the `t1` interaction trace at the drawn `(r, s)`.
 pub fn gen_t1_interaction(
     profile: MlDsaProfile,
     t1: &[T1Poly; K],

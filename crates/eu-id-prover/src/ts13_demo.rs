@@ -1,5 +1,7 @@
 //! Fixed public-context primitives for the TS13 public-input-unlinkable demo.
 //!
+//! ## Scope
+//!
 //! This module defines the deterministic public derivation.
 //! It also defines the zero-column transcript component.
 //! The fixed mdoc composition includes this component.
@@ -84,36 +86,56 @@ pub const TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES: usize = 20;
 /// proof-system name is a separate constant in the canonical context array.
 #[derive(Clone, Copy, Debug)]
 pub struct Ts13DemoPublicContextInput<'a> {
+    /// The TS13 demo circuit hash from the checked-in artifact.
     pub circuit_hash: &'a [u8; 32],
+    /// The relying-party-local request identifier.
     pub zk_system_id: &'a str,
+    /// The requested mdoc `docType`.
     pub document_type: &'a str,
+    /// The requested mdoc namespace.
     pub namespace: &'a str,
+    /// The requested element identifier.
     pub element_identifier: &'a str,
+    /// The canonical CBOR of the expected element value.
     pub expected_value_cbor: &'a [u8],
+    /// The verification time as Unix seconds.
     pub timestamp_epoch_seconds: i64,
+    /// The encoded SessionTranscript.
     pub session_transcript: &'a [u8],
+    /// The trusted issuer ML-DSA-65 public key.
     pub trusted_issuer_public_key: &'a [u8],
+    /// The revocation-authority ML-DSA-65 public key.
     pub revocation_public_key: &'a [u8],
+    /// The revocation epoch.
     pub revocation_epoch: u32,
 }
 
 /// All verifier-derived public bytes that the TS13 composition consumes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13DemoDerivedContext {
+    /// The validated canonical SessionTranscript.
     pub canonical_session_transcript: Vec<u8>,
+    /// The ISO DeviceAuthentication bytes.
     pub device_authentication_bytes: Vec<u8>,
+    /// The device COSE `Sig_structure`.
     pub device_cose_sig_structure: Vec<u8>,
+    /// The verification time as canonical `YYYY-MM-DDTHH:MM:SSZ`.
     pub verification_timestamp_rfc3339_utc:
         [u8; TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES],
+    /// The canonical CBOR of the TS13 request context array.
     pub canonical_context_cbor: Vec<u8>,
+    /// The SHA-256 digest of `canonical_context_cbor`.
     pub request_context_digest: [u8; 32],
 }
 
 /// Deterministic ISO device-authentication bytes derived from one request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ts13DemoDerivedDeviceAuthentication {
+    /// The validated canonical SessionTranscript.
     pub canonical_session_transcript: Vec<u8>,
+    /// The ISO DeviceAuthentication bytes.
     pub device_authentication_bytes: Vec<u8>,
+    /// The device COSE `Sig_structure`.
     pub device_cose_sig_structure: Vec<u8>,
 }
 
@@ -137,7 +159,9 @@ struct Ts13DemoRequestContextMeasurement {
 /// These errors do not contain private data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ts13DemoContextError {
+    /// The SessionTranscript is malformed.
     MalformedSessionTranscript,
+    /// The public context is invalid.
     InvalidPublicContext,
 }
 

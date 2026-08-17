@@ -1,5 +1,7 @@
 //! Quantum-safe prover for the TS13 identity profile.
 //!
+//! ## Scope
+//!
 //! One STARK proves the issuer, device, attribute, validity, and revocation
 //! constraints.
 
@@ -200,6 +202,7 @@ mod timing_tests {
     }
 }
 
+/// Verify one TS13 demo identity proof against its public input.
 pub fn verify_mdoc_ts13_demo(
     proof: &MdocProof,
     public: &MdocTs13DemoCircuitPublicInput,
@@ -210,16 +213,26 @@ pub fn verify_mdoc_ts13_demo(
 /// Errors from preparing, proving, or verifying an identity proof.
 #[derive(Debug)]
 pub enum Error {
+    /// The mdoc parse or extraction failed.
     Mdoc(mdoc::MdocError),
+    /// The prover rejected the witness or the configuration.
     Prove(String),
+    /// The verifier rejected the proof.
     Verify(String),
+    /// The credential shape does not match the fixed TS13 demo circuit.
     UnsupportedDemoCredentialShape,
+    /// The proof carries a PCS configuration weaker than the fixed parameters.
     WeakConfig {
+        /// The PCS configuration that the proof carries.
         got: PcsConfig,
+        /// The PCS configuration that the verifier requires.
         expected: PcsConfig,
     },
+    /// The recomputed preprocessed commitment root differs from the cached root.
     PreprocessedRootMismatch {
+        /// The root that the verifier recomputed.
         got: air_core::CommitmentRoot,
+        /// The root that the verifier expected.
         expected: air_core::CommitmentRoot,
     },
 }

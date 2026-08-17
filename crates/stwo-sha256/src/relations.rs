@@ -27,9 +27,13 @@ relation!(Range8Relation, RANGE_REL_SIZE);
 /// `range_8` checks digest bytes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RangeRelations {
+    /// Channel for the 2-addend carries (`T2`, `e_new`, `a_new`, finalization).
     pub range_2: Range2Relation,
+    /// Channel for the 4-addend schedule-recurrence carries.
     pub range_4: Range4Relation,
+    /// Channel for the 5-addend `T1` carries.
     pub range_5: Range5Relation,
+    /// Channel for the terminal digest bytes.
     pub range_8: Range8Relation,
 }
 
@@ -67,19 +71,27 @@ impl Default for RangeRelations {
     }
 }
 
+/// Shared handles for the four range relations. The shared-table provider
+/// populates them so sibling SHA modules reuse the drawn relations.
 #[derive(Clone, Default)]
 pub struct SharedRangeRelations {
+    /// Shared handle for the `Range_2` channel.
     pub range_2: SharedRelation<Range2Relation>,
+    /// Shared handle for the `Range_4` channel.
     pub range_4: SharedRelation<Range4Relation>,
+    /// Shared handle for the `Range_5` channel.
     pub range_5: SharedRelation<Range5Relation>,
+    /// Shared handle for the `Range_8` channel.
     pub range_8: SharedRelation<Range8Relation>,
 }
 
 impl SharedRangeRelations {
+    /// Create empty handles.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Publish drawn relations through the handles.
     pub fn set(&self, relations: &RangeRelations) {
         self.range_2.set(relations.range_2.clone());
         self.range_4.set(relations.range_4.clone());
@@ -87,6 +99,7 @@ impl SharedRangeRelations {
         self.range_8.set(relations.range_8.clone());
     }
 
+    /// Read the published relations. Panics if [`Self::set`] has not run.
     pub fn get(&self) -> RangeRelations {
         RangeRelations {
             range_2: self.range_2.get(),
@@ -97,16 +110,21 @@ impl SharedRangeRelations {
     }
 }
 
+/// Shared handles for the fixed SHA table relations (currently the four
+/// range channels).
 #[derive(Clone, Default)]
 pub struct SharedShaTableRelations {
+    /// Shared handles for the range relations.
     pub range: SharedRangeRelations,
 }
 
 impl SharedShaTableRelations {
+    /// Create empty handles.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Publish the drawn range relations through the handles.
     pub fn set(&self, range: &RangeRelations) {
         self.range.set(range);
     }
@@ -140,6 +158,7 @@ pub struct DigestRelation {
 }
 
 impl DigestRelation {
+    /// Draw fresh `LookupElements` for the limbs and digest channels.
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             limbs: Sha256DigestLimbs::draw(channel),
@@ -147,6 +166,7 @@ impl DigestRelation {
         }
     }
 
+    /// Return fixed relations for tests.
     pub fn dummy() -> Self {
         Self {
             limbs: Sha256DigestLimbs::dummy(),
@@ -167,6 +187,8 @@ impl Default for DigestRelation {
 pub use air_core::relations::FieldBytesRelation as Sha256Field;
 
 // The provider and consumer must use the same tuple size.
+/// Number of values in one field-relation tuple: `(field_id, byte_index,
+/// value)`.
 pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 
 /// Credential-field relation for the SHA-256 provider.
@@ -177,16 +199,20 @@ pub const FIELD_REL_SIZE: usize = air_core::relations::FIELD_BYTES_ARITY;
 /// order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FieldRelation {
+    /// External `(field_id, byte_index, value)` channel shared with composed
+    /// consumers.
     pub field: Sha256Field,
 }
 
 impl FieldRelation {
+    /// Draw fresh `LookupElements` for the field channel.
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             field: Sha256Field::draw(channel),
         }
     }
 
+    /// Return a fixed relation for tests.
     pub fn dummy() -> Self {
         Self {
             field: Sha256Field::dummy(),
@@ -205,6 +231,7 @@ impl Default for FieldRelation {
 /// channels.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sha256Relations {
+    /// The four range-check channels for carries and digest bytes.
     pub range: RangeRelations,
     /// Cross-component digest channel — provider side. Always drawn so the
     /// relation bundle is uniform. The digest bridge uses the external channel
@@ -229,6 +256,8 @@ impl Sha256Relations {
         }
     }
 
+    /// Draw only the range channels. The shared-table provider has no
+    /// digest or field channel, so those stay dummy.
     pub fn draw_sha_tables_provider(channel: &mut impl Channel) -> Self {
         Self {
             range: RangeRelations::draw(channel),
@@ -237,6 +266,8 @@ impl Sha256Relations {
         }
     }
 
+    /// Reuse the shared range relations and draw fresh digest and field
+    /// channels.
     pub fn draw_with_shared_tables(
         channel: &mut impl Channel,
         shared: &SharedShaTableRelations,

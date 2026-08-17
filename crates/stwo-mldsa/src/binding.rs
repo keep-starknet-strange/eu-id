@@ -91,7 +91,7 @@ pub const MSGLINK_ARITY: usize = 3;
 relation!(MsgLinkRelation, MSGLINK_ARITY);
 
 /// `(stream_id, byte_pos, byte)` — re-export of the stwo-keccak byte-I/O
-/// contract. Using keccak's type (not a fresh `relation!`) is what lets a mldsa
+/// contract. Keccak's relation type (not a fresh `relation!`) lets a mldsa
 /// consumer/producer balance against the sponge's yields/consumes.
 pub use stwo_keccak::relations::HashIoRelation;
 

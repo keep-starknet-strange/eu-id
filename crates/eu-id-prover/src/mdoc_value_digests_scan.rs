@@ -1,12 +1,14 @@
 //! Private canonical `valueDigests` scanner for the TS13 identity proof.
 //!
+//! ## Guarantees
+//!
 //! The scanner consumes canonical bytes from the private issuer message.
 //! It proves that the requested namespace occurs exactly once.
 //! It binds each selected digest ID and SHA-256 digest.
 //! It does not add either value to the clear public inputs.
 //! Extra canonical namespaces remain accepted.
 //!
-//! # Relation polarity
+//! ## Relation polarity
 //!
 //! | relation | provider | sign | consumer | sign |
 //! |---|---|---:|---|---:|
@@ -137,19 +139,42 @@ pub(crate) struct MdocValueDigestsScanHandles {
     pub(crate) item: MdocValueDigestItemHandles,
 }
 
+/// Why one MSO `valueDigests` map is not canonical.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MsoValueDigestsCanonicalityReason {
+    /// The `valueDigests` key is missing.
     MissingValueDigests,
+    /// The `valueDigests` key occurs more than once.
     AmbiguousValueDigests,
+    /// A token ends before its declared length.
     Truncated(&'static str),
+    /// The map is not a minimally encoded definite map.
     ExpectedDefiniteMap,
+    /// A namespace key is not a minimally encoded definite text string.
     ExpectedDefiniteText,
+    /// A namespace key is not valid UTF-8.
     InvalidUtf8,
-    NamespaceTooLong { length: usize, max: usize },
+    /// A namespace exceeds the length cap.
+    NamespaceTooLong {
+        /// The observed namespace length in bytes.
+        length: usize,
+        /// The maximum namespace length in bytes.
+        max: usize,
+    },
+    /// A namespace occurs more than once.
     DuplicateNamespace,
+    /// A digest ID is not a minimally encoded canonical integer.
     ExpectedCanonicalDigestId,
-    DigestIdOutOfRange { value: u64, max: u32 },
+    /// A digest ID exceeds the maximum.
+    DigestIdOutOfRange {
+        /// The decoded digest ID value.
+        value: u64,
+        /// The maximum digest ID value.
+        max: u32,
+    },
+    /// A digest is not a canonical 32-byte string.
     ExpectedDigestBstr32,
+    /// A digest ID occurs more than once in one namespace.
     DuplicateDigestId,
 }
 

@@ -1,14 +1,19 @@
 //! Demo-only ML-DSA-65 issuance helpers exported over UniFFI.
 //!
-//! NOT a production capability. There is no post-quantum PID issuer or PKI yet,
-//! so for end-to-end demos a fixed, deterministic "demo issuer" re-signs an
-//! existing (P-256) PID mdoc under ML-DSA-65. The wallet mints such a document
-//! and the verifier pins `sha256(demo_issuer_public_key())` as its trust anchor.
+//! ## Status
 //!
-//! The issuer key is owned here (single source of truth for the pin); the device
-//! key is a caller-supplied parameter, since holder binding is per-wallet. The
-//! deterministic seeds mirror `eu-id-prover`'s `mldsa_fixture` so the reference
-//! and the demo agree.
+//! This module is NOT a production capability. No post-quantum PID issuer or
+//! PKI exists yet. For end-to-end demos, a fixed deterministic "demo issuer"
+//! re-signs an existing (P-256) PID mdoc under ML-DSA-65. The wallet mints
+//! such a document. The verifier pins `sha256(demo_issuer_public_key())` as
+//! its trust anchor.
+//!
+//! ## Keys
+//!
+//! This module owns the issuer key: the module is the single source of truth
+//! for the pin. The device key is a caller-supplied parameter, because holder
+//! binding is per-wallet. The deterministic seeds mirror `eu-id-prover`'s
+//! `mldsa_fixture`, so the reference and the demo agree.
 
 use ciborium::value::Value;
 use eu_id_prover::ts13_demo::{ML_DSA_65_PUBLIC_KEY_BYTES, ML_DSA_65_SIGNATURE_BYTES};
@@ -49,7 +54,7 @@ fn decode_value(bytes: &[u8]) -> Result<Value, ZkError> {
         .map_err(|e| ZkError::InvalidInput(format!("invalid CBOR: {e}")))
 }
 
-/// COSE `protected` header `{1: -49}` serialized to a bstr.
+/// Serializes the COSE `protected` header `{1: -49}` to a bstr.
 fn mldsa_protected_header() -> Vec<u8> {
     encode_value(&Value::Map(vec![(
         Value::from(1),
@@ -67,7 +72,7 @@ fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
     ]))
 }
 
-/// An ML-DSA-65 AKP COSE_Key: `{1: AKP, 3: -49, -1: pkEncode}`.
+/// Builds an ML-DSA-65 AKP COSE_Key: `{1: AKP, 3: -49, -1: pkEncode}`.
 fn mldsa_cose_key(pk: &[u8]) -> Value {
     Value::Map(vec![
         (Value::from(1), Value::from(COSE_KTY_AKP)),
@@ -93,7 +98,7 @@ fn map_get<'a>(entries: &'a [(Value, Value)], key: &str) -> Result<&'a Value, Zk
         .ok_or_else(|| ZkError::InvalidInput(format!("missing field '{key}'")))
 }
 
-/// Lift the `MobileSecurityObject` map out of a COSE_Sign1 payload, accepting
+/// Lifts the `MobileSecurityObject` map out of a COSE_Sign1 payload, accepting
 /// both the standard `#6.24(bstr .cbor MSO)` wrapping and a bare MSO map.
 fn lift_mso(payload: &[u8]) -> Result<Value, ZkError> {
     match decode_value(payload)? {
@@ -107,7 +112,8 @@ fn lift_mso(payload: &[u8]) -> Result<Value, ZkError> {
     }
 }
 
-/// A copy of `mso` with `deviceKeyInfo.deviceKey` replaced by `device_key`.
+/// Returns a copy of `mso` with `deviceKeyInfo.deviceKey` replaced by
+/// `device_key`.
 fn replace_device_key(mso: &Value, device_key: Value) -> Result<Value, ZkError> {
     let mut out = mso.clone();
     let Value::Map(entries) = &mut out else {
@@ -168,7 +174,7 @@ pub fn demo_revocation_epoch() -> u32 {
     DEMO_REVOCATION_EPOCH
 }
 
-/// Build the demo revocation witness for an assembled ML-DSA mdoc `Document`.
+/// Builds the demo revocation witness for an assembled ML-DSA mdoc `Document`.
 #[uniffi::export]
 pub fn demo_revocation_witness(document: Vec<u8>) -> Result<DemoRevocationWitness, ZkError> {
     let document = as_map(&decode_value(&document)?, "Document")?;
@@ -205,13 +211,16 @@ pub fn demo_revocation_witness(document: Vec<u8>) -> Result<DemoRevocationWitnes
     })
 }
 
-/// Re-issue a P-256 PID mdoc under the demo ML-DSA-65 issuer.
+/// Re-issues a P-256 PID mdoc under the demo ML-DSA-65 issuer.
 ///
-/// Takes the wallet's real `IssuerSigned` CBOR (`{nameSpaces, issuerAuth}`),
-/// keeps the namespaces (and thus the `valueDigests`) verbatim, swaps the MSO
-/// `deviceKey` for `device_public_key` (a ML-DSA-65 `pkEncode`), and re-signs
-/// `issuerAuth` with the demo issuer key. The incoming P-256 signature is NOT
-/// verified — only the CBOR is read. Returns the new ML-DSA `IssuerSigned` CBOR.
+/// Takes the wallet's real `IssuerSigned` CBOR (`{nameSpaces, issuerAuth}`).
+/// Keeps the namespaces, and thus the `valueDigests`, verbatim. Replaces the
+/// MSO `deviceKey` with `device_public_key` (an ML-DSA-65 `pkEncode`).
+/// Re-signs `issuerAuth` with the demo issuer key. Returns the new ML-DSA
+/// `IssuerSigned` CBOR.
+///
+/// This function does not verify the incoming P-256 signature. It reads only
+/// the CBOR.
 #[uniffi::export]
 pub fn demo_mint_ml_dsa_signed_pid_mdoc(
     p256_issuer_signed: Vec<u8>,
@@ -274,13 +283,14 @@ pub fn demo_mint_ml_dsa_signed_pid_mdoc(
     ])))
 }
 
-/// The COSE `Sig_structure` the device must sign for this presentation — over the
-/// `DeviceAuthentication` derived from `session_transcript` + `doctype`.
+/// Returns the COSE `Sig_structure` that the device signs for the
+/// presentation. The structure covers the `DeviceAuthentication` derived from
+/// `session_transcript` and `doctype`.
 ///
-/// For the in-memory re-sign path: the caller signs these bytes with its own
-/// ML-DSA-65 key (e.g. a hardware-backed Android Keystore device key) and passes
-/// the resulting signature to [demo_build_ml_dsa_witness]. Keeping the signing on
-/// the caller side lets the real hardware device key do the signing.
+/// For the in-memory re-sign path, the caller signs these bytes with its own
+/// ML-DSA-65 key (for example, a hardware-backed Android Keystore device key)
+/// and passes the resulting signature to [demo_build_ml_dsa_witness]. Signing
+/// on the caller side lets the real hardware device key do the signing.
 #[uniffi::export]
 pub fn demo_device_auth_sig_structure(
     session_transcript: Vec<u8>,
@@ -293,12 +303,14 @@ pub fn demo_device_auth_sig_structure(
     Ok(sig_structure(&mldsa_protected_header(), &device_payload))
 }
 
-/// Assemble the full ISO 18013-5 `Document` CBOR the prover consumes as the witness.
+/// Assembles the full ISO 18013-5 `Document` CBOR that the prover consumes as
+/// the witness.
 ///
-/// Combines a ML-DSA `IssuerSigned` (from [demo_mint_ml_dsa_signed_pid_mdoc]) with a
-/// `deviceSigned` whose `deviceSignature` carries `device_signature` — the caller's
-/// raw FIPS 204 `sigEncode` over the [demo_device_auth_sig_structure] bytes. Keeps
-/// all CBOR/COSE assembly in Rust so the wallet only signs + calls.
+/// Combines an ML-DSA `IssuerSigned` (from [demo_mint_ml_dsa_signed_pid_mdoc])
+/// with a `deviceSigned`. The `deviceSignature` carries `device_signature`:
+/// the caller's raw FIPS 204 `sigEncode` over the
+/// [demo_device_auth_sig_structure] bytes. Keeps all CBOR/COSE assembly in
+/// Rust, so the wallet only signs and calls.
 #[uniffi::export]
 pub fn demo_build_ml_dsa_witness(
     ml_dsa_issuer_signed: Vec<u8>,
@@ -358,16 +370,18 @@ mod tests {
         SigningKey::<MlDsa65>::from_seed(&MLDSA_DEVICE_SEED.into())
     }
 
-    /// The demo device's ML-DSA-65 `pkEncode` — a convenient valid device key for the
-    /// mint/build-witness tests (the production device key is the wallet's Keystore key).
+    /// The demo device's ML-DSA-65 `pkEncode`. This key is a convenient valid
+    /// device key for the mint and build-witness tests. The production device
+    /// key is the wallet's Keystore key.
     fn device_public_key() -> Vec<u8> {
         let vk: EncodedVerifyingKey<MlDsa65> = device_signing_key().verifying_key().encode();
         vk.to_vec()
     }
 
-    /// A minimal P-256-style `IssuerSigned`: only the CBOR shape matters (the mint
-    /// never verifies the incoming signature). The MSO carries a placeholder
-    /// deviceKey and a `valueDigests` entry we expect to survive verbatim.
+    /// Builds a minimal P-256-style `IssuerSigned`. Only the CBOR shape
+    /// matters, because the mint never verifies the incoming signature. The
+    /// MSO carries a placeholder deviceKey and a `valueDigests` entry that the
+    /// mint must preserve verbatim.
     fn dummy_p256_issuer_signed() -> Vec<u8> {
         let mso = Value::Map(vec![
             ("version".into(), "1.0".into()),
@@ -505,8 +519,8 @@ mod tests {
         .clone();
         assert_eq!(map_get(&issuer_signed, "nameSpaces").unwrap(), &input_ns);
 
-        // The signature verifies under the demo issuer key — using the prover's own
-        // reference verifier, so proving will accept it.
+        // The signature verifies under the demo issuer key. The check uses the
+        // prover's own reference verifier, so proving accepts the signature.
         let signature = match &issuer_auth[3] {
             Value::Bytes(bytes) => bytes.clone(),
             _ => panic!("signature not a bstr"),
@@ -534,8 +548,8 @@ mod tests {
             demo_mint_ml_dsa_signed_pid_mdoc(dummy_p256_issuer_signed(), device_public_key())
                 .expect("mint");
 
-        // Real path: the caller signs the sig_structure with its own key (here the demo device key
-        // stands in for the Keystore key).
+        // Real path: the caller signs the sig_structure with its own key. In
+        // this test the demo device key stands in for the Keystore key.
         let sig_struct = demo_device_auth_sig_structure(transcript.clone(), PID_NS.to_string())
             .expect("sig_structure");
         let device_signature = {

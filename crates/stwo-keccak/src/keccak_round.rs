@@ -44,33 +44,38 @@ use crate::utils::{spread_u32, unspread_u32};
 
 // Lookup budgets for one arithmetic row.
 
-/// xor3 uses: theta C-parity (2 per byte · 5 · 8), theta-apply (25 · 8), chi
-/// closing (25 · 8, folding iota on lane 0).
+/// xor3 lookups for the theta C-parity: 2 per byte over 5 columns × 8 bytes.
 pub const N_XOR3_C: usize = 2 * SQRT_N_LANES * N_BYTES_IN_U64; // 80
+/// xor3 lookups for theta-apply: one per state byte (25 lanes × 8 bytes).
 pub const N_XOR3_THETA_APPLY: usize = N_LANES_KECCAK * N_BYTES_IN_U64; // 200
+/// xor3 lookups for chi closing: one per state byte, folding iota on lane 0.
 pub const N_XOR3_CHI_CLOSE: usize = N_LANES_KECCAK * N_BYTES_IN_U64; // 200
+/// Total xor3 lookups per round row.
 pub const N_XOR3_LOOKUPS: usize = N_XOR3_C + N_XOR3_THETA_APPLY + N_XOR3_CHI_CLOSE; // 480
 
-/// andnot uses: one per chi byte.
+/// andnot lookups: one per chi byte.
 pub const N_ANDNOT_LOOKUPS: usize = N_LANES_KECCAK * N_BYTES_IN_U64; // 200
 
-/// split uses: the theta C-rotation (rotr 63, r=7) is 5 lanes · 8 bytes, and
-/// rho does the 22 lanes with r≠0 · 8 bytes. Byte-only lanes emit none.
+/// Split lookups for the theta C-rotation (rotr 63, r=7): 5 lanes × 8 bytes.
 pub const N_SPLIT_C_ROT: usize = SQRT_N_LANES * N_BYTES_IN_U64; // 40
+/// Split lookups for rho: the 22 lanes with r≠0, 8 bytes each.
+/// Byte-only lanes emit no split lookup.
 pub const N_SPLIT_RHO: usize = (N_LANES_KECCAK - 3) * N_BYTES_IN_U64; // 176
+/// Total split lookups per round row.
 pub const N_SPLIT_LOOKUPS: usize = N_SPLIT_C_ROT + N_SPLIT_RHO; // 216
 
 /// hi-limb witness columns: one per split lookup.
 const N_HI_WITNESS: usize = N_SPLIT_LOOKUPS;
 
-/// Number of committed helper-trace columns before the interleaved chi/andnot
-/// cells: theta C-parity intermediates (t + C), all rotation spread-hi
-/// witnesses, and theta-apply outputs (res_S). This is also the first
-/// committed column (column 0) of the helper trace: the enabler, current_rc,
-/// perm_id, round_idx, and initial spread-state groups are computed in
-/// `fill_row` for the round arithmetic but are never committed as helper
-/// columns — the carrier commits its own schedule/state columns for those
-/// directly from the boundary witness (see `carrier::generate`), so
+/// Number of committed helper-trace columns before the interleaved
+/// chi/andnot cells: theta C-parity intermediates (t + C), all rotation
+/// spread-hi witnesses, and theta-apply outputs (res_S).
+///
+/// This is also the first committed column (column 0) of the helper trace.
+/// `fill_row` computes the enabler, current_rc, perm_id, round_idx, and
+/// initial spread-state groups for the round arithmetic, but never commits
+/// them as helper columns. The carrier commits its own schedule/state columns
+/// for those directly from the boundary witness (see `carrier::generate`), so
 /// materializing them here would only be discarded at the copy site.
 pub const ROUND_PRE_CHI_COLUMNS: usize = N_XOR3_C + N_HI_WITNESS + N_XOR3_THETA_APPLY;
 
@@ -94,6 +99,7 @@ struct Idx {
     split: usize,
 }
 
+/// The round lookup payloads and the active row count.
 pub struct InteractionClaimData {
     pub lookup_data: LookupData,
     pub non_padded_length: usize,

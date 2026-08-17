@@ -55,8 +55,8 @@ impl<R: Clone> SharedRelation<R> {
         Self::default()
     }
 
-    /// Store the drawn relation. Called by the provider module once, during its
-    /// `draw_relations`.
+    /// Store the drawn relation. The provider module calls this method once,
+    /// during its `draw_relations`.
     pub fn set(&self, relation: R) {
         *self.0.borrow_mut() = Some(relation);
     }

@@ -2,8 +2,8 @@
 //!
 //! The AIR (`coeffs`) yields each committed poly's `P̂(r,s)` into the
 //! `EvalAtRsRelation`. The verifier computes the public `Â_ij`, `t̂1_i`, and
-//! `q̂(s)` directly from the transcript-mixed public key. The folded identity consumes the claimed
-//! `ẑ_j, ŵ_i, ê_i, v̂_i, ĉ, Ĉ_i` evaluations:
+//! `q̂(s)` directly from the transcript-mixed public key. The folded identity
+//! consumes the claimed `ẑ_j, ŵ_i, ê_i, v̂_i, ĉ, Ĉ_i` evaluations:
 //!
 //! ```text
 //!   Σ_i ρ_RLC^i·[ Σ_j Â_ij(r,s)·ẑ_j(r,s) − ĉ(r,s)·t̂1_i(r,s) − ŵ_i(r,s)
@@ -104,8 +104,8 @@ fn compute_public_evals_from_a(
     }
 }
 
-/// Derive `A` from public `rho`.
-/// Invert the NTT and evaluate the public matrix and `t1` terms.
+/// Derive `A` from the public `rho`, invert the NTT, and evaluate the public
+/// matrix and `t1` terms bivariately at `(r, s)`.
 pub fn compute_public_evals(
     input: &MlDsaVerifyInput,
     r: SecureField,

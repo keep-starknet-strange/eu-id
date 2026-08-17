@@ -1,13 +1,12 @@
 //! AIR evaluator for the SHA-256 component.
 //!
 //! Implements [`FrameworkEval`] for the three-seed-row plus 64-round layout
-//! in [`crate::trace`]. Linear constraints bind the IV, mod-2³² additions,
-//! rolling round state, block chain, and final state. Other constraints bind the `σ`,
-//! `Σ`, `Maj`, and `Ch` outputs directly from Boolean bits and bind the
-//! working-state aliases.
-//! Separate bit recompositions bind each 16-bit word limb. `Range_{2,4,5}`
-//! lookups range-check addition carries. `Range_8` lookups range-check the
-//! final digest bytes in `crate::digest_bridge`.
+//! in [`crate::trace`]. Linear constraints bind the IV, the mod-2³²
+//! additions, the rolling round state, the block chain, and the final state.
+//! Ungated recompositions bind the `σ`, `Σ`, `Maj`, and `Ch` outputs to the
+//! committed Boolean bits. Gated recompositions bind each 16-bit word limb.
+//! `Range_{2,4,5}` lookups range-check the addition carries. `Range_8`
+//! lookups range-check the final digest bytes in `crate::digest_bridge`.
 //!
 //! The padding constraints bind the FIPS 180-4 §5.1.1 structure. They bind
 //! the `0x80` marker position, zero bytes after the marker, and the bit length
@@ -72,18 +71,17 @@ impl FrameworkEval for Sha256Eval {
     }
 
     fn max_constraint_log_degree_bound(&self) -> u32 {
-        // Wave C (2026-08-05, C10): base constraints are now degree ≤ 4 —
-        // the padding-role family (P.A–P.H) is gated by the preprocessed
-        // `r15` selector now that its 30 cells alias the finalization
-        // carries/`h_out` region, and (P.G)'s gate `r15 · (cum_marker +
-        // is_length_only_block)` (degree 3) times a schedule-word limb
-        // (degree 1) is the new base-constraint ceiling at degree 4. Full
-        // padded-stream mode's final-counter identity
-        // (`gate_r15 · (1-enabler_after_block) · (counter-expected)`) is
-        // also degree 4. The binding term is still the batch-4 LogUp
-        // finalizer (`finalize_logup_batched(LOGUP_BATCH)`): four degree-1
+        // Base constraints have degree ≤ 4. The padding-role family
+        // (P.A–P.H) is gated by the preprocessed `r15` selector, whose 30
+        // cells alias the finalization-carries/`h_out` region. The (P.G)
+        // gate `r15 · (cum_marker + is_length_only_block)` (degree 3) times
+        // a schedule-word limb (degree 1) sets the base-constraint ceiling
+        // at degree 4. The full padded-stream mode's final-counter identity
+        // (`gate_r15 · (1 − enabler_after_block) · (counter − expected)`)
+        // is also degree 4. The binding term is the batch-4 LogUp finalizer
+        // (`finalize_logup_batched(LOGUP_BATCH)`): four degree-1
         // denominators and degree-≤ 2 numerators fold to a degree-5
-        // constraint (see [`LOGUP_BATCH`]), so the budget stays
+        // constraint (see [`LOGUP_BATCH`]). The budget stays
         // `log_size + 2` (D ≤ 5).
         self.log_size + 2
     }
@@ -336,10 +334,10 @@ impl FrameworkEval for Sha256Eval {
         }
 
         // Flat view of the 30 aliased cells, in the SAME physical order
-        // `crate::trace::Layout::COL_PADDING_START..COL_PADDING_END` uses
-        // (which is defined to equal `COL_FINAL_CARRIES_START..` — see
-        // `Layout`'s docs): `final_carries[0..8]` flattened (16 cells) then
-        // `h_out[0..7)` flattened (14 cells). `h_out[N_STATE_WORDS - 1]`
+        // `crate::trace::Layout::COL_PADDING_START..COL_PADDING_END` uses.
+        // `COL_PADDING_START` is defined to equal `COL_FINAL_CARRIES_START`
+        // (see `Layout`'s docs): `final_carries[0..8]` flattened (16 cells)
+        // then `h_out[0..7)` flattened (14 cells). `h_out[N_STATE_WORDS - 1]`
         // (the last 2 cells of the 32-cell region) is never aliased.
         let aliased: [E::F; crate::trace::PADDING_ROW_COLS] = std::array::from_fn(|i| {
             if i < 2 * N_STATE_WORDS {
@@ -360,17 +358,17 @@ impl FrameworkEval for Sha256Eval {
             }
         });
 
-        // Merged zero-pin (LINEAR): an aliased cell is nonzero only on an
-        // `r15` or `r63` row. `(1 - r63 - r15)` is 0 on both families (they
-        // never coincide) and 1 elsewhere, so this single constraint
-        // replaces the old separate `not_r63 · cell` (finalization-only)
-        // and `not_r15 · cell` (padding-only) pins for these 30 cells.
+        // Merged zero-pin (linear): an aliased cell is nonzero only on an
+        // `r15` or `r63` row. `(1 − r63 − r15)` is 0 on both rows (they
+        // never coincide) and 1 elsewhere. This single constraint pins both
+        // the finalization view and the padding view of these 30 cells.
         let not_r63_not_r15 = E::F::one() - r63.clone() - r15.clone();
         for cell in aliased.iter() {
             eval.add_constraint(not_r63_not_r15.clone() * cell.clone());
         }
         // The 2 unaliased final slots (`h_out` word `N_STATE_WORDS - 1`)
-        // keep the plain finalization-only pin — never live at `t = 15`.
+        // keep the plain finalization-only pin — they are never live at
+        // `t = 15`.
         let not_r63 = E::F::one() - r63.clone();
         for cell in [&h_out[N_STATE_WORDS - 1].0, &h_out[N_STATE_WORDS - 1].1] {
             eval.add_constraint(not_r63.clone() * cell.clone());
@@ -469,17 +467,14 @@ impl FrameworkEval for Sha256Eval {
         let w_msg = |j: usize| -> &(E::F, E::F) { &w[15 - j] };
 
         // Every padding constraint group below is gated ×`r15` (bare, not
-        // `gate_r15 = enabler · r15`): the aliased cells now hold live
-        // finalization data on non-`r15` rows, so — unlike the pre-alias
-        // design, where these cells were unconditionally zero off the
-        // padding family — every P.* identity must be actively restricted
-        // to `t = 15` rows. Bare `r15` (not `gate_r15`) is required so the
-        // family still binds on a DISABLED `t = 15` row (`enabler = 0`,
-        // `r15 = 1`): `gate_r15` vanishes there (`enabler = 0`), which
-        // would make (P.A)/(P.A′)/(P.B) silently vacuous exactly on the
-        // rows the disabled-flag guard (P.A′) must cover, reopening the
-        // hole a malicious `is_marker_block = 1` on a disabled block would
-        // otherwise slip through.
+        // `gate_r15 = enabler · r15`). The aliased cells hold live
+        // finalization data on non-`r15` rows, so every P.* identity must
+        // actively restrict to `t = 15` rows. Bare `r15` keeps the family
+        // binding on a DISABLED `t = 15` row (`enabler = 0`, `r15 = 1`):
+        // `gate_r15` vanishes there, which would make (P.A)/(P.A′)/(P.B)
+        // silently vacuous on exactly the rows the disabled-flag guard
+        // (P.A′) must cover. That would reopen the hole a malicious
+        // `is_marker_block = 1` on a disabled block would slip through.
 
         // (P.A) Binary checks.
         for flag in [&is_marker_block, &is_length_block] {
@@ -510,13 +505,12 @@ impl FrameworkEval for Sha256Eval {
             .fold(E::F::from(M31::from(0u32)), |acc, b| acc + b);
         eval.add_constraint(r15.clone() * (sum_marker_byte_sel - is_marker_block.clone()));
 
-        // (P.C) Aux flags, inlined (no longer committed columns — each is a
-        // direct product of the already-boolean, already-pinned
-        // `is_marker_block`/`is_length_block`, so no separate booleanity or
-        // zero-pin constraint is needed). `is_marker_only_block` (the
-        // symmetric `is_marker_block · (1 − is_length_block)`) is dead code
-        // upstream — nothing reads it — so it is deleted outright rather
-        // than inlined.
+        // (P.C) Aux flags, inlined. Each is a direct product of the
+        // already-boolean, already-pinned `is_marker_block`/
+        // `is_length_block`, so it needs no committed column and no
+        // separate booleanity or zero-pin constraint. The symmetric
+        // `is_marker_only_block` (`is_marker_block · (1 − is_length_block)`)
+        // has no reader, so the AIR omits it.
         let is_length_only_block =
             (E::F::one() - is_marker_block.clone()) * is_length_block.clone();
 
@@ -1153,9 +1147,9 @@ mod tests {
         let mbyte: Vec<i64> = (0..4)
             .map(|k| cell(trace, Layout::marker_word_byte(k), slot))
             .collect();
-        // (P.C)/(P.C') are inlined AIR-side expressions now, not committed
-        // columns — recompute them the same way here (no residual to push
-        // for their own "definition"; there is no column to disagree with).
+        // (P.C)/(P.C') are inlined AIR-side expressions, not committed
+        // columns. Recompute them the same way here; no column can disagree
+        // with them, so they contribute no residual of their own.
         let is_length_only = (1 - is_marker) * is_length;
 
         let mut res = Vec::new();

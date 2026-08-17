@@ -39,6 +39,7 @@ pub const WORD_BIT_COLS: usize = 32;
 /// reads `b/c/d` and `f/g/h` from the preceding three rows.
 /// Operand order: `[a, e]`.
 pub const ROUND_BIT_OPERANDS: usize = 2;
+/// Total rolling-state bit columns: `ROUND_BIT_OPERANDS × WORD_BIT_COLS`.
 pub const ROUND_OPERAND_BIT_COLS: usize = ROUND_BIT_OPERANDS * WORD_BIT_COLS;
 /// Columns of the round family: 8 word-results × 2 limbs + 4 carry pairs
 /// × 2 ends = 24, then committed operand bits.
@@ -62,11 +63,10 @@ pub const SCHEDULE_ENTRY_COLS: usize = 6;
 /// 9. `bit_length_w15_hi` (1)
 ///
 /// `2 flags + 16 one-hot word selectors + 4 byte selectors + 4 marker bytes
-///     + 4 bit-length limbs = 30` cells per block. `is_length_only_block`,
-///     `is_marker_only_block`, and `marker_word_post_strict_15` used to be
-///     committed here; they are now inlined AIR-side expressions of
-///     `is_marker_block`/`is_length_block` (degree 2), or (for
-///     `is_marker_only_block`) deleted outright as dead — see
+///     + 4 bit-length limbs = 30` cells per block. `is_length_only_block`
+///     and `marker_word_post_strict_15` are inlined AIR-side expressions of
+///     `is_marker_block`/`is_length_block` (degree 2), not committed cells.
+///     `is_marker_only_block` has no reader and is omitted. See
 ///     `constraints.rs` (P.C)/(P.C') and [`crate::types::PaddingRowWitness`].
 pub const PADDING_ROW_COLS: usize = 2 + WORDS_PER_BLOCK + BYTES_PER_WORD + BYTES_PER_WORD + 4;
 
@@ -76,18 +76,23 @@ pub const PADDING_ROW_COLS: usize = 2 + WORDS_PER_BLOCK + BYTES_PER_WORD + BYTES
 pub struct Layout;
 
 impl Layout {
+    /// Row enabler: `1` on real rows, `0` on padding rows.
     pub const COL_ENABLER: usize = 0;
     /// The row's schedule word `W[t]`, `(lo, hi)`.
     pub const COL_W_LO: usize = 1;
+    /// High limb of the row's schedule word `W[t]`.
     pub const COL_W_HI: usize = 2;
     /// LSB-first bit decomposition of the row's schedule word `W[t]`.
     pub const COL_W_BITS_START: usize = Self::COL_W_HI + 1;
+    /// End (exclusive) of the `W[t]` bit columns.
     pub const COL_W_BITS_END: usize = Self::COL_W_BITS_START + WORD_BIT_COLS;
     /// Round family. It is active on round rows.
     pub const COL_ROUND_START: usize = Self::COL_W_BITS_END;
+    /// End (exclusive) of the round family.
     pub const COL_ROUND_END: usize = Self::COL_ROUND_START + ROUND_COLS;
     /// Schedule family — live on rows with `t ≥ 16`.
     pub const COL_SCHED_ENTRY_START: usize = Self::COL_ROUND_END;
+    /// End (exclusive) of the schedule family.
     pub const COL_SCHED_ENTRY_END: usize = Self::COL_SCHED_ENTRY_START + SCHEDULE_ENTRY_COLS;
     /// `t = 63` family. **ALIASED** with the per-block padding-role region
     /// (below): the first `PADDING_ROW_COLS` (30) of these 32
@@ -99,8 +104,11 @@ impl Layout {
     /// row's position mod 67 is either `18` (round 15) or `66` (round 63),
     /// never both — so no row ever needs both meanings from one cell.
     pub const COL_FINAL_CARRIES_START: usize = Self::COL_SCHED_ENTRY_END;
+    /// End (exclusive) of the finalization-carry cells.
     pub const COL_FINAL_CARRIES_END: usize = Self::COL_FINAL_CARRIES_START + 2 * N_STATE_WORDS;
+    /// Start of the `h_out` cells (8 words × 2 limbs), live at `t = 63`.
     pub const COL_H_OUT_START: usize = Self::COL_FINAL_CARRIES_END;
+    /// End (exclusive) of the `h_out` cells.
     pub const COL_H_OUT_END: usize = Self::COL_H_OUT_START + 2 * N_STATE_WORDS;
 
     /// `is_last_block` flag (1 col): `1` on the `t = 63` row of the final
@@ -127,18 +135,31 @@ impl Layout {
     /// reused for padding — see [`crate::constraints::Sha256Eval`]'s merged
     /// zero-pin vs. the plain finalization-only pin.
     pub const COL_PADDING_START: usize = Self::COL_FINAL_CARRIES_START;
+    /// `is_marker_block` flag cell.
     pub const COL_IS_MARKER_BLOCK: usize = Self::COL_PADDING_START;
+    /// `is_length_block` flag cell.
     pub const COL_IS_LENGTH_BLOCK: usize = Self::COL_PADDING_START + 1;
+    /// Start of the 16 one-hot marker-word indicator cells.
     pub const COL_IS_MARKER_WORD_START: usize = Self::COL_PADDING_START + 2;
+    /// End (exclusive) of the marker-word indicator cells.
     pub const COL_IS_MARKER_WORD_END: usize = Self::COL_IS_MARKER_WORD_START + WORDS_PER_BLOCK;
+    /// Start of the 4 one-hot marker-byte selector cells (BE order).
     pub const COL_MARKER_BYTE_SEL_START: usize = Self::COL_IS_MARKER_WORD_END;
+    /// End (exclusive) of the marker-byte selector cells.
     pub const COL_MARKER_BYTE_SEL_END: usize = Self::COL_MARKER_BYTE_SEL_START + BYTES_PER_WORD;
+    /// Start of the 4 marker-word byte cells (BE order).
     pub const COL_MARKER_WORD_BYTE_START: usize = Self::COL_MARKER_BYTE_SEL_END;
+    /// End (exclusive) of the marker-word byte cells.
     pub const COL_MARKER_WORD_BYTE_END: usize = Self::COL_MARKER_WORD_BYTE_START + BYTES_PER_WORD;
+    /// Low limb of the bit-length high word `W[14]`.
     pub const COL_BIT_LENGTH_W14_LO: usize = Self::COL_MARKER_WORD_BYTE_END;
+    /// High limb of the bit-length high word `W[14]`.
     pub const COL_BIT_LENGTH_W14_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 1;
+    /// Low limb of the bit-length low word `W[15]`.
     pub const COL_BIT_LENGTH_W15_LO: usize = Self::COL_MARKER_WORD_BYTE_END + 2;
+    /// High limb of the bit-length low word `W[15]`.
     pub const COL_BIT_LENGTH_W15_HI: usize = Self::COL_MARKER_WORD_BYTE_END + 3;
+    /// End (exclusive) of the padding-role region.
     pub const COL_PADDING_END: usize = Self::COL_PADDING_START + PADDING_ROW_COLS;
 
     /// Number of base trace columns. The padding-role region is aliased
@@ -248,13 +269,13 @@ impl Layout {
     /// Row `r` lives at coset index `r`, which maps to circle-domain index
     /// `coset_index_to_circle_domain_index(r, log_size)`, stored at slot
     /// `bit_reverse_index(·, log_size)` to match Stwo's bit-reversed
-    /// circle-domain convention. The result is the index callers should use
-    /// to look the row up in the returned `Vec<Vec<BaseField>>`.
+    /// circle-domain convention. The return value is the index callers use
+    /// to read the row in the returned `Vec<Vec<BaseField>>`.
     ///
     /// The mapping `r ↔ coset_index` matters for the AIR's cross-row reads:
     /// `next_interaction_mask(_, [0, -k])` walks coset indices, so offset
-    /// `-k` at the slot for row `r` returns the slot for row `r − k` —
-    /// exactly the working-state / schedule / block-chain links
+    /// `-k` at the slot for row `r` returns the slot for row `r − k`. These
+    /// are exactly the working-state, schedule, and block-chain links that
     /// [`crate::constraints::Sha256Eval`] needs.
     #[inline]
     pub fn row_slot(row_idx: usize, log_size: u32) -> usize {
@@ -490,11 +511,12 @@ fn decoy_witnesses_for_padding(n_real_rows: usize, n_rows: usize) -> Vec<Sha256W
     decoy_witnesses_for_padding_with(n_real_rows, n_rows, &mut OsRng)
 }
 
-/// Decoy-block generator with an injectable byte source. Production paths pass
-/// [`OsRng`] for fresh per-proof masking; the scalar/packed writer-equivalence
-/// test passes a seeded RNG so both writers consume the *same* decoy witnesses
-/// (otherwise the boundary sigma-bit columns, which recompute from padding
-/// neighbours, would differ across two independent generations by design).
+/// Decoy-block generator with an injectable byte source. Production paths
+/// pass [`OsRng`] for fresh per-proof masking. The scalar/packed
+/// writer-equivalence test passes a seeded RNG so both writers consume the
+/// same decoy witnesses. Otherwise the boundary sigma-bit columns — which
+/// recompute from padding neighbours — would differ across two independent
+/// generations by design.
 fn decoy_witnesses_for_padding_with(
     n_real_rows: usize,
     n_rows: usize,
@@ -538,16 +560,15 @@ fn disabled_decoy_row_values(
     values[Layout::COL_IS_LAST_BLOCK] = BaseField::from(0u32);
     // The padding-role region is ALIASED onto the finalization
     // carries/`h_out` cells (see `Layout::COL_PADDING_START`). At the
-    // decoy's `t = 15` row those cells hold whatever `write_round_row_values`
-    // left there for the padding family — zero them so the disabled-row
-    // invariant (padding flags are public-zero off an active block) holds.
-    // At the decoy's `t = 63` row (`block_row == STATE_SEED_ROWS + N_ROUNDS
-    // − 1`), the SAME physical cells instead hold the decoy's own
-    // finalization carries/`h_out` — real, honestly-computed values that
-    // must NOT be zeroed, since they are the Class-D digest-relation blind
-    // (a decoy's `h_out` masks the honest proof's final digest in the
-    // logup sum). Every other `block_row` never writes these cells at all
-    // (they stay zero-initialized), so the conditional is a no-op there.
+    // decoy's `t = 15` row, those cells hold the padding values that
+    // `write_round_row_values` wrote. Zero them: the disabled-row invariant
+    // requires public-zero padding flags off an active block. At the
+    // decoy's `t = 63` row (`block_row == STATE_SEED_ROWS + N_ROUNDS − 1`),
+    // the SAME cells instead hold the decoy's finalization carries and
+    // `h_out`. Do not zero those: they are the Class-D digest-relation
+    // blind (a decoy's `h_out` masks the honest proof's final digest in the
+    // LogUp sum). Every other `block_row` leaves these cells
+    // zero-initialized, so the conditional is a no-op there.
     if block_row != STATE_SEED_ROWS + N_ROUNDS - 1 {
         values[Layout::COL_PADDING_START..Layout::COL_PADDING_END].fill(BaseField::from(0u32));
     }
@@ -630,10 +651,10 @@ fn write_round_row_values(
     write_round_state_bits_row(row, round.state_in[0].to_u32(), round.state_in[4].to_u32());
 
     // Schedule family: the mod-add carries are only meaningful for t ≥ 16
-    // (the schedule recurrence add is gated by `is_sched` in the AIR). `σ0`
-    // /`σ1` (s0/s1) are filled for every row in a later unconditional pass
-    // (`fill_schedule_sigma_words_rows`/`_columns`) since their recomposition
-    // constraint is now ungated.
+    // (the AIR gates the schedule recurrence add by `is_sched`). `σ0`/`σ1`
+    // (s0/s1) are filled for every row in a later unconditional pass
+    // (`fill_schedule_sigma_words_rows`/`_columns`), because their
+    // recomposition constraint is ungated.
     if t >= 16 {
         let entry = &block.schedule_entries[t - 16];
         let [_s0_lo, _s0_hi, _s1_lo, _s1_hi, c_lo, c_hi] = Layout::schedule_entry();
@@ -851,11 +872,11 @@ fn write_padding_row_values(row: &mut [BaseField], p: &PaddingRowWitness) {
     row[Layout::COL_BIT_LENGTH_W15_HI] = m31(p.bit_length_w15_hi);
 }
 
-/// Required `log_size` for `n_blocks` blocks (smallest power of two
-/// `> 67 · n_blocks` — **strictly** greater, so the trace always ends with
-/// at least one padding row and the `is_last_block` gate
-/// `enabler · is_round_63 · (1 − enabler_next)` can fire — and at least
-/// `LOG_MIN` so SIMD backends are happy).
+/// Required `log_size` for `n_blocks` blocks: the smallest power of two
+/// **strictly** greater than `67 · n_blocks`. The strict inequality leaves
+/// at least one padding row, so the `is_last_block` gate
+/// `enabler · is_round_63 · (1 − enabler_next)` can fire. The result is at
+/// least `LOG_MIN` so the SIMD backend has one full packed lane.
 pub fn min_log_size(n_blocks: usize) -> u32 {
     const LOG_MIN: u32 = 4; // SIMD lane count is 16 → at least 16 rows.
     let rows = n_blocks.max(1) * ROWS_PER_BLOCK;
@@ -1105,12 +1126,12 @@ mod tests {
 
     /// The column-count breakdown documented on [`Layout`] adds up.
     ///
-    /// Wave C (2026-08-05, C10): the 30-cell padding-role region is now
-    /// ALIASED onto 30 of the 32 finalization-carry/`h_out` cells, not
-    /// additive — `TOTAL_COLS` ends at `is_last_block` (192 → 162).
-    /// `PADDING_ROW_COLS` still pins the alias width (it must stay ≤ 32,
-    /// the aliasable region's size, and equal to 30 exactly since 2 cells —
-    /// `h_out` word `N_STATE_WORDS − 1` — are deliberately left unaliased).
+    /// The 30-cell padding-role region ALIASES onto 30 of the 32
+    /// finalization-carry/`h_out` cells; it is not additive. `TOTAL_COLS`
+    /// ends at `is_last_block` (162, not 192). `PADDING_ROW_COLS` pins the
+    /// alias width: it must stay ≤ 32 (the aliasable region's size) and
+    /// equal 30 exactly, because 2 cells — `h_out` word
+    /// `N_STATE_WORDS − 1` — stay unaliased.
     #[test]
     fn layout_total_cols_matches_expected_breakdown() {
         let expected = 1 // enabler
@@ -1164,8 +1185,8 @@ mod tests {
                         block.schedule_entries[t - 16].lower_sigma0.lo
                     );
                 } else {
-                    // σ0/σ1 are now ungated: live and equal to
-                    // lower_sigma0(W[t-15]) on every row, not only t ≥ 16.
+                    // σ0/σ1 are ungated: live and equal to
+                    // lower_sigma0(W[t−15]) on every row, not only t ≥ 16.
                     let n_rows = 1usize << log_size;
                     let natural = b * ROWS_PER_BLOCK + STATE_SEED_ROWS + t;
                     let w15_slot = Layout::row_slot((natural + n_rows - 15) % n_rows, log_size);

@@ -2,8 +2,8 @@
 //!
 //! Cross-component bindings ([`WCellRelation`], [`HashIoRelation`]) live in
 //! [`crate::binding`]; this module adds only the shared range-table instance
-//! the decomp AIR draws for its own use. All drawn together after the base
-//! commit.
+//! the decomp AIR draws for its own use. Decomp draws all relations together
+//! after the base commit.
 //!
 //! | relation | arity | tuple | provider | consumer |
 //! |----------|-------|-------|----------|----------|

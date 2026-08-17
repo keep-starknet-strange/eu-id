@@ -1,10 +1,12 @@
 //! TS13 EUDI PID mdoc proof construction.
 //!
-//! This module parses the constrained ISO/IEC 18013-5 PID profile, prepares the
-//! mdoc statement/witness, and proves issuer signature, ISO device
-//! authentication, MSO digest membership, validity, device-key origin, and
-//! `age_over_18 = true` in one proof. The device-auth signature binds
-//! freshness.
+//! ## Scope
+//!
+//! This module parses the constrained ISO/IEC 18013-5 PID profile.
+//! It prepares the mdoc statement and witness.
+//! One proof covers the issuer signature, ISO device authentication, MSO digest
+//! membership, validity, device-key origin, and `age_over_18 = true`.
+//! The device-auth signature binds freshness.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Cursor;
@@ -225,18 +227,23 @@ macro_rules! collect_ts13_demo_modules {
     }};
 }
 
+/// A relying-party request for one PID attribute proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocPidRequest {
     pub(crate) session_transcript: Vec<u8>,
 }
 
+/// One extracted mdoc attribute with its MSO digest ID.
 #[derive(Clone, Debug)]
 pub struct ExtractedMdocAttribute {
+    /// The `digestID` that the MSO assigns to this attribute.
     pub digest_id: u32,
+    /// The canonical `IssuerSignedItemBytes` of this attribute.
     pub item: Vec<u8>,
 }
 
 impl MdocPidRequest {
+    /// Build an `age_over_18` request from one encoded SessionTranscript.
     pub fn age_over_18(session_transcript: Vec<u8>) -> Self {
         Self { session_transcript }
     }
@@ -260,11 +267,16 @@ fn private_issuer_verifier_input(public_key: &[u8]) -> Result<Box<MlDsaVerifyInp
     )))
 }
 
+/// The parsed PID mdoc and its decoded ML-DSA verification inputs.
 #[derive(Clone, Debug)]
 pub struct ExtractedPidMdoc {
+    /// The extracted `age_over_18` attribute.
     pub attribute: ExtractedMdocAttribute,
+    /// The MSO `validFrom` date as `(year, month, day)`.
     pub valid_from: (u16, u8, u8),
+    /// The MSO `validUntil` date as `(year, month, day)`.
     pub valid_until: (u16, u8, u8),
+    /// The canonical MobileSecurityObject payload bytes.
     pub mso: Vec<u8>,
     /// The ML-DSA-65 issuer-auth verification input.
     pub issuer_auth_input: Box<MlDsaVerifyInput>,
@@ -272,62 +284,138 @@ pub struct ExtractedPidMdoc {
     pub device_auth_input: Box<MlDsaVerifyInput>,
 }
 
+/// Errors from parsing or validating an mdoc for the TS13 circuit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MdocError {
+    /// CBOR decoding failed.
     Cbor(String),
+    /// A required CBOR field is missing.
     MissingField(&'static str),
+    /// A CBOR field has the wrong type.
     WrongType(&'static str),
+    /// The `docType` does not match the PID profile.
     DoctypeMismatch,
+    /// The MSO `valueDigests` map lacks the PID namespace.
     NamespaceMissing,
+    /// The requested element is absent from the namespace.
     ElementMissing(String),
+    /// The MSO digest algorithm is not SHA-256.
     UnsupportedDigestAlgorithm(String),
+    /// The item digest does not match the MSO `valueDigests` entry.
     ItemDigestMismatch {
+        /// The element identifier of the mismatched item.
         element: String,
+        /// The digest ID of the mismatched item.
         digest_id: u32,
     },
+    /// The device signature payload differs from the expected DeviceAuthentication bytes.
     DeviceAuthPayloadMismatch,
+    /// A COSE_Key is malformed or is not an ML-DSA-65 AKP key.
     InvalidCoseKey(&'static str),
+    /// A COSE_Sign1 structure is malformed.
     InvalidCoseSign1(&'static str),
+    /// An ML-DSA signature pre-check failed.
     InvalidSignature(&'static str),
+    /// A credential value falls outside the fixed circuit profile.
     UnsupportedCircuitValue(&'static str),
+    /// The MSO version is not the supported profile version.
     UnsupportedMsoVersion(String),
+    /// A timestamp field is malformed or out of range.
     InvalidTdate(&'static str),
+    /// The verification date precedes `validFrom`.
     CredentialNotYetValid,
+    /// The verification date is after `validUntil`.
     CredentialExpired,
+    /// The item random salt is shorter than the profile minimum.
     SaltTooShort {
+        /// The observed salt length in bytes.
         len: usize,
     },
+    /// The disclosed value differs from the fixed expected value.
     ValueEqualityMismatch {
+        /// The element identifier of the mismatched value.
         element: String,
     },
+    /// The `IssuerSignedItemBytes` is not canonical at `offset`.
     IssuerSignedItemNotCanonical {
+        /// The byte offset of the canonicality failure.
         offset: usize,
+        /// The canonicality failure reason.
         reason: MdocIssuerSignedItemCanonicalityReason,
     },
+    /// The MSO `valueDigests` map is not canonical at `offset`.
     MsoValueDigestsNotCanonical {
+        /// The byte offset of the canonicality failure.
         offset: usize,
+        /// The canonicality failure reason.
         reason: MdocMsoValueDigestsCanonicalityReason,
     },
 }
 
+/// Why one `IssuerSignedItemBytes` value is not canonical.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MdocIssuerSignedItemCanonicalityReason {
+    /// The input is empty.
     EmptyInput,
-    TraceTooLarge { bytes: usize },
+    /// The input exceeds the parser trace capacity.
+    TraceTooLarge {
+        /// The input length in bytes.
+        bytes: usize,
+    },
+    /// The SHA-256 padding is malformed.
     InvalidShaPadding(&'static str),
-    TruncatedToken { needed: usize },
-    InvalidAdditionalInfo { additional: u8 },
-    UnsupportedContainerLength { additional: u8 },
-    NonMinimalArgument { argument: u64 },
-    InvalidSimpleValue { additional: u8 },
+    /// A CBOR token ends before its declared length.
+    TruncatedToken {
+        /// The missing byte count.
+        needed: usize,
+    },
+    /// The additional-info value is reserved or unsupported.
+    InvalidAdditionalInfo {
+        /// The additional-info value.
+        additional: u8,
+    },
+    /// The container uses a non-canonical length argument.
+    UnsupportedContainerLength {
+        /// The additional-info value.
+        additional: u8,
+    },
+    /// The argument is not minimally encoded.
+    NonMinimalArgument {
+        /// The decoded argument value.
+        argument: u64,
+    },
+    /// The simple value uses a non-canonical encoding.
+    InvalidSimpleValue {
+        /// The additional-info value.
+        additional: u8,
+    },
+    /// The nesting depth exceeds the parser limit.
     NestingTooDeep,
+    /// A container ends before its declared item count.
     MissingContainer,
-    TrailingCbor { input_len: usize },
+    /// Bytes remain after the root token.
+    TrailingCbor {
+        /// The input length in bytes.
+        input_len: usize,
+    },
+    /// The root token does not occupy the full active prefix.
     IncompleteRoot,
+    /// The item content lacks the required tag 24.
     ExpectedTag24,
+    /// Tag 24 does not wrap a byte string.
     ExpectedTag24ByteString,
-    ExpectedTag24ByteStringU8Length { additional: u8 },
-    Tag24ByteStringLengthMismatch { declared: usize, actual: usize },
+    /// The tag-24 byte string does not use a one-byte length.
+    ExpectedTag24ByteStringU8Length {
+        /// The additional-info value.
+        additional: u8,
+    },
+    /// The tag-24 byte-string length differs from its content.
+    Tag24ByteStringLengthMismatch {
+        /// The declared length in bytes.
+        declared: usize,
+        /// The actual length in bytes.
+        actual: usize,
+    },
 }
 
 fn issuer_signed_item_parser_error(
@@ -483,6 +571,7 @@ fn mldsa_device_auth_input(
     Ok(Box::new(input))
 }
 
+/// Parse one TS13 PID mdoc document and build its circuit witness inputs.
 pub fn extract_pid_mdoc(
     document: &[u8],
     request: &MdocPidRequest,
@@ -832,6 +921,7 @@ fn sig_structure(protected: &[u8], payload: &[u8]) -> Vec<u8> {
     ]))
 }
 
+/// Encode the OID4VP SessionTranscript for one handover-info value.
 pub fn openid4vp_session_transcript(handover_info: &[u8]) -> Vec<u8> {
     encode_value(Value::Array(vec![
         Value::Null,
@@ -843,6 +933,7 @@ pub fn openid4vp_session_transcript(handover_info: &[u8]) -> Vec<u8> {
     ]))
 }
 
+/// Build the ISO DeviceAuthentication bytes from one SessionTranscript and one `docType`.
 pub fn device_authentication_bytes(
     session_transcript: &[u8],
     doc_type: &str,
@@ -1121,6 +1212,7 @@ fn parse_akp_mldsa_cose_key(key: &[(Value, Value)]) -> Result<&[u8], MdocError> 
 pub struct MdocRevocationKey(pub Vec<u8>);
 
 impl MdocRevocationKey {
+    /// Return the `pkEncode` bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -1131,14 +1223,18 @@ impl MdocRevocationKey {
 pub struct MdocRevocationSignature(pub Vec<u8>);
 
 impl MdocRevocationSignature {
+    /// Return the `sigEncode` bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
 
+/// Public inputs of the ML-DSA revocation check.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MdocRevocationPublicInputs {
+    /// The ML-DSA-65 revocation-authority public key.
     pub revocation_public_key: MdocRevocationKey,
+    /// The revocation epoch that the signature covers.
     pub epoch: u32,
 }
 
@@ -1149,10 +1245,14 @@ pub(crate) struct MdocRevocationRangeWitness {
     pub id_hi: u64,
 }
 
+/// Fixed issuer-message length in bytes for the TS13 demo circuit.
 pub const TS13_DEMO_ISSUER_MESSAGE_BYTES: usize = 2_534;
+/// Fixed MSO payload length in bytes for the TS13 demo circuit.
 pub const TS13_DEMO_MSO_PAYLOAD_BYTES: usize = 2_513;
+/// Fixed SHA-padded item length in bytes for the TS13 demo circuit.
 pub const TS13_DEMO_ITEM_PADDED_BYTES: u16 = 128;
 const TS13_DEMO_ATTRIBUTE_SHA_LOG_N_ROWS: u32 = 8;
+/// Fixed device COSE `Sig_structure` capacity in bytes for the TS13 demo circuit.
 pub const TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY: usize =
     stwo_mldsa::statement::DEVICE_SIG_STRUCTURE_CAPACITY;
 
@@ -1161,13 +1261,20 @@ pub const TS13_DEMO_DEVICE_SIG_STRUCTURE_CAPACITY: usize =
 /// Credential-selected lengths and the device key are intentionally absent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MdocTs13DemoCircuitPublicInput {
+    /// The TS13 demo circuit hash from the checked-in artifact.
     pub circuit_hash: [u8; 32],
+    /// The SHA-256 digest of the canonical request context.
     pub request_context_digest: [u8; 32],
+    /// The verification time as Unix seconds.
     pub timestamp_epoch_seconds: i64,
+    /// The verification time as canonical `YYYY-MM-DDTHH:MM:SSZ`.
     pub verification_timestamp_rfc3339_utc:
         [u8; TS13_DEMO_VERIFICATION_TIMESTAMP_RFC3339_UTC_BYTES],
+    /// The trusted issuer ML-DSA-65 public key.
     pub trusted_issuer_public_key: Vec<u8>,
+    /// The device COSE `Sig_structure` that the device signature covers.
     pub device_cose_sig_structure: Vec<u8>,
+    /// The public inputs of the revocation check.
     pub revocation: MdocRevocationPublicInputs,
 }
 
@@ -1226,7 +1333,9 @@ fn date_tuple(date: Date) -> Result<(u16, u8, u8), MdocError> {
 /// The transcript binds each claim to its role.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MdocMlDsaClaims {
+    /// The out-of-domain group evaluations of the hosted ML-DSA instance.
     pub group_evals: Vec<QM31>,
+    /// The LogUp claimed sums of the hosted ML-DSA instance.
     pub claimed_sums: Vec<QM31>,
 }
 
@@ -1274,14 +1383,20 @@ pub(crate) const MDOC_PROOF_SERIALIZED_CLAIM_NAMES: [&str; 19] = [
     "post_interaction_payloads",
 ];
 
+/// One TS13 identity proof: the shared STARK plus every module interaction claim.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MdocProof {
+    /// The shared STARK proof for all composed AIR modules.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
     sha_tables_interaction_claim: ShaTablesInteractionClaim,
+    /// The public claims of the issuer ML-DSA instance.
     pub mldsa: MdocMlDsaClaims,
+    /// The public claims of the device ML-DSA instance.
     pub device_mldsa: MdocMlDsaClaims,
+    /// The public claims of the revocation ML-DSA instance.
     pub revocation_mldsa: MdocMlDsaClaims,
     mldsa_range_table_claimed_sum: QM31,
+    /// The claimed sums of the proof-wide Keccak service.
     pub keccak_service_claimed_sums: Vec<QM31>,
     private_issuer_message_interaction_claim: MdocPrivateMessageInteractionClaim,
     attribute_sha_interaction_claim: Sha256InteractionClaim,
@@ -1329,6 +1444,7 @@ impl MdocProof {
             .collect()
     }
 
+    /// Check the proof shape against the checked-in TS13 demo artifact caps.
     pub fn has_ts13_demo_shape(&self) -> bool {
         use crate::ts13_demo_artifact_constants::{
             TS13_DEMO_FRI_FIRST_HASH_CAP, TS13_DEMO_FRI_FIRST_WITNESS_CAP,
@@ -1513,7 +1629,8 @@ fn mdoc_tree0_cache_insert(key: MdocTree0CacheKey, root: MdocTree0Root) -> Resul
 
 /// Executable serialization/claim geometry extracted from a real TS13 demo
 /// proof. The circuit-artifact drift test compares this view with the
-/// generated manifest; it is not part of the verifier's public statement.
+/// generated manifest. This view is not part of the verifier's public
+/// statement.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MdocTs13DemoProofShape {
@@ -1558,8 +1675,8 @@ pub struct MdocFriLayerShape {
     pub hash_count: usize,
 }
 
-/// Exact prover-constructed AIR/component geometry. This metadata is retained
-/// only in memory for circuit-artifact generation and drift tests.
+/// Exact prover-constructed AIR/component geometry. The prover retains this
+/// metadata only in memory for circuit-artifact generation and drift tests.
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MdocTs13DemoCircuitGeometry {
@@ -2741,8 +2858,8 @@ fn prove_mdoc_ts13_demo_circuit_inner(
     })
     .map_err(|error| Error::Prove(format!("TS13 private device ML-DSA: {error}")))?;
     // Hosted in-circuit ML-DSA revocation statement, private-message mode: the
-    // prover's input carries the REAL 20-byte message (from the private range
-    // witness); only its LENGTH is mixed into the transcript.
+    // prover's input carries the private 20-byte message from the range
+    // witness. Only its length enters the transcript.
     let mut revocation_mldsa = MlDsaStatementProver::hosted(
         revocation_prepared.0,
         revocation_prepared.1,
@@ -3227,8 +3344,8 @@ pub(crate) fn verify_mdoc_ts13_demo_circuit(
         Ok(expected_preprocessed_root)
     })) {
         Ok(Ok(expected_preprocessed_root)) => {
-            // Soundness/DoS boundary: a miss is memoized only after the whole
-            // proof has verified against the verifier-recomputed root.
+            // Soundness/DoS boundary: the verifier memoizes a miss only after
+            // the whole proof verifies against the verifier-recomputed root.
             if cached_preprocessed_root.is_none() {
                 mdoc_tree0_cache_insert(tree0_cache_key, expected_preprocessed_root)?;
             }
@@ -4128,13 +4245,13 @@ mod tests {
         const MSO_BLOCKS: usize = 40;
         const ITEM_BLOCKS: usize = 2;
         const ITEM_PADDED_BYTES: usize = TS13_DEMO_ITEM_PADDED_BYTES as usize;
-        // Wave C / C10 (2026-08-05): SHA's padding-role region is now
-        // ALIASED onto 30 of the 32 finalization-carry/`h_out` cells
-        // instead of adding 30 columns (`stwo_sha256::trace::Layout`
-        // 192 → 162 total). MSO loses 30 cols × 4096 rows = 122,880
-        // cells; the item/attribute instance loses 30 cols × 256 rows =
-        // 7,680 cells. Shared-table cells are untouched (range tables,
-        // not the SHA main trace).
+        // Wave C / C10 (2026-08-05): the SHA padding-role region now aliases
+        // 30 of the 32 finalization-carry/`h_out` cells instead of adding
+        // 30 columns (`stwo_sha256::trace::Layout` 192 → 162 total). The MSO
+        // instance loses 30 cols × 4096 rows = 122,880 cells. The
+        // item/attribute instance loses 30 cols × 256 rows = 7,680 cells.
+        // Shared-table cells stay unchanged (range tables, not the SHA main
+        // trace).
         const EXPECTED_MSO_CELLS: usize = 840_784;
         const EXPECTED_ITEM_CELLS: usize = 53_584;
         const EXPECTED_SHARED_TABLE_CELLS: usize = 4_128;

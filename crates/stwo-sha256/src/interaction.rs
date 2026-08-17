@@ -70,10 +70,12 @@ pub fn sha_lookups_per_row(field_exposure: &FieldExposure) -> usize {
 /// cumulatively reaches; the total over every component must be zero.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComponentClaim {
+    /// The cumulative sum this component's interaction columns must reach.
     pub claimed_sum: SecureField,
 }
 
 impl ComponentClaim {
+    /// Mix the claimed sum into the channel.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[self.claimed_sum]);
     }
@@ -85,7 +87,9 @@ impl ComponentClaim {
 /// (`crate::stark::commit_base_trace` / `crate::stark::component_provers`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
+    /// Claim of the main `Sha256Eval` consumer.
     pub sha256: ComponentClaim,
+    /// Claim of the digest-bridge component.
     pub digest_bridge: ComponentClaim,
     /// Claims for `Range_2`, `Range_4`, `Range_5`, and `Range_8`, in that
     /// order. A standalone proof must contain one claim per range table.
@@ -212,13 +216,14 @@ where
 /// Class-D blinded producer fraction. It mirrors the single gated
 /// `add_to_relation` entry `crate::components::emit_blind` fires per row —
 /// numerator `-(1 − is_dummy)·mult` — over the doubled (blinded) domain.
-/// Returns one `Vec<Frac>` of length `mults.len() = 2^(L+1)`: on a real row
-/// (`idx < real_len`) the numerator is `-mult`, identical to the unblinded emit;
-/// on a dummy row (`idx ≥ real_len`, `is_dummy = 1`) the numerator is `0`, so
-/// the fresh random blind multiplicity committed there never enters the LogUp
-/// sum. It stays in the committed multiplicity column as the mask. The caller
-/// pushes one fraction per producer. `build_interaction_columns` pairs two
-/// producer fractions in one interaction column.
+/// Returns one `Vec<Frac>` of length `mults.len() = 2^(L+1)`. On a real row
+/// (`idx < real_len`) the numerator is `-mult`, identical to the unblinded
+/// emit. On a dummy row (`idx ≥ real_len`, `is_dummy = 1`) the numerator is
+/// `0`, so the fresh random blind multiplicity committed there never enters
+/// the LogUp sum. It stays in the committed multiplicity column as the
+/// mask. The caller pushes one fraction per producer.
+/// `build_interaction_columns` pairs two producer fractions in one
+/// interaction column.
 pub(crate) fn producer_blind_frac_column<R, const N: usize>(
     rel: &R,
     mults: &[u32],
@@ -291,9 +296,9 @@ fn range_k_interaction(
 ///
 /// The cell values for each lookup come from the main trace at the row
 /// representing the block. Padding rows contribute `(0, 1)` (zero
-/// numerator, unit denominator) so they don't perturb the sum — the
-/// `enabler` column the AIR multiplies into every constraint takes care
-/// of the algebraic side.
+/// numerator, unit denominator) so they do not perturb the sum. The AIR
+/// multiplies `enabler` into every constraint, which covers the algebraic
+/// side.
 fn sha256_interaction(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
@@ -601,6 +606,9 @@ pub fn generate_interaction_trace(
     )
 }
 
+/// Generate the consumer-side interaction trace (main SHA eval and digest
+/// bridge) without the range-table producers. Use when a shared-table
+/// provider supplies the producers.
 pub fn generate_consumer_interaction_trace(
     relations: &Sha256Relations,
     witness: &Sha256Witness,
@@ -697,8 +705,8 @@ mod tests {
     }
 
     /// A malicious split can preserve `limb = 256·b_hi + b_lo` in M31 by
-    /// moving one radix unit between the two cells. The Range8 lookup must be
-    /// what rejects that otherwise constraint-preserving representation.
+    /// moving one radix unit between the two cells. The Range_8 lookup must
+    /// reject this otherwise constraint-preserving representation.
     #[test]
     fn range_8_rejects_recomposition_preserving_out_of_range_digest_byte() {
         let witness = compute_sha256_witness(b"abc");
@@ -782,14 +790,14 @@ mod tests {
         );
         let consumer = SecureField::one() / denom;
 
-        // The yield leaves the module unbalanced on its own (the whole point:
-        // the digest term enters the global balance)...
+        // The yield leaves the module unbalanced on its own: the digest
+        // term must enter the global balance. The synthetic consumer below
+        // cancels it exactly.
         assert_ne!(
             module_total,
             SecureField::zero(),
             "exposing the digest must leave an outstanding provider term",
         );
-        // ...and the synthetic consumer cancels it exactly.
         assert_eq!(
             module_total + consumer,
             SecureField::zero(),

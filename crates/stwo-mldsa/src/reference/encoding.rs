@@ -205,7 +205,7 @@ pub fn sig_decode(profile: MlDsaProfile, sig: &[u8]) -> Result<SignatureParts, M
 /// FIPS 204 Algorithm 21 `HintBitUnpack`: reconstruct the hint vector `h` and
 /// validate the encoding (indices strictly increasing within each polynomial,
 /// unused slots zero). Rejects malformed encodings. Several ACVP
-/// "modified signature - hint" negatives exercise.
+/// "modified signature - hint" negative tests exercise this rejection.
 fn hint_bit_unpack(profile: MlDsaProfile, bytes: &[u8]) -> Result<[[u8; N]; K], MlDsaError> {
     let mut h = [[0u8; N]; K];
     let mut index = 0usize; // running position into the first ω bytes

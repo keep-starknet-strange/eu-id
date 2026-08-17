@@ -1,3 +1,24 @@
+//! Proven inverse NTT over the expanded matrix `Â` for private-key ML-DSA
+//! verification.
+//!
+//! Private `ExpandA` yields each accepted coefficient as a stage-zero
+//! [`crate::binding::NttCellRelation`] cell `(poly, stage, index, limb0,
+//! limb1)` with a 12/11-bit limb split (base 4096). The butterfly component
+//! replays the 8-stage Gentleman–Sande inverse NTT: each row consumes two
+//! stage-`s` cells and yields two stage-`s+1` cells. The scaling component
+//! consumes the final stage-8 cells, multiplies by `256^-1 mod q`, splits the
+//! canonical output into balanced base-`B` digits, and Horner-accumulates
+//! each polynomial at the drawn `(r, s)`. It yields `Â_ij(r, s)` into
+//! `EvalAtRsRelation` at slots `A_EVAL_BASE + i·l + j`.
+//!
+//! ## Limb and canonicity policy
+//!
+//! Values are 12/11-bit limb pairs (C7b). Outputs consumed non-modularly
+//! downstream (`output0`, `output1`, scaling `output`) carry a slack
+//! complement that pins the exact representative in `[0, Q)`. Purely modular
+//! intermediates (`diff`, `quotient`) carry value-limb range checks only
+//! (C7a): their consumers need only the residue mod `Q`.
+
 use num_traits::{One, Zero};
 use stwo::core::fields::m31::{M31, P as M31_MODULUS};
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
@@ -20,9 +41,13 @@ use super::{
     gen_batched_logup, range_denominator, range_tuple, PrivateKeyEvalRelations, A_EVAL_BASE,
 };
 
+/// Number of matrix polynomials (`k · l`, maximum shape).
 pub const MATRIX_POLYS: usize = K * L;
+/// Inverse-NTT stage count: `log2(N) = 8`.
 pub const NTT_STAGES: usize = 8;
+/// Butterfly trace log size (covers `MATRIX_POLYS·NTT_STAGES·N/2` rows).
 pub const NTT_BUTTERFLY_LOG_SIZE: u32 = 15;
+/// Scaling trace log size (covers `MATRIX_POLYS·N` rows).
 pub const NTT_SCALING_LOG_SIZE: u32 = 13;
 
 const CARRY_OFFSET: i64 = 1 << 12;
@@ -134,6 +159,8 @@ fn scaling_active_id(profile: MlDsaProfile) -> PreProcessedColumnId {
     }
 }
 
+/// Preprocessed ids for both components (butterfly then scaling), in commit
+/// order.
 pub fn ntt_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> {
     core::iter::once(butterfly_active_id(profile))
         .chain(
@@ -150,12 +177,15 @@ pub fn ntt_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnId> 
         .collect()
 }
 
+/// Preprocessed log sizes, matching [`ntt_preprocessed_ids`] order.
 pub fn ntt_preprocessed_log_sizes() -> Vec<u32> {
     let mut sizes = vec![NTT_BUTTERFLY_LOG_SIZE; BUTTERFLY_PRE_NAMES.len()];
     sizes.extend(vec![NTT_SCALING_LOG_SIZE; SCALING_PRE_NAMES.len()]);
     sizes
 }
 
+/// Generate the butterfly and scaling preprocessed columns for the selected
+/// profile (schedule, active flags, and the split twiddle limbs).
 pub fn gen_ntt_preprocessed(profile: MlDsaProfile) -> Vec<ColEval> {
     let mut result = Vec::with_capacity(BUTTERFLY_PRE_NAMES.len() + SCALING_PRE_NAMES.len());
     let mut columns =
@@ -220,6 +250,7 @@ const B_QUOTIENT: usize = 14;
 const B_REDUCE: usize = 16;
 const B_BORROW: usize = 17;
 const B_CARRY: usize = 18;
+/// Butterfly base-column count: eight limb pairs + reduce/borrow + 2 carries.
 pub const NTT_BUTTERFLY_BASE_COLS: usize = 20;
 
 const S_INPUT: usize = 0;
@@ -228,21 +259,30 @@ const S_OUTPUT_SLACK: usize = 4;
 const S_QUOTIENT: usize = 6;
 const S_CARRY: usize = 8;
 const S_DIGIT: usize = 10;
+/// Scaling base-column count: five limb pairs + 2 carries + 3 digits.
 pub const NTT_SCALING_BASE_COLS: usize = 13;
 
+/// Butterfly LogUp entries per row: 4 NTT-cell ties + 12 range uses +
+/// 2 carries.
 pub const NTT_BUTTERFLY_LOGUP_ENTRIES: usize = 18;
+/// Scaling LogUp entries per row: 1 NTT-cell consume + 6 output/quotient
+/// range uses + 2 carries + 3 digit uses + 1 eval yield.
 pub const NTT_SCALING_LOGUP_ENTRIES: usize = 13;
+/// Butterfly interaction columns: batched LogUp (batch 4).
 pub const NTT_BUTTERFLY_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE * NTT_BUTTERFLY_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
+/// Scaling interaction columns: 4 accumulator coords + batched LogUp.
 pub const NTT_SCALING_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE
     + SECURE_EXTENSION_DEGREE * NTT_SCALING_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 
+/// Base-trace column log sizes (butterfly then scaling).
 pub fn ntt_trace_layout() -> Vec<u32> {
     let mut layout = vec![NTT_BUTTERFLY_LOG_SIZE; NTT_BUTTERFLY_BASE_COLS];
     layout.extend(vec![NTT_SCALING_LOG_SIZE; NTT_SCALING_BASE_COLS]);
     layout
 }
 
+/// Interaction column log sizes (butterfly then scaling).
 pub fn ntt_interaction_layout() -> Vec<u32> {
     let mut layout = vec![NTT_BUTTERFLY_LOG_SIZE; NTT_BUTTERFLY_INTERACTION_COLS];
     layout.extend(vec![NTT_SCALING_LOG_SIZE; NTT_SCALING_INTERACTION_COLS]);
@@ -343,11 +383,15 @@ fn record_canonical_uses(uses: &mut RcUses, value: u32) {
     record_value_range_uses(uses, Q - 1 - value);
 }
 
+/// Base-trace output of the inverse-NTT components.
 pub struct NttBase {
+    /// The concatenated butterfly and scaling base columns.
     pub trace: Vec<ColEval>,
+    /// The merged range-table uses.
     pub range_uses: RcUses,
 }
 
+/// Generate the butterfly and scaling base traces and their rc census.
 pub fn gen_ntt_base(profile: MlDsaProfile, a_hat: &[NttPoly]) -> NttBase {
     assert_eq!(a_hat.len(), MATRIX_POLYS);
     let mut states = a_hat.to_vec();
@@ -557,9 +601,12 @@ fn add_canonical_range_lookups<E: EvalAtRow>(
     add_value_range_lookups(eval, relations, gate, slack);
 }
 
+/// AIR evaluator for one inverse-NTT butterfly row.
 #[derive(Clone)]
 pub struct NttButterflyEval {
+    /// The verifier-selected parameter set.
     pub profile: MlDsaProfile,
+    /// The relations this component draws on.
     pub relations: PrivateKeyEvalRelations,
 }
 
@@ -693,11 +740,16 @@ impl FrameworkEval for NttButterflyEval {
     }
 }
 
+/// AIR evaluator for the inverse-NTT scaling and Horner evaluation rows.
 #[derive(Clone)]
 pub struct NttScalingEval {
+    /// The verifier-selected parameter set.
     pub profile: MlDsaProfile,
+    /// Drawn Horner evaluation point `r`.
     pub r: SecureField,
+    /// Drawn digit-combination point `s`.
     pub s: SecureField,
+    /// The relations this component draws on.
     pub relations: PrivateKeyEvalRelations,
 }
 
@@ -807,15 +859,22 @@ impl FrameworkEval for NttScalingEval {
     }
 }
 
+/// LogUp claimed sums of the two inverse-NTT components.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NttClaims {
+    /// Butterfly-chain claimed sum.
     pub butterfly: SecureField,
+    /// Scaling/eval claimed sum.
     pub scaling: SecureField,
 }
 
+/// Interaction-trace output of the inverse-NTT components.
 pub struct NttInteraction {
+    /// The concatenated butterfly and scaling interaction columns.
     pub trace: Vec<ColEval>,
+    /// `a_evals[poly]` = claimed `Â_ij(r, s)`, row-major.
     pub a_evals: Vec<SecureField>,
+    /// The two components' claimed sums.
     pub claims: NttClaims,
 }
 
@@ -847,6 +906,8 @@ fn push_range_entries(
     push_value_range_entries(entries, relations, Q - 1 - value);
 }
 
+/// Generate the butterfly and scaling interaction traces at the drawn
+/// `(r, s)`.
 pub fn gen_ntt_interaction(
     profile: MlDsaProfile,
     a_hat: &[NttPoly],

@@ -11,6 +11,8 @@ use crate::constants::{N_ROUNDS, N_STATE_WORDS};
 use crate::field_exposure::word_be_bytes;
 use crate::types::Sha256Witness;
 
+/// Sum equal-length multiplicity vectors element-wise. Panics on a length
+/// mismatch.
 pub fn sum_multiplicity_vectors(vectors: impl IntoIterator<Item = Vec<u32>>) -> Vec<u32> {
     let mut iter = vectors.into_iter();
     let mut acc = iter.next().unwrap_or_default();

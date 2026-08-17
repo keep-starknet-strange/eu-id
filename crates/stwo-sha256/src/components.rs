@@ -35,6 +35,7 @@ pub use crate::relations::Sha256Relations;
 /// Keeps these from colliding with other modules' tables when the integration
 /// crate combines multiple AIRs into one proof.
 pub const ID_PREFIX: &str = "sha256_";
+/// Namespace prefix for the shared-table (Class-D) preprocessed column IDs.
 pub const SHARED_ID_PREFIX: &str = "sha_shared_";
 
 fn id(name: &str) -> PreProcessedColumnId {
@@ -134,6 +135,7 @@ pub fn range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     id(kind.tag())
 }
 
+/// Preprocessed-column ID of a shared `Range_k` table's value column.
 pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
     shared_id(kind.tag())
 }
@@ -142,7 +144,7 @@ pub fn shared_range_column_id(kind: RangeKind) -> PreProcessedColumnId {
 /// It is `1` over the reserved dummy-key upper half
 /// `[2^L, 2^(L+1))`, `0` over the real lower half `[0, 2^L)`. Keyed by the
 /// blinded log size because equal-sized producers have the same selector.
-/// This lets the preprocessing tree commit one physical selector for all
+/// The preprocessing tree then commits one physical selector for all
 /// equal-sized tables.
 pub fn shared_producer_dummy_column_id(producer: SharedProducer) -> PreProcessedColumnId {
     shared_id(&format!("dummy_log_{}", producer.blind_log_size()))
@@ -202,9 +204,9 @@ pub(crate) fn round_cyclic_column_ids_ns(instance_namespace: &str) -> [PreProces
     ]
 }
 
-/// Tiny helper: emit one `RelationEntry` with the given multiplicity, then
-/// finalize. Generic over `R: Relation<E::F, E::EF>` so each table can pick
-/// its relation type without a `dyn` indirection.
+/// Emit one `RelationEntry` with multiplicity `mult` against `rel`.
+/// Generic over `R: Relation<E::F, E::EF>` so each table picks its relation
+/// type without a `dyn` indirection.
 fn emit<E: EvalAtRow, R: Relation<E::F, E::EF>>(
     eval: &mut E,
     rel: &R,
@@ -267,9 +269,13 @@ fn emit_blind<E: EvalAtRow, R: Relation<E::F, E::EF>>(
 /// audit (`crate::headroom`) reduces to.
 #[derive(Clone)]
 pub struct RangeKEval {
+    /// `log2` of the committed row count (`range_log_size(kind)`).
     pub log_size: u32,
+    /// The `Range_k` table this producer serves.
     pub kind: RangeKind,
+    /// LogUp relation bundle; this producer uses `range.range_k`.
     pub relations: Sha256Relations,
+    /// True when the shared-table (Class-D) preprocessed columns apply.
     pub shared_tables: bool,
 }
 
@@ -404,11 +410,13 @@ impl SharedProducer {
 /// producer eval.
 #[derive(Clone)]
 pub struct SharedProducerPairEval {
+    /// `log2` of the committed (blinded) row count of every producer.
     pub log_size: u32,
     /// 1 or 2 producers, all of `log_size`. Read in this order; the trace and
     /// interaction generators must lay their multiplicity/fraction columns in
     /// the same order (see `shared_tables::PRODUCER_PAIRS`).
     pub producers: Vec<SharedProducer>,
+    /// LogUp relation bundle shared with the consumers.
     pub relations: Sha256Relations,
 }
 
@@ -449,10 +457,10 @@ pub(crate) fn all_preprocessed_column_ids_ns(
     for &kind in RANGE_TABLES {
         out.push(range_column_id(kind));
     }
-    // Two boundary selectors sized to the main `Sha256Eval` trace. Read
-    // by the consumer eval via `get_preprocessed_column` (not by any
-    // producer component), so it lives at the tail of the ID list and is
-    // not allocated to a producer component.
+    // Two boundary selectors sized to the main `Sha256Eval` trace. The
+    // consumer eval reads them via `get_preprocessed_column` (no producer
+    // component reads them), so they live at the tail of the ID list and no
+    // producer component claims them.
     out.push(is_first_row_column_id_ns(instance_namespace));
     out.push(is_first_round_column_id_ns(instance_namespace));
     // Eight block-cyclic columns (K limbs, round indicators, schedule and
@@ -463,6 +471,8 @@ pub(crate) fn all_preprocessed_column_ids_ns(
     out
 }
 
+/// Preprocessed-column IDs a consumer-only instance commits: the boundary
+/// selectors, the block-cyclic columns, and the digest-bridge selector.
 pub fn consumer_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     consumer_preprocessed_column_ids_ns("")
 }
@@ -478,6 +488,9 @@ pub(crate) fn consumer_preprocessed_column_ids_ns(
     out
 }
 
+/// Preprocessed-column IDs of the shared-table (Class-D) providers, in the
+/// order `crate::preprocessed::generate_shared_table_preprocessed_trace`
+/// emits the matching columns.
 pub fn shared_table_preprocessed_column_ids() -> Vec<PreProcessedColumnId> {
     // Class D: each producer contributes its value column followed by
     // its `is_dummy` selector, in the exact order `SharedProducer::emit_entry`

@@ -1,5 +1,7 @@
 //! Private `IssuerSignedItemBytes` semantic binding.
 //!
+//! ## Data flow
+//!
 //! The CBOR parsers prove the complete SHA-padded outer item.
 //! They also prove the tag-24 inner map.
 //! This component consumes both parsed streams.
@@ -1433,7 +1435,7 @@ impl FrameworkEval for MdocPrivateItemEval {
                 ],
             ));
         }
-        // Main claimed-sum blinder is always the final interaction site.
+        // The claimed-sum blinder is always the final main interaction site.
         add_blinder_relation_entry(
             &mut eval,
             &self.blinder_relation,

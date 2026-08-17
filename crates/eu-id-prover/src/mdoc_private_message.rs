@@ -1,5 +1,7 @@
 //! Private issuer `Sig_structure` byte provider.
 //!
+//! ## Data flow
+//!
 //! Each active row provides one `(HOSTED_MSG_FIELD_ID, index, byte)` tuple.
 //! The issuer ML-DSA absorb consumes the tuple.
 //! `extra_uses` specifies additional consumers.
@@ -282,7 +284,7 @@ impl FrameworkEval for MdocPrivateMessageEval {
                 byte,
             ],
         ));
-        // Claimed-sum blinder is deliberately the final main-component site.
+        // The claimed-sum blinder is deliberately the final main-component site.
         add_blinder_relation_entry(
             &mut eval,
             &self.blinder_relation,

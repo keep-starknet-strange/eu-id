@@ -1,21 +1,20 @@
 //! Byte encoding for Stwo's [`GkrBatchProof`].
 //!
-//! `GkrBatchProof` is not part of
-//! [`StarkProof`](stwo::core::proof::StarkProof). A module stores its GKR proof
-//! in an opaque post-interaction payload. The module encodes and decodes that
-//! payload with the functions in this module.
+//! `GkrBatchProof` is not part of [`StarkProof`](stwo::core::proof::StarkProof).
+//! A module stores its GKR proof in an opaque post-interaction payload. The
+//! module encodes and decodes that payload with the functions in this module.
 //!
 //! `GkrBatchProof` has no `serde` implementation. The local owned types use its
-//! public accessors and constructors. These include [`GkrMask::new`],
-//! [`SumcheckProof.round_polys`], and [`UnivariatePoly::new`]. An encode and
-//! decode cycle preserves the proof.
+//! public accessors and constructors: [`GkrMask::new`],
+//! [`SumcheckProof.round_polys`], and [`UnivariatePoly::new`]. An encode-decode
+//! cycle preserves the proof.
 //!
-//! # Soundness
+//! ## Soundness
 //!
 //! Encoding and decoding do not verify the proof. The module replays the GKR
 //! proof against the shared Fiat-Shamir channel in `verify_post_interaction`
 //! with
-//! [`partially_verify_batch`](stwo::prover::lookups::gkr_verifier::partially_verify_batch)):
+//! [`partially_verify_batch`](stwo::prover::lookups::gkr_verifier::partially_verify_batch).
 //! The channel state already binds trees 0-2, the relations, and the claimed
 //! sums. A changed payload changes the channel state. The sumcheck or circuit
 //! check then rejects the proof.
@@ -39,12 +38,12 @@ pub const TS13_DEMO_GKR_MAX_PAYLOAD_BYTES: usize = 21_368;
 /// Serializable form of the public [`GkrBatchProof`] data.
 #[derive(Serialize, Deserialize)]
 struct GkrProofWire {
-    /// Sumcheck round polynomials for each layer.
-    /// Each polynomial is a coefficient vector.
+    /// Sumcheck round polynomials for each layer. Each polynomial is a
+    /// coefficient vector.
     sumcheck_round_polys: Vec<Vec<Vec<QM31>>>,
-    /// Per instance, per layer: the mask columns (each column is two evals).
+    /// Mask columns per instance and layer. Each column is two evals.
     layer_masks: Vec<Vec<Vec<[QM31; 2]>>>,
-    /// Per instance: the output-layer column claims.
+    /// Output-layer column claims per instance.
     output_claims: Vec<Vec<QM31>>,
 }
 

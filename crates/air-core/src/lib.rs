@@ -61,13 +61,22 @@ pub type Hasher = Blake2sMerkleHasher;
 /// Merkle root under the current [`Hasher`] alias).
 pub type CommitmentRoot = <Hasher as MerkleHasherLifted>::Hash;
 
+/// A preprocessed column evaluation: base-field values in bit-reversed order
+/// on the SIMD backend.
 pub type PreprocessedColumnEval = CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>;
 
+/// A content fingerprint of one preprocessed column, for the tree-0 dedup
+/// invariant. The 64-bit hash detects invalid deduplication only. It is not a
+/// soundness pin; the tree-0 commitment root is the soundness anchor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreprocessedColumnFingerprint {
+    /// The preprocessed column id.
     pub id: PreProcessedColumnId,
+    /// The module that produced the fingerprint.
     pub module: &'static str,
+    /// The column's log-size.
     pub log_size: u32,
+    /// A 64-bit `DefaultHasher` digest of the domain size and values.
     pub hash: u64,
 }
 
@@ -76,7 +85,7 @@ static TWIDDLE_CACHE: OnceLock<Mutex<HashMap<u32, &'static TwiddleTree<SimdBacke
 
 fn cached_twiddles(twiddle_log_size: u32) -> &'static TwiddleTree<SimdBackend> {
     let cache = TWIDDLE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    // Recover the consistent map after a panic while the lock is held.
+    // Recover the map contents after a panic poisons the lock.
     let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -133,6 +142,8 @@ fn select_first_preprocessed_ids(
     (unique, selected_by_module)
 }
 
+/// Fingerprint each preprocessed column of `module`. Panics unless `ids` and
+/// `columns` have the same length.
 pub fn fingerprint_preprocessed_columns(
     module: &'static str,
     ids: &[PreProcessedColumnId],
@@ -213,8 +224,11 @@ fn unique_preprocessed_layout(
 /// The verifier uses this to commit against the proof's commitments without
 /// rebuilding any trace.
 pub struct TreeLayout {
+    /// Tree-0 preprocessed column log-sizes.
     pub preprocessed: Vec<u32>,
+    /// Tree-1 witness and multiplicity column log-sizes.
     pub trace: Vec<u32>,
+    /// Tree-2 interaction (LogUp) column log-sizes.
     pub interaction: Vec<u32>,
 }
 
@@ -557,8 +571,8 @@ fn dump_shape_census_if_requested(modules: &[&mut dyn AirProver]) {
 }
 
 /// [`prove`], additionally returning each module's opaque post-interaction
-/// payload. The payloads are indexed by module position and must be given, in
-/// the same order, to
+/// payload. The payloads are indexed by module position. The caller must give
+/// them, in the same order, to
 /// [`verify_with_expected_preprocessed_root_and_payloads`].
 pub fn prove_with_post_interaction(
     modules: &mut [&mut dyn AirProver],
@@ -746,9 +760,8 @@ static PREPROCESSED_ROOT_CACHE: OnceLock<Mutex<HashMap<PreprocessedShapeKey, Com
 /// Compute the expected tree-0 (preprocessed) commitment root for a module set,
 /// by running exactly the [`prove`]-side tree-0 path: dedup the preprocessed ids
 /// first-writer-wins, write the selected columns into a fresh commitment
-/// scheme, and commit. Pinned verifiers compute this from trusted module data
-/// and pass it
-/// to [`verify_with_expected_preprocessed_root`].
+/// scheme, and commit. Pinned verifiers compute this root from trusted module
+/// data and pass it to [`verify_with_expected_preprocessed_root`].
 ///
 /// Roots are cached per shape (ordered unique `(id, log_size)` list + FRI
 /// blow-up) in a process-global map, so repeated verifies at one shape pay the

@@ -159,8 +159,8 @@ impl MlDsaVerifyInput {
     }
 
     /// Re-encode the public key to FIPS 204 `pkEncode` bytes so the reference
-    /// verifier, which ingests raw bytes, can use this
-    /// decoded input. Inverse of `pk_decode`.
+    /// verifier, which ingests raw bytes, can use this decoded input. Inverse
+    /// of `pk_decode`.
     pub fn encode_pk(&self, profile: MlDsaProfile) -> Vec<u8> {
         crate::reference::encoding::pk_encode(profile, &self.rho, &self.t1)
     }
@@ -176,7 +176,7 @@ impl MlDsaVerifyInput {
 // length ≤ 32, so every field here (`[u8; 48/64]`, `[[u32/i32/u8; 256]; K/L]`)
 // needs a `#[serde(with)]` shim. Each shim flattens to a length-prefixed `Vec`
 // and rebuilds with a length check — self-describing and format-agnostic.
-// ponytail: hand-rolled over pulling in `serde-big-array` for four call sites.
+// Hand-rolled instead of pulling in `serde-big-array` for four call sites.
 
 /// `[u8; N]` (N > 32) ⇆ `Vec<u8>`.
 mod flat_bytes {

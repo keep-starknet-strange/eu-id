@@ -129,6 +129,7 @@ pub struct CarrierShardWitness {
     pub carrier_data: Option<carrier::InteractionData>,
 }
 
+/// The sharded carrier witnesses and their combined table multiplicities.
 pub struct PermWitness {
     pub shards: Vec<CarrierShardWitness>,
     pub table_mult: TableMultiplicities,
@@ -433,6 +434,7 @@ fn write_selected(
 // Prover.
 // =============================================================================
 
+/// The prover half of the Keccak service module pair.
 pub struct KeccakServiceProver {
     jobs: JobList,
     handle: SharedKeccakRelations,
@@ -461,7 +463,7 @@ impl KeccakServiceProver {
     pub fn new(shapes: Vec<Shape>, messages: Vec<Vec<u8>>, handle: SharedKeccakRelations) -> Self {
         let jobs = JobList::new(shapes);
         // Duplicate stream ids across jobs would let two jobs' HashIo bytes
-        // alias; fail closed at construction.
+        // alias. Fail closed at construction.
         let mut seen = std::collections::HashSet::new();
         for s in &jobs.jobs {
             assert!(
@@ -713,6 +715,7 @@ impl AirProver for KeccakServiceProver {
 // Verifier.
 // =============================================================================
 
+/// The verifier half of the Keccak service module pair.
 pub struct KeccakServiceVerifier {
     jobs: JobList,
     handle: SharedKeccakRelations,

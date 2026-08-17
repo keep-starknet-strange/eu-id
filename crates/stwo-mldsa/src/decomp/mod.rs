@@ -156,9 +156,13 @@ pub const N_BASE_COLS: usize = COL_HINT_ACC + 5;
 /// single-profile in practice, statement.rs never constructs it with
 /// ML_DSA_44) and two final hint-sum checks follow. Total: 44.
 pub const N_LOGUP_ENTRIES: usize = LANES_PER_ROW * 10 + 2 + 2;
+/// Fractions batched per interaction column.
 pub const LOGUP_BATCH: usize = 4;
+/// Batched LogUp interaction columns.
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // hint_acc is a QM31 running sum
+/// Interaction base-column count: 4 accumulator coords + one batched LogUp
+/// column (`SECURE_EXTENSION_DEGREE` base cols) per fraction batch.
 pub const N_INTERACTION_COLS: usize = N_ACC_COORD_COLS + SECURE_EXTENSION_DEGREE * N_LOGUP_COLS;
 
 fn pre_id(name: &str) -> PreProcessedColumnId {
@@ -199,6 +203,8 @@ fn row_schedule() -> Vec<(usize, usize)> {
 // Preprocessed trace.
 // =============================================================================
 
+/// Generate the decomp preprocessed columns (enabler, start, byte_pos,
+/// is_last), in commit order.
 pub fn gen_decomp_preprocessed(_profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
@@ -561,6 +567,8 @@ impl PokedLane {
 // Base trace.
 // =============================================================================
 
+/// Generate the decomp base trace from the witness: per-lane decomposition
+/// cells, the boundary zero flags, and the hint accumulator.
 pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
@@ -607,14 +615,18 @@ pub fn gen_decomp_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEv
 // The AIR.
 // =============================================================================
 
+/// AIR evaluator for the decomp component.
 #[derive(Clone)]
 pub struct DecompEval {
+    /// Trace log size (`2^log_size` padded rows).
     pub log_size: u32,
+    /// The verifier-selected profile (pinned to ML-DSA-65 by [`Self::new`]).
     pub profile: MlDsaProfile,
     /// The HashIo stream id the 768 `w1Encode` bytes are yielded into. Per
     /// instance under a SHARED keccak relation set: `stream_base +`
     /// [`STREAM_ID_CTILDE_ABSORB`] (the standalone default is the constant).
     pub ct_stream: u32,
+    /// The relations this component draws on.
     pub relations: DecompRelations,
 }
 
@@ -681,7 +693,7 @@ impl FrameworkEval for DecompEval {
         let four = E::F::from(m31(LANES_PER_ROW as u32));
         let wbid_base = byte_pos.clone() * four;
 
-        // Two lanes' worth of base columns.
+        // Four lanes' worth of base columns.
         let lanes: Vec<Vec<E::F>> = (0..LANES_PER_ROW)
             .map(|_| (0..PER_LANE).map(|_| eval.next_trace_mask()).collect())
             .collect();
@@ -914,8 +926,11 @@ impl FrameworkEval for DecompEval {
 
 /// Output of the decomp interaction generator.
 pub struct DecompInteraction {
+    /// The interaction trace (accumulator coordinates, then batched LogUp).
     pub trace: Vec<ColEval>,
+    /// The component's own LogUp claimed sum.
     pub claimed_sum: SecureField,
+    /// The range-table uses this component requires.
     pub rc_uses: RcUses,
     /// The 768 emitted `w1Encode` bytes in byte-position order.
     /// `wcell_uses` are the `(w_bind_id, w)` tuples.
@@ -927,11 +942,14 @@ pub struct DecompInteraction {
 /// Witness-only outputs needed while writing base multiplicity and bridge
 /// columns. Computing these does not require Fiat–Shamir relations.
 pub struct DecompMetadata {
+    /// The range-table uses this component requires.
     pub rc_uses: RcUses,
+    /// The 768 emitted `w1Encode` bytes in byte-position order.
     pub w1_encode_bytes: Vec<u8>,
     checked_hint_total: u32,
 }
 
+/// Compute the witness-only decomp metadata (rc census and w1Encode bytes).
 pub fn gen_decomp_metadata(witness: &MlDsaWitness) -> DecompMetadata {
     let sched = row_schedule();
     gen_decomp_metadata_inner(witness, &sched, None)
@@ -1106,6 +1124,8 @@ fn apply_trace_poke_to_metadata(
     metadata
 }
 
+/// Generate the decomp interaction trace: the hint accumulator, the batched
+/// LogUp fractions, and the claimed sum.
 pub fn gen_decomp_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
@@ -1223,7 +1243,7 @@ fn gen_decomp_interaction_inner(
     };
 
     // --- Build the logup fraction streams in AIR emission order ---
-    // Each row has 40 fractions. Each of four lanes has 8 range uses and one
+    // Each row has 44 fractions. Each of four lanes has 9 range uses and one
     // WCell use. Two hash-byte slots and two final hint-sum checks follow.
     // Keep this order equal to the AIR order.
     for lane in 0..LANES_PER_ROW {

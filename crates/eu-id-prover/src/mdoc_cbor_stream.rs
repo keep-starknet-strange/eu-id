@@ -1,5 +1,7 @@
 //! Sound byte-stream parsing for mdoc CBOR.
 //!
+//! ## Guarantees
+//!
 //! This component does not interpret semantics.
 //! It consumes each byte of a SHA-padded or raw nested stream.
 //! The bytes come from [`FieldBytesRelation`].

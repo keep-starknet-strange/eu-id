@@ -73,18 +73,27 @@ relation!(SwapRelation, SWAP_ARITY);
 relation!(StepValRelation, STEPVAL_ARITY);
 relation!(SignBitRelation, SIGNBIT_ARITY);
 
+/// The relations the SampleInBall FSM draws together after its base commit.
 #[derive(Clone)]
 pub struct SibRelations {
+    /// Challenge-coefficient binding from coeffs.
     pub ccell: CCellRelation,
+    /// Keccak byte-I/O relation for the squeeze stream.
     pub hash_io: HashIoRelation,
+    /// Offline-memory channel for the Fisher–Yates array.
     pub mem: MemRelation,
+    /// FSM↔memory address tie.
     pub swap: SwapRelation,
+    /// FSM↔memory value tie.
     pub stepval: StepValRelation,
+    /// FSM↔memory sign-bit tie.
     pub signbit: SignBitRelation,
+    /// Proof-wide range-check relation.
     pub range: RangeRelation,
 }
 
 impl SibRelations {
+    /// Draw every relation independently (standalone testing).
     pub fn draw(channel: &mut impl stwo::core::channel::Channel) -> Self {
         Self {
             ccell: CCellRelation::draw(channel),
@@ -120,6 +129,7 @@ impl SibRelations {
         }
     }
 
+    /// Dummy relations for sizing tests.
     pub fn dummy() -> Self {
         Self {
             ccell: CCellRelation::dummy(),

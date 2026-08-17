@@ -41,8 +41,11 @@ use crate::sponge_link::ns_prefix;
 use stwo_keccak::relations::SharedKeccakRelations;
 use stwo_keccak::sponge::Shape;
 
+/// Number of matrix polynomials (`k · l`, maximum shape).
 pub const MATRIX_POLYS: usize = K * L;
+/// SHAKE-128 rate in bytes.
 pub const SHAKE128_RATE: usize = 168;
+/// Rejection candidates per rate block: three bytes per candidate.
 pub const CANDIDATES_PER_BLOCK: usize = SHAKE128_RATE / 3;
 /// Fixed fail-closed resource cap.
 ///
@@ -50,20 +53,31 @@ pub const CANDIDATES_PER_BLOCK: usize = SHAKE128_RATE / 3;
 /// `2^-127.485`, just above the proof-wide `2^-128` rail. Six blocks reduce
 /// that union bound to `2^-542.030`.
 pub const MAX_EXPAND_A_SQUEEZE_BLOCKS: usize = 6;
+/// Fixed squeeze budget in bytes (six rate blocks).
 pub const MAX_EXPAND_A_SQUEEZE_BYTES: usize = SHAKE128_RATE * MAX_EXPAND_A_SQUEEZE_BLOCKS;
+/// Fixed candidate budget: `56 · 6 = 336` candidates per polynomial.
 pub const MAX_CANDIDATES: usize = CANDIDATES_PER_BLOCK * MAX_EXPAND_A_SQUEEZE_BLOCKS;
 
+/// First ExpandA stream id above the caller's `stream_base`.
 pub const EXPAND_STREAM_OFFSET: u32 = 16;
+/// Stream-id stride between consecutive polynomials (absorb id, then absorb
+/// id + 1 = squeeze id).
 pub const EXPAND_STREAM_STRIDE: u32 = 2;
 const INVERSE_EXPAND_STREAM_STRIDE: u32 = (M31_MODULUS + 1) / EXPAND_STREAM_STRIDE;
+/// Stream-id spacing the caller must leave between consecutive instances.
 pub const REQUIRED_STREAM_STRIDE: u32 = 128;
 const LAST_EXPAND_STREAM_OFFSET: u32 =
     EXPAND_STREAM_OFFSET + EXPAND_STREAM_STRIDE * (MATRIX_POLYS as u32 - 1) + 1;
+/// Largest field-safe `stream_base`: every derived stream id stays `< P`.
 pub const MAX_EXPAND_STREAM_BASE: u32 = M31_MODULUS - 1 - LAST_EXPAND_STREAM_OFFSET;
 
+/// Absorb active rows: 34 bytes per matrix polynomial.
 pub const ABSORB_ACTIVE_ROWS: usize = MATRIX_POLYS * 34;
+/// Absorb trace log size.
 pub const ABSORB_LOG_SIZE: u32 = 10;
+/// Rejection active rows: `MAX_CANDIDATES` per matrix polynomial.
 pub const REJECTION_ACTIVE_ROWS: usize = MATRIX_POLYS * MAX_CANDIDATES;
+/// Rejection trace log size.
 pub const REJECTION_LOG_SIZE: u32 = 14;
 
 fn absorb_active_rows(profile: MlDsaProfile) -> usize {
@@ -115,11 +129,18 @@ const COL_REJECT_DELTA: usize = 10;
 const COL_LO4: usize = 11;
 const COL_HI4: usize = 12;
 
+/// Absorb base-column count (the absorbed byte).
 pub const ABSORB_BASE_COLS: usize = 1;
+/// Rejection base-column count.
 pub const REJECTION_BASE_COLS: usize = 13;
+/// Absorb LogUp entries per row (HashIo yield, rho-cell yield on poly 0).
 pub const ABSORB_LOGUP_ENTRIES: usize = 2;
+/// Rejection LogUp entries per row: 3 HashIo consumes + 8 range uses + 1 NTT
+/// cell yield.
 pub const REJECTION_LOGUP_ENTRIES: usize = 12;
+/// Absorb interaction columns (one batched fraction).
 pub const ABSORB_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
+/// Rejection interaction columns: batched LogUp (batch 4).
 pub const REJECTION_INTERACTION_COLS: usize =
     SECURE_EXTENSION_DEGREE * REJECTION_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 
@@ -153,45 +174,72 @@ const _: () = assert!(LAST_EXPAND_STREAM_OFFSET < REQUIRED_STREAM_STRIDE);
 /// Canonical block-aligned rejection prefixes for one `rho`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpandAWitness {
+    /// The verifier-selected parameter set.
     pub profile: MlDsaProfile,
+    /// The 32-byte matrix seed `rho`.
     pub rho: [u8; 32],
+    /// One canonical block-aligned squeeze prefix per matrix polynomial.
     pub squeeze_streams: Vec<Vec<u8>>,
 }
 
 /// Fail-closed witness and fixed-resource validation errors.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExpandAError {
+    /// The witness holds the wrong number of squeeze streams.
     StreamCount {
+        /// Expected stream count (`matrix_polys`).
         expected: usize,
+        /// Actual stream count.
         actual: usize,
     },
+    /// A squeeze stream is empty.
     EmptyStream {
+        /// Offending polynomial index.
         poly: usize,
     },
+    /// A squeeze stream length is not a multiple of the SHAKE-128 rate.
     StreamNotBlockAligned {
+        /// Offending polynomial index.
         poly: usize,
+        /// Offending stream length in bytes.
         len: usize,
     },
+    /// A squeeze stream exceeds the six-block cap.
     StreamExceedsCap {
+        /// Offending polynomial index.
         poly: usize,
+        /// Offending stream length in bytes.
         len: usize,
     },
+    /// Six blocks did not yield 256 accepted candidates.
     SqueezeCapExceeded {
+        /// Offending polynomial index.
         poly: usize,
     },
+    /// A squeeze stream is not the canonical block-aligned prefix.
     NonCanonicalLength {
+        /// Offending polynomial index.
         poly: usize,
+        /// Canonical length in bytes.
         expected: usize,
+        /// Actual length in bytes.
         actual: usize,
     },
+    /// A squeeze stream differs from canonical SHAKE-128 output.
     StreamMismatch {
+        /// Offending polynomial index.
         poly: usize,
     },
+    /// The stream base exceeds the field-safe maximum.
     InvalidStreamBase {
+        /// Offending stream base.
         stream_base: u32,
+        /// Maximum field-safe base (`MAX_EXPAND_STREAM_BASE`).
         max: u32,
     },
+    /// A polynomial index is outside the profile's active range.
     PolynomialOutOfRange {
+        /// Offending polynomial index.
         poly: usize,
     },
 }
@@ -253,11 +301,14 @@ impl std::error::Error for ExpandAError {}
 /// Shared output handles drawn and published by this module.
 #[derive(Clone)]
 pub struct ExpandABindings {
+    /// Shared `rho`-cell handle this module publishes.
     pub rho: SharedRhoCellRelation,
+    /// Shared NTT-cell handle this module publishes.
     pub ntt: SharedNttCellRelation,
 }
 
 impl ExpandABindings {
+    /// Create both shared handles (undrawn).
     pub fn new() -> Self {
         Self {
             rho: SharedRhoCellRelation::new(),
@@ -275,7 +326,9 @@ impl Default for ExpandABindings {
 /// The public proof claim for private `ExpandA`. Both log sizes are constants.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpandAClaim {
+    /// LogUp claimed sum of the absorb component.
     pub absorb_claimed_sum: SecureField,
+    /// LogUp claimed sum of the rejection component.
     pub rejection_claimed_sum: SecureField,
 }
 
@@ -283,7 +336,9 @@ pub struct ExpandAClaim {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpandAPreprocessedComponent {
+    /// The absorb component's preprocessed stack.
     Absorb,
+    /// The rejection component's preprocessed stack.
     Rejection,
 }
 
@@ -291,32 +346,50 @@ pub enum ExpandAPreprocessedComponent {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpandATraceAttack {
+    /// Overwrite one absorb base-trace cell.
     Absorb {
+        /// Attacked row.
         row: usize,
+        /// Injected value.
         value: u32,
     },
+    /// Overwrite one rejection base-trace cell.
     Rejection {
+        /// Attacked row.
         row: usize,
+        /// Attacked column.
         column: usize,
+        /// Injected value.
         value: u32,
     },
+    /// Overwrite one preprocessed cell.
     Preprocessed {
+        /// Attacked component's preprocessed stack.
         component: ExpandAPreprocessedComponent,
+        /// Attacked row.
         row: usize,
+        /// Attacked column.
         column: usize,
+        /// Injected value.
         value: u32,
     },
 }
 
+/// The relations the ExpandA components draw on.
 #[derive(Clone)]
 pub struct ExpandARelations {
+    /// Keccak byte-I/O relation for the absorb and squeeze streams.
     pub hash_io: HashIoRelation,
+    /// Proof-wide range relation.
     pub range: RangeRelation,
+    /// Private `rho` cell relation.
     pub rho: RhoCellRelation,
+    /// Stage-zero NTT cell relation.
     pub ntt: NttCellRelation,
 }
 
 impl ExpandARelations {
+    /// Dummy relations for sizing tests.
     pub fn dummy() -> Self {
         Self {
             hash_io: HashIoRelation::dummy(),
@@ -327,6 +400,7 @@ impl ExpandARelations {
     }
 }
 
+/// Reject a `stream_base` whose derived stream ids would wrap the M31 field.
 pub fn validate_stream_base(stream_base: u32) -> Result<(), ExpandAError> {
     if stream_base > MAX_EXPAND_STREAM_BASE {
         return Err(ExpandAError::InvalidStreamBase {
@@ -344,6 +418,7 @@ fn validate_poly(profile: MlDsaProfile, poly: usize) -> Result<u32, ExpandAError
     Ok(poly as u32)
 }
 
+/// Absorb stream id for one matrix polynomial: `stream_base + 16 + 2·poly`.
 pub fn absorb_stream_id(
     profile: MlDsaProfile,
     stream_base: u32,
@@ -354,6 +429,7 @@ pub fn absorb_stream_id(
     Ok(stream_base + EXPAND_STREAM_OFFSET + EXPAND_STREAM_STRIDE * poly)
 }
 
+/// Squeeze stream id for one matrix polynomial: the absorb id + 1.
 pub fn squeeze_stream_id(
     profile: MlDsaProfile,
     stream_base: u32,
@@ -486,6 +562,8 @@ fn validate_stream_with(
     Ok(counts)
 }
 
+/// Validate all stored prefixes against canonical SHAKE-128 and return their
+/// consumed-candidate counts.
 pub fn validate_stream(witness: &ExpandAWitness) -> Result<Vec<usize>, ExpandAError> {
     validate_stream_with(witness, fixed_squeeze_stream)
 }
@@ -535,6 +613,8 @@ fn rejection_preprocessed_ids(ns: &str) -> Vec<PreProcessedColumnId> {
         .collect()
 }
 
+/// Preprocessed ids for both components (absorb then rejection), in commit
+/// order.
 pub fn expand_a_preprocessed_ids(ns: &str) -> Vec<PreProcessedColumnId> {
     let mut ids = absorb_preprocessed_ids(ns);
     ids.extend(rejection_preprocessed_ids(ns));
@@ -615,6 +695,8 @@ fn gen_rejection_preprocessed(
         .collect()
 }
 
+/// Generate the absorb and rejection preprocessed columns for the selected
+/// profile.
 pub fn gen_expand_a_preprocessed(profile: MlDsaProfile, ns: &str) -> Vec<ColEval> {
     gen_expand_a_preprocessed_with_attack(profile, ns, None)
 }
@@ -1296,6 +1378,7 @@ pub struct ExpandAProver {
 }
 
 impl ExpandAProver {
+    /// Create the prover module; validates the witness fail-closed.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         profile: MlDsaProfile,
@@ -1333,14 +1416,17 @@ impl ExpandAProver {
         })
     }
 
+    /// The current public claim (both claimed sums).
     pub fn claim(&self) -> ExpandAClaim {
         self.claim.clone()
     }
 
+    /// The range-table uses this module requires.
     pub fn range_uses(&self) -> &RcUses {
         &self.range_uses
     }
 
+    /// The SHAKE-128 job shapes and absorb messages for the Keccak service.
     pub fn keccak_jobs(&self) -> Result<(Vec<Shape>, Vec<Vec<u8>>), ExpandAError> {
         Ok((
             shake128_job_shapes(self.profile, self.stream_base)?,
@@ -1486,6 +1572,7 @@ pub struct ExpandAVerifier {
 }
 
 impl ExpandAVerifier {
+    /// Create the verifier module from the public claim.
     pub fn new(
         profile: MlDsaProfile,
         claim: ExpandAClaim,

@@ -1,5 +1,7 @@
 //! Deterministic circuit identity generator for the canonical TS13 demo.
 //!
+//! ## Build integration
+//!
 //! `src/bin/ts13_demo_artifact.rs` compiles this module.
 //! The JSON input has no defaults. The composed prover supplies the geometry.
 

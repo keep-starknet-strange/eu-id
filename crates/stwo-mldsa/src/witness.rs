@@ -64,7 +64,7 @@ pub const HALF_B: i128 = B / 2;
 /// Degree bound of the ℤ[X] product `u_i`: `deg ≤ 510` ⇒ 511 coefficients.
 pub const U_LEN: usize = 2 * N - 1; // 511
 
-/// Digit counts for each polynomial kind.
+/// `z_j` digit count.
 pub const T_Z: usize = 3;
 /// `w_i` digit count.
 pub const T_W: usize = 3;
@@ -510,8 +510,8 @@ fn build_from_trace(
 /// ```
 ///
 /// We assert exact `B`-divisibility at each carry step and that the closing
-/// `t = 5` boundary equation holds (this is what forces the carry chain to zero
-/// out. No explicit boundary constraint is necessary.
+/// `t = 5` boundary equation holds (this is what forces the carry chain to
+/// zero out; no explicit boundary constraint is necessary).
 #[allow(clippy::too_many_arguments)]
 fn compute_carries(
     a_digits: &[Vec<[i128; T_A]>], // a_digits[j][m]
@@ -533,7 +533,7 @@ fn compute_carries(
     let mut carry = vec![[0i128; T_MAX + 1]; U_LEN];
     for m in 0..U_LEN {
         let mut c_prev = 0i128; // C_{m,−1} = 0 (structural).
-                                // Carry columns t ∈ [0, T_MAX]: solve E_{m,t}=0 for the carry-out.
+        // Carry columns t ∈ [0, T_MAX]: solve E_{m,t}=0 for the carry-out.
         for t in 0..=T_MAX {
             // E_{m,t} = F_{m,t} − C_prev + B·C_out = 0  ⇒  C_out = (C_prev − F)/B.
             let partial = f[m][t] - c_prev;

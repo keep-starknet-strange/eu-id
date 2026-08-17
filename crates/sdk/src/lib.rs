@@ -1,9 +1,15 @@
 //! ML-DSA EU-ID ZK SDK, exposed to Kotlin and Swift through UniFFI.
 //!
+//! ## Entry point
+//!
 //! [`prove_identity`] accepts one tagged theorem and returns its opaque proof
 //! bytes. The TS13 variant runs the canonical public-input-unlinkable identity
-//! proof with revocation. The Product variant is interface-compatible only:
-//! this branch ships no product circuit, so it fails closed with
+//! proof with revocation.
+//!
+//! ## Product variant
+//!
+//! The Product variant is interface-compatible only. This branch ships no
+//! product circuit, so the Product variant fails closed with
 //! [`ZkError::UnsupportedProofSystem`].
 
 use bincode::Options;
@@ -43,6 +49,7 @@ where
     handle.join().map_err(|_| failure)?
 }
 
+/// Predicate mode of a product theorem: age, nationality, or a combination.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PredicateMode {
     Age,
@@ -80,6 +87,7 @@ impl PredicateMode {
     }
 }
 
+/// Nationality predicate mode. `Any` accepts every nationality.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NatMode {
     Any,
@@ -93,6 +101,8 @@ impl NatMode {
     }
 }
 
+/// The ZK contract v1: canonical names for the spec, elements, parameters,
+/// and results.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct ZkContract {
     pub system_name: String,
@@ -126,12 +136,13 @@ const TS13_REVOCATION_ID_WIDTH_BYTES: u32 = 8;
 const ML_DSA_65_PUBLIC_KEY_BYTES: usize = eu_id_prover::ts13_demo::ML_DSA_65_PUBLIC_KEY_BYTES;
 const SECONDS_PER_DAY: i64 = 86_400;
 /// Compat document envelope over the canonical identity envelope. V3 was the
-/// pre-canonicalization circuit; those proofs no longer verify anywhere.
+/// pre-canonicalization circuit; V3 proofs no longer verify anywhere.
 const TS13_ENVELOPE_FORMAT_V4: u16 = 4;
-/// Bound the wallet-compatible wrapper while leaving room for the fixed
+/// Bounds the wallet-compatible wrapper while leaving room for the fixed
 /// identity envelope, issuer key, and request binding.
 const MAX_TS13_DOCUMENT_PROOF_BYTES: usize = 2_097_152;
 
+/// Disclosure kind of a TS13 attribute: equality or extension.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Ts13DisclosureKind {
     Equality,
@@ -183,6 +194,7 @@ pub struct Ts13PresentationRequest {
     pub revocation_epoch: u32,
 }
 
+/// One attribute disclosed in a [`Ts13ZkDocument`].
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ts13DisclosedAttribute {
     pub namespace: String,
@@ -191,6 +203,8 @@ pub struct Ts13DisclosedAttribute {
     pub disclosure: Ts13DisclosureKind,
 }
 
+/// The ZK document a wallet returns to a verifier: binding hash, disclosed
+/// attributes, and proof.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ts13ZkDocument {
     pub doc_type: String,
@@ -213,6 +227,7 @@ pub struct Ts13MdocWitness {
     pub revocation_signature: Vec<u8>,
 }
 
+/// Returns the ZK contract v1 with the canonical field names.
 #[uniffi::export]
 pub fn zk_contract_v1() -> ZkContract {
     ZkContract {
@@ -428,6 +443,8 @@ fn is_lower_hex_sha256(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
+/// Validates a TS13 presentation request against the pinned canonical tuple.
+/// Fails closed on any unsupported field.
 #[uniffi::export]
 pub fn ts13_validate_presentation_request(
     request: &Ts13PresentationRequest,
@@ -480,6 +497,8 @@ pub fn ts13_validate_presentation_request(
     Ok(())
 }
 
+/// Builds a [`Ts13ZkDocument`] from a validated request. Binds the document to
+/// the request through `request_binding_hash`.
 #[uniffi::export]
 pub fn ts13_build_zk_document(
     request: Ts13PresentationRequest,
@@ -498,9 +517,9 @@ pub fn ts13_build_zk_document(
 }
 
 /// Compat wrapper around the canonical identity envelope. The canonical
-/// envelope is statement-free (unlinkability), so the issuer key the verifier
-/// must check against `trusted_issuer_hashes` rides here, exactly as the old
-/// envelope carried it inside its mdoc statement.
+/// envelope carries no statement (unlinkability). The verifier must check the
+/// issuer key against `trusted_issuer_hashes`, so this wrapper carries the
+/// issuer key, as the old envelope carried it inside its mdoc statement.
 #[derive(Serialize, Deserialize)]
 struct Ts13ProofEnvelope {
     envelope_format: u16,
@@ -523,9 +542,10 @@ fn decode_ts13_proof_envelope(proof: &[u8]) -> Result<Ts13ProofEnvelope, ZkError
             "TS13 proof envelope exceeds size limit".to_string(),
         ));
     }
-    // Peek only the leading `envelope_format` field: allow trailing bytes here
-    // (the rest of the envelope follows it). The full decode below still pins
-    // exact consumption via `reject_trailing_bytes`.
+    // Decode only the leading `envelope_format` field. Trailing bytes are
+    // allowed here because the rest of the envelope follows that field. The
+    // full decode below still pins exact consumption via
+    // `reject_trailing_bytes`.
     let envelope_format: u16 = bounded_bincode_options(MAX_TS13_DOCUMENT_PROOF_BYTES)
         .allow_trailing_bytes()
         .deserialize(proof)
@@ -550,8 +570,8 @@ fn canonical_ts13_disclosures() -> Vec<Ts13DisclosedAttribute> {
     }]
 }
 
-/// The canonical [`IdentityStatement`] a presentation request pins down, given
-/// the issuer public key resolved against `trusted_issuer_hashes`.
+/// Builds the canonical [`IdentityStatement`] that a presentation request pins
+/// down, given the issuer public key resolved against `trusted_issuer_hashes`.
 fn ts13_identity_statement(
     request: &Ts13PresentationRequest,
     trusted_issuer_public_key: Vec<u8>,
@@ -655,6 +675,9 @@ fn ts13_document_matches_request(
     true
 }
 
+/// Verifies a [`Ts13ZkDocument`] against a presentation request. Returns
+/// `Ok(false)` when the document does not match the request, the envelope is
+/// malformed, the issuer key is not trusted, or the proof does not verify.
 #[uniffi::export]
 pub fn ts13_verify_zk_document(
     request: &Ts13PresentationRequest,
@@ -681,49 +704,58 @@ pub fn ts13_verify_zk_document(
     Ok(verified)
 }
 
+/// Returns the SDK crate version.
 #[uniffi::export]
 pub fn sdk_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Returns the canonical element identifier for an age-over predicate.
 #[uniffi::export]
 pub fn result_age_over(min_age: u32) -> String {
     format!("age_over_{min_age}")
 }
 
+/// Parses a predicate-mode token. Returns `None` for unknown tokens.
 #[uniffi::export]
 pub fn predicate_mode_from_token(token: String) -> Option<PredicateMode> {
     PredicateMode::from_token(&token)
 }
 
+/// Returns the wire token of a predicate mode.
 #[uniffi::export]
 pub fn predicate_mode_token(mode: PredicateMode) -> String {
     mode.as_token().to_string()
 }
 
+/// Reports whether the predicate mode evaluates the age predicate.
 #[uniffi::export]
 pub fn predicate_mode_uses_age(mode: PredicateMode) -> bool {
     mode.uses_age()
 }
 
+/// Reports whether the predicate mode evaluates the nationality predicate.
 #[uniffi::export]
 pub fn predicate_mode_uses_nat(mode: PredicateMode) -> bool {
     mode.uses_nat()
 }
 
+/// Returns the wire token of a nationality mode.
 #[uniffi::export]
 pub fn nat_mode_token(mode: NatMode) -> String {
     mode.as_token().to_string()
 }
 
+/// Converts an ISO 3166-1 alpha-2 code to its numeric code. Returns `None`
+/// for unknown codes.
 #[uniffi::export]
 pub fn iso_alpha2_to_numeric(alpha2: String) -> Option<u32> {
     eu_id_prover::iso_alpha2_to_numeric(&alpha2)
 }
 
-/// Which ZK identity system this SDK build implements. This branch is ML-DSA
-/// by construction; the P-256 variant exists for interface compatibility with
-/// callers that switch on it.
+/// Identifies the ZK identity system this SDK build implements. This build is
+/// ML-DSA by construction. The P-256 variant exists only for interface
+/// compatibility with callers that switch on the system kind.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZkSystemKind {
     P256,
@@ -746,11 +778,13 @@ pub enum TrustedIssuers {
     PublicKeys(Vec<Vec<u8>>),
 }
 
+/// The result of a successful identity-proof verification.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct ZkVerifyResult {
     pub ok: bool,
 }
 
+/// SDK errors surfaced over UniFFI. Error messages carry no private data.
 #[derive(uniffi::Error, thiserror::Error, Clone, Debug, PartialEq, Eq)]
 pub enum ZkError {
     #[error("invalid input: {0}")]
@@ -799,7 +833,7 @@ impl From<IdentityError> for ZkError {
     }
 }
 
-/// Existing product theorem, without any optional TS13 fields.
+/// Holds the existing product theorem, without any optional TS13 fields.
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
 pub struct ProductPublicStatementV1 {
     pub spec_id: String,
@@ -815,7 +849,7 @@ pub struct ProductPublicStatementV1 {
     pub nat_mode: NatMode,
 }
 
-/// Existing product mdoc witness, without any optional TS13 fields.
+/// Holds the existing product mdoc witness, without any optional TS13 fields.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct ProductMdocWitnessV1 {
     pub document: Vec<u8>,
@@ -855,8 +889,9 @@ pub fn prove_identity(
             })
             .map_err(ZkError::from)
         }
-        // ponytail: no product circuit on this branch; the variant exists so
-        // callers compile — restoring the product prover is a separate effort.
+        // ponytail: this branch ships no product circuit. The Product variant
+        // exists so callers compile. Restoring the product prover is a separate
+        // effort.
         (ZkPublicStatement::ProductV1(_), ZkMdocWitness::ProductV1(_)) => {
             Err(ZkError::UnsupportedProofSystem)
         }

@@ -23,6 +23,7 @@ pub enum XofMode {
 }
 
 impl XofMode {
+    /// Sponge rate in bytes.
     pub const fn rate(self) -> usize {
         match self {
             Self::Shake256 => N_BYTES_IN_RATE,
@@ -30,6 +31,7 @@ impl XofMode {
         }
     }
 
+    /// Transcript tag that binds the variant to the channel.
     pub const fn transcript_tag(self) -> u64 {
         match self {
             Self::Shake256 => 256,
@@ -57,10 +59,15 @@ pub struct Shape {
     /// message and circuit artifact; serializing a capacity-shaped `Shape`
     /// fails instead of treating it as a fixed-length shape.
     pub message_capacity: Option<usize>,
+    /// Absorb rows allocated by the fixed geometry.
     pub n_absorb: usize,
+    /// Squeeze blocks of the job.
     pub n_squeeze: usize,
+    /// Globally unique stream id of the absorb byte stream.
     pub absorb_stream_id: u32,
+    /// Globally unique stream id of the squeeze byte stream.
     pub squeeze_stream_id: u32,
+    /// Global permutation-id base. The job list re-stamps it cumulatively.
     pub perm_id_base: usize,
 }
 
@@ -134,6 +141,7 @@ impl<'de> Deserialize<'de> for Shape {
 }
 
 impl Shape {
+    /// A SHAKE-256 fixed-length job.
     pub fn new(
         message_len: usize,
         n_squeeze: usize,
@@ -260,6 +268,7 @@ impl Shape {
         }
     }
 
+    /// Whether the job fixes its geometry by capacity.
     pub const fn has_message_capacity(&self) -> bool {
         self.message_capacity.is_some()
     }
@@ -269,19 +278,23 @@ impl Shape {
         (self.message_len + 1).div_ceil(self.rate())
     }
 
+    /// The job's sponge rate in bytes.
     pub const fn rate(&self) -> usize {
         self.xof_mode.rate()
     }
 
+    /// Number of permutations in the job.
     pub fn n_perms(&self) -> usize {
         n_perms(self.n_absorb, self.n_squeeze)
     }
 
+    /// Total squeeze output bytes.
     pub fn output_len(&self) -> usize {
         self.n_squeeze * self.rate()
     }
 }
 
+/// Invalid capacity-shape parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShapeError {
     MessageExceedsCapacity {

@@ -3,9 +3,8 @@
 //! Pipeline:
 //!
 //! 1. `compute_padding_witness(msg)` applies FIPS 180-4 section 5.1.1.
-//! 2. `compute_block_witness(h_in, block_bytes)` creates the schedule, 64
-//!    round witnesses, and 8
-//!    finalization adds.
+//! 2. `compute_block_witness(h_in, block_bytes)` creates the schedule, the
+//!    64 round witnesses, and the 8 finalization adds.
 //! 3. `compute_sha256_witness(msg)` chains the blocks. It uses `H⁽⁰⁾ = IV` and
 //!    `H⁽ᵗ⁺¹⁾ = compress(H⁽ᵗ⁾, blockₜ)` for each block.
 //!
@@ -45,11 +44,12 @@ fn add_words_with_carries(words: &[u32]) -> (u32, AddCarries) {
     let mut hi_sum: u32 = 0;
     for &w in words {
         lo_sum = lo_sum.wrapping_add(w & 0xFFFF);
-        // accumulate the actual u32 hi sum WITHOUT wrap so we can read the
-        // top carry cleanly.
+        // Accumulate the u32 hi sum without wrap so the top carry reads
+        // cleanly.
         hi_sum += w >> LIMB_BITS;
     }
-    let carry_lo = lo_sum >> LIMB_BITS; // bounded by len(words) - 1 in practice
+    // `k` addend limbs sum to `< k · 2¹⁶`, so `carry_lo ≤ k − 1`.
+    let carry_lo = lo_sum >> LIMB_BITS;
     let res_lo = lo_sum & 0xFFFF;
     let hi_total = hi_sum + carry_lo;
     let carry_hi = hi_total >> LIMB_BITS;
@@ -182,16 +182,16 @@ pub fn compute_block_witness(
         schedule_entries,
         rounds,
         finalization_carries,
-        // Padding-role witness is populated at the top-level emitter,
-        // where the message length and total block count are known.
+        // The top-level emitter populates the padding-role witness, where
+        // the message length and total block count are known.
         padding_row: crate::types::PaddingRowWitness::default(),
     }
 }
 
-/// Top-level witness emitter — pads, parses, and produces one BlockWitness
+/// Top-level witness emitter: pad, parse, and produce one `BlockWitness`
 /// per padded block. The returned digest is recoverable from the last
-/// block's `h_out`; we attach it explicitly so consumers don't have to
-/// recompose.
+/// block's `h_out`; the emitter attaches it explicitly so consumers do not
+/// recompose it.
 pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
     let padding = compute_padding_witness(msg);
     let blocks_parsed = parse_blocks(&padding.padded);
@@ -201,7 +201,7 @@ pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
     let mut h_state = HashState(IV);
     let mut blocks = Vec::with_capacity(n_blocks);
     for (idx, _block) in blocks_parsed.iter().enumerate() {
-        // Re-extract the raw bytes for this block — the parsed `Block`
+        // Re-extract the raw bytes of this block; the parsed `Block`
         // value's bytes are an internal detail.
         let raw: [u8; BLOCK_BYTES] = padding.padded[idx * BLOCK_BYTES..(idx + 1) * BLOCK_BYTES]
             .try_into()
@@ -228,9 +228,9 @@ pub fn compute_sha256_witness(msg: &[u8]) -> Sha256Witness {
     }
 }
 
-/// Smoke check: assert `(result_word, carries)` consistency for one
-/// `add_words_with_carries` call. Available so the trace generator can
-/// reuse the same identity at constraint-emit time without duplicating it.
+/// Check the `(result_word, carries)` consistency of one
+/// `add_words_with_carries` call. The trace generator reuses the same
+/// identity at constraint-emit time without duplicating it.
 pub fn add_identity_holds(addends: &[u32], result: u32, carries: AddCarries) -> bool {
     let lo_sum: u32 = addends.iter().map(|w| w & 0xFFFF).sum();
     let hi_sum: u32 = addends.iter().map(|w| w >> LIMB_BITS).sum();

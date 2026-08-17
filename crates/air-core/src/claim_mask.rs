@@ -1,3 +1,17 @@
+//! Random mask traces that hide per-component LogUp claimed sums.
+//!
+//! Each masked component adds the fraction `mask * beta / 1` to its LogUp sum,
+//! where `mask` is a random QM31 value per row and `beta` is a shared nonzero
+//! challenge. [`ClaimMaskRing`] generates one mask trace per component. The
+//! per-trace target sums telescope to zero, so the ring adds nothing to the
+//! global LogUp balance.
+//!
+//! ## Challenge
+//!
+//! [`ClaimMaskChallengeModule`] draws `beta` once from the shared Fiat-Shamir
+//! channel and publishes it through [`SharedClaimMaskChallenge`]. Every masked
+//! component must use the same `beta`; otherwise the mask sums do not cancel.
+
 use std::collections::VecDeque;
 use std::fmt;
 use std::fs::File;
@@ -25,6 +39,8 @@ use crate::{Air, AirProver, Ch, Mc, TreeLayout};
 /// The TS13 profile uses a 256-row minimum mask. This size lets its log-8
 /// merged-SHA component join the zero-sum ring with the semantic parsers.
 pub const CLAIM_MASK_MIN_LOG_SIZE: u32 = 8;
+/// Number of M31 columns in a claim-mask trace. Four columns hold the four
+/// limbs of one QM31 mask value per row.
 pub const CLAIM_MASK_TRACE_COLUMNS: usize = 4;
 
 const CLAIM_MASK_PROTOCOL_VERSION: u64 = 1;
@@ -44,36 +60,49 @@ const CLAIM_MASK_CHALLENGE_DOMAIN: [u32; 8] = [
 ];
 const CLAIM_MASK_PRG_DOMAIN: &[u8] = b"eu-id/claim-mask/prg/v1";
 
+/// A claim-mask column: M31 values in bit-reversed circle-domain order.
 pub type ClaimMaskColumn = CircleEvaluation<SimdBackend, M31, BitReversedOrder>;
 
+/// Errors from claim-mask ring construction, trace consumption, and the shared
+/// challenge.
 #[derive(Debug)]
 pub enum ClaimMaskError {
+    /// The ring has fewer than two components.
     TooFewComponents {
         count: usize,
     },
+    /// A component log-size is below [`CLAIM_MASK_MIN_LOG_SIZE`].
     LogSizeTooSmall {
         index: usize,
         log_size: u32,
         minimum: u32,
     },
+    /// A component log-size does not fit this platform.
     LogSizeTooLarge {
         index: usize,
         log_size: u32,
     },
+    /// OS entropy for the mask PRG is unavailable.
     Entropy(io::Error),
+    /// A component requested a trace out of the declared log-size order.
     LogSizeOutOfOrder {
         index: usize,
         expected: u32,
         actual: u32,
     },
+    /// The ring has no trace left for the requested log-size.
     Exhausted {
         requested_log_size: u32,
     },
+    /// Not all traces were consumed.
     NotExhausted {
         remaining: usize,
     },
+    /// The shared challenge was not drawn.
     ChallengeNotDrawn,
+    /// The shared challenge was already initialized.
     ChallengeAlreadySet,
+    /// The shared challenge must be nonzero.
     ZeroChallenge,
 }
 
@@ -162,18 +191,26 @@ fn validate_ordered_log_sizes(ordered_log_sizes: &[u32]) -> Result<(), ClaimMask
     Ok(())
 }
 
+/// The mask challenge shared by all masked components in a proof.
+///
+/// [`ClaimMaskChallengeModule`] sets the value once. Every masked component
+/// reads the same nonzero challenge, so the mask sums cancel in the global
+/// LogUp balance.
 #[derive(Clone, Debug, Default)]
 pub struct SharedClaimMaskChallenge(Arc<OnceLock<QM31>>);
 
 impl SharedClaimMaskChallenge {
+    /// Create an empty shared challenge.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Return the challenge, or `None` before it is drawn.
     pub fn get(&self) -> Option<QM31> {
         self.0.get().copied()
     }
 
+    /// Return the challenge, or [`ClaimMaskError::ChallengeNotDrawn`].
     pub fn require(&self) -> Result<QM31, ClaimMaskError> {
         self.get().ok_or(ClaimMaskError::ChallengeNotDrawn)
     }
@@ -188,6 +225,11 @@ impl SharedClaimMaskChallenge {
     }
 }
 
+/// The module that draws the shared claim-mask challenge.
+///
+/// The module commits no columns. It mixes the protocol domain, version, and
+/// ordered component log-sizes into the transcript, then draws a nonzero
+/// challenge into the shared slot.
 #[derive(Clone, Debug)]
 pub struct ClaimMaskChallengeModule {
     shared: SharedClaimMaskChallenge,
@@ -195,6 +237,7 @@ pub struct ClaimMaskChallengeModule {
 }
 
 impl ClaimMaskChallengeModule {
+    /// Create the module for the ordered component log-sizes.
     pub fn new(
         shared: SharedClaimMaskChallenge,
         ordered_log_sizes: impl Into<Vec<u32>>,
@@ -274,6 +317,8 @@ impl AirProver for ClaimMaskChallengeModule {
     }
 }
 
+/// One component's mask trace: four M31 columns of random values whose QM31
+/// sum equals `target_sum`.
 #[derive(Clone, Debug)]
 pub struct ClaimMaskTrace {
     columns: [ClaimMaskColumn; CLAIM_MASK_TRACE_COLUMNS],
@@ -281,28 +326,35 @@ pub struct ClaimMaskTrace {
 }
 
 impl ClaimMaskTrace {
+    /// The trace log-size.
     pub fn log_size(&self) -> u32 {
         self.columns[0].domain.log_size()
     }
 
+    /// The four M31 columns, one per QM31 limb.
     pub fn columns(&self) -> &[ClaimMaskColumn; CLAIM_MASK_TRACE_COLUMNS] {
         &self.columns
     }
 
+    /// The QM31 sum of all mask values in the trace.
     pub fn target_sum(&self) -> QM31 {
         self.target_sum
     }
 
+    /// The number of packed SIMD rows.
     pub fn packed_rows(&self) -> usize {
         self.columns[0].values.data.len()
     }
 
+    /// Read the packed QM31 mask at SIMD row `vec_row`.
     pub fn packed_at(&self, vec_row: usize) -> PackedQM31 {
         PackedQM31::from_packed_m31s(std::array::from_fn(|coordinate| {
             self.columns[coordinate].values.data[vec_row]
         }))
     }
 
+    /// Compute the packed mask fraction `(mask * beta, 1)` at SIMD row
+    /// `vec_row`.
     pub fn packed_fraction_at(&self, vec_row: usize, beta: QM31) -> (PackedQM31, PackedQM31) {
         packed_claim_mask_fraction(self.packed_at(vec_row), beta)
     }
@@ -338,6 +390,11 @@ impl ClaimMaskTrace {
     }
 }
 
+/// The ordered set of mask traces for one proof.
+///
+/// The per-trace target sums telescope to zero, so the ring adds nothing to
+/// the global LogUp balance. Components take traces in the declared log-size
+/// order. [`ClaimMaskRing::finish`] checks full consumption.
 #[derive(Debug)]
 pub struct ClaimMaskRing {
     traces: VecDeque<ClaimMaskTrace>,
@@ -345,6 +402,7 @@ pub struct ClaimMaskRing {
 }
 
 impl ClaimMaskRing {
+    /// Generate the ring for the ordered component log-sizes, using OS entropy.
     pub fn new(ordered_log_sizes: &[u32]) -> Result<Self, ClaimMaskError> {
         validate_ordered_log_sizes(ordered_log_sizes)?;
         let mut randomness = ClaimMaskPrg::from_os()?;
@@ -365,6 +423,7 @@ impl ClaimMaskRing {
         })
     }
 
+    /// Take the next trace. The trace must have log-size `log_size`.
     pub fn take(&mut self, log_size: u32) -> Result<ClaimMaskTrace, ClaimMaskError> {
         let trace = self.traces.front().ok_or(ClaimMaskError::Exhausted {
             requested_log_size: log_size,
@@ -384,6 +443,7 @@ impl ClaimMaskRing {
             .expect("claim-mask trace existed before pop"))
     }
 
+    /// Check that every trace was consumed.
     pub fn finish(&self) -> Result<(), ClaimMaskError> {
         if self.traces.is_empty() {
             Ok(())
@@ -395,12 +455,16 @@ impl ClaimMaskRing {
     }
 }
 
+/// Add the mask fraction `mask * beta / 1` to the component's LogUp sum. The
+/// challenge `beta` must be nonzero.
 pub fn add_claim_mask_fraction<E: EvalAtRow>(eval: &mut E, beta: QM31) {
     assert!(!beta.is_zero(), "claim-mask challenge must be nonzero");
     let mask = E::combine_ef(std::array::from_fn(|_| eval.next_trace_mask()));
     eval.write_logup_frac(Fraction::new(mask * beta, E::EF::one()));
 }
 
+/// Packed form of [`add_claim_mask_fraction`]: return `(mask * beta, 1)`. The
+/// challenge `beta` must be nonzero.
 pub fn packed_claim_mask_fraction(mask: PackedQM31, beta: QM31) -> (PackedQM31, PackedQM31) {
     assert!(!beta.is_zero(), "claim-mask challenge must be nonzero");
     (mask * beta, PackedQM31::one())

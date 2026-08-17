@@ -1,5 +1,7 @@
 //! Private MobileSecurityObject fact binding for the TS13 identity proof.
 //!
+//! ## Data flow
+//!
 //! `mdoc_private_message::MdocPrivateMessageProvider` provides the issuer
 //! `Sig_structure`.
 //! This component consumes positive issuer-message tuples.
@@ -10,7 +12,7 @@
 //! A separate component scans the namespace-scoped `valueDigests` map.
 //! Both components share [`SharedMdocMsoStartRelation`].
 //!
-//! # Relation polarity
+//! ## Relation polarity
 //!
 //! | relation | provider | sign | consumer | sign |
 //! |---|---|---:|---|---:|
@@ -413,7 +415,7 @@ impl MdocPrivateMsoBindWitness {
         issuer_message: Vec<u8>,
         mso_bytes: &[u8],
     ) -> Result<Self, MdocPrivateMsoBindError> {
-        // Validate all public limits before you construct the search value.
+        // Validate all public limits before constructing the search value.
         // Relation handles do not change this canonical witness helper.
         validate_spec(spec)?;
         if issuer_message.len() != spec.issuer_message_len {
@@ -1416,7 +1418,7 @@ fn private_mso_interaction_trace(
         );
     }
 
-    // Claimed-sum blinder is always the final main-component site.
+    // The claimed-sum blinder is always the final main-component site.
     let blinder_numerator = PackedQM31::broadcast(inputs.blinder_m);
     let blinder_denominator = blinder_denominator(inputs.blinder_relation, inputs.blinder_v);
     sites.push(vec![(blinder_numerator, blinder_denominator); n_vec_rows]);

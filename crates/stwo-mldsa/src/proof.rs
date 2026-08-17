@@ -64,13 +64,19 @@ use crate::witness::MlDsaWitness;
 /// The public statement + prover claims of a coeffs proof.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CoeffsProof {
+    /// The public statement (`rho`, `t1`, message, and the signature witness).
     pub input: MlDsaVerifyInput,
     /// The 30 claimed `P̂(r,s)` group evaluations, in poly_id order.
     pub group_evals: Vec<SecureField>,
+    /// LogUp claimed sum of the coeffs component.
     pub coeffs_claimed_sum: SecureField,
+    /// LogUp claimed sums of the eight per-kind range tables.
     pub rc_claimed_sums: [SecureField; 8],
+    /// LogUp claimed sum of the test-side WCell balancer.
     pub wcell_claimed_sum: SecureField,
+    /// LogUp claimed sum of the test-side CCell balancer.
     pub ccell_claimed_sum: SecureField,
+    /// The composed STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
@@ -193,6 +199,7 @@ impl Built {
     }
 }
 
+/// Prover-side AIR driver for the standalone coeffs harness.
 pub struct CoeffsProver {
     witness: MlDsaWitness,
     input: MlDsaVerifyInput,
@@ -566,6 +573,7 @@ impl Air for CoeffsVerifier {
 // Entry points.
 // =============================================================================
 
+/// Prove the standalone coeffs statement for `witness` and `input`.
 pub fn prove_coeffs(
     witness: MlDsaWitness,
     input: MlDsaVerifyInput,

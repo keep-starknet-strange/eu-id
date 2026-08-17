@@ -1,11 +1,16 @@
 //! Randomizes individual private-data LogUp claimed-sum slots.
 //!
+//! ## Protocol
+//!
 //! The prover samples `v` and `m` for each module.
 //! It adds two opposite fractions to two claim slots.
 //! Their global sum is zero, and each slot is uniform.
 //! The proof carries `v` and `m`.
 //! The verifier rebuilds both fractions at OODS.
 //! A change breaks the LogUp boundary.
+//!
+//! ## Limitations
+//!
 //! The published pair still reveals the module sum.
 //! This method does not make STWO zero knowledge.
 

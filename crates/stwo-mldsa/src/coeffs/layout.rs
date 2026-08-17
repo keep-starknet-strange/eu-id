@@ -1,7 +1,7 @@
-//! Row-stacking layout for the tall `mldsa_coeffs` component. The coefficients
-//! of each witness and carry polynomial
-//! are stacked into contiguous Horner groups; the accumulator (interaction tree)
-//! evaluates each group at the drawn `(r, s)` and emits `P̂(r, s)` at its end row.
+//! Row-stacking layout for the tall `mldsa_coeffs` component. The component
+//! stacks the coefficients of each witness and carry polynomial into contiguous
+//! Horner groups; the accumulator (interaction tree) evaluates each group at
+//! the drawn `(r, s)` and emits `P̂(r, s)` at its end row.
 //!
 //! ## Group order (fixed = `poly_id`)
 //!
@@ -35,11 +35,17 @@ pub const CARRY_DIGITS: usize = T_MAX + 1;
 /// `MAX_DIGITS` cells are meaningful; the rest are pinned to zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
+    /// Response `z` polynomial (three digits per coefficient, paired rows).
     Z,
+    /// Approximate commitment `w'approx` polynomial (paired rows).
     W,
+    /// Decomposition remainder `e` polynomial.
     E,
+    /// Decomposition quotient `v` polynomial (`N−1` coefficients).
     V,
+    /// Challenge polynomial `c` (coefficients in `{−1, 0, 1}`).
     C,
+    /// Carry polynomial `Ĉ` of the integer-lift identity.
     Carry,
 }
 
@@ -80,7 +86,9 @@ impl Kind {
 /// One Horner group: `count` contiguous coefficient rows of a single polynomial.
 #[derive(Clone, Copy, Debug)]
 pub struct Group {
+    /// The kind of polynomial this group holds.
     pub kind: Kind,
+    /// Dense index into the flat `[z…, w…, e…, v…, c, Ĉ…]` polynomial order.
     pub poly_id: u32,
     /// Logical coefficients in this polynomial.
     pub coeffs: usize,

@@ -43,20 +43,25 @@ use crate::binding::{HashIoRelation, MsgLinkRelation};
 /// A component that provides (`yield_positive = true`) or requires
 /// (`yield_positive = false`) a list of PUBLIC bytes on `dst_stream` at
 /// positions `dst_off + i`. The bytes are Eval CONSTANTS (both sides construct
-/// the Eval from public data with the `io_provider` pattern. Thus, the tuples are
-/// pinned to the public values with no committable cell to forge. Single packed
-/// row (`LOG_N_LANES`), lane-0 enabler.
+/// the Eval from public data with the `io_provider` pattern). Thus, the tuples
+/// are pinned to the public values with no committable cell to forge. Single
+/// packed row (`LOG_N_LANES`), lane-0 enabler.
 #[derive(Clone)]
 pub struct PublicPrefixEval {
+    /// Destination HashIo stream id.
     pub dst_stream: u32,
+    /// Position of the first byte on the destination stream.
     pub dst_off: u32,
+    /// The public bytes.
     pub bytes: Vec<u8>,
     /// Number of relation entries compiled into the component. It equals
     /// `bytes.len()` for fixed inputs and the profile capacity for the
     /// variable public device message. Inactive entries use zero numerator and
     /// a canonical zero byte.
     pub entry_capacity: usize,
+    /// `true` → yield (+); `false` → require (−).
     pub yield_positive: bool,
+    /// The shared HashIo relation.
     pub hash_io: HashIoRelation,
 }
 
@@ -81,6 +86,7 @@ impl PublicPrefixEval {
         enabler[0] = m31(1);
         vec![col_eval(LINK_LOG_SIZE, enabler)]
     }
+    /// Interaction trace: one lane-0 fraction column for the whole entry list.
     pub fn gen_interaction(&self) -> (Vec<ColEval>, SecureField) {
         assert!(
             self.bytes.len() <= self.entry_capacity,
@@ -225,14 +231,21 @@ pub(crate) fn bridge_preprocessed_column_count(log_size: u32, len: usize) -> usi
 /// trace cell used on both sides.
 #[derive(Clone)]
 pub struct BridgeEval {
+    /// Diagnostic tag for this bridge instance.
     pub tag: &'static str,
     /// Instance namespace. An empty value adds no prefix.
     pub ns: String,
+    /// Trace log size (`2^log_size` padded rows).
     pub log_size: u32,
+    /// The source relation the bridge requires on.
     pub src: SrcRelation,
+    /// Destination HashIo stream id.
     pub dst_stream: u32,
+    /// Position of the first byte on the destination stream.
     pub dst_off: u32,
+    /// Number of bridged bytes (active rows).
     pub len: usize,
+    /// The shared HashIo relation (destination side).
     pub hash_io: HashIoRelation,
 }
 
@@ -246,6 +259,8 @@ impl BridgeEval {
     fn idx_col(&self) -> PreProcessedColumnId {
         prefix_affine_id(self.log_size, self.len, 0)
     }
+    /// Preprocessed ids for this bridge's shape.
+    /// Preprocessed ids for this bridge's shape.
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
         let mut ids = Vec::with_capacity(bridge_preprocessed_column_count(self.log_size, self.len));
         if self.uses_active_column() {
@@ -254,6 +269,8 @@ impl BridgeEval {
         ids.push(self.idx_col());
         ids
     }
+    /// Generate the preprocessed columns (`active` mask if partial, then the
+    /// index column).
     pub fn gen_preprocessed(&self) -> Vec<ColEval> {
         let rows = 1usize << self.log_size;
         let mut idx = vec![m31(0); rows];
@@ -282,6 +299,7 @@ impl BridgeEval {
         }
         vec![col_eval(self.log_size, byte)]
     }
+    /// Interaction trace: the source require and destination yield fractions.
     pub fn gen_interaction(&self, bytes: &[u8]) -> (Vec<ColEval>, SecureField) {
         // Two fractions per row: source require (−), dest yield (+).
         let zero = SecureField::from(m31(0));
@@ -427,13 +445,19 @@ impl FrameworkEval for BridgeEval {
 /// only closes the LogUp balance.
 #[derive(Clone)]
 pub struct SqueezeSinkEval {
+    /// Diagnostic tag for this sink instance.
     pub tag: &'static str,
     /// Instance namespace. An empty value adds no prefix.
     pub ns: String,
+    /// Trace log size (`2^log_size` padded rows).
     pub log_size: u32,
+    /// The squeeze stream id this sink drains.
     pub stream: u32,
+    /// Position of the first drained byte on the stream.
     pub off: u32,
+    /// Number of drained tail bytes (active rows).
     pub len: usize,
+    /// The shared HashIo relation.
     pub hash_io: HashIoRelation,
 }
 
@@ -444,9 +468,11 @@ impl SqueezeSinkEval {
     fn pos_col(&self) -> PreProcessedColumnId {
         prefix_affine_id(self.log_size, self.len, self.off)
     }
+    /// Preprocessed ids for this sink's shape (`active`, `pos`).
     pub fn preprocessed_ids(&self) -> Vec<PreProcessedColumnId> {
         vec![self.active_col(), self.pos_col()]
     }
+    /// Generate the `active` and `pos` preprocessed columns.
     pub fn gen_preprocessed(&self) -> Vec<ColEval> {
         let rows = 1usize << self.log_size;
         let mut active = vec![m31(0); rows];
@@ -460,6 +486,7 @@ impl SqueezeSinkEval {
             .map(|v| col_eval(self.log_size, v))
             .collect()
     }
+    /// Base trace: the drained byte per row.
     pub fn gen_base(&self, bytes: &[u8]) -> Vec<ColEval> {
         assert_eq!(bytes.len(), self.len, "sink byte count mismatch");
         let rows = 1usize << self.log_size;
@@ -469,6 +496,7 @@ impl SqueezeSinkEval {
         }
         vec![col_eval(self.log_size, byte)]
     }
+    /// Interaction trace: one require (−) fraction per drained byte.
     pub fn gen_interaction(&self, bytes: &[u8]) -> (Vec<ColEval>, SecureField) {
         gen_single_yield(
             self.log_size,

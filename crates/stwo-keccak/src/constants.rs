@@ -6,17 +6,17 @@ pub const N_LANES_KECCAK: usize = 25;
 pub const N_BYTES_IN_U64: usize = 8;
 /// Total state bytes: 25 lanes x 8 bytes = 200.
 pub const N_BYTES_IN_STATE: usize = N_LANES_KECCAK * N_BYTES_IN_U64;
-/// sqrt of the lane count (the 5 in 5x5).
+/// Square root of the lane count (the 5 in 5x5).
 pub const SQRT_N_LANES: usize = 5;
 /// Rounds in Keccak-f[1600].
 pub const N_ROUNDS: usize = 24;
 
-/// SHAKE-256 rate in bytes (1088 bits). Capacity is 512 bits.
+/// SHAKE-256 rate in bytes (1088 bits). The capacity is 512 bits.
 pub const N_BYTES_IN_RATE: usize = 136;
-/// SHAKE-128 rate in bytes (1344 bits). Capacity is 256 bits.
+/// SHAKE-128 rate in bytes (1344 bits). The capacity is 256 bits.
 pub const N_BYTES_IN_SHAKE128_RATE: usize = 168;
-/// SHAKE domain-separation suffix byte (`0x1F` = `0b0001_1111`; the two low
-/// bits `11` are the SHA-3 XOF domain tag, then the pad10*1 start bit).
+/// SHAKE domain-separation suffix byte (`0x1F` = `0b0001_1111`). The two low
+/// bits `11` are the SHA-3 XOF domain tag. The next bit starts pad10*1.
 pub const DELIMITED_SUFFIX: u8 = 0x1F;
 /// Final padding bit OR-ed into the last rate byte (`0x80`).
 pub const FINAL_BIT: u8 = 0x80;

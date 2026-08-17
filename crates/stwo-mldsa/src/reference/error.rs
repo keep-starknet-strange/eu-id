@@ -32,8 +32,11 @@ pub enum MlDsaError {
     /// The circuit profile's fixed SampleInBall squeeze resource ended before
     /// all challenge positions were placed.
     SampleInBallExhausted {
+        /// Challenge positions placed before exhaustion.
         accepted: usize,
+        /// Challenge positions required (`τ`).
         required: usize,
+        /// Squeeze bytes consumed before exhaustion.
         squeeze_bytes: usize,
     },
 }

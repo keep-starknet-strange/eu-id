@@ -31,12 +31,19 @@ use crate::air_util::{
     gen_value_table_preprocessed, m31, ColEval,
 };
 
+/// The range-check table kinds (bound ids) in the proof-wide `(value, bound_id)`
+/// relation. Each kind names one contiguous value domain of the shared table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcKind {
+    /// 9-bit range (`[0, 2^9)`): coefficient digits with offset `+2^8`.
     Rc9,
+    /// 13-bit range (`[0, 2^13)`): low parts of carry and z-norm splits.
     Rc13,
+    /// 8-bit range (`[0, 2^8)`): bytes and decomp hint accumulator.
     Rc8,
+    /// 7-bit range (`[0, 2^7)`): high parts of carry and z-norm splits.
     Rc7,
+    /// Challenge-coefficient domain `{−1, 0, 1}`.
     Ternary,
     /// C5: folded in from `mldsa_decomp`'s private table (w1/w1' after C8c).
     /// Appended AFTER `Ternary` so no existing `row_base` moves.
@@ -51,6 +58,7 @@ pub enum RcKind {
 }
 
 impl RcKind {
+    /// All kinds, in table layout order (row bases accumulate in this order).
     pub const ALL: [RcKind; 8] = [
         RcKind::Rc9,
         RcKind::Rc13,
@@ -61,8 +69,10 @@ impl RcKind {
         RcKind::Rc11,
         RcKind::Rc12,
     ];
+    /// The original power-of-two range kinds.
     pub const RANGE: [RcKind; 4] = [RcKind::Rc9, RcKind::Rc13, RcKind::Rc8, RcKind::Rc7];
 
+    /// Number of values in this kind's domain.
     pub const fn n_values(self) -> usize {
         match self {
             RcKind::Rc9 => 1 << 9,
@@ -99,6 +109,7 @@ impl RcKind {
         }
     }
 
+    /// First table row of this kind's domain (domains are contiguous).
     pub const fn row_base(self) -> usize {
         match self {
             RcKind::Rc9 => 0,
@@ -119,6 +130,8 @@ impl RcKind {
         }
     }
 
+    /// Trace log size of a standalone per-kind table (floored at the SIMD lane
+    /// width).
     pub const fn log_size(self) -> u32 {
         let bits = usize::BITS - (self.n_values() - 1).leading_zeros();
         if bits < LOG_N_LANES {
@@ -128,6 +141,7 @@ impl RcKind {
         }
     }
 
+    /// Short stable name used in preprocessed column ids.
     pub fn name(self) -> &'static str {
         match self {
             RcKind::Rc9 => "rc9",
@@ -141,6 +155,7 @@ impl RcKind {
         }
     }
 
+    /// Preprocessed id of this kind's standalone value column.
     pub fn value_column_id(self) -> PreProcessedColumnId {
         PreProcessedColumnId {
             id: format!("mldsa_{}_value", self.name()),
@@ -148,15 +163,19 @@ impl RcKind {
     }
 }
 
+/// Active (non-padding) rows of the combined range table: the sum of all kind
+/// domain sizes.
 pub const RANGE_TABLE_ACTIVE_ROWS: usize = RcKind::Rc12.row_base() + RcKind::Rc12.n_values();
 const _: () = assert!(RANGE_TABLE_ACTIVE_ROWS <= 1 << 14);
 /// Sparse, decoupled from `RcKind::ALL.len()` (see [`RcKind::bound_id`]).
 pub const PADDING_BOUND_ID: u32 = 15;
 
+/// Log size of the combined range table.
 pub const fn range_table_log_size() -> u32 {
     14
 }
 
+/// Preprocessed ids `(value, bound_id)` of the combined range table.
 pub fn range_table_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     ["mldsa_range_value", "mldsa_range_bound_id"]
         .into_iter()
@@ -180,6 +199,7 @@ fn range_table_columns() -> (Vec<M31>, Vec<M31>) {
     (values, ids)
 }
 
+/// Generate the combined range table's preprocessed columns `(value, bound_id)`.
 pub fn gen_range_table_preprocessed() -> Vec<ColEval> {
     let (values, ids) = range_table_columns();
     vec![
@@ -188,6 +208,8 @@ pub fn gen_range_table_preprocessed() -> Vec<ColEval> {
     ]
 }
 
+/// Multiplicity column of the combined range table: one use count per
+/// `(kind, value)`, laid out at `kind.row_base() + value`.
 pub fn gen_range_table_multiplicities(uses: [&[u32]; 8]) -> ColEval {
     let mut values = vec![m31(0); 1usize << range_table_log_size()];
     for (kind, counts) in RcKind::ALL.into_iter().zip(uses) {
@@ -199,6 +221,8 @@ pub fn gen_range_table_multiplicities(uses: [&[u32]; 8]) -> ColEval {
     col_eval(range_table_log_size(), values)
 }
 
+/// Interaction column for the combined range table provider:
+/// `−mult / combine(value, bound_id)` per row.
 pub fn gen_range_table_interaction(
     multiplicity: &ColEval,
     relation: &RangeRelation,
@@ -213,8 +237,11 @@ pub fn gen_range_table_interaction(
     logup.finalize_last()
 }
 
+/// AIR evaluator for the combined range table: yields `−mult` against
+/// `(value, bound_id)` from preprocessed columns.
 #[derive(Clone)]
 pub struct RangeTableEval {
+    /// The proof-wide range relation this table yields into.
     pub relation: RangeRelation,
 }
 
@@ -242,8 +269,11 @@ impl FrameworkEval for RangeTableEval {
     }
 }
 
+/// Framework component type of the combined range table.
 pub type RangeTableComponent = FrameworkComponent<RangeTableEval>;
+/// Number of range-table components in the shared AIR.
 pub const RANGE_TABLE_COMPONENTS: usize = 1;
+/// Interaction columns of the range table (one batched fraction).
 pub const RANGE_TABLE_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 const SHARED_RANGE_TABLE_MIX_TAG: u64 = 0x4d4c_4453_4152_4e47;
 
@@ -257,6 +287,8 @@ pub struct SharedRangeTable {
 }
 
 impl SharedRangeTable {
+    /// Prover-side constructor: sum every consumer's per-kind use counts into
+    /// the multiplicity column.
     pub fn prover(uses: &[RcUses], handle: SharedRangeRelation) -> Self {
         assert!(
             !uses.is_empty(),
@@ -287,6 +319,7 @@ impl SharedRangeTable {
         }
     }
 
+    /// Verifier-side constructor: no multiplicity, only the claimed sum.
     pub fn verifier(claimed_sum: SecureField, handle: SharedRangeRelation) -> Self {
         Self {
             handle,
@@ -297,6 +330,7 @@ impl SharedRangeTable {
         }
     }
 
+    /// The LogUp claimed sum of the table's interaction trace.
     pub fn claimed_sum(&self) -> SecureField {
         self.claimed_sum
     }
@@ -403,14 +437,18 @@ impl AirProver for SharedRangeTable {
 
 // The standalone coefficient tests use these split providers.
 // They use the same relation and tuple IDs as the combined provider.
+/// Preprocessed value column of a standalone per-kind table.
 pub fn gen_table_preprocessed(kind: RcKind) -> ColEval {
     gen_value_table_preprocessed(kind.log_size(), kind.n_values())
 }
 
+/// Multiplicity column of a standalone per-kind table.
 pub fn gen_table_multiplicities(kind: RcKind, uses: &[u32]) -> ColEval {
     gen_value_table_multiplicities(kind.log_size(), kind.n_values(), uses)
 }
 
+/// Interaction column of a standalone per-kind table provider:
+/// `−mult / combine(value, bound_id)` with the kind's fixed `bound_id`.
 pub fn gen_table_interaction(
     kind: RcKind,
     multiplicity: &ColEval,
@@ -425,9 +463,12 @@ pub fn gen_table_interaction(
     )
 }
 
+/// AIR evaluator for a standalone per-kind range table.
 #[derive(Clone)]
 pub struct RcTableEval {
+    /// The kind whose domain this table provides.
     pub kind: RcKind,
+    /// The range relation this table yields into.
     pub relation: RangeRelation,
 }
 
@@ -454,6 +495,7 @@ impl FrameworkEval for RcTableEval {
     }
 }
 
+/// Interaction columns of a standalone per-kind table (one batched fraction).
 pub const RC_TABLE_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 
 #[cfg(test)]

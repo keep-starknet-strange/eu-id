@@ -1,3 +1,18 @@
+//! Private-key folded-identity component.
+//!
+//! One packed row consumes all 66 claimed evaluations from `EvalAtRsRelation`
+//! (coeffs slots 0..30, `A` slots 30..60, scaled-`t1` slots 60..66) and
+//! constrains the `ρ_RLC`-weighted fold of the integer-lift identity to zero:
+//!
+//! ```text
+//!   Σ_i ρ_RLC^i·[ Σ_j Â_ij·ẑ_j − ĉ·(2^d·t̂1_i) − ŵ_i
+//!                 − (r^256 + 1)·v̂_i − q̂(s)·ê_i − (s − B)·Ĉ_i ] == 0
+//! ```
+//!
+//! The evaluations come from the proven inverse-NTT (`A`) and packed-`t1`
+//! components, not from verifier-native computation. This closes the same
+//! identity that [`crate::verifier_native`] checks in public-key mode.
+
 use num_traits::{One, Zero};
 use stwo::core::fields::qm31::{SecureField, SECURE_EXTENSION_DEGREE};
 use stwo::prover::backend::simd::m31::LOG_N_LANES;
@@ -14,8 +29,11 @@ use crate::witness::B;
 
 use super::{gen_batched_logup, PrivateDeviceEvals, PrivateKeyEvalRelations, PRIVATE_EVAL_COUNT};
 
+/// Trace log size: one packed row, lane 0 active.
 pub const FOLD_LOG_SIZE: u32 = LOG_N_LANES;
+/// LogUp entries: one `EvalAtRs` consume per claimed evaluation.
 pub const FOLD_LOGUP_ENTRIES: usize = PRIVATE_EVAL_COUNT;
+/// Interaction columns: batched LogUp (batch 4).
 pub const FOLD_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE * FOLD_LOGUP_ENTRIES.div_ceil(4);
 
 #[derive(Clone, Copy, Debug)]
@@ -51,31 +69,42 @@ fn active_id() -> PreProcessedColumnId {
     }
 }
 
+/// Preprocessed ids (the lane-0 `active` column).
 pub fn fold_preprocessed_ids() -> Vec<PreProcessedColumnId> {
     vec![active_id()]
 }
 
+/// Preprocessed log sizes, matching [`fold_preprocessed_ids`] order.
 pub fn fold_preprocessed_log_sizes() -> Vec<u32> {
     vec![FOLD_LOG_SIZE]
 }
 
+/// Generate the lane-0 `active` preprocessed column.
 pub fn gen_fold_preprocessed() -> Vec<ColEval> {
     let mut active = vec![m31(0); 1usize << FOLD_LOG_SIZE];
     active[0] = m31(1);
     vec![col_eval(FOLD_LOG_SIZE, active)]
 }
 
+/// Interaction column log sizes.
 pub fn fold_interaction_layout() -> Vec<u32> {
     vec![FOLD_LOG_SIZE; FOLD_INTERACTION_COLS]
 }
 
+/// AIR evaluator for the private-key folded identity.
 #[derive(Clone)]
 pub struct PrivateFoldEval {
+    /// The verifier-selected parameter set.
     pub profile: MlDsaProfile,
+    /// Drawn RLC weight `ρ_RLC` over the `k` row identities.
     pub rho_rlc: SecureField,
+    /// Drawn Horner evaluation point `r`.
     pub r: SecureField,
+    /// Drawn digit-combination point `s`.
     pub s: SecureField,
+    /// The relations this component draws on.
     pub relations: PrivateKeyEvalRelations,
+    /// The 66 claimed evaluations this fold consumes.
     pub evals: PrivateDeviceEvals,
 }
 
@@ -168,6 +197,8 @@ impl FrameworkEval for PrivateFoldEval {
     }
 }
 
+/// Generate the fold interaction trace: one `EvalAtRs` consume fraction per
+/// claimed evaluation on lane 0.
 pub fn gen_fold_interaction(
     evals: &PrivateDeviceEvals,
     relation: &crate::coeffs::relations::EvalAtRsRelation,

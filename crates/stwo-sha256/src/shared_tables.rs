@@ -38,6 +38,8 @@ use crate::preprocessed::{
 use crate::relations::{Sha256Relations, SharedShaTableRelations};
 use crate::types::Sha256Witness;
 
+/// Aggregate claim of the shared-table provider: one claimed sum per
+/// producer pair.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShaTablesInteractionClaim {
     /// One claim per producer *pair* (chunk of [`PRODUCER_PAIRS`]). A chunk of
@@ -49,22 +51,23 @@ pub struct ShaTablesInteractionClaim {
 }
 
 impl ShaTablesInteractionClaim {
+    /// Return the per-pair claimed sums in `PRODUCER_PAIRS` order.
     pub fn claimed_sums(&self) -> Vec<QM31> {
         self.pairs.iter().map(|c| c.claimed_sum).collect()
     }
 }
 
-/// The pairing of shared-table producers into co-located components. Each inner
-/// slice is one component owning one or two producers of the *same* `log_size`;
-/// a two-producer chunk pairs its fractions into a single `SecureField`
-/// interaction column (R2 fraction batching). This one list drives four sites
-/// that must stay in lockstep: interaction-column generation
-/// (`shared_table_interaction_trace`), multiplicity-column order
+/// The pairing of shared-table producers into co-located components. Each
+/// inner slice is one component owning one or two producers of the same
+/// `log_size`. A two-producer chunk pairs its fractions into a single
+/// `SecureField` interaction column (R2 fraction batching). This one list
+/// drives four sites that must stay in lockstep: interaction-column
+/// generation (`shared_table_interaction_trace`), multiplicity-column order
 /// (`shared_table_trace`), interaction/trace log-size layout, and component
-/// registration (`ShaTablesComponents`). Range₈ is the lone log₂8 producer;
-/// the three small range tables form one pair + one single = 3 chunks. Under
-/// Class-D single-gated blinding each producer emits
-/// ONE fraction, so each chunk yields exactly one paired interaction column:
+/// registration (`ShaTablesComponents`). Range_8 is the lone log₂-8
+/// producer; the three small range tables form one pair and one single, for
+/// 3 chunks. Under Class-D single-gated blinding each producer emits ONE
+/// fraction, so each chunk yields exactly one paired interaction column:
 /// 4 producers → 3 interaction columns.
 const PRODUCER_PAIRS: &[&[SharedProducer]] = &[
     &[SharedProducer::Range(RangeKind::Range8)],
@@ -82,12 +85,17 @@ fn range_index(kind: RangeKind) -> usize {
         .expect("range table is enumerated in RANGE_TABLES")
 }
 
+/// Combined per-key multiplicities for the shared range tables.
 #[derive(Clone, Debug)]
 pub struct ShaTableMultiplicities {
+    /// One blinded multiplicity vector per `Range_k` table, in
+    /// `RANGE_TABLES` order.
     pub range: Vec<Vec<u32>>,
 }
 
 impl ShaTableMultiplicities {
+    /// Sum the per-consumer multiplicity vectors and add the Class-D blind
+    /// upper half to each.
     pub fn from_consumers(consumers: &[&Sha256Witness]) -> Self {
         assert!(
             !consumers.is_empty(),
@@ -130,11 +138,10 @@ fn blind_extend(real: Vec<u32>) -> Vec<u32> {
     out
 }
 
-/// Per-tree committed-column counts of one shared-SHA producer *component*.
-/// After R2 fraction batching a component may own two co-located producers
-/// sharing one interaction column; the name
-/// joins the producer tags so the probe emits TRUE per-component rows instead
-/// of aggregating every producer under one `(tree, log_size)` bucket.
+/// Prover-side module for the shared SHA range-table providers.
+///
+/// After R2 fraction batching, one component can own two co-located
+/// producers that share one interaction column.
 pub struct ShaTablesProver {
     multiplicities: ShaTableMultiplicities,
     shared: SharedShaTableRelations,
@@ -144,6 +151,8 @@ pub struct ShaTablesProver {
 }
 
 impl ShaTablesProver {
+    /// Create the provider from the combined multiplicities and the shared
+    /// relation handles.
     pub fn new(multiplicities: ShaTableMultiplicities, shared: SharedShaTableRelations) -> Self {
         Self {
             multiplicities,
@@ -154,6 +163,7 @@ impl ShaTablesProver {
         }
     }
 
+    /// The aggregate claim, set during the interaction phase of proving.
     pub fn interaction_claim(&self) -> &ShaTablesInteractionClaim {
         self.interaction_claim
             .as_ref()
@@ -173,6 +183,7 @@ impl ShaTablesProver {
     }
 }
 
+/// Verifier-side module for the shared SHA range-table providers.
 pub struct ShaTablesVerifier {
     interaction_claim: ShaTablesInteractionClaim,
     shared: SharedShaTableRelations,
@@ -181,6 +192,8 @@ pub struct ShaTablesVerifier {
 }
 
 impl ShaTablesVerifier {
+    /// Create the verifier from the aggregate claim and the shared relation
+    /// handles.
     pub fn new(
         interaction_claim: ShaTablesInteractionClaim,
         shared: SharedShaTableRelations,
@@ -208,6 +221,7 @@ impl ShaTablesVerifier {
 
 impl Air for ShaTablesProver {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
+        // "SHATABLE" transcript tag.
         channel.mix_u64(0x5348_4154_4142_4c45);
     }
 
@@ -314,6 +328,7 @@ impl AirProver for ShaTablesProver {
 
 impl Air for ShaTablesVerifier {
     fn mix_public(&self, channel: &mut Blake2sChannel) {
+        // "SHATABLE" transcript tag; must match the prover.
         channel.mix_u64(0x5348_4154_4142_4c45);
     }
 
@@ -460,12 +475,13 @@ fn shared_table_interaction_trace(
     (combined, ShaTablesInteractionClaim { pairs: pair_claims })
 }
 
-/// The Class-D single gated LogUp fraction of one shared-table producer over
-/// the doubled domain: real rows from the table, then reserved dummy rows with
-/// unreachable keys `≥ 2^16`. The numerator is `-(1 − is_dummy)·mult/combine(row)`
-/// — `-mult` on real rows, `0` on the dummy upper half — so the fresh random
-/// blind multiplicity there never enters the LogUp sum (see
-/// [`producer_blind_frac_column`] and `emit_blind`).
+/// The Class-D single gated LogUp fraction of one shared-table producer
+/// over the doubled domain: real rows from the table, then reserved dummy
+/// rows with unreachable keys `≥ 2^16`. The fraction is
+/// `-(1 − is_dummy)·mult / combine(row)`: numerator `-mult` on real rows,
+/// `0` on the dummy upper half. The fresh random blind multiplicity there
+/// never enters the LogUp sum (see [`producer_blind_frac_column`] and
+/// `emit_blind`).
 fn producer_frac(
     relations: &Sha256Relations,
     multiplicities: &ShaTableMultiplicities,

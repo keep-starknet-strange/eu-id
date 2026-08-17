@@ -22,7 +22,9 @@ pub const LIMB_MAX: u32 = LIMB_BASE - 1;
 /// input to or an output of a lookup keyed on `[0, 2¹⁶)`).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WordLimbs {
+    /// Low 16-bit limb of the word.
     pub lo: u32,
+    /// High 16-bit limb of the word.
     pub hi: u32,
 }
 
@@ -109,10 +111,10 @@ pub struct PaddingWitness {
     pub bit_length: u64,
 }
 
-/// One row of the per-round witness, holding every value the AIR refers to
-/// inside that round. Limb-level fields are `u32` because the trace converts
-/// them to M31 just before commitment — and so this struct is testable
-/// without pulling in field types.
+/// One row of the per-round witness. It holds every value the AIR refers to
+/// inside that round. Limb-level fields are `u32`: the trace converts them to
+/// M31 just before commitment, so this struct needs no field types and stays
+/// testable without them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RoundWitness {
     /// Round index `t ∈ [0, 64)`.
@@ -153,7 +155,9 @@ pub struct RoundWitness {
 /// number of words summed; the AIR range-checks them.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AddCarries {
+    /// Carry from the low-limb sum into the high-limb sum.
     pub lo: u32,
+    /// Carry out of the high-limb sum. The mod-2³² add discards it.
     pub hi: u32,
 }
 
@@ -190,14 +194,21 @@ impl LimbBytes {
 pub struct ScheduleEntryWitness {
     /// Schedule index `t ∈ [16, 64)`.
     pub t: u32,
+    /// Input word `W[t−2]`.
     pub w_t_minus_2: WordLimbs,
+    /// Input word `W[t−7]`.
     pub w_t_minus_7: WordLimbs,
+    /// Input word `W[t−15]`.
     pub w_t_minus_15: WordLimbs,
+    /// Input word `W[t−16]`.
     pub w_t_minus_16: WordLimbs,
+    /// `σ0(W[t−15])`.
     pub lower_sigma0: WordLimbs,
+    /// `σ1(W[t−2])`.
     pub lower_sigma1: WordLimbs,
     /// The four-word `+` carries.
     pub carries: AddCarries,
+    /// The derived schedule word `W[t]`.
     pub w_t: WordLimbs,
 }
 
@@ -230,13 +241,12 @@ pub const BYTES_PER_WORD: usize = 4;
 /// The symmetric `is_marker_only_block` (`is_marker · (1 − is_length)`) is
 /// consumed nowhere and is not represented at all.
 ///
-/// **Note on the asymmetric `_15`-only aux.** A symmetric `..._14`
-/// auxiliary would express "force `W[14]` to zero on marker-only blocks
-/// whose marker is strictly before `W[14]`." But the marker-only block
-/// only appears in overflow Case B (`msg.len() % 64 ∈ [56, 64)`), where
-/// the marker sits in `W[14]` or `W[15]` — never before `W[14]`. So
-/// the aux would be identically zero and its W[14]-zero constraints
-/// vacuous; we omit it.
+/// **Why only the `_15` aux exists.** A symmetric `..._14` auxiliary would
+/// force `W[14]` to zero on marker-only blocks whose marker sits strictly
+/// before `W[14]`. But a marker-only block appears only in overflow Case B
+/// (`msg.len() % 64 ∈ [56, 64)`), where the marker sits in `W[14]` or
+/// `W[15]` — never before `W[14]`. Such an aux would be identically zero
+/// and its `W[14]`-zero constraints vacuous, so the AIR omits it.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaddingRowWitness {
     /// 1 iff this block contains the `0x80` padding marker.
@@ -269,19 +279,19 @@ pub struct PaddingRowWitness {
 }
 
 impl PaddingRowWitness {
-    /// Build the padding-row witness for block `block_idx` of a message
-    /// whose FIPS-padded form is `padded`, given the raw message byte
-    /// length `message_byte_length` and the total `n_blocks` in the
-    /// padded stream.
+    /// Build the padding-row witness for block `block_idx` of a message.
+    /// `padded` is the FIPS-padded stream, `message_byte_length` the raw
+    /// message byte length, and `n_blocks` the total block count of
+    /// `padded`.
     ///
-    /// The marker sits at byte offset `message_byte_length` in the padded
-    /// stream (FIPS §5.1.1). Its containing block is therefore
-    /// `message_byte_length / BLOCK_BYTES`; its byte-within-block offset is
-    /// `message_byte_length % BLOCK_BYTES`; from there the word index and
-    /// byte-in-word fall out by dividing / modding by `BYTES_PER_WORD`.
-    /// The length block is always the final block (`n_blocks − 1`); the
-    /// two coincide in Case A (when `message_byte_length % 64 ∈ [0, 56)`)
-    /// and differ in Case B (overflow into a separate length-only block).
+    /// The marker sits at byte offset `message_byte_length` in `padded`
+    /// (FIPS §5.1.1). Its containing block is `message_byte_length /
+    /// BLOCK_BYTES`. Its byte-within-block offset is `message_byte_length %
+    /// BLOCK_BYTES`. Dividing and modding that offset by `BYTES_PER_WORD`
+    /// gives the word index and the byte-in-word. The length block is always
+    /// the final block (`n_blocks − 1`). The two coincide in Case A
+    /// (`message_byte_length % 64 ∈ [0, 56)`) and differ in Case B (overflow
+    /// into a separate length-only block).
     pub fn for_block(
         block_idx: usize,
         padded: &[u8],

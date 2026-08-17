@@ -1,5 +1,7 @@
 //! Bind and normalize the private ML-DSA device public key in the MSO.
 //!
+//! ## Data flow
+//!
 //! The private MSO binder emits the first FIPS 204 `pkEncode` position.
 //! This component consumes the 1,952 ML-DSA-65 `pkEncode` bytes.
 //! It emits the same bytes for the private-key evaluator.

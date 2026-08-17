@@ -1,9 +1,22 @@
+//! TS13 profile capacity limits and revocation encodings.
+//!
+//! ## Revocation binding
+//!
+//! The revocation ID derives from the MSO bytes.
+//! The revocation message encodes the sorted ID pair and the epoch.
+//! The revocation authority signs this message with ML-DSA.
+
 use sha2::{Digest, Sha256};
 
+/// Maximum MSO payload length in bytes that the TS13 profile accepts.
 pub const TS13_MAX_MSO_PAYLOAD_BYTES: usize = 4_096;
+/// Maximum issuer ML-DSA message length in bytes that the TS13 profile accepts.
 pub const TS13_MAX_ISSUER_MLDSA_MESSAGE_BYTES: usize = 4_160;
+/// Maximum mdoc document length in bytes that the TS13 profile accepts.
 pub const TS13_MAX_DOCUMENT_BYTES: usize = 16_384;
 
+/// Derive the revocation ID from the first eight SHA-256 digest bytes of the MSO, in
+/// little-endian order.
 pub fn ts13_mso_derived_revocation_id(mso: &[u8]) -> u64 {
     let digest = Sha256::digest(mso);
     let bytes: [u8; 8] = digest[..8]
@@ -12,6 +25,9 @@ pub fn ts13_mso_derived_revocation_id(mso: &[u8]) -> u64 {
     u64::from_le_bytes(bytes)
 }
 
+/// Encode the sorted revocation pair and the epoch as 20 little-endian bytes.
+///
+/// Supply `id_lo` and `id_hi` in sorted order.
 pub fn ts13_revocation_message(id_lo: u64, id_hi: u64, epoch: u32) -> [u8; 20] {
     let mut message = [0u8; 20];
     message[..8].copy_from_slice(&id_lo.to_le_bytes());

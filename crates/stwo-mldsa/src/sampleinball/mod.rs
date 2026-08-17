@@ -1,12 +1,10 @@
 //! `sampleinball_fsm` implements FIPS 204 [CHAL] SampleInBall (Algorithm 29)
-//! over the witnessed
-//! SHAKE squeeze stream.
+//! over the witnessed SHAKE squeeze stream.
 //!
 //! [`crate::reference::sample_in_ball`] defines the reference behavior. It
 //! squeezes rate blocks on demand. The first 8 bytes are the sign source `s`.
-//! For each target
-//! `i ∈ [N−τ, N)` it rejection-samples `j ← byte` (reject while `byte > i`) and
-//! sets `c[i] = c[j]; c[j] = (−1)^{s&1}; s ≫= 1`.
+//! For each target `i ∈ [N−τ, N)` it rejection-samples `j ← byte` (reject
+//! while `byte > i`) and sets `c[i] = c[j]; c[j] = (−1)^{s&1}; s ≫= 1`.
 //!
 //! ## Layout
 //!
@@ -814,6 +812,8 @@ pub fn gen_sib_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval
 // Base trace.
 // =============================================================================
 
+/// Generate the SIB base trace: the stream-stage FSM state, the c-stage
+/// coefficients, and the offline-memory unsorted/sorted access columns.
 pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let srows = stream_rows(witness);
@@ -904,9 +904,12 @@ pub fn gen_sib_base_trace(witness: &MlDsaWitness, log_size: u32) -> Vec<ColEval>
 // The AIR.
 // =============================================================================
 
+/// AIR evaluator for the SampleInBall FSM component.
 #[derive(Clone)]
 pub struct SibEval {
+    /// Trace log size (`2^log_size` padded rows).
     pub log_size: u32,
+    /// The verifier-selected parameter set.
     pub profile: MlDsaProfile,
     /// Instance namespace. An empty value preserves single-instance identifiers.
     pub ns: String,
@@ -914,6 +917,7 @@ pub struct SibEval {
     /// instance under a SHARED keccak relation set: `stream_base +`
     /// [`STREAM_ID_SIB_SQUEEZE`] (the standalone default is the constant).
     pub sib_stream: u32,
+    /// The relations this component draws on.
     pub relations: SibRelations,
 }
 
@@ -928,7 +932,9 @@ pub struct SibEval {
 /// 4; stepval read-yield, stepval write-i-consume = 2; signbit sign-yield ×8,
 /// signbit write-j-consume = 9. Total 11 + 4 + 2 + 9 = 26.
 pub const N_LOGUP_ENTRIES: usize = 11 + 4 + 2 + 9;
+/// Fractions batched per interaction column.
 pub const LOGUP_BATCH: usize = 4;
+/// Batched LogUp interaction columns.
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE; // Σc² accumulator.
 /// No dedicated sorted-view passthrough interaction column: the previous
@@ -1376,8 +1382,11 @@ impl FrameworkEval for SibEval {
 // =============================================================================
 
 pub struct SibInteraction {
+    /// The interaction trace (accumulator coordinates, then batched LogUp).
     pub trace: Vec<ColEval>,
+    /// The component's own LogUp claimed sum.
     pub claimed_sum: SecureField,
+    /// The range-table uses this component requires.
     pub rc_uses: RcUses,
     /// The stream bytes that the FSM consumes.
     pub stream_bytes: Vec<u8>,
@@ -1388,10 +1397,13 @@ pub struct SibInteraction {
 /// Witness-only outputs needed for base multiplicity columns and standalone
 /// balancers. No Fiat–Shamir relation values are required.
 pub struct SibMetadata {
+    /// The range-table uses this component requires.
     pub rc_uses: RcUses,
+    /// The stream bytes that the FSM consumes.
     pub stream_bytes: Vec<u8>,
 }
 
+/// Compute the witness-only SIB metadata (rc census and stream bytes).
 pub fn gen_sib_metadata(witness: &MlDsaWitness) -> SibMetadata {
     let srows = stream_rows(witness);
     let mem = mem_trace(witness);
@@ -1436,6 +1448,9 @@ fn gen_sib_metadata_from_parts(
     }
 }
 
+/// Generate the SIB interaction trace: the Σc² accumulator, the batched LogUp
+/// fractions (stream, c-binding, memory, and tie channels), and the claimed
+/// sum.
 pub fn gen_sib_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
@@ -1549,7 +1564,7 @@ pub fn gen_sib_interaction(
         entries.push((nums, dens));
     };
 
-    // AIR emission order (7): accept_lo(rc8), accept_hi(rc8), reject_lo(rc8),
+    // AIR emission order (6): accept_lo(rc8), accept_hi(rc8), reject_lo(rc8),
     // reject_hi(rc8), hashio(−), ccell(+).
     push(
         &|coset| match coset_row[coset] {

@@ -34,11 +34,15 @@ use crate::utils::{circle_row_to_coset, col_eval, spread_u32, ColEval};
 /// One input boundary row followed by one row for each Keccak round.
 pub const ROWS_PER_PERMUTATION: usize = N_ROUNDS + 1;
 
+/// Schedule columns: 6 flags plus the 4 nonzero-capable Iota byte lanes.
 pub const N_SCHEDULE_COLUMNS: usize = 6 + IOTA_RC_BYTE_INDICES.len();
+/// Core columns: the 200 carrier state limbs plus the round helper block.
 pub const N_CORE_COLUMNS: usize =
     N_BYTES_IN_STATE + keccak_round::ROUND_PRE_CHI_COLUMNS + N_ANDNOT_LOOKUPS;
+/// Total committed carrier columns per row.
 pub const N_COLUMNS: usize = N_SCHEDULE_COLUMNS + N_CORE_COLUMNS;
 
+/// LogUp lookups per row: schedule, state-IN, the round arithmetic, state-OUT.
 pub const N_TOTAL_LOOKUPS: usize = 1 + 1 + keccak_round::N_ARITHMETIC_LOOKUPS + 1;
 
 const HEADER_COLUMN: usize = 0;
@@ -50,7 +54,9 @@ const END_COLUMN: usize = 5;
 const ROUND_CONSTANT_START: usize = 6;
 const CARRIER_START: usize = N_SCHEDULE_COLUMNS;
 
+/// First committed round-constant column (the spread Iota byte lanes).
 pub const ROUND_CONSTANT_COLUMN_START: usize = ROUND_CONSTANT_START;
+/// First committed carrier-state column.
 pub const CARRIER_COLUMN_START: usize = CARRIER_START;
 
 const CHI_CLOSE_LOOKUP_START: usize = N_XOR3_C + N_XOR3_THETA_APPLY;
@@ -63,6 +69,7 @@ const _: () = assert!(N_CORE_COLUMNS == 896);
 const _: () = assert!(N_COLUMNS == 906);
 const _: () = assert!(N_TOTAL_LOOKUPS == 899);
 
+/// Carrier claim: the shard's permutation count and global perm-id base.
 #[derive(Clone, Copy, Default, Serialize, Deserialize, Debug)]
 pub struct Claim {
     pub n_perms: usize,
@@ -70,6 +77,7 @@ pub struct Claim {
 }
 
 impl Claim {
+    /// Trace log size: the padded row count, at least one SIMD row.
     pub fn log_size(&self) -> u32 {
         (self.n_perms * ROWS_PER_PERMUTATION)
             .next_power_of_two()
@@ -77,10 +85,12 @@ impl Claim {
             .max(LOG_N_LANES)
     }
 
+    /// Per-tree column log sizes (trace columns only).
     pub fn log_sizes(&self) -> TreeVec<Vec<u32>> {
         TreeVec::new(vec![vec![], vec![self.log_size(); N_COLUMNS], vec![]])
     }
 
+    /// Mix the claim into the Fiat-Shamir channel.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_u64(self.n_perms as u64);
         channel.mix_u64(self.perm_id_base as u64);
@@ -190,8 +200,8 @@ pub fn generate(boundaries: &keccak::BoundaryWitness, perm_id_base: usize) -> Wi
         columns[PERMUTATION_COLUMN][row] = boundary.perm_id;
         columns[POSITION_COLUMN][row] = M31::from(position as u32);
         let round = position.saturating_sub(1);
-        // Only the 4 nonzero-capable Iota byte lanes are committed; the other
-        // 4 are literal zero in every round and are inlined at the AIR level.
+        // The trace commits only the 4 nonzero-capable Iota byte lanes. The
+        // other 4 lanes are literal zero in every round; the AIR inlines them.
         for (column, byte) in IOTA_RC_BYTE_INDICES.into_iter().enumerate() {
             columns[ROUND_CONSTANT_START + column][row] =
                 M31::from(spread_u32(IOTA_RC[round].to_le_bytes()[byte] as u32));
@@ -210,10 +220,10 @@ pub fn generate(boundaries: &keccak::BoundaryWitness, perm_id_base: usize) -> Wi
     let (full_trace, mut round_data) =
         keccak_round::generate_arithmetic_trace(round_inputs, n_rows);
 
-    // The helper trace commits only the kept 696 columns (see
-    // `keccak_round::N_ARITHMETIC_COLUMNS`'s doc): the pre-chi block starts
-    // at column 0, followed directly by the (now contiguous) andnot block —
-    // the Chi-close round-output cell is a lookup payload only and was never
+    // The helper trace commits only the kept 696 columns (see the
+    // `keccak_round::N_ARITHMETIC_COLUMNS` doc). The pre-chi block starts at
+    // column 0. The andnot block follows it directly and is now contiguous.
+    // The Chi-close round-output cell is a lookup payload only; it was never
     // committed as a helper column.
     let pre_chi_target = CARRIER_START + N_BYTES_IN_STATE;
     let andnot_target = pre_chi_target + keccak_round::ROUND_PRE_CHI_COLUMNS;
@@ -230,8 +240,8 @@ pub fn generate(boundaries: &keccak::BoundaryWitness, perm_id_base: usize) -> Wi
 
     // The carrier forces each Chi output to the current carrier. On headers
     // and padding rows, this value can differ from the helper's round output.
-    // The numerator is zero on these rows, but the GKR tie-back still binds the
-    // denominator. Store the exact committed expression for every row.
+    // The numerator is zero on these rows, but the GKR tie-back still binds
+    // the denominator. Store the exact committed expression for every row.
     for row in 0..n_rows {
         let vector_row = row / N_LANES;
         let lane = row % N_LANES;
@@ -267,12 +277,15 @@ pub fn generate(boundaries: &keccak::BoundaryWitness, perm_id_base: usize) -> Wi
 // Fixed schedule table.
 // =============================================================================
 
+/// Log size of the fixed schedule table (32 rows: 25 positions, 7 padding).
 pub const SCHEDULE_TABLE_LOG_SIZE: u32 = 5;
+/// Schedule preprocessed columns: 5 flags plus the 4 Iota byte lanes.
 pub const N_SCHEDULE_TABLE_PREPROCESSED: usize = 5 + IOTA_RC_BYTE_INDICES.len();
 /// No dedicated multiplicity trace column: the numerator `valid · n_perms` is
 /// computed directly from the `valid` preprocessed column (see
 /// [`ScheduleTableEval::evaluate`] and [`generate_schedule_interaction`]).
 pub const N_SCHEDULE_TABLE_TRACE: usize = 0;
+/// Schedule interaction columns: one QM31 fraction column (4 M31 columns).
 pub const N_SCHEDULE_TABLE_INTERACTION: usize = SECURE_EXTENSION_DEGREE;
 
 fn schedule_table_id(name: &str) -> PreProcessedColumnId {
@@ -281,20 +294,23 @@ fn schedule_table_id(name: &str) -> PreProcessedColumnId {
     }
 }
 
+/// The schedule preprocessed column ids, in commit order.
 pub fn schedule_table_ids() -> Vec<PreProcessedColumnId> {
     let mut ids = ["valid", "position", "header", "round", "final"]
         .into_iter()
         .map(schedule_table_id)
         .collect::<Vec<_>>();
-    // Only the 4 nonzero-capable Iota byte lanes; the other 4 are literal
-    // zero in every round and are inlined at the AIR level (see `carrier`
-    // module's Iota handling).
+    // Only the 4 nonzero-capable Iota byte lanes. The other 4 lanes are
+    // literal zero in every round; the carrier AIR inlines them (see the
+    // `carrier` module's Iota handling).
     for byte in IOTA_RC_BYTE_INDICES {
         ids.push(schedule_table_id(&format!("round_constant_{byte}")));
     }
     ids
 }
 
+/// Generate the fixed schedule preprocessed columns (commit order =
+/// [`schedule_table_ids`]).
 pub fn generate_schedule_table_preprocessed() -> Vec<ColEval> {
     let n_rows = 1usize << SCHEDULE_TABLE_LOG_SIZE;
     let value = |row: usize, column: usize| -> M31 {
@@ -324,12 +340,14 @@ pub fn generate_schedule_table_preprocessed() -> Vec<ColEval> {
         .collect()
 }
 
+/// AIR evaluator for the fixed schedule table.
 #[derive(Clone)]
 pub struct ScheduleTableEval {
     pub n_perms: usize,
     pub relations: KeccakRelations,
 }
 
+/// The schedule table component type.
 pub type ScheduleTableComponent = FrameworkComponent<ScheduleTableEval>;
 
 impl FrameworkEval for ScheduleTableEval {
@@ -345,8 +363,8 @@ impl FrameworkEval for ScheduleTableEval {
         let ids = schedule_table_ids();
         let values: [E::F; N_SCHEDULE_TABLE_PREPROCESSED] =
             std::array::from_fn(|column| eval.get_preprocessed_column(ids[column].clone()));
-        // multiplicity == valid * n_perms always; use the expression directly
-        // instead of a separate witnessed-and-constrained trace column.
+        // The multiplicity is always `valid · n_perms`. Use the expression
+        // directly instead of a separate witnessed-and-constrained column.
         let numerator = values[0].clone() * BaseField::from(self.n_perms as u32);
         eval.add_to_relation(RelationEntry::new(
             &self.relations.round_schedule,
@@ -358,11 +376,13 @@ impl FrameworkEval for ScheduleTableEval {
     }
 }
 
+/// The schedule table's LogUp claimed sum.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InteractionClaim {
     pub claimed_sum: SecureField,
 }
 
+/// Build the schedule interaction trace and its claimed sum.
 pub fn generate_schedule_interaction(
     relations: &KeccakRelations,
     n_perms: usize,
@@ -391,6 +411,7 @@ pub fn generate_schedule_interaction(
 // Carrier AIR and GKR leaves.
 // =============================================================================
 
+/// The relation family of one carrier lookup slot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LookupKind {
     Schedule,
@@ -399,17 +420,20 @@ pub enum LookupKind {
     Split(usize),
 }
 
+/// One carrier lookup slot: relation family, numerator, and tuple.
 pub struct Lookup<E: EvalAtRow> {
     pub kind: LookupKind,
     pub num: E::EF,
     pub tuple: Vec<E::F>,
 }
 
+/// AIR evaluator for the carrier component.
 #[derive(Clone)]
 pub struct Eval {
     pub claim: Claim,
 }
 
+/// The carrier component type.
 pub type Component = FrameworkComponent<Eval>;
 
 impl FrameworkEval for Eval {
@@ -428,6 +452,7 @@ impl FrameworkEval for Eval {
     }
 }
 
+/// Collect every carrier lookup of one row in canonical slot order.
 pub fn collect_lookups<E: EvalAtRow>(
     eval: &mut E,
     n_perms: usize,
@@ -439,8 +464,8 @@ pub fn collect_lookups<E: EvalAtRow>(
     let permutation_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
     let position_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
     let end_mask = eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]);
-    // Only the 4 nonzero-capable Iota byte lanes are committed (see
-    // `IOTA_RC_BYTE_INDICES`); the other 4 are a literal zero in every round.
+    // The trace commits only the 4 nonzero-capable Iota byte lanes (see
+    // `IOTA_RC_BYTE_INDICES`). The other 4 lanes are literal zero every round.
     let round_constant_masks: [[E::F; 2]; IOTA_RC_BYTE_INDICES.len()] =
         std::array::from_fn(|_| eval.next_interaction_mask(ORIGINAL_TRACE_IDX, [-1, 0]));
 
@@ -495,8 +520,8 @@ pub fn collect_lookups<E: EvalAtRow>(
     for value in &committed_rc {
         eval.add_constraint(inactive.clone() * value.clone());
     }
-    // Full 8-lane view for the round arithmetic (chi/iota fold-in): the other
-    // 4 lanes are a literal zero in every round, not a committed column.
+    // Full 8-lane view for the round arithmetic (chi/iota fold-in). The other
+    // 4 lanes are literal zero in every round, not a committed column.
     let current_rc: [E::F; N_BYTES_IN_U64] = std::array::from_fn(|byte| match IOTA_RC_BYTE_INDICES
         .iter()
         .position(|&b| b == byte)
@@ -547,7 +572,7 @@ pub fn collect_lookups<E: EvalAtRow>(
     lookups.extend(arithmetic.into_iter().map(|lookup| Lookup {
         kind: match lookup.kind {
             // The andnot lookup retargets onto the xor3 relation/table (see
-            // `keccak_round::write_andnot`); no separate `LookupKind` needed.
+            // `keccak_round::write_andnot`). No separate `LookupKind` needed.
             keccak_round::ArithmeticLookupKind::Xor3
             | keccak_round::ArithmeticLookupKind::Andnot => LookupKind::Xor3,
             keccak_round::ArithmeticLookupKind::Split(shift) => LookupKind::Split(shift),

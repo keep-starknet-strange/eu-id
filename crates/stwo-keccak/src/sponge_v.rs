@@ -90,6 +90,8 @@ fn n_logup_entries(jobs: &JobList) -> usize {
     N_LOGUP_ENTRIES + usize::from(jobs.has_message_capacity())
 }
 
+/// Interaction columns for this job list (batch-4 QM31 fractions,
+/// pre-expanded to M31).
 pub fn n_interaction_cols(jobs: &JobList) -> usize {
     SECURE_EXTENSION_DEGREE * n_logup_entries(jobs).div_ceil(LOGUP_BATCH)
 }
@@ -107,8 +109,9 @@ pub struct JobList {
 }
 
 impl JobList {
-    /// Build the list from job shapes, re-stamping `perm_id_base` cumulatively
-    /// The list owns the global permutation-id plan and ignores an input base.
+    /// Build the list from job shapes and re-stamp `perm_id_base`
+    /// cumulatively. The list owns the global permutation-id plan and ignores
+    /// any input base.
     pub fn new(shapes: impl IntoIterator<Item = Shape>) -> Self {
         let mut jobs = Vec::new();
         let mut base = 0usize;
@@ -141,14 +144,17 @@ impl JobList {
         Self { jobs }
     }
 
+    /// Total permutations over all jobs.
     pub fn n_perms_total(&self) -> usize {
         self.jobs.iter().map(Shape::n_perms).sum()
     }
 
+    /// Whether any job fixes its geometry by capacity.
     pub fn has_message_capacity(&self) -> bool {
         self.jobs.iter().any(Shape::has_message_capacity)
     }
 
+    /// Number of capacity-shaped jobs.
     pub fn capacity_job_count(&self) -> usize {
         self.jobs
             .iter()
@@ -156,6 +162,7 @@ impl JobList {
             .count()
     }
 
+    /// Number of schedule preprocessed columns.
     pub fn n_schedule_cols(&self) -> usize {
         N_SCHEDULE_COLS
             + pad_gate_aliases(self)
@@ -166,10 +173,12 @@ impl JobList {
             + self.capacity_job_count()
     }
 
+    /// Number of base witness columns.
     pub fn n_base_cols(&self) -> usize {
         N_BASE_COLS + usize::from(self.has_message_capacity()) * N_CAPACITY_BASE_COLS
     }
 
+    /// Trace log size: the padded permutation count, at least one SIMD row.
     pub fn log_size(&self) -> u32 {
         (self.n_perms_total() as u32)
             .next_power_of_two()
@@ -179,7 +188,7 @@ impl JobList {
 
     /// Stable FNV-1a digest of the full job-list shape, embedded in every
     /// schedule preprocessed identifier. It encodes the job list, so two
-    /// different job lists can never alias through tree-0 first-writer dedup).
+    /// different job lists can never alias through tree-0 first-writer dedup.
     pub fn shape_digest(&self) -> String {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut mix = |v: u64| {
@@ -423,10 +432,15 @@ pub struct RowData {
     /// Dynamic pad suffix for capacity mode (and the mirrored static pad mask
     /// for fixed mode when a mixed job list carries these columns).
     pub pad_gate: [u8; MAX_RATE],
+    /// Padded absorb block bytes for this row.
     pub block_byte: [u8; MAX_RATE],
+    /// Post-absorb rate bytes (previous rate ⊕ block).
     pub new_rate: [u8; MAX_RATE],
+    /// Previous row's post-permutation state bytes.
     pub prev_post: [u8; N_BYTES_IN_STATE],
+    /// This row's post-permutation state bytes.
     pub post: [u8; N_BYTES_IN_STATE],
+    /// Squeeze output bytes (the post-state rate).
     pub squeeze_byte: [u8; MAX_RATE],
 }
 
@@ -625,12 +639,14 @@ pub fn generate_base_trace(run: &SpongeVRun) -> Vec<ColEval> {
 // Claim.
 // =============================================================================
 
+/// The sponge claim: the stamped job list.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Claim {
     pub jobs: JobList,
 }
 
 impl Claim {
+    /// Per-tree column log sizes: schedule, base, and interaction.
     pub fn log_sizes(&self) -> TreeVec<Vec<u32>> {
         let ls = self.jobs.log_size();
         TreeVec::new(vec![
@@ -645,6 +661,7 @@ impl Claim {
 // Constraints.
 // =============================================================================
 
+/// AIR evaluator for the vertical sponge component.
 #[derive(Clone)]
 pub struct Eval {
     pub jobs: JobList,
@@ -1016,27 +1033,30 @@ impl FrameworkEval for Eval {
     }
 }
 
+/// The vertical sponge component type.
 pub type Component = FrameworkComponent<Eval>;
 
 // =============================================================================
 // Interaction trace.
 // =============================================================================
 
+/// The sponge's LogUp claimed sum.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct InteractionClaim {
     pub claimed_sum: SecureField,
 }
 
 impl InteractionClaim {
+    /// Mix the claimed sum into the Fiat-Shamir channel.
     pub fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[self.claimed_sum]);
     }
 }
 
-/// The per-row logup fractions in EXACTLY the AIR's emission order.
-/// Zero-multiplicity entries are `(0, 1)`. This is sound because the batch constraint
-/// evaluates the symbolic multiplicity (a preprocessed gate that IS zero
-/// there), so the committed accumulator step is 0 either way.
+/// The per-row LogUp fractions in exactly the AIR's emission order.
+/// Zero-multiplicity entries are `(0, 1)`. This is sound: the batch
+/// constraint evaluates the symbolic multiplicity (a preprocessed gate that
+/// is zero there), so the committed accumulator step is 0 either way.
 fn row_fracs(
     rel: &KeccakRelations,
     sched: &RowSched,

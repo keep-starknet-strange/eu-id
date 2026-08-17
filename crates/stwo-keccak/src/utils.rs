@@ -2,7 +2,7 @@
 //! and validate traces.
 //!
 //! The state is `[PackedM31; 200]`: 25 lanes of 8 little-endian byte limbs.
-//! byte `idx = lane*8 + byte_idx`. The `N_LANES` SIMD lanes of each `PackedM31`
+//! Byte `idx = lane*8 + byte_idx`. The `N_LANES` SIMD lanes of each `PackedM31`
 //! carry independent permutation instances. One column set proves `N_LANES`
 //! permutations at once. This is the unit for cells-per-permutation accounting.
 
@@ -58,10 +58,12 @@ pub struct Enabler {
 }
 
 impl Enabler {
+    /// Create an enabler active on the first `padding_offset` rows.
     pub const fn new(padding_offset: usize) -> Self {
         Self { padding_offset }
     }
 
+    /// The packed mask for vector row `vec_row`.
     pub fn packed_at(&self, vec_row: usize) -> PackedM31 {
         let row_offset = vec_row * N_LANES;
         if row_offset >= self.padding_offset {

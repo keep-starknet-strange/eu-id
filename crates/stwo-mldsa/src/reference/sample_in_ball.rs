@@ -31,23 +31,23 @@ pub struct SampleInBallResult {
 /// Squeezes an unbounded SHAKE-256 stream: the first 8 bytes are the sign bits
 /// `s`, then for each `i ∈ [n−τ, n)` a rejection-sampled index `j ≤ i` is drawn
 /// and `c[i] ← c[j]; c[j] ← (−1)^{bit}`.
-/// Profiled SampleInBall with the circuit's explicit squeeze resource cap.
 ///
-/// ML-DSA-44 uses one 136-byte block. The probability that the 128 candidate
-/// bytes after the sign source fail to place all 39 coefficients is
-/// approximately 2^-202.929. Exhaustion is a typed error, not an implicit
-/// extension of the proof geometry.
+/// The circuit profile fixes an explicit squeeze resource cap. ML-DSA-44 uses
+/// one 136-byte block. The probability that the 128 candidate bytes after the
+/// sign source fail to place all 39 coefficients is approximately 2^-202.929.
+/// Exhaustion is a typed error, not an implicit extension of the proof
+/// geometry.
 pub fn sample_in_ball(
     profile: MlDsaProfile,
     c_tilde: &[u8],
 ) -> Result<SampleInBallResult, MlDsaError> {
     // Squeeze one SHAKE-256 rate block (136 bytes) at a time from the standard
-    // streaming XOF. The recorded transcript is then block-aligned
-    // to what the sampler actually consumed
+    // streaming XOF. The recorded transcript is then block-aligned to what the
+    // sampler actually consumed
     // (`squeezed.len() == RATE · ceil(consumed_len / RATE)`), which is exactly
     // the stream the in-circuit sponge job replays (`statement::n_squeeze_sib`)
-    // and sets the SIB component's log size. Squeezing more bytes would increase
-    // that component without adding consumed data.
+    // and which sets the SIB component's log size. Squeezing more bytes would
+    // grow that component without adding consumed data.
     let mut reader = Shake256Reader::new(&[c_tilde]);
     let mut stream = reader.read(RATE);
 

@@ -1,4 +1,17 @@
 //! TS13 identity types and proof envelope.
+//!
+//! ## Envelope format
+//!
+//! The envelope has a fixed 46-byte header: the magic `EUIDTS13`, version 4,
+//! the canonical circuit hash, and the proof body capacity. The body is the
+//! bincode proof with fixed-width little-endian integers, zero-padded to the
+//! capacity. The capacity is a non-zero multiple of 65,536 bytes.
+//!
+//! ## Verification invariants
+//!
+//! The decoder rejects an unknown circuit hash before it decodes the body. The
+//! decoder also rejects non-canonical bodies, trailing bytes, and non-zero
+//! padding.
 
 use std::io::Cursor;
 
@@ -298,6 +311,7 @@ fn map_core_prove_error(error: eu_id_prover::Error) -> IdentityError {
     }
 }
 
+/// Runs the canonical identity proof and returns the encoded proof envelope.
 pub(crate) fn prove_identity_inner(
     statement: &IdentityStatement,
     witness: IdentityWitness,
@@ -335,6 +349,7 @@ pub(crate) fn prove_identity_inner(
     Ok(envelope)
 }
 
+/// Decodes the proof envelope and verifies the canonical identity proof.
 pub(crate) fn verify_identity_inner(
     statement: &IdentityStatement,
     envelope: &[u8],

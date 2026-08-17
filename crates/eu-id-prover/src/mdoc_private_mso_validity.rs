@@ -1,5 +1,7 @@
 //! Exact private MSO validity for the TS13 identity demo.
 //!
+//! ## Guarantees
+//!
 //! The private MSO binder authenticates two 20-byte tag-0 UTC strings.
 //! It emits the strings through [`MdocMsoValidityBytesRelation`].
 //! This component consumes the bytes.

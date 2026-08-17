@@ -1,3 +1,9 @@
+//! Generate or check the checked-in TS13 demo circuit artifact.
+//!
+//! ## Usage
+//!
+//! Run `ts13_demo_artifact [--workspace PATH] [--input PATH] [--check]`.
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 

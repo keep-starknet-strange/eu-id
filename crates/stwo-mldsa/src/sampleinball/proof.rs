@@ -48,14 +48,23 @@ use super::{
     N_INTERACTION_COLS,
 };
 
+/// The public statement + prover claims of a SampleInBall proof.
 pub struct SibProof {
+    /// LogUp claimed sum of the SIB FSM component.
     pub sib_claimed_sum: SecureField,
+    /// LogUp claimed sum of the shared range table.
     pub range_claimed_sum: SecureField,
+    /// LogUp claimed sum of the test-side CCell provider.
     pub ccell_claimed_sum: SecureField,
+    /// LogUp claimed sum of the test-side HashIo producer.
     pub hashio_claimed_sum: SecureField,
+    /// SIB trace log size.
     pub log_size: u32,
+    /// CCell balancer log size.
     pub ccell_log_size: u32,
+    /// HashIo balancer log size.
     pub hashio_log_size: u32,
+    /// The composed STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
@@ -91,19 +100,22 @@ fn gen_all_preprocessed(log_size: u32) -> Vec<ColEval> {
     cols
 }
 
-/// This standalone harness's own range-use census, converted to the 7-slot
+/// This standalone harness's own range-use census, converted to the 8-slot
 /// shape [`gen_range_table_multiplicities`] expects. Only Rc8/Rc11 are ever
 /// nonzero for SIB; the rest stay at the `RcUses::new()` zero default.
 fn range_uses_arrays(rc_uses: &crate::coeffs::RcUses) -> [&[u32]; 8] {
     core::array::from_fn(|index| rc_uses.for_kind(RcKind::ALL[index]))
 }
 
+/// The `(c_bind_id, c)` tuples the test-side CCell provider yields.
 fn ccell_tuples(witness: &MlDsaWitness) -> Vec<Vec<u32>> {
     (0..N)
         .map(|m| vec![m as u32, enc_signed(witness.digits.c[m]).0])
         .collect()
 }
 
+/// The `(stream_id, byte_pos, byte)` tuples the test-side HashIo producer
+/// yields.
 fn hashio_tuples(bytes: &[u8]) -> Vec<Vec<u32>> {
     bytes
         .iter()
@@ -138,6 +150,7 @@ impl Built {
     }
 }
 
+/// Prover-side AIR driver for the standalone SIB harness.
 pub struct SibProver {
     witness: MlDsaWitness,
     relations: Option<SibRelations>,
@@ -424,6 +437,7 @@ impl Air for SibVerifier {
     }
 }
 
+/// Prove the standalone SampleInBall statement for `witness`.
 pub fn prove_sib(witness: MlDsaWitness, config: PcsConfig) -> Result<SibProof, ProvingError> {
     super::validate_stream(&witness).map_err(|_| ProvingError::ConstraintsNotSatisfied)?;
     let log_size = sib_log_size();

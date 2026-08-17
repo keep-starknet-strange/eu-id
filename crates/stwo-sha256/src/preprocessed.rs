@@ -53,6 +53,8 @@ pub type PreprocessedTrace = (
     Vec<u32>,
 );
 
+/// Log sizes of every shared-table (Class-D) preprocessed column, in
+/// `shared_table_preprocessed_column_ids` order.
 pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
     // Class D: every shared producer's preprocessed columns (value/group cells
     // + the `is_dummy` selector) live at the blinded log size `L + 1` (doubled
@@ -79,6 +81,8 @@ pub fn shared_table_preprocessed_log_sizes() -> Vec<u32> {
 /// doubled tables.
 static SHARED_TABLE_PREPROCESSED_CACHE: OnceLock<PreprocessedTrace> = OnceLock::new();
 
+/// Return the cached shared-table preprocessed trace, building it on first
+/// use. See [`SHARED_TABLE_PREPROCESSED_CACHE`] for why caching is sound.
 pub fn generate_shared_table_preprocessed_trace() -> PreprocessedTrace {
     SHARED_TABLE_PREPROCESSED_CACHE
         .get_or_init(|| {
@@ -398,13 +402,13 @@ mod tests {
         }
     }
 
-    /// Wave C / C10 (2026-08-05): the padding-role region now aliases 30 of
-    /// the 32 finalization-carry/`h_out` trace cells, sound only because
-    /// `r15` (cyclic[3], round 15) and `r63` (cyclic[4], round 63) never
-    /// both fire on one row. Check this pointwise, structurally, for two
-    /// `log_n_rows` values (below and above one packed SIMD lane) —
-    /// `ROWS_PER_BLOCK = 67` is prime, so `position mod 67` is `18` xor `66`
-    /// for every row, never both.
+    /// The padding-role region aliases 30 of the 32
+    /// finalization-carry/`h_out` trace cells. The alias is sound only
+    /// because `r15` (cyclic[3], round 15) and `r63` (cyclic[4], round 63)
+    /// never both fire on one row. Check this pointwise for two
+    /// `log_n_rows` values (below and above one packed SIMD lane).
+    /// `ROWS_PER_BLOCK = 67` is prime, so `position mod 67` is `18` xor
+    /// `66` for every row, never both.
     #[test]
     fn r15_and_r63_are_pointwise_disjoint() {
         for log_n_rows in [8u32, 12u32] {

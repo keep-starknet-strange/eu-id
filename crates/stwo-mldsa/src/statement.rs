@@ -152,13 +152,16 @@ const HOSTED_PRIVATE_KEY_MODE_TAG: u64 = 0x4d4c_4453_4150_4b01;
 /// Models the contiguous permutation-id ranges of the SHAKE-256 chains.
 /// Public-message instances omit the µ chain (`n_mu = 0`).
 ///
-/// The actual assignment is performed by
-/// [`stwo_keccak::sponge_v::JobList::new`] over the proof-wide concatenated
-/// job list. Tests use this struct to check the same range boundaries.
+/// [`stwo_keccak::sponge_v::JobList::new`] performs the actual assignment over
+/// the proof-wide concatenated job list. Tests use this struct to check the
+/// same range boundaries.
 #[derive(Clone, Copy, Debug)]
 pub struct PermIdPlan {
+    /// First permutation id of the µ chain (always 0).
     pub mu_base: usize,
+    /// First permutation id of the c̃ chain.
     pub c_tilde_base: usize,
+    /// First permutation id of the SIB chain.
     pub sib_base: usize,
 }
 
@@ -184,6 +187,7 @@ impl PermIdPlan {
 /// public lengths, and claimed sums, with no witness.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MlDsaProof {
+    /// The public statement (`rho`, `t1`, message, and the signature witness).
     pub input: MlDsaVerifyInput,
     /// The 30 claimed `P̂(r,s)` group evaluations (coeffs), in poly_id order.
     pub group_evals: Vec<SecureField>,
@@ -195,6 +199,7 @@ pub struct MlDsaProof {
     /// Opaque post-interaction payloads. The Keccak service stores its
     /// round-GKR proof in its module slot.
     pub post_interaction_payloads: Vec<Vec<u8>>,
+    /// The composed STARK proof.
     pub stark_proof: StarkProof<Blake2sMerkleHasher>,
 }
 
@@ -1543,6 +1548,7 @@ fn build_components(
 // Prover.
 // =============================================================================
 
+/// Prover-side AIR driver for the composed ML-DSA statement.
 pub struct MlDsaProver {
     witness: MlDsaWitness,
     input: MlDsaVerifyInput,
@@ -2407,6 +2413,7 @@ impl VerifierStatementInput {
     }
 }
 
+/// Verifier-side AIR driver for the composed ML-DSA statement.
 pub struct MlDsaVerifier {
     input: VerifierStatementInput,
     ctx: LayoutCtx,
@@ -2689,6 +2696,7 @@ impl Air for MlDsaVerifier {
 // Entry points.
 // =============================================================================
 
+/// Prove the standalone composed ML-DSA statement for `witness` and `input`.
 pub fn prove_mldsa(
     witness: MlDsaWitness,
     input: MlDsaVerifyInput,
@@ -2797,6 +2805,8 @@ pub fn hosted_private_key_claimed_sums_len() -> usize {
     claimed_sums_len(ML_DSA_65, true, true, true)
 }
 
+/// Verify a standalone composed ML-DSA proof under the caller's exact PCS
+/// policy.
 pub fn verify_mldsa(
     proof: &MlDsaProof,
     expected_config: PcsConfig,

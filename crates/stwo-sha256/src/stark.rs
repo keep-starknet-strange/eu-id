@@ -20,7 +20,7 @@ use crate::interaction::InteractionClaim;
 use crate::types::{Digest, Sha256Witness};
 use crate::witness::compute_sha256_witness;
 
-/// Tuning knobs for the prover.
+/// Configuration for the prover.
 ///
 /// `Default` selects the smallest legal value for each parameter. It can prove
 /// one padded block on the SIMD backend. Longer messages need a larger
@@ -83,8 +83,8 @@ pub struct Sha256Proof {
     pub log_n_rows: u32,
     /// Per-component LogUp claimed sums. The total must be zero.
     pub interaction_claim: InteractionClaim,
-    /// Stwo PCS configuration the proof was generated with. Surfaced so
-    /// the verifier can reconstruct the same `CommitmentSchemeVerifier`.
+    /// Stwo PCS configuration used to generate this proof. The verifier
+    /// reads it to reconstruct the same `CommitmentSchemeVerifier`.
     pub pcs_config: PcsConfig,
     /// The underlying Stwo STARK proof (Merkle commitments, FRI proof,
     /// OODS values, PoW nonce).
@@ -289,7 +289,9 @@ pub fn native_digest(message: &[u8]) -> Digest {
 /// proofs use the optional digest provider relation for that binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sha256PublicInputs {
+    /// The 32-byte SHA-256 digest of the message.
     pub digest: [u8; DIGEST_BYTES],
+    /// Number of blocks in the padded preimage.
     pub n_blocks: usize,
 }
 
@@ -397,17 +399,17 @@ mod tests {
     }
 
     /// Pins the `public_inputs_for(msg) == Sha256Proof::public_inputs()`
-    /// contract for every message a downstream caller might use. We
-    /// drive it against the witness-derived shape instead of running
-    /// the prover (which is `#[ignore]`d everywhere else), since the
-    /// proof's `digest` / `n_blocks` fields are populated from the
-    /// witness verbatim in `prove_sha256_inner`.
+    /// contract for every message a downstream caller might use. Drive it
+    /// against the witness-derived shape instead of running the prover
+    /// (which is `#[ignore]`d everywhere else): the proof's `digest` /
+    /// `n_blocks` fields are populated from the witness verbatim in
+    /// `prove_sha256_inner`.
     #[test]
     fn public_inputs_for_matches_proof_public_inputs_shape() {
-        // A proof we can synthesise without running the prover: every
+        // Synthesize a proof stand-in without running the prover: every
         // field of `Sha256Proof::public_inputs()` reads from the proof's
-        // own metadata fields, so building a stand-in struct with the
-        // same `digest` / `n_blocks` exercises the contract.
+        // own metadata fields, so a struct with the same `digest` /
+        // `n_blocks` exercises the contract.
         for msg in [&b""[..], b"abc", &[0u8; 56], &[0u8; 1024]] {
             let from_message = public_inputs_for(msg);
             let witness = compute_sha256_witness(msg);

@@ -212,12 +212,14 @@ pub fn coeffs_preprocessed_ids(profile: MlDsaProfile) -> Vec<PreProcessedColumnI
 /// Fourteen shared range streams plus the four distinct relation yields. Range
 /// kinds occupy disjoint row slots and are namespaced by fixed bound ids.
 pub const N_RANGE_STREAMS: usize = 14;
+/// Total LogUp entries emitted per row across all streams and yields.
 pub const N_LOGUP_ENTRIES: usize = N_RANGE_STREAMS
     + 1                                             // eval yield
     + 2                                             // two WCell yields per paired w row
     + 1; // CCell yield (c cells)
 /// Four fractions per interaction column, matching the `decomp` precedent.
 pub const LOGUP_BATCH: usize = 4;
+/// Batched LogUp interaction columns.
 pub const N_LOGUP_COLS: usize = N_LOGUP_ENTRIES.div_ceil(LOGUP_BATCH);
 /// The 4 accumulator coordinate columns come first in the interaction tree.
 const N_ACC_COORD_COLS: usize = SECURE_EXTENSION_DEGREE;
@@ -264,6 +266,7 @@ fn group_is_active(profile: MlDsaProfile, group: Group) -> bool {
     }
 }
 
+/// Generate the preprocessed columns for the selected profile, in commit order.
 pub fn gen_coeffs_preprocessed(profile: MlDsaProfile, log_size: u32) -> Vec<ColEval> {
     let rows = 1usize << log_size;
     let sched = row_schedule();
@@ -461,12 +464,18 @@ fn paired_recompositions(digits: &[i128; MAX_DIGITS]) -> [i128; 2] {
 // The AIR.
 // =============================================================================
 
+/// AIR evaluator for the stacked coefficient component.
 #[derive(Clone)]
 pub struct CoeffsEval {
+    /// Trace log size (`2^log_size` padded rows).
     pub log_size: u32,
+    /// The verifier-selected ML-DSA parameter set.
     pub profile: MlDsaProfile,
+    /// Drawn Horner evaluation point `r` (accumulator step).
     pub r: SecureField,
+    /// Drawn digit-combination point `s`.
     pub s: SecureField,
+    /// The relations this component draws on.
     pub relations: CoeffsRelations,
 }
 
@@ -793,7 +802,9 @@ impl FrameworkEval for CoeffsEval {
 /// The coeffs interaction claim (its own logup residue) plus the per-group
 /// claimed evaluations (consumed by the verifier-native fold).
 pub struct CoeffsInteraction {
+    /// The interaction trace (accumulator coordinates, then batched LogUp).
     pub trace: Vec<ColEval>,
+    /// The component's own LogUp claimed sum.
     pub claimed_sum: SecureField,
     /// `group_evals[poly_id]` = `P̂(r,s)` of that group.
     pub group_evals: Vec<SecureField>,
@@ -805,13 +816,21 @@ pub struct CoeffsInteraction {
 /// folded decomp's and sampleinball's private tables (Rc4, Rc11) in here too.
 #[derive(Clone)]
 pub struct RcUses {
+    /// Use counts for the 9-bit digit range.
     pub rc9: Vec<u32>,
+    /// Use counts for the 13-bit low-part range.
     pub rc13: Vec<u32>,
+    /// Use counts for the 8-bit range.
     pub rc8: Vec<u32>,
+    /// Use counts for the 7-bit high-part range.
     pub rc7: Vec<u32>,
+    /// Use counts for the ternary challenge range.
     pub ternary: Vec<u32>,
+    /// Use counts for the 4-bit w1 range (decomp).
     pub rc4: Vec<u32>,
+    /// Use counts for the 11-bit range (SIB timestamps, NTT high limb).
     pub rc11: Vec<u32>,
+    /// Use counts for the 12-bit NTT low-limb range.
     pub rc12: Vec<u32>,
 }
 
@@ -909,6 +928,8 @@ pub fn gen_coeffs_rc_uses(witness: &MlDsaWitness) -> RcUses {
     rc_uses
 }
 
+/// Generate the interaction trace: the Horner accumulator, the batched LogUp
+/// fractions, the claimed sum, the per-group evaluations, and the rc census.
 pub fn gen_coeffs_interaction(
     witness: &MlDsaWitness,
     log_size: u32,
@@ -998,7 +1019,7 @@ pub fn gen_coeffs_interaction(
     let mut entries: Vec<(Vec<PackedQM31>, Vec<PackedQM31>)> = Vec::new();
     let mut claimed = zero;
 
-    // helper closure to push one logup entry stream.
+    // Helper closure: push one logup entry stream.
     let push_entry = |frac_of: &dyn Fn(usize) -> (SecureField, SecureField),
                       entries: &mut Vec<(Vec<PackedQM31>, Vec<PackedQM31>)>,
                       claimed: &mut SecureField| {

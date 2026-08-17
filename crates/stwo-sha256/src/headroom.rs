@@ -44,8 +44,8 @@ pub const M31_CENTER_LIMIT: i128 = (M31_MODULUS - 1) / 2;
 // For a k-addend mod-2³² limb-add, the honest carry per limb lies in
 // `[0, k)` — equivalently, in `{0, 1, …, k − 1}` (k values). Downstream
 // lookup wiring sizes the preprocessed carry range-check table to match.
-// The exclusive upper bound — also the table row count — is what we
-// publish here as `RANGE_k`.
+// The exclusive upper bound is also the table row count; this module
+// publishes it as `RANGE_k`.
 
 /// Carry-range upper bound (exclusive) for **2-addend** mod-2³² adds. Used
 /// by `T2 = Σ0 + Maj`, `e_new = d + T1`, `a_new = T1 + T2`, and the

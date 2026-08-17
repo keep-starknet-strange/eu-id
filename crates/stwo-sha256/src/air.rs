@@ -72,9 +72,10 @@ fn layout(
     }
 }
 
-/// Flatten the per-component claims into one slice in component (commit) order
-/// — the order [`Sha256Components`] adds them and the order the orchestrator
-/// mixes and balances. Equals [`InteractionClaim::total`] when summed.
+/// Flatten the per-component claims into one slice in component (commit)
+/// order — the order [`Sha256Components`] adds them and the order the
+/// orchestrator mixes and balances. The flattened values sum to
+/// [`InteractionClaim::total`].
 pub fn flatten_claimed_sums(claim: &InteractionClaim) -> Vec<QM31> {
     let mut out = Vec::new();
     out.push(claim.sha256.claimed_sum);
@@ -101,6 +102,8 @@ pub struct Sha256Prover<'a> {
 }
 
 impl<'a> Sha256Prover<'a> {
+    /// Create a prover module for `witness` with a trace of
+    /// `2^log_n_rows` rows.
     pub fn new(witness: &'a Sha256Witness, log_n_rows: u32) -> Self {
         Self {
             witness,
@@ -169,6 +172,8 @@ impl<'a> Sha256Prover<'a> {
         self
     }
 
+    /// Use the shared range-table providers in `shared` instead of local
+    /// producer components.
     pub fn with_shared_tables(mut self, shared: SharedShaTableRelations) -> Self {
         self.shared_tables = Some(shared);
         self
@@ -185,18 +190,19 @@ impl<'a> Sha256Prover<'a> {
 
     /// Test-only hook: commit `base` verbatim instead of the
     /// witness-derived generator's output. Adversarial tests use this to
-    /// plant an illegal cell (e.g. `is_last_block` outside its true row, or
-    /// an enabler prefix that isn't block-aligned) and drive the *real*
-    /// STARK prove/verify pipeline against it — `tests/constraint_negative.rs`'s
-    /// hand-rolled evaluator no-ops `add_to_relation`, so it can't exercise
-    /// a mutation whose only consequence surfaces through a relation (the
-    /// digest LogUp) or through trace/interaction-trace inconsistency. The
-    /// interaction trace is still generated from `witness` (this hook does
-    /// not intercept it), so a mutated `base` that changes what a relation
-    /// should have yielded is exactly the class of bug this exists to catch.
-    /// `base` must match [`build_base_trace`]'s shape (same `witness`,
-    /// `log_n_rows`, `field_exposure`, and shared-tables mode this builder
-    /// will otherwise use) — this does not re-validate that.
+    /// plant an illegal cell (for example `is_last_block` outside its true
+    /// row, or an enabler prefix that is not block-aligned) and run the
+    /// real STARK prove/verify pipeline against it. The hand-rolled
+    /// evaluator in `tests/constraint_negative.rs` no-ops
+    /// `add_to_relation`, so it cannot exercise a mutation whose only
+    /// consequence surfaces through a relation (the digest LogUp) or
+    /// through trace/interaction-trace inconsistency. The interaction
+    /// trace still comes from `witness`; this hook does not intercept it.
+    /// A mutated `base` that changes what a relation should have yielded is
+    /// exactly the bug class this hook exists to catch. `base` must match
+    /// [`build_base_trace`]'s shape (same `witness`, `log_n_rows`,
+    /// `field_exposure`, and shared-tables mode this builder will otherwise
+    /// use); this hook does not re-validate that.
     #[doc(hidden)]
     pub fn with_base(
         mut self,
@@ -362,9 +368,10 @@ impl AirProver for Sha256Prover<'_> {
     }
 
     fn preprocessed_column_fingerprints(&mut self) -> Vec<PreprocessedColumnFingerprint> {
-        // Fingerprint exactly what `write_preprocessed` will commit: the caller-provided
-        // evals when set, otherwise the (cached) generated trace. Do not `take` — the
-        // evals must still be available for the later `write_preprocessed` call.
+        // Fingerprint exactly the columns `write_preprocessed` will commit:
+        // the caller-provided evals when set, else the (cached) generated
+        // trace. Do not `take`: the evals must remain available for the
+        // later `write_preprocessed` call.
         let ids = self.preprocessed_column_ids();
         match &self.preprocessed {
             Some(evals) if !self.uses_shared_tables() => {
@@ -504,6 +511,8 @@ pub struct Sha256Verifier {
 }
 
 impl Sha256Verifier {
+    /// Create a verifier module from the public size surface and the
+    /// proof's aggregate claim.
     pub fn new(log_n_rows: u32, interaction_claim: InteractionClaim) -> Self {
         Self {
             log_n_rows,
@@ -557,6 +566,8 @@ impl Sha256Verifier {
         self
     }
 
+    /// Use the shared range-table providers in `shared` instead of local
+    /// producer components.
     pub fn with_shared_tables(mut self, shared: SharedShaTableRelations) -> Self {
         self.shared_tables = Some(shared);
         self
@@ -820,8 +831,8 @@ fn base_trace_log_sizes(
 /// log_sizes of every interaction-trace column in commit order. Each
 /// component's column count is `ceil(n_lookups / batch)` — batch 4
 /// ([`LOGUP_BATCH`]) for the `Sha256Eval` consumer, pairs for the
-/// single-lookup producers. We infer the count from the structural firing
-/// rule (matching the `interaction::sha256_interaction` derivation).
+/// single-lookup producers. The count follows the structural firing rule
+/// (matching the `interaction::sha256_interaction` derivation).
 fn interaction_trace_log_sizes(
     log_n_rows: u32,
     expose_digest: bool,

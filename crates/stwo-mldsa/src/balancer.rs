@@ -62,8 +62,11 @@ pub const BALANCER_INTERACTION_COLS: usize = SECURE_EXTENSION_DEGREE;
 
 #[derive(Clone)]
 pub struct BalancerEval {
+    /// Trace log size (`2^log_size` padded rows).
     pub log_size: u32,
+    /// Tuple arity of the targeted relation.
     pub arity: usize,
+    /// The cross-component relation this balancer targets.
     pub relation: BalancerRelation,
     /// `true` → consume (+1 numerator); `false` → yield (−1).
     pub sign_positive: bool,
