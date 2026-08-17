@@ -1210,7 +1210,11 @@ fn gen_decomp_interaction_inner(
                 let (num, den) = frac(coset);
                 n[lane] = num;
                 d[lane] = den;
-                *claimed += num / den;
+                // Debug-only cross-check of `finalize_last`'s sum; skipped in
+                // release so the per-lane inversion is not wasted work.
+                if cfg!(debug_assertions) {
+                    *claimed += num / den;
+                }
             }
             nums.push(PackedQM31::from_array(n));
             dens.push(PackedQM31::from_array(d));
